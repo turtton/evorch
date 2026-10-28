@@ -60,6 +60,7 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
     .expect("client");
     let mut request = request();
     request.observation = Some(ObservationContext {
+        attempts: None,
         turn: None,
         run_id: "codex-run".into(),
         purpose: Default::default(),

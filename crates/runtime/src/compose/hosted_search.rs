@@ -37,6 +37,7 @@ pub(super) fn resolve(
             max_results: None,
             reasoning_effort: resolved.reasoning_effort,
             observation: Some(providers::ObservationContext {
+                attempts: None,
                 turn: invocation.turn.clone(),
                 run_id: invocation.run_id.clone(),
                 purpose: event_bus::RequestPurpose::WebSearch,

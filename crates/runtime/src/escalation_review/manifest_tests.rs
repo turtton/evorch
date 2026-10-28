@@ -5,7 +5,7 @@ use super::*;
 use crate::rules::{ProjectTrust, RulesSettings, RulesSource};
 use crate::skill::{SkillScope, append_skill_attachment};
 use event_bus::event::diagnostic_codes;
-use event_bus::{DiagnosticEvent, EventBus, EventKind, EventReceiver};
+use event_bus::{DiagnosticEvent, Event, EventBus, EventKind, EventReceiver};
 use providers::FinishReason;
 use support::{ScriptedModel, text_response};
 use tools::tools::shell_escalation::{FileAccessRequest, ShellAccess};
@@ -254,7 +254,16 @@ async fn every_review_kind_records_a_manifest_matching_what_the_model_received()
         assert_eq!(manifest.payload, Some(digest_of(&user)), "{name}");
         assert!(manifest.schema.is_some(), "{name}");
         let request = manifest.model_request.as_ref().unwrap();
-        assert!(request.finished_at_ns.unwrap() >= request.requested_at_ns);
+        assert_eq!(
+            (request.category.as_str(), request.role.as_str()),
+            match kind {
+                ManifestKind::Shell | ManifestKind::FileAccess => ("tool-execution", "Reviewer"),
+                ManifestKind::Web | ManifestKind::Upload => ("quick", "Worker"),
+            },
+            "{name}"
+        );
+        assert!(request.finished_at_ns.is_some(), "{name}: ended");
+        assert!(manifest.review_id.is_some(), "{name}");
         let verdict = manifest.outcome.verdict.as_ref().unwrap();
         assert_eq!(manifest.outcome.status, OutcomeStatus::Decided, "{name}");
         assert_eq!(verdict.risk_level, Some(RiskLevel::Low), "{name}");
@@ -329,7 +338,7 @@ async fn user_words_are_named_by_evidence_id_and_no_body_is_stored() {
     let manifest: ReviewManifest = serde_json::from_str(detail).unwrap();
     let context = manifest.context.unwrap();
     assert_eq!(context.user_request_count, 2);
-    assert_eq!(context.user_requests_omitted, 0);
+    assert_eq!(context.user_request_parts, 0);
     assert_eq!(
         context.user_requests,
         [
@@ -506,14 +515,14 @@ async fn the_request_sent_to_the_model_carries_nothing_from_the_record() {
 
 #[tokio::test]
 async fn a_record_that_cannot_be_made_leaves_a_warning_and_the_review_is_unchanged() {
-    fn refuse(_: &ReviewManifest) -> Result<String, String> {
+    fn refuse(_: &str) -> Result<String, String> {
         Err("disk on fire".into())
     }
     let mut fixture = Fixture::new(RULES_TEXT);
     let run = run_with(&[]);
     let rules = rules_source(fixture._project.path());
     let (context, _) = review_context(run, Some(&rules)).unwrap();
-    let context = context.recorded_to(fixture.sink().with_encoder(refuse));
+    let context = context.recorded_to(fixture.sink().with_seal(refuse));
     let model = scripted(APPROVE);
     let verdict = QuickModelReviewer::new(model.clone())
         .review_scoped_with_context("run-1", "pwd", "check", Some(context), ShellAccess::Host)
@@ -762,4 +771,232 @@ async fn the_gate_records_a_shell_review_with_the_call_it_decided() {
     let (_, user) = received(&model).await;
     assert_eq!(manifest.payload, Some(digest_of(&user)));
     assert_eq!(manifest.context.unwrap().lineage_run_ids, [id.to_string()]);
+}
+
+#[tokio::test]
+async fn delegation_prompts_are_stored_as_hashes_not_text() {
+    const DELEGATED: &str = "DELEGATION-needle: refactor the module and push it";
+    let mut run = run_with(&[]);
+    run.delegation_chain = vec![DELEGATED.into()];
+    let mut fixture = Fixture::new(RULES_TEXT);
+    let model = scripted(APPROVE);
+    QuickModelReviewer::new(model.clone())
+        .review_scoped_with_context(
+            "run-1",
+            "pwd",
+            "check",
+            Some(fixture.context(run)),
+            ShellAccess::Host,
+        )
+        .await
+        .unwrap();
+    let records = fixture.diagnostics();
+    assert!(!records[0].detail.contains("needle"));
+    let manifest: ReviewManifest = serde_json::from_str(&records[0].detail).unwrap();
+    let (_, user) = received(&model).await;
+    let sent: serde_json::Value = serde_json::from_str(&user).unwrap();
+    let sent_prompt = sent["context"]["delegation_chain"][0].as_str().unwrap();
+    assert_eq!(sent_prompt, DELEGATED);
+    assert_eq!(
+        manifest.context.unwrap().delegation_chain,
+        [digest_of(sent_prompt)]
+    );
+}
+
+#[tokio::test]
+async fn every_user_input_the_payload_carried_is_recoverable_from_the_events() {
+    const COUNT: usize = 700;
+    let mut fixture = Fixture::new(RULES_TEXT);
+    let run = ReviewRunContext::empty("run-1");
+    for index in 0..COUNT {
+        run.add_request(request(
+            &format!("input {index}"),
+            &format!("ev-{index:04}"),
+        ));
+    }
+    let model = scripted(APPROVE);
+    QuickModelReviewer::new(model.clone())
+        .review_scoped_with_context(
+            "run-1",
+            "pwd",
+            "check",
+            Some(fixture.context(run)),
+            ShellAccess::Host,
+        )
+        .await
+        .unwrap();
+    let records = fixture.diagnostics();
+    assert!(
+        records
+            .iter()
+            .all(|record| record.detail.len() < 128 * 1024)
+    );
+    let manifest: ReviewManifest = serde_json::from_str(&records[0].detail).unwrap();
+    let context = manifest.context.unwrap();
+    assert_eq!(context.user_request_count, COUNT);
+    assert_eq!(context.user_request_parts, records.len() - 1);
+    assert!(context.user_request_parts >= 2);
+
+    let mut ids: Vec<_> = context
+        .user_requests
+        .iter()
+        .map(|r| r.evidence_id.clone())
+        .collect();
+    for (index, record) in records[1..].iter().enumerate() {
+        let part: serde_json::Value = serde_json::from_str(&record.detail).unwrap();
+        let part: ManifestPart = serde_json::from_value(part["manifest_part"].clone()).unwrap();
+        assert_eq!(Some(&part.review_id), manifest.review_id.as_ref());
+        assert_eq!(
+            (part.index, part.count),
+            (index, context.user_request_parts)
+        );
+        ids.extend(part.user_requests.iter().map(|r| r.evidence_id.clone()));
+    }
+    let expected: Vec<_> = (0..COUNT)
+        .map(|index| Some(format!("ev-{index:04}")))
+        .collect();
+    assert_eq!(ids, expected, "all inputs, in payload order");
+    let (_, user) = received(&model).await;
+    let sent: serde_json::Value = serde_json::from_str(&user).unwrap();
+    assert_eq!(
+        sent["context"]["real_user_requests"]
+            .as_array()
+            .unwrap()
+            .len(),
+        COUNT
+    );
+}
+
+/// A model that, like a provider adapter, notes its attempts in the log it is given.
+struct AttemptingModel;
+
+#[async_trait::async_trait]
+impl crate::AgentModel for AttemptingModel {
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "attempting".into()
+    }
+
+    async fn complete(
+        &self,
+        invocation: &AgentInvocationContext,
+        _: Role,
+        _: &[Message],
+        _: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, crate::RuntimeError> {
+        let log = invocation.attempts.as_ref().expect("a review passes a log");
+        for (request_id, model, fails) in [("req-1", "primary", true), ("req-2", "fallback", false)]
+        {
+            log.started(AttemptRecord {
+                request_id: request_id.into(),
+                provider: "stub".into(),
+                profile: Some("stub-profile".into()),
+                protocol: "stub-protocol".into(),
+                model: model.into(),
+                streaming: false,
+                outcome: AttemptOutcome::Pending,
+            });
+            log.finished(
+                request_id,
+                if fails {
+                    AttemptOutcome::Failed {
+                        failure: event_bus::ProviderFailureKind::Timeout,
+                    }
+                } else {
+                    AttemptOutcome::Completed {
+                        finish_reason: "stop".into(),
+                    }
+                },
+            );
+        }
+        Ok(text_response(APPROVE, FinishReason::Stop))
+    }
+}
+
+#[tokio::test]
+async fn the_manifest_names_each_provider_attempt_and_its_model() {
+    let mut fixture = Fixture::new(RULES_TEXT);
+    let verdict = QuickModelReviewer::new(Arc::new(AttemptingModel))
+        .review_scoped_with_context(
+            "run-1",
+            "pwd",
+            "check",
+            Some(fixture.context(run_with(&[]))),
+            ShellAccess::Host,
+        )
+        .await;
+    assert_eq!(verdict, Ok(ReviewVerdict::Approve));
+    let attempts = fixture.manifest().attempts;
+    let summary: Vec<_> = attempts
+        .iter()
+        .map(|attempt| (attempt.request_id.as_str(), attempt.model.as_str()))
+        .collect();
+    assert_eq!(summary, [("req-1", "primary"), ("req-2", "fallback")]);
+    assert_eq!(
+        attempts[0].outcome,
+        AttemptOutcome::Failed {
+            failure: event_bus::ProviderFailureKind::Timeout
+        }
+    );
+}
+
+#[tokio::test]
+async fn parallel_reviews_of_one_run_keep_their_own_attempts() {
+    let mut fixture = Fixture::new(RULES_TEXT);
+    let review = |command: &'static str| {
+        let context = fixture.context(run_with(&[]));
+        async move {
+            QuickModelReviewer::new(Arc::new(AttemptingModel))
+                .review_scoped_with_context(
+                    "run-1",
+                    command,
+                    "check",
+                    Some(context),
+                    ShellAccess::Host,
+                )
+                .await
+        }
+    };
+    let (first, second) = tokio::join!(review("pwd"), review("ls"));
+    assert_eq!(
+        (first, second),
+        (Ok(ReviewVerdict::Approve), Ok(ReviewVerdict::Approve))
+    );
+    let records = fixture.diagnostics();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        let manifest: ReviewManifest = serde_json::from_str(&record.detail).unwrap();
+        assert_eq!(manifest.attempts.len(), 2, "no attempt of the other review");
+    }
+}
+
+#[tokio::test]
+async fn credential_shaped_metadata_is_redacted_and_the_event_still_reaches_storage() {
+    let secret_name = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+    assert!(
+        secret_guard::SecretRedactor::from_env()
+            .detect(secret_name)
+            .is_some()
+    );
+    let mut fixture = Fixture::new(RULES_TEXT);
+    let context = fixture.context(run_with(&[(secret_name, SkillScope::Builtin, SKILL_BODY)]));
+    QuickModelReviewer::new(scripted(APPROVE))
+        .review_scoped_with_context("run-1", "pwd", "check", Some(context), ShellAccess::Host)
+        .await
+        .unwrap();
+    let record = fixture.diagnostics().remove(0);
+    assert!(!record.detail.contains(secret_name));
+    serde_json::from_str::<ReviewManifest>(&record.detail).expect("still valid JSON");
+
+    // The real storage guard accepts the event, so the record is not lost.
+    let dir = tempfile::tempdir().unwrap();
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: dir.path().join("secret.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    storage
+        .handle()
+        .append_event(Some("test"), &Event::new(record))
+        .expect("storage accepts the redacted record");
+    storage.close();
 }

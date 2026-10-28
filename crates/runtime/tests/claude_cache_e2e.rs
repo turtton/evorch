@@ -290,6 +290,7 @@ async fn exercise(oauth: bool, effort: Option<&str>) {
     } = harness(oauth, levels, 5).await;
     let mut events = bus.subscribe();
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "claude-cache-contract".into(),
         model_preference: Some(ModelPreference {
             profile: "claude".into(),

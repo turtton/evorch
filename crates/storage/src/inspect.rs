@@ -159,18 +159,19 @@ impl Database {
         let mut event_kinds = BTreeMap::<String, u64>::new();
         let (events, _) = self.inspect_events(EventScope::Run(run_id), 10_000)?;
         let mut diagnostics = Vec::new();
-        let mut review_manifests = Vec::new();
+        let mut manifest_events = Vec::new();
         for event in events {
             *event_kinds.entry(event.kind.clone()).or_default() += 1;
             if event.kind != "Diagnostic" {
                 continue;
             }
             if is_review_manifest(&event.payload) {
-                review_manifests.push(self.review_manifest_json(run_id, &event)?);
+                manifest_events.push(event);
             } else {
                 diagnostics.push(event_json(&event));
             }
         }
+        let review_manifests = self.review_manifests_json(&manifest_events)?;
         let candidate_pattern = format!("%{}%", Value::String(run_id.into()));
         Ok(json!({
             "run_id": run_id,
@@ -194,48 +195,100 @@ impl Database {
         }))
     }
 
-    /// One escalation review record with the provider requests that may have
-    /// served it. The model call carries no ID of its own, so these are the
-    /// run's `escalation_review` ledger rows that finished while the review was
-    /// waiting; reviews overlapping in one run share candidates.
-    fn review_manifest_json(
-        &self,
-        run_id: &str,
-        event: &InspectEvent,
-    ) -> Result<Value, StorageError> {
-        let diagnostic = &event.payload["payload"];
-        let detail = diagnostic["detail"].as_str().unwrap_or_default();
-        let parsed = serde_json::from_str::<Value>(detail).ok();
-        let window = parsed.as_ref().and_then(|manifest| {
-            let request = &manifest["model_request"];
-            Some((
-                request["requested_at_ns"].as_i64()?,
-                request["finished_at_ns"].as_i64()?,
-            ))
-        });
-        let candidates = match window {
-            Some((from, to)) => self.json_rows(
-                "SELECT request_id, at_ns, provider, profile, model, status, failure
-                 FROM usage_requests
-                 WHERE run_id = ?1 AND purpose = 'escalation_review'
-                   AND at_ns BETWEEN CAST(?2 AS INTEGER) AND CAST(?3 AS INTEGER)
-                 ORDER BY at_ns",
-                &[run_id, &from.to_string(), &to.to_string()],
-            )?,
-            None => Vec::new(),
+    /// The escalation review records among `events`: each manifest with the
+    /// continuation events of its user-request list joined back in, and the
+    /// ledger rows of the provider attempts it names. The manifest keeps the
+    /// attempts itself; the ledger rows are extra detail while they are retained.
+    fn review_manifests_json(&self, events: &[InspectEvent]) -> Result<Vec<Value>, StorageError> {
+        let detail = |event: &InspectEvent| -> Option<Value> {
+            serde_json::from_str(event.payload["payload"]["detail"].as_str()?).ok()
         };
-        Ok(json!({
-            "event_id": event.id,
-            "wall_clock_ns": event.wall_clock_ns,
-            "severity": diagnostic["severity"],
-            "thread_id": diagnostic["thread_id"],
-            "call_id": diagnostic["call_id"],
-            // A record that could not be made, or one this build cannot read,
-            // is shown as stored.
-            "manifest": parsed,
-            "detail": if parsed.is_some() { Value::Null } else { json!(detail) },
-            "usage_request_candidates": candidates,
-        }))
+        let mut parts = BTreeMap::<String, Vec<(u64, Vec<Value>)>>::new();
+        for event in events {
+            if let Some(part) =
+                detail(event).and_then(|detail| detail.get("manifest_part").cloned())
+                && let (Some(id), Some(index), Some(refs)) = (
+                    part["review_id"].as_str(),
+                    part["index"].as_u64(),
+                    part["user_requests"].as_array(),
+                )
+            {
+                parts
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push((index, refs.clone()));
+            }
+        }
+        let mut manifests = Vec::new();
+        for event in events {
+            let parsed = detail(event);
+            if parsed
+                .as_ref()
+                .is_some_and(|d| d.get("manifest_part").is_some())
+            {
+                continue;
+            }
+            let mut manifest = parsed;
+            let mut complete = Value::Null;
+            if let Some(manifest) = manifest.as_mut() {
+                let id = manifest["review_id"].as_str().map(str::to_owned);
+                if let (Some(id), Some(context)) = (id, manifest["context"].as_object_mut()) {
+                    let mut joined = parts.get(&id).cloned().unwrap_or_default();
+                    joined.sort_by_key(|(index, _)| *index);
+                    if let Some(Value::Array(refs)) = context.get_mut("user_requests") {
+                        for (_, more) in joined {
+                            refs.extend(more);
+                        }
+                        complete = json!(
+                            context.get("user_request_count").and_then(Value::as_u64)
+                                == context
+                                    .get("user_requests")
+                                    .and_then(Value::as_array)
+                                    .map(|refs| refs.len() as u64)
+                        );
+                    }
+                }
+            }
+            let request_ids: Vec<String> = manifest
+                .as_ref()
+                .and_then(|manifest| manifest["attempts"].as_array())
+                .map(|attempts| {
+                    attempts
+                        .iter()
+                        .filter_map(|attempt| attempt["request_id"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ledger = if request_ids.is_empty() {
+                Vec::new()
+            } else {
+                let marks = vec!["?"; request_ids.len()].join(",");
+                let ids: Vec<&str> = request_ids.iter().map(String::as_str).collect();
+                self.json_rows(
+                    &format!(
+                        "SELECT request_id, at_ns, provider, profile, model, status, failure,
+                                input_tokens, output_tokens, cache_read_tokens, cost_usd
+                         FROM usage_requests WHERE request_id IN ({marks}) ORDER BY at_ns"
+                    ),
+                    &ids,
+                )?
+            };
+            let diagnostic = &event.payload["payload"];
+            manifests.push(json!({
+                "event_id": event.id,
+                "wall_clock_ns": event.wall_clock_ns,
+                "severity": diagnostic["severity"],
+                "thread_id": diagnostic["thread_id"],
+                "call_id": diagnostic["call_id"],
+                // A record that could not be made, or one this build cannot
+                // read, is shown as stored.
+                "detail": if manifest.is_some() { Value::Null } else { diagnostic["detail"].clone() },
+                "manifest": manifest,
+                "user_requests_complete": complete,
+                "usage_requests": ledger,
+            }));
+        }
+        Ok(manifests)
     }
 
     /// Newest candidates first across every project unless one is named; limit is capped at 1000.

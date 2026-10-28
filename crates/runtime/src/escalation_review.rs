@@ -25,10 +25,11 @@ use loaded_skills::{detach_attached_skills, merge_views};
 pub(crate) use manifest::ManifestSink;
 use manifest::{Audit, ContextAudit, ReviewKind};
 pub use manifest::{
-    Decision, Digest, MANIFEST_VERSION, ModelRequest, Outcome, OutcomeStatus,
+    Decision, Digest, MANIFEST_VERSION, ManifestPart, ModelRequest, Outcome, OutcomeStatus,
     ReviewKind as ManifestKind, ReviewManifest, ReviewedContext, RulesEntry, SkillEntry,
     TextDigest, UserRequestRef, VerdictRecord, sha256_hex,
 };
+pub use providers::{AttemptOutcome, AttemptRecord};
 
 pub const DEFAULT_REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -673,6 +674,7 @@ impl QuickModelReviewer {
             },
         ];
         let invocation = AgentInvocationContext {
+            attempts: Some(audit.attempt_log()),
             turn: None,
             run_id: run_id.to_owned(),
             category: Some(category.to_string()),

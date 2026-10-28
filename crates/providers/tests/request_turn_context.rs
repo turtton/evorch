@@ -17,6 +17,7 @@ async fn api_key_messages_wire_is_unchanged_by_runtime_turn_provenance() {
     .unwrap();
     let mut request: ChatRequest = serde_json::from_value(json!({"model":"claude-test","messages":[{"role":"user","content":[{"type":"text","text":"stable"}]}]})).unwrap();
     request.observation = Some(ObservationContext {
+        attempts: None,
         run_id: "run".into(),
         ..Default::default()
     });

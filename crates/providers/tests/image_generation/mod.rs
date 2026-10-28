@@ -71,6 +71,7 @@ fn request() -> ImageGenerationRequest {
         model: "gpt-image-2".into(),
         prompt: "draw a tree".into(),
         observation: Some(ObservationContext {
+            attempts: None,
             run_id: "image-run".into(),
             ..Default::default()
         }),

@@ -187,6 +187,7 @@ async fn execute(
         return Err("image generation interrupted; no files saved".into());
     }
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: state.caller_run_id().to_string(),
         turn: Some(state.turn.clone()),
         ..Default::default()

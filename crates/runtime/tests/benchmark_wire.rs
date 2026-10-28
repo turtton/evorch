@@ -100,6 +100,7 @@ async fn benchmark_preserves_http_payload_and_rejects_cross_protocol_before_requ
         agents,
     ));
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "trial".into(),
         ..Default::default()
     };

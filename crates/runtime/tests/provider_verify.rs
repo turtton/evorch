@@ -154,6 +154,7 @@ async fn unverified_fallback_never_spawned_and_emits_provider_unavailable() {
     );
     let mut receiver = bus.subscribe();
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "verify-run".into(),
         model_preference: Some(ModelPreference {
             profile: "fallback".into(),

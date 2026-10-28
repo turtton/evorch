@@ -22,6 +22,7 @@ fn scoped_observer(bus: &Arc<EventBus>, run: &str, request: &Value) -> AttemptOb
         "test",
         false,
         Some(ObservationContext {
+            attempts: None,
             turn: None,
             run_id: run.into(),
             purpose: Default::default(),

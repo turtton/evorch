@@ -25,6 +25,8 @@ use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use providers::{AttemptLog, AttemptRecord};
+
 use super::{
     AuthorizationLevel, ProcedureStep, ReviewContext, ReviewError, ReviewVerdict, RiskLevel,
     WireVerdict,
@@ -32,9 +34,9 @@ use super::{
 
 pub const MANIFEST_VERSION: u32 = 1;
 
-/// Most user-request references one record lists, newest last. The count and
-/// the omitted number are always recorded.
-const MAX_USER_REQUEST_REFS: usize = 256;
+/// User-request references kept in the record itself; any further ones follow in
+/// continuation events of this many each, so none is dropped.
+const REFS_PER_EVENT: usize = 256;
 /// Largest record emitted, well below the storage limit for one event.
 const MAX_DETAIL_BYTES: usize = 128 * 1024;
 
@@ -121,13 +123,17 @@ pub struct UserRequestRef {
 pub struct ReviewedContext {
     pub root_run_id: String,
     pub lineage_run_ids: Vec<String>,
-    pub delegation_chain: Vec<String>,
+    /// The agent-written delegation prompts, by hash and size only.
+    pub delegation_chain: Vec<Digest>,
     /// The evidence stamp's revision the review was prepared against.
     pub evidence_revision: u64,
+    /// Every real user input the payload carried.
     pub user_request_count: usize,
-    /// Up to the newest [`MAX_USER_REQUEST_REFS`], in payload order.
+    /// The first part of those inputs, in payload order. The rest are in
+    /// `user_request_parts` continuation events ([`ManifestPart`]) of the same
+    /// `review_id`; `evorch inspect` joins them.
     pub user_requests: Vec<UserRequestRef>,
-    pub user_requests_omitted: usize,
+    pub user_request_parts: usize,
     pub project_rules: Option<RulesEntry>,
     pub loaded_skills: Vec<SkillEntry>,
 }
@@ -141,9 +147,8 @@ pub enum ReviewKind {
     Upload,
 }
 
-/// The model call, as requested. The route that served it is in the usage
-/// ledger: `usage_requests` rows of this run with purpose `escalation_review`
-/// finishing between these two times.
+/// The model call, as requested. The provider attempts that served it are in
+/// [`ReviewManifest::attempts`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub category: String,
@@ -192,6 +197,8 @@ pub struct Outcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewManifest {
     pub version: u32,
+    /// Names this review in its continuation events. Absent when nothing was sent.
+    pub review_id: Option<String>,
     pub kind: ReviewKind,
     /// Access the request asked for: `host_unsandboxed` or `network_only` for
     /// shell, `file_read` or `file_write`, `web`, `upload`.
@@ -203,13 +210,35 @@ pub struct ReviewManifest {
     pub model_request: Option<ModelRequest>,
     /// The system message as sent.
     pub instruction: Option<Digest>,
-    /// The structured-output schema as sent.
+    /// The structured-output schema requested. A provider may adapt it for its
+    /// API, so this names what the runtime asked for, not the provider's wire form.
     pub schema: Option<Digest>,
-    /// The user message as sent: the whole payload JSON.
+    /// The user message handed to the model boundary: the whole payload JSON.
+    /// It matches the input that was prepared; it does not by itself show that a
+    /// provider received it, which `attempts` does.
     pub payload: Option<Digest>,
+    /// Every provider attempt made for the call, with the model and route it
+    /// used. `request_id` is the key of the `usage_requests` row, which the
+    /// ledger's retention may remove; this copy is kept.
+    pub attempts: Vec<AttemptRecord>,
     /// Absent when the review had no run context.
     pub context: Option<ReviewedContext>,
     pub outcome: Outcome,
+}
+
+/// Continuation of a record's user-request list; the detail of its own event is
+/// `{"manifest_part": ..}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestPart {
+    pub review_id: String,
+    pub index: usize,
+    pub count: usize,
+    pub user_requests: Vec<UserRequestRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PartDetail {
+    manifest_part: ManifestPart,
 }
 
 /// Where a record is sent: the bus, tagged with the call it belongs to so it
@@ -220,7 +249,7 @@ pub(crate) struct ManifestSink {
     run_id: String,
     thread_id: Option<String>,
     call_id: Option<String>,
-    encode: fn(&ReviewManifest) -> Result<String, String>,
+    seal: fn(&str) -> Result<String, String>,
 }
 
 impl std::fmt::Debug for ManifestSink {
@@ -233,15 +262,18 @@ impl std::fmt::Debug for ManifestSink {
     }
 }
 
-fn encode(manifest: &ReviewManifest) -> Result<String, String> {
-    let detail = serde_json::to_string(manifest).map_err(|error| error.to_string())?;
-    if detail.len() > MAX_DETAIL_BYTES {
+/// Checks and cleans the serialized record before it is emitted: an oversized
+/// record is refused, and anything shaped like a credential (a skill name or a
+/// path can be anything) is redacted, so the storage secret guard never rejects
+/// the whole event.
+fn seal(json: &str) -> Result<String, String> {
+    if json.len() > MAX_DETAIL_BYTES {
         return Err(format!(
             "record is {} bytes, over the {MAX_DETAIL_BYTES} byte limit",
-            detail.len()
+            json.len()
         ));
     }
-    Ok(detail)
+    Ok(secret_guard::SecretRedactor::from_env().redact(json).text)
 }
 
 impl ManifestSink {
@@ -256,33 +288,65 @@ impl ManifestSink {
             run_id: run_id.to_owned(),
             thread_id,
             call_id,
-            encode,
+            seal,
         }
     }
 
+    fn call_id(&self) -> &str {
+        self.call_id.as_deref().unwrap_or_default()
+    }
+
     #[cfg(test)]
-    pub(crate) fn with_encoder(
-        mut self,
-        encode: fn(&ReviewManifest) -> Result<String, String>,
-    ) -> Self {
-        self.encode = encode;
+    pub(crate) fn with_seal(mut self, seal: fn(&str) -> Result<String, String>) -> Self {
+        self.seal = seal;
         self
     }
 
     fn emit(&self, manifest: &ReviewManifest) {
-        let (severity, detail) = match (self.encode)(manifest) {
+        let payload_sha = manifest
+            .payload
+            .as_ref()
+            .map_or("none", |payload| payload.sha256.as_str());
+        let mut main = manifest.clone();
+        let mut parts = Vec::new();
+        if let (Some(review_id), Some(context)) = (&manifest.review_id, &mut main.context)
+            && context.user_requests.len() > REFS_PER_EVENT
+        {
+            let rest = context.user_requests.split_off(REFS_PER_EVENT);
+            let chunks: Vec<_> = rest.chunks(REFS_PER_EVENT).map(<[_]>::to_vec).collect();
+            context.user_request_parts = chunks.len();
+            let count = chunks.len();
+            parts.extend(
+                chunks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, user_requests)| PartDetail {
+                        manifest_part: ManifestPart {
+                            review_id: review_id.clone(),
+                            index,
+                            count,
+                            user_requests,
+                        },
+                    }),
+            );
+        }
+        self.send(&main, payload_sha);
+        for part in &parts {
+            self.send(part, payload_sha);
+        }
+    }
+
+    fn send(&self, record: &impl Serialize, payload_sha: &str) {
+        let (severity, detail) = match serde_json::to_string(record)
+            .map_err(|error| error.to_string())
+            .and_then(|json| (self.seal)(&json))
+        {
             Ok(detail) => (DiagnosticSeverity::Info, detail),
             // The review is already decided and goes on; what is left is the
             // fact that no record exists, and the hash that would identify it.
             Err(error) => (
                 DiagnosticSeverity::Warning,
-                format!(
-                    "manifest could not be recorded: {error}; payload_sha256={}",
-                    manifest
-                        .payload
-                        .as_ref()
-                        .map_or("none", |payload| payload.sha256.as_str())
-                ),
+                format!("manifest could not be recorded: {error}; payload_sha256={payload_sha}"),
             ),
         };
         self.bus.emit(Event::new(DiagnosticEvent {
@@ -316,14 +380,17 @@ impl ReviewContext {
 
     fn reviewed(&self) -> ReviewedContext {
         let all = &self.real_user_requests;
-        let omitted = all.len().saturating_sub(MAX_USER_REQUEST_REFS);
         ReviewedContext {
             root_run_id: self.root_run_id.clone(),
             lineage_run_ids: self.audit.lineage_run_ids.clone(),
-            delegation_chain: self.delegation_chain.clone(),
+            delegation_chain: self
+                .delegation_chain
+                .iter()
+                .map(|text| Digest::of(text))
+                .collect(),
             evidence_revision: self.audit.evidence_revision,
             user_request_count: all.len(),
-            user_requests: all[omitted..]
+            user_requests: all
                 .iter()
                 .map(|request| UserRequestRef {
                     evidence_id: request.evidence.id.clone(),
@@ -335,7 +402,7 @@ impl ReviewContext {
                         .map(|question| question.id.clone()),
                 })
                 .collect(),
-            user_requests_omitted: omitted,
+            user_request_parts: 0,
             project_rules: self.project_rules.as_ref().map(|rules| RulesEntry {
                 path: rules.source.clone(),
                 trust: rules.trust.to_owned(),
@@ -354,6 +421,7 @@ impl ReviewContext {
 /// [`Audit::conclude`] or, when the review is dropped after sending (an
 /// interrupted tool call), as `cancelled`.
 pub(super) struct Audit {
+    attempts: AttemptLog,
     sink: Option<ManifestSink>,
     manifest: ReviewManifest,
     sent: bool,
@@ -369,9 +437,11 @@ impl Audit {
         context: Option<&ReviewContext>,
     ) -> Self {
         Self {
+            attempts: AttemptLog::default(),
             sink: context.and_then(|context| context.audit.sink.clone()),
             manifest: ReviewManifest {
                 version: MANIFEST_VERSION,
+                review_id: None,
                 kind,
                 scope: scope.to_owned(),
                 tool: tool.map(str::to_owned),
@@ -380,6 +450,7 @@ impl Audit {
                 instruction: None,
                 schema: None,
                 payload: None,
+                attempts: Vec::new(),
                 context: context.map(ReviewContext::reviewed),
                 outcome: Outcome {
                     status: OutcomeStatus::Cancelled,
@@ -391,6 +462,11 @@ impl Audit {
         }
     }
 
+    /// Where the provider attempts for this review are noted.
+    pub(super) fn attempt_log(&self) -> AttemptLog {
+        self.attempts.clone()
+    }
+
     /// Notes the exact text about to go to the model.
     pub(super) fn sent(
         &mut self,
@@ -400,15 +476,29 @@ impl Audit {
         schema: &serde_json::Value,
         payload: &str,
     ) {
+        let requested_at_ns = crate::run_store::review_time_ns();
         self.manifest.model_request = Some(ModelRequest {
             category: category.to_string(),
             role: format!("{role:?}"),
-            requested_at_ns: crate::run_store::review_time_ns(),
+            requested_at_ns,
             finished_at_ns: None,
         });
         self.manifest.instruction = Some(Digest::of(instruction));
         self.manifest.schema = Some(Digest::of(&schema.to_string()));
-        self.manifest.payload = Some(Digest::of(payload));
+        let payload = Digest::of(payload);
+        self.manifest.review_id = Some(
+            sha256_hex(
+                format!(
+                    "{}|{}|{requested_at_ns}|{}",
+                    self.manifest.run_id,
+                    self.sink.as_ref().map_or("", |sink| sink.call_id()),
+                    payload.sha256
+                )
+                .as_bytes(),
+            )[..32]
+                .to_owned(),
+        );
+        self.manifest.payload = Some(payload);
         self.sent = true;
     }
 
@@ -458,6 +548,7 @@ impl Audit {
         if let Some(request) = &mut self.manifest.model_request {
             request.finished_at_ns = Some(crate::run_store::review_time_ns());
         }
+        self.manifest.attempts = self.attempts.snapshot();
         if let Some(sink) = &self.sink {
             sink.emit(&self.manifest);
         }

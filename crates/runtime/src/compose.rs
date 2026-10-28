@@ -871,6 +871,7 @@ impl RoutedModel {
                     |settings| settings.service_tier,
                 ),
                 observation: Some(ObservationContext {
+                    attempts: invocation.attempts.clone(),
                     turn: invocation.turn.clone(),
                     run_id: invocation.run_id.clone(),
                     purpose: invocation.purpose,
@@ -1209,6 +1210,7 @@ impl AgentModel for RoutedModel {
             service_tier: replay_service_tier(speed),
             output_schema: None,
             observation: Some(ObservationContext {
+                attempts: None,
                 turn: invocation.turn.clone(),
                 run_id: invocation.run_id.clone(),
                 purpose: event_bus::RequestPurpose::Compaction,

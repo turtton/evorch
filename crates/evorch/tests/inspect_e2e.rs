@@ -7,8 +7,9 @@ use std::process::Command;
 
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, LifecycleEvent};
 use runtime::escalation_review::{
-    Decision, Digest, MANIFEST_VERSION, ManifestKind, ModelRequest, Outcome, OutcomeStatus,
-    ReviewManifest, VerdictRecord,
+    AttemptOutcome, AttemptRecord, Decision, Digest, MANIFEST_VERSION, ManifestKind, ManifestPart,
+    ModelRequest, Outcome, OutcomeStatus, ReviewManifest, ReviewedContext, UserRequestRef,
+    VerdictRecord,
 };
 use runtime::self_improvement::{ImprovementCollector, ImprovementPolicy, ImprovementSettings};
 use serde_json::Value;
@@ -224,9 +225,33 @@ fn malformed_arguments_print_usage() {
     }
 }
 
+fn attempt(request_id: &str, model: &str) -> AttemptRecord {
+    AttemptRecord {
+        request_id: request_id.into(),
+        provider: "p".into(),
+        profile: None,
+        protocol: "openai-chat-completions".into(),
+        model: model.into(),
+        streaming: false,
+        outcome: AttemptOutcome::Completed {
+            finish_reason: "stop".into(),
+        },
+    }
+}
+
+fn request_ref(id: &str) -> UserRequestRef {
+    UserRequestRef {
+        evidence_id: Some(id.into()),
+        kind: Some("host_chat".into()),
+        target_run_id: "run-7".into(),
+        answers_question_id: None,
+    }
+}
+
 fn review_manifest(run_id: &str) -> ReviewManifest {
     ReviewManifest {
         version: MANIFEST_VERSION,
+        review_id: Some(format!("review-of-{run_id}")),
         kind: ManifestKind::Shell,
         scope: "network_only".into(),
         tool: Some("shell".into()),
@@ -246,7 +271,21 @@ fn review_manifest(run_id: &str) -> ReviewManifest {
             sha256: "2".repeat(64),
             bytes: 20,
         }),
-        context: None,
+        attempts: vec![
+            attempt("req-kept", "reviewer-model"),
+            attempt("req-expired", "fallback-model"),
+        ],
+        context: Some(ReviewedContext {
+            root_run_id: run_id.into(),
+            lineage_run_ids: vec![run_id.into()],
+            delegation_chain: Vec::new(),
+            evidence_revision: 3,
+            user_request_count: 3,
+            user_requests: vec![request_ref("ev-1"), request_ref("ev-2")],
+            user_request_parts: 1,
+            project_rules: None,
+            loaded_skills: Vec::new(),
+        }),
         outcome: Outcome {
             status: OutcomeStatus::Decided,
             verdict: Some(VerdictRecord {
@@ -287,7 +326,7 @@ fn usage_request(request_id: &str, run_id: &str, at_ns: i64, purpose: &str) -> U
 }
 
 #[test]
-fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
+fn run_shows_each_review_manifest_with_its_attempts_and_complete_user_requests() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("evorch-events.db");
     let storage = Storage::open(StorageConfig {
@@ -297,6 +336,12 @@ fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
     .unwrap();
     let handle = storage.handle();
     let manifest = review_manifest("run-7");
+    let part = ManifestPart {
+        review_id: "review-of-run-7".into(),
+        index: 0,
+        count: 1,
+        user_requests: vec![request_ref("ev-3")],
+    };
     let emit = |run: &str, detail: String, severity| {
         Event::new(DiagnosticEvent {
             source: "sandbox".into(),
@@ -316,6 +361,11 @@ fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
         ),
         emit(
             "run-7",
+            serde_json::json!({ "manifest_part": part }).to_string(),
+            DiagnosticSeverity::Info,
+        ),
+        emit(
+            "run-7",
             format!(
                 "manifest could not be recorded: boom; payload_sha256={}",
                 "3".repeat(64)
@@ -330,19 +380,18 @@ fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
     ] {
         handle.append_event(Some("evorch-gui"), &event).unwrap();
     }
+    // Only one of the two attempts is still in the ledger.
     handle
         .record_usage_requests(vec![
-            usage_request("req-in", "run-7", 1_500, "escalation_review"),
-            usage_request("req-before", "run-7", 900, "escalation_review"),
-            usage_request("req-agent", "run-7", 1_500, "agent"),
-            usage_request("req-other-run", "run-70", 1_500, "escalation_review"),
+            usage_request("req-kept", "run-7", 1_500, "escalation_review"),
+            usage_request("req-unrelated", "run-7", 1_500, "escalation_review"),
         ])
         .unwrap();
     storage.close();
 
     let run = inspect(&path, &["run", "run-7"]).unwrap();
     let manifests = run["review_manifests"].as_array().unwrap();
-    assert_eq!(manifests.len(), 2);
+    assert_eq!(manifests.len(), 2, "the continuation is joined, not listed");
     assert_eq!(run["diagnostics"].as_array().unwrap().len(), 0);
 
     let first = &manifests[0];
@@ -350,10 +399,21 @@ fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
     assert_eq!(first["thread_id"], "thread-1");
     assert_eq!(first["manifest"]["payload"]["sha256"], "2".repeat(64));
     assert_eq!(first["manifest"]["outcome"]["verdict"]["decision"], "deny");
-    let candidates = first["usage_request_candidates"].as_array().unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0]["request_id"], "req-in");
-    assert_eq!(candidates[0]["model"], "reviewer-model");
+    let ids: Vec<_> = first["manifest"]["context"]["user_requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|request| request["evidence_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["ev-1", "ev-2", "ev-3"]);
+    assert_eq!(first["user_requests_complete"], true);
+    // The manifest names both attempts and their models by itself.
+    let attempts = first["manifest"]["attempts"].as_array().unwrap();
+    assert_eq!(attempts[1]["request_id"], "req-expired");
+    assert_eq!(attempts[1]["model"], "fallback-model");
+    let ledger = first["usage_requests"].as_array().unwrap();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0]["request_id"], "req-kept");
 
     let unreadable = &manifests[1];
     assert_eq!(unreadable["severity"], "warning");
@@ -364,8 +424,5 @@ fn run_shows_each_review_manifest_with_the_requests_that_may_have_served_it() {
             .unwrap()
             .contains("could not be recorded")
     );
-    assert_eq!(
-        unreadable["usage_request_candidates"],
-        serde_json::json!([])
-    );
+    assert_eq!(unreadable["usage_requests"], serde_json::json!([]));
 }

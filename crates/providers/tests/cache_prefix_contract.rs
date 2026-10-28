@@ -66,6 +66,7 @@ fn conversation_with_effort(model: &str, effort: &str) -> Vec<ChatRequest> {
     }))
     .unwrap();
     request.observation = Some(ObservationContext {
+        attempts: None,
         turn: None,
         run_id: "stable-cache-prefix-conversation".into(),
         purpose: Default::default(),
