@@ -5,13 +5,33 @@ use runtime::escalation_review::{QuickModelReviewer, ReviewError, ReviewVerdict}
 use std::sync::Arc;
 use support::{ScriptedModel, text_response};
 
+fn opaque_reasoning() -> ContentBlock {
+    ContentBlock::ResponsesReasoning {
+        item: serde_json::json!({"type":"reasoning","id":"rs-review","summary":[],"encrypted_content":"dummy-ciphertext"}),
+        origin: providers::ResponsesReplayOrigin {
+            dialect: providers::ResponsesDialect::Codex,
+            profile: "test".into(),
+            route_model: "test-model".into(),
+            wire_model: "test-model".into(),
+            speed: providers::ResponsesSpeed::Standard,
+            service_tier: None,
+            endpoint_fingerprint: "test-endpoint".into(),
+            account: providers::ResponsesAccount::Unavailable,
+        },
+    }
+}
+
 async fn assert_invalid(response: ChatResponse) {
-    // Given: a provider response outside the verdict contract.
-    let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(response)])));
-    // When: reviewing a shell request.
-    let result = reviewer.review("strict", "pwd", "inspect").await;
-    // Then: the response cannot authorize escalation.
-    assert_eq!(result, Err(ReviewError::InvalidVerdict));
+    for opaque in [false, true] {
+        // Opaque replay state must not make any invalid answer acceptable.
+        let mut response = response.clone();
+        if opaque {
+            response.message.content.insert(0, opaque_reasoning());
+        }
+        let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(response)])));
+        let result = reviewer.review("strict", "pwd", "inspect").await;
+        assert_eq!(result, Err(ReviewError::InvalidVerdict), "opaque={opaque}");
+    }
 }
 
 #[tokio::test]
@@ -51,6 +71,8 @@ async fn reviewer_uses_only_final_text_for_approval_and_denial() {
             block: serde_json::json!({"type":"redacted_thinking","data":"opaque-reasoning"}),
             prefix_hash: None,
         });
+        response.message.content.insert(0, opaque_reasoning());
+        response.message.content.push(opaque_reasoning());
         let reviewer = QuickModelReviewer::new(Arc::new(ScriptedModel::new([Ok(response)])));
         // When / Then: only the final text can approve or deny escalation.
         assert_eq!(
@@ -118,6 +140,16 @@ async fn reviewer_rejects_text_plus_tool_use_as_invalid() {
     let mut response = text_response(r#"{"approve":true}"#, FinishReason::Stop);
     response.message.content.push(ContentBlock::Anthropic {
         block: serde_json::json!({"type":"server_tool_use","id":"server","name":"web_search","input":{"query":"lookup"}}),
+        prefix_hash: None,
+    });
+    assert_invalid(response).await;
+}
+
+#[tokio::test]
+async fn reviewer_rejects_text_plus_unknown_block_as_invalid() {
+    let mut response = text_response(r#"{"approve":true}"#, FinishReason::Stop);
+    response.message.content.push(ContentBlock::Anthropic {
+        block: serde_json::json!({"type":"future_unknown_block"}),
         prefix_hash: None,
     });
     assert_invalid(response).await;

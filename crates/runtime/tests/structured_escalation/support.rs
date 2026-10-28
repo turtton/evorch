@@ -18,6 +18,42 @@ pub(super) struct Harness {
     pub(super) model: Arc<dyn AgentModel>,
 }
 
+pub(super) struct ReviewAdapterModel {
+    pub(super) reviewer: Arc<dyn AgentModel>,
+    pub(super) conversation: super::runtime_support::ScriptedModel,
+}
+
+#[async_trait::async_trait]
+impl AgentModel for ReviewAdapterModel {
+    async fn complete(
+        &self,
+        invocation: &runtime::AgentInvocationContext,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        tools: &[providers::ToolSpec],
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        self.conversation
+            .complete(invocation, role, messages, tools)
+            .await
+    }
+
+    async fn complete_structured(
+        &self,
+        invocation: &runtime::AgentInvocationContext,
+        role: runtime::Role,
+        messages: &[providers::Message],
+        schema: &providers::JsonSchema,
+    ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
+        self.reviewer
+            .complete_structured(invocation, role, messages, schema)
+            .await
+    }
+
+    fn selected_model(&self, role: runtime::Role, category: Option<&str>) -> String {
+        self.reviewer.selected_model(role, category)
+    }
+}
+
 pub(super) fn harness(base_url: &str, codex: bool, timeout: Duration) -> Harness {
     harness_with_model(base_url, codex, timeout, MODEL)
 }
