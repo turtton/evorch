@@ -46,6 +46,27 @@ impl ThreadMetrics {
     }
 }
 
+/// The total length covered by `spans`, counting overlaps once.
+fn union_length(spans: &mut [(Instant, Instant)]) -> Duration {
+    spans.sort_unstable();
+    let mut union = Duration::ZERO;
+    let mut open: Option<(Instant, Instant)> = None;
+    for &(start, end) in spans.iter() {
+        open = match open {
+            Some((from, until)) if start <= until => Some((from, until.max(end))),
+            Some((from, until)) => {
+                union += until.saturating_duration_since(from);
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((from, until)) = open {
+        union += until.saturating_duration_since(from);
+    }
+    union
+}
+
 impl TelemetryOverlay {
     pub fn thread_metrics(&self, run_ids: &[String]) -> ThreadMetrics {
         self.thread_metrics_at(run_ids, Instant::now())
@@ -55,20 +76,21 @@ impl TelemetryOverlay {
         let mut cost_total = 0.0;
         let mut has_cost = false;
         let mut cost_partial = false;
-        let mut wall_time = Duration::ZERO;
+        let mut spans: Vec<(Instant, Instant)> = Vec::new();
         for run_id in run_ids {
             if let Some(cost) = self.costs.get(run_id) {
                 cost_total += cost;
                 has_cost = true;
             }
             cost_partial |= self.partially_priced.contains(run_id);
-            if let Some(accumulated) = self.accumulated_running.get(run_id) {
-                wall_time += *accumulated;
+            if let Some(finished) = self.running_spans.get(run_id) {
+                spans.extend_from_slice(finished);
             }
             if let Some(start) = self.active_running_start.get(run_id) {
-                wall_time += now.saturating_duration_since(*start);
+                spans.push((*start, now.max(*start)));
             }
         }
+        let wall_time = union_length(&mut spans);
         // Prefer explicit conversation roots. Older observations can lack a
         // lifecycle marker, so use parentless runs only when none are known.
         // A thread still owns all its subagents for the total cost above.

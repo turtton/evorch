@@ -28,6 +28,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !self.subagent_run_is_visible(run_id) {
             return;
         }
+        self.dock_subagent_pane(id);
+        self.restore_subagent_focus(focus);
+        self.equalize_subagent_panes();
+    }
+
+    /// Give a subagent its own leaf below the last subagent leaf, or to the
+    /// right of the workbench when there is none yet.
+    fn dock_subagent_pane(&mut self, id: PanelId) {
         let bottom = self.subagent_leaves().last().copied();
         let tree = self.dock.main_surface_mut();
         if tree.is_empty() {
@@ -37,6 +45,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         } else {
             tree.split_right(NodeIndex::root(), 0.7, vec![id]);
         }
+    }
+
+    /// A finished subagent that the runtime resumed leaves its parked tab and
+    /// gets its own split pane again. Anything not parked is left alone.
+    pub fn unpark_subagent(&mut self, run_id: &str) {
+        let id = PanelId::new(format!("agent-{run_id}"));
+        let Some(panel) = self.panels.get_mut(&id) else {
+            return;
+        };
+        if !matches!(panel.kind, PanelKind::ParkedAgentTranscript(_)) {
+            return;
+        }
+        panel.kind = PanelKind::SubagentTranscript;
+        // Another thread's pane is not in the dock; switching to its thread
+        // docks it as a running transcript.
+        if !self.subagent_run_is_visible(run_id) {
+            return;
+        }
+        let focus = self.subagent_focus_snapshot();
+        if let Some(path) = self.dock.find_tab(&id) {
+            self.dock.remove_tab(path);
+        }
+        self.dock_subagent_pane(id);
         self.restore_subagent_focus(focus);
         self.equalize_subagent_panes();
     }

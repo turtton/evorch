@@ -108,10 +108,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if message.status != status {
                 message.status = status;
                 changed = true;
-                if was_delivered {
+                // Also withdraws the bubble shown optimistically at send time.
+                if message.status != DeliveryStatus::Delivered {
                     self.transcripts
                         .remove_host_input(&message.thread_id, &message.id);
-                } else if !startup && message.status == DeliveryStatus::Delivered {
+                } else if !startup {
                     self.transcripts.push_host_input(
                         &message.thread_id,
                         &message.id,
@@ -235,7 +236,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.follow_up_queues.clear();
         for message in &self.history {
             if message.resolution.is_none()
-                && (message.status == DeliveryStatus::Queued || message.awaits_user())
+                && ((message.status == DeliveryStatus::Queued && !message.starts_run)
+                    || message.awaits_user())
             {
                 let mut row = message.undelivered_row();
                 row.undelivered = message.status != DeliveryStatus::Queued;
@@ -382,6 +384,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.push_notice(format!("拒否状態を保存できませんでした: {error}"));
             return false;
         }
+        // A refusal after the bubble went up takes the bubble back.
+        self.transcripts.remove_host_input(&thread, id);
         let active = self
             .sidebar
             .active_thread

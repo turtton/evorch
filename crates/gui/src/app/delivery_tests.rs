@@ -7,6 +7,7 @@ use crate::model::composer::ProviderStatus;
 use std::sync::{Arc, Mutex};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+mod new_run_bubble;
 mod performance;
 mod review;
 
@@ -53,6 +54,7 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         image_count: 2,
         resent_from: None,
         status: DeliveryStatus::Dropped,
+        starts_run: false,
         resolution: None,
     });
     state.rebuild_delivery_rows();
