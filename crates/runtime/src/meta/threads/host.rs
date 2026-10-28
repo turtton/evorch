@@ -156,6 +156,14 @@ impl AgentRuntime {
         let mut search = parse(&output, enabled);
         if let Some(titles) = titles {
             rank_titles(&mut search, titles, query);
+        } else if !query.is_empty() {
+            // A body page after the title pages: threads already listed as
+            // title matches are not listed again.
+            let titles = scan_titles(&scope, query, 0, 0)?;
+            search
+                .hits
+                .retain(|hit| !titles.all.contains(&hit.thread_id));
+            search.title_scan_limited = titles.limited;
         }
         Ok(search)
     }

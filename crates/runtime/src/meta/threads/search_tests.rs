@@ -1547,3 +1547,57 @@ fn host_search_flags_title_matching_that_did_not_reach_older_threads() {
             .title_scan_limited
     );
 }
+
+/// Follows `search_threads_for_host` cursors to the end, returning every page's thread IDs.
+fn host_pages(f: &Fixture, query: &str, limit: usize) -> Vec<Vec<String>> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = f
+            .runtime
+            .search_threads_for_host(f.project.path(), query, limit, cursor.as_deref())
+            .unwrap();
+        pages.push(page.hits.iter().map(|hit| hit.thread_id.clone()).collect());
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return pages,
+        }
+        assert!(pages.len() < 20, "the cursor chain must end");
+    }
+}
+
+#[test]
+fn host_search_lists_a_thread_once_when_its_title_and_body_both_match() {
+    // Given: threads whose titles and bodies both contain the query, one body-only
+    // thread, and a page of 20 so titles end both mid-page and exactly on a page.
+    for (titles, limit) in [(25, 20), (20, 20)] {
+        let f = Fixture::new();
+        let names: Vec<String> = (0..titles).map(|index| format!("report {index}")).collect();
+        let mut all: Vec<&str> = names.iter().map(String::as_str).collect();
+        all.push("Notes");
+        many_threads_with_titles(&f, &all);
+        for index in 0..=titles {
+            let run = format!("run-{}", 3000 + index);
+            f.native_run(
+                &run,
+                Some(&format!("t{index:03}")),
+                None,
+                vec![
+                    assistant(vec![text("the report body")]),
+                    assistant(vec![text("done")]),
+                ],
+            );
+            f.index(&run);
+        }
+        // When: following the cursors through title pages and into the body pages.
+        let pages = host_pages(&f, "report", limit);
+        // Then: every thread appears exactly once, none repeated by a body page.
+        let mut flat: Vec<_> = pages.concat();
+        let listed = flat.len();
+        flat.sort();
+        flat.dedup();
+        assert_eq!(listed, flat.len(), "{pages:?}");
+        assert_eq!(flat.len(), titles + 1, "{pages:?}");
+        assert!(pages.iter().all(|page| page.len() <= limit));
+    }
+}

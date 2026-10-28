@@ -333,6 +333,75 @@ fn shortcuts_behind_the_picker_stay_quiet_in_both_steps() {
 }
 
 #[test]
+fn ctrl_k_and_the_search_button_do_not_open_the_search_over_the_model_picker() {
+    // Given: the model picker is open.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let button = default_model(&harness);
+    open_picker(&mut harness, &button);
+
+    // When: the search shortcut is pressed, or the search is requested directly.
+    harness.key_press(egui::Modifiers::COMMAND, Key::K);
+    harness.run();
+    harness.state_mut().open_thread_search();
+    harness.run();
+
+    // Then: only the picker is open.
+    assert!(!harness.state().thread_search().is_open());
+    assert!(harness.has_label(SEARCH_LABEL));
+
+    // When: the picker is closed, the shortcut opens the search again.
+    press(&mut harness, Key::Escape);
+    assert!(!harness.has_label(SEARCH_LABEL));
+    harness.key_press(egui::Modifiers::COMMAND, Key::K);
+    harness.run();
+    assert!(harness.state().thread_search().is_open());
+}
+
+#[test]
+fn pressing_the_model_button_behind_the_search_backdrop_only_dismisses_the_search() {
+    // Given: the search is open over the composer.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let button = default_model(&harness);
+    harness.key_press(egui::Modifiers::COMMAND, Key::K);
+    harness.run();
+    assert!(harness.state().thread_search().is_open());
+
+    // When: the model button behind the backdrop is pressed.
+    harness.click_label(&button);
+    harness.run();
+
+    // Then: the click dismissed the search and did not stack the picker on it.
+    assert!(!harness.state().thread_search().is_open());
+    assert!(!harness.has_label(SEARCH_LABEL));
+}
+
+#[test]
+fn shortcuts_behind_the_search_stay_quiet() {
+    // Given: Alt+R cycles the composer role, and the search is open.
+    let temp = tempfile::tempdir().unwrap();
+    let mut harness = workbench(temp.path(), true);
+    harness.run();
+    let role = harness.state().composer().role;
+    harness.key_press(egui::Modifiers::COMMAND, Key::K);
+    harness.run();
+    assert!(harness.state().thread_search().is_open());
+    // When/Then: the shortcut does nothing while the search is up...
+    harness.key_press(egui::Modifiers::ALT, Key::R);
+    harness.run();
+    assert_eq!(harness.state().composer().role, role);
+    // ...and works again once it is closed.
+    press(&mut harness, Key::Escape);
+    assert!(!harness.state().thread_search().is_open());
+    harness.key_press(egui::Modifiers::ALT, Key::R);
+    harness.run();
+    assert_ne!(harness.state().composer().role, role);
+}
+
+#[test]
 fn clearing_selection_restores_automatic_routing() {
     // Given
     let temp = tempfile::tempdir().unwrap();
