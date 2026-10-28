@@ -239,3 +239,54 @@ fn current_adaptive_models_validate_effort_and_reject_impossible_disable() {
             .is_err()
     );
 }
+
+// Given: API-key requests with and without an explicit effort
+// When: controls are resolved per model capability
+// Then: supported efforts reuse the subscription mapping minus the Claude Code beta
+// `context_management`, while anything unsupported or unspecified sends nothing.
+#[test]
+fn api_key_reasoning_maps_supported_efforts_and_omits_everything_else() {
+    let none = ClaudeReasoningControls::default();
+    assert_eq!(
+        ClaudeWireProfile.api_key_reasoning("claude-sonnet-4-6", 4096, None),
+        none,
+        "an unspecified effort must keep the model default"
+    );
+
+    let adaptive = ClaudeWireProfile.api_key_reasoning("claude-sonnet-4-6", 4096, Some("high"));
+    assert_eq!(
+        adaptive.thinking,
+        Some(json!({"type": "adaptive", "display": "summarized"}))
+    );
+    assert_eq!(adaptive.output_config, Some(json!({"effort": "high"})));
+    assert_eq!(adaptive.context_management, None);
+
+    let manual = ClaudeWireProfile.api_key_reasoning("claude-sonnet-4-5", 4096, Some("medium"));
+    assert_eq!(
+        manual.thinking,
+        Some(json!({"type": "enabled", "budget_tokens": 4095}))
+    );
+    assert_eq!(
+        manual.output_config, None,
+        "effort is unsupported on this model"
+    );
+    assert_eq!(manual.context_management, None);
+
+    let disabled = ClaudeWireProfile.api_key_reasoning("claude-sonnet-4-6", 4096, Some("none"));
+    assert_eq!(disabled.thinking, Some(json!({"type": "disabled"})));
+    assert_eq!(disabled.output_config, None);
+
+    for (model, max_tokens, effort) in [
+        ("some-gateway/model", 4096, "high"),
+        ("claude-sonnet-4-6", 4096, "xhigh"),
+        ("claude-sonnet-4-6", 4096, "minimal"),
+        ("claude-mythos-preview", 4096, "none"),
+        ("claude-sonnet-4-5", 1024, "low"),
+    ] {
+        assert_eq!(
+            ClaudeWireProfile.api_key_reasoning(model, max_tokens, Some(effort)),
+            none,
+            "{model} {effort} must not be sent"
+        );
+    }
+}

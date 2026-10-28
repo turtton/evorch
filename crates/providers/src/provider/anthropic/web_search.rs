@@ -10,7 +10,7 @@ use serde_json::json;
 use super::{ANTHROPIC_PROTOCOL, AnthropicClient, MessagesRequest};
 use crate::http::UsageEmitter;
 use crate::observe::AttemptObserver;
-use crate::provider::claude::{self, ClaudeWireProfile};
+use crate::provider::claude;
 use crate::wire::anthropic::{WireContentBlock, WireMessage, WireMessagesRequest, WireRole};
 use crate::{
     FinishReason, HostedWebSearch, HostedWebSearchError, HostedWebSearchRequest,
@@ -181,16 +181,11 @@ impl AnthropicClient {
                     request.observation.as_ref().map(|o| o.run_id.as_str()),
                 )
             }),
-            reasoning: self
-                .claude_oauth
-                .then(|| {
-                    ClaudeWireProfile.reasoning(
-                        &request.model,
-                        MAX_TOKENS,
-                        request.reasoning_effort.as_deref(),
-                    )
-                })
-                .transpose()?,
+            reasoning: self.reasoning_controls(
+                &request.model,
+                MAX_TOKENS,
+                request.reasoning_effort.as_deref(),
+            )?,
         })
     }
 }

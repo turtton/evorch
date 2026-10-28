@@ -248,8 +248,8 @@ pub fn effort_choices(preference: &ModelPreference, profiles: &[ProfileSummary])
         .as_ref()
         .or_else(|| profile.and_then(|profile| profile.default_model.as_ref()));
     let levels = profile.and_then(|profile| profile.effort_levels.get(selected_model?));
-    // The Anthropic API client does not forward effort yet, so only the levels a model
-    // lists explicitly are offered, never the common defaults.
+    // Only the levels a model lists explicitly are offered, never the common defaults:
+    // the Anthropic API client sends an effort only for models with a known mapping.
     if profile.is_some_and(|profile| profile.provider_type == model::ProviderType::Anthropic) {
         return levels.cloned().unwrap_or_default();
     }

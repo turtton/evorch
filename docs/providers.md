@@ -135,6 +135,24 @@ Sonnet 4.6 and Opus 4.6/4.7; unsupported model/effort combinations fail before
 inference. Agent Roles and the chat model picker offer the effort levels
 supported by the selected subscription model. Models that require thinking
 do not offer `none`, and unrecognized models have no effort selector.
+
+API-key profiles (`type = "anthropic"`) send the same `thinking` and
+`output_config.effort` mapping when a route or the model picker selects a
+reasoning effort and the model supports it (the capability table is shared with
+subscription profiles; Claude Code's `context_management` beta is not sent, so
+no `anthropic-beta` header is needed). Nothing is sent when no effort is
+selected, so default behavior is unchanged, and an effort the model does not
+support (or an unrecognized model ID, such as a gateway alias) is omitted with
+a warning instead of failing the request. Enabled thinking requires the default
+temperature, so a custom `temperature` with a thinking effort is rejected
+before inference.
+
+Prompt cache: within a run, keep the model and effort fixed. Anthropic renders
+the resolved effort and thinking configuration into the cached prefix, so
+changing the effort between requests is an explicit cache boundary: the cache
+restarts on the first request after the change, and continuations that keep the
+new effort reuse it again. `cache_prefix_contract` and `claude_cache_e2e` pin
+this contract. Switching efforts mid-run is not a history replacement.
 See the [Anthropic stream contract](anthropic-stream-events.md)
 for supported events and signature replay boundaries. Cursor does not expose
 temperature, output-token limits, or service-tier controls.
