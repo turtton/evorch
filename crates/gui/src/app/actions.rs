@@ -601,10 +601,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             LoopEvent::ChatRejected { reason, .. } => {
                 tracing::warn!(%reason, "chat command rejected");
-                self.push_notice(format!(
-                    "chat failed: {}",
-                    crate::model::failure_text::english(&reason)
-                ));
+                self.push_reason_notice("chat failed: ", &reason);
             }
             LoopEvent::GoalAccepted { thread_id, goal_id } => {
                 if self
@@ -619,7 +616,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             LoopEvent::CommandRejected { reason } => {
                 tracing::warn!(%reason, "goal loop command rejected");
-                self.push_notice(crate::model::failure_text::english(&reason));
+                self.push_reason_notice("", &reason);
             }
         }
     }

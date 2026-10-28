@@ -70,7 +70,7 @@ pub fn render(
     }
 
     if let Some(error) = &pane_state.error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
 }
 

@@ -381,10 +381,9 @@ fn ownership_status_ui(ui: &mut egui::Ui, status: &OwnershipStatus, now: Instant
 }
 
 fn ownership_action_error_ui(ui: &mut egui::Ui, error: &OwnershipActionError) {
-    ui.colored_label(
-        palette().ERROR_FG,
-        format!("{}: {}", error.operation, error.detail),
-    );
+    crate::theme::widgets::reason_label_with(ui, palette().ERROR_FG, &error.detail, |shown| {
+        format!("{}: {shown}", error.operation)
+    });
 }
 
 #[cfg(test)]

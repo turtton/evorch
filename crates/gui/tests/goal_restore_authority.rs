@@ -194,14 +194,17 @@ fn rejected(events: &[LoopEvent], reason: &str) {
     )
     .unwrap();
     app.apply_loop_event(events[0].clone());
-    assert!(
-        app.transcript()
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry,
-        gui::model::transcript::TranscriptEntry::Notice { text }
-        if text.starts_with("chat failed:") && text.contains(reason)))
-    );
+    assert!(app.transcript().entries().iter().any(|entry| match entry {
+        // English reasons stay a plain notice; Japanese ones are translated
+        // with the original kept in the hover.
+        gui::model::transcript::TranscriptEntry::Notice { text } => {
+            text.starts_with("chat failed:") && text.contains(reason)
+        }
+        gui::model::transcript::TranscriptEntry::Diagnostic { text, hover, .. } => {
+            text.starts_with("chat failed:") && hover.contains(reason)
+        }
+        _ => false,
+    }));
 }
 
 #[test]

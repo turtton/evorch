@@ -30,7 +30,7 @@ pub fn catalog_toolbar(ui: &mut egui::Ui, state: &mut CatalogState) {
         }
     });
     if let Some(error) = &state.error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     if state.is_busy() {
         ui.ctx()

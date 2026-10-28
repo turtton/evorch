@@ -150,10 +150,10 @@ pub fn provider_models(
         }
     });
     if let Some(error) = &inputs.error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     if let Some(error) = &editor.validation_error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     let refresh = fetch_models(ui, editor);
     let height = ui.cursor().top() - top;
@@ -188,10 +188,9 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut OpenAiEditorModel) -> bool {
                 )));
             }
             ModelsFetchState::Failed(error) => {
-                ui.colored_label(
-                    palette().ERROR_FG,
-                    format!("Auto-fetch failed ({error}); manual entry below"),
-                );
+                crate::theme::widgets::reason_label_with(ui, palette().ERROR_FG, error, |shown| {
+                    format!("Auto-fetch failed ({shown}); manual entry below")
+                });
             }
         }
     });

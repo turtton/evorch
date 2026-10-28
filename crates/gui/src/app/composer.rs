@@ -488,6 +488,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .push_thread(TranscriptEntry::Notice { text: text.into() });
     }
 
+    /// A notice for a rejected command: the reason in English, the original in the hover.
+    pub(super) fn push_reason_notice(&mut self, prefix: &str, reason: &str) {
+        self.transcripts
+            .push_thread(crate::model::transcript::reason_entry(
+                prefix, reason, false,
+            ));
+    }
+
     pub(super) fn refresh_image_capability(&mut self) {
         let Some(model) = self.active_model() else {
             return;

@@ -43,7 +43,7 @@ pub fn routing_settings_modal(
                     .show(ui, |ui| route_list(ui, model));
             });
             if let Some(error) = &model.validation_error {
-ui.colored_label(palette().ERROR_FG, error);
+crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
             }
             if busy {
                 ui.label(muted("Saving and reloading runtime..."));

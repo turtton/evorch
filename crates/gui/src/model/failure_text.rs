@@ -452,6 +452,75 @@ mod tests {
         }
     }
 
+    // Given: the profile validation failures routing really produces when settings are saved
+    // and the models are rebuilt (RoutingError wraps the Japanese reason in English)
+    // When: translated / Then: English, with the protocol names and the actual value kept
+    #[test]
+    fn routing_profile_errors_translate() {
+        use std::sync::Arc;
+
+        use routing::factory::{FactoryOptions, build_provider_client};
+        use routing::{CredentialRef, ProviderProfile};
+        use sandbox::credential::CredentialStore;
+        use sandbox::error::CredentialError;
+
+        struct NoStore;
+        impl CredentialStore for NoStore {
+            fn get(&self, _: &str) -> Result<Option<sandbox::Secret>, CredentialError> {
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &sandbox::Secret) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+        let profile = |provider_type, api_protocol| ProviderProfile {
+            name: "p".into(),
+            provider_type,
+            api_protocol,
+            base_url: "https://example.invalid".into(),
+            credential: CredentialRef::Env { var: "KEY".into() },
+            models: vec![],
+            default_model: "m".into(),
+            edit_tool: config::EditToolSelection::default(),
+        };
+        let failure = |profile: ProviderProfile| {
+            build_provider_client(
+                &profile,
+                Arc::new(NoStore),
+                None,
+                &FactoryOptions::default(),
+            )
+            .err()
+            .expect("a mismatched protocol is rejected")
+            .to_string()
+        };
+        let openai = failure(profile(
+            model::ProviderType::OpenAi,
+            model::ApiProtocol::OpenAiCompletions,
+        ));
+        assert!(
+            contains_japanese(&openai),
+            "the producer keeps its wording: {openai}"
+        );
+        assert_eq!(
+            english(&openai),
+            "invalid provider profile: provider type `openai` supports only api protocol `openai-responses` (actual: openai-completions); set api_protocol to `openai-responses`"
+        );
+        let compatible = failure(profile(
+            model::ProviderType::OpenAiCompatible,
+            model::ApiProtocol::OpenAiResponses,
+        ));
+        assert!(!contains_japanese(&english(&compatible)), "{compatible}");
+        let codex = failure(profile(
+            model::ProviderType::OpenAiCodex,
+            model::ApiProtocol::OpenAiResponses,
+        ));
+        assert!(!contains_japanese(&english(&codex)), "{codex}");
+    }
+
     // Given: English text / When: translated / Then: it is unchanged
     #[test]
     fn english_text_is_unchanged() {

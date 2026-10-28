@@ -50,18 +50,26 @@ pub enum MessageDirection {
     Outgoing,
 }
 
-/// A failed run as the transcript shows it: runtime reasons are Japanese, so
-/// the line is English and the original reason moves to the hover.
-fn failure_entry(reason: &str) -> TranscriptEntry {
+/// A transcript line `prefix` + `reason`. Runtime reasons are Japanese, so the
+/// line shows the English form and the original reason moves to the hover;
+/// a reason that needs no translation stays a plain notice or error.
+pub(crate) fn reason_entry(prefix: &str, reason: &str, error: bool) -> TranscriptEntry {
     let shown = crate::model::failure_text::english(reason);
+    let text = format!("{prefix}{shown}");
     if shown == reason {
-        return TranscriptEntry::Error {
-            text: format!("Run failed: {reason}"),
+        return if error {
+            TranscriptEntry::Error { text }
+        } else {
+            TranscriptEntry::Notice { text }
         };
     }
     TranscriptEntry::Diagnostic {
-        severity: event_bus::DiagnosticSeverity::Error,
-        text: format!("Run failed: {shown}"),
+        severity: if error {
+            event_bus::DiagnosticSeverity::Error
+        } else {
+            event_bus::DiagnosticSeverity::Warning
+        },
+        text,
         hover: reason.to_owned(),
     }
 }
@@ -328,7 +336,7 @@ impl TranscriptModel {
                     reason: Some(reason),
                     ..
                 } | event_bus::LifecycleEvent::Failed { reason, .. },
-            ) => self.push(failure_entry(reason)),
+            ) => self.push(reason_entry("Run failed: ", reason, true)),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, ..
             }) if self.agent_names.contains_key(run_id) => {

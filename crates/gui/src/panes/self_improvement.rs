@@ -219,7 +219,11 @@ impl SelfImprovementPane {
         ui.ctx()
             .request_repaint_after(Duration::from_secs_f64((self.next_poll_at - now).max(0.0)));
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
+            crate::theme::widgets::reason_label(
+                ui,
+                crate::theme::tokens::palette().ERROR_FG,
+                error,
+            );
         }
         ui.label(crate::theme::text::muted(format!(
             "{} candidates (up to 200)",

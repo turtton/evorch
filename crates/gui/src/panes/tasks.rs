@@ -52,7 +52,12 @@ pub fn tasks_pane(
                         }
                     }
                     Err(error) => {
-                        ui.colored_label(palette().ERROR_FG, format!("Cannot load tasks: {error}"));
+                        crate::theme::widgets::reason_label_with(
+                            ui,
+                            palette().ERROR_FG,
+                            error.to_string(),
+                            |shown| format!("Cannot load tasks: {shown}"),
+                        );
                     }
                     Ok(None) => {}
                 }

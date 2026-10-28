@@ -695,3 +695,52 @@ fn chat_rejected_event_renders_notice() {
     assert!(harness.has_label("chat failed: provider unavailable"));
     assert_eq!(harness.state().issued().len(), 1);
 }
+
+// Given: chat and command rejections whose reasons are Japanese, known or not
+// When: they are applied through the loop-event API
+// Then: the notice reads in English and the original reason stays in its hover
+#[test]
+fn rejection_notices_read_in_english_and_keep_the_original_in_the_hover() {
+    use gui::model::transcript::TranscriptEntry;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut harness = workbench(temp.path(), ProviderStatus::Configured);
+    submit(&mut harness, "hello");
+    let known = "モデル呼び出しに失敗しました: HTTP 500";
+    let unknown = "未知の拒否理由: detail";
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::ChatRejected {
+            thread_id: "thread-1".into(),
+            reason: known.into(),
+        });
+    harness
+        .state_mut()
+        .apply_loop_event(LoopEvent::CommandRejected {
+            reason: unknown.into(),
+        });
+    harness.run();
+    let notices: Vec<(String, String)> = harness
+        .state()
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Diagnostic { text, hover, .. } => Some((text.clone(), hover.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [
+            (
+                "chat failed: Model call failed: HTTP 500".to_owned(),
+                known.to_owned()
+            ),
+            (
+                format!("{}: detail", gui::model::failure_text::UNTRANSLATED),
+                unknown.to_owned()
+            ),
+        ]
+    );
+    assert!(harness.has_label("chat failed: Model call failed: HTTP 500"));
+}

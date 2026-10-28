@@ -442,7 +442,7 @@ pub(crate) fn local_image_ui(ui: &mut egui::Ui, path: &Path) {
             ui.label("Not an image file.");
         }
         Some(Err(error)) => {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            crate::theme::widgets::reason_label(ui, ui.visuals().error_fg_color, error);
         }
         None => {
             ui.label("Loading image…");
@@ -524,7 +524,7 @@ fn file_viewer(ui: &mut egui::Ui, path: &Path, root: Option<&Path>, reload_poll:
                 ui.ctx().request_repaint_after(Duration::from_millis(50));
             }
             Some(Err(error)) => {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                crate::theme::widgets::reason_label(ui, ui.visuals().error_fg_color, error);
             }
             Some(Ok(LoadedFile::Image(_))) => {
                 egui::ScrollArea::both()
