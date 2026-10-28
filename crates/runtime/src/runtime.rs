@@ -291,6 +291,8 @@ pub(crate) struct RunEntry {
     _join: Option<JoinHandle<()>>,
 }
 
+type MessageDelivery = (String, AgentMessage, DeliveryDisposition);
+
 struct SentRecord {
     sender: RunId,
     recipient: RunId,
@@ -2755,8 +2757,37 @@ impl AgentRuntime {
         kind: AgentMessageKind,
         content: String,
         reply_to: Option<String>,
-    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+    ) -> Result<MessageDelivery, RuntimeError> {
+        let queued = crate::mailbox::QueuedMessage::explicit(AgentMessage {
+            message_id: String::new(),
+            sender_run_id: sender.to_string(),
+            recipient_run_id: recipient.to_string(),
+            kind,
+            content,
+            reply_to,
+        });
+        self.try_live_queued_delivery(sender, recipient, queued)
+            .map(|delivery| delivery.expect("explicit messages cannot be observed completions"))
+    }
+
+    /// Keep origin through the final runs-locked enqueue. Observation uses the
+    /// same lock, so it either prevents delivery or removes the typed queue item.
+    fn try_live_queued_delivery(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        mut queued: crate::mailbox::QueuedMessage,
+    ) -> Result<Option<MessageDelivery>, RuntimeError> {
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(recipient) {
+            self.execution_hook(HookPoint::LiveMessagePrepared, &execution);
+        }
         let runs = lock_runs(&self.shared.runs);
+        if queued.observed() {
+            return Ok(None);
+        }
+        let kind = queued.message.kind.clone();
+        let reply_to = &queued.message.reply_to;
         let sender_entry = runs.get(&sender).ok_or_else(|| unknown_run(sender))?;
         let recipient_entry = runs.get(&recipient).ok_or_else(|| unknown_run(recipient))?;
 
@@ -2830,17 +2861,11 @@ impl AgentRuntime {
             self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
         );
 
-        let message = AgentMessage {
-            message_id: message_id.clone(),
-            sender_run_id: sender.to_string(),
-            recipient_run_id: recipient.to_string(),
-            kind: kind.clone(),
-            content: content.clone(),
-            reply_to: reply_to.clone(),
-        };
-
+        queued.message.message_id.clone_from(&message_id);
+        let message = queued.message.clone();
+        let interrupts_wait = queued.interrupts_wait();
         let mailbox = Arc::clone(&recipient_entry.mailbox);
-        if let Err(push_error) = mailbox.try_push(message.clone()) {
+        if let Err(push_error) = mailbox.try_push_queued(queued) {
             return Err(match push_error {
                 PushError::Full => RuntimeError::MailboxFull {
                     run_id: recipient.to_string(),
@@ -2852,6 +2877,7 @@ impl AgentRuntime {
         }
 
         if reply_correlation.is_none() {
+            let sender = message.sender_run_id.parse().unwrap_or(sender);
             sent.insert(message_id.clone(), SentRecord { sender, recipient });
         }
         drop(sent);
@@ -2860,7 +2886,7 @@ impl AgentRuntime {
         let disposition = match phase {
             AgentRunPhase::Waiting => DeliveryDisposition::Wake,
             AgentRunPhase::Pending | AgentRunPhase::Running => {
-                if is_child_to_parent {
+                if interrupts_wait && is_child_to_parent {
                     DeliveryDisposition::Steering
                 } else {
                     DeliveryDisposition::Aside
@@ -2869,7 +2895,7 @@ impl AgentRuntime {
             AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
         };
 
-        Ok((message_id, message, disposition))
+        Ok(Some((message_id, message, disposition)))
     }
 
     /// run 自身の待機で mailbox を非消費のまま監視するための参照を返す。

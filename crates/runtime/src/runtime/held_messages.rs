@@ -11,6 +11,7 @@ pub(crate) const AUTO_WAKE_LIMIT: u32 = 20;
 impl AgentRuntime {
     /// Hold `message` for a recipient that is not running. The caller holds the
     /// runs lock, so registration cannot release the queue concurrently.
+    #[cfg(test)]
     pub(super) fn hold_message(&self, recipient: RunId, message: AgentMessage) {
         self.hold_queued_message(recipient, crate::mailbox::QueuedMessage::explicit(message));
     }
@@ -224,8 +225,16 @@ impl AgentRuntime {
                 _ => return,
             }
         };
-        if let Err(error) = self.restore_and_deliver(parent, run, first.message.clone()) {
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(run) {
+            self.execution_hook(HookPoint::HeldMessageTaken, &execution);
+        }
+        if let Err(error) = self.restore_queued_and_deliver(parent, run, first.clone()) {
             tracing::info!(%run, %error, "held messages wait for the subagent to be resumed");
+            let _runs = lock_runs(&self.shared.runs);
+            if first.observed() {
+                return;
+            }
             self.shared
                 .held_messages
                 .lock()
@@ -375,3 +384,6 @@ mod tests {
         assert_eq!(pauses, 1, "the pause is announced once per budget");
     }
 }
+
+#[cfg(test)]
+mod race_tests;
