@@ -232,6 +232,7 @@ mod tests {
                 options: vec![],
                 blocking: true,
                 answer: None,
+                answer_origin: None,
             };
             let mut model = NotificationsModel::default();
             // When: the pending question arrives.
@@ -267,6 +268,7 @@ mod tests {
                 options: vec![],
                 blocking: true,
                 answer,
+                answer_origin: None,
             };
             let mut model = NotificationsModel::default();
             model.apply_event(

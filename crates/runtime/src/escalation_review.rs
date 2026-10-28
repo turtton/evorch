@@ -1483,6 +1483,7 @@ mod tests {
             options: vec![],
             blocking: true,
             answer: Some("Allow temporary test files".into()),
+            answer_origin: None,
         };
         run.add_user_answer("run-81", &question, "Allow temporary test files");
         let _ = reviewer

@@ -512,10 +512,7 @@ impl RuntimeCommandSink {
                 if active {
                     return vec![saved];
                 }
-                let text = format!(
-                    "[user-answer id={}]\nQuestion: {}\nAnswer: {}",
-                    question.id, question.title, answer
-                );
+                let text = question.answer_message();
                 let mut events = self.submit_authorized(
                     WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
                         submission_id: String::new(),

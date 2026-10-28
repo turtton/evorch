@@ -673,9 +673,44 @@ pub struct UserQuestion {
     pub options: Vec<String>,
     pub blocking: bool,
     pub answer: Option<String>,
+    /// Who supplied `answer`. `None` while pending, and for answers stored before
+    /// the origin was recorded (their source is unknown, not assumed to be a user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_origin: Option<AnswerOrigin>,
+}
+
+/// The source of a question's answer. Only `Host` is a person's answer; a
+/// parent agent's answer must never be mistaken for the user's approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnswerOrigin {
+    /// Submitted through the host-facing (user) answer API.
+    Host,
+    /// Given by the requester's Orchestrator parent via `answer_subagent_question`.
+    ParentAgent { answered_by_run_id: String },
 }
 
 impl UserQuestion {
+    /// The user-role message that delivers the stored answer to a recipient run.
+    ///
+    /// Injection and the history check that stops re-injection after a restore
+    /// both use this, so they cannot drift apart. Only a parent agent's answer
+    /// gets a distinct tag; host and legacy (unknown-origin) answers keep the
+    /// original `user-answer` form so histories saved earlier still match.
+    pub fn answer_message(&self) -> String {
+        let tag = match &self.answer_origin {
+            Some(AnswerOrigin::ParentAgent { answered_by_run_id }) => {
+                format!("parent-answer id={} from={answered_by_run_id}", self.id)
+            }
+            Some(AnswerOrigin::Host) | None => format!("user-answer id={}", self.id),
+        };
+        format!(
+            "[{tag}]\nQuestion: {}\nAnswer: {}",
+            self.title,
+            self.answer.as_deref().unwrap_or_default()
+        )
+    }
+
     /// Child-to-parent questions must never become user-facing prompts.
     pub fn is_user_visible(&self) -> bool {
         self.run_id == self.root_run_id
@@ -1400,6 +1435,54 @@ pub enum CompactionEvent {
 mod tests {
     use super::*;
     use crate::{OwnershipAction, OwnershipEvent};
+
+    fn answered_question(origin: Option<AnswerOrigin>) -> UserQuestion {
+        UserQuestion {
+            id: "question-1".into(),
+            run_id: "run-child".into(),
+            root_run_id: "run-root".into(),
+            root_name: "orchestrator".into(),
+            recipient_run_ids: Vec::new(),
+            title: "Which API?".into(),
+            options: Vec::new(),
+            blocking: true,
+            answer: Some("Use A".into()),
+            answer_origin: origin,
+        }
+    }
+
+    #[test]
+    fn answer_message_tells_a_parent_agent_answer_from_a_host_answer() {
+        let host = answered_question(Some(AnswerOrigin::Host)).answer_message();
+        let parent = answered_question(Some(AnswerOrigin::ParentAgent {
+            answered_by_run_id: "run-parent".into(),
+        }))
+        .answer_message();
+        assert_eq!(
+            host,
+            "[user-answer id=question-1]\nQuestion: Which API?\nAnswer: Use A"
+        );
+        assert_eq!(
+            parent,
+            "[parent-answer id=question-1 from=run-parent]\nQuestion: Which API?\nAnswer: Use A"
+        );
+    }
+
+    #[test]
+    fn answers_stored_before_origin_existed_keep_the_legacy_message_form() {
+        // Saved histories hold `[user-answer ...]`; matching them avoids re-injection on restore.
+        let legacy: UserQuestion = serde_json::from_value(serde_json::json!({
+            "id":"question-1", "run_id":"run-child", "root_run_id":"run-root",
+            "root_name":"orchestrator", "title":"Which API?", "options":[],
+            "blocking":true, "answer":"Use A"
+        }))
+        .unwrap();
+        assert_eq!(legacy.answer_origin, None);
+        assert_eq!(
+            legacy.answer_message(),
+            answered_question(Some(AnswerOrigin::Host)).answer_message()
+        );
+    }
 
     #[test]
     fn serde_round_trip_preserves_every_variant() {

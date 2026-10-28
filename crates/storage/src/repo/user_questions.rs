@@ -1,5 +1,5 @@
 use crate::{StorageError, entity::SecretGuard};
-use event_bus::UserQuestion;
+use event_bus::{AnswerOrigin, UserQuestion};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageError> {
@@ -18,6 +18,7 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
             .iter()
             .any(|s| s.trim().is_empty() || s.len() > 256)
         || question.answer.is_some()
+        || question.answer_origin.is_some()
     {
         return Err(invalid(
             "invalid question: title 1..2048 bytes, at most 3 options of 1..256 bytes",
@@ -59,9 +60,19 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<UserQuestion>, StorageE
     json.map(|s| hydrate(conn, &s)).transpose()
 }
 
-pub fn answer(conn: &Connection, id: &str, answer: &str) -> Result<(), StorageError> {
+pub fn answer(
+    conn: &Connection,
+    id: &str,
+    answer: &str,
+    origin: &AnswerOrigin,
+) -> Result<(), StorageError> {
     if answer.trim().is_empty() || answer.len() > 4096 {
         return Err(invalid("answer must be 1..4096 bytes"));
+    }
+    if matches!(origin, AnswerOrigin::ParentAgent { answered_by_run_id }
+        if answered_by_run_id.is_empty() || answered_by_run_id.len() > 64)
+    {
+        return Err(invalid("answering run ID must be 1..64 bytes"));
     }
     SecretGuard::from_env().check_text("user_question", "answer", answer)?;
     let mut question = get(conn, id)?.ok_or_else(|| invalid("unknown question"))?;
@@ -73,6 +84,7 @@ pub fn answer(conn: &Connection, id: &str, answer: &str) -> Result<(), StorageEr
         };
     }
     question.answer = Some(answer.into());
+    question.answer_origin = Some(origin.clone());
     let payload = serde_json::to_string(&question).map_err(|e| invalid(&e.to_string()))?;
     // Plan A's fence is on the answer itself, not each recipient. Never persist
     // evidence for a losing answer, even if the caller read a stale pending row.

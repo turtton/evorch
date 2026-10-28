@@ -40,6 +40,7 @@ fn question() -> UserQuestion {
         options: vec!["Markdown".into(), "JSON".into()],
         blocking: true,
         answer: None,
+        answer_origin: None,
     }
 }
 #[test]
