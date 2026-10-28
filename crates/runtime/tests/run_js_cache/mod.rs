@@ -1,30 +1,69 @@
-//! `run_js` and the prompt cache: its description is generated once per run, so
-//! every request of a run carries byte-identical tool definitions and the cached
-//! prefix is reused (AGENTS.md "Cache correctness gate").
+//! `run_js` and the prompt cache. The description is generated once per run, so
+//! every request of a run carries byte-identical tool definitions; and a run in
+//! which a program really runs (child calls, a result large enough to become an
+//! artifact) still extends the previous wire input request after request.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use event_bus::AgentRunPhase;
+use mock_openai::ScriptedResponse;
 use runtime::{Role, RunConfig};
-use serde_json::Value;
+use sandbox::DirectSandbox;
+use serde_json::{Value, json};
 use tools::Tool;
+use tools::tools::run_js::WorkerLauncher;
 
-use super::{BulkRead, Harness, MODEL, Wire, harness_with_model, read_response, text_response};
+use super::{
+    BulkRead, Harness, MODEL, Wire, harness_with_model, read_response, text_response,
+    through_phase, verify_trace,
+};
 
-fn harness(enabled: bool) -> Harness {
+/// A `sh` worker speaking the protocol: it reads a large file through the host,
+/// writes one, prints far more than the output limit and returns a string.
+fn worker(target: &Path) -> WorkerLauncher {
+    let script = format!(
+        r#"read -r run
+printf '%s\n' '{{"type":"tool_call","id":1,"name":"read","args":{{"index":1}}}}'
+read -r _
+printf '%s\n' '{{"type":"tool_call","id":2,"name":"write","args":{{"path":"{target}","content":"written by run_js\n"}}}}'
+read -r _
+printf '{{"type":"output","text":"%s\\n"}}\n' "$(head -c 60000 /dev/zero | tr '\0' x)"
+printf '%s\n' '{{"type":"done","value":"all done"}}'"#,
+        target = target.display()
+    );
+    WorkerLauncher::injected(
+        Arc::new(DirectSandbox::new_unchecked()),
+        "sh".into(),
+        vec!["-c".into(), script],
+    )
+}
+
+fn harness(enabled: bool, script: Vec<ScriptedResponse>, launcher: WorkerLauncher) -> Harness {
     harness_with_model(
         Wire::ChatCompletions,
         MODEL,
-        vec![read_response(1), read_response(3), text_response("done")],
+        script,
         1_000_000,
         Arc::new(BulkRead),
         vec![
             Arc::new(tools::Write) as Arc<dyn Tool>,
-            Arc::new(tools::RunJs::new()),
+            Arc::new(tools::RunJs::with_launcher(launcher)),
         ],
         None,
         0.5,
         |config| config.tools.run_js.enabled = enabled,
+    )
+}
+
+fn run_js_response(index: usize) -> ScriptedResponse {
+    ScriptedResponse::tool_call(
+        &format!("response-{index}"),
+        MODEL,
+        0,
+        &format!("call-{index}"),
+        "run_js",
+        [json!({"code": "/* the worker script runs */"}).to_string()],
     )
 }
 
@@ -47,14 +86,35 @@ fn tool_names(request: &Value) -> Vec<String> {
         .collect()
 }
 
+/// A program runs for real, its child calls and its large result enter the
+/// history, and the run keeps extending the wire prefix.
 #[tokio::test]
-async fn run_js_definition_is_byte_identical_across_the_turns_of_a_run() {
-    let harness = harness(true);
+async fn a_run_that_executes_run_js_preserves_tools_and_the_wire_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("written.txt");
+    let mut harness = harness(
+        true,
+        vec![run_js_response(0), read_response(3), text_response("done")],
+        worker(&target),
+    );
+
     let run =
         harness
             .runtime
             .delegate_background(Role::Worker, "work".into(), RunConfig::default());
-    assert_eq!(harness.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+
+    // The program really ran: its write happened and the history holds its result.
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "written by run_js\n"
+    );
+    // The input-derived mock cache and the contract's append-only assertions.
+    verify_trace(&harness, run, &events, 0);
 
     let requests = requests(&harness);
     assert_eq!(requests.len(), 3);
@@ -62,6 +122,46 @@ async fn run_js_definition_is_byte_identical_across_the_turns_of_a_run() {
     for request in &requests[1..] {
         assert_eq!(serde_json::to_string(&request["tools"]).unwrap(), first);
     }
+    let history = requests[2]["messages"].as_array().unwrap();
+    let result = history
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "call-0")
+        .expect("run_js result in the history")["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(result.contains("Output artifact"), "{result}");
+    assert!(
+        result.contains("=> all done\n[run_js: 2 calls, 0 failed; wrote: "),
+        "{result}"
+    );
+    // The earlier requests' history is a strict prefix of the later ones.
+    for pair in requests.windows(2) {
+        let (before, after) = (
+            pair[0]["messages"].as_array().unwrap(),
+            pair[1]["messages"].as_array().unwrap(),
+        );
+        assert!(after.len() > before.len());
+        assert_eq!(before[..], after[..before.len()]);
+    }
+}
+
+/// The definition of `run_js` is generated from this run's tools.
+#[tokio::test]
+async fn the_run_js_definition_lists_the_callable_tools_of_the_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = harness(
+        true,
+        vec![read_response(3), text_response("done")],
+        worker(&directory.path().join("unused")),
+    );
+    let run =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+
+    let requests = requests(&harness);
     let run_js = requests[0]["tools"]
         .as_array()
         .unwrap()
@@ -69,27 +169,37 @@ async fn run_js_definition_is_byte_identical_across_the_turns_of_a_run() {
         .find(|tool| tool["function"]["name"] == "run_js")
         .expect("run_js is offered when enabled");
     let description = run_js["function"]["description"].as_str().unwrap();
-    assert!(
-        description.contains("read(args: { index: number })"),
-        "declarations come from this run's tools: {description}"
-    );
+    assert!(description.contains("read(args: { index: number })"));
     assert!(description.contains("write(args: { content: string; path: string })"));
 }
 
+/// While it is off, nothing about the other tools differs.
 #[tokio::test]
-async fn disabled_run_js_leaves_the_tool_definitions_unchanged() {
-    let harness = harness(false);
-    let run =
-        harness
-            .runtime
-            .delegate_background(Role::Worker, "work".into(), RunConfig::default());
-    assert_eq!(harness.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+async fn disabled_run_js_leaves_the_other_tool_definitions_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let launcher = || worker(&directory.path().join("unused"));
+    let script = || vec![read_response(3), text_response("done")];
 
-    let requests = requests(&harness);
-    let names = tool_names(&requests[0]);
-    assert!(!names.contains(&"run_js".to_owned()), "{names:?}");
-    assert!(
-        !requests[0]["tools"].to_string().contains("run_js"),
-        "no definition mentions run_js while it is off"
-    );
+    let mut off = harness(false, script(), launcher());
+    let run = off
+        .runtime
+        .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    through_phase(&mut off.receiver, run, AgentRunPhase::Done).await;
+    let mut on = harness(true, script(), launcher());
+    let run = on
+        .runtime
+        .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    through_phase(&mut on.receiver, run, AgentRunPhase::Done).await;
+
+    let (off, on) = (requests(&off), requests(&on));
+    assert!(!tool_names(&off[0]).contains(&"run_js".to_owned()));
+    assert!(!off[0]["tools"].to_string().contains("run_js"));
+    let without_run_js: Vec<Value> = on[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| tool["function"]["name"] != "run_js")
+        .cloned()
+        .collect();
+    assert_eq!(Value::Array(without_run_js), off[0]["tools"]);
 }

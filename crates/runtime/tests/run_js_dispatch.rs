@@ -17,6 +17,7 @@ use runtime::{AgentRuntime, RunConfig};
 use sandbox::{ApprovalMode, ApprovalPolicy, DirectSandbox, PolicyDecision};
 use serde_json::json;
 use support::{ScriptedModel, drain_events, text_response, tool_response};
+use tools::post_edit::{PostEditHook, PostEditInput, PostEditOutcome};
 use tools::tools::run_js::WorkerLauncher;
 use tools::{RunJs, ToolExecutor};
 
@@ -37,6 +38,7 @@ struct Fixture {
     runtime: AgentRuntime,
     bus: Arc<EventBus>,
     model: Arc<ScriptedModel>,
+    executor: Arc<ToolExecutor>,
 }
 
 fn fixture(
@@ -45,11 +47,22 @@ fn fixture(
     settings: config::RunJsConfig,
     responses: Vec<providers::ChatResponse>,
 ) -> Fixture {
+    fixture_with(launcher, policy, None, settings, responses)
+}
+
+fn fixture_with(
+    launcher: WorkerLauncher,
+    policy: Option<ApprovalPolicy>,
+    hook: Option<Arc<dyn PostEditHook>>,
+    settings: config::RunJsConfig,
+    responses: Vec<providers::ChatResponse>,
+) -> Fixture {
     let bus = Arc::new(EventBus::new(256));
     let mut executor = ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
-    );
+    )
+    .with_post_edit_hook(hook);
     executor
         .register(Arc::new(RunJs::with_launcher(launcher)))
         .unwrap();
@@ -57,12 +70,14 @@ fn fixture(
         executor.set_policy(policy);
     }
     let model = Arc::new(ScriptedModel::new(responses.into_iter().map(Ok)));
-    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+    let executor = Arc::new(executor);
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::clone(&executor), model.clone());
     runtime.set_run_js_settings(settings);
     Fixture {
         runtime,
         bus,
         model,
+        executor,
     }
 }
 
@@ -160,7 +175,12 @@ read -r reply
     assert_eq!(started(&events, "run_js").len(), 1);
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.contains("tools.edit is not available"), "{text}");
-    assert!(text.ends_with("[run_js: 1 calls, 1 failed]"), "{text}");
+    assert!(
+        text.ends_with(
+            "[run_js: 1 calls, 1 failed (edit #1: tools.edit is not available in this run)]"
+        ),
+        "{text}"
+    );
 }
 
 #[tokio::test]
@@ -453,4 +473,302 @@ read -r reply
     assert_eq!(streamed, "child-output\n");
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.ends_with("[run_js: 1 calls, 0 failed]"), "{text}");
+}
+
+/// Every call that started must have exactly one terminal event.
+fn open_tool_calls(events: &[Event]) -> Vec<String> {
+    let mut open: Vec<String> = Vec::new();
+    for event in events {
+        match &event.kind {
+            EventKind::Tool(ToolEvent::ToolStarted { call_id, .. }) => open.push(call_id.clone()),
+            EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. }) => {
+                let position = open
+                    .iter()
+                    .position(|id| id == call_id)
+                    .unwrap_or_else(|| panic!("{call_id} completed without starting or twice"));
+                open.remove(position);
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
+fn completed<'a>(events: &'a [Event], call: &str) -> Option<(&'a Option<String>, bool)> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::Tool(ToolEvent::ToolCompleted {
+            call_id,
+            output,
+            is_error,
+            ..
+        }) if call_id == call => Some((output, *is_error)),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn a_command_cut_off_with_the_program_is_closed_and_keeps_its_effects_unobserved() {
+    let directory = tempfile::tempdir().unwrap();
+    let fifo = directory.path().join("started");
+    let pid_file = directory.path().join("child.pid");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // The child records its pid, tells the worker it runs, and then sleeps for
+    // good; the worker finishes without waiting for it.
+    let command = format!(
+        "echo $$ > {}; echo go > {}; exec sleep 600",
+        pid_file.display(),
+        fifo.display()
+    );
+    let script = format!(
+        r#"printf '%s\n' '{{"type":"tool_call","id":1,"name":"shell","args":{{"command":"{command}"}}}}'
+read -r _ < {fifo}
+printf '%s\n' '{{"type":"done","value":"left it running"}}'"#,
+        fifo = fifo.display()
+    );
+    let fixture = fixture(
+        worker(&script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    let mut receiver = fixture.bus.subscribe();
+    let run =
+        fixture
+            .runtime
+            .delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    // A command cut off with the program may have had effects nobody saw, so, as
+    // for a cancelled model call, the run keeps its ownership instead of finishing
+    // (this fixture has no durable store to record the snapshot in).
+    let phase = fixture.runtime.wait(run).await;
+    let events = drain_events(&mut receiver).await;
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    let reason = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Error,
+                reason,
+                ..
+            }) => reason.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(reason.contains("unobserved shell effects"), "{reason}");
+
+    // The child's terminal event exists, is not duplicated, and precedes the parent's.
+    assert_eq!(open_tool_calls(&events), Vec::<String>::new());
+    let (output, is_error) = completed(&events, "js-1/1").expect("child completed");
+    assert_eq!((output.as_deref(), is_error), (Some("cancelled"), true));
+    let position = |call: &str| {
+        events
+            .iter()
+            .position(|event| {
+                matches!(&event.kind, EventKind::Tool(ToolEvent::ToolCompleted { call_id, .. }) if call_id == call)
+            })
+            .unwrap()
+    };
+    assert!(position("js-1/1") < position("js-1"));
+    // The parent says what was cut off, and its process is gone once jobs are drained.
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("=> left it running"), "{text}");
+    assert!(
+        text.contains("shell #1: cut off before it finished"),
+        "{text}"
+    );
+    fixture
+        .executor
+        .drain_shell_jobs(&run.to_string())
+        .await
+        .unwrap();
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_err(),
+        "child {pid} is still alive"
+    );
+}
+
+/// 60 KiB of printed output: the output limiter replaces the result's detail with
+/// an artifact reference.
+const BIG_OUTPUT: &str =
+    r#"printf '{"type":"output","text":"%s"}\n' "$(head -c 60000 /dev/zero | tr '\0' x)""#;
+
+fn read_call_line(id: u64, path: &str) -> String {
+    format!(
+        "printf '%s\\n' '{{\"type\":\"tool_call\",\"id\":{id},\"name\":\"read\",\"args\":{{\"path\":\"{path}\"}}}}'\nread -r _\n"
+    )
+}
+
+#[tokio::test]
+async fn calls_are_counted_even_when_the_result_detail_is_replaced_by_an_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_file(directory.path(), "a.txt", "x\n");
+    let script = format!(
+        "{}{}{BIG_OUTPUT}\nprintf '%s\\n' '{{\"type\":\"done\",\"value\":null}}'",
+        read_call_line(1, &file),
+        read_call_line(2, &file)
+    );
+    let fixture = fixture(
+        worker(&script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+    let mut config = RunConfig::default();
+    // run_js itself plus its two reads reach the limit; the program's calls count.
+    config.budget.max_tool_calls = 3;
+
+    let mut receiver = fixture.bus.subscribe();
+    let run = fixture
+        .runtime
+        .delegate_background(Role::Worker, "task".into(), config);
+    let phase = fixture.runtime.wait(run).await;
+    let events = drain_events(&mut receiver).await;
+
+    let detail = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                call_id, detail, ..
+            }) if call_id == "js-1" => detail.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(detail["output_artifact"]["path"].is_string(), "{detail}");
+    assert_eq!(detail["run_js"]["calls"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        phase,
+        Ok(AgentRunPhase::Error),
+        "the tool-call budget was spent"
+    );
+}
+
+#[tokio::test]
+async fn identical_calls_made_inside_the_program_stop_the_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = write_file(directory.path(), "a.txt", "x\n");
+    let script = format!(
+        "{}{}{}printf '%s\\n' '{{\"type\":\"done\",\"value\":null}}'",
+        read_call_line(1, &file),
+        read_call_line(2, &file),
+        read_call_line(3, &file)
+    );
+    let fixture = fixture(
+        worker(&script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+    let mut config = RunConfig::default();
+    config.budget.max_identical_tool_call_repeats = 3;
+
+    let mut receiver = fixture.bus.subscribe();
+    let run = fixture
+        .runtime
+        .delegate_background(Role::Worker, "task".into(), config);
+    let phase = fixture.runtime.wait(run).await;
+    let events = drain_events(&mut receiver).await;
+
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    let reason = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Error,
+                reason,
+                ..
+            }) => reason.clone(),
+            _ => None,
+        })
+        .expect("the run ends with a reason");
+    assert!(reason.starts_with("IdenticalToolCalls"), "{reason}");
+    assert!(reason.contains("tool=read"), "{reason}");
+}
+
+#[tokio::test]
+async fn different_calls_inside_the_program_are_not_a_repeat() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut calls = String::new();
+    for (id, name) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let file = write_file(directory.path(), &format!("{name}.txt"), "x\n");
+        calls.push_str(&read_call_line(id as u64 + 1, &file));
+    }
+    let script = format!("{calls}printf '%s\\n' '{{\"type\":\"done\",\"value\":null}}'");
+    let fixture = fixture(
+        worker(&script),
+        None,
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+    let mut config = RunConfig::default();
+    config.budget.max_identical_tool_call_repeats = 3;
+
+    let run = fixture
+        .runtime
+        .delegate_background(Role::Worker, "task".into(), config);
+    assert_eq!(fixture.runtime.wait(run).await, Ok(AgentRunPhase::Done));
+}
+
+struct WarningHook;
+
+#[async_trait::async_trait]
+impl PostEditHook for WarningHook {
+    async fn check(&self, _: &PostEditInput) -> PostEditOutcome {
+        PostEditOutcome::Warning {
+            message: "UNTRUSTED-REPOSITORY-COMMENT".into(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_summary_reports_failed_calls_and_checker_warnings_the_program_discarded() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory
+        .path()
+        .join("new.rs")
+        .to_string_lossy()
+        .into_owned();
+    let missing = directory
+        .path()
+        .join("absent.txt")
+        .to_string_lossy()
+        .into_owned();
+    // The program ignores every reply and returns nothing.
+    let script = format!(
+        r#"printf '%s\n' '{{"type":"tool_call","id":1,"name":"write","args":{{"path":"{target}","content":"// c\n"}}}}'
+read -r _
+printf '%s\n' '{{"type":"tool_call","id":2,"name":"read","args":{{"path":"{missing}"}}}}'
+read -r _
+printf '%s\n' '{{"type":"done","value":null}}'"#
+    );
+    let fixture = fixture_with(
+        worker(&script),
+        None,
+        Some(Arc::new(WarningHook)),
+        enabled(),
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    run(&fixture, Role::Worker).await;
+
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(
+        text.ends_with(&format!(
+            "[run_js: 2 calls, 1 failed (read #2: {missing}: no such file or directory); wrote: {target}; warnings: write #1: post-edit checker warning on {target}]"
+        )) || (text.contains("read #2:") && text.contains("warnings: write #1: post-edit checker warning")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("wrote: {target}")), "{text}");
+    assert!(!text.contains("UNTRUSTED-REPOSITORY-COMMENT"), "{text}");
+    assert_eq!(text.lines().count(), 1, "one summary line and nothing else");
 }
