@@ -157,6 +157,7 @@ fn fixture_with_model(
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
         run_js_unconfirmed: Arc::default(),
+        unobserved_job_reminders: 0,
         reported_questions: std::collections::HashSet::new(),
         last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),

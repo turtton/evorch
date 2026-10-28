@@ -726,6 +726,33 @@ async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
     assert!(reason.contains("max_tool_calls=20"), "{reason}");
 }
 
+#[tokio::test]
+async fn a_child_shell_cut_off_by_the_timeout_does_not_keep_the_run_from_finishing() {
+    // The program starts a long command and then waits for it; the run_js timeout ends
+    // both. The cut-off command is reported in the result the model gets, which is what
+    // a terminal shell response is for a normal command: nothing is left unobserved.
+    let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"sleep 30"}}'
+exec sleep 600"#;
+    let fixture = fixture(
+        worker(script),
+        None,
+        enabled(),
+        vec![
+            tool_response("js-1", "run_js", json!({"code": "x", "timeout_ms": 500})),
+            finish(),
+        ],
+    );
+
+    let events = run(&fixture, Role::Worker).await;
+
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("run_js timed out after 500 ms"), "{text}");
+    assert!(text.contains("shell #1"), "the command is named: {text}");
+    // The model's report was accepted at once: no reminder about shell jobs, no loop.
+    assert_eq!(fixture.model.observed().await.len(), 2);
+    assert_eq!(open_tool_calls(&events), Vec::<String>::new());
+}
+
 /// Every call that started must have exactly one terminal event.
 fn open_tool_calls(events: &[Event]) -> Vec<String> {
     let mut open: Vec<String> = Vec::new();
@@ -758,7 +785,7 @@ fn completed<'a>(events: &'a [Event], call: &str) -> Option<(&'a Option<String>,
 }
 
 #[tokio::test]
-async fn a_command_cut_off_with_the_program_is_closed_and_keeps_its_effects_unobserved() {
+async fn a_command_cut_off_with_the_program_is_closed_and_reported_to_the_model() {
     let directory = tempfile::tempdir().unwrap();
     let fifo = directory.path().join("started");
     let pid_file = directory.path().join("child.pid");
@@ -818,24 +845,18 @@ printf '%s\n' '{{"type":"done","value":"left it running"}}'"#,
         fixture
             .runtime
             .delegate_background(Role::Worker, "task".into(), RunConfig::default());
-    // A command cut off with the program may have had effects nobody saw, so, as
-    // for a cancelled model call, the run keeps its ownership instead of finishing
-    // (this fixture has no durable store to record the snapshot in).
+    // A command cut off with the program may have had effects, but the result the model
+    // gets names it ("cut off before it finished"), which is what a terminal shell
+    // response does for a normal command: it is observed, and the run may finish. (Were
+    // it left unobserved, the loop would remind the model of the job for ever.)
     let phase = fixture.runtime.wait(run).await;
     let events = drain_events(&mut receiver).await;
-    assert_eq!(phase, Ok(AgentRunPhase::Error));
-    let reason = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
-                to: AgentRunPhase::Error,
-                reason,
-                ..
-            }) => reason.clone(),
-            _ => None,
-        })
-        .unwrap();
-    assert!(reason.contains("unobserved shell effects"), "{reason}");
+    assert_eq!(phase, Ok(AgentRunPhase::Done));
+    assert_eq!(
+        fixture.model.observed().await.len(),
+        2,
+        "no reminder was needed"
+    );
 
     // The child's terminal event exists, is not duplicated, and precedes the parent's.
     assert_eq!(open_tool_calls(&events), Vec::<String>::new());

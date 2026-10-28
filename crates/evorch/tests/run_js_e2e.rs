@@ -377,6 +377,12 @@ async fn the_examples_in_the_description_run_as_written() {
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("lib.rs"), "x\n".repeat(lines)).unwrap();
     }
+    // A path with a space in it, which a split on whitespace would get wrong.
+    std::fs::write(
+        repository.path().join("crates/alpha/with space.rs"),
+        "x\n".repeat(4),
+    )
+    .unwrap();
     for args in [["init", "-q"], ["add", "."]] {
         let status = std::process::Command::new("git")
             .args(args)
@@ -399,7 +405,7 @@ async fn the_examples_in_the_description_run_as_written() {
     .await;
     assert!(!counted.is_error, "{}", counted.content);
     assert!(
-        counted.content.contains("=> {\"alpha\":3,\"beta\":7}"),
+        counted.content.contains("=> {\"alpha\":7,\"beta\":7}"),
         "{}",
         counted.content
     );

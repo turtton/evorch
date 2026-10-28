@@ -532,6 +532,73 @@ impl JobRegistry {
         .await
     }
 
+    /// Acknowledges the outcome of the finished jobs a `run_js` call started: the call's
+    /// result, which says which commands were cut off and what may have changed, has
+    /// reached the model, which is what a terminal shell response does for a normal
+    /// command. A job that is still running is left unobserved.
+    pub(super) fn observe_children(&self, run_id: &str, parent_call_id: &str) {
+        let prefix = format!("{parent_call_id}/");
+        for job in self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|job| {
+                job.owner == run_id
+                    && job
+                        .call_id
+                        .as_deref()
+                        .is_some_and(|call_id| call_id.starts_with(&prefix))
+            })
+        {
+            let mut state = job
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.completion.is_some() {
+                state.observed = true;
+            }
+        }
+    }
+
+    /// One line per job of the run that is running or whose result nobody has read,
+    /// naming it as the model can: its handle (a command started inside `run_js`
+    /// has none it can poll) and what state it is in.
+    pub(super) fn unobserved_summaries(&self, run_id: &str) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|job| job.owner == run_id && job.unobserved())
+            .map(|job| {
+                let state = job
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let status = state
+                    .completion
+                    .as_ref()
+                    .map_or("running", |completion| completion.status);
+                let status = if state.completion.is_some() {
+                    format!("{status}, result not read")
+                } else {
+                    status.to_owned()
+                };
+                if state.exposed {
+                    format!("{} ({status})", job.handle)
+                } else {
+                    format!(
+                        "{} ({status}; started by a program, not pollable)",
+                        job.handle
+                    )
+                }
+            })
+            .collect();
+        lines.sort();
+        lines
+    }
+
     async fn drain_where(&self, selected: impl Fn(&Job) -> bool) -> Result<(), ToolError> {
         let jobs: Vec<_> = self
             .jobs

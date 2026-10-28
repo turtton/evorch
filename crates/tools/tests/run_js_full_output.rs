@@ -173,6 +173,21 @@ async fn a_result_already_cut_is_not_cut_again_into_a_second_artifact_or_a_whole
         normalized.next,
         Some(json!({"tool": "read", "path": artifact}))
     );
+    // The head of the preview, with the `exit_code:` line, was trimmed to make room for
+    // the long reference; the status is still there, structured.
+    assert!(
+        !child.content.starts_with("exit_code:"),
+        "the header was trimmed"
+    );
+    assert_eq!(
+        normalized.detail,
+        json!({"exit_code": 0, "timed_out_ms": null})
+    );
+    assert_eq!(
+        child.detail.as_ref().unwrap()["output_artifact"]["path"],
+        json!(artifact),
+        "and so is the artifact"
+    );
     assert!(normalized.text.len() < size);
 }
 

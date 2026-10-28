@@ -68,7 +68,7 @@ pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
 
     let mut exit_header = None;
     if tool == "shell" {
-        exit_header = split_shell_header(&mut text);
+        exit_header = split_shell_header(&mut text).or_else(|| shell_status(&detail));
     }
 
     if whole {
@@ -155,6 +155,16 @@ fn merge(detail: &mut Value, extra: Value) {
     if let (Some(detail), Value::Object(extra)) = (detail.as_object_mut(), extra) {
         detail.extend(extra);
     }
+}
+
+/// The exit status a cut shell result carries in its detail, for when the ceiling
+/// trimmed the header line off the preview.
+fn shell_status(detail: &Value) -> Option<ShellHeader> {
+    let status = detail.get("shell")?;
+    Some(ShellHeader {
+        exit_code: status.get("exit_code")?.as_i64()?,
+        timed_out_ms: status.get("timed_out_ms").and_then(Value::as_u64),
+    })
 }
 
 struct ShellHeader {
@@ -386,6 +396,24 @@ mod tests {
         assert_eq!(
             normalized.detail,
             json!({"diff": diff, "added": 1, "removed": 1})
+        );
+    }
+
+    #[test]
+    fn a_cut_shell_result_whose_header_was_trimmed_keeps_its_status_from_the_detail() {
+        // The preview starts mid-output: no `exit_code:` line, but the detail has it.
+        let content = "...end of the output\n[Output artifact: /var/tmp/o/3.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]";
+        let result = ToolResult::error(content).with_detail(json!({
+            "output_artifact": {"path": "/var/tmp/o/3.txt", "original_bytes": 9},
+            "shell": {"exit_code": -1, "timed_out_ms": 30000}
+        }));
+        let normalized = normalize("shell", &json!({}), &result);
+        assert!(!normalized.ok);
+        assert_eq!(normalized.text, "...end of the output");
+        assert!(normalized.truncated);
+        assert_eq!(
+            normalized.detail,
+            json!({"exit_code": -1, "timed_out_ms": 30000})
         );
     }
 

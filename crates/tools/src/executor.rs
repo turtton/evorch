@@ -445,6 +445,21 @@ impl ToolExecutor {
         }
     }
 
+    /// Acknowledges the finished shell jobs the `run_js` call `parent_call_id` started,
+    /// once its result has reached the model (see `Tool::observe_child_shell_jobs`).
+    pub fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str) {
+        if let Some(shell) = self.tools.get("shell") {
+            shell.tool.observe_child_shell_jobs(run_id, parent_call_id);
+        }
+    }
+
+    /// One line per running or unread shell job of the run.
+    pub fn unobserved_shell_job_summaries(&self, run_id: &str) -> Vec<String> {
+        self.tools.get("shell").map_or_else(Vec::new, |shell| {
+            shell.tool.unobserved_shell_job_summaries(run_id)
+        })
+    }
+
     /// Release terminal handles after durable side-effect markers have been saved.
     /// The caller must prevent a new incarnation of this run from starting first.
     pub fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {

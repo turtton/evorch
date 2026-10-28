@@ -314,6 +314,12 @@ impl Tool for Shell {
     ) -> Result<(), ToolError> {
         self.jobs.drain_children(run_id, parent_call_id).await
     }
+    fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str) {
+        self.jobs.observe_children(run_id, parent_call_id);
+    }
+    fn unobserved_shell_job_summaries(&self, run_id: &str) -> Vec<String> {
+        self.jobs.unobserved_summaries(run_id)
+    }
     fn release_shell_jobs(&self, run_id: &str) -> Result<(), ToolError> {
         self.jobs.release(run_id)
     }
@@ -528,6 +534,18 @@ fn shell_result(capture: Capture, exit_code: i32, timed_out: Option<u64>) -> Too
         || format!("exit_code: {exit_code}"),
         |ms| format!("exit_code: {exit_code}\ntimed out after {ms} ms; partial output follows"),
     );
+    // A cut result keeps the exit status where the ceiling cannot trim it away with the
+    // head of the preview (the header is the first line).
+    if let Some(detail) = result
+        .detail
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        detail.insert(
+            "shell".to_owned(),
+            serde_json::json!({"exit_code": exit_code, "timed_out_ms": timed_out}),
+        );
+    }
     result.content = format!("{status}\n{}", result.content);
     result.full_content = result
         .full_content

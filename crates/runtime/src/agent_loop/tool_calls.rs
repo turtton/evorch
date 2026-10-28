@@ -1316,6 +1316,14 @@ impl LoopState {
                     {
                         shell_cwds.push(PathBuf::from(cwd));
                     }
+                    // The run_js result, which says which commands were cut off, is now in
+                    // the history: the model has been told what became of them. Jobs that
+                    // could not be confirmed stopped stay unobserved (the run stops below).
+                    if name == tools::tools::run_js::NAME {
+                        self.shared
+                            .executor
+                            .observe_child_shell_jobs(&self.task.run_id.to_string(), &id);
+                    }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
                 }

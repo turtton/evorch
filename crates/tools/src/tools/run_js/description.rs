@@ -8,7 +8,7 @@ use super::typings;
 pub const BASE_DESCRIPTION: &str = "Run JavaScript (ES2023, QuickJS) that calls your tools, and return only what you print or return.";
 
 /// Added to `shell` when `run_js` is offered.
-pub const SHELL_HINT: &str = " Before writing a `python3 - <<EOF`, `node -e`, `perl -i -pe` or `awk` script, a `for ... done` loop or `xargs sed -i` to aggregate output, read many files or change many places, use run_js instead.";
+pub const SHELL_HINT: &str = " Before writing a `python3 - <<EOF`, `cat > script.py <<EOF`, `node -e`, `perl -i -pe` or `awk` script, a `for ... done` loop or `xargs sed -i` to aggregate output, read many files or change many places, use run_js instead.";
 
 /// Added to `edit` when `run_js` is offered.
 pub const EDIT_HINT: &str = " To apply the same edit in many files, use run_js with tools.edit instead of looping `sed -i` in shell.";
@@ -32,12 +32,12 @@ for (const p of [\"a.rs\", \"b.rs\", \"c.rs\"]) {\n\
 return out.join(\"\\n\");",
     "const r = await tools.shell({ command: \"git ls-files -z '*.rs' | xargs -0 wc -l\" });\n\
 if (!r.ok || r.truncated) throw new Error(\"wc failed or was cut: \" + r.text.slice(0, 200));\n\
-const lines = r.text.trim().split(\"\\n\").filter((l) => !l.endsWith(\" total\"));\n\
 const byDir = {};\n\
-for (const l of lines) {\n\
-  const [n, path] = l.trim().split(/\\s+/);\n\
-  const dir = path.split(\"/\")[1];\n\
-  byDir[dir] = (byDir[dir] || 0) + Number(n);\n\
+for (const l of r.text.split(\"\\n\")) {\n\
+  const m = l.match(/^\\s*(\\d+) (.+)$/); // \"<lines> <path>\"; a path may contain spaces\n\
+  if (!m || m[2] === \"total\") continue;\n\
+  const dir = m[2].split(\"/\")[1];\n\
+  byDir[dir] = (byDir[dir] || 0) + Number(m[1]);\n\
 }\n\
 return JSON.stringify(byDir);",
 ];
@@ -63,7 +63,7 @@ check `.ok` instead of printing it. The full diff is in `detail.diff`; git_diff'
 fetch, timers, TextEncoder, URL, structuredClone, Intl (localeCompare orders by code point).\n\
 - A returned string is shown as is, anything else as JSON.\n\
 - Calls needing approval or non-isolated shell fail here; make them as normal tool calls.\n\
-- Run builds and long tests as normal shell jobs, not here.\n\
+- Do not put cargo, builds or tests in run_js: they hit its time limit and are cut off. Run them as normal shell calls; to parse their output in JS, have the shell command write it to a file and read that file here.\n\
 - Limits: {seconds} s (timeout_ms up to {max}), {memory} MiB JS heap, {calls} tool calls (following a `next` once is free).\n\
 Available tools:\n\
 {declarations}\n\
@@ -101,7 +101,8 @@ mod tests {
         assert!(text.starts_with(BASE_DESCRIPTION));
         assert!(text.contains("Limits: 30 s (timeout_ms up to 300000), 64 MiB JS heap, 1000 tool calls (following a `next` once is free)."));
         assert!(text.contains("grep(args: { path: string; pattern: string })"));
-        assert!(text.contains("Run builds and long tests as normal shell jobs"));
+        assert!(text.contains("Do not put cargo, builds or tests in run_js"));
+        assert!(text.contains("write it to a file and read that file here"));
         assert!(text.contains("readText(next.path)"));
         assert!(text.contains("next=null"));
         assert!(text.contains("structuredClone"));
@@ -117,6 +118,7 @@ mod tests {
         assert!(text.contains(EXAMPLES[1]));
         assert!(text.contains(EXAMPLES[2]));
         assert!(SHELL_HINT.contains("perl -i -pe") && SHELL_HINT.contains("`awk`"));
+        assert!(SHELL_HINT.contains("cat > script.py <<EOF"));
         assert!(text.contains("whole up to 1 MiB per command"));
         assert!(text.contains("JS heap"));
         assert!(EXAMPLES[2].contains("!r.ok || r.truncated"));

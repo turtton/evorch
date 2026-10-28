@@ -480,6 +480,41 @@ fn failed_seqs(result: &ToolResult) -> Vec<u64> {
 }
 
 #[tokio::test]
+async fn a_worker_that_is_gone_after_the_time_limit_is_reported_as_a_timeout() {
+    // The worker outlives the limit of 300 ms a little and then exits without a word,
+    // as one stopped by its own timer does.
+    let late = run(
+        "sleep 1\nexit 0",
+        ScriptHost::new(Behavior::Exclusive),
+        "x",
+        300,
+    )
+    .await;
+    assert!(late.is_error);
+    assert!(
+        late.content
+            .contains("run_js timed out after 300 ms and was stopped"),
+        "{}",
+        late.content
+    );
+    assert!(
+        !late.content.contains("exited without finishing"),
+        "{}",
+        late.content
+    );
+    assert_eq!(late.detail.unwrap()["run_js"]["limit_hit"], "timeout");
+
+    // One that dies well within the limit is a failure of the worker, not a timeout.
+    let early = run("exit 0", ScriptHost::new(Behavior::Exclusive), "x", 60_000).await;
+    assert!(
+        early.content.contains("exited without finishing"),
+        "{}",
+        early.content
+    );
+    assert!(!early.content.contains("timed out"), "{}", early.content);
+}
+
+#[tokio::test]
 async fn a_program_cannot_make_up_a_continuation_to_get_past_the_call_limit() {
     // Offsets and byte offsets nobody offered: each is an ordinary read, so after the
     // limit of 3 they are refused (with a pointer to aggregating in shell).

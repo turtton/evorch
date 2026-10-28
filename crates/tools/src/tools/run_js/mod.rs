@@ -294,6 +294,6 @@ impl RunJs {
         let stderr = connection.stderr_tail();
         // Kill and reap the worker before reporting anything.
         drop(connection);
-        summary::finish(state, ending, &stderr, timeout_ms)
+        summary::finish(state, ending, &stderr, timeout_ms, settings)
     }
 }

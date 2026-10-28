@@ -29,7 +29,25 @@ const REASON_CHARS: usize = 100;
 const LISTED_FAILURES: usize = 5;
 const LISTED_WARNINGS: usize = 3;
 
-pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u64) -> ToolResult {
+/// What the model is told when the time limit ended the call. The limit and how to
+/// raise it are in it, and where long work belongs, so the next attempt does not
+/// repeat the same call.
+fn timeout_message(timeout_ms: u64, limits: &config::RunJsConfig) -> String {
+    format!(
+        "run_js timed out after {timeout_ms} ms and was stopped, together with the commands it had started. \
+The limit is {} ms unless timeout_ms is given (at most {}). Builds, tests and other long work belong in normal shell calls; \
+run them there, with the output going to a file if run_js should read it afterwards",
+        limits.default_timeout_ms, limits.max_timeout_ms
+    )
+}
+
+pub(super) fn finish(
+    mut state: Run,
+    ending: Ending,
+    stderr: &str,
+    timeout_ms: u64,
+    limits: &config::RunJsConfig,
+) -> ToolResult {
     state.calls.sort_by_key(|call| call.seq);
     state.failures.sort_by_key(|failure| failure.seq);
     let mut content = failed_calls_notice(&state)
@@ -66,13 +84,19 @@ pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u
                 } else if state.limit_hit.is_none() && lowered.contains("output limit") {
                     state.limit_hit = Some("output");
                 }
-                failure = Some(if error.stack.trim().is_empty() {
-                    error.message
+                // The engine's own timeout message is replaced by the same, fuller one.
+                let message = if expired {
+                    timeout_message(timeout_ms, limits)
                 } else {
-                    format!("{}\n{}", error.message, error.stack.trim_end())
+                    error.message
+                };
+                failure = Some(if error.stack.trim().is_empty() {
+                    message
+                } else {
+                    format!("{message}\n{}", error.stack.trim_end())
                 });
             } else if timed_out {
-                failure = Some(format!("run_js timed out after {timeout_ms} ms"));
+                failure = Some(timeout_message(timeout_ms, limits));
             } else if !value.is_null() {
                 let text = match &value {
                     Value::String(text) => text.clone(),
@@ -282,6 +306,7 @@ fn run_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::run_js::protocol::JsError;
     use crate::tools::run_js::serve::Recorded;
 
     fn done(value: Value) -> Ending {
@@ -310,12 +335,24 @@ mod tests {
 
     #[test]
     fn a_string_return_value_is_shown_as_is() {
-        let result = finish(Run::default(), done(json!("line one\nline two")), "", 1000);
+        let result = finish(
+            Run::default(),
+            done(json!("line one\nline two")),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         assert_eq!(
             result.content,
             "=> line one\nline two\n[run_js: 0 calls, 0 failed]"
         );
-        let result = finish(Run::default(), done(json!({"a": [1, "x"]})), "", 1000);
+        let result = finish(
+            Run::default(),
+            done(json!({"a": [1, "x"]})),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         assert_eq!(
             result.content,
             "=> {\"a\":[1,\"x\"]}\n[run_js: 0 calls, 0 failed]"
@@ -336,7 +373,13 @@ mod tests {
         state
             .warnings
             .push((2, "write".into(), "comment checker flagged /w/b.rs".into()));
-        let result = finish(state, done(Value::Null), "", 1000);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         assert_eq!(
             result.content,
             "2 of 2 tool calls failed: edit #1: old_string not found in /w/a.rs; read #3: no such file\n\
@@ -365,7 +408,13 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         }
         let (_, failure) = failed_call(2, "edit", "old_string not found");
         state.failures.push(failure);
-        let result = finish(state, done(json!("answer")), "", 1000);
+        let result = finish(
+            state,
+            done(json!("answer")),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         let lines: Vec<&str> = result.content.lines().collect();
         assert_eq!(
             lines[0],
@@ -376,7 +425,13 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         assert!(lines[3].starts_with("[run_js: 3 calls, 1 failed"));
         assert_eq!(lines.len(), 4);
         assert_eq!(result.detail.unwrap()["run_js"]["output_bytes"], 9);
-        let clean = finish(Run::default(), done(json!("ok")), "", 1000);
+        let clean = finish(
+            Run::default(),
+            done(json!("ok")),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         assert!(!clean.content.contains("tool calls failed"));
     }
 
@@ -390,7 +445,13 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         state.calls.push(call);
         state.failures.push(failure);
         let returned = "first\n=> second line of the same string\nthird";
-        let result = finish(state, done(json!(returned)), "", 1000);
+        let result = finish(
+            state,
+            done(json!(returned)),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         let layout = &result.detail.as_ref().unwrap()["run_js"]["layout"];
         let content = &result.content;
         let at = |key: &str| usize::try_from(layout[key].as_u64().unwrap()).unwrap();
@@ -407,11 +468,66 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         assert_eq!(&content[start..end], returned);
         assert!(content[at("summary_start")..].starts_with("[run_js: 1 calls, 1 failed"));
 
-        let nothing = finish(Run::default(), done(Value::Null), "", 1000);
+        let nothing = finish(
+            Run::default(),
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         let layout = &nothing.detail.unwrap()["run_js"]["layout"];
         assert!(layout["returned"].is_null());
         assert_eq!(layout["console_end"], 0);
         assert_eq!(layout["summary_start"], 0);
+    }
+
+    #[test]
+    fn a_timeout_says_what_the_limit_is_and_where_long_work_belongs() {
+        let limits = config::RunJsConfig::default();
+        let host_side = finish(
+            Run::default(),
+            Ending::Done {
+                value: Value::Null,
+                error: None,
+                timed_out: true,
+            },
+            "",
+            30_000,
+            &limits,
+        );
+        // The engine's own report of the same timeout gets the same words, and its stack.
+        let engine_side = finish(
+            Run::default(),
+            Ending::Done {
+                value: Value::Null,
+                error: Some(JsError {
+                    message: "run_js timed out after 30000 ms".into(),
+                    stack: "    at <anonymous> (run_js:3:1)".into(),
+                }),
+                timed_out: true,
+            },
+            "",
+            30_000,
+            &limits,
+        );
+        for result in [&host_side, &engine_side] {
+            assert!(result.is_error);
+            let text = &result.content;
+            assert!(
+                text.contains("run_js timed out after 30000 ms and was stopped"),
+                "{text}"
+            );
+            assert!(
+                text.contains("The limit is 30000 ms unless timeout_ms is given (at most 300000)"),
+                "{text}"
+            );
+            assert!(
+                text.contains("Builds, tests and other long work belong in normal shell calls"),
+                "{text}"
+            );
+            assert_eq!(result.detail.as_ref().unwrap()["run_js"]["timed_out"], true);
+        }
+        assert!(engine_side.content.contains("at <anonymous> (run_js:3:1)"));
     }
 
     #[test]
@@ -436,7 +552,13 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         let (call, failure) = failed_call(1, "write", "cut off before it finished");
         state.calls.push(call);
         state.failures.push(failure);
-        let result = finish(state, done(Value::Null), "", 1000);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         assert!(
             result.content.contains("may have changed: /w/half.rs"),
             "{}",
@@ -459,7 +581,13 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
                 paths: vec![format!("/workspace/some/long/path/segment/file-{seq}.rs")],
             });
         }
-        let result = finish(state, done(Value::Null), "", 1000);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
         let detail = result.detail.unwrap();
         assert!(detail.to_string().len() <= DETAIL_BUDGET_BYTES);
     }

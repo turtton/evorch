@@ -443,6 +443,12 @@ pub(super) async fn serve(
                 let (message, _permit) = message.unwrap_or((Ok(None), None));
                 let (message, line_bytes) = match message {
                     Ok(Some(message)) => message,
+                    // A worker that is gone at or after the time limit hit that limit, however
+                    // it went: the report says so instead of "exited without finishing".
+                    Ok(None) if Instant::now() >= session.deadline => {
+                        state.limit_hit = Some("timeout");
+                        break Ending::Done { value: Value::Null, error: None, timed_out: true };
+                    }
                     Ok(None) => break Ending::Failed("the JS worker exited without finishing".into()),
                     Err(error) => break Ending::Failed(format!("the JS worker sent an invalid message: {}", super::summary::one_line(&error.to_string(), 200))),
                 };

@@ -90,6 +90,11 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
         .as_ref()
         .and_then(|detail| detail.get("run_js"))
         .cloned();
+    let shell_status = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("shell"))
+        .cloned();
     let checker_outcome = result
         .detail
         .as_ref()
@@ -142,6 +147,9 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
     if replaced {
         if let Some(run_js) = run_js {
             result.detail.get_or_insert_with(|| serde_json::json!({}))["run_js"] = run_js;
+        }
+        if let Some(shell_status) = shell_status {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["shell"] = shell_status;
         }
         if let Some(outcome) = checker_outcome {
             result.detail.get_or_insert_with(|| serde_json::json!({}))["comment_checker"] =

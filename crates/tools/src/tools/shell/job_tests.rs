@@ -861,3 +861,48 @@ async fn a_command_started_inside_run_js_streams_output_while_the_caller_waits()
     }
     assert_eq!(log, "step one\nstep two\n");
 }
+
+#[tokio::test]
+async fn a_cut_off_child_is_observed_once_its_program_result_was_delivered_not_before() {
+    let shell = shell();
+    let child = |call: &str, parent: &str| ToolExecutionContext {
+        run_id: "owner".into(),
+        call_id: Some(call.into()),
+        parent_call_id: Some(parent.into()),
+        shell_wait_policy: crate::executor::ShellWaitPolicy::UntilTerminal,
+        ..Default::default()
+    };
+    // Two programs each started a long command; both were cut off (their futures dropped).
+    for (call, parent) in [("parent/1", "parent"), ("other/1", "other")] {
+        let ctx = child(call, parent);
+        let mut started = Box::pin(shell.execute_with_context(&ctx, json!({"command":"sleep 30"})));
+        assert!(futures_util::poll!(started.as_mut()).is_pending());
+        drop(started);
+    }
+
+    shell
+        .drain_child_shell_jobs("owner", "parent")
+        .await
+        .unwrap();
+    // Stopped, but nobody was told what became of it.
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    let before = shell.unobserved_shell_job_summaries("owner");
+    assert_eq!(before.len(), 2, "{before:?}");
+    assert!(
+        before.iter().any(|line| line.contains("not pollable")),
+        "a command started by a program cannot be polled: {before:?}"
+    );
+
+    shell.observe_child_shell_jobs("owner", "parent");
+
+    // Only that program's job is acknowledged; the other program's still counts (its own
+    // result must say what became of it).
+    let after = shell.unobserved_shell_job_summaries("owner");
+    assert_eq!(after.len(), 1, "{after:?}");
+    shell
+        .drain_child_shell_jobs("owner", "other")
+        .await
+        .unwrap();
+    shell.observe_child_shell_jobs("owner", "other");
+    assert!(!shell.has_unobserved_shell_jobs("owner"));
+}
