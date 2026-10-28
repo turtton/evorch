@@ -848,3 +848,107 @@ impl PostEditHook for HugeWarningHook {
         }
     }
 }
+
+/// A `run_js` whose program ended with something it started not confirmed stopped,
+/// as `RunJs` reports when draining its commands fails (that path is unit-tested in
+/// the tools crate; here only what the runtime does with the report matters).
+struct UnconfirmedRunJs;
+
+#[async_trait::async_trait]
+impl tools::Tool for UnconfirmedRunJs {
+    fn name(&self) -> &str {
+        "run_js"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]})
+    }
+
+    fn permissions(&self) -> tools::Permissions {
+        tools::Permissions::read_only()
+    }
+
+    fn execution_mode(&self) -> tools::ToolExecutionMode {
+        tools::ToolExecutionMode::Exclusive
+    }
+
+    async fn execute(&self, _: serde_json::Value) -> Result<tools::ToolResult, tools::ToolError> {
+        unreachable!("the runtime always provides a context")
+    }
+
+    async fn execute_with_context(
+        &self,
+        ctx: &tools::ToolExecutionContext,
+        _: serde_json::Value,
+    ) -> Result<tools::ToolResult, tools::ToolError> {
+        ctx.run_js_host
+            .as_ref()
+            .expect("a host")
+            .report_unconfirmed("injected: job-1 was not confirmed stopped");
+        Ok(tools::ToolResult::error(
+            "run_js could not confirm that the commands it started have stopped",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_cleanup_stops_the_run_before_any_further_tool_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let same_wave = directory.path().join("same-wave");
+    let next_turn = directory.path().join("next-turn");
+    let bus = Arc::new(EventBus::new(256));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    executor.register(Arc::new(UnconfirmedRunJs)).unwrap();
+    let model = Arc::new(ScriptedModel::new(
+        [
+            // The write behind run_js in the same batch is a later wave.
+            Ok(support::tool_responses([
+                ("js-1", "run_js", json!({"code": "x"})),
+                (
+                    "w-1",
+                    "write",
+                    json!({"path": same_wave.to_string_lossy(), "content": "x"}),
+                ),
+            ])),
+            Ok(tool_response(
+                "s-1",
+                "shell",
+                json!({"command": format!("touch {}", next_turn.display())}),
+            )),
+            Ok(finish()),
+        ]
+        .into_iter(),
+    ));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+    runtime.set_run_js_settings(enabled());
+    let mut events = bus.subscribe();
+
+    let run = runtime.delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    let phase = runtime.wait(run).await;
+    let events = drain_events(&mut events).await;
+
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    let reason = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Error,
+                reason,
+                ..
+            }) => reason.clone(),
+            _ => None,
+        })
+        .expect("an error reason");
+    assert!(reason.contains("run_js could not confirm"), "{reason}");
+    assert!(started(&events, "write").is_empty(), "the write ran");
+    assert!(started(&events, "shell").is_empty(), "the shell ran");
+    assert!(!same_wave.exists() && !next_turn.exists());
+    assert_eq!(
+        model.observed().await.len(),
+        1,
+        "no second request was made"
+    );
+}

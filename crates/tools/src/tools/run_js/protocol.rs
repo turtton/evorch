@@ -73,6 +73,20 @@ where
     T: serde::de::DeserializeOwned,
     R: AsyncBufRead + Unpin,
 {
+    Ok(read_message_sized(reader)
+        .await?
+        .map(|(message, _)| message))
+}
+
+/// Like [`read_message`], and also returns the size of the line the message came in.
+///
+/// # Errors
+/// As [`read_message`].
+pub async fn read_message_sized<T, R>(reader: &mut R) -> std::io::Result<Option<(T, usize)>>
+where
+    T: serde::de::DeserializeOwned,
+    R: AsyncBufRead + Unpin,
+{
     let mut line = Vec::new();
     loop {
         let available = reader.fill_buf().await?;
@@ -99,7 +113,7 @@ where
         }
     }
     serde_json::from_slice(&line)
-        .map(Some)
+        .map(|message| Some((message, line.len())))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 

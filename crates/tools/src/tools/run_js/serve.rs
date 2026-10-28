@@ -21,12 +21,12 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
 use super::protocol::{self, HostMessage, JsError, WorkerMessage};
 use super::worker::WorkerConnection;
-use super::{ChildCall, ChildOutcome, RunJsHost, call_paths};
+use super::{CALLABLE_TOOLS, ChildCall, ChildOutcome, RunJsHost, call_paths};
 
 /// Bytes of printed output the host keeps; the executor then bounds what the
 /// model sees.
@@ -39,6 +39,9 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 const OVER_LIMIT_REQUESTS: u32 = 32;
 /// Total size of the arguments a program may send in one run.
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Largest total of the lines read from the worker and not yet handled. A single
+/// line is at most [`protocol::MAX_LINE_BYTES`], so this admits at least one.
+const READ_AHEAD_BYTES: usize = protocol::MAX_LINE_BYTES;
 /// Replies waiting for a worker that does not read them.
 const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
@@ -138,6 +141,10 @@ pub(super) struct Session<'a> {
     pub max_tool_calls: u32,
     pub deadline: Instant,
     pub bounds: Bounds,
+    /// Tests end the wait for the worker when this is notified, once they know the
+    /// worker is in the state under test, instead of waiting for the clock.
+    #[cfg(test)]
+    pub expire: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Limits that keep a worker from making the host buffer without end.
@@ -306,6 +313,20 @@ impl Scheduler {
     }
 }
 
+async fn wait_for_deadline(session: &Session<'_>, hard_deadline: Instant) {
+    #[cfg(test)]
+    if let Some(expire) = &session.expire {
+        tokio::select! {
+            () = tokio::time::sleep_until(hard_deadline) => {}
+            () = expire.notified() => {}
+        }
+        return;
+    }
+    #[cfg(not(test))]
+    let _ = session;
+    tokio::time::sleep_until(hard_deadline).await;
+}
+
 /// Runs the program to its end. Every call still unfinished at that point is
 /// dropped before this returns.
 pub(super) async fn serve(
@@ -336,12 +357,27 @@ pub(super) async fn serve(
         }
     }));
     // Reading whole lines is not cancel-safe inside select!, so a task owns the reader.
+    // What it has read but the loop has not yet handled is bounded by bytes (not only
+    // by count): each message holds permits for its line until it is handled.
     let (incoming, mut messages) = mpsc::channel(64);
+    let read_ahead = Arc::new(Semaphore::new(READ_AHEAD_BYTES));
     let _reader_task = AbortOnDrop(tokio::spawn(async move {
         loop {
-            let message = protocol::read_message::<WorkerMessage, _>(&mut reader).await;
+            let message = protocol::read_message_sized::<WorkerMessage, _>(&mut reader).await;
             let last = !matches!(message, Ok(Some(_)));
-            if incoming.send(message).await.is_err() || last {
+            let (message, permit) = match message {
+                Ok(Some((message, bytes))) => {
+                    let wanted = u32::try_from(bytes.clamp(1, READ_AHEAD_BYTES)).unwrap_or(1);
+                    let Ok(permit) = Arc::clone(&read_ahead).acquire_many_owned(wanted).await
+                    else {
+                        break;
+                    };
+                    (Ok(Some((message, bytes))), Some(permit))
+                }
+                Ok(None) => (Ok(None), None),
+                Err(error) => (Err(error), None),
+            };
+            if incoming.send((message, permit)).await.is_err() || last {
                 break;
             }
         }
@@ -357,10 +393,11 @@ pub(super) async fn serve(
     let ending = loop {
         tokio::select! {
             message = messages.recv() => {
-                let message = match message.unwrap_or(Ok(None)) {
+                let (message, _permit) = message.unwrap_or((Ok(None), None));
+                let (message, line_bytes) = match message {
                     Ok(Some(message)) => message,
                     Ok(None) => break Ending::Failed("the JS worker exited without finishing".into()),
-                    Err(error) => break Ending::Failed(format!("the JS worker sent an invalid message: {error}")),
+                    Err(error) => break Ending::Failed(format!("the JS worker sent an invalid message: {}", super::summary::one_line(&error.to_string(), 200))),
                 };
                 match message {
                     WorkerMessage::Output { text } => state.push_output(&text),
@@ -368,8 +405,13 @@ pub(super) async fn serve(
                         break Ending::Done { value, error, timed_out };
                     }
                     WorkerMessage::ToolCall { id, name, args } => {
+                        // Only a name run_js knows is kept or answered: an arbitrary one
+                        // from an untrusted worker is neither copied nor repeated.
+                        let Some(name) = CALLABLE_TOOLS.iter().find(|known| **known == name).map(|known| (*known).to_owned()) else {
+                            break Ending::Failed("the JS worker called a tool that run_js does not provide".to_owned());
+                        };
                         seq += 1;
-                        request_bytes = request_bytes.saturating_add(args.to_string().len());
+                        request_bytes = request_bytes.saturating_add(line_bytes);
                         if seq > session.max_tool_calls.saturating_add(session.bounds.over_limit_requests) {
                             state.limit_hit = Some("tool_calls");
                             break Ending::Failed(format!(
@@ -419,7 +461,7 @@ pub(super) async fn serve(
                 }
                 scheduler.start_ready(&session);
             }
-            () = tokio::time::sleep_until(hard_deadline) => {
+            () = wait_for_deadline(&session, hard_deadline) => {
                 break Ending::Done { value: Value::Null, error: None, timed_out: true };
             }
         }

@@ -164,6 +164,10 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
+    /// Set by the `run_js` host when something a program started may still be running
+    /// and could not be stopped. From then on no tool runs, and finalization retains
+    /// the workspace like it does for shell jobs it could not drain.
+    run_js_unconfirmed: Arc<std::sync::Mutex<Option<String>>>,
     /// Child questions a `wait` already reported to this run; a wait returns
     /// early only for questions not in this set.
     pub(crate) reported_questions: std::collections::HashSet<String>,
@@ -367,6 +371,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         escalation_detector: EscalationDetector::default(),
         budget: crate::budget_tracker::BudgetCounters::default(),
         identical_calls: identical_calls::IdenticalCalls::default(),
+        run_js_unconfirmed: Arc::default(),
         reported_questions: std::collections::HashSet::new(),
         last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),

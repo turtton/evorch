@@ -82,6 +82,11 @@ pub trait RunJsHost: Send + Sync + std::fmt::Debug {
     async fn drain_children(&self, _parent_call_id: &str) -> Result<(), String> {
         Ok(())
     }
+    /// Something `run_js` started may still be running and could not be stopped or
+    /// confirmed stopped (`detail` says what). The host must stop running tools for
+    /// this run: that state is reported by the host itself, not by a result the
+    /// model or the output limiter could reshape.
+    fn report_unconfirmed(&self, _detail: &str) {}
 }
 
 /// Paths a call names, as the program gave them.
@@ -103,6 +108,8 @@ pub struct RunJs {
     launcher: WorkerLauncher,
     #[cfg(test)]
     bounds: Option<serve::Bounds>,
+    #[cfg(test)]
+    expire: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl RunJs {
@@ -116,7 +123,15 @@ impl RunJs {
             launcher,
             #[cfg(test)]
             bounds: None,
+            #[cfg(test)]
+            expire: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_expiry(mut self, expire: Arc<tokio::sync::Notify>) -> Self {
+        self.expire = Some(expire);
+        self
     }
 
     #[cfg(test)]
@@ -221,14 +236,17 @@ impl RunJs {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let tools = host.tool_names();
         // Preparing the worker (locating it, listing its libraries) counts against the
-        // call's deadline too. A preparation that outlives the call finishes on its
-        // own and is dropped, killing whatever it started.
-        let mut connection = match tokio::time::timeout_at(deadline, self.launcher.launch()).await {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
+        // call's deadline too, and is cancelled, its processes killed, at the deadline.
+        let unconfirmed: Arc<dyn Fn(String) + Send + Sync> = {
+            let host = Arc::clone(&host);
+            Arc::new(move |detail| host.report_unconfirmed(&detail))
+        };
+        let mut connection = match self.launcher.launch(deadline, unconfirmed).await {
+            Ok(connection) => connection,
+            Err(worker::LaunchError::Failed(error)) => {
                 return ToolResult::error(format!("run_js is unavailable: {error}"));
             }
-            Err(_) => {
+            Err(worker::LaunchError::NotReady) => {
                 return ToolResult::error(format!(
                     "run_js is unavailable: the worker was not ready within {timeout_ms} ms"
                 ));
@@ -250,12 +268,19 @@ impl RunJs {
                 max_tool_calls: settings.max_tool_calls,
                 deadline,
                 bounds: self.bounds(),
+                #[cfg(test)]
+                expire: self.expire.clone(),
             },
             start,
             &mut state,
         )
         .await;
         state.drain_error = host.drain_children(call_id).await.err();
+        if let Some(error) = &state.drain_error {
+            host.report_unconfirmed(&format!(
+                "commands started by run_js were not confirmed stopped: {error}"
+            ));
+        }
         if matches!(ending, serve::Ending::Failed(_)) {
             connection.settle_stderr().await;
         }

@@ -741,6 +741,9 @@ impl LoopState {
             parent_call_id: None,
             run_js_host: None,
         };
+        if self.stop_for_run_js_unconfirmed() {
+            return false;
+        }
         let js_host = self.run_js_host(&ctx);
         let ctx = ToolExecutionContext {
             run_js_host: js_host
@@ -1312,6 +1315,11 @@ impl LoopState {
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
+                }
+                // Results are recorded first, so the model-facing history keeps the
+                // run_js text; then nothing else runs.
+                if self.stop_for_run_js_unconfirmed() {
+                    return false;
                 }
                 if let Some((id, name, input, error)) = stalled {
                     self.stop_identical_calls(&id, &name, &input, error, true);

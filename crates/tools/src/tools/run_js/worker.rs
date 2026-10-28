@@ -5,11 +5,14 @@
 //! there is no fallback to running the worker unsandboxed.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use sandbox::{CommandSpec, MinimalSandbox, Sandbox, StdioSession};
 use tokio::io::BufReader;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::time::Instant;
 
 /// Environment variable naming the evorch binary that serves `js-worker`.
 pub const WORKER_ENV: &str = "EVORCH_JS_WORKER";
@@ -27,6 +30,7 @@ const LIBRARY_PATH_ENV: &str = "LD_LIBRARY_PATH";
 #[derive(Clone)]
 pub struct WorkerLauncher {
     mode: Mode,
+    cancel_confirmation: Duration,
 }
 
 #[derive(Clone)]
@@ -39,24 +43,131 @@ enum Mode {
         program: PathBuf,
         args: Vec<String>,
     },
-    /// Preparation that does not finish until the receiver is released, to test that
-    /// starting a worker is bounded by the call's deadline.
+    /// A caller-supplied preparation step, to test how starting a worker is cancelled.
     #[cfg(test)]
-    Stalled(Arc<Mutex<std::sync::mpsc::Receiver<()>>>),
+    Preparing(Arc<PrepareFn>),
+}
+
+#[cfg(test)]
+type PrepareFn = dyn Fn(&AtomicBool) -> Result<Prepared, String> + Send + Sync;
+
+/// What it takes to start the worker, once it is known where it is and what it may see.
+struct Prepared {
+    sandbox: Arc<dyn Sandbox>,
+    spec: CommandSpec,
+    keep_alive: Vec<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+/// A sandbox and the command to run through it (what a test preparation yields).
+#[cfg(test)]
+pub(super) struct Sandboxed {
+    pub sandbox: Arc<dyn Sandbox>,
+    pub spec: CommandSpec,
+}
+
+/// Why no worker was started.
+#[derive(Debug)]
+pub enum LaunchError {
+    /// The deadline passed first. Whatever was being prepared has been stopped.
+    NotReady,
+    Failed(String),
+}
+
+/// Longest wait for a cancelled preparation to confirm it has stopped.
+const CANCEL_CONFIRMATION: Duration = Duration::from_secs(5);
+const UNCONFIRMED_START: &str = "cancelling the start of the JS worker was not confirmed in time";
+
+/// Set when the blocking preparation has ended, whatever the way.
+#[derive(Default)]
+struct Finished {
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Finished {
+    fn signal(&self) {
+        *self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+
+    /// Whether the preparation ended within `limit`.
+    fn wait(&self, limit: Duration) -> bool {
+        let done = self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (done, _) = self
+            .changed
+            .wait_timeout_while(done, limit, |done| !*done)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *done
+    }
+}
+
+struct SignalOnDrop(Arc<Finished>);
+
+impl Drop for SignalOnDrop {
+    fn drop(&mut self) {
+        self.0.signal();
+    }
+}
+
+/// Stops a preparation that is still running when the launching future is dropped
+/// (the tool call was cancelled): cancels it and waits, briefly and synchronously,
+/// until it has killed what it started. If that cannot be confirmed the host is told,
+/// so the run stops rather than carrying on with a process of unknown fate.
+struct Preparation {
+    cancel: Arc<AtomicBool>,
+    finished: Arc<Finished>,
+    on_unconfirmed: Arc<dyn Fn(String) + Send + Sync>,
+    confirmation: Duration,
+    armed: bool,
+}
+
+impl Drop for Preparation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.cancel.store(true, Ordering::SeqCst);
+        if !self.finished.wait(self.confirmation) {
+            (self.on_unconfirmed)(UNCONFIRMED_START.to_owned());
+        }
+    }
 }
 
 impl WorkerLauncher {
     #[cfg(test)]
-    pub(super) fn stalled(release: std::sync::mpsc::Receiver<()>) -> Self {
+    pub(super) fn preparing(
+        prepare: impl Fn(&AtomicBool) -> Result<Sandboxed, String> + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            mode: Mode::Stalled(Arc::new(Mutex::new(release))),
+            mode: Mode::Preparing(Arc::new(move |cancel| {
+                prepare(cancel).map(|sandboxed| Prepared {
+                    sandbox: sandboxed.sandbox,
+                    spec: sandboxed.spec,
+                    keep_alive: Vec::new(),
+                })
+            })),
+            cancel_confirmation: CANCEL_CONFIRMATION,
         }
     }
 
     pub const fn production() -> Self {
         Self {
             mode: Mode::Production,
+            cancel_confirmation: CANCEL_CONFIRMATION,
         }
+    }
+
+    /// How long a cancelled start may take to confirm it stopped what it started.
+    #[cfg(test)]
+    pub(super) const fn with_cancel_confirmation(mut self, limit: Duration) -> Self {
+        self.cancel_confirmation = limit;
+        self
     }
 
     /// Runs `program args` through `sandbox` instead of the production setup.
@@ -68,19 +179,60 @@ impl WorkerLauncher {
                 program,
                 args,
             },
+            cancel_confirmation: CANCEL_CONFIRMATION,
         }
     }
 
-    /// Starts a worker.
+    /// Starts a worker, or gives up at `deadline`. Preparation (locating the worker,
+    /// listing its libraries) runs on a blocking thread that is told to stop when
+    /// the deadline passes or this future is dropped; it kills what it started and
+    /// never starts the worker afterwards. When this returns an error, nothing
+    /// started is left, unless `on_unconfirmed` was called.
     ///
     /// # Errors
-    /// A message naming what is missing or what the sandbox refused.
-    pub async fn launch(&self) -> Result<WorkerConnection, String> {
+    /// [`LaunchError::NotReady`] at the deadline, otherwise a message naming what
+    /// is missing or what the sandbox refused.
+    pub async fn launch(
+        &self,
+        deadline: Instant,
+        on_unconfirmed: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Result<WorkerConnection, LaunchError> {
         let mode = self.mode.clone();
-        let spawned = tokio::task::spawn_blocking(move || spawn(&mode))
-            .await
-            .map_err(|error| format!("worker launch task failed: {error}"))??;
-        spawned.into_connection()
+        let cancel = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(Finished::default());
+        let mut preparation = Preparation {
+            cancel: Arc::clone(&cancel),
+            finished: Arc::clone(&finished),
+            on_unconfirmed: Arc::clone(&on_unconfirmed),
+            confirmation: self.cancel_confirmation,
+            armed: true,
+        };
+        let task = tokio::task::spawn_blocking(move || {
+            let _signal = SignalOnDrop(finished);
+            spawn(&mode, &cancel)
+        });
+        tokio::pin!(task);
+        let outcome = tokio::select! {
+            joined = &mut task => Some(joined),
+            () = tokio::time::sleep_until(deadline) => None,
+        };
+        let joined = if let Some(joined) = outcome {
+            joined
+        } else {
+            preparation.cancel.store(true, Ordering::SeqCst);
+            // The preparation polls the flag; wait for it to confirm, off the runtime thread's clock.
+            match tokio::time::timeout(self.cancel_confirmation, &mut task).await {
+                Ok(joined) => drop(joined),
+                Err(_) => on_unconfirmed(UNCONFIRMED_START.to_owned()),
+            }
+            preparation.armed = false;
+            return Err(LaunchError::NotReady);
+        };
+        preparation.armed = false;
+        let spawned = joined
+            .map_err(|error| LaunchError::Failed(format!("worker launch task failed: {error}")))?
+            .map_err(LaunchError::Failed)?;
+        spawned.into_connection().map_err(LaunchError::Failed)
     }
 }
 
@@ -94,7 +246,7 @@ impl std::fmt::Debug for WorkerLauncher {
                     Mode::Production => "production",
                     Mode::Injected { .. } => "injected",
                     #[cfg(test)]
-                    Mode::Stalled(_) => "stalled",
+                    Mode::Preparing(_) => "preparing",
                 },
             )
             .finish()
@@ -195,46 +347,59 @@ impl Spawned {
     }
 }
 
-fn spawn(mode: &Mode) -> Result<Spawned, String> {
-    match mode {
+/// Prepares and starts the worker. `cancel` is checked after every step that
+/// takes time: once it is set no worker is started, and one already started is
+/// killed and reaped before this returns.
+fn spawn(mode: &Mode, cancel: &AtomicBool) -> Result<Spawned, String> {
+    let cancelled = || "the start of the JS worker was cancelled".to_owned();
+    let prepared = match mode {
         #[cfg(test)]
-        Mode::Stalled(release) => {
-            let _ = release
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .recv();
-            Err("released without a worker".to_owned())
-        }
+        Mode::Preparing(prepare) => prepare(cancel)?,
         Mode::Injected {
             sandbox,
             program,
             args,
-        } => start(
-            sandbox.as_ref(),
-            CommandSpec {
+        } => Prepared {
+            sandbox: Arc::clone(sandbox),
+            spec: CommandSpec {
                 program: program.to_string_lossy().into_owned(),
                 args: args.clone(),
                 cwd: None,
                 extra_env: library_path(),
             },
-            Vec::new(),
-        ),
+            keep_alive: Vec::new(),
+        },
         Mode::Production => {
             let program = locate_worker()?;
-            let sandbox = MinimalSandbox::detect(&program, &[LIBRARY_PATH_ENV])
+            let sandbox = MinimalSandbox::detect_cancellable(&program, &[LIBRARY_PATH_ENV], cancel)
                 .map_err(|error| format!("bubblewrap is unavailable: {error}"))?;
-            start(
-                &sandbox,
-                CommandSpec {
-                    program: sandbox.executable().to_string_lossy().into_owned(),
-                    args: vec![WORKER_SUBCOMMAND.to_owned()],
-                    cwd: None,
-                    extra_env: Vec::new(),
-                },
-                vec![Box::new(sandbox.clone())],
-            )
+            let spec = CommandSpec {
+                program: sandbox.executable().to_string_lossy().into_owned(),
+                args: vec![WORKER_SUBCOMMAND.to_owned()],
+                cwd: None,
+                extra_env: Vec::new(),
+            };
+            Prepared {
+                sandbox: Arc::new(sandbox.clone()),
+                spec,
+                keep_alive: vec![Box::new(sandbox)],
+            }
         }
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Err(cancelled());
     }
+    let spawned = start(
+        prepared.sandbox.as_ref(),
+        prepared.spec,
+        prepared.keep_alive,
+    )?;
+    if cancel.load(Ordering::SeqCst) {
+        // Dropping kills the process group and reaps it.
+        drop(spawned);
+        return Err(cancelled());
+    }
+    Ok(spawned)
 }
 
 fn start(

@@ -109,7 +109,33 @@ impl LoopState {
                 .unwrap_or_default(),
             tools,
             records: Mutex::new(HashMap::new()),
+            unconfirmed: Arc::clone(&self.run_js_unconfirmed),
         }))
+    }
+
+    /// Stops the run when a `run_js` program left something that could not be
+    /// confirmed stopped. Returns whether it did.
+    pub(super) fn stop_for_run_js_unconfirmed(&mut self) -> bool {
+        let detail = self
+            .run_js_unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(detail) = detail else {
+            return false;
+        };
+        self.finish_error(format!(
+            "run_js could not confirm that what it started has stopped ({detail}); no further tools run and the workspace is retained"
+        ));
+        true
+    }
+
+    /// The same condition, for finalization.
+    pub(super) fn run_js_unconfirmed_detail(&self) -> Option<String> {
+        self.run_js_unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -130,6 +156,8 @@ pub(crate) struct RuntimeRunJsHost {
     settings: config::RunJsConfig,
     tools: Vec<String>,
     records: Mutex<HashMap<String, Vec<ChildRecord>>>,
+    /// Shared with the loop; see `LoopState::run_js_unconfirmed`.
+    unconfirmed: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for RuntimeRunJsHost {
@@ -270,6 +298,13 @@ impl RunJsHost for RuntimeRunJsHost {
 
     fn shares_wave(&self, name: &str) -> bool {
         super::tool_calls::shares_wave(&self.executor, name)
+    }
+
+    fn report_unconfirmed(&self, detail: &str) {
+        self.unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| detail.to_owned());
     }
 
     async fn drain_children(&self, parent_call_id: &str) -> Result<(), String> {
