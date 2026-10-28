@@ -6,16 +6,23 @@ fn additional_roles_have_least_privilege_capabilities() {
     let cases = [
         (
             "WebResearcher",
-            ["read", "grep", "web_search", "web_fetch"]
+            ["read", "grep", "web_search", "web_fetch", "run_js"]
                 .into_iter()
                 .chain(agents::BROWSER_TOOLS)
                 .collect::<Vec<_>>(),
         ),
         (
             "Planner",
-            vec!["read", "grep", "git_diff", "skill_load", "web_fetch"],
+            vec![
+                "read",
+                "grep",
+                "git_diff",
+                "skill_load",
+                "web_fetch",
+                "run_js",
+            ],
         ),
-        ("Advisor", vec!["read", "grep", "git_diff"]),
+        ("Advisor", vec!["read", "grep", "git_diff", "run_js"]),
         ("MultimodalLooker", vec!["read"]),
         (
             "Evaluator",
@@ -139,6 +146,39 @@ fn evaluator_cannot_change_files_run_commands_delegate_or_browse() {
                 agents::CapabilityDecision::Denied { .. }
             ),
             "{tool}"
+        );
+    }
+}
+
+#[test]
+fn run_js_is_granted_to_every_role_except_orchestrator_evaluator_and_looker() {
+    // Given: the ADR 0039 role boundary for run_js.
+    for (role, granted) in [
+        (Role::Orchestrator, false),
+        (Role::Evaluator, false),
+        (Role::MultimodalLooker, false),
+        (Role::Worker, true),
+        (Role::Explorer, true),
+        (Role::Reviewer, true),
+        (Role::WebResearcher, true),
+        (Role::Planner, true),
+        (Role::Advisor, true),
+    ] {
+        // When / Then: the capability matches, and a role without it is denied.
+        assert_eq!(
+            role.capabilities().allowed_tools.contains("run_js"),
+            granted,
+            "{}",
+            role.name()
+        );
+        assert_eq!(
+            matches!(
+                role.capabilities().check_tool(role.name(), "run_js"),
+                agents::CapabilityDecision::Allowed
+            ),
+            granted,
+            "{}",
+            role.name()
         );
     }
 }

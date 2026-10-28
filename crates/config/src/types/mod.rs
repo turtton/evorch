@@ -60,7 +60,7 @@ pub use storage::{
     StorageConfig, ThreadIndexConfig,
 };
 pub use team::TeamConfig;
-pub use tools::{BrowserToolsConfig, ToolsConfig};
+pub use tools::{BrowserToolsConfig, RunJsConfig, ToolsConfig};
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
 pub const CURRENT_VERSION: u32 = 3;

@@ -150,13 +150,20 @@ const SANDBOX_KEYS: &[&str] = &[
     "escalate_to_user_on_deny",
 ];
 const COMMENT_CHECKER_KEYS: &[&str] = &["enabled", "binary", "timeout_ms", "prompt"];
-const TOOLS_KEYS: &[&str] = &["browser"];
+const TOOLS_KEYS: &[&str] = &["browser", "run_js"];
 const BROWSER_TOOLS_KEYS: &[&str] = &[
     "enabled",
     "executable",
     "max_pages",
     "max_tabs",
     "coordinate_actions",
+];
+const RUN_JS_KEYS: &[&str] = &[
+    "enabled",
+    "default_timeout_ms",
+    "max_timeout_ms",
+    "memory_limit_mib",
+    "max_tool_calls",
 ];
 const EVAL_KEYS: &[&str] = &[
     "user_simulator",
@@ -248,6 +255,11 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         && let Some(browser) = tools.get("browser").and_then(toml::Value::as_table)
     {
         check_keys(browser, "tools.browser", BROWSER_TOOLS_KEYS)?;
+    }
+    if let Some(tools) = root.get("tools").and_then(toml::Value::as_table)
+        && let Some(run_js) = tools.get("run_js").and_then(toml::Value::as_table)
+    {
+        check_keys(run_js, "tools.run_js", RUN_JS_KEYS)?;
     }
     validate_eval(root)?;
     validate_section(root, "storage", STORAGE_KEYS)?;
@@ -408,6 +420,14 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         .and_then(toml::Value::as_table_mut)
     {
         retain_known(browser, "tools.browser", BROWSER_TOOLS_KEYS, &mut ignored);
+    }
+    if let Some(run_js) = root
+        .get_mut("tools")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tools| tools.get_mut("run_js"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        retain_known(run_js, "tools.run_js", RUN_JS_KEYS, &mut ignored);
     }
     if let Some(thread_index) = root
         .get_mut("storage")

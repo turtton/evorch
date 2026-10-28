@@ -12,6 +12,37 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     pub browser: BrowserToolsConfig,
+    pub run_js: RunJsConfig,
+}
+
+/// The `run_js` code-mode tool (ADR 0039). Off by default: the tool is offered
+/// only when `enabled` is set, so default requests keep their tool list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunJsConfig {
+    /// Offers `run_js` to the roles that may use it.
+    pub enabled: bool,
+    /// Time limit of one call when it passes no `timeout_ms`. Waiting for the
+    /// tool calls made inside the code counts.
+    pub default_timeout_ms: u64,
+    /// Largest `timeout_ms` a call may ask for.
+    pub max_timeout_ms: u64,
+    /// Memory limit of the JavaScript engine, in MiB.
+    pub memory_limit_mib: u32,
+    /// Tool calls the code may make in one `run_js` call.
+    pub max_tool_calls: u32,
+}
+
+impl Default for RunJsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_timeout_ms: 30_000,
+            max_timeout_ms: 300_000,
+            memory_limit_mib: 64,
+            max_tool_calls: 200,
+        }
+    }
 }
 
 /// The agent browser tools (ADR 0034).
@@ -71,5 +102,35 @@ mod tests {
         );
         assert!(toml::from_str::<Config>("[tools.browser]\nmax_pages = 0").is_err());
         assert!(toml::from_str::<Config>("[tools.browser]\nmax_tabs = 0").is_err());
+    }
+
+    #[test]
+    fn run_js_defaults_off_with_documented_limits_and_parses_partially() {
+        let default = RunJsConfig::default();
+        assert!(!default.enabled);
+        assert_eq!(
+            (
+                default.default_timeout_ms,
+                default.max_timeout_ms,
+                default.memory_limit_mib,
+                default.max_tool_calls
+            ),
+            (30_000, 300_000, 64, 200)
+        );
+        assert_eq!(Config::default().tools.run_js, default);
+        assert_eq!(toml::from_str::<Config>("").unwrap().tools.run_js, default);
+
+        let parsed: Config =
+            toml::from_str("[tools.run_js]\nenabled = true\nmax_tool_calls = 10").unwrap();
+
+        assert_eq!(
+            parsed.tools.run_js,
+            RunJsConfig {
+                enabled: true,
+                max_tool_calls: 10,
+                ..default
+            }
+        );
+        assert!(toml::from_str::<Config>("[tools.run_js]\nunknown = 1").is_err());
     }
 }

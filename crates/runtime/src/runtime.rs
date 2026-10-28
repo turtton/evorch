@@ -131,6 +131,8 @@ pub(crate) struct Shared {
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
+    /// `[tools.run_js]` (ADR 0039): whether `run_js` is offered and its limits.
+    pub(crate) run_js: Mutex<config::RunJsConfig>,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     /// Variables added to every shell command, including run-built executors'.
     pub(crate) shell_environment: OnceLock<Vec<(String, String)>>,
@@ -719,6 +721,7 @@ impl AgentRuntime {
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
+                run_js: Mutex::new(config::RunJsConfig::default()),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),
@@ -810,6 +813,7 @@ impl AgentRuntime {
         let _ = self.shared.orchestration.set(config.orchestration.clone());
         let _ = self.shared.budget.set((&config.budget).into());
         self.set_web_tools_enabled(config.sandbox.web_tools_enabled);
+        self.set_run_js_settings(config.tools.run_js.clone());
         self.set_sandbox_escalation(
             config.sandbox.escalation_approval,
             config.sandbox.escalate_to_user_on_deny,
@@ -1031,6 +1035,7 @@ impl AgentRuntime {
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
+                run_js: Mutex::new(config::RunJsConfig::default()),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),

@@ -80,6 +80,34 @@ impl AgentRuntime {
         self.shared.web_tools_enabled.load(Ordering::Acquire)
     }
 
+    /// Sets the `run_js` switch and limits (ADR 0039). Only new calls see the
+    /// change; it never alters a request that has already been sent.
+    pub fn set_run_js_settings(&self, settings: config::RunJsConfig) {
+        *self
+            .shared
+            .run_js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+    }
+
+    /// The current `run_js` switch and limits.
+    pub fn run_js_settings(&self) -> config::RunJsConfig {
+        self.shared
+            .run_js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether `run_js` is offered to the roles that may use it.
+    pub fn run_js_enabled(&self) -> bool {
+        self.shared
+            .run_js
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled
+    }
+
     pub fn execution_policy(&self, role: Role) -> ExecutionPolicy {
         let (approval, fallback) = self
             .shared
