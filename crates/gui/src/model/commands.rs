@@ -213,6 +213,20 @@ pub trait CommandSink: Send {
         Ok(None)
     }
 
+    /// Searches `project`'s threads by title and body off the UI thread; the
+    /// answer arrives on the receiver. `cursor` continues a search that examined
+    /// only part of the project. `None` without a live runtime; a request
+    /// superseded by a newer one is dropped, which disconnects its receiver.
+    fn search_threads(
+        &self,
+        _project: std::path::PathBuf,
+        _query: String,
+        _limit: usize,
+        _cursor: Option<String>,
+    ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
+        None
+    }
+
     fn set_default_cwd(&mut self, _cwd: Option<std::path::PathBuf>) -> Result<(), String> {
         Ok(())
     }

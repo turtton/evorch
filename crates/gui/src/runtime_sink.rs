@@ -57,7 +57,17 @@ pub struct RuntimeCommandSink {
     /// Project each thread last submitted from, for host follow-ups that carry none.
     thread_roots: BTreeMap<String, PathBuf>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
+    search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
 }
+
+/// Reply channel, project, query, result limit and continuation cursor of a thread search.
+type SearchJob = (
+    std::sync::mpsc::Sender<Result<runtime::HostThreadSearch, String>>,
+    PathBuf,
+    String,
+    usize,
+    Option<String>,
+);
 
 impl RuntimeCommandSink {
     fn rebind_conversation_root(&mut self, thread: &str, run: RunId) {
@@ -99,6 +109,7 @@ impl RuntimeCommandSink {
             chat_permits: BTreeMap::new(),
             thread_roots: BTreeMap::new(),
             ownership: None,
+            search_jobs: crate::model::latest_job::LatestJob::default(),
         }
     }
 
@@ -270,6 +281,34 @@ impl CommandSink for RuntimeCommandSink {
                 .map_err(|error| error.to_string());
             let _ = sender.send(report);
         });
+        Some(receiver)
+    }
+
+    fn search_threads(
+        &self,
+        project: PathBuf,
+        query: String,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runtime = self.runtime.clone();
+        let handle = self.handle.clone();
+        // One storage read at a time, newest request first: a search left over
+        // from a closed modal is replaced, and its dropped sender tells the
+        // modal it was superseded.
+        self.search_jobs.submit(
+            (sender, project, query, limit, cursor),
+            move |(sender, project, query, limit, cursor)| {
+                let found =
+                    runtime.search_threads_for_host(&project, &query, limit, cursor.as_deref());
+                let _ = sender.send(found);
+            },
+            move |worker| {
+                // Storage reads block, so they stay off the UI and async worker threads.
+                handle.spawn_blocking(worker);
+            },
+        );
         Some(receiver)
     }
 

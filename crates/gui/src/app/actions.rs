@@ -364,6 +364,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn toggle_pin(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
+        // A child hangs under its parent, so a pin could never take effect.
+        // Ignore stale child actions the same way archiving does.
+        if workspace_ui::display_parent(&self.sidebar.threads, &thread_id).is_some() {
+            return Ok(());
+        }
         let pinned = self
             .sidebar
             .threads

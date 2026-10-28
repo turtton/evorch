@@ -1227,3 +1227,323 @@ fn search_output_pages_at_sixteen_kib_without_losing_threads() {
     assert!(pages > 1, "fixture must actually exercise the output bound");
     assert_eq!(seen.len(), 20);
 }
+
+fn host_ids(search: &crate::HostThreadSearch) -> Vec<&str> {
+    let mut ids: Vec<_> = search
+        .hits
+        .iter()
+        .map(|hit| hit.thread_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn host_search_finds_titles_and_bodies_of_the_project_only() {
+    // Given: threads in the open project and one in another project, each body indexed.
+    let f = Fixture::new();
+    f.thread("alpha", Some(f.project.path()), "run-201", |_| {});
+    f.thread("beta", Some(f.project.path()), "run-202", |row| {
+        row.title = Some("unrelated".into());
+    });
+    f.thread("outside", Some(f.other.path()), "run-203", |row| {
+        row.title = Some("title of outside".into());
+    });
+    for (run, thread, body) in [
+        ("run-201", "alpha", "nothing special"),
+        ("run-202", "beta", "the hostneedle is here"),
+        ("run-203", "outside", "an outside hostneedle"),
+    ] {
+        f.native_run(run, Some(thread), None, vec![assistant(vec![text(body)])]);
+        f.index(run);
+    }
+    let search = |query: &str| {
+        f.runtime
+            .search_threads_for_host(f.project.path(), query, 20, None)
+            .unwrap()
+    };
+    // When / Then: a title query finds only the project's thread, with its title as the snippet.
+    let by_title = search("title of");
+    assert_eq!(host_ids(&by_title), ["alpha"]);
+    assert_eq!(by_title.hits[0].snippet_kind.as_deref(), Some("title"));
+    // A body query finds the thread whose conversation holds the text.
+    let by_body = search("hostneedle");
+    assert_eq!(host_ids(&by_body), ["beta"]);
+    assert_eq!(
+        by_body.hits[0].snippet_kind.as_deref(),
+        Some("conversation")
+    );
+    assert!(
+        by_body.hits[0]
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| snippet.contains("hostneedle"))
+    );
+    assert_eq!(by_body.index.unindexed, 0);
+    // A blank query lists the project's threads without snippets.
+    let listing = search("   ");
+    assert_eq!(host_ids(&listing), ["alpha", "beta"]);
+    assert!(listing.hits.iter().all(|hit| hit.snippet.is_none()));
+}
+
+#[test]
+fn host_search_reports_unindexed_bodies_instead_of_hiding_them() {
+    // Given: a project thread whose body was never indexed.
+    let f = Fixture::new();
+    f.thread("alpha", Some(f.project.path()), "run-201", |_| {});
+    f.native_run(
+        "run-201",
+        Some("alpha"),
+        None,
+        vec![
+            assistant(vec![text("unindexedneedle intermediate")]),
+            assistant(vec![text("a different final report")]),
+        ],
+    );
+    // When: searching text outside the final report, which only the index holds.
+    let search = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "unindexedneedle", 20, None)
+        .unwrap();
+    // Then: no body hit, and the gap in coverage is reported.
+    assert!(search.hits.is_empty());
+    assert!(search.index.unindexed > 0);
+}
+
+#[test]
+fn host_search_rejects_a_project_folder_that_does_not_exist() {
+    let f = Fixture::new();
+    let missing = f.project.path().join("gone");
+    assert!(
+        f.runtime
+            .search_threads_for_host(&missing, "x", 5, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn host_search_ranks_fuzzy_title_matches_ahead_of_body_matches() {
+    // Given: titles that contain "pg" literally, by scattered letters or not at all,
+    // and a thread whose body (not its title) holds it.
+    let f = Fixture::new();
+    for (id, title, run, at) in [
+        ("exact", "Fix pg retries", "run-201", 1),
+        ("scattered", "Payment gateway rewrite", "run-202", 5),
+        ("none", "Unrelated chat", "run-203", 9),
+        ("body", "Notes", "run-204", 7),
+    ] {
+        f.thread(id, Some(f.project.path()), run, |row| {
+            row.title = Some(title.into());
+            row.updated_at_ns = at;
+        });
+        let body = if id == "body" {
+            "we talked about pg"
+        } else {
+            "nothing"
+        };
+        f.native_run(run, Some(id), None, vec![assistant(vec![text(body)])]);
+        f.index(run);
+    }
+    let search = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "pg", 20, None)
+        .unwrap();
+    // Then: the literal title leads, the fuzzy (subsequence) title follows, the body-only
+    // thread comes last and the unrelated one is absent.
+    let ids: Vec<_> = search
+        .hits
+        .iter()
+        .map(|hit| hit.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["exact", "scattered", "body"]);
+    assert_eq!(search.hits[1].snippet_kind.as_deref(), Some("title"));
+    // Matching is case-insensitive and spans non-adjacent letters.
+    let fuzzy = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "PMGW", 20, None)
+        .unwrap();
+    assert_eq!(host_ids(&fuzzy), ["scattered"]);
+}
+
+#[test]
+fn host_search_cursor_reaches_a_match_beyond_the_first_hundred_threads() {
+    // Given: 101 project threads, the oldest holding the only body match.
+    let f = Fixture::new();
+    for index in 0..=100_i64 {
+        let id = format!("t{index:03}");
+        let run = format!("run-{}", 1000 + index);
+        f.thread(&id, Some(f.project.path()), &run, |row| {
+            row.updated_at_ns = 10 + index;
+        });
+    }
+    f.native_run(
+        "run-1000",
+        Some("t000"),
+        None,
+        vec![
+            assistant(vec![text("tailneedle early body")]),
+            assistant(vec![text("final")]),
+        ],
+    );
+    f.index("run-1000");
+    // When: searching, the first page examines only the 100 newest threads.
+    let first = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "tailneedle", 20, None)
+        .unwrap();
+    // Then: it is empty but not exhausted, and the cursor leads to the match.
+    assert!(first.hits.is_empty());
+    let cursor = first.next_cursor.expect("unexamined threads remain");
+    let second = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "tailneedle", 20, Some(&cursor))
+        .unwrap();
+    assert_eq!(host_ids(&second), ["t000"]);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn host_search_surfaces_the_cursor_of_a_page_cut_by_the_body_budget() {
+    // Given: one thread with more matching blocks than a page may verify.
+    let f = Fixture::new();
+    f.thread("alpha", Some(f.project.path()), "run-201", |_| {});
+    f.native_run(
+        "run-201",
+        Some("alpha"),
+        None,
+        (0..2001)
+            .map(|_| assistant(vec![text("budgetneedle")]))
+            .collect(),
+    );
+    f.index("run-201");
+    let first = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "budgetneedle", 20, None)
+        .unwrap();
+    // Then: the cut is reported rather than treated as the end of the search.
+    let cursor = first.next_cursor.expect("the page was cut");
+    let rest = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "budgetneedle", 20, Some(&cursor))
+        .unwrap();
+    assert!(rest.next_cursor.is_none());
+}
+
+fn many_threads_with_titles(f: &Fixture, titles: &[&str]) {
+    for (index, title) in titles.iter().enumerate() {
+        let id = format!("t{index:03}");
+        f.thread(
+            &id,
+            Some(f.project.path()),
+            &format!("run-{}", 3000 + index),
+            |row| {
+                row.title = Some((*title).into());
+                row.updated_at_ns = 10 + index as i64;
+            },
+        );
+    }
+}
+
+#[test]
+fn host_search_never_returns_more_than_the_limit_even_with_fuzzy_titles() {
+    // Given: three titles that match "pg" by scattered letters, and a body-only thread.
+    let f = Fixture::new();
+    many_threads_with_titles(
+        &f,
+        &["Payment gateway", "Pipeline graph", "Page group", "Notes"],
+    );
+    f.native_run(
+        "run-3003",
+        Some("t003"),
+        None,
+        vec![
+            assistant(vec![text("pg in the body")]),
+            assistant(vec![text("done")]),
+        ],
+    );
+    f.index("run-3003");
+    let search = |limit, cursor: Option<&str>| {
+        f.runtime
+            .search_threads_for_host(f.project.path(), "pg", limit, cursor)
+            .unwrap()
+    };
+    // When: following the cursors with a page of one.
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = search(1, cursor.as_deref());
+        // Then: no page exceeds the limit, and every match is reached exactly once.
+        assert!(page.hits.len() <= 1, "{:?}", page.hits);
+        seen.extend(page.hits.iter().map(|hit| hit.thread_id.clone()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, ["t000", "t001", "t002", "t003"]);
+
+    // When: the page holds the fuzzy matches and one more.
+    let four = search(4, None);
+    // Then: fuzzy titles and the body hit share the page without exceeding it.
+    assert_eq!(four.hits.len(), 4);
+    assert_eq!(four.hits[3].thread_id, "t003");
+    assert!(search(2, None).hits.len() <= 2);
+}
+
+#[test]
+fn host_search_cursor_reaches_every_fuzzy_title_match_beyond_the_first_page() {
+    // Given: 21 titles that match "pg" only by scattered letters.
+    let f = Fixture::new();
+    let titles: Vec<String> = (0..21).map(|index| format!("Page group {index}")).collect();
+    let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+    many_threads_with_titles(&f, &refs);
+    let first = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "pg", 20, None)
+        .unwrap();
+    // Then: the first page is full and the 21st is reachable from its cursor.
+    assert_eq!(first.hits.len(), 20);
+    let cursor = first.next_cursor.expect("one title is left");
+    let second = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "pg", 20, Some(&cursor))
+        .unwrap();
+    assert_eq!(second.hits.len(), 1);
+    assert!(second.next_cursor.is_none());
+    let mut all: Vec<_> = first
+        .hits
+        .iter()
+        .chain(&second.hits)
+        .map(|hit| hit.thread_id.clone())
+        .collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 21);
+}
+
+#[test]
+fn host_search_flags_title_matching_that_did_not_reach_older_threads() {
+    // Given: more threads than the fuzzy title pass reads; only the oldest title matches.
+    let f = Fixture::new();
+    let mut titles = vec!["needle in the oldest"];
+    titles.extend(std::iter::repeat_n("Chat", 2100));
+    many_threads_with_titles(&f, &titles);
+    // When: searching letters that match it only as a subsequence.
+    let search = f
+        .runtime
+        .search_threads_for_host(f.project.path(), "ndlo", 20, None)
+        .unwrap();
+    // Then: the miss is reported instead of looking like an exhaustive result.
+    assert!(search.hits.is_empty());
+    assert!(search.title_scan_limited);
+    let small = Fixture::new();
+    many_threads_with_titles(&small, &["Chat"]);
+    assert!(
+        !small
+            .runtime
+            .search_threads_for_host(small.project.path(), "ndlo", 20, None)
+            .unwrap()
+            .title_scan_limited
+    );
+}

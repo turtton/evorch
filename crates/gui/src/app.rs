@@ -39,6 +39,7 @@ mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
 mod thread_mirror;
+mod thread_search;
 mod usage_ledger;
 mod viewer;
 mod work_panels;

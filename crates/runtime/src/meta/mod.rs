@@ -23,6 +23,7 @@ mod skills;
 mod specs;
 pub(crate) use specs::tool_spec;
 pub(crate) use threads::bound_result as bound_thread_result;
+pub use threads::{HOST_SEARCH_MAX_LIMIT, HostSearchIndex, HostThreadHit, HostThreadSearch};
 mod threads;
 
 use agents::Role;
