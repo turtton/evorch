@@ -73,7 +73,8 @@ pub(super) struct Failure {
 #[derive(Default)]
 pub(super) struct Run {
     pub output: String,
-    pub output_truncated: bool,
+    /// Bytes of printed output past [`MAX_OUTPUT_BYTES`] that were not kept.
+    pub output_dropped: u64,
     pub calls: Vec<Recorded>,
     pub written: BTreeSet<String>,
     /// Paths of writes that were cut off, so whether they happened is unknown.
@@ -95,11 +96,13 @@ impl Run {
             self.output.push_str(text);
             return;
         }
-        self.output_truncated = true;
         let mut end = room;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
+        self.output_dropped = self
+            .output_dropped
+            .saturating_add((text.len() - end) as u64);
         self.output.push_str(&text[..end]);
     }
 

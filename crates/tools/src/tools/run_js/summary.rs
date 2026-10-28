@@ -38,6 +38,32 @@ const PATHS_BYTES: usize = 1200;
 #[cfg(test)]
 const SUMMARY_LINE_MAX_BYTES: usize = 4608;
 
+/// The output ceiling keeps only the first [`crate::output::CAPTURE_BYTES`] of a result,
+/// in its artifact and in the preview it takes from the end of that. The summary line is
+/// the end of the result, so the result must never be longer than that: `finish` gives
+/// the printed output what remains after everything else, each part bounded.
+const CAPTURE_BYTES: usize = crate::output::CAPTURE_BYTES;
+/// The returned value, at most this much, with its note.
+const RETURN_BYTES: usize = 256 * 1024;
+/// The error message and stack of a failed program, and the note about commands that were
+/// not confirmed stopped, at most this much together.
+const FAILURE_BYTES: usize = 16 * 1024;
+/// Room for the line breaks, `=> `, the notes about cut texts and a margin.
+const NOTES_BYTES: usize = 8 * 1024;
+const DRAIN_NOTE_CHARS: usize = 1000;
+
+/// `text` cut to at most `max` bytes on a character boundary, and how many bytes it lost.
+fn cut_to(text: &str, max: usize) -> (&str, usize) {
+    if text.len() <= max {
+        return (text, 0);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], text.len() - end)
+}
+
 /// What the model is told when the time limit ended the call. The limit and how to
 /// raise it are in it, and where long work belongs, so the next attempt does not
 /// repeat the same call.
@@ -60,6 +86,7 @@ pub(super) fn finish(
     state.calls.sort_by_key(|call| call.seq);
     state.failures.sort_by_key(|failure| failure.seq);
     let mut content = String::new();
+    let summary = summary_line(&state);
     // Neither of these depends on the failure list, which leaves reasons out.
     for notice in [cut_off_notice(&state), failed_calls_notice(&state)]
         .into_iter()
@@ -68,14 +95,24 @@ pub(super) fn finish(
         content.push_str(&notice);
         content.push('\n');
     }
+    // Everything but the printed output is bounded, and the printed output gets what is
+    // left of the capture limit, so the whole result, which ends with the summary line,
+    // is never longer than the output ceiling keeps.
+    let output_room = CAPTURE_BYTES
+        .saturating_sub(content.len() + summary.len() + RETURN_BYTES + FAILURE_BYTES + NOTES_BYTES);
     let output = std::mem::take(&mut state.output);
+    let (kept, cut_here) = cut_to(&output, output_room);
     let output_bytes = output.len();
-    content.push_str(&output);
-    if !output.is_empty() && !content.ends_with('\n') {
+    let dropped = state.output_dropped.saturating_add(cut_here as u64);
+    content.push_str(kept);
+    if !kept.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    if state.output_truncated {
-        content.push_str("[run_js: output was cut at 8 MiB]\n");
+    if dropped > 0 {
+        content.push_str(&format!(
+            "[output truncated by run_js: {dropped} bytes dropped]\n"
+        ));
+        state.limit_hit.get_or_insert("output");
     }
     let console_end = content.len();
     let mut returned = None;
@@ -105,11 +142,12 @@ pub(super) fn finish(
                 } else {
                     error.message
                 };
-                failure = Some(if error.stack.trim().is_empty() {
+                let failed = if error.stack.trim().is_empty() {
                     message
                 } else {
                     format!("{message}\n{}", error.stack.trim_end())
-                });
+                };
+                failure = Some(bounded_failure(failed));
             } else if timed_out {
                 failure = Some(timeout_message(timeout_ms, limits));
             } else if !value.is_null() {
@@ -119,8 +157,15 @@ pub(super) fn finish(
                 };
                 return_bytes = text.len();
                 content.push_str("=> ");
-                returned = Some((content.len(), content.len() + text.len()));
-                content.push_str(&text);
+                let start = content.len();
+                let (kept, cut) = cut_to(&text, RETURN_BYTES);
+                content.push_str(kept);
+                if cut > 0 {
+                    content.push_str(&format!(
+                        "\n[returned value truncated by run_js: {cut} bytes dropped]"
+                    ));
+                }
+                returned = Some((start, content.len()));
                 content.push('\n');
             }
         }
@@ -130,13 +175,14 @@ pub(super) fn finish(
             } else {
                 format!(" (worker stderr: {stderr})")
             };
-            failure = Some(format!("{reason}{stderr}"));
+            failure = Some(bounded_failure(format!("{reason}{stderr}")));
         }
     }
     if let Some(error) = &state.drain_error {
         let note = format!(
-            "run_js could not confirm that the commands it started have stopped ({error}); \
-treat their effects as unknown"
+            "run_js could not confirm that the commands it started have stopped ({}); \
+treat their effects as unknown",
+            one_line(error, DRAIN_NOTE_CHARS)
         );
         failure = Some(match failure {
             Some(existing) => format!("{existing}\n{note}"),
@@ -148,8 +194,8 @@ treat their effects as unknown"
         content.push('\n');
     }
     let summary_start = content.len();
-    let summary = summary_line(&state);
     content.push_str(&summary);
+    debug_assert!(content.len() <= CAPTURE_BYTES, "{} bytes", content.len());
     let layout = json!({
         "bytes": content.len(),
         "console_end": console_end,
@@ -177,6 +223,16 @@ treat their effects as unknown"
             .collect(),
         summary_line: summary,
     })
+}
+
+/// A failure text cut to what the result reserves for it, so it cannot crowd out the
+/// summary line.
+fn bounded_failure(text: String) -> String {
+    let (kept, cut) = cut_to(&text, FAILURE_BYTES - 2 * DRAIN_NOTE_CHARS);
+    if cut == 0 {
+        return text;
+    }
+    format!("{kept}\n[failure text truncated by run_js: {cut} bytes dropped]")
 }
 
 /// The first line of the result when a call failed. A failed call does not make the
@@ -770,6 +826,229 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
             "the whole line is in the preview"
         );
         assert_eq!(acknowledged_cut_off(&limited), [41, 42, 43, 44, 45]);
+    }
+
+    /// The run of the capture-limit tests: failed calls, one cut-off command (seq 6) and
+    /// long written paths, so the summary line is as long as it gets.
+    fn heavy_state() -> Run {
+        let mut state = run_with_failures_and_cut_off(5, vec![cut_off(6, "cargo check")]);
+        state.written = many_long_paths(500, "w");
+        state.uncertain = many_long_paths(500, "u");
+        state
+    }
+
+    /// What the output ceiling must keep of `result`: the summary line is the end of both
+    /// the preview and the artifact (when one was saved), and the host acknowledges.
+    fn assert_summary_survives(result: ToolResult, what: &str) {
+        let summary = result.content.lines().last().unwrap().to_owned();
+        assert!(summary.starts_with("[run_js: "), "{what}");
+        assert!(
+            result.content.len() <= CAPTURE_BYTES,
+            "{what}: whole result is in capture"
+        );
+        let limited = crate::output::limit_result(result);
+        let Some(artifact) = limited
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.get("output_artifact").cloned())
+        else {
+            // Small enough to be returned whole.
+            assert!(limited.content.ends_with(&summary), "{what}");
+            assert_eq!(acknowledged_cut_off(&limited), [6], "{what}");
+            return;
+        };
+        let kept = limited
+            .content
+            .rsplit_once("\n[Output ")
+            .unwrap_or_else(|| panic!("{what}: no note after the preview"))
+            .0;
+        assert!(
+            kept.ends_with(&summary),
+            "{what}: the preview ends with the summary line"
+        );
+        assert_eq!(acknowledged_cut_off(&limited), [6], "{what}");
+        if let Some(path) = artifact["path"].as_str() {
+            assert_eq!(
+                artifact["complete"], true,
+                "{what}: the artifact has the whole result"
+            );
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert!(
+                saved.ends_with(&summary),
+                "{what}: the artifact ends with the summary line"
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_line_survives_output_before_at_and_past_the_capture_limit() {
+        let base = finish(
+            heavy_state(),
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let room = CAPTURE_BYTES - base.content.len() - RETURN_BYTES - FAILURE_BYTES - NOTES_BYTES;
+        for (size, dropped) in [
+            (room - 1, 0),
+            (room, 0),
+            (room + 1, 1),
+            (CAPTURE_BYTES - 1, CAPTURE_BYTES - 1 - room),
+            (CAPTURE_BYTES, CAPTURE_BYTES - room),
+            (CAPTURE_BYTES + 1, CAPTURE_BYTES + 1 - room),
+        ] {
+            let mut state = heavy_state();
+            state.output = "x".repeat(size);
+            let result = finish(
+                state,
+                done(Value::Null),
+                "",
+                1000,
+                &config::RunJsConfig::default(),
+            );
+            let note = format!("[output truncated by run_js: {dropped} bytes dropped]");
+            assert_eq!(
+                result.content.contains("[output truncated by run_js:"),
+                dropped > 0,
+                "{size}"
+            );
+            if dropped > 0 {
+                assert!(result.content.contains(&note), "{size}: {dropped}");
+                assert_eq!(
+                    result.detail.as_ref().unwrap()["run_js"]["limit_hit"],
+                    "output"
+                );
+            }
+            assert_summary_survives(result, &format!("output of {size} bytes"));
+        }
+    }
+
+    #[test]
+    fn dropped_bytes_the_host_never_kept_are_counted_in_the_note() {
+        let mut state = heavy_state();
+        state.output = "x".repeat(1000);
+        state.output_dropped = 7_000_000;
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        assert!(
+            result
+                .content
+                .contains("[output truncated by run_js: 7000000 bytes dropped]")
+        );
+        assert_summary_survives(result, "host-dropped output");
+    }
+
+    #[test]
+    fn a_huge_return_value_and_error_text_share_the_budget_without_pushing_out_the_summary() {
+        let mut state = heavy_state();
+        state.output = "x".repeat(CAPTURE_BYTES);
+        let value = Value::String("r".repeat(20 * 1024 * 1024));
+        let result = finish(
+            state,
+            done(value),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        assert!(
+            result
+                .content
+                .contains("[returned value truncated by run_js: ")
+        );
+        let layout = &result.detail.as_ref().unwrap()["run_js"]["layout"];
+        let [start, end] = [
+            layout["returned"][0].as_u64().unwrap(),
+            layout["returned"][1].as_u64().unwrap(),
+        ];
+        assert!(
+            end - start <= (RETURN_BYTES + 100) as u64,
+            "the returned range is bounded"
+        );
+        assert_summary_survives(result, "huge returned value");
+
+        let mut state = heavy_state();
+        state.output = "x".repeat(CAPTURE_BYTES);
+        state.drain_error = Some("d".repeat(100_000));
+        let error = JsError {
+            message: "m".repeat(5_000_000),
+            stack: "s".repeat(5_000_000),
+        };
+        let ending = Ending::Done {
+            value: Value::Null,
+            error: Some(error),
+            timed_out: false,
+        };
+        let result = finish(state, ending, "", 1000, &config::RunJsConfig::default());
+        assert!(
+            result
+                .content
+                .contains("[failure text truncated by run_js: ")
+        );
+        assert!(
+            result
+                .content
+                .contains("could not confirm that the commands it started have stopped")
+        );
+        assert!(result.is_error);
+        assert_summary_survives(result, "huge error text");
+    }
+
+    #[test]
+    fn the_summary_line_survives_when_the_artifact_cannot_be_saved() {
+        // The output directory is under a regular file, so nothing can be saved there.
+        const CHILD: &str = "EVORCH_SUMMARY_TEST";
+        let test = "tools::run_js::summary::tests::the_summary_line_survives_when_the_artifact_cannot_be_saved";
+        if std::env::var(CHILD).is_err() {
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("file");
+            std::fs::write(&file, "x").unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("EVORCH_OUTPUT_DIR", file.join("below"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated process failed");
+            return;
+        }
+        let base = finish(
+            heavy_state(),
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let room = CAPTURE_BYTES - base.content.len() - RETURN_BYTES - FAILURE_BYTES - NOTES_BYTES;
+        for size in [room, room + 1, CAPTURE_BYTES + 1] {
+            let mut state = heavy_state();
+            state.output = "x".repeat(size);
+            let result = finish(
+                state,
+                done(Value::Null),
+                "",
+                1000,
+                &config::RunJsConfig::default(),
+            );
+            let summary = result.content.lines().last().unwrap().to_owned();
+            let limited = crate::output::limit_result(result);
+            assert!(limited.content.contains("Artifact unavailable"), "{size}");
+            let kept = limited
+                .content
+                .rsplit_once("\n[Output truncated;")
+                .unwrap()
+                .0;
+            assert!(
+                kept.ends_with(&summary),
+                "{size}: the preview still ends with the summary line"
+            );
+            assert_eq!(acknowledged_cut_off(&limited), [6], "{size}");
+        }
     }
 
     #[test]
