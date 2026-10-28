@@ -99,6 +99,9 @@ pub fn composer_strip_within(
     max_input: f32,
 ) -> ComposerStripOutput {
     let mut action = None;
+    // While the model picker is up its keys are not the composer's; Escape in
+    // particular must not stop a running turn.
+    let picker_was_open = picker_state.open;
     let input_id = ui.id().with("composer-input");
     let min_input = COMPOSER_MIN_HEIGHT - 2.0 * SP_2;
     // Wrapped rows are only known after layout, so the viewport follows the
@@ -207,7 +210,7 @@ pub fn composer_strip_within(
                     .and_then(|state| state.cursor.char_range())
                     .map(|range| range.primary.index.0);
                 ui.data_mut(|data| data.insert_temp(ime_id, ime_composing && model.focused));
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if !picker_was_open && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     if !items.is_empty() {
                         model.dismiss_completions();
                     } else if can_stop {
@@ -377,6 +380,7 @@ mod tests {
     use crate::theme::tokens::SP_3;
 
     struct Fixture {
+        profiles: Vec<runtime::compose::ProfileSummary>,
         phase: Option<workspace_ui::ThreadRunPhase>,
         model: ComposerModel,
         picker_state: crate::model::model_picker::ModelPickerState,
@@ -391,10 +395,10 @@ mod tests {
                     ui,
                     &mut state.model,
                     crate::panes::model_picker::ModelPickerContext {
-                        profiles: &[],
+                        profiles: &state.profiles,
                         preference: None,
                         default_model: None,
-                        enabled: false,
+                        enabled: !state.profiles.is_empty(),
                     },
                     &mut state.picker_state,
                     state.phase,
@@ -404,6 +408,7 @@ mod tests {
                 }
             },
             Fixture {
+                profiles: Vec::new(),
                 phase: None,
                 model: ComposerModel {
                     input: input.into(),
@@ -440,6 +445,50 @@ mod tests {
         h.run();
         assert_eq!(h.state().action, Some(ComposerAction::Stop));
         assert_eq!(h.state().model.input, "draft");
+    }
+
+    #[test]
+    fn esc_while_the_model_picker_is_open_never_stops_a_running_turn() {
+        use crate::panes::model_picker::{EFFORT_HEADING, SEARCH_LABEL};
+        // Given: a running turn and a picker whose only model offers effort levels.
+        let mut h = harness("draft");
+        h.state_mut().phase = Some(workspace_ui::ThreadRunPhase::Running);
+        h.state_mut().profiles = vec![runtime::compose::ProfileSummary {
+            name: "p".into(),
+            provider_type: model::ProviderType::OpenAiCompatible,
+            models: vec!["m".into()],
+            default_model: Some("m".into()),
+            effort_levels: [("m".to_owned(), vec!["low".to_owned(), "high".to_owned()])].into(),
+        }];
+        h.run();
+        let open = |h: &mut Harness<'static, Fixture>| {
+            h.get_by_label("Select model").click();
+            h.run();
+            assert!(h.query_by_label(SEARCH_LABEL).is_some());
+        };
+        let escape = |h: &mut Harness<'static, Fixture>| {
+            h.key_press(egui::Key::Escape);
+            h.run();
+        };
+        // When/Then: Escape in the model list only closes the picker.
+        open(&mut h);
+        escape(&mut h);
+        assert!(!h.state().picker_state.open);
+        assert_eq!(h.state().action, None);
+        // When/Then: in the effort step it goes back to the list, then closes it.
+        open(&mut h);
+        h.get_by_label("p / m").click();
+        h.run();
+        assert!(h.query_by_label(EFFORT_HEADING).is_some());
+        escape(&mut h);
+        assert!(h.query_by_label(SEARCH_LABEL).is_some());
+        assert_eq!(h.state().action, None);
+        escape(&mut h);
+        assert!(!h.state().picker_state.open);
+        assert_eq!(h.state().action, None);
+        // Then: with the picker closed, Escape stops the turn again.
+        escape(&mut h);
+        assert_eq!(h.state().action, Some(ComposerAction::Stop));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod agents;
 pub mod budget;
 pub mod comment_checker;
 pub mod compaction;
+pub mod cursor_model;
 pub mod edit_tool;
 pub mod eval;
 pub mod misc;

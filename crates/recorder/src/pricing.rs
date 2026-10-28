@@ -26,6 +26,7 @@ pub fn fallback_provider_type(provider: &str) -> Option<config::ProviderTypeConf
     match provider {
         "openai" => Some(config::ProviderTypeConfig::OpenAi),
         "openai-codex" => Some(config::ProviderTypeConfig::OpenAiCodex),
+        "cursor" => Some(config::ProviderTypeConfig::Cursor),
         _ => None,
     }
 }
@@ -103,7 +104,9 @@ fn is_free(schedule: &PriceSchedule) -> bool {
     set_is_free(&schedule.standard) && schedule.fast.as_ref().is_none_or(set_is_free)
 }
 
-/// Static TOML prices first, then the catalog entry the profile resolves to.
+/// Static TOML prices first, then the catalog entry the profile resolves to. A
+/// Cursor model without an explicit reference takes Cursor's own docs prices when
+/// the docs list it, and otherwise the API prices of the model its ID is a variant of.
 pub fn resolve_model_pricing(
     entry: Option<&ModelEntryConfig>,
     provider_type: Option<config::ProviderTypeConfig>,
@@ -113,16 +116,19 @@ pub fn resolve_model_pricing(
 ) -> Option<PriceSchedule> {
     let fallback = ModelEntryConfig::enabled(model);
     let entry = entry.unwrap_or(&fallback);
-    let catalog = catalog
-        .and_then(|catalog| {
-            runtime::model_resolve::resolve_catalog_entry(
-                entry,
-                catalog,
-                Some(profile),
-                provider_type,
-            )
-        })
-        .map(catalog_schedule);
+    let docs = runtime::model_resolve::cursor_docs_pricing(entry, catalog, provider_type);
+    let catalog = docs.or_else(|| {
+        catalog
+            .and_then(|catalog| {
+                runtime::model_resolve::resolve_catalog_entry(
+                    entry,
+                    catalog,
+                    Some(profile),
+                    provider_type,
+                )
+            })
+            .map(catalog_schedule)
+    });
     entry.pricing_for(catalog)
 }
 
@@ -216,6 +222,12 @@ impl UsagePricing {
         let provider_type = profile_config
             .map(|profile| profile.provider_type)
             .or(fallback_provider_type(provider));
+        if provider_type == Some(config::ProviderTypeConfig::Cursor) {
+            return self
+                .pricing(provider, profile, model)
+                .filter(|schedule| !is_free(schedule))
+                .map(|schedule| (schedule, PriceBasis::ApiEquivalent));
+        }
         let Some((provider_type, providers)) = provider_type.and_then(|provider_type| {
             api_equivalent_providers(provider_type).map(|providers| (provider_type, providers))
         }) else {

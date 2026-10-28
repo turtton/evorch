@@ -442,6 +442,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        if self.picker_owns_input() {
+            return;
+        }
         if let Some(action) = ctx.input(|input| self.keymap.action_for_input(input)) {
             if action == KeyAction::CycleAgentRole && self.settings_owns_input() {
                 return;
