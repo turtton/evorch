@@ -8,6 +8,8 @@ Proposed（2026-10-22、下書き）。利用者との相談で、目的と方�
 
 2026-10-28 追記: 利用者との相談で、検証の方式を変えた。まず `run_js` ありで 5 つのモデルの使い方を Worker で観察し、改善の余地がある間は改善を続ける。`run_js` なしとの比較は、ありの費用を見てから行うか決める。あわせて、shell の複雑なワンライナーの進捗が分かりにくいという観点と、`run_js` の中の長い処理の見え方を加えた。
 
+2026-10-28 追記（試作の実装を受けた更新）: 試作（`feat/run-js-prototype`、PR 作成中）で確定・変更した点を反映した。戻り値の形、QuickJS-NG の実測、worker の隔離、子の並行と計上、終了時の扱い、メモリ上限の意味、組み込み skill の見送り、headless 評価の手順、評価に使う正確なモデル ID である。
+
 ## Context
 
 oh-my-pi（`omp`）と senpi は、agent が JS や Python のコードを実行する `eval` ツールを持つ。コードの中から agent 自身のツールを呼べる。
@@ -58,23 +60,29 @@ shell の中で書かれたスクリプトについて:
 - agent が書いた JS を実行し、その結果を返すツール `run_js` を加える。名前に `eval` を使わない。`crates/eval` と Evaluator ロールの「評価」と紛らわしいためである。
 - 対応する言語は JS（ES2023 相当）だけにする。Python などの他の言語には対応しない。npm パッケージと Node / Bun の API は提供しない。
 - 使えるのは ECMAScript 標準の組み込みである。文字列のメソッド、正規表現（名前付きグループ、後読み、`\p{…}`）、`JSON`、`Array` / `Map` / `Set` などが含まれる。
-- Intl は使えない。QuickJS-NG は Intl を実装しない方針である。そのため、`localeCompare` はコードポイント順で比較し、`toLocaleString` はロケールを無視し、`Intl.Segmenter` はない。`setTimeout`、`TextEncoder`、`URL` などの Web の API もない。
-- 引数は、コード（`code`）と、任意の時間の上限（`timeout_ms`）とする。コードはトップレベルの `await` を使える async 関数の本体として実行する。`return` した値と、`console.log` / `print` の出力を返す。
+- 実際に rquickjs 0.14（QuickJS-NG）で動かして確かめた（試作）。
+  - 存在する: `queueMicrotask`、`performance`、`atob` / `btoa`、`WeakRef`、`eval`、`Function`、`Set` の新しいメソッド、Iterator helpers、`Object.groupBy`、正規表現の `v` フラグなど。
+  - 存在しない: `structuredClone`、`setTimeout`、`fetch`、`require`、`TextEncoder`、`URL`、`Intl`、`import()`。
+  - QuickJS-NG は Intl を実装しない。`localeCompare` は NFC に正規化した後のコードポイント順で比較する。ロケールは無視される。
+- 引数は、コード（`code`）と、任意の時間の上限（`timeout_ms`）とする。コードはトップレベルの `await` を使える async 関数の本体として実行する。`return` した値と、`console.log` / `print` の出力を返す。戻り値の文字列はそのまま返し、それ以外は JSON にする（「モデルには結果だけを返す」の節）。
 
 ### エンジンは QuickJS を、sandbox の中の別プロセスで動かす
 
 - エンジンには QuickJS-NG（QuickJS のフォーク）を、Rust のバインディングの rquickjs を通して使う。rquickjs は、メモリの上限、スタックの上限、割り込みのハンドラを持つ（`AsyncRuntime::set_memory_limit` / `set_max_stack_size` / `set_interrupt_handler`）。ビルドも軽い。
-- エンジンは evorch のプロセスの中では動かさない。evorch のバイナリを JS worker のモード（例: `evorch js-worker`）で起動し、bwrap の中で動かす。この worker には次の制約を課す。
-  - ネットワークを持たない（`--unshare-net`）。
-  - ワークスペースを含むファイルシステムを見せない。空の tmpfs と、実行に必要な読み取り専用の領域だけを置く。
-  - credential と環境変数を渡さない。
+- エンジンは evorch のプロセスの中では動かさない。evorch のバイナリを JS worker のモード（例: `evorch js-worker`）で起動し、bwrap の中で動かす。この worker は、shell とは別の専用の `MinimalSandbox` で動かす（試作で確定）。制約は次のとおりである。
+  - 読み取り専用で見せるのは、実行ファイル、検証済みの ELF loader、`ld.so` で列挙したライブラリだけにする。ワークスペースを含むその他のファイルシステムは見せない。
+  - `/tmp` は private な tmpfs、`/dev` を置き、`/proc` は自分の PID namespace のものにする。
+  - ネットワークと IPC を共有しない（`--unshare-net` など）。capability はすべて落とす。
+  - credential を渡さない。環境変数も渡さないが、`LD_LIBRARY_PATH` だけは転送する（dev ビルドの動的ライブラリの探索に必要なため）。
+  - loader は、`/nix/store` または標準のシステムディレクトリにある、root 所有で書き込みできないものに限る。ライブラリの列挙自体も bwrap の中で、期限と出力の上限を付けて行う。
+  - 評価環境は NixOS である。FHS / usr-merge の環境では実機で確かめていない。
 - 別プロセスにするのは、QuickJS のメモリ安全性のバグを、モデルが書いたコードから突かれても、sandbox の外にある evorch 本体に届かないようにするためである。プロセスが落ちた場合は、その呼び出しを失敗として返す。
 - QuickJS の `std` / `os` モジュールは組み込まない。モジュールの読み込み（`import`）も提供しない。
 
 ### 外の世界にはツールを通してだけ触れる
 
 - worker は、`tools.<name>(args)` を呼ぶと、ツール呼び出しの要求を stdio 経由で evorch 本体に送る。本体はその要求を、通常のツール呼び出しと同じ `ToolExecutor` で実行する。ロールの許可、パスの境界、network guard、承認、secret の秘匿、編集後のフックが、そのまま適用される。
-- `tools.<name>` は Promise を返す。結果の形は「コードに返す結果の形」の節で決める。`Promise.all` で並行に呼べる。並行の可否は、ツールの `ToolExecutionMode` に従う。
+- `tools.<name>` は Promise を返す。結果の形は「コードに返す結果の形」の節で決める。`Promise.all` で並行に呼べる。並行の可否は、ツールの `ToolExecutionMode` に従う。`Shared` のツールは並走し、`edit` / `write` / `shell` は単独で実行し、順序は program の順にする。
 - コードから呼べるツールは、次の 2 つの条件をどちらも満たすものだけにする。
   1. その run のロールに許可されている。
   2. コードからの呼び出しを許す一覧に入っている。第 1 段階の一覧は `read`、`grep`、`git_diff`、`edit`、`write`、`shell` とする。
@@ -105,7 +113,7 @@ shell の中で書かれたスクリプトについて:
   3. 結果の形と、`Promise.all` での並行の呼び出し
   4. 使えない API（fs、require、fetch、timers、Intl）と、コードから行えない呼び出し（承認が必要なもの、`isolated` 以外の shell）
   5. 上限
-- **長い例は組み込みの skill に分ける。** 説明に載せる例は短いもの 1 つとする。長い使い方の例は組み込みの skill にして、必要なときに `skill_load` で読ませる。たとえば、まとめ読みと要約、複数ファイルの同じ規則での編集、テストログの集計である。
+- **長い例は組み込みの skill に分ける。** 説明に載せる例は短いもの 1 つとする。長い使い方の例は組み込みの skill にして、必要なときに `skill_load` で読ませる。たとえば、まとめ読みと要約、複数ファイルの同じ規則での編集、テストログの集計である。この組み込みの skill は、試作では提供していない（後続で扱う）。
 - **他のツールとの使い分けを書く。** shell のガイダンスには、データの加工や複数か所の編集を shell の中のスクリプトで行わず、`run_js` を使うよう書く。
 - **長い処理は `run_js` に入れない。** ビルドや長いテストのように時間のかかるコマンドは、`run_js` の中ではなく、通常の shell のジョブとして実行するよう書く。`run_js` は時間の上限を持ち、待っている間は 1 つのツールの呼び出しとして見えるためである。
 
@@ -121,7 +129,7 @@ across many places. Do not use it for a single tool call.
 - Edits go through tools.edit / tools.write so they show as diffs. There is no fs, require, fetch, timers or Intl.
 - Calls needing approval or non-isolated shell fail here; make them as normal tool calls.
 - Run builds and long tests as normal shell jobs, not here.
-- Limits: 30 s (timeout_ms up to 300000), 64 MiB, 200 tool calls.
+- Limits: 30 s (timeout_ms up to 300000), 64 MiB JS heap, 200 tool calls.
 Available tools:
 <generated TypeScript declarations for this run>
 Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text.split("\n"); ...
@@ -133,12 +141,15 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 
 - コード内の呼び出しにも、それぞれ `call_id`（`<親の call_id>/<連番>`）を割り当てる。`ToolStarted` / `ToolCompleted` を発行し、親の `run_js` の呼び出しを指す任意の項目 `parent_call_id` を持たせる。旧形式のイベントでは、この項目は欠落する。
 - OTel では、親の `run_js` の span の子として記録する。
-- 重複呼び出しの検出（`IdenticalToolCalls`）と予算の計上は、コード内の呼び出しも数える。
+- 重複呼び出しの検出（`IdenticalToolCalls`）、予算、escalation の計上は、コード内の呼び出しも数える。計上は本体側の記録で行い、子の出力が artifact に退避されても影響を受けない。
+- 呼び出しの上限を超えた後の要求は、一定の件数で打ち切る。その間に返すエラーメッセージは、バイト数で制限する。
 
 ### モデルには結果だけを返す
 
-- モデルに返すのは、`return` した値（JSON にしたもの）と、出力したテキストだけにする。子の呼び出しの生の出力は、コードが出力しない限りコンテキストに入れない。これがトークンを減らすための要点である。
-- 加えて、副作用を見落とさないよう、短い要約を必ず付ける。要約に含めるのは、子の呼び出しの数、失敗した呼び出し、書き換えたファイルの一覧、編集後のフックの警告である。
+- モデルに返すのは、`return` した値と、出力したテキストだけにする。子の呼び出しの生の出力は、コードが出力しない限りコンテキストに入れない。これがトークンを減らすための要点である。
+- 戻り値は、文字列ならそのまま生のテキストで返し、JSON の文字列にはしない。それ以外の値は JSON にする。実機で観察したところ、JSON の文字列にすると `\n` がエスケープされて読みにくく、サイズも増えたためである。
+- 本文の形は、出力、`=> <戻り値>`、最終行の要約の順にする。最終行は `[run_js: N calls, M failed (…); wrote: …; may have changed: …; warnings: …]` とする。
+- 副作用を見落とさないよう、この要約を必ず付ける。要約に含めるのは、子の呼び出しの数、失敗した呼び出し（短い理由を添える）、書き換えたファイルの一覧、編集後のフックの警告があったことである。警告の本文は含めない。失敗の理由と警告の発生は本体側で保持し、コードが出力しなくても必ず要約に入れる。
 - 出力が大きい場合は、既存のツール出力と同じ上限と artifact への退避（`crates/tools/src/output.rs`）に従う。
 - JS の例外は、セル内の行番号を付けたスタックトレースとして返す。
 
@@ -160,7 +171,9 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 ### 上限
 
 - 時間の上限の既定は 30 秒、最大は 300 秒とする。子の呼び出しを待つ時間も含める。上限を超えたら、割り込みで JS を止め、実行中の子の呼び出しを取り消す。run の停止と取り消しも同じ経路で止める。
-- メモリの上限は 64 MiB、子の呼び出しは 1 回の実行につき 200 回までとする。
+- メモリの上限は 64 MiB、子の呼び出しは 1 回の実行につき 200 回までとする。64 MiB は QuickJS のヒープの上限であり、プロセスの RSS の上限ではない。
+- 時間切れと取り消しでは、開始済みの子を停止して回収する。子の shell の停止を確認してから、親の `run_js` を完了する。停止を確認できない場合は、run を止め、workspace と ownership を保持したままにする（fail-closed）。
+- `run_js` に打ち切られた子の shell の副作用は、未観測として扱う。durable snapshot がない環境では、run は Error になる。
 - いずれの値も初期値であり、評価の結果を見て調整する。
 
 ### 提供する範囲と既定値
@@ -178,9 +191,9 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 
 - **方式**: Worker の run を、`run_js` を有効にして headless で実行する（`evorch run --role worker --prompt … --user-config <dir>`）。モデルは、モデルごとの設定ディレクトリ（overlay）で切り替える。ADR 0036 の thread の再実行は使わない。決めた課題を、モデルごとに同じ条件で走らせて観察するほうが軽いためである。
 - **対象のモデル**: 5 つとする。
-  - provider `codex-personal`（Codex のサブスクリプション）の sol、luna、astra
-  - provider `claude-personal`（Claude のサブスクリプション）の opus、sonnet
-  - 正確なモデルの ID は、利用者の設定に登録された名前を使う。
+  - provider `codex-personal`（Codex のサブスクリプション）: sol（`gpt-6.1-sol`）、luna（`gpt-6-luna+fast`）、astra（`gpt-6-astra`）
+  - provider `claude-personal`（Claude のサブスクリプション）: opus（`claude-opus-5-5`）、sonnet（`claude-sonnet-5-5`）
+- **headless の実行手順**（試作で確定）: 実行は `evorch run … --run-js-enabled <bool> --db <path>`、結果の確認は `evorch inspect --db <path> run <id> --full` と `events --run <id>` で行う。overlay は、`--user-config` が元の設定にフォールバックしないため、`config.toml` のコピーに `config.d` を重ねて作る。`config.d` で、候補が 1 件だけの評価専用の route を Worker に割り当てる（provider は固定）。課題とスクリプトは `evals/run-js`（`feat/run-js-eval` ブランチ）にある。
 - **題材**: evorch リポジトリの特定のコミットを使う。規模が大きく、まとめ読み・集計・複数か所の編集が自然に起きるためである。run ごとに、そのコミットから専用の clone か worktree を作る。利用者の作業ツリーでは実行しない。
 - **課題**: 6 つ程度とする。課題ごとに、作業が正しく終わったかを確かめるコマンドを付ける。
   1. 複数のファイルにまたがる調査と要約
@@ -244,6 +257,7 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 - `web_fetch` などネットワークを使うツールを、コードから呼べる一覧に加えるか。
 - `evorch inspect` に、この ADR の計測と同じ集計（ツール別の件数、読み取りの連続、shell の中のスクリプト）を出すサブコマンドを加えるか。今回は store を直接集計した。
 - 時間・メモリ・呼び出し回数の上限の値。
-- QuickJS-NG で使える組み込みは、ドキュメントで確かめただけである。実際に rquickjs で動かして、文字列の操作と正規表現の挙動を確かめる必要がある。
+- 組み込みの実測は、試作で rquickjs 0.14 を使って行った（「使えるのは ECMAScript 標準の組み込みである」の節）。文字列の操作と正規表現の細部は、評価で問題が出た場合に追加で確かめる。
+- FHS / usr-merge の環境で、worker の `MinimalSandbox`（loader とライブラリの読み取り専用 mount）が動くか。評価環境の NixOS でしか確かめていない。
 - ワンライナーの複雑さをどう数えるか。区切りの記号の数だけでは、引用符の中の記号や、パイプでつないだ 1 つの処理も数えてしまう。第 1 段階の予備の実行で、実際のコマンドを見て数え方を決める。
 - 第 2 段階（`run_js` なしとの比較）を行うか。第 1 段階の費用を見て利用者が決める。
