@@ -158,6 +158,8 @@ fn fixture_with_model(
         identical_calls: identical_calls::IdenticalCalls::default(),
         run_js_unconfirmed: Arc::default(),
         unobserved_job_reminders: 0,
+        total_job_reminders: 0,
+        reminded_jobs: std::collections::BTreeSet::new(),
         reported_questions: std::collections::HashSet::new(),
         last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),

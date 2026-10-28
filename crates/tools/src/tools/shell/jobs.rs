@@ -532,12 +532,15 @@ impl JobRegistry {
         .await
     }
 
-    /// Acknowledges the outcome of the finished jobs a `run_js` call started: the call's
-    /// result, which says which commands were cut off and what may have changed, has
-    /// reached the model, which is what a terminal shell response does for a normal
-    /// command. A job that is still running is left unobserved.
-    pub(super) fn observe_children(&self, run_id: &str, parent_call_id: &str) {
-        let prefix = format!("{parent_call_id}/");
+    /// Acknowledges the outcome of the finished jobs of the `run_js` call `parent_call_id`
+    /// whose child call numbers are `seqs`: the call's result named exactly these as cut
+    /// off and possibly partly run, and it is in the history. A job that is still running,
+    /// or whose number was not named, stays unobserved.
+    pub(super) fn observe_children(&self, run_id: &str, parent_call_id: &str, seqs: &[u32]) {
+        let wanted: Vec<String> = seqs
+            .iter()
+            .map(|seq| format!("{parent_call_id}/{seq}"))
+            .collect();
         for job in self
             .jobs
             .lock()
@@ -548,7 +551,7 @@ impl JobRegistry {
                     && job
                         .call_id
                         .as_deref()
-                        .is_some_and(|call_id| call_id.starts_with(&prefix))
+                        .is_some_and(|call_id| wanted.iter().any(|wanted| wanted == call_id))
             })
         {
             let mut state = job

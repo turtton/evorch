@@ -189,9 +189,10 @@ pub trait Tool: Send + Sync + std::any::Any {
         Ok(())
     }
 
-    /// Acknowledge the finished jobs the `run_js` call `parent_call_id` started, once its
-    /// result has reached the model. Jobs still running stay unobserved.
-    fn observe_child_shell_jobs(&self, _run_id: &str, _parent_call_id: &str) {}
+    /// Acknowledge the finished jobs of the `run_js` call `parent_call_id` whose child call
+    /// numbers are `seqs`, once its result, which names them, has reached the model. Jobs
+    /// still running, or not named, stay unobserved.
+    fn observe_child_shell_jobs(&self, _run_id: &str, _parent_call_id: &str, _seqs: &[u32]) {}
 
     /// One line per running or unread job of the run, for a reminder that names them.
     fn unobserved_shell_job_summaries(&self, _run_id: &str) -> Vec<String> {

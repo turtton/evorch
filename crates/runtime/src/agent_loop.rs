@@ -128,6 +128,9 @@ const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_sec
 /// stopped for ignoring them.
 const MAX_UNOBSERVED_JOB_REMINDERS: u32 = 3;
 
+/// Reminders in all before a run is stopped, however the jobs came and went.
+const MAX_TOTAL_JOB_REMINDERS: u32 = 10;
+
 /// The reminder for a model that ended its turn with shell jobs unobserved.
 fn unobserved_jobs_reminder(jobs: &[String]) -> String {
     let named = if jobs.is_empty() {
@@ -185,8 +188,13 @@ pub(crate) struct LoopState {
     /// and could not be stopped. From then on no tool runs, and finalization retains
     /// the workspace like it does for shell jobs it could not drain.
     run_js_unconfirmed: Arc<std::sync::Mutex<Option<String>>>,
-    /// Reminders about unobserved shell jobs since the model last made a tool call.
+    /// Reminders in a row about unobserved shell jobs, restarted when one of the jobs
+    /// reminded of was dealt with.
     unobserved_job_reminders: u32,
+    /// All reminders about unobserved shell jobs this run.
+    total_job_reminders: u32,
+    /// The jobs the last reminder named.
+    reminded_jobs: std::collections::BTreeSet<String>,
     /// Child questions a `wait` already reported to this run; a wait returns
     /// early only for questions not in this set.
     pub(crate) reported_questions: std::collections::HashSet<String>,
@@ -392,6 +400,8 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         identical_calls: identical_calls::IdenticalCalls::default(),
         run_js_unconfirmed: Arc::default(),
         unobserved_job_reminders: 0,
+        total_job_reminders: 0,
+        reminded_jobs: std::collections::BTreeSet::new(),
         reported_questions: std::collections::HashSet::new(),
         last_tool: None,
         retracted_delegates: retracted_delegates::RetractedDelegates::default(),
@@ -1294,8 +1304,6 @@ impl LoopState {
             }
             self.owner_turn_open = false;
             if has_tool_uses {
-                // The model acted on a reminder, or on something else: start counting anew.
-                self.unobserved_job_reminders = 0;
                 self.budget.finish_round();
                 match self.publish_budget() {
                     crate::budget_tracker::BudgetDecision::Continue => {}
@@ -1324,17 +1332,36 @@ impl LoopState {
                         .executor
                         .has_unobserved_shell_jobs(&self.task.run_id.to_string())
                     {
-                        // The model keeps answering without a tool call; asking again with
-                        // the same words would never end. Name the jobs, and stop the run
-                        // when naming them did not help.
+                        // The model keeps answering without dealing with the jobs; asking
+                        // again with the same words would never end. Name them, and stop the
+                        // run when naming them did not help. Only a job being dealt with
+                        // (read, stopped, acknowledged) restarts the count: other tool calls,
+                        // failed ones included, do not, and the total is capped as well.
                         let jobs = self
                             .shared
                             .executor
                             .unobserved_shell_job_summaries(&self.task.run_id.to_string());
+                        let handles: std::collections::BTreeSet<String> = jobs
+                            .iter()
+                            .filter_map(|job| job.split(' ').next().map(str::to_owned))
+                            .collect();
+                        if self.reminded_jobs.difference(&handles).next().is_some() {
+                            self.unobserved_job_reminders = 0;
+                        }
+                        self.reminded_jobs = handles;
                         self.unobserved_job_reminders += 1;
-                        if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS {
+                        self.total_job_reminders += 1;
+                        if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS
+                            || self.total_job_reminders > MAX_TOTAL_JOB_REMINDERS
+                        {
+                            let reminders =
+                                if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS {
+                                    format!("{MAX_UNOBSERVED_JOB_REMINDERS} reminders")
+                                } else {
+                                    format!("{MAX_TOTAL_JOB_REMINDERS} reminders in all")
+                                };
                             self.finish_error(format!(
-                                "shell jobs stayed unobserved after {MAX_UNOBSERVED_JOB_REMINDERS} reminders: {}",
+                                "shell jobs stayed unobserved after {reminders}: {}",
                                 jobs.join(", ")
                             ));
                             return;

@@ -314,8 +314,8 @@ impl Tool for Shell {
     ) -> Result<(), ToolError> {
         self.jobs.drain_children(run_id, parent_call_id).await
     }
-    fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str) {
-        self.jobs.observe_children(run_id, parent_call_id);
+    fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str, seqs: &[u32]) {
+        self.jobs.observe_children(run_id, parent_call_id, seqs);
     }
     fn unobserved_shell_job_summaries(&self, run_id: &str) -> Vec<String> {
         self.jobs.unobserved_summaries(run_id)

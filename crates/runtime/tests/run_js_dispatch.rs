@@ -726,31 +726,129 @@ async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
     assert!(reason.contains("max_tool_calls=20"), "{reason}");
 }
 
+/// A fixture whose runtime has a durable store, so a run can record unobserved effects.
+fn store_fixture(
+    launcher: WorkerLauncher,
+    responses: Vec<providers::ChatResponse>,
+) -> (Fixture, storage::Storage, tempfile::TempDir) {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("run.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    executor
+        .register(Arc::new(RunJs::with_launcher(launcher)))
+        .unwrap();
+    let model = Arc::new(ScriptedModel::new(responses.into_iter().map(Ok)));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone())
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    runtime.set_run_js_settings(enabled());
+    (
+        Fixture {
+            runtime,
+            bus,
+            model,
+        },
+        storage,
+        directory,
+    )
+}
+
+/// Starts a run whose program has started a long shell command and waits for it, stops the
+/// run once the command runs, and returns how the run ended with its events.
+async fn stop_while_the_command_runs(
+    fixture: &Fixture,
+) -> (Result<AgentRunPhase, runtime::RuntimeError>, Vec<Event>) {
+    let mut events = fixture.bus.subscribe();
+    let run =
+        fixture
+            .runtime
+            .delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    // The command has started when its own start event is published.
+    let mut seen = Vec::new();
+    loop {
+        let event = events.recv().await.unwrap();
+        let started = matches!(
+            &event.kind,
+            EventKind::Tool(ToolEvent::ToolStarted { call_id, .. }) if call_id == "js-1/1"
+        );
+        seen.push(event);
+        if started {
+            break;
+        }
+    }
+    fixture
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let phase = fixture.runtime.wait(run).await;
+    seen.extend(drain_events(&mut events).await);
+    (phase, seen)
+}
+
+fn error_reason(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+            to: AgentRunPhase::Error,
+            reason,
+            ..
+        }) => reason.clone(),
+        _ => None,
+    })
+}
+
 #[tokio::test]
-async fn a_child_shell_cut_off_by_the_timeout_does_not_keep_the_run_from_finishing() {
-    // The program starts a long command and then waits for it; the run_js timeout ends
-    // both. The cut-off command is reported in the result the model gets, which is what
-    // a terminal shell response is for a normal command: nothing is left unobserved.
+async fn a_stop_before_the_program_result_is_returned_leaves_the_command_unobserved() {
+    // The program starts a long command and waits for it; the run is stopped while it runs.
+    // The result the run_js call gets is the executor's "stopped", which names no command,
+    // so nothing tells the model the command may have partly run.
     let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"sleep 30"}}'
 exec sleep 600"#;
     let fixture = fixture(
         worker(script),
         None,
         enabled(),
-        vec![
-            tool_response("js-1", "run_js", json!({"code": "x", "timeout_ms": 500})),
-            finish(),
-        ],
+        vec![run_js_call("js-1"), finish()],
     );
 
-    let events = run(&fixture, Role::Worker).await;
+    let (phase, events) = stop_while_the_command_runs(&fixture).await;
 
-    let text = result_text(&fixture.model, "js-1").await;
-    assert!(text.contains("run_js timed out after 500 ms"), "{text}");
-    assert!(text.contains("shell #1"), "the command is named: {text}");
-    // The model's report was accepted at once: no reminder about shell jobs, no loop.
-    assert_eq!(fixture.model.observed().await.len(), 2);
-    assert_eq!(open_tool_calls(&events), Vec::<String>::new());
+    assert_eq!(phase, Ok(AgentRunPhase::Error));
+    let reason = error_reason(&events).expect("the run ended in an error");
+    assert!(
+        reason.contains("unobserved shell effects require a durable terminal snapshot"),
+        "{reason}"
+    );
+    let (output, _) = completed(&events, "js-1").expect("the call was closed");
+    assert!(
+        matches!(output.as_deref(), Some("stopped" | "cancelled")),
+        "{output:?}"
+    );
+}
+
+#[tokio::test]
+async fn with_a_durable_store_the_stopped_run_records_the_unobserved_command_instead() {
+    let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"sleep 30"}}'
+exec sleep 600"#;
+    let (fixture, _storage, _directory) =
+        store_fixture(worker(script), vec![run_js_call("js-1"), finish()]);
+
+    let (phase, events) = stop_while_the_command_runs(&fixture).await;
+
+    // The terminal snapshot could be saved, so there is nothing to retain ownership for;
+    // the command is still not claimed to have been seen.
+    assert_ne!(phase, Ok(AgentRunPhase::Done));
+    assert!(
+        error_reason(&events).is_none_or(|reason| !reason.contains("durable terminal snapshot")),
+        "{:?}",
+        error_reason(&events)
+    );
 }
 
 /// Every call that started must have exactly one terminal event.
@@ -876,6 +974,13 @@ printf '%s\n' '{{"type":"done","value":"left it running"}}'"#,
     assert!(text.contains("=> left it running"), "{text}");
     assert!(
         text.contains("shell #1: cut off before it finished"),
+        "{text}"
+    );
+    // Told apart from the failures: named by its command, as possibly partly run.
+    assert!(
+        text.contains(
+            "cut off when the program ended and may have partly run: shell #1 `echo $$ > "
+        ),
         "{text}"
     );
     assert!(

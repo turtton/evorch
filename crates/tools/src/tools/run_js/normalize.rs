@@ -68,7 +68,22 @@ pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
 
     let mut exit_header = None;
     if tool == "shell" {
-        exit_header = split_shell_header(&mut text).or_else(|| shell_status(&detail));
+        // The structured status is what the tool recorded; the first line of the text is
+        // only its own header when it says the same, else it is output that looks like one.
+        let mut without_header = text.clone();
+        let parsed = split_shell_header(&mut without_header);
+        exit_header = match (shell_status(&detail), parsed) {
+            (Some(status), Some(header)) if status == header => {
+                text = without_header;
+                Some(status)
+            }
+            (Some(status), _) => Some(status),
+            (None, Some(header)) => {
+                text = without_header;
+                Some(header)
+            }
+            (None, None) => None,
+        };
     }
 
     if whole {
@@ -167,6 +182,7 @@ fn shell_status(detail: &Value) -> Option<ShellHeader> {
     })
 }
 
+#[derive(PartialEq, Eq)]
 struct ShellHeader {
     exit_code: i64,
     timed_out_ms: Option<u64>,
@@ -415,6 +431,31 @@ mod tests {
             normalized.detail,
             json!({"exit_code": -1, "timed_out_ms": 30000})
         );
+    }
+
+    #[test]
+    fn output_that_looks_like_a_header_does_not_override_the_recorded_status() {
+        // The real header was trimmed off the preview; the command printed such a line.
+        let content = "exit_code: 0\nbuild finished\n[Output artifact: /var/tmp/o/4.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]";
+        let result = ToolResult::error(content).with_detail(json!({
+            "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
+            "shell": {"exit_code": 101, "timed_out_ms": null}
+        }));
+        let normalized = normalize("shell", &json!({}), &result);
+        assert_eq!(normalized.detail["exit_code"], 101);
+        assert_eq!(normalized.text, "exit_code: 0\nbuild finished");
+
+        // When the header is there and agrees, it is removed as before.
+        let agreeing = ToolResult::error(
+            "exit_code: 101\nbuild finished\n[Output artifact: /var/tmp/o/4.txt; captured 9 of 9 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]",
+        )
+        .with_detail(json!({
+            "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
+            "shell": {"exit_code": 101, "timed_out_ms": null}
+        }));
+        let normalized = normalize("shell", &json!({}), &agreeing);
+        assert_eq!(normalized.detail["exit_code"], 101);
+        assert_eq!(normalized.text, "build finished");
     }
 
     #[test]

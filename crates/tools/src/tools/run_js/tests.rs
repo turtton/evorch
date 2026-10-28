@@ -515,6 +515,41 @@ async fn a_worker_that_is_gone_after_the_time_limit_is_reported_as_a_timeout() {
 }
 
 #[tokio::test]
+async fn a_shell_command_running_when_the_program_ends_is_named_as_cut_off() {
+    // The program starts a long command and finishes without waiting for it.
+    let script = format!(
+        "{}{DONE}",
+        call_line(
+            1,
+            "shell",
+            &json!({"command": "cargo check --offline -p tools --tests\n  --message-format=json"})
+        )
+    );
+    let result = run(&script, ScriptHost::new(Behavior::Hang), "x", 60_000).await;
+
+    let text = &result.content;
+    assert!(
+        text.starts_with("1 shell command was cut off when the program ended and may have partly run: shell #1 `cargo check --offline -p tools --tests --message-format=json`\n"),
+        "{text}"
+    );
+    assert_eq!(super::delivered_cut_off_shells(&result), [1]);
+    // A read still running is cut off too, but only commands are named: they have effects.
+    let reads = run(
+        &call_line(1, "read", &json!({"path": "a"})),
+        ScriptHost::new(Behavior::Hang),
+        "x",
+        60_000,
+    )
+    .await;
+    assert!(
+        !reads.content.contains("cut off when the program ended"),
+        "{}",
+        reads.content
+    );
+    assert!(super::delivered_cut_off_shells(&reads).is_empty());
+}
+
+#[tokio::test]
 async fn a_program_cannot_make_up_a_continuation_to_get_past_the_call_limit() {
     // Offsets and byte offsets nobody offered: each is an ordinary read, so after the
     // limit of 3 they are refused (with a pointer to aggregating in shell).

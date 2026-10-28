@@ -445,11 +445,14 @@ impl ToolExecutor {
         }
     }
 
-    /// Acknowledges the finished shell jobs the `run_js` call `parent_call_id` started,
-    /// once its result has reached the model (see `Tool::observe_child_shell_jobs`).
-    pub fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str) {
+    /// Acknowledges the finished shell jobs of the `run_js` call `parent_call_id` that its
+    /// result named as cut off (child call numbers `seqs`), once that result has reached
+    /// the model (see `Tool::observe_child_shell_jobs`).
+    pub fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str, seqs: &[u32]) {
         if let Some(shell) = self.tools.get("shell") {
-            shell.tool.observe_child_shell_jobs(run_id, parent_call_id);
+            shell
+                .tool
+                .observe_child_shell_jobs(run_id, parent_call_id, seqs);
         }
     }
 

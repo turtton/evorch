@@ -893,7 +893,10 @@ async fn a_cut_off_child_is_observed_once_its_program_result_was_delivered_not_b
         "a command started by a program cannot be polled: {before:?}"
     );
 
-    shell.observe_child_shell_jobs("owner", "parent");
+    // A call number the result did not name acknowledges nothing.
+    shell.observe_child_shell_jobs("owner", "parent", &[2]);
+    assert_eq!(shell.unobserved_shell_job_summaries("owner").len(), 2);
+    shell.observe_child_shell_jobs("owner", "parent", &[1]);
 
     // Only that program's job is acknowledged; the other program's still counts (its own
     // result must say what became of it).
@@ -903,6 +906,6 @@ async fn a_cut_off_child_is_observed_once_its_program_result_was_delivered_not_b
         .drain_child_shell_jobs("owner", "other")
         .await
         .unwrap();
-    shell.observe_child_shell_jobs("owner", "other");
+    shell.observe_child_shell_jobs("owner", "other", &[1]);
     assert!(!shell.has_unobserved_shell_jobs("owner"));
 }

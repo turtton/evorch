@@ -50,9 +50,15 @@ pub(super) fn finish(
 ) -> ToolResult {
     state.calls.sort_by_key(|call| call.seq);
     state.failures.sort_by_key(|failure| failure.seq);
-    let mut content = failed_calls_notice(&state)
-        .map(|notice| format!("{notice}\n"))
-        .unwrap_or_default();
+    let mut content = String::new();
+    // Neither of these depends on the failure list, which leaves reasons out.
+    for notice in [cut_off_notice(&state), failed_calls_notice(&state)]
+        .into_iter()
+        .flatten()
+    {
+        content.push_str(&notice);
+        content.push('\n');
+    }
     let output = std::mem::take(&mut state.output);
     let output_bytes = output.len();
     content.push_str(&output);
@@ -170,12 +176,68 @@ fn failed_calls_notice(state: &Run) -> Option<String> {
     ))
 }
 
+/// Commands named in a cut-off notice before the rest are only counted.
+const LISTED_CUT_OFF: usize = 5;
+
+/// What the model is told of the shell commands that were running when the program
+/// ended and were stopped: each by its call number and the start of its command, and that
+/// it may have partly run. This is the acknowledgement that lets the host stop treating
+/// their effects as unseen, so it is exactly what [`delivered_cut_off_shells`] checks for,
+/// and it is bounded but never left out.
+fn cut_off_list(state: &Run) -> Option<String> {
+    if state.cut_off.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = state
+        .cut_off
+        .iter()
+        .take(LISTED_CUT_OFF)
+        .map(|cut| format!("shell #{} `{}`", cut.seq, cut.command))
+        .collect();
+    if state.cut_off.len() > LISTED_CUT_OFF {
+        parts.push(format!("+{} more", state.cut_off.len() - LISTED_CUT_OFF));
+    }
+    Some(parts.join("; "))
+}
+
+fn cut_off_notice(state: &Run) -> Option<String> {
+    let list = cut_off_list(state)?;
+    let count = state.cut_off.len();
+    Some(format!(
+        "{count} shell command{} cut off when the program ended and may have partly run: {list}",
+        if count == 1 { " was" } else { "s were" }
+    ))
+}
+
+/// The call numbers of the cut-off shell commands that `result` really tells the model
+/// about: they are in its detail and each is named in its text. The host acknowledges
+/// exactly these (and nothing for a result that merely says "stopped" or "cancelled").
+pub fn delivered_cut_off_shells(result: &ToolResult) -> Vec<u32> {
+    let Some(cut_off) = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("run_js"))
+        .and_then(|run| run.get("cut_off"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    cut_off
+        .iter()
+        .filter_map(|entry| u32::try_from(entry.get("seq")?.as_u64()?).ok())
+        .filter(|seq| result.content.contains(&format!("shell #{seq} `")))
+        .collect()
+}
+
 /// One line, however much went wrong: reasons are cut and listed up to a limit.
 fn summary_line(state: &Run) -> String {
     let failed = state.calls.iter().filter(|call| call.is_error).count();
     let mut line = format!("[run_js: {} calls, {failed} failed", state.calls.len());
     if !state.failures.is_empty() {
         line.push_str(&format!(" ({})", failure_list(&state.failures)));
+    }
+    if let Some(list) = cut_off_list(state) {
+        line.push_str(&format!("; cut off, may have partly run: {list}"));
     }
     if !state.written.is_empty() {
         line.push_str(&format!("; wrote: {}", join_paths(&state.written)));
@@ -256,6 +318,11 @@ fn run_detail(
 ) -> Value {
     let written: Vec<&String> = state.written.iter().collect();
     let uncertain: Vec<&String> = state.uncertain.iter().collect();
+    let cut_off: Vec<Value> = state
+        .cut_off
+        .iter()
+        .map(|cut| json!({"seq": cut.seq, "command": cut.command}))
+        .collect();
     let calls_value = |keep_paths: bool, limit: usize| -> Vec<Value> {
         state
             .calls
@@ -281,6 +348,7 @@ fn run_detail(
             "layout": layout,
             "timed_out": timed_out,
             "limit_hit": state.limit_hit,
+            "cut_off": cut_off,
             "written_paths": written,
             "uncertain_paths": uncertain,
         })
@@ -479,6 +547,143 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         assert!(layout["returned"].is_null());
         assert_eq!(layout["console_end"], 0);
         assert_eq!(layout["summary_start"], 0);
+    }
+
+    fn cut_off(seq: u32, command: &str) -> super::super::serve::CutOff {
+        super::super::serve::CutOff {
+            seq,
+            command: command.into(),
+        }
+    }
+
+    /// A run whose calls 1..=`failed` failed and whose call `failed + 1`, a shell command,
+    /// was cut off.
+    fn run_with_failures_and_cut_off(failed: u32, cut: Vec<super::super::serve::CutOff>) -> Run {
+        let mut state = Run::default();
+        for seq in 1..=failed {
+            let (call, failure) = failed_call(seq, "read", &format!("no such file {seq}"));
+            state.calls.push(call);
+            state.failures.push(failure);
+        }
+        for entry in &cut {
+            let (call, failure) = failed_call(entry.seq, "shell", "cut off before it finished");
+            state.calls.push(call);
+            state.failures.push(failure);
+        }
+        state.cut_off = cut;
+        state
+    }
+
+    #[test]
+    fn a_cut_off_shell_is_named_even_when_five_failures_fill_the_failure_list() {
+        let state =
+            run_with_failures_and_cut_off(5, vec![cut_off(6, "cargo check --offline -p tools")]);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let text = &result.content;
+        // The failure list shows five reasons and counts the rest: the shell is in "+1 more".
+        assert!(text.contains("+1 more"), "{text}");
+        assert!(!text.contains("shell #6: cut off"), "{text}");
+        // It is named apart from that list, at the top and in the summary line.
+        assert!(
+            text.starts_with("1 shell command was cut off when the program ended and may have partly run: shell #6 `cargo check --offline -p tools`\n"),
+            "{text}"
+        );
+        let last = text.lines().last().unwrap();
+        assert!(
+            last.contains(
+                "; cut off, may have partly run: shell #6 `cargo check --offline -p tools`"
+            ),
+            "{last}"
+        );
+        assert_eq!(delivered_cut_off_shells(&result), [6]);
+        assert_eq!(
+            result.detail.as_ref().unwrap()["run_js"]["cut_off"],
+            json!([{"seq": 6, "command": "cargo check --offline -p tools"}])
+        );
+    }
+
+    #[test]
+    fn many_cut_off_commands_are_bounded_and_only_the_named_ones_count_as_told() {
+        let cut: Vec<_> = (1..=7)
+            .map(|seq| cut_off(seq, &format!("sleep {seq}")))
+            .collect();
+        let result = finish(
+            run_with_failures_and_cut_off(0, cut),
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let text = &result.content;
+        assert!(text.starts_with("7 shell commands were cut off"), "{text}");
+        assert!(text.contains("shell #5 `sleep 5`; +2 more"), "{text}");
+        assert!(
+            !text.contains("shell #6 `"),
+            "the rest are counted, not named: {text}"
+        );
+        // Only the five the model was told about are acknowledged.
+        assert_eq!(delivered_cut_off_shells(&result), [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn the_cut_off_notice_survives_a_large_output_that_became_an_artifact() {
+        let mut state = run_with_failures_and_cut_off(5, vec![cut_off(6, "cargo check")]);
+        state.output = "x\n".repeat(60_000);
+        let result = finish(
+            state,
+            done(Value::Null),
+            "",
+            1000,
+            &config::RunJsConfig::default(),
+        );
+        let limited = crate::output::limit_result(result);
+
+        assert!(
+            limited.content.contains("[Output artifact: "),
+            "it was cut to a preview"
+        );
+        let last = limited
+            .content
+            .trim_end()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned();
+        let before = limited
+            .content
+            .rsplit_once("[Output artifact: ")
+            .unwrap()
+            .0
+            .to_owned();
+        assert!(
+            before.contains("; cut off, may have partly run: shell #6 `cargo check`"),
+            "the summary line is in the preview: {last}"
+        );
+        assert_eq!(delivered_cut_off_shells(&limited), [6]);
+    }
+
+    #[test]
+    fn a_result_that_does_not_name_the_command_acknowledges_nothing() {
+        // A run that was stopped or cancelled, or a failed task, has no such detail.
+        for text in ["stopped", "cancelled", "task failed"] {
+            assert_eq!(
+                delivered_cut_off_shells(&ToolResult::error(text)),
+                Vec::<u32>::new()
+            );
+        }
+        // A detail that lists a command the text does not name (the text was replaced).
+        let forged = ToolResult::error("something else")
+            .with_detail(json!({"run_js": {"cut_off": [{"seq": 3, "command": "make"}]}}));
+        assert!(delivered_cut_off_shells(&forged).is_empty());
+        let named = ToolResult::error("... shell #3 `make` ...")
+            .with_detail(json!({"run_js": {"cut_off": [{"seq": 3, "command": "make"}]}}));
+        assert_eq!(delivered_cut_off_shells(&named), [3]);
     }
 
     #[test]

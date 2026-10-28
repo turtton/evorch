@@ -370,16 +370,16 @@ async fn the_examples_in_the_description_run_as_written() {
         "NewName again\n"
     );
 
-    // Counting is the shell's job: the example runs in a repository of two crates.
+    // Counting is the shell's job: the example runs in a repository of two crates, one
+    // of whose directories has a space in its name (a split on whitespace gets that wrong).
     let repository = tempfile::tempdir().unwrap();
-    for (name, lines) in [("alpha", 3), ("beta", 5), ("beta/nested", 2)] {
+    for (name, lines) in [("alpha space", 3), ("beta", 5), ("beta/nested", 2)] {
         let directory = repository.path().join("crates").join(name);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("lib.rs"), "x\n".repeat(lines)).unwrap();
     }
-    // A path with a space in it, which a split on whitespace would get wrong.
     std::fs::write(
-        repository.path().join("crates/alpha/with space.rs"),
+        repository.path().join("crates/alpha space/with space.rs"),
         "x\n".repeat(4),
     )
     .unwrap();
@@ -405,7 +405,9 @@ async fn the_examples_in_the_description_run_as_written() {
     .await;
     assert!(!counted.is_error, "{}", counted.content);
     assert!(
-        counted.content.contains("=> {\"alpha\":7,\"beta\":7}"),
+        counted
+            .content
+            .contains("=> {\"alpha space\":7,\"beta\":7}"),
         "{}",
         counted.content
     );

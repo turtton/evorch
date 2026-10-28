@@ -1316,13 +1316,21 @@ impl LoopState {
                     {
                         shell_cwds.push(PathBuf::from(cwd));
                     }
-                    // The run_js result, which says which commands were cut off, is now in
-                    // the history: the model has been told what became of them. Jobs that
-                    // could not be confirmed stopped stay unobserved (the run stops below).
+                    // The cut-off commands a run_js result names are acknowledged when that
+                    // result goes into the history: the model has then been told they may
+                    // have partly run. Only the result the tool itself made counts (it carries
+                    // the list and names each command); a run that was stopped or cancelled,
+                    // a failed task or an error in handling the output leaves them unobserved.
+                    // A command that could not be confirmed stopped stays unobserved too.
                     if name == tools::tools::run_js::NAME {
-                        self.shared
-                            .executor
-                            .observe_child_shell_jobs(&self.task.run_id.to_string(), &id);
+                        let seqs = tools::tools::run_js::delivered_cut_off_shells(&result);
+                        if !seqs.is_empty() {
+                            self.shared.executor.observe_child_shell_jobs(
+                                &self.task.run_id.to_string(),
+                                &id,
+                                &seqs,
+                            );
+                        }
                     }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();

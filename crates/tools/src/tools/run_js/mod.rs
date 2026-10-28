@@ -16,6 +16,7 @@ mod summary;
 mod tests;
 pub mod typings;
 pub mod worker;
+pub use summary::delivered_cut_off_shells;
 
 use std::sync::Arc;
 use std::time::Duration;

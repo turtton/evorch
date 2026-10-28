@@ -56,6 +56,14 @@ pub(super) struct Recorded {
     pub paths: Vec<String>,
 }
 
+/// A shell command that was running when the program ended, and so was stopped before
+/// it finished: it may have changed things, and the model must be told.
+pub(super) struct CutOff {
+    pub seq: u32,
+    /// The start of the command, on one line.
+    pub command: String,
+}
+
 pub(super) struct Failure {
     pub seq: u32,
     pub name: String,
@@ -71,6 +79,9 @@ pub(super) struct Run {
     /// Paths of writes that were cut off, so whether they happened is unknown.
     pub uncertain: BTreeSet<String>,
     pub failures: Vec<Failure>,
+    /// Shell commands cut off with the program. Kept apart from `failures`, whose list is
+    /// cut to a few reasons: these are never left out of what the model is told.
+    pub cut_off: Vec<CutOff>,
     pub warnings: Vec<(u32, String, String)>,
     /// Set when the commands the program started could not be confirmed stopped.
     pub drain_error: Option<String>,
@@ -216,6 +227,17 @@ struct Pending {
     continuation: bool,
 }
 
+/// Characters of a shell command kept to name it.
+const COMMAND_HEAD_CHARS: usize = 60;
+
+fn command_head(args: &Value) -> String {
+    let command = args
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    super::summary::one_line(command, COMMAND_HEAD_CHARS)
+}
+
 /// A page of a file as a `read` names it: path, first line, byte within that line.
 type PageKey = (String, u64, u64);
 
@@ -256,6 +278,8 @@ fn page_of(path: &Value, offset: Option<&Value>, byte_offset: Option<&Value>) ->
 struct InFlight {
     name: String,
     paths: Vec<String>,
+    /// For `shell`: the start of its command.
+    command: Option<String>,
 }
 
 /// Starts calls in program order: a Shared call may start while only Shared calls
@@ -298,6 +322,7 @@ impl Scheduler {
                 InFlight {
                     name: name.clone(),
                     paths: call_paths(&name, &args),
+                    command: (name == "shell").then(|| command_head(&args)),
                 },
             );
             let host = Arc::clone(session.host);
@@ -332,6 +357,9 @@ impl Scheduler {
         for (seq, call) in cancelled {
             if matches!(call.name.as_str(), "edit" | "write") {
                 state.uncertain.extend(call.paths.iter().cloned());
+            }
+            if let Some(command) = call.command {
+                state.cut_off.push(CutOff { seq, command });
             }
             state.calls.push(Recorded {
                 seq,
