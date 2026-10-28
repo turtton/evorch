@@ -9,6 +9,8 @@ mod hosted_search_cache;
 mod image_generation_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
+#[path = "run_js_cache/mod.rs"]
+mod run_js_cache;
 mod support;
 use std::sync::Arc;
 
