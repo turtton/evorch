@@ -30,6 +30,14 @@ impl TranscriptModel {
         }
     }
 
+    /// Whether a `delegate` call is still spawning, so its card covers the start.
+    pub(super) fn delegate_in_flight(&self) -> bool {
+        self.entries.iter().rev().take(32).any(|entry| {
+            matches!(entry, TranscriptEntry::Tool { tool_name, status: super::ToolStatus::Running, .. }
+                if tool_name == "delegate")
+        })
+    }
+
     pub(super) fn terminal_notice(&self, event: &Event) -> Option<TranscriptEntry> {
         let (run_id, state) = match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {

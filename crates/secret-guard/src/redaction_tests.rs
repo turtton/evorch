@@ -80,3 +80,52 @@ fn distinct_secret_json_keys_retain_both_values() {
     assert_eq!(value.as_object().unwrap().len(), 2);
     assert!(!value.to_string().contains("sk-abcdefghijklmnopqrstuvwxyz"));
 }
+
+#[test]
+fn streaming_redaction_masks_an_unfinished_credential_at_the_end() {
+    let redactor = SecretRedactor::with_known_values([]);
+    // Too short for any rule yet, but already recognisable as a credential opening.
+    let partial = redactor.redact_streaming("{\"token\":\"ghp_ABCD");
+    assert_eq!(partial.text, "{\"token\":\"[REDACTED:partial-credential]");
+    assert_eq!(partial.count, 1);
+    // Complete tokens use the regular rules and ordinary words are untouched.
+    let complete = redactor.redact_streaming(&format!("key ghp_{} then risk", "A".repeat(36)));
+    assert_eq!(complete.text, "key [REDACTED:github-token] then risk");
+    assert_eq!(redactor.redact_streaming("plain text").count, 0);
+    // A prefix inside a longer earlier token is not the unfinished tail.
+    assert_eq!(redactor.redact_streaming("ghp_ABCD done").count, 0);
+}
+
+#[test]
+fn streaming_redaction_masks_the_beginning_of_a_known_credential_of_any_shape() {
+    let redactor = SecretRedactor::with_known_values(["correct horse battery staple".into()]);
+    // Every ending that already shows 4+ characters of the value is withheld,
+    // wherever the fragment boundary fell, including inside the spaces.
+    for shown in [
+        "corr",
+        "correct h",
+        "correct horse battery",
+        "correct horse battery stapl",
+    ] {
+        let redacted = redactor.redact_streaming(&format!("password={shown}"));
+        assert_eq!(
+            redacted.text, "password=[REDACTED:partial-credential]",
+            "{shown}"
+        );
+        assert_eq!(redacted.count, 1);
+    }
+    // Complete values use the regular rule; shorter or unrelated endings stay.
+    let complete = redactor.redact_streaming("password=correct horse battery staple");
+    assert_eq!(complete.text, "password=[REDACTED:known-credential-value]");
+    assert_eq!(redactor.redact_streaming("password=cor").count, 0);
+    assert_eq!(
+        redactor.redact_streaming("password=correct horse, x").count,
+        0
+    );
+    // A value that is multi-byte never splits a character.
+    let japanese = SecretRedactor::with_known_values(["秘密の合言葉です".into()]);
+    assert_eq!(
+        japanese.redact_streaming("x=秘密の合").text,
+        "x=[REDACTED:partial-credential]"
+    );
+}

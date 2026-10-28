@@ -161,6 +161,38 @@ impl SecretRedactor {
         }
     }
 
+    /// Like [`Self::redact`] for text that is still being written. An unfinished
+    /// credential at the very end is masked too, so one never shows up in pieces:
+    /// a trailing token that already opens like a credential, or a trailing run
+    /// that is the beginning of a known credential value.
+    #[must_use]
+    pub fn redact_streaming(&self, text: &str) -> RedactedText {
+        let mut redacted = self.redact(text);
+        let token_start = redacted
+            .text
+            .char_indices()
+            .rev()
+            .find(|(_, character)| !is_token_character(*character))
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        let token = &redacted.text[token_start..];
+        let mut cut = STREAMING_PREFIXES
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+            .then_some(token_start);
+        let known_start = self
+            .known_values
+            .iter()
+            .filter_map(|known| known_prefix_start(&redacted.text, known))
+            .min();
+        cut = cut.into_iter().chain(known_start).min();
+        if let Some(start) = cut {
+            redacted.text.truncate(start);
+            redacted.text.push_str("[REDACTED:partial-credential]");
+            redacted.count += 1;
+        }
+        redacted
+    }
+
     /// Redact textual JSON payloads, including credential-shaped object keys.
     /// Callers must exclude protocol identifiers from this payload-only traversal.
     pub fn redact_json(&self, value: &mut serde_json::Value) -> usize {
@@ -274,6 +306,37 @@ fn scan_prefixed<'a>(
 }
 
 type Rule = (&'static str, &'static str, usize, fn(u8) -> bool);
+/// Credential openings that identify an unfinished token while it streams in.
+const STREAMING_PREFIXES: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "AKIA",
+    "AIza",
+    "xox",
+    "eyJ",
+];
+
+/// Fewest characters of a known value that count as a recognisable beginning.
+const MIN_KNOWN_PREFIX_LEN: usize = 4;
+
+/// Start of the longest ending of `text` that is a proper beginning of `known`.
+fn known_prefix_start(text: &str, known: &str) -> Option<usize> {
+    (MIN_KNOWN_PREFIX_LEN..known.len())
+        .rev()
+        .filter(|length| known.is_char_boundary(*length))
+        .find(|length| text.ends_with(&known[..*length]))
+        .map(|length| text.len() - length)
+}
+
+fn is_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
 const PREFIX_RULES: &[Rule] = &[
     ("sk-", "openai-style-key", 20, base64url),
     ("ghp_", "github-token", 30, |byte| {

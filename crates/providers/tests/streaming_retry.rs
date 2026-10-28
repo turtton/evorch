@@ -74,6 +74,7 @@ async fn mid_stream_disconnect_retries_and_preserves_display() {
     });
     bus.emit(terminal.clone());
     let mut display = String::new();
+    let mut retries = 0;
     loop {
         let event = next_event(&mut receiver).await;
         if event == terminal {
@@ -83,10 +84,12 @@ async fn mid_stream_disconnect_retries_and_preserves_display() {
             EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
                 display.push_str(&delta)
             }
+            EventKind::Message(MessageEvent::StreamRetried { .. }) => retries += 1,
             other => panic!("予期しない表示イベント: {other:?}"),
         }
     }
     assert_eq!(display, "partial tail");
+    assert_eq!(retries, 1, "the retry is announced once");
     assert_eq!(server.connections.load(Ordering::SeqCst), 2);
 }
 
@@ -113,6 +116,7 @@ async fn mid_frame_disconnect_retries_and_deduplicates_complete_prefix() {
             EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
                 display.push_str(&delta);
             }
+            EventKind::Message(MessageEvent::StreamRetried { .. }) => {}
             other => panic!("予期しない表示イベント: {other:?}"),
         }
     }

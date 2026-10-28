@@ -148,7 +148,10 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         },
         // 観測専用の最終結果はセッションの応答差分へ混ぜず、events から再生する。
         EventKind::Message(
-            MessageEvent::FinalResultPublished { .. } | MessageEvent::MessageCompleted { .. },
+            MessageEvent::FinalResultPublished { .. }
+            | MessageEvent::MessageCompleted { .. }
+            | MessageEvent::ToolCallDelta { .. }
+            | MessageEvent::StreamRetried { .. },
         ) => {}
         EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
             if let Some(session) = state.session(stored) {

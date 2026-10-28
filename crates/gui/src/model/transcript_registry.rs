@@ -143,6 +143,12 @@ impl TranscriptRegistry {
                     | event_bus::AgentRunPhase::Error,
                 ..
             }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+            // An idle run discards drafts of calls its finished response never started.
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: event_bus::AgentRunPhase::Waiting,
+                ..
+            }) => self.route_run(run_id),
             EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. })
             | EventKind::Fault(_) => {
                 vec![TranscriptKey::Thread]
@@ -162,7 +168,9 @@ impl TranscriptRegistry {
                 | MessageEvent::MessageCompleted { run_id, .. },
             ) => self.route_run(run_id),
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
+            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::ToolCallDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::StreamRetried { run_id }) => match run_id {
                 Some(run_id) => self.route_run(run_id),
                 None => Vec::new(),
             },
@@ -209,7 +217,9 @@ impl TranscriptRegistry {
         match &event.kind {
             EventKind::Message(
                 MessageEvent::MessageDelta { run_id: None, .. }
-                | MessageEvent::ReasoningDelta { run_id: None, .. },
+                | MessageEvent::ReasoningDelta { run_id: None, .. }
+                | MessageEvent::ToolCallDelta { run_id: None, .. }
+                | MessageEvent::StreamRetried { run_id: None },
             ) => {
                 tracing::warn!("dropped run-less stream delta");
                 return;
@@ -221,6 +231,10 @@ impl TranscriptRegistry {
                 | MessageEvent::ReasoningDelta {
                     run_id: Some(_), ..
                 }
+                | MessageEvent::ToolCallDelta {
+                    run_id: Some(_), ..
+                }
+                | MessageEvent::StreamRetried { run_id: Some(_) }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. },
             )

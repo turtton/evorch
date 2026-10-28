@@ -630,6 +630,31 @@ pub enum MessageEvent {
         #[serde(default)]
         run_id: Option<String>,
     },
+    /// Live display of a tool call the model is still composing.
+    ///
+    /// Observational only and never persisted: the accepted response
+    /// (`MessageCompleted` / `ToolStarted`) stays the single source of truth and
+    /// these fragments are neither replayed to the model nor part of any prompt.
+    ToolCallDelta {
+        /// Agent run that is streaming the call. Deltas without a run cannot be
+        /// attributed to a transcript and are dropped by display consumers.
+        run_id: Option<String>,
+        /// Position of the call within the streamed response.
+        index: usize,
+        /// Provider call ID; only the first fragment of a call carries it.
+        call_id: Option<String>,
+        /// Tool name; only the first fragment of a call carries it.
+        tool_name: Option<String>,
+        /// Raw argument text appended by this fragment.
+        arguments_delta: String,
+    },
+    /// The provider is retrying a response whose stream failed. The retry replays
+    /// the response from its start, so display consumers discard what the failed
+    /// attempt left behind, whether or not the retry carries any tool call.
+    StreamRetried {
+        /// Agent run that is streaming, when attributable.
+        run_id: Option<String>,
+    },
 }
 
 /// A persisted clarification, independent of tool approval and run phase.
