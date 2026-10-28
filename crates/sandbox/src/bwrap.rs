@@ -107,24 +107,7 @@ impl BwrapSandbox {
     }
 
     pub fn detect_with_program(program: &Path, config: BwrapConfig) -> Result<Self, SandboxError> {
-        let status = Command::new(program)
-            .args([
-                "--ro-bind",
-                "/",
-                "/",
-                "--unshare-net",
-                "--die-with-parent",
-                "true",
-            ])
-            .status()
-            .map_err(|error| SandboxError::BwrapUnavailable {
-                detail: error.to_string(),
-            })?;
-        if !status.success() {
-            return Err(SandboxError::BwrapUnavailable {
-                detail: format!("機能確認が終了コード {status} で失敗しました"),
-            });
-        }
+        probe(program)?;
         let unavailable = |error: std::io::Error| SandboxError::BwrapUnavailable {
             detail: format!("/var/tmp の作業領域を作成できません: {error}"),
         };
@@ -304,7 +287,31 @@ impl Sandbox for BwrapSandbox {
     }
 }
 
-fn locate_bwrap() -> Option<PathBuf> {
+/// Runs bubblewrap once with the features every sandbox here needs.
+pub(crate) fn probe(program: &Path) -> Result<(), SandboxError> {
+    let status = Command::new(program)
+        .args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--unshare-net",
+            "--die-with-parent",
+            "true",
+        ])
+        .status()
+        .map_err(|error| SandboxError::BwrapUnavailable {
+            detail: error.to_string(),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SandboxError::BwrapUnavailable {
+            detail: format!("機能確認が終了コード {status} で失敗しました"),
+        })
+    }
+}
+
+pub(crate) fn locate_bwrap() -> Option<PathBuf> {
     let path = Command::new("which").arg("bwrap").output().ok()?;
     if path.status.success() {
         let program = String::from_utf8(path.stdout).ok()?;
