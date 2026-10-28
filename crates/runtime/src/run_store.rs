@@ -396,6 +396,7 @@ pub(crate) fn materialize_review_context(
                 .collect::<Vec<_>>(),
         ))),
         delegation_chain: Vec::new(),
+        loaded_skills: Vec::new(),
     })
 }
 

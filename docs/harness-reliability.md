@@ -79,8 +79,36 @@ by the same gate as shell escalation, under `sandbox.escalation_approval` and
 user (approval input `kind: "file_access"` with the tool, canonical `path`,
 `access`, justification and change), and `auto` asks the escalation reviewer,
 falling back to the user on a decline when configured. An approval the
-reviewer rates critical-risk always goes to the user for the final decision,
-whatever `escalate_to_user_on_deny` says. When the automatic reviewer denies
+reviewer rates critical-risk goes to the user for the final decision,
+whatever `escalate_to_user_on_deny` says. The one exception is a shell
+command whose verdict carries `procedure_step: verified` with at least medium
+authorization, while approved project rules or a loaded skill are in the
+review context: the reviewer declares that the real user requested the work,
+that rules or a skill define this step, that the command touches only the
+work's own products or what the procedure names, and that the command itself
+performs the prerequisite check the procedure calls for. The runtime checks
+the declared level, the context and the access kind (file, web and upload
+reviews ignore `verified`), and logs the basis. A missing `procedure_step`
+counts as `none`, and rules or skills with no text do not count as a
+procedure in the context.
+
+The review context carries `loaded_skills`: the skill bodies the runtime read
+for the run (`skill_load` without a resource, `load_skills` of a delegated
+child). A child starts from a copy of its parent's list; a restored run
+rebuilds it from the names saved with it, keeping only those it can read
+again, and a seed that starts a successor of an escalated run saves the source
+run's names. Builtin and user skills are always shown; repository skills only
+while the project is approved; skills from allowed directories are never
+recorded. A body is cut at 16 KiB and the newest 6 are kept. Skills are
+procedures, like project rules, and never widen authorization.
+
+The `shell` tool description gained a sentence about splitting host-access work
+from sandbox work. Tool specs are fixed when a run starts, so only new
+conversations and runs restored after the update send the new text; within a
+run, the system prompt, tools and sent history stay unchanged across skill
+reads and reviews (`structured_escalation` covers this end to end).
+
+When the automatic reviewer denies
 three consecutive shell or file escalation requests in one run, that run's
 later requests are refused
 without review (and without asking the user) until the user sends new input to
