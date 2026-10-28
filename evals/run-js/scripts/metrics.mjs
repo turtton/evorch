@@ -434,7 +434,8 @@ export function computeRun(entry) {
   };
 
   // --- 時間・状態
-  const stamps = events.map((e) => e.ns).filter((x) => typeof x === 'number');
+  // 所要時間はツール以外も含む全イベントの最初〜最後（ツールイベントだけだと実時間より短くなる）。
+  const stamps = (eventsDoc.events ?? []).map((e) => e?.wall_clock_ns).filter((x) => typeof x === 'number');
   const eventSpanMs = stamps.length > 1 ? (Math.max(...stamps) - Math.min(...stamps)) / 1e6 : null;
   const result = entry.result ?? {};
   const label = entry.label ?? {};

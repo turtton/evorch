@@ -31,6 +31,17 @@ assert.equal(r1.shell.pipes.max, 3);
 assert.equal(r1.duration_s, 95);
 assert.equal(r1.verify, 'pass');
 
+// 所要時間の fallback（result.json なし）はツール以外も含む全イベントの最初〜最後
+const spanEntry = {
+  run: { run_id: 'run-span', usage_requests: [], context: {} },
+  events: { events: [
+    { id: 1, kind: 'Lifecycle', payload: { kind: 'Lifecycle', payload: { kind: 'AgentRunStarted', payload: {} } }, wall_clock_ns: 1000000000 },
+    { id: 2, kind: 'Tool', payload: { kind: 'Tool', payload: { kind: 'ToolStarted', payload: { call_id: 'c1', tool_name: 'read', run_id: 'run-span' } } }, wall_clock_ns: 2000000000 },
+    { id: 3, kind: 'Lifecycle', payload: { kind: 'Lifecycle', payload: { kind: 'AgentRunStateChanged', payload: {} } }, wall_clock_ns: 11000000000 },
+  ] },
+};
+assert.equal(computeRun(spanEntry).duration_s, 10);
+
 // run 2
 assert.deepEqual(r2.run_js.errors, { js_exception: 0, host_rejected: 0, child_tool_error: 0, timeout: 1, limit_hit: 1, pre_run_error: 1 });
 assert.deepEqual(r2.run_js.limit_hit_kinds, { tool_calls: 1 });
