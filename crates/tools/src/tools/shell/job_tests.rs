@@ -801,3 +801,63 @@ async fn synchronous_capacity_failure_is_immediate_without_spawning_or_leaking_o
     assert!(!directory.path().join("must-not-start").exists());
     shell.drain_shell_jobs("private-owner").await.unwrap();
 }
+
+#[tokio::test]
+async fn a_command_started_inside_run_js_streams_output_while_the_caller_waits() {
+    let shell = shell();
+    let bus = Arc::new(event_bus::EventBus::new(256));
+    let mut events = bus.subscribe();
+    shell.set_event_bus(Arc::clone(&bus));
+    let child = ToolExecutionContext {
+        run_id: "owner".into(),
+        call_id: Some("parent/1".into()),
+        parent_call_id: Some("parent".into()),
+        shell_wait_policy: crate::executor::ShellWaitPolicy::UntilTerminal,
+        ..Default::default()
+    };
+    // A plain synchronous call exposes no job, so it publishes nothing.
+    let plain = ToolExecutionContext {
+        parent_call_id: None,
+        call_id: Some("plain".into()),
+        ..child.clone()
+    };
+    let result = shell
+        .execute_with_context(&plain, json!({"command":"echo quiet"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "exit_code: 0\nquiet\n");
+
+    let result = shell
+        .execute_with_context(&child, json!({"command":"echo step one; echo step two"}))
+        .await
+        .unwrap();
+    // The model-facing result is still the complete synchronous result.
+    assert_eq!(result.content, "exit_code: 0\nstep one\nstep two\n");
+
+    let mut log = String::new();
+    loop {
+        let event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+            call_id,
+            run_id,
+            chunk,
+            status,
+            exit_code,
+            ..
+        }) = events.recv().await.expect("bus event").kind
+        else {
+            continue;
+        };
+        assert_eq!(
+            call_id.as_deref(),
+            Some("parent/1"),
+            "only the child streams"
+        );
+        assert_eq!(run_id.as_deref(), Some("owner"));
+        log.push_str(&chunk);
+        if status != "running" {
+            assert_eq!(exit_code, Some(0));
+            break;
+        }
+    }
+    assert_eq!(log, "step one\nstep two\n");
+}

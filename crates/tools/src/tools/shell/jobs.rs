@@ -119,6 +119,9 @@ struct Job {
     call_id: Option<String>,
     thread: Option<String>,
     synchronous: bool,
+    /// Publishes live output although no handle is exposed: a command started inside
+    /// `run_js` is waited for to its end, yet its card shows the output as it arrives.
+    stream_output: bool,
     timeout_ms: Option<u64>,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
@@ -232,6 +235,7 @@ impl JobRegistry {
                 call_id: ctx.call_id.clone(),
                 thread: ctx.thread_id.clone(),
                 synchronous,
+                stream_output: ctx.parent_call_id.is_some(),
                 timeout_ms,
                 state: Mutex::new(State {
                     output: LiveOutput::new(synchronous),
@@ -694,10 +698,11 @@ async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !state.exposed && state.completion.is_some() {
+            let visible = state.exposed || job.stream_output;
+            if !visible && state.completion.is_some() {
                 return;
             }
-            state.exposed
+            visible
         };
         if !exposed {
             if changed.changed().await.is_err() {
