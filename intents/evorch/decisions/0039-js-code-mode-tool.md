@@ -10,6 +10,8 @@ Proposed（2026-10-22、下書き）。利用者との相談で、目的と方�
 
 2026-10-28 追記（試作の実装を受けた更新）: 試作（`feat/run-js-prototype`、PR 作成中）で確定・変更した点を反映した。戻り値の形、QuickJS-NG の実測、worker の隔離、子の並行と計上、終了時の扱い、メモリ上限の意味、組み込み skill の見送り、headless 評価の手順、評価に使う正確なモデル ID である。
 
+2026-10-29 追記（試作のその後の変更を受けた更新）: 試作（PR #397、`feat/run-js-prototype`、head `f139cccb`）と評価（課題 v1〜v3、ラウンド r1〜r4）で変わった点を反映した。子の呼び出しの上限と計上、子の結果の形、結果の本文の構成、打ち切られた子 shell の扱い、未観測の shell ジョブの一般的なガード、headless の終了コード、説明の要点、評価の経過、ワンライナーの数え方である。
+
 ## Context
 
 oh-my-pi（`omp`）と senpi は、agent が JS や Python のコードを実行する `eval` ツールを持つ。コードの中から agent 自身のツールを呼べる。
@@ -99,6 +101,9 @@ shell の中で書かれたスクリプトについて:
   - `truncated` / `next`: 打ち切りの有無と、続きを取るための引数。`read` の `next_offset` / `next_byte_offset` などを、ツールごとに構造化する。
   - `detail`: ツールが添えるメタデータ。
 - 正規化はツールごとの変換として、本体の側で行う。モデルに返す通常のツールの出力は変えない。
+- 子の結果の本文は、モデルに返す通常のツールの出力と次の点で異なる。
+  - `edit` / `write` / `git_diff` の `text` は要約にする（`edited <path> (+N −M)` など）。全文の diff は `detail.diff` に入れる。コードが `text` を出力して、コンテキストに diff が流れ込まないようにするためである。
+  - 子の `shell` の出力は、1 MiB までは全文を JS に返す。これは runtime 専用の sidecar に持ち、イベントと GUI に出る出力は従来どおり bounded のままにする。NUL も保持する。1 MiB を超えたら `truncated: true` と `next = {tool: "read", path}` を返す。ディスクに退避した出力の読み戻しはしない。
 - 補助の関数を 1 つ用意する。`readText(path)` は、`read` の続きを自動で読み進めて全文を返す。合計の上限（初期値 4 MiB）を超えたらエラーにする。各回の `read` は、通常の子の呼び出しとして記録する。
 - 補助の関数を増やすのは、評価で必要が示されたときに限る。
 
@@ -113,9 +118,14 @@ shell の中で書かれたスクリプトについて:
   3. 結果の形と、`Promise.all` での並行の呼び出し
   4. 使えない API（fs、require、fetch、timers、Intl）と、コードから行えない呼び出し（承認が必要なもの、`isolated` 以外の shell）
   5. 上限
-- **長い例は組み込みの skill に分ける。** 説明に載せる例は短いもの 1 つとする。長い使い方の例は組み込みの skill にして、必要なときに `skill_load` で読ませる。たとえば、まとめ読みと要約、複数ファイルの同じ規則での編集、テストログの集計である。この組み込みの skill は、試作では提供していない（後続で扱う）。
-- **他のツールとの使い分けを書く。** shell のガイダンスには、データの加工や複数か所の編集を shell の中のスクリプトで行わず、`run_js` を使うよう書く。
-- **長い処理は `run_js` に入れない。** ビルドや長いテストのように時間のかかるコマンドは、`run_js` の中ではなく、通常の shell のジョブとして実行するよう書く。`run_js` は時間の上限を持ち、待っている間は 1 つのツールの呼び出しとして見えるためである。
+- **長い例は組み込みの skill に分ける。** 説明に載せる例は短いもの 1 つとする。長い使い方の例は組み込みの skill にして、必要なときに `skill_load` で読ませる。たとえば、まとめ読みと要約、複数ファイルの同じ規則での編集、テストログの集計である。この組み込みの skill は、試作では提供していない（後続で扱う）。試作の説明には、まとめ読み、同じ編集の繰り返し、shell 1 回での集計の 3 つの例を載せた。固定費は下の見積りより大きくなるので、評価で測る。
+- **他のツールとの使い分けを書く。** shell のガイダンスには、データの加工や複数か所の編集を shell の中のスクリプトで行わず、`run_js` を使うよう書く。`edit` のガイダンスにも、同じ編集を多くのファイルに行うときは、shell の `sed -i` のループではなく `run_js` と `tools.edit` を使うよう書く。
+- **長い処理は `run_js` に入れない。** ビルドや長いテストのように時間のかかるコマンドは、`run_js` の中ではなく、通常の shell のジョブとして実行するよう書く。`run_js` は時間の上限を持ち、待っている間は 1 つのツールの呼び出しとして見えるためである。cargo などのビルドとテストは、説明の例にも入れない。コンパイラの出力をコードで処理したいときは、通常の shell でファイルに書き出し、`run_js` でそのファイルを読むよう書く。
+- **説明の要点（試作で追加）。**
+  - shell の `python3 - <<EOF`、`cat > script.py <<EOF`、`node -e`、`perl -i -pe`、`awk`、集計や読み取りのための `for` ループ、`xargs sed -i` の代わりに `run_js` を使う。
+  - shell の薄いラッパーや、1 回の呼び出しで済む作業には使わない。
+  - ファイル全体や長いコマンド出力をダンプせず、必要な行や数だけを出力する。
+  - `truncated: true` は `text` が一部だということである。`next` があれば `readText(next.path)` で続きを読み、`next` が null なら範囲を絞って呼び直す。部分的な出力から数えたり、結論を出したりしない。
 
 説明の本文の下書き（他のツールに合わせて英語）:
 
@@ -129,7 +139,7 @@ across many places. Do not use it for a single tool call.
 - Edits go through tools.edit / tools.write so they show as diffs. There is no fs, require, fetch, timers or Intl.
 - Calls needing approval or non-isolated shell fail here; make them as normal tool calls.
 - Run builds and long tests as normal shell jobs, not here.
-- Limits: 30 s (timeout_ms up to 300000), 64 MiB JS heap, 200 tool calls.
+- Limits: 30 s (timeout_ms up to 300000), 64 MiB JS heap, 1000 tool calls (following a `next` once is free).
 Available tools:
 <generated TypeScript declarations for this run>
 Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text.split("\n"); ...
@@ -141,16 +151,22 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 
 - コード内の呼び出しにも、それぞれ `call_id`（`<親の call_id>/<連番>`）を割り当てる。`ToolStarted` / `ToolCompleted` を発行し、親の `run_js` の呼び出しを指す任意の項目 `parent_call_id` を持たせる。旧形式のイベントでは、この項目は欠落する。
 - OTel では、親の `run_js` の span の子として記録する。
-- 重複呼び出しの検出（`IdenticalToolCalls`）、予算、escalation の計上は、コード内の呼び出しも数える。計上は本体側の記録で行い、子の出力が artifact に退避されても影響を受けない。
+- 重複呼び出しの検出（`IdenticalToolCalls`）、予算、escalation の計上は、コード内の呼び出しも数える。`IdenticalToolCalls` には子の呼び出しも入る。計上は本体側の記録で行い、子の出力が artifact に退避されても影響を受けない。
+- 計上は、コストに応じて次のように調整する。大量のファイルを処理するプログラムを、止まったループと取り違えないためである（`crates/runtime/src/agent_loop/run_js_accounting.rs`）。
+  - 子の `read` / `grep` / `git_diff` は、tool call の予算に 10 回で 1 回分として数える。`edit` / `write` / `shell` は 1 回ずつ数える。
+  - host が返した `next` に一致するページの継続は、1 回だけ無料にする。引数が `offset` だけ同じでも、継続とは見なさない。
+  - 同一プログラムの中で、すでに実行された `shell` / `write` / `edit` の後に同じファイルを読み直すことは、再読（`max_file_rereads`）に数えない。artifact の `read` も再読に数えない。
 - 呼び出しの上限を超えた後の要求は、一定の件数で打ち切る。その間に返すエラーメッセージは、バイト数で制限する。
 
 ### モデルには結果だけを返す
 
 - モデルに返すのは、`return` した値と、出力したテキストだけにする。子の呼び出しの生の出力は、コードが出力しない限りコンテキストに入れない。これがトークンを減らすための要点である。
 - 戻り値は、文字列ならそのまま生のテキストで返し、JSON の文字列にはしない。それ以外の値は JSON にする。実機で観察したところ、JSON の文字列にすると `\n` がエスケープされて読みにくく、サイズも増えたためである。
-- 本文の形は、出力、`=> <戻り値>`、最終行の要約の順にする。最終行は `[run_js: N calls, M failed (…); wrote: …; may have changed: …; warnings: …]` とする。
+- 本文の形は、（失敗または打ち切りがあれば先頭にその通知）、出力、`=> <戻り値>`、最終行の要約の順にする。最終行は `[run_js: N calls, M failed (…); wrote: …; may have changed: …; warnings: …]` とする。
 - 副作用を見落とさないよう、この要約を必ず付ける。要約に含めるのは、子の呼び出しの数、失敗した呼び出し（短い理由を添える）、書き換えたファイルの一覧、編集後のフックの警告があったことである。警告の本文は含めない。失敗の理由と警告の発生は本体側で保持し、コードが出力しなくても必ず要約に入れる。
-- 出力が大きい場合は、既存のツール出力と同じ上限と artifact への退避（`crates/tools/src/output.rs`）に従う。
+- 最終行の要約は bounded にする。各一覧に件数と 1 件の長さの上限を設け、全体で 4.6 KB 程度以下に収める。打ち切られた shell は優先して名指しする。
+- 本文全体は、capture の上限（8 MiB、`crates/tools/src/output.rs`）に収まるようにする。収まらないときは、最終行の要約が残るよう、出力（印字したテキスト）を先に削る。それでも大きい場合は、既存のツール出力と同じ artifact への退避に従う。
+- GUI は、`detail.run_js.layout` のバイトオフセットで本文を区分する。印字した出力や戻り値に `=> ` で始まる行があっても、構造と取り違えないためである。
 - JS の例外は、セル内の行番号を付けたスタックトレースとして返す。
 
 ### GUI で処理の中身を見せる
@@ -171,9 +187,10 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 ### 上限
 
 - 時間の上限の既定は 30 秒、最大は 300 秒とする。子の呼び出しを待つ時間も含める。上限を超えたら、割り込みで JS を止め、実行中の子の呼び出しを取り消す。run の停止と取り消しも同じ経路で止める。
-- メモリの上限は 64 MiB、子の呼び出しは 1 回の実行につき 200 回までとする。64 MiB は QuickJS のヒープの上限であり、プロセスの RSS の上限ではない。
+- メモリの上限は 64 MiB、子の呼び出しは 1 回の実行につき 1000 回まで（設定 `max_tool_calls` の既定。試作の初期値 200 から、評価で引き上げた）とする。回数は「子の呼び出しの上限」の計上の調整を適用した後の値である。超えた後の要求は、一定の件数で打ち切る。64 MiB は QuickJS のヒープの上限であり、プロセスの RSS の上限ではない。
 - 時間切れと取り消しでは、開始済みの子を停止して回収する。子の shell の停止を確認してから、親の `run_js` を完了する。停止を確認できない場合は、run を止め、workspace と ownership を保持したままにする（fail-closed）。
-- `run_js` に打ち切られた子の shell の副作用は、未観測として扱う。durable snapshot がない環境では、run は Error になる。
+- `run_js` に打ち切られた子の shell の副作用は、原則として未観測として扱う。例外は、`run_js` 自身が最終行の要約でその shell を名指しし、その行が最終的な本文に残ったことを、runtime 専用の receipt で確認できた seq のジョブだけである。これは観測済みとし、通常の shell の応答と同等に扱う。receipt はツールだけが設定でき、本文のテキストは信用しない。stopped / cancelled / panic / 出力処理のエラーでは receipt がないので、未観測のままになる。未観測のままで durable snapshot がない環境では、run は Error になる。
+- 未観測の shell ジョブがあるまま応答を終えたときの reminder は、`run_js` に限らない一般的なガードにする。reminder にはジョブの ID と状態を含める。連続 3 回、累計 10 回で run を Error にする。連続回数をリセットするのは、名指ししたジョブが解消されたとき（読み取り、停止、確認）だけで、他のツール呼び出しではリセットしない。きっかけは評価での暴走である。`run_js` の中の cargo が打ち切られて未観測のジョブが残り、モデルが同じ nudge に 483 回応答し続けた（料金表換算 $12.6）。
 - いずれの値も初期値であり、評価の結果を見て調整する。
 
 ### 提供する範囲と既定値
@@ -187,13 +204,14 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 
 このツールの目的は、ターン数とトークンの効率を上げることである。あわせて、shell の中のスクリプトやワンライナーでしていた処理を、利用者が追える形にすることも狙う。評価は 2 段階で行う。
 
-#### 第 1 段階: `run_js` ありで 5 つのモデルの使い方を観察し、改善する
+#### 第 1 段階: `run_js` ありで複数のモデルの使い方を観察し、改善する
 
 - **方式**: Worker の run を、`run_js` を有効にして headless で実行する（`evorch run --role worker --prompt … --user-config <dir>`）。モデルは、モデルごとの設定ディレクトリ（overlay）で切り替える。ADR 0036 の thread の再実行は使わない。決めた課題を、モデルごとに同じ条件で走らせて観察するほうが軽いためである。
-- **対象のモデル**: 5 つとする。
+- **対象のモデル**: 5 つを候補とした。
   - provider `codex-personal`（Codex のサブスクリプション）: sol（`gpt-6.1-sol`）、luna（`gpt-6-luna+fast`）、astra（`gpt-6-astra`）
   - provider `claude-personal`（Claude のサブスクリプション）: opus（`claude-opus-5-5`）、sonnet（`claude-sonnet-5-5`）
-- **headless の実行手順**（試作で確定）: 実行は `evorch run … --run-js-enabled <bool> --db <path>`、結果の確認は `evorch inspect --db <path> run <id> --full` と `events --run <id>` で行う。overlay は、`--user-config` が元の設定にフォールバックしないため、`config.toml` のコピーに `config.d` を重ねて作る。`config.d` で、候補が 1 件だけの評価専用の route を Worker に割り当てる（provider は固定）。課題とスクリプトは `evals/run-js`（`feat/run-js-eval` ブランチ）にある。
+  - 実際に評価したのは、sol を除く 4 モデルである。sol は provider が `model is not advertised` を返して使えず、利用者の判断で除外した。
+- **headless の実行手順**（試作で確定）: 実行は `evorch run … --run-js-enabled <bool> --db <path>`、結果の確認は `evorch inspect --db <path> run <id> --full` と `events --run <id>` で行う。overlay は、`--user-config` が元の設定にフォールバックしないため、`config.toml` のコピーに `config.d` を重ねて作る。`config.d` で、候補が 1 件だけの評価専用の route を Worker に割り当てる（provider は固定）。headless の run は、blocking な質問で入力待ちになると、run を止めて終了コード 3 で終了する。入力待ちかどうかは、run の phase と永続化された質問の状態で判定する（`crates/evorch/src/headless.rs`）。答える人のいない質問で、評価の run が止まり続けないようにするためである。課題とスクリプトは `evals/run-js`（`feat/run-js-eval` ブランチ）にある。
 - **題材**: evorch リポジトリの特定のコミットを使う。規模が大きく、まとめ読み・集計・複数か所の編集が自然に起きるためである。run ごとに、そのコミットから専用の clone か worktree を作る。利用者の作業ツリーでは実行しない。
 - **課題**: 6 つ程度とする。課題ごとに、作業が正しく終わったかを確かめるコマンドを付ける。
   1. 複数のファイルにまたがる調査と要約
@@ -210,7 +228,12 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
   - shell の中の処理: ヒアドキュメントのスクリプトの数、スクリプトによるファイルの書き換えの数、ワンライナーの複雑さ（1 回の shell の呼び出しにつないだ手順の数（`;` / `&&` / `||` / パイプで区切った数）とコマンドの長さ）、長いビルドと他の手順を 1 回にまとめた呼び出しの数
   - 品質: 確かめるコマンドの結果と、LLM による採点
 - **改善の進め方**: 観察で見つかった問題（使うべき場面で使わない、誤った使い方、説明の誤解、結果の形の扱いにくさ）に合わせて、説明・結果の形・補助の関数・上限を直し、同じ課題で走らせ直す。改善の余地がある間は、費用をかけて繰り返す。直した内容と、それによる指標の変化を記録する。
-- **集計の手段**: 上の指標を run ごとに出す集計を用意する。`evorch inspect` のサブコマンドか、store を読み取り専用で読むスクリプトとする（Open questions）。
+- **集計の手段**: 上の指標を run ごとに出す集計を用意する。`evorch inspect` のサブコマンドか、store を読み取り専用で読むスクリプトとする（Open questions）。試作では、`evals/run-js/scripts/metrics.mjs` と `classify-shell.mjs` で集計している。
+- **評価の経過**（2026-10-29 時点）:
+  - 課題は v1 → v2 → v3 と改めた（`evals/run-js`、`feat/run-js-eval`）。v1・v2 は、モデルが集計や改名を 1 本のスクリプトで片づけ、往復が増えなかった。そのため `run_js` の効果を測れる規模にならなかった。v3 は、入力の種類、読まないと分からない項目、コンパイラの出力に従う手直し、複数 crate にまたがる変更を加え、往復が増えざるをえない形にした。
+  - ラウンドは r1（予備、v1）、r2（v2）、r3（v3）、r4（v3、`f139cccb`）と進めた。r3 で、`run_js` の中の cargo の打ち切りから未観測のジョブが残る暴走が出た（「上限」の節）。r3 までの結果を受けて、計上、結果の形、説明、未観測のジョブの扱いを直した。
+  - r4（v3、`f139cccb`、1 回目）: 24 組（4 モデル × 6 課題）が完走し、22 / 24 が合格した。料金表換算は $9.76 だった。`run_js` を使った課題数は、t5（対照）を除く 5 課題のうち、astra 5、luna 5、opus 3、sonnet 3 だった。Claude の 2 モデルは、説明を変えても、shell でプログラム（ヒアドキュメントなど）を書き続ける傾向があった。
+  - 現在、r4 と同じ条件で 3 回の繰り返しを実行している。数値は概要にとどめ、結果は繰り返しが終わってから集計する。
 
 #### 第 2 段階: `run_js` なしとの比較
 
@@ -244,7 +267,7 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 - rquickjs（C のコードを含む）が依存に加わる。JS worker のモードの起動と、stdio のプロトコルの保守が必要になる。
 - `ToolStarted` / `ToolCompleted` に任意の `parent_call_id` が加わる。読む側（storage の投影、GUI、OTel、`crates/eval` の記録）は、子の呼び出しを扱えるようにする必要がある。
 - コードからは承認の必要な操作ができない。そのため、権限の昇格が必要な作業では、従来どおり通常のツール呼び出しを使う。
-- モデルが `run_js` を使いこなせるかは、モデルの系統によって差が出うる。そのため、評価の第 1 段階で Codex と Claude の 5 つのモデルを観察する。
+- モデルが `run_js` を使いこなせるかは、モデルの系統によって差が出うる。そのため、評価の第 1 段階で Codex と Claude のモデルを観察する（候補は 5 つ、実際は 4 つ）。
 - 評価は、利用者のサブスクリプションの利用枠を使う。評価の実行が、普段の作業の利用枠を減らす。
 - `run_js` の説明は一般的なツールより長く、600〜800 トークン程度の固定費が毎回のリクエストにかかる。この固定費は、評価で効果と並べて測る。
 - コード向けの結果の正規化は、ツールごとの変換として保守する必要がある。ツールの出力の形を変えるときは、変換も合わせて変える。
@@ -259,5 +282,8 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 - 時間・メモリ・呼び出し回数の上限の値。
 - 組み込みの実測は、試作で rquickjs 0.14 を使って行った（「使えるのは ECMAScript 標準の組み込みである」の節）。文字列の操作と正規表現の細部は、評価で問題が出た場合に追加で確かめる。
 - FHS / usr-merge の環境で、worker の `MinimalSandbox`（loader とライブラリの読み取り専用 mount）が動くか。評価環境の NixOS でしか確かめていない。
-- ワンライナーの複雑さをどう数えるか。区切りの記号の数だけでは、引用符の中の記号や、パイプでつないだ 1 つの処理も数えてしまう。第 1 段階の予備の実行で、実際のコマンドを見て数え方を決める。
+- ワンライナーの複雑さをどう数えるか。区切りの記号の数だけでは、引用符の中の記号や、パイプでつないだ 1 つの処理も数えてしまう。そこで、「プログラム的構造」を主指標にする案を採用し、評価の中で確かめている。
+  - 数えるのは、ヒアドキュメントやインラインのインタプリタ本体、`for` / `while` / `xargs` によるファイルの反復、3 段以上の text 処理、複数のファイルへの `sed -i` である。
+  - ファイルへの書き込みだけのヒアドキュメントは除く。
+  - ビルドの連結数は別の指標とし、文字数は補助とする。
 - 第 2 段階（`run_js` なしとの比較）を行うか。第 1 段階の費用を見て利用者が決める。
