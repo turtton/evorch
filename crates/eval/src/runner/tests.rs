@@ -142,15 +142,30 @@ async fn preflight_checks_candidate_child_roles_before_starting_any_baseline() {
         .expect(3)
         .mount(&server)
         .await;
-    preflight_config(&fixture, server.uri());
+    let mut config = preflight_config(&fixture, server.uri());
     // A post-capture project override must not contaminate the snapshot preflight.
+    let mut late = config.role_profile_config(None).unwrap();
+    late.routing.routes.get_mut("worker").unwrap()[0].model = Some("missing".into());
+    config.role_profiles.insert("post_capture".into(), late);
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
     let project_config = fixture.recorded.source.root().join(".evorch");
     std::fs::create_dir_all(&project_config).unwrap();
     std::fs::write(
         project_config.join("config.toml"),
-        "[routing.routes]\nworker = [{ profile = \"primary\", model = \"missing\" }]\n",
+        "role_profile = 'post_capture'\n",
     )
     .unwrap();
+    let live = load_config(
+        Some(fixture.user.path()),
+        Some(&fixture.recorded.source.root()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(roles::role_models(&live, "worker")[0].model, "missing");
     let mut deps = fixture.deps(vec![], vec![]);
     deps.models = None;
     deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
@@ -250,6 +265,77 @@ async fn preflight_checks_user_simulator_before_starting_replays() {
     assert!(report["checks"][0]["error"].is_null(), "{report}");
     assert!(report["checks"][1]["error"].is_string(), "{report}");
     assert!(!output.join("runs").exists());
+}
+
+async fn rejects_undefined_route_before_replay(overlay: &str, role: &str) {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    preflight_config(&fixture, server.uri());
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some(overlay));
+    let output = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| {
+        panic!("no baseline or candidate replay may start")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    let reason = report["checks"][1]["error"].as_str().unwrap();
+    assert!(reason.contains("typo") && reason.contains(role), "{report}");
+    assert_eq!(report["checks"][1]["label"], CANDIDATE);
+    assert_eq!(
+        read_json(&output.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!output.join("runs").exists());
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the valid baseline catalog was checked"
+    );
+    assert!(
+        requests.iter().all(|request| request.method == "GET"),
+        "no inference requests: {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_child_head_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.reviewer]\nmodels = [{ route = 'typo' }]\n",
+        "reviewer",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_child_fallback_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.reviewer]\nmodels = [{ route = 'reviewer' }, { route = 'typo' }]\n",
+        "reviewer",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_category_fallback_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.worker.categories.quick]\nmodels = [{ route = 'worker' }, { route = 'typo' }]\n",
+        "worker",
+    )
+    .await;
 }
 
 #[tokio::test]

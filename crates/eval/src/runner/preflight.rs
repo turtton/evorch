@@ -120,10 +120,29 @@ async fn check_config(
     };
     let result = async {
         let config = config?;
-        check.models = addresses
+        // Model summaries omit unresolved routes. Promote the config validator's
+        // target-chain warnings to failures before collecting those summaries.
+        let prefixes: Vec<_> = addresses
             .iter()
-            .flat_map(|role| roles::role_models(&config, role))
+            .map(|role| format!("agents.{role}."))
             .collect();
+        if let Some(problem) = config.chain_problems().into_iter().find(|problem| {
+            matches!(problem, config::ConfigError::InvalidField { path, .. }
+                if prefixes.iter().any(|prefix| path.starts_with(prefix)))
+        }) {
+            return Err(problem.to_string());
+        }
+        for role in addresses {
+            let models = roles::role_models(&config, role);
+            let inherits_run_chain =
+                *role == "roles.compactor" && config.agents.roles.compactor.models.is_empty();
+            if models.is_empty() && !inherits_run_chain {
+                return Err(format!(
+                    "no model routes resolve for preflight role `{role}`"
+                ));
+            }
+            check.models.extend(models);
+        }
         check
             .models
             .sort_by(|a, b| (&a.profile, &a.model).cmp(&(&b.profile, &b.model)));
