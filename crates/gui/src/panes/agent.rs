@@ -310,7 +310,11 @@ fn run_detail_body(
                     continue;
                 }
                 if let Some((icon, color)) = event_icon(entry) {
-                    event_line(ui, icon, &entry_label(entry), color);
+                    let hover = match entry {
+                        TranscriptEntry::Diagnostic { hover, .. } => Some(hover.as_str()),
+                        _ => None,
+                    };
+                    event_line(ui, icon, &entry_label(entry), color, hover);
                     continue;
                 }
                 entry_frame(entry).show(ui, |ui| {
@@ -327,6 +331,7 @@ fn run_detail_body(
                         TranscriptEntry::Error { .. }
                         | TranscriptEntry::UserMessage { .. }
                         | TranscriptEntry::Notice { .. }
+                        | TranscriptEntry::Diagnostic { .. }
                         | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
                         | TranscriptEntry::Tool { .. }
@@ -363,11 +368,19 @@ fn run_detail_body(
                         return;
                     }
                     let foreground = match entry {
-                        TranscriptEntry::Error { .. } => palette().ERROR_FG,
+                        TranscriptEntry::Error { .. }
+                        | TranscriptEntry::Diagnostic {
+                            severity: event_bus::DiagnosticSeverity::Error,
+                            ..
+                        } => palette().ERROR_FG,
                         TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
                         _ => palette().TEXT,
                     };
-                    ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
+                    let response =
+                        ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
+                    if let TranscriptEntry::Diagnostic { hover, .. } = entry {
+                        response.on_hover_text(hover);
+                    }
                 });
             }
             if let Some(identity) = identity {
@@ -381,8 +394,16 @@ fn run_detail_body(
 /// Single-line lifecycle entries render as a muted icon line, not a card.
 fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
     match entry {
-        TranscriptEntry::Notice { .. } => Some((icons::INFO, palette().TEXT_MUTED)),
-        TranscriptEntry::AgentMessage { .. }
+        TranscriptEntry::Notice { .. }
+        | TranscriptEntry::Diagnostic {
+            severity: event_bus::DiagnosticSeverity::Info | event_bus::DiagnosticSeverity::Warning,
+            ..
+        } => Some((icons::INFO, palette().TEXT_MUTED)),
+        TranscriptEntry::Diagnostic {
+            severity: event_bus::DiagnosticSeverity::Error,
+            ..
+        }
+        | TranscriptEntry::AgentMessage { .. }
         | TranscriptEntry::Error { .. }
         | TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::SandboxReview { .. }
@@ -400,7 +421,11 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
 /// stand out (errors, reviews, compaction) get a borderless tinted surface.
 fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
     let fill = match entry {
-        TranscriptEntry::Error { .. } => palette().ERROR_SURFACE,
+        TranscriptEntry::Error { .. }
+        | TranscriptEntry::Diagnostic {
+            severity: event_bus::DiagnosticSeverity::Error,
+            ..
+        } => palette().ERROR_SURFACE,
         TranscriptEntry::SandboxReview { .. } => palette().WARNING_SURFACE,
         TranscriptEntry::Compaction { .. } => palette().SURFACE,
         _ => {
@@ -438,7 +463,7 @@ fn user_bubble(ui: &mut egui::Ui, text: &str) {
                                     .small()
                                     .color(palette().TEXT_MUTED),
                                 )
-                                .on_hover_text("送信時に skill 本文を添付済み");
+                                .on_hover_text("Skill body attached when sent");
                             }
                         });
                     }
@@ -447,7 +472,7 @@ fn user_bubble(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32) {
+fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32, hover: Option<&str>) {
     ui.horizontal_wrapped(|ui| {
         ui.add_space(SP_1);
         ui.spacing_mut().item_spacing.x = SP_2;
@@ -465,6 +490,9 @@ fn event_line(ui: &mut egui::Ui, icon: &str, text: &str, color: Color32) {
             .wrap(),
         );
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+        if let Some(hover) = hover {
+            response.on_hover_text(hover);
+        }
     });
 }
 
@@ -485,6 +513,7 @@ fn entry_label(entry: &TranscriptEntry) -> String {
             crate::model::composer::split_skill_attachments(text).0
         ),
         TranscriptEntry::Notice { text }
+        | TranscriptEntry::Diagnostic { text, .. }
         | TranscriptEntry::SandboxReview { text, .. }
         | TranscriptEntry::Error { text } => text.clone(),
         TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
@@ -626,7 +655,7 @@ mod tests {
             (ThreadRunPhase::Running, "Running"),
             (ThreadRunPhase::Waiting, "Waiting for input"),
             (ThreadRunPhase::Done, "Done"),
-            (ThreadRunPhase::Stopped, "Stopped (resumable)"),
+            (ThreadRunPhase::Stopped, "Stopped"),
         ] {
             let mut harness = Harness::builder()
                 .with_size(egui::vec2(400.0, 80.0))

@@ -255,9 +255,8 @@ fn stop_preserves_partial_display_and_resumed_turn_is_separate() {
         reason: Some("stopped by operator".into()),
     }));
     assert!(!registry.thread().thinking_is_streaming(0));
-    assert!(
-        matches!(&registry.thread().entries()[2], TranscriptEntry::Notice { text } if text.contains("resumable"))
-    );
+    // A stop leaves no transcript notice; the phase indicator carries it.
+    assert_eq!(registry.thread().entries().len(), 2);
     registry.apply(&Event::new(LifecycleEvent::AgentRunStateChanged {
         run_id: "stream".into(),
         from: AgentRunPhase::Stopped,
@@ -273,7 +272,7 @@ fn stop_preserves_partial_display_and_resumed_turn_is_separate() {
         matches!(&registry.thread().entries()[1], TranscriptEntry::Message { text, .. } if text == "partial answer")
     );
     assert!(
-        matches!(&registry.thread().entries()[3], TranscriptEntry::Message { text, .. } if text == "resumed answer")
+        matches!(&registry.thread().entries()[2], TranscriptEntry::Message { text, .. } if text == "resumed answer")
     );
     assert!(
         registry

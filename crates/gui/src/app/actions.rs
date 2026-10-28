@@ -588,17 +588,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .insert(run_id, workspace_ui::ThreadRunPhase::Stopped);
                 self.running_children
                     .insert(thread_id.clone(), running_children);
-                if self
-                    .sidebar
-                    .active_thread
-                    .as_ref()
-                    .is_some_and(|id| id.to_string() == thread_id)
-                {
-                    self.push_notice(format!(
-                        "Run stopped: {}",
-                        crate::panes::composer::stopped_banner(running_children)
-                    ));
-                }
             }
             LoopEvent::ChatNotice { thread_id, text } => {
                 if self
@@ -612,7 +601,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             LoopEvent::ChatRejected { reason, .. } => {
                 tracing::warn!(%reason, "chat command rejected");
-                self.push_notice(format!("chat failed: {reason}"));
+                self.push_reason_notice("chat failed: ", &reason);
             }
             LoopEvent::GoalAccepted { thread_id, goal_id } => {
                 if self
@@ -627,7 +616,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             LoopEvent::CommandRejected { reason } => {
                 tracing::warn!(%reason, "goal loop command rejected");
-                self.push_notice(reason);
+                self.push_reason_notice("", &reason);
             }
         }
     }

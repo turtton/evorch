@@ -121,7 +121,7 @@ fn warning_tooltip_contains_full_id_generation_state_and_technical_detail() {
     status.observe("thread", Err(RegistryError::ReaderPoisoned), now);
     let mut harness = status_harness(status, now);
     harness.run();
-    let tooltip = "Owner owner-full-id · generation 7 · Running · read-only\n操作権限の確認を再試行中...\nownership reader lock is poisoned";
+    let tooltip = "Owner owner-full-id · generation 7 · Running · read-only\nRechecking access…\nownership reader lock is poisoned";
     assert!(harness.query_by_label(tooltip).is_none());
     harness.get_by_label("read-only ⚠").hover();
     harness.run_steps(3);

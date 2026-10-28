@@ -1595,10 +1595,13 @@ impl LoopState {
 
     fn snapshot_diagnostic(&self, error: &impl std::fmt::Display) {
         self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
-            source: "run_context".into(), severity: event_bus::DiagnosticSeverity::Warning,
+            source: "run_context".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::CONTEXT_SNAPSHOT_FAILED.into(),
-            detail: format!("復元用コンテキストを保存できませんでした。以前の有効なチェックポイントがあれば保持します: {error}"),
-            run_id: Some(self.task.run_id.to_string()), thread_id: None, call_id: None,
+            detail: format!("Could not save the conversation checkpoint: {error}"),
+            run_id: Some(self.task.run_id.to_string()),
+            thread_id: None,
+            call_id: None,
         }));
     }
 
@@ -1791,7 +1794,7 @@ impl LoopState {
             severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::OWNERSHIP_REGISTRY_WAIT.into(),
             detail: format!(
-                "The owner registry stayed locked for over {} s; the run waits for it instead of failing.",
+                "Waiting for the owner registry (locked for over {} s)",
                 OWNERSHIP_WAIT_NOTICE.as_secs()
             ),
             run_id: Some(self.task.run_id.to_string()),

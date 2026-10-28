@@ -2118,7 +2118,7 @@ impl AgentRuntime {
             source: "agent_runtime".into(),
             severity: event_bus::DiagnosticSeverity::Warning,
             code: event_bus::event::diagnostic_codes::HOST_INPUT_RECEIPT_FAILED.into(),
-            detail: format!("host input receipts left unsettled: {detail}"),
+            detail: format!("Input delivery receipts could not be settled: {detail}"),
             run_id: Some(run_id.to_string()),
             thread_id: None,
             call_id: None,

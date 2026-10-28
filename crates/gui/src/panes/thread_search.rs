@@ -99,7 +99,7 @@ fn status_line(ui: &mut egui::Ui, modal: &ThreadSearchModal, rows: usize, projec
     };
     match &outcome.result {
         Err(error) if !modal.is_stale(project) => {
-            ui.colored_label(palette().ERROR_FG, error);
+            crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
         }
         Err(_) => {
             ui.label(muted(SEARCHING_LABEL));

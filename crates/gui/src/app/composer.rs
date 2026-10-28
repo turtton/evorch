@@ -262,7 +262,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.history = previous_history;
                             self.composer_drafts = previous_drafts;
                             self.sidebar = previous_sidebar;
-                            self.push_notice(format!("送信前の保存に失敗しました: {error}"));
+                            self.push_notice(format!("Could not save before sending: {error}"));
                             return;
                         }
                         let submission_id = submission.submission_id.clone();
@@ -486,6 +486,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {
         self.transcripts
             .push_thread(TranscriptEntry::Notice { text: text.into() });
+    }
+
+    /// A notice for a rejected command: the reason in English, the original in the hover.
+    pub(super) fn push_reason_notice(&mut self, prefix: &str, reason: &str) {
+        self.transcripts
+            .push_thread(crate::model::transcript::reason_entry(
+                prefix, reason, false,
+            ));
     }
 
     pub(super) fn refresh_image_capability(&mut self) {

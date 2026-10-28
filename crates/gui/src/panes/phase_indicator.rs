@@ -2,7 +2,8 @@ use egui::Ui;
 use workspace_ui::ThreadRunPhase;
 
 use crate::theme::tokens::{
-    FONT_BADGE, FONT_SMALL, R_SM, SP_1, STATUS_STROKE, palette, phase_color, phase_label,
+    FONT_BADGE, FONT_SMALL, R_SM, SP_1, STATUS_STROKE, palette, phase_color, phase_hint,
+    phase_label,
 };
 use crate::theme::widgets::badge;
 
@@ -14,7 +15,7 @@ pub fn phase_circle(ui: &mut Ui, phase: Option<ThreadRunPhase>) {
         Some(phase) => crate::theme::widgets::status_dot(ui, phase_color(phase)),
         None => crate::theme::widgets::status_dot(ui, palette().TEXT_MUTED),
     };
-    response.on_hover_text(phase.map_or("Idle", phase_label));
+    response.on_hover_text(phase.map_or("Idle", phase_hint));
 }
 
 pub fn phase_indicator(ui: &mut Ui, phase: ThreadRunPhase) {
@@ -47,7 +48,8 @@ pub fn phase_indicator_with_ack(ui: &mut Ui, phase: ThreadRunPhase, unread: bool
                         egui::RichText::new(label)
                             .size(FONT_BADGE)
                             .color(if unread { palette().CANVAS } else { accent }),
-                    );
+                    )
+                    .on_hover_text(phase_hint(phase));
                 });
         }
     });
@@ -125,10 +127,24 @@ mod tests {
         assert_eq!(pill_count(&harness), 1);
     }
 
+    // Given: a stopped run / When: its badge is hovered
+    // Then: the hover says how to resume (the status dot uses the same hint),
+    // since no banner does; other phases keep their plain label
+    #[test]
+    fn stopped_hover_explains_how_to_resume() {
+        let mut badge = harness(Some(ThreadRunPhase::Stopped));
+        badge.get_by_label("Stopped").hover();
+        badge.run_steps(5);
+        badge.get_by_label(crate::theme::tokens::STOPPED_HINT);
+        for phase in PHASES.into_iter().filter(|p| *p != ThreadRunPhase::Stopped) {
+            assert_eq!(crate::theme::tokens::phase_hint(phase), phase_label(phase));
+        }
+    }
+
     #[test]
     fn stopped_badge_is_resumable_and_warning_not_error() {
         let harness = harness(Some(ThreadRunPhase::Stopped));
-        harness.get_by_label("Stopped (resumable)");
+        harness.get_by_label("Stopped");
         assert_eq!(spinner_count(&harness), 0);
         assert_eq!(phase_color(ThreadRunPhase::Stopped), palette().WARNING_FG);
         assert_ne!(phase_color(ThreadRunPhase::Stopped), palette().ERROR_FG);

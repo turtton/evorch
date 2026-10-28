@@ -178,7 +178,7 @@ fn fork_from_a_turn_inherits_history_up_to_it_and_seeds_the_next_message() {
     let (gui, _conversation) = two_turns(temp.path());
     let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
     harness.run();
-    assert_eq!(harness.count_labels("ここから fork"), 2);
+    assert_eq!(harness.count_labels("Fork from here"), 2);
     // When: forking from the first turn.
     let turn = first_turn(harness.state());
     let fork = harness
@@ -222,9 +222,9 @@ fn rewind_replaces_the_row_in_place_and_can_be_undone() {
     );
     let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
     harness.run();
-    assert!(harness.has_label("版 2 / 2"));
+    assert!(harness.has_label("Version 2 / 2"));
     // When: switching back to the pre-rewind version from the branch marker.
-    harness.click_label("前の版");
+    harness.click_label("Previous version");
     harness.run();
     // Then: the original conversation is back, still offering the newer version.
     let gui = harness.state();
@@ -237,7 +237,7 @@ fn rewind_replaces_the_row_in_place_and_can_be_undone() {
         texts(gui.transcript()),
         ["first", "answer one", "second", "answer two"]
     );
-    assert!(harness.has_label("版 1 / 2"));
+    assert!(harness.has_label("Version 1 / 2"));
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn edit_rows_stay_one_row_tall_under_their_messages() {
     // does not stretch to the viewport and push the rest of the turn down.
     let first = harness.label_rects("You: first")[0];
     let second = harness.label_rects("You: second")[0];
-    let edits = harness.label_rects("ここから編集");
+    let edits = harness.label_rects("Edit from here");
     assert_eq!(edits.len(), 2);
     for (message, edit) in [(first, edits[0]), (second, edits[1])] {
         let gap = edit.top() - message.bottom();
@@ -322,8 +322,8 @@ fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
     let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
     harness.run();
     // Then: editing covers every rewind, so no turn offers a separate one.
-    assert_eq!(harness.count_labels("ここから編集"), 2);
-    assert_eq!(harness.count_labels("ここまで巻き戻す"), 0);
+    assert_eq!(harness.count_labels("Edit from here"), 2);
+    assert_eq!(harness.count_labels("Rewind to here"), 0);
     // When: editing the second message, before resending anything.
     let message = user_message(harness.state(), "second");
     let version = harness
@@ -332,7 +332,7 @@ fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
         .unwrap();
     harness.run();
     // Then: the versions switch on the fork row of the turn it returned to.
-    assert!(same_row(&harness, "ここから fork", "版 2 / 2"));
+    assert!(same_row(&harness, "Fork from here", "Version 2 / 2"));
     // When: the edited message is sent and answered.
     conversation.turn(
         harness.state_mut(),
@@ -342,8 +342,8 @@ fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
     );
     harness.run();
     // Then: the switcher moves beside the edited message's edit action.
-    assert!(same_row(&harness, "ここから編集", "版 2 / 2"));
-    assert_eq!(harness.count_labels("ここから編集"), 2);
+    assert!(same_row(&harness, "Edit from here", "Version 2 / 2"));
+    assert_eq!(harness.count_labels("Edit from here"), 2);
     // When: editing that message again.
     let message = user_message(harness.state(), "second, edited");
     harness
@@ -352,14 +352,14 @@ fn editing_replaces_rewinding_and_versions_follow_the_edited_message() {
         .unwrap();
     harness.run();
     // Then: all three versions after the first turn form one list.
-    assert!(harness.has_label("版 3 / 3"));
-    harness.click_label("前の版");
+    assert!(harness.has_label("Version 3 / 3"));
+    harness.click_label("Previous version");
     harness.run();
     assert_eq!(
         harness.state().sidebar().active_thread.as_ref(),
         Some(&version)
     );
-    assert!(harness.has_label("版 2 / 3"));
+    assert!(harness.has_label("Version 2 / 3"));
 }
 
 #[test]
@@ -372,8 +372,8 @@ fn versions_of_the_first_message_move_from_the_top_to_the_message() {
     let mut harness = HeadlessWorkbench::new(gui, [1600.0, 900.0]);
     harness.run();
     // Then: the empty version offers its versions above the conversation.
-    assert!(harness.has_label("最初のメッセージを編集した版があります"));
-    assert!(harness.has_label("版 2 / 2"));
+    assert!(harness.has_label("The first message has edited versions"));
+    assert!(harness.has_label("Version 2 / 2"));
     // When: the edited first message is sent.
     conversation.turn(
         harness.state_mut(),
@@ -383,8 +383,8 @@ fn versions_of_the_first_message_move_from_the_top_to_the_message() {
     );
     harness.run();
     // Then: the versions switch beside that message instead.
-    assert!(!harness.has_label("最初のメッセージを編集した版があります"));
-    assert!(same_row(&harness, "ここから編集", "版 2 / 2"));
+    assert!(!harness.has_label("The first message has edited versions"));
+    assert!(same_row(&harness, "Edit from here", "Version 2 / 2"));
 }
 
 #[test]
@@ -413,11 +413,11 @@ fn rewind_is_offered_only_before_a_turn_without_an_editable_message() {
     harness.run();
     // Then: only the boundary before the agent's own turn offers a rewind; the
     // latest turn has nothing to drop.
-    assert_eq!(harness.count_labels("ここから fork"), 2);
-    assert_eq!(harness.count_labels("ここまで巻き戻す"), 1);
-    assert_eq!(harness.count_labels("ここから編集"), 1);
-    let forks = harness.label_rects("ここから fork");
-    let rewind = harness.label_rects("ここまで巻き戻す")[0];
+    assert_eq!(harness.count_labels("Fork from here"), 2);
+    assert_eq!(harness.count_labels("Rewind to here"), 1);
+    assert_eq!(harness.count_labels("Edit from here"), 1);
+    let forks = harness.label_rects("Fork from here");
+    let rewind = harness.label_rects("Rewind to here")[0];
     assert!((forks[0].center().y - rewind.center().y).abs() < 1.0);
 }
 

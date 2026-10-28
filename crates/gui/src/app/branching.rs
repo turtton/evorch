@@ -15,11 +15,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         for run in &thread.run_ids {
             match self.phases.get(run) {
                 Some(ThreadRunPhase::Running | ThreadRunPhase::Pending) => {
-                    return Some("実行中は巻き戻せません");
+                    return Some("Cannot rewind while running");
                 }
                 // Mid-turn waits (subagents, replies) are not completed turns.
                 Some(ThreadRunPhase::Waiting) if !self.idle_turns.contains(run) => {
-                    return Some("ターンの途中では巻き戻せません");
+                    return Some("Cannot rewind in the middle of a turn");
                 }
                 _ => {}
             }
@@ -29,7 +29,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             question.answer.is_none()
                 && super::questions::belongs_to_thread(question, &thread_id, &thread.run_ids)
         }) {
-            return Some("未回答の質問があるため巻き戻せません");
+            return Some("Cannot rewind with unanswered questions");
         }
         None
     }
@@ -43,7 +43,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let point = self
             .thread_transcript(&source)
             .and_then(|model| model.fork_point(entry_id))
-            .ok_or(WorkbenchError::Branch("分岐できるターンが見つかりません"))?;
+            .ok_or(WorkbenchError::Branch("No turn to branch from"))?;
         self.branch_thread(&source, Some(point), LineageKind::Fork)
     }
 
@@ -58,7 +58,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let point = self
             .thread_transcript(&thread)
             .and_then(|model| model.fork_point(entry_id))
-            .ok_or(WorkbenchError::Branch("巻き戻せるターンが見つかりません"))?;
+            .ok_or(WorkbenchError::Branch("No turn to rewind to"))?;
         self.branch_thread(&thread, Some(point), LineageKind::Rewind)
     }
 
@@ -73,7 +73,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .thread_transcript(&thread)
             .and_then(|model| Some((model.edit_point(entry_id)?, model.user_text(entry_id)?)))
             .map(|(point, text)| (point, text.to_owned()))
-            .ok_or(WorkbenchError::Branch("このメッセージからは編集できません"))?;
+            .ok_or(WorkbenchError::Branch("This message cannot be edited"))?;
         let id = self.branch_thread(&thread, point, LineageKind::Rewind)?;
         self.composer.input = text;
         self.flush_composer_draft();
@@ -201,7 +201,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .thread_transcript(source)
             .unwrap_or(&empty)
             .branch_at(point.as_ref(), kind, &source.to_string())
-            .ok_or(WorkbenchError::Branch("分岐点が履歴に見つかりません"))?;
+            .ok_or(WorkbenchError::Branch("Branch point not found in history"))?;
         let id = self.branch_id(source, kind);
         let mut record = ThreadRecord {
             archived: original.archived,

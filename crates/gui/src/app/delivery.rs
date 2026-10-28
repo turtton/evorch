@@ -100,7 +100,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             } else if startup && message.status == DeliveryStatus::Queued {
                 DeliveryStatus::Rejected {
-                    reason: "送信前に中断".into(),
+                    reason: "Interrupted before sending".into(),
                 }
             } else {
                 continue;
@@ -335,7 +335,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.history.remove(index);
         }
         if let Err(error) = self.persist_history() {
-            self.push_notice(format!("下書きを保存できませんでした: {error}"));
+            self.push_notice(format!("Could not save the draft: {error}"));
             if !withdrawn {
                 self.history = history;
                 self.composer_drafts = drafts;
@@ -381,7 +381,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .find(|message| message.id == id)
                 .unwrap()
                 .status = DeliveryStatus::Queued;
-            self.push_notice(format!("拒否状態を保存できませんでした: {error}"));
+            self.push_notice(format!("Could not save the rejection state: {error}"));
             return false;
         }
         // A refusal after the bubble went up takes the bubble back.

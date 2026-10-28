@@ -130,7 +130,7 @@ pub(super) fn codex_body(
             }
         });
         if let Some(error) = &inputs.error {
-            ui.colored_label(palette().ERROR_FG, error);
+            crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
         }
         let label = ui.label("Default model");
         egui::ComboBox::from_id_salt("codex-default-model")
@@ -177,10 +177,9 @@ fn fetch_models(ui: &mut egui::Ui, editor: &mut CodexEditorModel) -> bool {
                 )));
             }
             ModelsFetchState::Failed(error) => {
-                ui.colored_label(
-                    palette().ERROR_FG,
-                    format!("Auto-fetch failed ({error}); configured models are unchanged"),
-                );
+                crate::theme::widgets::reason_label_with(ui, palette().ERROR_FG, error, |shown| {
+                    format!("Auto-fetch failed ({shown}); configured models are unchanged")
+                });
             }
         }
     });

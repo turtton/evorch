@@ -449,9 +449,9 @@ fn renaming_implicit_worker_route_leaves_an_actionable_missing_route() {
         harness.state().role_settings().agents.worker.head_route(),
         None
     );
-    assert!(harness.has_label("未定義 (route なし)"));
-    assert!(harness.has_label("route を作成"));
-    harness.click_label("route を作成");
+    assert!(harness.has_label("Undefined (no route)"));
+    assert!(harness.has_label("Create route"));
+    harness.click_label("Create route");
     harness.run();
     assert_eq!(
         harness

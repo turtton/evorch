@@ -65,7 +65,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     &parent.id.to_string(),
                     TranscriptEntry::Notice {
                         text: format!(
-                            "未回答の質問 ({}) は継承先 Orchestrator · {} ({thread_id}, {new_run_id}) に引き継ぎ済みです。元の質問 ID のまま、ここからも回答できます。新 ID で再質問しないでください。",
+                            "Unanswered questions ({}) moved to Orchestrator · {} ({thread_id}, {new_run_id}). Answer them here or there under the same IDs.",
                             inherited.join(", "), parent.title
                         ),
                     },
@@ -77,7 +77,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     &thread_id,
                     TranscriptEntry::Notice {
                         text: format!(
-                            "{} からの escalation: {}\n{}",
+                            "Escalated from {}: {}\n{}",
                             parent.title, summary.escalation_reason, summary.original_request
                         ),
                     },

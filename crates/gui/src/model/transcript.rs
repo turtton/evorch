@@ -50,6 +50,30 @@ pub enum MessageDirection {
     Outgoing,
 }
 
+/// A transcript line `prefix` + `reason`. Runtime reasons are Japanese, so the
+/// line shows the English form and the original reason moves to the hover;
+/// a reason that needs no translation stays a plain notice or error.
+pub(crate) fn reason_entry(prefix: &str, reason: &str, error: bool) -> TranscriptEntry {
+    let shown = crate::model::failure_text::english(reason);
+    let text = format!("{prefix}{shown}");
+    if shown == reason {
+        return if error {
+            TranscriptEntry::Error { text }
+        } else {
+            TranscriptEntry::Notice { text }
+        };
+    }
+    TranscriptEntry::Diagnostic {
+        severity: if error {
+            event_bus::DiagnosticSeverity::Error
+        } else {
+            event_bus::DiagnosticSeverity::Warning
+        },
+        text,
+        hover: reason.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEntry {
     Error {
@@ -60,6 +84,13 @@ pub enum TranscriptEntry {
     },
     Notice {
         text: String,
+    },
+    /// A runtime diagnostic: `text` is the short user-facing line, `hover`
+    /// carries severity, source, code and the raw detail.
+    Diagnostic {
+        severity: event_bus::DiagnosticSeverity,
+        text: String,
+        hover: String,
     },
     SandboxReview {
         text: String,
@@ -290,9 +321,10 @@ impl TranscriptModel {
                 run_id: run_id.clone(),
                 context_len: *context_len,
             }),
+            // A stop is visible in the phase indicator and the Stop controls; no notice.
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 to: event_bus::AgentRunPhase::Stopped, ..
-            }) => self.push(TranscriptEntry::Notice { text: "Run stopped (resumable)".into() }),
+            }) => {}
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
                     to: event_bus::AgentRunPhase::Error,
@@ -308,9 +340,7 @@ impl TranscriptModel {
                     reason: Some(reason),
                     ..
                 } | event_bus::LifecycleEvent::Failed { reason, .. },
-            ) => self.push(TranscriptEntry::Error {
-                text: format!("Run failed: {reason}"),
-            }),
+            ) => self.push(reason_entry("Run failed: ", reason, true)),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, ..
             }) if self.agent_names.contains_key(run_id) => {
@@ -517,6 +547,7 @@ impl TranscriptModel {
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::Diagnostic { .. }
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
@@ -844,6 +875,26 @@ mod tests {
             model.entries(),
             &[TranscriptEntry::Error {
                 text: "Run failed: profile=x http error 401".into(),
+            }]
+        );
+    }
+
+    // Given: a run that fails with the Japanese runtime Display (the same text the model reads)
+    // When: the transcript shows it / Then: English line, original reason in the hover
+    #[test]
+    fn japanese_failure_reason_shows_in_english_with_the_original_in_the_hover() {
+        let reason = "モデル呼び出しに失敗しました: HTTP 500";
+        let mut model = TranscriptModel::new();
+        model.apply(&Event::new(LifecycleEvent::Failed {
+            session_id: "run-error".into(),
+            reason: reason.into(),
+        }));
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Diagnostic {
+                severity: event_bus::DiagnosticSeverity::Error,
+                text: "Run failed: Model call failed: HTTP 500".into(),
+                hover: reason.into(),
             }]
         );
     }

@@ -109,7 +109,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .and_then(|thread| {
                             // Preserve the latest run's input/attention state unless
                             // the root was stopped: live children must not hide its
-                            // resumable banner and second-stage stop action.
+                            // stop-subagents control.
                             thread
                                 .run_ids
                                 .iter()

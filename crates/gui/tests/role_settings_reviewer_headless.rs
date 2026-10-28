@@ -136,7 +136,7 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
     harness.run();
     harness.click_label("plan-review");
     harness.run();
-    assert!(!harness.has_label("未定義 (route なし)"));
+    assert!(!harness.has_label("Undefined (no route)"));
     assert!(
         harness
             .state()
@@ -160,8 +160,8 @@ fn reviewer_categories_inherit_role_status_without_materializing_overrides() {
             },
         );
     harness.run();
-    assert!(harness.has_label("未定義 (route なし)"));
-    harness.click_label("route を作成");
+    assert!(harness.has_label("Undefined (no route)"));
+    harness.click_label("Create route");
     harness.run();
     assert!(harness.state().routing_settings().open);
     assert!(

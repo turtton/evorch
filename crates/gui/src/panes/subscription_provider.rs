@@ -106,7 +106,7 @@ pub fn subscription_body(
             }
         }
         SubscriptionAuthState::Failed(error) => {
-            ui.colored_label(palette().ERROR_FG, *error);
+            crate::theme::widgets::reason_label(ui, palette().ERROR_FG, *error);
         }
     }
     if busy {

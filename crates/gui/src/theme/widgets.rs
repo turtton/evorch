@@ -72,6 +72,29 @@ pub fn halo_dot(ui: &mut Ui, color: Color32, active: bool) -> Response {
     response
 }
 
+/// A failure reason in `color`: runtime reasons can be Japanese, so the label
+/// shows the English form and the original text is kept in the hover.
+pub fn reason_label(ui: &mut Ui, color: Color32, raw: impl AsRef<str>) -> Response {
+    reason_label_with(ui, color, raw, str::to_owned)
+}
+
+/// [`reason_label`] with the English reason embedded in a longer `text`.
+pub fn reason_label_with(
+    ui: &mut Ui,
+    color: Color32,
+    raw: impl AsRef<str>,
+    text: impl FnOnce(&str) -> String,
+) -> Response {
+    let raw = raw.as_ref();
+    let shown = crate::model::failure_text::english(raw);
+    let response = ui.colored_label(color, text(&shown));
+    if shown == raw {
+        response
+    } else {
+        response.on_hover_text(raw)
+    }
+}
+
 pub fn badge(ui: &mut Ui, text: impl Into<String>, fg: Color32, bg: Color32) -> Response {
     Frame::new()
         .fill(bg)

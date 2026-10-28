@@ -355,7 +355,7 @@ impl ComposerModel {
 
     pub fn image_warning(&self) -> Option<&'static str> {
         (!self.attachments.is_empty() && !self.image_input_supported)
-            .then_some("このモデルは画像入力に対応していないため、画像は送信できません")
+            .then_some("This model does not accept images")
     }
 }
 
