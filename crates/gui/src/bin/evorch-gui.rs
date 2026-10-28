@@ -585,7 +585,7 @@ impl CredentialStore for UnwiredCredentialStore {
 impl UnwiredCredentialStore {
     fn unwired() -> CredentialError {
         CredentialError::KeychainUnavailable {
-            detail: String::from("The GUI runtime has no credential store connected"),
+            detail: String::from("GUI runtime は credential store を接続していない"),
         }
     }
 }
@@ -1261,6 +1261,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Given: the fail-closed credential store of the Fixed model source
+    // When: its error reaches a provider / run failure reason
+    // Then: the wording the model reads is unchanged; only the GUI translates it
+    #[test]
+    fn unwired_credential_store_error_keeps_its_model_facing_wording() {
+        use sandbox::credential::CredentialStore as _;
+        let error = super::UnwiredCredentialStore.get("key").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "資格情報サービスを利用できません: GUI runtime は credential store を接続していない"
+        );
+    }
+
     #[test]
     fn thread_index_initial_settings_and_reload_reach_writer_in_order() {
         let dir = tempfile::tempdir().unwrap();

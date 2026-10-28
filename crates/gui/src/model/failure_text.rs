@@ -249,6 +249,63 @@ const RULES: &[(&str, &str)] = &[
         "provider type `openai-codex` は keyring 認証情報参照のみをサポートします。環境変数参照ではなく keyring 参照 (service = \"evorch\", account = \"...\") に変更してください",
         "provider type `openai-codex` supports only keyring credentials; use a keyring reference (service = \"evorch\", account = \"...\") instead of an environment variable",
     ),
+    // sandbox and credential stores
+    (
+        "サンドボックスを利用できません: {}",
+        "The sandbox is unavailable: {0}",
+    ),
+    (
+        "サンドボックス仕様が不正です: {}",
+        "The sandbox specification is invalid: {0}",
+    ),
+    (
+        "資格情報の入出力に失敗しました: {}",
+        "Credential I/O failed: {0}",
+    ),
+    (
+        "資格情報ファイルが壊れています: {}",
+        "The credential file is corrupt: {0}",
+    ),
+    (
+        "資格情報サービスを利用できません: {}",
+        "The credential service is unavailable: {0}",
+    ),
+    (
+        "GUI runtime は credential store を接続していない",
+        "The GUI runtime has no credential store connected",
+    ),
+    (
+        "bwrap 実行ファイルが見つかりません",
+        "The bwrap executable was not found",
+    ),
+    (
+        "機能確認が終了コード {} で失敗しました",
+        "The capability check failed with exit code {0}",
+    ),
+    (
+        "/var/tmp の作業領域を作成できません: {}",
+        "Could not create the /var/tmp work area: {0}",
+    ),
+    (
+        "資格情報の操作が panic しました",
+        "A credential operation panicked",
+    ),
+    (
+        "資格情報 worker が終了しています",
+        "The credential worker has exited",
+    ),
+    (
+        "資格情報 worker が要求を受信しません（タイムアウト）",
+        "The credential worker did not receive the request (timed out)",
+    ),
+    (
+        "資格情報 worker が応答しません（タイムアウト）",
+        "The credential worker did not respond (timed out)",
+    ),
+    (
+        "資格情報 worker の応答がありません",
+        "The credential worker gave no response",
+    ),
     // providers
     (
         "OpenAI stream chunk の解析に失敗しました: {}",
@@ -280,7 +337,11 @@ const RULES: &[(&str, &str)] = &[
     ),
 ];
 
-const MAX_DEPTH: usize = 4;
+const MAX_DEPTH: usize = 8;
+
+/// Shown in place of a Japanese segment no template knows; the original text
+/// stays in the hover of whatever displays the result.
+pub const UNTRANSLATED: &str = "(message not available in English)";
 
 /// Whether `text` still contains Japanese (kana, kanji or full-width forms).
 pub fn contains_japanese(text: &str) -> bool {
@@ -290,31 +351,40 @@ pub fn contains_japanese(text: &str) -> bool {
     })
 }
 
-/// `reason` with the Japanese runtime wording translated; text it does not
-/// know, including English text, comes back unchanged.
+/// `reason` in English: known Japanese runtime wording is translated, also
+/// when English prefixes such as `request failed: ` wrap it, and a Japanese
+/// segment no template knows becomes [`UNTRANSLATED`]. Text without Japanese
+/// comes back unchanged.
 pub fn english(reason: &str) -> String {
     translate(reason, MAX_DEPTH)
 }
 
 fn translate(text: &str, depth: usize) -> String {
-    if depth == 0 || !contains_japanese(text) {
+    if !contains_japanese(text) {
         return text.to_owned();
+    }
+    if depth == 0 {
+        return UNTRANSLATED.to_owned();
     }
     for (japanese, english) in RULES {
         let Some(captures) = capture(japanese, text) else {
             continue;
         };
-        let captures: Vec<String> = captures
-            .into_iter()
-            .map(|part| translate(part, depth - 1))
-            .collect();
         let mut out = (*english).to_owned();
-        for (index, part) in captures.iter().enumerate() {
-            out = out.replace(&format!("{{{index}}}"), part);
+        for (index, part) in captures.into_iter().enumerate() {
+            out = out.replace(&format!("{{{index}}}"), &translate(part, depth - 1));
         }
         return out;
     }
-    text.to_owned()
+    // Peel one `head: ` segment so wrappers of any language translate piecewise.
+    match text.split_once(": ") {
+        Some((head, tail)) => format!(
+            "{}: {}",
+            translate(head, depth - 1),
+            translate(tail, depth - 1)
+        ),
+        None => UNTRANSLATED.to_owned(),
+    }
 }
 
 /// The parts of `text` the `{}` holes of `template` stand for, if it matches.
@@ -382,10 +452,67 @@ mod tests {
         }
     }
 
-    // Given: English or unknown text / When: translated / Then: it is unchanged
+    // Given: English text / When: translated / Then: it is unchanged
     #[test]
-    fn other_text_is_unchanged() {
+    fn english_text_is_unchanged() {
         assert_eq!(english("connection lost"), "connection lost");
-        assert_eq!(english("未知の失敗"), "未知の失敗");
+    }
+
+    // Given: Japanese no template knows, alone or inside English wrappers
+    // When: translated / Then: only that segment is replaced by the generic line
+    #[test]
+    fn unknown_japanese_segments_become_a_generic_line() {
+        assert_eq!(english("未知の失敗"), UNTRANSLATED);
+        assert_eq!(
+            english("request failed: 未知の失敗: detail"),
+            format!("request failed: {UNTRANSLATED}: detail")
+        );
+        assert_eq!(
+            english("モデル呼び出しに失敗しました: 未知の失敗"),
+            format!("Model call failed: {UNTRANSLATED}")
+        );
+    }
+
+    // Given: the real error chain of an unwired credential store, built from the real
+    // ProviderError, RuntimeError, CredentialError and routing wrapper wording
+    // When: translated / Then: every wrapped Japanese segment reads in English
+    #[test]
+    fn nested_provider_and_runtime_errors_translate_segment_by_segment() {
+        use providers::ProviderError;
+        use runtime::RuntimeError;
+        use sandbox::error::CredentialError;
+        let credential = CredentialError::KeychainUnavailable {
+            detail: "GUI runtime は credential store を接続していない".into(),
+        };
+        let provider =
+            ProviderError::Request(format!("credential store 操作に失敗しました: {credential}"));
+        let reason = RuntimeError::Model {
+            reason: provider.to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            reason,
+            "モデル呼び出しに失敗しました: request failed: credential store 操作に失敗しました: 資格情報サービスを利用できません: GUI runtime は credential store を接続していない"
+        );
+        assert_eq!(
+            english(&reason),
+            "Model call failed: request failed: Credential store operation failed: The credential service is unavailable: The GUI runtime has no credential store connected"
+        );
+
+        let retries = ProviderError::RetriesExhausted {
+            attempts: 3,
+            last: Box::new(ProviderError::InvalidJson {
+                detail: "OpenAI response の解析に失敗しました: eof".into(),
+            }),
+        };
+        assert_eq!(
+            english(
+                &RuntimeError::Model {
+                    reason: retries.to_string()
+                }
+                .to_string()
+            ),
+            "Model call failed: stream failed after 3 attempts: invalid JSON: Could not parse the OpenAI response: eof"
+        );
     }
 }

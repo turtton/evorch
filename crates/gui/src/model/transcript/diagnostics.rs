@@ -245,14 +245,36 @@ fn structured(event: &DiagnosticEvent) -> Option<String> {
             let server = text("server")
                 .filter(|server| !server.is_empty())
                 .map_or_else(String::new, |server| format!(" to {server}"));
+            let status = value.get("status").and_then(serde_json::Value::as_u64);
             Some(match text("class") {
                 Some("success") => format!("MCP tool call{server} succeeded"),
-                Some(class) => format!("MCP tool call{server} failed ({class})"),
+                Some(class) => match mcp_failure(class, status) {
+                    Some(reason) => format!("MCP tool call{server} failed: {reason}"),
+                    None => format!("MCP tool call{server} failed"),
+                },
                 None => format!("MCP tool call{server} reported a result"),
             })
         }
         _ => None,
     }
+}
+
+/// Why an MCP call failed, from the producer's failure class (`McpErrorKind`);
+/// `None` for a class this build does not know, which the hover still carries.
+fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
+    Some(match class {
+        "timeout" => "timed out".to_owned(),
+        "transport" => "the connection failed".to_owned(),
+        "http_status" => match status {
+            Some(status) => format!("the server answered with HTTP {status}"),
+            None => "the server answered with an HTTP error".to_owned(),
+        },
+        "protocol" => "the response was invalid".to_owned(),
+        "server_rejected" => "the server rejected the request".to_owned(),
+        "tool_rejected" => "the tool reported an error".to_owned(),
+        "configuration" => "the server is misconfigured".to_owned(),
+        _ => return None,
+    })
 }
 
 /// Severity, source and code, then the raw detail, for the hover.
@@ -386,13 +408,66 @@ mod tests {
         assert_eq!(text, "MCP tool call to docs succeeded");
         assert!(hover.ends_with(ok));
         let failed = r#"{"server":"docs","method":"tools/call","request_id":4,"class":"timeout","status":null}"#;
-        let (text, _) = text_and_hover(&diagnostic(Error, code::TOOL_RESULT, failed));
-        assert_eq!(text, "MCP tool call to docs failed (timeout)");
+        let (text, hover) = text_and_hover(&diagnostic(Error, code::TOOL_RESULT, failed));
+        assert_eq!(text, "MCP tool call to docs failed: timed out");
+        assert!(hover.contains(r#""class":"timeout""#));
 
         for code in [code::PUBLISH_DIAGNOSTICS, code::TOOL_RESULT] {
             let (text, _) = text_and_hover(&diagnostic(Info, code, "{not json"));
             assert!(!text.contains('{') && !text.is_empty(), "{code}: {text}");
         }
+    }
+
+    // Given: every failure class the MCP producer can emit (matched exhaustively, so a new
+    // class breaks this test) / When: shown / Then: natural English, never the raw class
+    #[test]
+    fn every_mcp_failure_class_reads_as_english() {
+        use tools::mcp::{McpError, McpErrorKind};
+        let kinds = [
+            McpErrorKind::Timeout,
+            McpErrorKind::Transport,
+            McpErrorKind::HttpStatus(503),
+            McpErrorKind::Protocol,
+            McpErrorKind::ServerRejected,
+            McpErrorKind::ToolRejected,
+            McpErrorKind::Configuration,
+        ];
+        for kind in kinds {
+            let expected = match kind {
+                McpErrorKind::Timeout => "timed out",
+                McpErrorKind::Transport => "the connection failed",
+                McpErrorKind::HttpStatus(_) => "the server answered with HTTP 503",
+                McpErrorKind::Protocol => "the response was invalid",
+                McpErrorKind::ServerRejected => "the server rejected the request",
+                McpErrorKind::ToolRejected => "the tool reported an error",
+                McpErrorKind::Configuration => "the server is misconfigured",
+            };
+            let detail = McpError {
+                server: "docs".into(),
+                method: "tools/call",
+                request_id: Some(1),
+                kind,
+            }
+            .detail()
+            .to_string();
+            let (text, hover) = text_and_hover(&diagnostic(
+                event_bus::DiagnosticSeverity::Error,
+                code::TOOL_RESULT,
+                &detail,
+            ));
+            assert_eq!(text, format!("MCP tool call to docs failed: {expected}"));
+            assert!(
+                hover.ends_with(&detail),
+                "{kind:?}: raw JSON stays in the hover"
+            );
+        }
+        let (text, hover) = text_and_hover(&diagnostic(
+            event_bus::DiagnosticSeverity::Error,
+            code::TOOL_RESULT,
+            r#"{"server":"docs","class":"brand_new","status":null}"#,
+        ));
+        assert_eq!(text, "MCP tool call to docs failed");
+        assert!(hover.contains("brand_new"));
     }
 
     // Given: unknown codes with an empty or JSON detail / When: shown
