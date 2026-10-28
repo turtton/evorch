@@ -515,14 +515,20 @@ read -r reply
 }
 
 #[tokio::test]
-async fn a_child_shell_whose_output_was_cut_into_an_artifact_reaches_the_program_whole() {
+async fn a_child_shell_cut_into_an_artifact_returns_its_tail_and_a_next_the_program_can_read() {
     let script = r#"printf '%s\n' '{"type":"tool_call","id":1,"name":"shell","args":{"command":"seq 1 3000"}}'
 read -r reply
 case "$reply" in
-  *'"truncated":false'*) lines=$(printf '%s' "$reply" | grep -o '2999\\n3000' | wc -l) ;;
-  *) lines=cut ;;
+  *'"truncated":true'*) ;;
+  *) printf '{"type":"done","value":"not truncated"}\n'; exit 0 ;;
 esac
-printf '{"type":"done","value":"%s"}\n' "$lines""#;
+path=$(printf '%s' "$reply" | sed 's/.*"next":{"path":"\([^"]*\)".*/\1/')
+printf '{"type":"tool_call","id":2,"name":"read","args":{"path":"%s"}}\n' "$path"
+read -r second
+case "$second" in
+  *'"ok":true'*) printf '{"type":"done","value":"continued"}\n' ;;
+  *) printf '{"type":"done","value":"read failed"}\n' ;;
+esac"#;
     let fixture = fixture(
         worker(script),
         None,
@@ -533,7 +539,7 @@ printf '{"type":"done","value":"%s"}\n' "$lines""#;
     let events = run(&fixture, Role::Worker).await;
 
     let text = result_text(&fixture.model, "js-1").await;
-    assert!(text.contains("=> 1\n"), "{text}");
+    assert!(text.contains("=> continued\n"), "{text}");
     let (output, _) = completed(&events, "js-1/1").expect("child completed");
     assert!(
         output.as_deref().unwrap().contains("[Output artifact: "),

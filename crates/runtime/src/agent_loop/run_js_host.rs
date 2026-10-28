@@ -395,60 +395,67 @@ impl RunJsHost for RuntimeRunJsHost {
             finished: false,
         };
         let outcome = validated.scope_approved().execute().await;
+        // The call's record is settled here, right after it finished and before the
+        // reply is shaped for the program. Nothing below awaits, so cancelling this
+        // future can no longer leave a call unrecorded or recorded twice: before this
+        // point the guard closes it (one terminal event, one record), after it the
+        // guard is finished and this is the only record.
         guard.finished = true;
-        drop(guard);
-        let (is_error, outcome) = match outcome {
-            Ok(result) => {
-                let normalized = normalize::normalize_full(&name, &args, &result).await;
-                let written = if matches!(name.as_str(), "edit" | "write") && !result.is_error {
-                    paths.clone()
-                } else {
-                    Vec::new()
-                };
-                let warning = (result
-                    .detail
-                    .as_ref()
-                    .and_then(|detail| detail.get("comment_checker"))
-                    .and_then(|checker| checker.get("outcome"))
-                    .and_then(Value::as_str)
-                    == Some("warning"))
-                .then(|| {
-                    format!(
-                        "post-edit checker warning on {}",
-                        paths.first().map_or("the edited file", String::as_str)
-                    )
-                });
-                let failure = result
-                    .is_error
-                    .then(|| first_line(&normalized.text).unwrap_or_else(|| "failed".into()));
-                (
-                    result.is_error,
-                    ChildOutcome {
-                        is_error: result.is_error,
-                        result: Ok(normalized.into_value()),
-                        paths: paths.clone(),
-                        written,
-                        failure,
-                        warning,
-                    },
-                )
-            }
-            Err(error) => {
-                let message = error.agent_message();
-                (true, failed(&message, paths.clone()))
-            }
-        };
         self.record(
             &parent_call_id,
             ChildRecord {
                 seq,
-                name,
+                name: name.clone(),
                 input: given,
-                is_error,
+                is_error: outcome.as_ref().map_or(true, |result| result.is_error),
                 paths: paths.iter().map(PathBuf::from).collect(),
             },
         );
-        outcome
+        drop(guard);
+        child_outcome(&name, &args, paths, outcome)
+    }
+}
+
+/// What the program is told about a finished call.
+fn child_outcome(
+    name: &str,
+    args: &Value,
+    paths: Vec<String>,
+    outcome: Result<tools::ToolResult, tools::ToolError>,
+) -> ChildOutcome {
+    let result = match outcome {
+        Ok(result) => result,
+        Err(error) => return failed(&error.agent_message(), paths),
+    };
+    let normalized = normalize::normalize(name, args, &result);
+    let written = if matches!(name, "edit" | "write") && !result.is_error {
+        paths.clone()
+    } else {
+        Vec::new()
+    };
+    let warning = (result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("comment_checker"))
+        .and_then(|checker| checker.get("outcome"))
+        .and_then(Value::as_str)
+        == Some("warning"))
+    .then(|| {
+        format!(
+            "post-edit checker warning on {}",
+            paths.first().map_or("the edited file", String::as_str)
+        )
+    });
+    let failure = result
+        .is_error
+        .then(|| first_line(&normalized.text).unwrap_or_else(|| "failed".into()));
+    ChildOutcome {
+        is_error: result.is_error,
+        result: Ok(normalized.into_value()),
+        paths,
+        written,
+        failure,
+        warning,
     }
 }
 
@@ -469,3 +476,6 @@ fn failed(message: &str, paths: Vec<String>) -> ChildOutcome {
         warning: None,
     }
 }
+
+#[cfg(test)]
+mod tests;

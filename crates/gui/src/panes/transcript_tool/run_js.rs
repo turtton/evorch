@@ -195,7 +195,55 @@ struct Sections<'a> {
     summary: Option<&'a str>,
 }
 
-fn sections(output: &str) -> Sections<'_> {
+/// Splits `output` by the byte offsets the run recorded in `detail.run_js.layout`,
+/// so a console or return text that contains `=> ` lines stays where it is. `None`
+/// when there is no layout, or it does not describe this exact text.
+fn sections_by_layout<'a>(output: &'a str, detail: &serde_json::Value) -> Option<Sections<'a>> {
+    let layout = detail.get("run_js")?.get("layout")?;
+    let offset = |value: &serde_json::Value| value.as_u64().and_then(|n| usize::try_from(n).ok());
+    if offset(layout.get("bytes")?)? != output.len() {
+        return None;
+    }
+    let console_end = offset(layout.get("console_end")?)?;
+    let summary_start = offset(layout.get("summary_start")?)?;
+    let returned = match layout.get("returned")? {
+        serde_json::Value::Null => None,
+        range => {
+            let range = range.as_array()?;
+            Some((offset(range.first()?)?, offset(range.get(1)?)?))
+        }
+    };
+    if console_end > summary_start {
+        return None;
+    }
+    let returned = match returned {
+        Some((start, end)) => {
+            if start < console_end + "=> ".len() || start > end || end >= summary_start {
+                return None;
+            }
+            Some(output.get(start..end)?)
+        }
+        None => None,
+    };
+    let console = output.get(..console_end)?;
+    let summary = output.get(summary_start..)?;
+    summary.starts_with("[run_js:").then(|| Sections {
+        console: console.trim_end_matches('\n'),
+        returned,
+        summary: Some(summary.trim_end()),
+    })
+}
+
+fn sections<'a>(output: &'a str, detail: Option<&serde_json::Value>) -> Sections<'a> {
+    detail
+        .and_then(|detail| sections_by_layout(output, detail))
+        .unwrap_or_else(|| sections_by_text(output))
+}
+
+/// The fallback for text the layout does not describe (an older result, or one the
+/// output limiter cut): the last line starting `[run_js:` is the summary and the
+/// last line starting `=> ` begins the return value.
+fn sections_by_text(output: &str) -> Sections<'_> {
     let trimmed = output.trim_end();
     let (rest, summary) = match trimmed.rfind('\n').map_or((0, 0), |at| (at, at + 1)) {
         (end, start) if trimmed[start..].starts_with("[run_js:") => {
@@ -325,7 +373,7 @@ pub fn run_js_card(
                 });
         }
         if expanded && !running {
-            result(ui, output.as_deref(), *is_error);
+            result(ui, output.as_deref(), detail.as_ref(), *is_error);
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, palette().ERROR_FG);
             }
@@ -356,7 +404,7 @@ pub fn run_js_card(
     });
 }
 
-fn result(ui: &mut Ui, output: Option<&str>, is_error: bool) {
+fn result(ui: &mut Ui, output: Option<&str>, detail: Option<&serde_json::Value>, is_error: bool) {
     let Some(output) = output else {
         return;
     };
@@ -365,7 +413,7 @@ fn result(ui: &mut Ui, output: Option<&str>, is_error: bool) {
         code(ui, output, palette().ERROR_FG);
         return;
     }
-    let sections = sections(output);
+    let sections = sections(output, detail);
     if !sections.console.is_empty() {
         ui.label("Output");
         code(ui, sections.console, palette().TEXT);
@@ -441,7 +489,7 @@ mod tests {
         let output =
             "line one\n=> line two\n=> {\"ok\":true}\n[run_js: 2 calls, 0 failed; wrote: a.rs]\n";
         assert_eq!(
-            sections(output),
+            sections(output, None),
             Sections {
                 console: "line one\n=> line two",
                 returned: Some("{\"ok\":true}"),
@@ -449,7 +497,7 @@ mod tests {
             }
         );
         assert_eq!(
-            sections("=> 3\n[run_js: 0 calls, 0 failed]"),
+            sections("=> 3\n[run_js: 0 calls, 0 failed]", None),
             Sections {
                 console: "",
                 returned: Some("3"),
@@ -458,7 +506,7 @@ mod tests {
         );
         // Text that does not follow the format stays whole.
         assert_eq!(
-            sections("plain"),
+            sections("plain", None),
             Sections {
                 console: "plain",
                 returned: None,
@@ -471,7 +519,7 @@ mod tests {
     fn a_leading_failure_notice_is_console_text_and_leaves_the_return_value_and_summary_alone() {
         let output = "1 of 2 tool calls failed: edit #1: old_string not found\nprogress\n=> done\n[run_js: 2 calls, 1 failed (edit #1: old_string not found)]";
         assert_eq!(
-            sections(output),
+            sections(output, None),
             Sections {
                 console: "1 of 2 tool calls failed: edit #1: old_string not found\nprogress",
                 returned: Some("done"),
@@ -480,9 +528,120 @@ mod tests {
         );
         let only_notice =
             "1 of 1 tool calls failed: read #1: x\n=> 3\n[run_js: 1 calls, 1 failed (read #1: x)]";
-        let parsed = sections(only_notice);
+        let parsed = sections(only_notice, None);
         assert_eq!(parsed.returned, Some("3"));
         assert_eq!(parsed.console, "1 of 1 tool calls failed: read #1: x");
+    }
+
+    /// A result and the layout the run records for it (`summary.rs`).
+    fn with_layout(
+        output: &str,
+        console_end: usize,
+        returned: Option<&str>,
+    ) -> (String, serde_json::Value) {
+        let range = returned.map(|text| {
+            let start = output.find(text).unwrap();
+            [start, start + text.len()]
+        });
+        let summary_start = output.rfind("[run_js:").unwrap();
+        let detail = json!({"run_js": {"layout": {
+            "bytes": output.len(),
+            "console_end": console_end,
+            "returned": range,
+            "summary_start": summary_start,
+        }}});
+        (output.to_owned(), detail)
+    }
+
+    #[test]
+    fn the_layout_keeps_a_return_marker_inside_a_text_where_it_belongs() {
+        let notice = "1 of 2 tool calls failed: read #1: x\n";
+        let printed = "step\n=> printed, not returned\n";
+        let returned = "first\n=> second line of the same string\nthird";
+        let output =
+            format!("{notice}{printed}=> {returned}\n[run_js: 2 calls, 1 failed (read #1: x)]");
+        let (output, detail) = with_layout(&output, notice.len() + printed.len(), Some(returned));
+
+        let by_layout = sections(&output, Some(&detail));
+
+        assert_eq!(
+            by_layout,
+            Sections {
+                console: "1 of 2 tool calls failed: read #1: x\nstep\n=> printed, not returned",
+                returned: Some(returned),
+                summary: Some("[run_js: 2 calls, 1 failed (read #1: x)]"),
+            }
+        );
+        // The text alone cannot tell: it takes the last marker as the return value.
+        assert_eq!(
+            sections(&output, None).returned,
+            Some("second line of the same string\nthird")
+        );
+        // No return value, but the printed text contains the marker.
+        let printed_only = "=> looks like a return value\n[run_js: 0 calls, 0 failed]";
+        let (output, detail) =
+            with_layout(printed_only, "=> looks like a return value\n".len(), None);
+        let by_layout = sections(&output, Some(&detail));
+        assert_eq!(by_layout.returned, None);
+        assert_eq!(by_layout.console, "=> looks like a return value");
+    }
+
+    #[test]
+    fn a_layout_that_does_not_describe_the_text_is_ignored() {
+        let output = "\u{e9}\n=> 7\n[run_js: 0 calls, 0 failed]";
+        let layout = |bytes: usize, console_end: usize, returned: Option<[usize; 2]>, summary| {
+            json!({"run_js": {"layout": {
+                "bytes": bytes,
+                "console_end": console_end,
+                "returned": returned,
+                "summary_start": summary,
+            }}})
+        };
+        let length = output.len();
+        let good = layout(length, 3, Some([6, 7]), 8);
+        assert_eq!(
+            sections_by_layout(output, &good),
+            Some(Sections {
+                console: "\u{e9}",
+                returned: Some("7"),
+                summary: Some("[run_js: 0 calls, 0 failed]"),
+            })
+        );
+        for (what, bad) in [
+            (
+                "the text was cut by the output limiter",
+                layout(length + 40, 3, Some([6, 7]), 8),
+            ),
+            (
+                "an offset inside a character",
+                layout(length, 1, Some([6, 7]), 8),
+            ),
+            (
+                "the return value before the console ends",
+                layout(length, 3, Some([4, 7]), 8),
+            ),
+            (
+                "the return value past the summary",
+                layout(length, 3, Some([6, 9]), 8),
+            ),
+            (
+                "an offset out of range",
+                layout(length, 3, Some([6, 7]), 500),
+            ),
+            (
+                "a summary that is not the summary",
+                layout(length, 3, Some([6, 7]), 6),
+            ),
+            ("console after the summary", layout(length, 9, None, 8)),
+        ] {
+            assert_eq!(sections_by_layout(output, &bad), None, "{what}");
+            assert_eq!(
+                sections(output, Some(&bad)),
+                sections_by_text(output),
+                "{what}"
+            );
+        }
+        assert_eq!(sections_by_layout(output, &json!({"run_js": {}})), None);
     }
 
     #[test]
@@ -520,7 +679,10 @@ mod tests {
     #[test]
     fn a_multi_line_string_return_value_runs_to_the_summary_line() {
         assert_eq!(
-            sections("progress\n=> first line\nsecond line\n\n[run_js: 1 calls, 0 failed]"),
+            sections(
+                "progress\n=> first line\nsecond line\n\n[run_js: 1 calls, 0 failed]",
+                None
+            ),
             Sections {
                 console: "progress",
                 returned: Some("first line\nsecond line"),

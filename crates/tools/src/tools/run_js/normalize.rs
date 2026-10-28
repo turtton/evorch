@@ -7,18 +7,10 @@
 //! from a normal tool call is unchanged; this only runs for calls made inside
 //! `run_js`.
 
-use std::io::Read;
-use std::path::Path;
-
 use serde_json::{Value, json};
 
 use super::diff_summary::{self, Summary, Writer};
 use crate::result::ToolResult;
-
-/// Largest output a program gets whole. Executor limits keep long output out of the
-/// model's context; a program's context is its own memory, so it may have more.
-/// Anything larger is returned as its tail with `next` pointing at the artifact.
-pub const INLINE_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 const READ_NOTE: &str = "\n\n[Output truncated (range limit:";
 const ARTIFACT_NOTE: &str = "\n[Output artifact: ";
@@ -59,61 +51,8 @@ impl Normalized {
     }
 }
 
-/// Normalises the result of `tool` called with `args`. Output the executor moved
-/// into an artifact is not restored; see [`normalize_full`].
+/// Normalises the result of `tool` called with `args`.
 pub fn normalize(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
-    normalize_with(tool, args, result, None)
-}
-
-/// [`normalize`], but output that the executor cut down to a preview and saved as a
-/// complete artifact of at most [`INLINE_OUTPUT_BYTES`] is read back, so the program
-/// sees all of it (`truncated` false).
-pub async fn normalize_full(tool: &str, args: &Value, result: &ToolResult) -> Normalized {
-    let full = full_output(result).await;
-    normalize_with(tool, args, result, full)
-}
-
-/// The text of the complete artifact behind `result`, when it is small enough.
-async fn full_output(result: &ToolResult) -> Option<String> {
-    let artifact = result.detail.as_ref()?.get("output_artifact")?;
-    if artifact.get("complete")?.as_bool() != Some(true) {
-        return None;
-    }
-    let saved = artifact.get("saved_bytes")?.as_u64()?;
-    if saved > INLINE_OUTPUT_BYTES {
-        return None;
-    }
-    let path = std::path::PathBuf::from(artifact.get("path")?.as_str()?);
-    tokio::task::spawn_blocking(move || read_artifact(&path, saved))
-        .await
-        .ok()?
-}
-
-/// Reads an artifact written by the executor: only under its output directory, and
-/// only if it still holds exactly the `bytes` that were saved.
-fn read_artifact(path: &Path, bytes: u64) -> Option<String> {
-    let root = crate::output::output_root().ok()?;
-    if !path.starts_with(&root) || path.components().any(|part| part.as_os_str() == "..") {
-        return None;
-    }
-    let mut text = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(INLINE_OUTPUT_BYTES + 1)
-        .read_to_end(&mut text)
-        .ok()?;
-    if text.len() as u64 != bytes {
-        return None;
-    }
-    String::from_utf8(text).ok()
-}
-
-fn normalize_with(
-    tool: &str,
-    args: &Value,
-    result: &ToolResult,
-    full: Option<String>,
-) -> Normalized {
     let mut text = result.content.clone();
     let mut detail = result.detail.clone().unwrap_or(Value::Null);
     let mut truncated = false;
@@ -130,16 +69,9 @@ fn normalize_with(
         .and_then(Value::as_str)
         && let Some(index) = text.rfind(ARTIFACT_NOTE)
     {
+        next = Some(json!({"tool": "read", "path": artifact}));
+        truncated = true;
         text.truncate(index);
-        if let Some(full) = full {
-            text = full;
-            if let Some(object) = detail.as_object_mut() {
-                object.remove("output_artifact");
-            }
-        } else {
-            next = Some(json!({"tool": "read", "path": artifact}));
-            truncated = true;
-        }
     } else if let Some(index) = text.rfind(UNSAVED_NOTE)
         && text.ends_with(']')
     {
@@ -410,69 +342,6 @@ mod tests {
         assert_eq!(normalized.detail["diff"], diff);
         let clean = normalize("git_diff", &json!({}), &ToolResult::success(""));
         assert_eq!(clean.text, "");
-    }
-
-    /// A shell result the executor turned into an artifact: `lines` lines of text.
-    fn large_shell_result(lines: usize) -> (ToolResult, String) {
-        let body: String = (0..lines).map(|index| format!("line {index}\n")).collect();
-        let mut capture = crate::output::Capture::default();
-        capture.push(body.as_bytes());
-        let mut result = capture.finish();
-        result.content = format!("exit_code: 0\n{}", result.content);
-        (result, body)
-    }
-
-    #[tokio::test]
-    async fn output_cut_into_an_artifact_is_returned_whole_to_the_program() {
-        let (result, body) = large_shell_result(2000);
-        assert!(result.content.contains("[Output artifact: "));
-        let preview = normalize("shell", &json!({}), &result);
-        assert!(preview.truncated, "the model-side preview is partial");
-        assert!(preview.text.len() < body.len());
-
-        let full = normalize_full("shell", &json!({}), &result).await;
-        assert!(full.ok);
-        assert_eq!(full.text, body);
-        assert!(!full.truncated);
-        assert_eq!(full.next, None);
-        assert_eq!(full.detail["exit_code"], 0);
-    }
-
-    #[tokio::test]
-    async fn output_too_large_to_inline_keeps_the_artifact_continuation() {
-        let line = "x".repeat(1023);
-        let body = format!("{line}\n").repeat(1100);
-        let mut capture = crate::output::Capture::default();
-        capture.push(body.as_bytes());
-        let mut result = capture.finish();
-        result.content = format!("exit_code: 0\n{}", result.content);
-        assert!(body.len() as u64 > INLINE_OUTPUT_BYTES);
-
-        let normalized = normalize_full("shell", &json!({}), &result).await;
-        assert!(normalized.truncated);
-        let path = normalized.next.as_ref().expect("a continuation")["path"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), body);
-        assert!(normalized.text.len() < body.len());
-    }
-
-    #[tokio::test]
-    async fn only_files_under_the_output_directory_are_read_back() {
-        let directory = tempfile::tempdir().unwrap();
-        let outside = directory.path().join("secret.txt");
-        std::fs::write(&outside, "secret").unwrap();
-        let result = ToolResult::success(format!(
-            "preview\n[Output artifact: {}; captured 6 of 6 bytes; complete; redacted spans: 0. Use read with offset/limit or grep. Temporary logs can expire.]",
-            outside.display()
-        ))
-        .with_detail(json!({
-            "output_artifact": {"path": outside, "original_bytes": 6, "saved_bytes": 6, "complete": true, "redactions": 0}
-        }));
-        let normalized = normalize_full("git_diff", &json!({}), &result).await;
-        assert_eq!(normalized.text, "preview");
-        assert!(normalized.truncated);
     }
 
     #[test]

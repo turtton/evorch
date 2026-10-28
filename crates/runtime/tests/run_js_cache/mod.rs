@@ -12,7 +12,7 @@ use runtime::{Role, RunConfig};
 use sandbox::DirectSandbox;
 use serde_json::{Value, json};
 use tools::Tool;
-use tools::tools::run_js::WorkerLauncher;
+use tools::tools::run_js::{WorkerLauncher, description as run_js_description};
 
 use super::{
     BulkRead, Harness, MODEL, Wire, harness_with_model, read_response, text_response,
@@ -39,6 +39,25 @@ printf '%s\n' '{{"type":"done","value":"all done"}}'"#,
     )
 }
 
+fn shell() -> Arc<dyn Tool> {
+    Arc::new(tools::Shell::new(Arc::new(DirectSandbox::new_unchecked())))
+}
+
+fn definition<'a>(request: &'a Value, name: &str) -> &'a Value {
+    request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is offered"))
+}
+
+fn description<'a>(request: &'a Value, name: &str) -> &'a str {
+    definition(request, name)["function"]["description"]
+        .as_str()
+        .unwrap()
+}
+
 fn harness(enabled: bool, script: Vec<ScriptedResponse>, launcher: WorkerLauncher) -> Harness {
     harness_with_model(
         Wire::ChatCompletions,
@@ -48,6 +67,8 @@ fn harness(enabled: bool, script: Vec<ScriptedResponse>, launcher: WorkerLaunche
         Arc::new(BulkRead),
         vec![
             Arc::new(tools::Write) as Arc<dyn Tool>,
+            Arc::new(tools::Edit),
+            shell(),
             Arc::new(tools::RunJs::with_launcher(launcher)),
         ],
         None,
@@ -173,6 +194,47 @@ async fn the_run_js_definition_lists_the_callable_tools_of_the_run() {
     assert!(description.contains("write(args: { content: string; path: string })"));
 }
 
+/// `shell` and `edit` point at run_js only while it is on; the pointers are part of
+/// the run's fixed tool definitions, so they never change during the run.
+#[tokio::test]
+async fn the_shell_and_edit_hints_are_in_every_request_of_a_run_that_has_run_js() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("written.txt");
+    let mut harness = harness(
+        true,
+        vec![run_js_response(0), read_response(3), text_response("done")],
+        worker(&target),
+    );
+    let run =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    verify_trace(&harness, run, &events, 0);
+
+    let requests = requests(&harness);
+    assert_eq!(requests.len(), 3);
+    let shell_hinted = format!(
+        "{}{}",
+        shell().description(),
+        run_js_description::SHELL_HINT
+    );
+    let edit_hinted = format!(
+        "{}{}",
+        tools::Edit.description(),
+        run_js_description::EDIT_HINT
+    );
+    for request in &requests {
+        assert_eq!(description(request, "shell"), shell_hinted);
+        assert_eq!(description(request, "edit"), edit_hinted);
+        assert!(!description(request, "write").contains("run_js"));
+    }
+    let first = serde_json::to_string(&requests[0]["tools"]).unwrap();
+    for request in &requests[1..] {
+        assert_eq!(serde_json::to_string(&request["tools"]).unwrap(), first);
+    }
+}
+
 /// While it is off, nothing about the other tools differs.
 #[tokio::test]
 async fn disabled_run_js_leaves_the_other_tool_definitions_unchanged() {
@@ -194,12 +256,34 @@ async fn disabled_run_js_leaves_the_other_tool_definitions_unchanged() {
     let (off, on) = (requests(&off), requests(&on));
     assert!(!tool_names(&off[0]).contains(&"run_js".to_owned()));
     assert!(!off[0]["tools"].to_string().contains("run_js"));
-    let without_run_js: Vec<Value> = on[0]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|tool| tool["function"]["name"] != "run_js")
-        .cloned()
-        .collect();
-    assert_eq!(Value::Array(without_run_js), off[0]["tools"]);
+    // Off, shell and edit keep the descriptions their tools define.
+    assert_eq!(description(&off[0], "shell"), shell().description());
+    assert_eq!(description(&off[0], "edit"), tools::Edit.description());
+    // On, only run_js is added and the two pointers appended; the rest is identical.
+    let others = |request: &Value| -> Vec<Value> {
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| {
+                !matches!(
+                    tool["function"]["name"].as_str(),
+                    Some("run_js" | "shell" | "edit")
+                )
+            })
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&on[0]), others(&off[0]));
+    for name in ["shell", "edit"] {
+        let (before, after) = (definition(&off[0], name), definition(&on[0], name));
+        let mut hinted = after.clone();
+        let original = description(&off[0], name);
+        let added = description(&on[0], name)
+            .strip_prefix(original)
+            .expect("only appended");
+        assert!(added.contains("run_js"), "{name}: {added}");
+        hinted["function"]["description"] = Value::String(original.to_owned());
+        assert_eq!(&hinted, before, "{name} differs beyond its description");
+    }
 }

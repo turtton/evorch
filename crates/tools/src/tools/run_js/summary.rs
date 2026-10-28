@@ -1,9 +1,13 @@
 //! The result the model receives: printed output, the returned value and one
 //! summary line, plus the `detail` the interface reads.
 //!
-//! Shape of `content`, which the GUI parses:
+//! Shape of `content`, which the GUI reads through `detail.run_js.layout` (byte
+//! offsets of the parts below, so a printed or returned text that itself contains
+//! `=> ` lines cannot be mistaken for the structure; text without a matching layout
+//! falls back to reading the last `[run_js:` and `=> ` lines):
 //!
 //! ```text
+//! N of M tool calls failed: …  (only when a call failed)
 //! <printed output>
 //! => <returned value>          (a string as is, anything else as JSON)
 //! <error message and stack>    (only when the program failed)
@@ -28,14 +32,20 @@ const LISTED_WARNINGS: usize = 3;
 pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u64) -> ToolResult {
     state.calls.sort_by_key(|call| call.seq);
     state.failures.sort_by_key(|failure| failure.seq);
-    let mut content = std::mem::take(&mut state.output);
-    let output_bytes = content.len();
-    if !content.is_empty() && !content.ends_with('\n') {
+    let mut content = failed_calls_notice(&state)
+        .map(|notice| format!("{notice}\n"))
+        .unwrap_or_default();
+    let output = std::mem::take(&mut state.output);
+    let output_bytes = output.len();
+    content.push_str(&output);
+    if !output.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
     if state.output_truncated {
         content.push_str("[run_js: output was cut at 8 MiB]\n");
     }
+    let console_end = content.len();
+    let mut returned = None;
     let mut timed_out = false;
     let mut return_bytes = 0;
     let mut failure = None;
@@ -69,7 +79,10 @@ pub(super) fn finish(mut state: Run, ending: Ending, stderr: &str, timeout_ms: u
                     other => other.to_string(),
                 };
                 return_bytes = text.len();
-                content.push_str(&format!("=> {text}\n"));
+                content.push_str("=> ");
+                returned = Some((content.len(), content.len() + text.len()));
+                content.push_str(&text);
+                content.push('\n');
             }
         }
         Ending::Failed(reason) => {
@@ -95,11 +108,16 @@ treat their effects as unknown"
         content.push_str(failure);
         content.push('\n');
     }
+    let summary_start = content.len();
     content.push_str(&summary_line(&state));
-    if let Some(notice) = failed_calls_notice(&state) {
-        content.insert_str(0, &format!("{notice}\n"));
-    }
-    let detail = json!({"run_js": run_detail(&state, output_bytes, return_bytes, timed_out)});
+    let layout = json!({
+        "bytes": content.len(),
+        "console_end": console_end,
+        "returned": returned.map(|(start, end)| [start, end]),
+        "summary_start": summary_start,
+    });
+    let detail =
+        json!({"run_js": run_detail(&state, output_bytes, return_bytes, timed_out, layout)});
     let result = if failure.is_some() {
         ToolResult::error(content)
     } else {
@@ -205,7 +223,13 @@ pub(super) fn one_line(text: &str, limit: usize) -> String {
     cut
 }
 
-fn run_detail(state: &Run, output_bytes: usize, return_bytes: usize, timed_out: bool) -> Value {
+fn run_detail(
+    state: &Run,
+    output_bytes: usize,
+    return_bytes: usize,
+    timed_out: bool,
+    layout: Value,
+) -> Value {
     let written: Vec<&String> = state.written.iter().collect();
     let uncertain: Vec<&String> = state.uncertain.iter().collect();
     let calls_value = |keep_paths: bool, limit: usize| -> Vec<Value> {
@@ -230,6 +254,7 @@ fn run_detail(state: &Run, output_bytes: usize, return_bytes: usize, timed_out: 
             "calls_failed": state.calls.iter().filter(|call| call.is_error).count(),
             "output_bytes": output_bytes,
             "return_bytes": return_bytes,
+            "layout": layout,
             "timed_out": timed_out,
             "limit_hit": state.limit_hit,
             "written_paths": written,
@@ -353,6 +378,40 @@ wrote: /w/b.rs; warnings: write #2: comment checker flagged /w/b.rs]"
         assert_eq!(result.detail.unwrap()["run_js"]["output_bytes"], 9);
         let clean = finish(Run::default(), done(json!("ok")), "", 1000);
         assert!(!clean.content.contains("tool calls failed"));
+    }
+
+    #[test]
+    fn the_layout_locates_the_parts_even_when_the_texts_contain_return_markers() {
+        let mut state = Run {
+            output: "step\n=> printed, not returned".into(),
+            ..Run::default()
+        };
+        let (call, failure) = failed_call(1, "read", "no such file");
+        state.calls.push(call);
+        state.failures.push(failure);
+        let returned = "first\n=> second line of the same string\nthird";
+        let result = finish(state, done(json!(returned)), "", 1000);
+        let layout = &result.detail.as_ref().unwrap()["run_js"]["layout"];
+        let content = &result.content;
+        let at = |key: &str| usize::try_from(layout[key].as_u64().unwrap()).unwrap();
+        assert_eq!(at("bytes"), content.len());
+        assert_eq!(
+            &content[..at("console_end")],
+            "1 of 1 tool calls failed: read #1: no such file\nstep\n=> printed, not returned\n"
+        );
+        let range = layout["returned"].as_array().unwrap();
+        let (start, end) = (
+            usize::try_from(range[0].as_u64().unwrap()).unwrap(),
+            usize::try_from(range[1].as_u64().unwrap()).unwrap(),
+        );
+        assert_eq!(&content[start..end], returned);
+        assert!(content[at("summary_start")..].starts_with("[run_js: 1 calls, 1 failed"));
+
+        let nothing = finish(Run::default(), done(Value::Null), "", 1000);
+        let layout = &nothing.detail.unwrap()["run_js"]["layout"];
+        assert!(layout["returned"].is_null());
+        assert_eq!(layout["console_end"], 0);
+        assert_eq!(layout["summary_start"], 0);
     }
 
     #[test]

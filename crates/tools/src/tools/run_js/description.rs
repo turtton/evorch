@@ -42,7 +42,7 @@ if the program would only return one long shell command's output, call shell dir
 A failed call resolves with ok=false and the message in text: check `.ok`. `readText(path)` returns a whole file.\n\
 - Edits go through tools.edit / tools.write so they show as diffs. The text of edit and write is a one-line summary (`edited <path> (+N −M)`): \
 check `.ok` instead of printing it. The full diff is in `detail.diff`; git_diff's text is a per-file summary and its diff is in `detail.diff` too.\n\
-- Output up to 1 MiB comes back whole. With truncated=true you have only part of it: follow `next` (`readText(next.path)`) before counting or concluding.\n\
+- truncated=true means `text` is only part of the output. With a `next`, continue with `readText(next.path)`; with next=null (for example a cut-off grep), call again with a narrower range. Never count or conclude from partial output.\n\
 - ES2023 plus queueMicrotask, performance, atob/btoa, WeakRef, Set methods and Iterator helpers. Not available: fs, require, import, \
 fetch, timers, TextEncoder, URL, structuredClone, Intl (localeCompare orders by code point).\n\
 - A returned string is shown as is, anything else as JSON.\n\
@@ -83,7 +83,9 @@ mod tests {
         assert!(text.contains("Limits: 30 s (timeout_ms up to 300000), 64 MiB, 200 tool calls."));
         assert!(text.contains("grep(args: { path: string; pattern: string })"));
         assert!(text.contains("Run builds and long tests as normal shell jobs"));
-        assert!(text.contains("follow `next`"));
+        assert!(text.contains("readText(next.path)"));
+        assert!(text.contains("next=null"));
+        assert!(!text.contains("1 MiB"));
         assert!(text.contains("structuredClone"));
     }
 

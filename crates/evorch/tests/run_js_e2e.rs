@@ -56,9 +56,7 @@ impl RunJsHost for TestHost {
         {
             Ok(result) => ChildOutcome {
                 is_error: result.is_error,
-                result: Ok(normalize::normalize_full(&call.name, &call.args, &result)
-                    .await
-                    .into_value()),
+                result: Ok(normalize::normalize(&call.name, &call.args, &result).into_value()),
                 paths: Vec::new(),
                 written: Vec::new(),
                 failure: None,
