@@ -56,8 +56,8 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 #[cfg(test)]
 mod host_input_tests;
 pub(crate) mod user_inbox;
-pub use user_inbox::FollowUpStatus;
 use user_inbox::UserInbox;
+pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
 
 const INBOX_CAPACITY: usize = 32;
 
@@ -1506,6 +1506,7 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
+        let inbox_rx = crate::runtime::user_inbox::InboxReceiver::new(inbox_rx, &user_inbox);
         let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
@@ -1976,7 +1977,7 @@ impl AgentRuntime {
         let send = || {
             // A sealed incarnation has drained its inbox for good: refuse before
             // reserving, persisting or creating a goal.
-            if trusted_user && inbox.sealed() {
+            if trusted_user && (inbox.sealed() || inbox.status().pending >= INBOX_CAPACITY) {
                 return Err(RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
                 });
@@ -2038,11 +2039,11 @@ impl AgentRuntime {
                 self.goal_user_input(run_id, &text);
             }
             let enqueue = |seq| {
-                permit.send((text.clone(), images, trusted_user, prompt_id, seq));
+                permit.send((text.clone(), images, trusted_user, prompt_id.clone(), seq));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {
-                inbox.enqueue(enqueue)?;
+                inbox.enqueue(prompt_id.as_deref(), enqueue)?;
             } else {
                 enqueue(0)?;
             }
@@ -2100,7 +2101,9 @@ impl AgentRuntime {
                     prompt_id,
                     reason,
                 },
-                storage::HostInputStatus::Accepted => continue,
+                storage::HostInputStatus::Accepted | storage::HostInputStatus::Withdrawn => {
+                    continue;
+                }
             };
             self.shared.bus.emit(Event::new(event));
         }
@@ -2224,6 +2227,33 @@ impl AgentRuntime {
         let mut status = entry.user_inbox.status();
         status.closed = entry.inbox_tx.is_closed();
         Ok(status)
+    }
+
+    /// Withdraw only input not yet adopted by the agent. The next-request cut
+    /// does not consume input. Successful withdrawal is durable before returning.
+    pub fn withdraw_follow_up(&self, run_id: RunId, prompt_id: &str) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
+        let inbox = Arc::clone(&self.entry(run_id)?.user_inbox);
+        inbox.withdraw(prompt_id, || {
+            let store = self
+                .shared
+                .run_store
+                .get()
+                .ok_or_else(|| Self::review_error(run_id, "storage is not configured"))?;
+            let transition = storage::HostInputTransition::new(
+                prompt_id,
+                storage::HostInputStatus::Withdrawn,
+                None,
+            );
+            let applied = store
+                .handle
+                .transition_host_inputs(&[transition])
+                .map_err(|error| Self::review_error(run_id, error))?;
+            if applied.is_empty() {
+                return Err(user_inbox::FollowUpWithdrawalError::AlreadyConsumed.into());
+            }
+            Ok(())
+        })
     }
 
     /// Deliver queued follow-ups before the next model request, without cancelling

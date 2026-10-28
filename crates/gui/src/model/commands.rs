@@ -165,6 +165,15 @@ pub trait CommandSink: Send {
         Ok(Vec::new())
     }
 
+    /// Withdraw an accepted input before it enters the live agent context.
+    fn withdraw_follow_up(
+        &mut self,
+        _thread: &str,
+        _prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        Err(runtime::FollowUpWithdrawalError::Unknown.into())
+    }
+
     /// Runtime receipt observation, not an acknowledgement of command acceptance.
     fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
         None

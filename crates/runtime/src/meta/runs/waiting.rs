@@ -128,16 +128,21 @@ async fn wait_with(
         // Another wait in this same tool batch may already have received input.
         user_input_response(runtime, caller, &request)
     } else {
-        tokio::select! {
-            biased;
-            // Observe cancellation/terminal state first. If observation wins a
-            // race with UI delivery, the receiver retains the input for the next
-            // tool round boundary.
-            result = observe(runtime, caller, &request, state.channels.cancel_rx.clone()) => result,
-            Some(message) = state.channels.inbox_rx.recv() => {
-                // Inject after ToolResults, never between ToolUse and ToolResult.
-                state.queue_user_message(message);
-                user_input_response(runtime, caller, &request)
+        let observation = observe(runtime, caller, &request, state.channels.cancel_rx.clone());
+        tokio::pin!(observation);
+        loop {
+            tokio::select! {
+                biased;
+                // Keep observation alive when discarding a withdrawn input;
+                // receiving a tombstone must not interrupt the wait.
+                result = &mut observation => break result,
+                Some(message) = state.channels.inbox_rx.recv() => {
+                    // Inject after ToolResults, never between ToolUse and ToolResult.
+                    state.queue_user_message(message);
+                    if state.has_pending_user_messages() {
+                        break user_input_response(runtime, caller, &request);
+                    }
+                }
             }
         }
     };

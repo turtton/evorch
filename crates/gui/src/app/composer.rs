@@ -261,6 +261,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             return;
                         }
                         let submission_id = submission.submission_id.clone();
+                        self.queued_images
+                            .insert(submission_id.clone(), self.composer.attachments.clone());
                         self.issued
                             .push(WorkbenchCommand::SendChat(submission.clone()));
                         let events = match permit {

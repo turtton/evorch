@@ -2,7 +2,7 @@ use super::*;
 use crate::AgentRuntime;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Default)]
 struct BlockedModel {
@@ -123,7 +123,7 @@ fn fixture_with_model(
         channels: LoopChannels {
             phase_tx: watch::channel(AgentRunPhase::Pending).0,
             message_count_tx: watch::channel(0).0,
-            inbox_rx: mpsc::channel(1).1,
+            inbox_rx: mpsc::channel(1).1.into(),
             user_inbox: Arc::new(crate::runtime::user_inbox::UserInbox::default()),
             cancel_rx,
             mailbox_version_rx: mailbox.subscribe_version(),

@@ -33,6 +33,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 && ids.contains(&message.id)
             {
                 message.status = DeliveryStatus::Delivered;
+                self.queued_images.remove(&message.id);
                 changed = true;
             }
         }
@@ -51,7 +52,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .map(|receipt| (receipt.prompt_id.as_str(), receipt))
             .collect();
-        let mut changed = false;
+        let before = self.history.len();
+        self.history.retain(|message| {
+            !receipts
+                .get(message.id.as_str())
+                .is_some_and(|receipt| receipt.status == HostInputStatus::Withdrawn)
+        });
+        let mut changed = self.history.len() != before;
         for message in &mut self.history {
             if message.resolution.is_some() || message.id.is_empty() {
                 continue;
@@ -63,6 +70,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     changed = true;
                 }
                 match receipt.status {
+                    // A failed withdrawal proves adoption before the snapshot
+                    // receipt commits. Accepted cannot revoke that observation.
+                    HostInputStatus::Accepted if was_delivered => DeliveryStatus::Delivered,
                     HostInputStatus::Accepted => {
                         let terminal = self.phases.get(&receipt.run_id).is_some_and(|phase| {
                             matches!(
@@ -86,6 +96,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     HostInputStatus::Delivered => DeliveryStatus::Delivered,
                     HostInputStatus::Dropped => DeliveryStatus::Dropped,
                     HostInputStatus::Unknown => DeliveryStatus::Unknown,
+                    HostInputStatus::Withdrawn => continue,
                 }
             } else if startup && message.status == DeliveryStatus::Queued {
                 DeliveryStatus::Rejected {
@@ -213,6 +224,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn rebuild_delivery_rows(&mut self) {
+        let pending: HashSet<_> = self
+            .history
+            .iter()
+            .filter(|message| message.status == DeliveryStatus::Queued || message.awaits_user())
+            .map(|message| message.id.as_str())
+            .collect();
+        self.queued_images
+            .retain(|id, _| pending.contains(id.as_str()));
         self.follow_up_queues.clear();
         for message in &self.history {
             if message.resolution.is_none()
@@ -236,22 +255,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .iter()
             .filter(|draft| Some(&draft.thread_id) == thread.as_ref())
             .map(|draft| draft.images_needed)
-            .sum();
+            .sum::<usize>()
+            .saturating_sub(self.composer.attachments.len());
     }
 
     /// Move to a durable composer draft before touching the visible editor.
     /// A failed save rolls back both the original and its draft.
     pub(super) fn move_to_composer(&mut self, id: &str) -> bool {
+        self.move_to_composer_inner(id, false)
+    }
+
+    pub(super) fn move_withdrawn_to_composer(&mut self, id: &str) -> bool {
+        self.move_to_composer_inner(id, true)
+    }
+
+    fn move_to_composer_inner(&mut self, id: &str, withdrawn: bool) -> bool {
         let Some(index) = self
             .history
             .iter()
-            .position(|message| message.id == id && message.awaits_user())
+            .position(|message| message.id == id && (withdrawn || message.awaits_user()))
         else {
             return false;
         };
         let history = self.history.clone();
         let drafts = self.composer_drafts.clone();
         let sidebar = self.sidebar.clone();
+        let images = if withdrawn {
+            self.queued_images.get(id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let message = &mut self.history[index];
         let draft_id = uuid::Uuid::new_v4().to_string();
         message.resolution = Some(Resolution::MovedToComposer {
@@ -296,14 +329,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             record.draft_input.clone_from(&restored);
         }
+        if withdrawn {
+            self.history.remove(index);
+        }
         if let Err(error) = self.persist_history() {
-            self.history = history;
-            self.composer_drafts = drafts;
-            self.sidebar = sidebar;
             self.push_notice(format!("下書きを保存できませんでした: {error}"));
-            return false;
+            if !withdrawn {
+                self.history = history;
+                self.composer_drafts = drafts;
+                self.sidebar = sidebar;
+                return false;
+            }
+            // Withdrawal is already durable and cannot be undone. Preserve the
+            // recovered editor contents in memory even when saving its draft fails.
+        }
+        if withdrawn {
+            self.queued_images.remove(id);
         }
         if active {
+            self.composer.attachments.extend(images);
             self.composer.input = restored;
             self.composer.pending_cursor = Some(self.composer.input.chars().count());
             self.composer.focus_requested = true;

@@ -336,6 +336,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Stop => self.stop_chat(),
                 ComposerAction::DeliverNextTurn => self.deliver_follow_ups_next_turn(),
+                ComposerAction::EditQueued(index) => self.withdraw_queued_follow_up(index, true),
+                ComposerAction::DeleteQueued(index) => self.withdraw_queued_follow_up(index, false),
                 ComposerAction::RestoreQueued(index) => self.restore_queued_follow_up(index),
                 ComposerAction::DismissQueued(index) => self.dismiss_queued_follow_up(index),
                 ComposerAction::ModelPreference(_) => {}

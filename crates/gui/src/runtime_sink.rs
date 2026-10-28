@@ -177,6 +177,19 @@ impl CommandSink for RuntimeCommandSink {
         Ok(Vec::new())
     }
 
+    fn withdraw_follow_up(
+        &mut self,
+        thread: &str,
+        prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        let run = self
+            .chat_runs
+            .get(thread)
+            .or_else(|| self.goal_runs.get(thread))
+            .ok_or(runtime::FollowUpWithdrawalError::Unknown)?;
+        self.runtime.withdraw_follow_up(*run, prompt_id)
+    }
+
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
         let run = self
             .chat_runs

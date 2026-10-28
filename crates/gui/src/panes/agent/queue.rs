@@ -2,7 +2,7 @@
 //! agent, listed above goal and procedures.
 //!
 //! Rows read top to bottom in delivery order. Only the next one to send
-//! carries a control, because the runtime delivers the whole queue together.
+//! carries Send sooner; each queued input can independently be edited/deleted.
 use crate::model::composer::QueuedFollowUp;
 use crate::panes::composer::ComposerAction;
 use crate::theme::widgets::{accessible, ghost, icon_button, icon_text, labeled};
@@ -72,14 +72,23 @@ fn row(
                 if item_button(ui, icons::PENCIL_SIMPLE, "Edit in composer", &item.text).clicked() {
                     action = Some(ComposerAction::RestoreQueued(index));
                 }
-            } else if is_next {
-                if band.next_turn_requested {
-                    let response = ui.label(
-                        egui::RichText::new(icons::HOURGLASS_MEDIUM).color(palette().TEXT_MUTED),
-                    );
-                    labeled(response, "Sending after the current tools");
-                } else if icon_button(ui, icons::KEY_RETURN, "Send sooner").clicked() {
-                    action = Some(ComposerAction::DeliverNextTurn);
+            } else {
+                if item_button(ui, icons::X, "Delete", &item.text).clicked() {
+                    action = Some(ComposerAction::DeleteQueued(index));
+                }
+                if item_button(ui, icons::PENCIL_SIMPLE, "Edit", &item.text).clicked() {
+                    action = Some(ComposerAction::EditQueued(index));
+                }
+                if is_next {
+                    if band.next_turn_requested {
+                        let response = ui.label(
+                            egui::RichText::new(icons::HOURGLASS_MEDIUM)
+                                .color(palette().TEXT_MUTED),
+                        );
+                        labeled(response, "Sending after the current tools");
+                    } else if icon_button(ui, icons::KEY_RETURN, "Send sooner").clicked() {
+                        action = Some(ComposerAction::DeliverNextTurn);
+                    }
                 }
             }
             let color = if is_next {
