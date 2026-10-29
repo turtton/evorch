@@ -6,15 +6,19 @@ use super::*;
 use crate::skill::{SkillScope, append_skill_attachment};
 use crate::skill_source::SkillCatalogSource;
 
-const BODY: &str = "Step one.\nStep two with a </skill> marker.\n";
+pub(super) const BODY: &str = "Step one.\nStep two with a </skill> marker.\n";
 
-struct Skills {
+/// `(name, text)` of each skill a reviewer is shown.
+type ReviewedSkills = Vec<(String, String)>;
+
+pub(super) struct Skills {
     fixture: Fixture,
-    events: event_bus::EventReceiver,
+    pub(super) events: event_bus::EventReceiver,
     _skills: tempfile::TempDir,
+    config: storage::StorageConfig,
 }
 
-fn write_skill(dir: &std::path::Path, name: &str, body: &str) {
+pub(super) fn write_skill(dir: &std::path::Path, name: &str, body: &str) {
     let skill = dir.join(name);
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
@@ -25,7 +29,11 @@ fn write_skill(dir: &std::path::Path, name: &str, body: &str) {
 }
 
 impl Skills {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
+        Self::with_model(Arc::new(CompletingModel))
+    }
+
+    pub(super) fn with_model(model: Arc<dyn AgentModel>) -> Self {
         let skills = tempfile::tempdir().unwrap();
         write_skill(skills.path(), "demo", BODY);
         write_skill(skills.path(), "other", "Other steps.\n");
@@ -44,20 +52,18 @@ impl Skills {
         let storage = storage::Storage::open(config.clone()).unwrap();
         let bus = Arc::new(EventBus::new(128));
         let events = bus.subscribe();
-        let runtime = AgentRuntime::new(
-            bus.clone(),
-            Arc::new(ToolExecutor::new(bus.clone())),
-            Arc::new(CompletingModel),
-        )
-        .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap())
-        .with_skill_source(Arc::new(SkillCatalogSource::new(
-            config::Config::default(),
-            None,
-            Vec::new(),
-            vec![(SkillScope::User, skills.path().to_path_buf())],
-            bus,
-        )));
+        let runtime =
+            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus.clone())), model)
+                .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap())
+                .with_skill_source(Arc::new(SkillCatalogSource::new(
+                    config::Config::default(),
+                    None,
+                    Vec::new(),
+                    vec![(SkillScope::User, skills.path().to_path_buf())],
+                    bus,
+                )));
         Self {
+            config,
             events,
             fixture: Fixture {
                 runtime,
@@ -68,12 +74,28 @@ impl Skills {
         }
     }
 
-    fn skills_dir(&self) -> &std::path::Path {
+    /// A new runtime over the same storage and skill directory, as after a restart.
+    pub(super) fn restarted(&self, model: Arc<dyn AgentModel>) -> AgentRuntime {
+        let bus = Arc::new(EventBus::new(128));
+        AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus.clone())), model)
+            .with_run_store(
+                crate::RunStore::open(&self.config, self.fixture.storage.handle()).unwrap(),
+            )
+            .with_skill_source(Arc::new(SkillCatalogSource::new(
+                config::Config::default(),
+                None,
+                Vec::new(),
+                vec![(SkillScope::User, self._skills.path().to_path_buf())],
+                bus,
+            )))
+    }
+
+    pub(super) fn skills_dir(&self) -> &std::path::Path {
         self._skills.path()
     }
 
     /// A waiting chat run that accepts follow-ups.
-    async fn waiting_chat(&self) -> RunId {
+    pub(super) async fn waiting_chat(&self) -> RunId {
         let run = self
             .runtime()
             .delegate_chat(
@@ -93,7 +115,7 @@ impl Skills {
 
     /// The `(name, text)` pairs the reviewer would see as loaded skills: from
     /// the live review context and from one rebuilt out of storage.
-    fn reviewed_skills(&self, run: RunId) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    fn reviewed_skills(&self, run: RunId) -> (ReviewedSkills, ReviewedSkills) {
         let store = self.runtime().shared.run_store.get().unwrap();
         let live = self.runtime().chat_review_context(store, run).unwrap();
         let restored = crate::run_store::materialize_review_context(store, run).unwrap();
@@ -118,11 +140,11 @@ impl Skills {
         (skills(live), skills(restored))
     }
 
-    fn runtime(&self) -> &AgentRuntime {
+    pub(super) fn runtime(&self) -> &AgentRuntime {
         &self.fixture.runtime
     }
 
-    fn mentioning(names: &[&str], prompt_id: &str) -> RunConfig {
+    pub(super) fn mentioning(names: &[&str], prompt_id: &str) -> RunConfig {
         RunConfig {
             skill_mentions: names.iter().map(|name| (*name).to_owned()).collect(),
             initial_prompt_id: Some(prompt_id.into()),
@@ -130,7 +152,7 @@ impl Skills {
         }
     }
 
-    fn evidence(&self, run: RunId) -> Vec<storage::ReviewEvidenceRow> {
+    pub(super) fn evidence(&self, run: RunId) -> Vec<storage::ReviewEvidenceRow> {
         self.runtime()
             .shared
             .run_store
@@ -141,7 +163,7 @@ impl Skills {
     }
 
     /// The user-role text blocks of the run's saved history.
-    fn user_texts(&self, run: RunId) -> Vec<String> {
+    pub(super) fn user_texts(&self, run: RunId) -> Vec<String> {
         let record = self
             .runtime()
             .shared
@@ -164,7 +186,7 @@ impl Skills {
             .collect()
     }
 
-    fn receipt_text(&self, prompt_id: &str) -> String {
+    pub(super) fn receipt_text(&self, prompt_id: &str) -> String {
         self.runtime()
             .host_input_receipts(&[prompt_id.into()])
             .unwrap()
@@ -174,7 +196,7 @@ impl Skills {
     }
 }
 
-fn attached(typed: &str, bodies: &[(&str, &str)]) -> String {
+pub(super) fn attached(typed: &str, bodies: &[(&str, &str)]) -> String {
     let mut text = typed.to_owned();
     for (name, body) in bodies {
         append_skill_attachment(&mut text, name, body);

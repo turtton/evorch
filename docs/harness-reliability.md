@@ -130,11 +130,19 @@ question remain the user's words. A user may attach at most 6 skills to the
 reviewer's view (the newest are kept, and a later message attaching the same
 skill replaces the earlier one); this limit is separate from the 6 skills the
 agent loaded, and a user attachment replaces an agent-loaded skill of the
-same name. The saved conversation keeps the sent prompt as it was, and a
+same name. Evidence is immutable and keyed by content, so the same words with
+the same skills sent twice are one evidence row; "newest" is the order the
+messages were accepted, which each host-input receipt keeps by naming the
+evidence it stands for (`host_input_receipts.evidence_id`), so a restored
+review context lists the attachments in the same order, repeats included, as
+the live one. The saved conversation keeps the sent prompt as it was, and a
 restore, fork or rewind never expands mentions again. Evidence saved before
 attachments existed is not migrated: its skill blocks stay inside the user's
-words. The GUI keeps the typed words and the skill names, so a message shows
-its skill chips also after a restart, and a run's published instruction
+words. The GUI shows what the runtime recorded
+for a submission (`AgentRuntime::host_input_origins`: the typed words and the
+skill names), taking it over its own copy right after acceptance and again for
+every saved message when history is restored, so a message shows its skill
+chips also after a restart. A run's published instruction
 (`TaskPromptPublished`) names the typed words and skills beside the prompt.
 
 The `shell` tool description gained a sentence about splitting host-access work
