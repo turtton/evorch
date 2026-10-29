@@ -8,6 +8,36 @@ use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(5);
 const TOP_CAUSES: usize = 8;
+const TOP_PANES: usize = 5;
+const PANE_MEASUREMENTS_ID: &str = "gui::frame_trace::pane_measurements";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct PaneMeasurement {
+    total: Duration,
+    samples: u32,
+}
+
+type PaneMeasurements = BTreeMap<String, PaneMeasurement>;
+
+/// Adds a tab-viewer duration to the measurements for the current egui pass.
+pub(super) fn record_pane_time(ctx: &egui::Context, pane: String, elapsed: Duration) {
+    if !enabled() {
+        return;
+    }
+    ctx.data_mut(|data| {
+        let id = egui::Id::new(PANE_MEASUREMENTS_ID);
+        let mut measurements = data.get_temp::<PaneMeasurements>(id).unwrap_or_default();
+        let measurement = measurements.entry(pane).or_default();
+        measurement.total += elapsed;
+        measurement.samples += 1;
+        data.insert_temp(id, measurements);
+    });
+}
+
+fn take_pane_measurements(ctx: &egui::Context) -> PaneMeasurements {
+    ctx.data_mut(|data| data.remove_temp(egui::Id::new(PANE_MEASUREMENTS_ID)))
+        .unwrap_or_default()
+}
 
 /// Uses the log filter instead of an `EVORCH_*` variable, which the config
 /// loader would read as a config field.
@@ -52,6 +82,8 @@ pub struct PassRecord {
     pub immediate: bool,
     /// `file:line reason` of each repaint request made during the previous pass.
     pub causes: Vec<String>,
+    /// Per-pane render totals and sample counts collected during this pass.
+    pub panes: BTreeMap<String, (Duration, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +92,7 @@ pub struct FrameSummary {
     pub frames: u32,
     pub discarded_reruns: u32,
     pub immediate_frames: u32,
+    pub echo_frames: u32,
     pub mean_pass: Duration,
     pub longest_pass: Duration,
     /// Mean per pass.
@@ -67,13 +100,32 @@ pub struct FrameSummary {
     pub other: Duration,
     /// Call sites of immediate repaints, most frequent first, counted once per frame.
     pub causes: Vec<(String, u32)>,
+    /// Call sites also observed on non-immediate frames in this window.
+    pub delayed_causes: BTreeSet<String>,
+    /// Mean render duration per pane, slowest first.
+    pub panes: Vec<(String, Duration)>,
 }
 
 impl FrameSummary {
     pub fn causes_line(&self) -> String {
         self.causes
             .iter()
-            .map(|(cause, count)| format!("{count}x {cause}"))
+            .map(|(cause, count)| {
+                let marker = if self.delayed_causes.contains(cause) {
+                    ""
+                } else {
+                    "*"
+                };
+                format!("{count}x {cause}{marker}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    pub fn panes_line(&self) -> String {
+        self.panes
+            .iter()
+            .map(|(pane, average)| format!("{pane}={:.2}ms", average.as_secs_f64() * 1000.0))
             .collect::<Vec<_>>()
             .join("; ")
     }
@@ -86,6 +138,7 @@ impl FrameSummary {
             frames = self.frames,
             fps = f64::from(self.frames) / self.seconds,
             immediate_frames = self.immediate_frames,
+            echo_frames = self.echo_frames,
             discarded_reruns = self.discarded_reruns,
             mean_pass_ms = ms(self.mean_pass),
             longest_pass_ms = ms(self.longest_pass),
@@ -97,6 +150,7 @@ impl FrameSummary {
             draft_ms = ms(self.sections.draft),
             other_ms = ms(self.other),
             causes = %self.causes_line(),
+            panes = %self.panes_line(),
             "GUI frame trace"
         );
     }
@@ -109,10 +163,13 @@ pub struct FrameTrace {
     passes: u32,
     discarded_reruns: u32,
     immediate_frames: u32,
+    immediate_frame_causes: Vec<BTreeSet<String>>,
     elapsed: Duration,
     longest: Duration,
     sections: PassSections,
     causes: BTreeMap<String, u32>,
+    delayed_causes: BTreeSet<String>,
+    pane_measurements: PaneMeasurements,
 }
 
 impl FrameTrace {
@@ -123,10 +180,13 @@ impl FrameTrace {
             passes: 0,
             discarded_reruns: 0,
             immediate_frames: 0,
+            immediate_frame_causes: Vec::new(),
             elapsed: Duration::ZERO,
             longest: Duration::ZERO,
             sections: PassSections::default(),
             causes: BTreeMap::new(),
+            delayed_causes: BTreeSet::new(),
+            pane_measurements: BTreeMap::new(),
         }
     }
 
@@ -136,15 +196,24 @@ impl FrameTrace {
         self.elapsed += pass.elapsed;
         self.longest = self.longest.max(pass.elapsed);
         self.sections.add(pass.sections);
+        for (pane, (duration, samples)) in pass.panes {
+            let total = self.pane_measurements.entry(pane).or_default();
+            total.total += duration;
+            total.samples += samples;
+        }
         if pass.discarded_rerun {
             self.discarded_reruns += 1;
         } else {
             self.frames += 1;
+            let causes: BTreeSet<_> = pass.causes.into_iter().collect();
             if pass.immediate {
                 self.immediate_frames += 1;
-                for cause in pass.causes.into_iter().collect::<BTreeSet<_>>() {
+                self.immediate_frame_causes.push(causes.clone());
+                for cause in causes {
                     *self.causes.entry(cause).or_default() += 1;
                 }
+            } else {
+                self.delayed_causes.extend(causes);
             }
         }
         let window = now.saturating_duration_since(self.started);
@@ -154,6 +223,8 @@ impl FrameTrace {
         let mut causes: Vec<_> = std::mem::take(&mut self.causes).into_iter().collect();
         causes.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         causes.truncate(TOP_CAUSES);
+        let echo_frames = echo_frame_count(&self.immediate_frame_causes, &self.delayed_causes);
+        let panes = summarize_panes(&self.pane_measurements);
         let passes = self.passes.max(1);
         let mean = |total: Duration| total / passes;
         let sections = PassSections {
@@ -169,11 +240,14 @@ impl FrameTrace {
             frames: self.frames,
             discarded_reruns: self.discarded_reruns,
             immediate_frames: self.immediate_frames,
+            echo_frames,
             mean_pass: mean(self.elapsed),
             longest_pass: self.longest,
             sections,
             other: mean(self.elapsed.saturating_sub(self.sections.measured())),
             causes,
+            delayed_causes: std::mem::take(&mut self.delayed_causes),
+            panes,
         };
         *self = Self::new(now);
         Some(summary)
@@ -187,25 +261,49 @@ impl FrameTrace {
         sections: PassSections,
     ) {
         let immediate = ctx.requested_repaint_last_pass();
-        let causes = if immediate {
-            ctx.repaint_causes()
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let causes = ctx
+            .repaint_causes()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let pass = PassRecord {
             elapsed,
             sections,
             discarded_rerun: ctx.current_pass_index() > 0,
             immediate,
             causes,
+            panes: take_pane_measurements(ctx)
+                .into_iter()
+                .map(|(pane, measurement)| (pane, (measurement.total, measurement.samples)))
+                .collect(),
         };
         if let Some(summary) = self.record(Instant::now(), pass) {
             summary.log();
         }
     }
+}
+
+fn echo_frame_count(
+    immediate_frame_causes: &[BTreeSet<String>],
+    delayed_causes: &BTreeSet<String>,
+) -> u32 {
+    immediate_frame_causes
+        .iter()
+        .filter(|causes| {
+            !causes.is_empty() && causes.iter().all(|cause| delayed_causes.contains(cause))
+        })
+        .count() as u32
+}
+
+fn summarize_panes(measurements: &PaneMeasurements) -> Vec<(String, Duration)> {
+    let mut panes: Vec<_> = measurements
+        .iter()
+        .filter(|(_, measurement)| measurement.samples > 0)
+        .map(|(pane, measurement)| (pane.clone(), measurement.total / measurement.samples))
+        .collect();
+    panes.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    panes.truncate(TOP_PANES);
+    panes
 }
 
 #[cfg(test)]
@@ -222,6 +320,7 @@ mod tests {
             discarded_rerun: false,
             immediate,
             causes: causes.iter().map(|cause| (*cause).to_owned()).collect(),
+            panes: BTreeMap::new(),
         }
     }
 
@@ -261,7 +360,7 @@ mod tests {
             summary.causes,
             vec![("a.rs:1 spin".to_owned(), 2), ("b.rs:2".to_owned(), 1)]
         );
-        assert_eq!(summary.causes_line(), "2x a.rs:1 spin; 1x b.rs:2");
+        assert_eq!(summary.causes_line(), "2x a.rs:1 spin*; 1x b.rs:2*");
     }
 
     #[test]
@@ -303,5 +402,105 @@ mod tests {
             "{:?}",
             trace.causes
         );
+    }
+
+    #[test]
+    fn marks_immediate_only_causes_and_counts_echo_frames_for_the_window() {
+        let delayed = BTreeSet::from(["delayed.rs:1".to_owned()]);
+        let immediate = vec![
+            BTreeSet::from(["delayed.rs:1".to_owned()]),
+            BTreeSet::from(["immediate.rs:2".to_owned()]),
+            BTreeSet::new(),
+        ];
+        assert_eq!(echo_frame_count(&immediate, &delayed), 1);
+
+        let summary = FrameSummary {
+            seconds: 5.0,
+            frames: 3,
+            discarded_reruns: 0,
+            immediate_frames: 3,
+            echo_frames: echo_frame_count(&immediate, &delayed),
+            mean_pass: Duration::ZERO,
+            longest_pass: Duration::ZERO,
+            sections: PassSections::default(),
+            other: Duration::ZERO,
+            causes: vec![
+                ("delayed.rs:1".to_owned(), 1),
+                ("immediate.rs:2".to_owned(), 1),
+            ],
+            delayed_causes: delayed,
+            panes: Vec::new(),
+        };
+        assert_eq!(summary.causes_line(), "1x delayed.rs:1; 1x immediate.rs:2*");
+    }
+
+    #[test]
+    fn pane_summary_averages_ranks_and_formats_the_top_five() {
+        let measurements: PaneMeasurements = (0_u32..7)
+            .map(|index| {
+                (
+                    format!("pane-{index}"),
+                    PaneMeasurement {
+                        total: Duration::from_millis(u64::from(index + 1) * 2),
+                        samples: 2,
+                    },
+                )
+            })
+            .collect();
+        let panes = summarize_panes(&measurements);
+        assert_eq!(
+            panes,
+            (2_u32..=6)
+                .rev()
+                .map(|index| {
+                    (
+                        format!("pane-{index}"),
+                        Duration::from_millis(u64::from(index + 1)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        let summary = FrameSummary {
+            seconds: 5.0,
+            frames: 1,
+            discarded_reruns: 0,
+            immediate_frames: 0,
+            echo_frames: 0,
+            mean_pass: Duration::ZERO,
+            longest_pass: Duration::ZERO,
+            sections: PassSections::default(),
+            other: Duration::ZERO,
+            causes: Vec::new(),
+            delayed_causes: BTreeSet::new(),
+            panes,
+        };
+        assert_eq!(
+            summary.panes_line(),
+            "pane-6=7.00ms; pane-5=6.00ms; pane-4=5.00ms; pane-3=4.00ms; pane-2=3.00ms"
+        );
+    }
+
+    #[test]
+    fn trace_counts_echo_frames_when_their_causes_are_also_seen_as_delayed() {
+        let start = Instant::now();
+        let mut trace = FrameTrace::new(start);
+        assert!(
+            trace
+                .record(start, pass(10, true, &["same.rs:1"]))
+                .is_none()
+        );
+        assert!(
+            trace
+                .record(
+                    start + Duration::from_millis(1),
+                    pass(10, false, &["same.rs:1"])
+                )
+                .is_none()
+        );
+        let summary = trace
+            .record(start + WINDOW, pass(10, false, &[]))
+            .expect("window elapsed");
+        assert_eq!(summary.echo_frames, 1);
+        assert_eq!(summary.causes_line(), "1x same.rs:1");
     }
 }

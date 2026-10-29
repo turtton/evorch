@@ -260,6 +260,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
         let Some(panel) = self.panels.get(tab) else {
             return;
         };
+        let pane_started = super::frame_trace::enabled().then(std::time::Instant::now);
         let command_start = ui.ctx().output(|output| output.commands.len());
         let displayed: Vec<_> = self
             .attention_acks
@@ -482,6 +483,13 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     }
                 }
             }
+        }
+        if let Some(started) = pane_started {
+            super::frame_trace::record_pane_time(
+                ui.ctx(),
+                format!("{} ({})", panel.title, tab.as_str()),
+                started.elapsed(),
+            );
         }
     }
 }
