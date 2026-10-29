@@ -83,11 +83,18 @@ pub struct ReleasedRun {
     pub terminal_phase: Option<String>,
 }
 
+/// An event other processes persisted, with its place in the log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FedEvent {
+    pub id: i64,
+    pub event: Event,
+}
+
 /// What one poll found.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FeedBatch {
     /// Events other processes persisted, in log order.
-    pub events: Vec<Event>,
+    pub events: Vec<FedEvent>,
     /// Threads another process released or handed off in `events`.
     pub released: Vec<ReleasedThread>,
     /// The `sidebar.json` stamp when it differs from the previous poll's.
@@ -185,7 +192,10 @@ impl FeedPoller {
                 scanned += page.scanned;
                 batch
                     .events
-                    .extend(page.events.into_iter().map(|stored| stored.event));
+                    .extend(page.events.into_iter().map(|stored| FedEvent {
+                        id: stored.id,
+                        event: stored.event,
+                    }));
                 if page.scanned < PAGE_SIZE {
                     complete = true;
                     break;
@@ -208,10 +218,10 @@ impl FeedPoller {
         Ok(batch)
     }
 
-    fn released_threads(&self, events: &[Event]) -> Vec<ReleasedThread> {
+    fn released_threads(&self, events: &[FedEvent]) -> Vec<ReleasedThread> {
         let mut threads: Vec<&str> = Vec::new();
-        for event in events {
-            if let EventKind::Ownership(ownership) = &event.kind
+        for fed in events {
+            if let EventKind::Ownership(ownership) = &fed.event.kind
                 && matches!(
                     ownership.action,
                     OwnershipAction::Released | OwnershipAction::Handoff

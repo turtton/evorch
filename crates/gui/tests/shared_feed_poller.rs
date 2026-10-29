@@ -2,7 +2,9 @@
 //! without its own rows, and without losing or repeating any.
 
 use event_bus::{Event, EventKind, LifecycleEvent};
-use gui::shared_state::{FeedBatch, FeedConfig, FeedPoller, FeedWorker, PAGE_SIZE, POLL_ROW_LIMIT};
+use gui::shared_state::{
+    FedEvent, FeedBatch, FeedConfig, FeedPoller, FeedWorker, PAGE_SIZE, POLL_ROW_LIMIT,
+};
 use storage::{Storage, StorageConfig};
 use tempfile::TempDir;
 
@@ -12,10 +14,10 @@ fn started(label: impl Into<String>) -> Event {
     })
 }
 
-fn labels(events: &[Event]) -> Vec<String> {
+fn labels(events: &[FedEvent]) -> Vec<String> {
     events
         .iter()
-        .map(|event| match &event.kind {
+        .map(|fed| match &fed.event.kind {
             EventKind::Lifecycle(LifecycleEvent::Started { session_id }) => session_id.clone(),
             other => panic!("unexpected event {other:?}"),
         })
@@ -62,6 +64,8 @@ fn six_hundred_events_arrive_in_order_in_pages_and_nothing_is_read_while_idle() 
     assert_eq!(labels(&batch.events), expected);
     assert_eq!(follower.event_queries(), 3);
     assert_eq!(follower.cursor(), 600);
+    let ids: Vec<i64> = batch.events.iter().map(|fed| fed.id).collect();
+    assert_eq!(ids, (1..=600).collect::<Vec<i64>>());
     assert!(!batch.backlog);
 
     // And: polls while nothing was committed run no event query
@@ -197,7 +201,10 @@ fn dropping_a_worker_whose_queue_is_full_returns() {
     let worker = FeedWorker::spawn_source(
         || {
             Ok(FeedBatch {
-                events: vec![started("again")],
+                events: vec![FedEvent {
+                    id: 1,
+                    event: started("again"),
+                }],
                 backlog: true,
                 ..FeedBatch::default()
             })

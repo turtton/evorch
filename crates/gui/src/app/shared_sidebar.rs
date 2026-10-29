@@ -296,16 +296,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         };
         self.adopt_saved(&before, merged);
-        let saved = HistorySidebarRef {
-            sidebar: &self.sidebar,
-            user_messages: &self.history,
-            composer_drafts: &self.composer_drafts,
-        };
-        let base = serde_json::to_vec_pretty(&saved).ok();
+        // The base is what the file held, not what this process now holds:
+        // changes of this process that were not saved yet (a deferred save)
+        // stay differences from it and are written by the next save.
         let mut shared = self.shared_sidebar.borrow_mut();
         shared.stamp = stamp;
         shared.import_pending = false;
-        shared.base = base;
+        shared.base = Some(bytes);
     }
 
     /// Replaces the shared state with `merged` and brings everything derived

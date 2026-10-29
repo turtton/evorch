@@ -80,8 +80,10 @@ pub struct WorkbenchState<S> {
     pub(super) sidebar_path: Option<PathBuf>,
     pub(super) shared_sidebar: std::cell::RefCell<super::shared_sidebar::SharedSidebar>,
     pub(super) shared_feed: super::shared_feed::SharedFeedState,
-    /// The last event ID the startup replay reflected.
-    pub(super) restored_event_cursor: i64,
+    /// The highest event ID reflected in what is shown: through the startup
+    /// replay, then through events followed from other processes. Events
+    /// after it are still to be shown; events up to it never are again.
+    pub(super) shown_through_event: i64,
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) receipt_reconciliation: super::delivery::ReceiptReconciliation,
     pub(super) draft_dirty_at: std::cell::Cell<Option<std::time::Instant>>,
@@ -222,7 +224,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             sidebar_path: None,
             shared_sidebar: Default::default(),
             shared_feed: Default::default(),
-            restored_event_cursor: 0,
+            shown_through_event: 0,
             history: Vec::new(),
             receipt_reconciliation: Default::default(),
             draft_dirty_at: Default::default(),

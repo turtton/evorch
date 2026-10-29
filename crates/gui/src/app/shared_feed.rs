@@ -14,7 +14,7 @@ use workspace_ui::ThreadRunPhase;
 
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
-use crate::shared_state::{FeedBatch, FeedConfig, FeedPoller, FeedWorker, ReleasedRun};
+use crate::shared_state::{FedEvent, FeedBatch, FeedConfig, FeedPoller, FeedWorker, ReleasedRun};
 
 /// How long events of a conversation unknown to the sidebar wait for the
 /// sidebar that introduces it before being folded without it.
@@ -32,7 +32,7 @@ pub(super) enum SharedFeed {
 pub(super) struct SharedFeedState {
     pub feed: Option<SharedFeed>,
     /// Events not folded yet, oldest first.
-    pub pending: std::collections::VecDeque<Event>,
+    pub pending: std::collections::VecDeque<FedEvent>,
     pub blocked_since: Option<Instant>,
     /// How the runs of threads other processes released last ended, by thread.
     pub released_runs: std::collections::BTreeMap<String, Vec<ReleasedRun>>,
@@ -83,7 +83,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         FeedConfig {
             db_path,
             own_stream,
-            cursor: self.restored_event_cursor,
+            cursor: self.shown_through_event,
             sidebar_path: self.sidebar_path.clone(),
         }
     }
@@ -167,8 +167,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // thread's transcript.
         self.transcripts.select_thread(None);
         let mut imported = false;
-        while let Some(event) = self.shared_feed.pending.front() {
-            if self.waits_for_sidebar(event) {
+        while let Some(fed) = self.shared_feed.pending.front() {
+            if self.waits_for_sidebar(&fed.event) {
                 if !imported {
                     imported = true;
                     self.import_shared_sidebar();
@@ -183,8 +183,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             self.shared_feed.blocked_since = None;
-            if let Some(event) = self.shared_feed.pending.pop_front() {
-                self.fold_shared_event(&event);
+            if let Some(fed) = self.shared_feed.pending.pop_front() {
+                self.fold_shared_event(&fed.event);
+                self.shown_through_event = self.shown_through_event.max(fed.id);
             }
         }
         self.transcripts.select_thread(active);
@@ -295,6 +296,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Conversations that just became known and whose runs were already shown
     /// without one: replay those runs' events from the database so the
     /// conversation's transcript has what happened before it was known.
+    /// Only events already reflected (up to `shown_through_event`) are replayed;
+    /// the later ones are still to be folded by the feed, exactly once.
     pub(super) fn rehydrate_threads(&mut self, threads: &[(String, Vec<String>)]) {
         let path = self.shared_feed.db_path.clone().or_else(|| {
             self.memory
@@ -339,7 +342,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .collect();
             messages.sort_by_key(|message| message.at);
             let mut messages = messages.into_iter().peekable();
-            for stored in events {
+            let shown_through = self.shown_through_event;
+            for stored in events
+                .into_iter()
+                .filter(|stored| stored.id <= shown_through)
+            {
                 while messages
                     .peek()
                     .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
@@ -379,6 +386,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Where the replay of a restart stopped, so following starts after it.
     pub(super) fn note_replayed_event(&mut self, id: i64) {
-        self.restored_event_cursor = self.restored_event_cursor.max(id);
+        self.shown_through_event = self.shown_through_event.max(id);
     }
 }

@@ -826,3 +826,137 @@ fn importing_the_sidebar_keeps_this_windows_selection_and_typed_text() {
     assert_eq!(b.state.sidebar().selected_project, selected);
     assert_eq!(b.state.composer().input, "typing in B");
 }
+
+#[test]
+fn an_unsaved_change_survives_importing_and_is_written_by_the_next_save() {
+    // Given: A's rename is deferred because another process holds the lock
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let alpha = a.open_thread(&shared, "Alpha");
+    let mut b = open_window(&shared, "evorch-gui:b");
+    let held = lock_file(&shared);
+    held.lock().expect("hold the lock");
+    a.state
+        .rename_thread(alpha, "Renamed by A".into())
+        .expect("rename");
+    assert!(a.state.sidebar_save_deferred());
+    drop(held);
+
+    // When: B saves, A follows (importing) without saving, B saves again, then A repeats its save
+    b.state.create_thread("From B1").expect("create");
+    a.state.poll_shared_feed();
+    b.state.create_thread("From B2").expect("create");
+    a.state.flush_deferred_sidebar_save();
+
+    // Then: the rename reached the file next to both of B's threads, and stays after the next import
+    assert!(!a.state.sidebar_save_deferred());
+    let on_disk: BTreeSet<_> = workspace_ui::load_sidebar(&shared.sidebar())
+        .expect("sidebar")
+        .threads
+        .into_iter()
+        .map(|thread| thread.title)
+        .collect();
+    assert_eq!(
+        on_disk,
+        BTreeSet::from([
+            "Renamed by A".to_owned(),
+            "From B1".to_owned(),
+            "From B2".to_owned()
+        ])
+    );
+    a.state.poll_shared_feed();
+    assert_eq!(titles(&a.state), on_disk);
+}
+
+/// A works in a thread whose sidebar B lacks: `before` is persisted, then B restarts
+/// (its replay holds them, unattributed), `after` is persisted, then the sidebar is
+/// published, B follows and opens the thread.
+fn conversation_across_a_late_sidebar(before: &[Event], after: &[Event]) -> (Window, ThreadId) {
+    let shared = Box::leak(Box::new(Shared::new()));
+    let private = shared.dir.path().join("private.json");
+    let mut a = open_window_with_sidebar(shared, "evorch-gui:a", private.clone());
+    let thread = a.open_thread(shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    for event in before {
+        a.emit(event.clone());
+    }
+    let mut b = open_window(shared, "evorch-gui:b");
+    for event in after {
+        a.emit(event.clone());
+    }
+    std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
+    b.state.poll_shared_feed();
+    b.state.switch_thread(thread.clone()).expect("open");
+    (b, thread)
+}
+
+fn tool_event(completed: bool) -> Event {
+    if completed {
+        Event::new(ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: "run-a:c1".into(),
+            is_error: false,
+            output: Some("ok".into()),
+            detail: None,
+            run_id: Some("run-a".into()),
+            parent_call_id: None,
+        })
+    } else {
+        Event::new(ToolEvent::ToolStarted {
+            tool_name: "shell".into(),
+            call_id: "run-a:c1".into(),
+            input: None,
+            run_id: Some("run-a".into()),
+            parent_call_id: None,
+        })
+    }
+}
+
+#[test]
+fn completed_messages_on_both_sides_of_the_restart_each_appear_once() {
+    let (b, _) = conversation_across_a_late_sidebar(
+        &[reply("run-a", "reply1")],
+        &[reply("run-a", "reply2"), reply("run-a", "reply3")],
+    );
+
+    assert_eq!(texts(&b.state), ["reply1", "reply2", "reply3"]);
+}
+
+#[test]
+fn a_streamed_message_split_by_the_restart_is_not_repeated() {
+    let delta = |text: &str| {
+        Event::new(MessageEvent::MessageDelta {
+            run_id: Some("run-a".into()),
+            delta: text.into(),
+        })
+    };
+    let (b, _) = conversation_across_a_late_sidebar(
+        &[delta("al"), delta("pha ")],
+        &[delta("beta "), delta("gamma")],
+    );
+
+    assert_eq!(texts(&b.state), ["alpha beta gamma"]);
+}
+
+#[test]
+fn a_tool_call_split_by_the_restart_is_shown_once_and_completed() {
+    let (b, _) = conversation_across_a_late_sidebar(&[tool_event(false)], &[tool_event(true)]);
+
+    let calls: Vec<_> = b
+        .state
+        .transcript()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, TranscriptEntry::Tool { .. }))
+        .collect();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(matches!(
+        calls[0],
+        TranscriptEntry::Tool { output: Some(output), .. } if output == "ok"
+    ));
+}
