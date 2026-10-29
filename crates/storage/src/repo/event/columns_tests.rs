@@ -548,7 +548,13 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
         [],
     )
     .unwrap();
-    let total = kinds.len() as u64 + 1;
+    conn.execute(
+        "INSERT INTO events (schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+         VALUES (1, 1, 1, 'Lifecycle', '{\"kind\":\"Lifecycle\",\"payload\":{\"kind\":\"Removed\",\"payload\":{\"nested\":{\"run_id\":\"run-gone\"}}}}')",
+        [],
+    )
+    .unwrap();
+    let total = kinds.len() as u64 + 2;
 
     // When: the current migrations are applied.
     crate::migrations::apply_migrations(&conn).unwrap();
@@ -573,10 +579,11 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
         })
         .unwrap();
 
-    // Then: everything is converted exactly once and the removed variant is blank.
+    // Then: everything is converted exactly once; a removed variant is blank and
+    // keeps the run its raw payload names.
     assert_eq!(
         (rest.converted, rest.remaining, rest.undecodable),
-        (total - 10, 0, 1)
+        (total - 10, 0, 2)
     );
     let again = database
         .backfill_event_columns(&EventBackfillOptions::default())
@@ -605,8 +612,11 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
         assert_eq!(subkind, kind.subkind_name());
         assert_eq!(run_id.as_deref(), kind.primary_run_id());
     }
-    let (_, _, subkind, run_id, _) = rows.last().unwrap();
-    assert_eq!((subkind.as_str(), run_id.as_deref()), ("", None));
+    let [.., (_, _, blank, no_run, _), (_, _, named, run, _)] = rows.as_slice() else {
+        panic!("rows");
+    };
+    assert_eq!((blank.as_str(), no_run.as_deref()), ("", None));
+    assert_eq!((named.as_str(), run.as_deref()), ("", Some("run-gone")));
 }
 
 fn plan(conn: &Connection, sql: &str, bound: usize) -> String {
@@ -893,7 +903,7 @@ fn reads_agree_before_during_and_after_the_backfill() {
 }
 
 #[test]
-fn undecodable_unconverted_rows_are_skipped_by_index_reads() {
+fn undecodable_rows_are_skipped_by_typed_reads_but_inspectable_by_run_throughout() {
     // Given: a row written by an older build whose variant is gone.
     let database = open();
     let kept = append(
@@ -912,8 +922,10 @@ fn undecodable_unconverted_rows_are_skipped_by_index_reads() {
             [],
         )
         .unwrap();
+    let gone = database.conn.last_insert_rowid();
 
-    // When/Then: reads return only the decodable event, before and after backfill.
+    // When/Then: typed reads return only the decodable event, and raw inspection
+    // still returns both with the same order and truncation, before and after.
     for _ in 0..2 {
         let mut ids = Vec::new();
         database
@@ -925,10 +937,144 @@ fn undecodable_unconverted_rows_are_skipped_by_index_reads() {
             .for_each_event_for_runs(&["run-1".to_owned()], |stored| ids.push(stored.id))
             .unwrap();
         assert_eq!(ids, [kept]);
+        let (all, truncated) = database
+            .inspect_events(EventScope::Run("run-1"), 10)
+            .unwrap();
+        assert_eq!(all.iter().map(|e| e.id).collect::<Vec<_>>(), [kept, gone]);
+        assert!(!truncated);
+        let (newest, truncated) = database
+            .inspect_events(EventScope::Run("run-1"), 1)
+            .unwrap();
+        assert_eq!(newest.iter().map(|e| e.id).collect::<Vec<_>>(), [gone]);
+        assert!(truncated);
         database
             .backfill_event_columns(&EventBackfillOptions::default())
             .unwrap();
     }
+}
+
+fn file_config(dir: &tempfile::TempDir) -> StorageConfig {
+    StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..StorageConfig::default()
+    }
+}
+
+fn run_message(run: &str, text: &str) -> EventKind {
+    kind_from(adjacent(
+        "Message",
+        "MessageCompleted",
+        json!({"run_id": run, "text": text}),
+    ))
+}
+
+/// Every row's columns equal what the Rust helpers derive from its payload.
+fn assert_columns_match_payloads(conn: &Connection) {
+    let mut statement = conn
+        .prepare("SELECT id, subkind, run_id, payload FROM events ORDER BY id")
+        .unwrap();
+    let rows: Vec<(i64, Option<String>, Option<String>, String)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (id, subkind, run_id, payload) in rows {
+        let kind: EventKind = serde_json::from_str(&payload).unwrap();
+        assert_eq!(subkind.as_deref(), Some(kind.subkind_name()), "row {id}");
+        assert_eq!(run_id.as_deref(), kind.primary_run_id(), "row {id}");
+    }
+}
+
+#[test]
+fn a_busy_writer_stops_the_backfill_without_partial_updates_and_a_rerun_finishes() {
+    // Given: a file database with unconverted rows, one batch already converted.
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = file_config(&dir);
+    let database = Database::open(&config).unwrap();
+    for index in 0..12 {
+        insert_unconverted(&database.conn, &run_message("run-1", &format!("m{index}")));
+    }
+    database
+        .backfill_event_columns(&EventBackfillOptions {
+            batch_rows: 5,
+            max_rows: Some(5),
+        })
+        .unwrap();
+    assert_eq!(database.unbackfilled_event_count().unwrap(), 7);
+
+    // When: another connection holds the write lock, so the backfill cannot begin.
+    database
+        .conn
+        .busy_timeout(std::time::Duration::ZERO)
+        .unwrap();
+    let other = Connection::open(&config.db_path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let failed = database.backfill_event_columns(&EventBackfillOptions {
+        batch_rows: 5,
+        max_rows: None,
+    });
+
+    // Then: it fails as busy and changes nothing.
+    assert!(matches!(failed, Err(StorageError::Sqlite(_))), "{failed:?}");
+    other.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(database.unbackfilled_event_count().unwrap(), 7);
+    drop(other);
+    drop(database);
+
+    // When: the database is reopened and the backfill runs again.
+    let reopened = Database::open(&config).unwrap();
+    let summary = reopened
+        .backfill_event_columns(&EventBackfillOptions {
+            batch_rows: 5,
+            max_rows: None,
+        })
+        .unwrap();
+
+    // Then: only the remaining rows are converted, and all match their payloads.
+    assert_eq!((summary.converted, summary.remaining), (7, 0));
+    assert_columns_match_payloads(&reopened.conn);
+}
+
+#[test]
+fn appends_during_the_backfill_and_old_rows_are_all_attributed() {
+    // Given: a file database with unconverted rows of several runs.
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = file_config(&dir);
+    let database = Database::open(&config).unwrap();
+    for index in 0..120 {
+        let run = format!("run-{}", index % 3);
+        insert_unconverted(&database.conn, &run_message(&run, &format!("old{index}")));
+    }
+
+    // When: another connection appends while the backfill converts in small batches.
+    std::thread::scope(|scope| {
+        let appender = scope.spawn(|| {
+            let writer = Database::open(&config).unwrap();
+            for index in 0..60 {
+                let run = format!("run-{}", index % 3);
+                append(&writer.conn, &run_message(&run, &format!("new{index}")));
+            }
+        });
+        let summary = database
+            .backfill_event_columns(&EventBackfillOptions {
+                batch_rows: 7,
+                max_rows: None,
+            })
+            .unwrap();
+        assert_eq!(summary.remaining, 0);
+        appender.join().unwrap();
+    });
+
+    // Then: no row is left unattributed, and per-run reads see old and new rows.
+    assert_eq!(database.unbackfilled_event_count().unwrap(), 0);
+    assert_columns_match_payloads(&database.conn);
+    let mut seen = 0;
+    database
+        .for_each_event_for_runs(&["run-1".to_owned()], |_| seen += 1)
+        .unwrap();
+    assert_eq!(seen, 40 + 20);
 }
 
 #[test]

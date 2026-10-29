@@ -7,6 +7,14 @@
 //! maintenance run calls [`Database::backfill_event_columns`], which can be
 //! interrupted and repeated: each batch commits on its own and the next call
 //! continues with the rows still unconverted.
+//!
+//! WAL growth: each batch is followed by a passive checkpoint, which copies the
+//! frames no reader still needs and lets SQLite reuse the log from its start.
+//! With no long-lived reader the log stays within a few batches (about 85 MB
+//! for 5,000-row batches on a 2.9 GB history). A reader that keeps an old
+//! snapshot open holds the log's tail, so then the WAL keeps growing until it
+//! ends: there is no hard size limit. Offline maintenance that needs one must
+//! run with the readers and writers stopped.
 
 use event_bus::EventKind;
 use rusqlite::{Connection, TransactionBehavior, params};
@@ -27,7 +35,8 @@ const LOG_EVERY_BATCHES: u64 = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventBackfillOptions {
     /// Rows per transaction. Each commit is followed by a passive WAL
-    /// checkpoint, so this bounds the WAL growth of a run.
+    /// checkpoint, which keeps the WAL short only while no long-lived reader
+    /// pins it; the size is not hard-limited.
     pub batch_rows: usize,
     /// Stop after about this many rows, leaving the rest for a later call.
     pub max_rows: Option<u64>,
@@ -48,7 +57,9 @@ pub struct EventBackfillSummary {
     /// Rows converted by this call.
     pub converted: u64,
     /// Converted rows whose payload no longer decodes. They get an empty
-    /// `subkind` and no `run_id`, as the readers skip them anyway.
+    /// `subkind`, and as `run_id` the first `run_id` string found in the raw
+    /// payload (keys in sorted order, depth first), so that raw inspection
+    /// still finds them by run.
     pub undecodable: u64,
     /// Transactions committed by this call.
     pub batches: u64,
@@ -124,8 +135,8 @@ fn backfill(
         summary.converted += batch.converted;
         summary.undecodable += batch.undecodable;
         summary.batches += 1;
-        // Truncating would stall behind readers; a passive checkpoint only
-        // moves what no reader needs, which is enough to keep the WAL short.
+        // Truncating would stall behind readers. A passive checkpoint only moves
+        // what no reader needs, so a long-lived reader leaves the WAL growing.
         checkpoint_passive(conn);
         if summary.batches % LOG_EVERY_BATCHES == 0 {
             tracing::info!(
@@ -186,13 +197,8 @@ fn convert_batch(
             "UPDATE events SET subkind = ?2, run_id = ?3 WHERE id = ?1 AND subkind IS NULL",
         )?;
         for (id, columns) in &derived {
-            match columns {
-                Some((subkind, run_id)) => update.execute(params![id, subkind, run_id])?,
-                None => {
-                    undecodable += 1;
-                    update.execute(params![id, "", Option::<String>::None])?
-                }
-            };
+            undecodable += u64::from(!columns.decoded);
+            update.execute(params![id, columns.subkind, columns.run_id])?;
         }
     }
     transaction.commit()?;
@@ -204,15 +210,49 @@ fn convert_batch(
     }))
 }
 
-/// The stored columns of an event payload, or `None` if it does not decode.
-fn derive_columns(payload: &str) -> Option<(&'static str, Option<String>)> {
-    let kind = serde_json::from_str::<EventKind>(payload).ok()?;
-    Some((kind.subkind_name(), kind.primary_run_id().map(String::from)))
+struct Columns {
+    subkind: &'static str,
+    run_id: Option<String>,
+    decoded: bool,
+}
+
+/// The stored columns of an event payload. A payload the current types reject
+/// still names its run in raw JSON, which inspection of old events relies on.
+fn derive_columns(payload: &str) -> Columns {
+    match serde_json::from_str::<EventKind>(payload) {
+        Ok(kind) => Columns {
+            subkind: kind.subkind_name(),
+            run_id: kind.primary_run_id().map(String::from),
+            decoded: true,
+        },
+        Err(_) => Columns {
+            subkind: "",
+            run_id: serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|value| first_run_id(&value)),
+            decoded: false,
+        },
+    }
+}
+
+fn first_run_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            object
+                .iter()
+                .find_map(|(key, value)| match (key.as_str(), value.as_str()) {
+                    ("run_id", Some(run_id)) => Some(run_id.to_owned()),
+                    _ => first_run_id(value),
+                })
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(first_run_id),
+        _ => None,
+    }
 }
 
 fn checkpoint_passive(conn: &Connection) {
-    // The result row reports busy/log/checkpointed frames; a busy checkpoint
-    // only means the WAL is trimmed by a later one.
+    // The result row reports busy/log/checkpointed frames; a partial checkpoint
+    // only means the rest is moved by a later one.
     if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
         tracing::warn!(target: LOG_TARGET, %error, "passive WAL checkpoint failed");
     }
