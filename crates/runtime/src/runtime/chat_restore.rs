@@ -101,6 +101,9 @@ impl AgentRuntime {
         mut authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
         let prompt = continuation.prompt();
+        // Only a new prompt takes mentions; a resume attaches nothing.
+        let mentions = std::mem::take(&mut authority.skill_mentions);
+        let mentions: &[String] = if prompt.is_some() { &mentions } else { &[] };
         // The host's ID for this prompt, or a fresh one: its receipt is tracked.
         let prompt_id = prompt.map(|_| {
             authority
@@ -146,10 +149,15 @@ impl AgentRuntime {
             let Some(prompt) = prompt else {
                 return Ok(run_id);
             };
+            let project_root = lock_runs(&self.shared.runs)
+                .get(&run_id)
+                .and_then(|entry| entry.config.project_root.clone());
+            // Read the skills before anything is recorded: a failure refuses the whole message.
+            let host = self.expand_host_prompt(prompt.into(), mentions, project_root.as_deref())?;
             self.set_model_preference(run_id, authority.model_preference)?;
             self.send_inbox_message(
                 run_id,
-                prompt.into(),
+                host,
                 authority.images,
                 true,
                 authority.initial_thread_goal,
@@ -165,6 +173,20 @@ impl AgentRuntime {
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         self.validate_history_restore(&record, &descriptor, &authority)?;
+        // Expand once, before any evidence, receipt or snapshot is written.
+        let host = prompt
+            .map(|prompt| {
+                self.expand_host_prompt(
+                    prompt.into(),
+                    mentions,
+                    descriptor
+                        .project_root
+                        .as_deref()
+                        .or(authority.project_root.as_deref()),
+                )
+            })
+            .transpose()?;
+        let sent = host.as_ref().map(|host| host.prompt.as_str());
         #[cfg(test)]
         if let Ok(execution) = self.execution_snapshot(run_id) {
             self.execution_hook(
@@ -240,13 +262,12 @@ impl AgentRuntime {
                 )));
             }
         }
-        if let Some(prompt) = prompt {
+        if let (Some(prompt), Some(sent)) = (prompt, sent) {
             // Save accepted human input even when no provider is registered.
             // The in-memory continuation still appends it exactly once at start.
+            // The history holds what the agent was sent, skills included.
             let mut history = restored.messages.clone();
-            let mut content = vec![providers::ContentBlock::Text {
-                text: prompt.into(),
-            }];
+            let mut content = vec![providers::ContentBlock::Text { text: sent.into() }];
             content.extend(
                 authority
                     .images
@@ -312,13 +333,15 @@ impl AgentRuntime {
         }
         let pending_reference =
             self.resolve_pending_reference(descriptor.pending_reference_id.as_deref())?;
-        let mut evidence = prompt
-            .map(|prompt| {
-                crate::run_store::evidence_row(
+        let mut evidence = host
+            .as_ref()
+            .map(|host| {
+                crate::run_store::evidence_row_with_attachments(
                     &review.root_run_id,
                     &run_id.to_string(),
                     "host_chat",
-                    prompt,
+                    &host.typed,
+                    host.attachments.clone(),
                 )
             })
             .into_iter()
@@ -441,7 +464,7 @@ impl AgentRuntime {
             run_id,
             None,
             role,
-            prompt.unwrap_or_default().into(),
+            sent.unwrap_or_default().into(),
             config,
             continuation,
             review_seed,
@@ -508,6 +531,7 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        let mentions = std::mem::take(&mut config.skill_mentions);
         if let Some((objective, criteria)) = &config.initial_thread_goal {
             self.validate_new_thread_goal(thread_id, objective, criteria)
                 .map_err(|reason| RuntimeError::RunRestoreFailed {
@@ -612,6 +636,9 @@ impl AgentRuntime {
             }
         };
         config.name = Some(name);
+        // Expand once, before any evidence or receipt is written; a failure
+        // refuses the message whole.
+        let host = self.expand_host_prompt(prompt, &mentions, config.project_root.as_deref())?;
         let run_id = self.shared.run_ids.next();
         let prompt_id = Some(
             config
@@ -637,8 +664,13 @@ impl AgentRuntime {
         } else {
             "initial_prompt"
         };
-        let mut row =
-            crate::run_store::evidence_row(&review.root_run_id, &run_id.to_string(), kind, &prompt);
+        let mut row = crate::run_store::evidence_row_with_attachments(
+            &review.root_run_id,
+            &run_id.to_string(),
+            kind,
+            &host.typed,
+            host.attachments.clone(),
+        );
         let pending_reference = self.resolve_pending_reference(
             restored
                 .as_ref()
@@ -675,7 +707,7 @@ impl AgentRuntime {
                             prompt_id: prompt_id.clone(),
                             run_id: run_id.to_string(),
                             root_run_id: review.root_run_id.clone(),
-                            text: prompt.clone(),
+                            text: host.typed.clone(),
                             image_count: u32::try_from(config.images.len()).unwrap_or(u32::MAX),
                             status: storage::HostInputStatus::Accepted,
                             reason: None,
@@ -698,7 +730,7 @@ impl AgentRuntime {
         let started = self.start_seeded_chat(
             thread_id,
             role,
-            prompt,
+            host,
             config,
             seed,
             SeededChat {
@@ -730,7 +762,7 @@ impl AgentRuntime {
         &self,
         thread_id: &str,
         role: Role,
-        prompt: String,
+        host: HostPrompt,
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
         chat: SeededChat,
@@ -749,7 +781,11 @@ impl AgentRuntime {
             // An invalid graph still fails closed before the run is installed.
             review = self.chat_review_context(store, run_id)?;
         } else {
-            review.add_user_request(&run_id.to_string(), &prompt);
+            review.add_user_request_with_skills(
+                &run_id.to_string(),
+                &host.typed,
+                host.attachments.clone(),
+            );
         }
         let review_seed = Some(ReviewSeed {
             provenance,
@@ -799,13 +835,13 @@ impl AgentRuntime {
                     reason: RunRestoreFailure::CorruptContext(reason),
                 })?;
         }
-        self.goal_user_input(run_id, &prompt);
+        self.goal_user_input(run_id, &host.typed);
         config.initial_prompt_id = prompt_id;
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,
             role,
-            prompt,
+            host.prompt,
             config,
             continuation,
             review_seed,

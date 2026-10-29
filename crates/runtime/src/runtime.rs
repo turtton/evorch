@@ -12,6 +12,8 @@ mod chat_restore;
 mod child_renewal;
 mod completion_relay;
 mod held_messages;
+mod host_prompt;
+pub(crate) use host_prompt::HostPrompt;
 mod output;
 mod project;
 mod questions;
@@ -548,7 +550,7 @@ impl AgentRuntime {
     fn record_host_input(
         &self,
         run_id: RunId,
-        text: &str,
+        host: &HostPrompt,
         reference: Option<&PendingReference>,
         prompt_id: &str,
         image_count: u32,
@@ -571,11 +573,12 @@ impl AgentRuntime {
                 review
             }
         };
-        let mut row = crate::run_store::evidence_row(
+        let mut row = crate::run_store::evidence_row_with_attachments(
             &review.root_run_id,
             &run_id.to_string(),
             "host_chat",
-            text,
+            &host.typed,
+            host.attachments.clone(),
         );
         if let Some(reference) = reference {
             row.reference_kind = Some("assistant_turn".into());
@@ -607,7 +610,7 @@ impl AgentRuntime {
                     prompt_id: prompt_id.into(),
                     run_id: run_id.to_string(),
                     root_run_id: review.root_run_id.clone(),
-                    text: text.into(),
+                    text: host.typed.clone(),
                     image_count,
                     status: storage::HostInputStatus::Accepted,
                     reason: None,
@@ -1902,7 +1905,14 @@ impl AgentRuntime {
         images: Vec<crate::DelegateImage>,
         submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, images, true, None, submission_id)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            images,
+            true,
+            None,
+            submission_id,
+        )
     }
 
     pub(crate) fn send_internal_message(
@@ -1910,7 +1920,14 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, Vec::new(), false, None, None)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            Vec::new(),
+            false,
+            None,
+            None,
+        )
     }
 
     /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
@@ -1978,7 +1995,7 @@ impl AgentRuntime {
     fn send_inbox_message(
         &self,
         run_id: RunId,
-        text: String,
+        host: HostPrompt,
         images: Vec<crate::DelegateImage>,
         trusted_user: bool,
         initial_goal: Option<(String, Vec<String>)>,
@@ -2024,7 +2041,7 @@ impl AgentRuntime {
             if let Some(prompt_id) = &prompt_id {
                 let pending = self.persist_pending_reference(run_id)?;
                 let image_count = u32::try_from(images.len()).unwrap_or(u32::MAX);
-                self.record_host_input(run_id, &text, pending.as_ref(), prompt_id, image_count)?;
+                self.record_host_input(run_id, &host, pending.as_ref(), prompt_id, image_count)?;
                 if let Some(pending) = pending {
                     match self.take_pending_reference(run_id, pending.token) {
                         Ok(Some(_)) => {}
@@ -2064,10 +2081,16 @@ impl AgentRuntime {
             }
             // Invalidate the old check before the model can consume new host input.
             if trusted_user {
-                self.goal_user_input(run_id, &text);
+                self.goal_user_input(run_id, &host.typed);
             }
             let enqueue = |seq| {
-                permit.send((text.clone(), images, trusted_user, prompt_id.clone(), seq));
+                permit.send((
+                    host.prompt.clone(),
+                    images,
+                    trusted_user,
+                    prompt_id.clone(),
+                    seq,
+                ));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {

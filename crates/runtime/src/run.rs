@@ -163,6 +163,12 @@ pub struct RunConfig {
     /// runtime records the prompt's delivery receipt under this ID. Consumed
     /// when the run starts, so delegated children never inherit it.
     pub initial_prompt_id: Option<String>,
+    /// Names of the skills the user attached to this run's new prompt with
+    /// `@name`. The runtime reads their bodies and appends them to the prompt
+    /// the agent sees, keeping the user's own words and the skill bodies apart
+    /// in review evidence. Consumed when the prompt is accepted, so delegated
+    /// children never inherit it.
+    pub skill_mentions: Vec<String>,
     pub budget: crate::budget_tracker::BudgetSettings,
     /// Durable task identity when this run is attached to a task.
     pub task_id: Option<String>,

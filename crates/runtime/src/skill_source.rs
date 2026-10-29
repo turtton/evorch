@@ -125,21 +125,7 @@ impl SkillCatalogSource {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut skill_dirs = self
-                .skill_dirs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if !repo_skills {
-                skill_dirs.retain(|(scope, _)| !is_repo_scope(*scope));
-            } else if let Some(repo_root) = repo_root {
-                replace_repo_dirs(&mut skill_dirs, repo_root);
-            }
-            let mut registry = discover_with_builtin(&skill_dirs);
-            if !repo_skills && let Some(repo_root) = repo_root {
-                registry.withhold_untrusted_project(repo_root.to_path_buf());
-            }
-            let registry = Arc::new(registry);
+            let registry = Arc::new(self.discover_for(repo_root, repo_skills));
             let catalog = build_catalog(&CatalogBuildInput {
                 config: &self.config,
                 user_presets_dir: self.user_presets_dir.as_deref(),
@@ -171,6 +157,32 @@ impl SkillCatalogSource {
         };
         self.emit_diagnostics(diagnostics, error);
         snapshot
+    }
+
+    /// The skills a run in `repo_root` would see, discovered fresh like
+    /// [`Self::snapshot_for`] but without rebuilding the catalog, replacing the
+    /// current registry or emitting diagnostics. For reading the bodies of
+    /// skills a user mentioned, which must not disturb a run's own snapshot.
+    pub fn registry_for(&self, repo_root: Option<&Path>, repo_skills: bool) -> Arc<SkillRegistry> {
+        Arc::new(self.discover_for(repo_root, repo_skills))
+    }
+
+    fn discover_for(&self, repo_root: Option<&Path>, repo_skills: bool) -> SkillRegistry {
+        let mut skill_dirs = self
+            .skill_dirs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if !repo_skills {
+            skill_dirs.retain(|(scope, _)| !is_repo_scope(*scope));
+        } else if let Some(repo_root) = repo_root {
+            replace_repo_dirs(&mut skill_dirs, repo_root);
+        }
+        let mut registry = discover_with_builtin(&skill_dirs);
+        if !repo_skills && let Some(repo_root) = repo_root {
+            registry.withhold_untrusted_project(repo_root.to_path_buf());
+        }
+        registry
     }
 
     // bus の購読側が snapshot を要求しても state のロックと競合させない。

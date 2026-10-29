@@ -224,14 +224,27 @@ impl ReviewRunContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn add_user_request(&self, target_run_id: &str, text: &str) {
+        self.add_user_request_with_skills(target_run_id, text, Vec::new());
+    }
+
+    /// Like [`Self::add_user_request`] for a message the host expanded
+    /// `@skill` mentions of: `text` is the user's words alone and `attachments`
+    /// the skills read for them.
+    pub(crate) fn add_user_request_with_skills(
+        &self,
+        target_run_id: &str,
+        text: &str,
+        attachments: Vec<storage::EvidenceAttachment>,
+    ) {
         self.add_request(UserRequest {
             target_run_id: target_run_id.into(),
             text: text.into(),
             in_reply_to: None,
             reference_context: None,
             evidence: EvidenceRef::default(),
-            attachments: Vec::new(),
+            attachments,
         });
     }
 
