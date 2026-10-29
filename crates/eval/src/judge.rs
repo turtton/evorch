@@ -204,7 +204,7 @@ impl Judge {
         schema: &JsonSchema,
         validate: impl Fn(&T) -> Result<(), String>,
     ) -> Judged<T> {
-        let messages = [
+        let mut messages = vec![
             Message {
                 role: providers::Role::System,
                 content: vec![ContentBlock::Text {
@@ -229,12 +229,11 @@ impl Judge {
         let mut requests = self.bus.subscribe();
         let mut last = JudgeError::Invalid("no attempt was made".into());
         let mut answer = None;
-        let mut next = messages.to_vec();
         for attempt in 1..=ATTEMPTS {
             let response = tokio::time::timeout(
                 TIMEOUT,
                 self.model
-                    .complete_structured(&invocation, ROLE, &next, schema),
+                    .complete_structured(&invocation, ROLE, &messages, schema),
             )
             .await;
             last = match response {
@@ -245,7 +244,7 @@ impl Judge {
                     match structured::parse::<T>(content).and_then(|value| {
                         validate(&value)
                             .map(|()| value)
-                            .map_err(|reason| Unusable::rejected(reason, content))
+                            .map_err(|reason| Unusable::new(&reason, content))
                     }) {
                         Ok(value) => {
                             answer = Some(value);
@@ -254,7 +253,7 @@ impl Judge {
                         Err(unusable) => {
                             let described = unusable.describe(attempt);
                             tracing::warn!(run_id = %self.run_id, "unusable judge answer: {described}");
-                            next = unusable.retry_messages(&messages);
+                            unusable.append_retry(&mut messages);
                             JudgeError::Invalid(described)
                         }
                     }
@@ -446,6 +445,25 @@ mod tests {
         let requests = retried.requests();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1].len(), 4);
+    }
+
+    #[tokio::test]
+    async fn retries_append_to_the_history_already_sent() {
+        // Given: two different unusable answers in a row, then the analysis.
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text("I will analyse the replays now."),
+            crate::test_support::text(r#"{"time_and_tokens":"only one field"}"#),
+            crate::test_support::text(ANALYSIS),
+        ]);
+
+        // When: the analysis is requested.
+        let judged = judge(&model).analyze(&serde_json::json!({})).await;
+
+        // Then: it is used, and each request is the previous one with the rejection appended.
+        assert_eq!(judged.result.unwrap().difference, "e");
+        let requests = model.requests();
+        assert_eq!(requests.iter().map(Vec::len).collect::<Vec<_>>(), [2, 4, 6]);
+        crate::test_support::assert_prefix_kept(&requests);
     }
 
     #[tokio::test]

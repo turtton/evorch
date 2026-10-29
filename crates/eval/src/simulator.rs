@@ -80,7 +80,7 @@ impl UserSimulator {
             "replay_conversation": replay,
             "pending_question": pending,
         });
-        let messages = [
+        let mut messages = vec![
             Message {
                 role: providers::Role::System,
                 content: vec![ContentBlock::Text {
@@ -103,12 +103,11 @@ impl UserSimulator {
             turn: None,
         };
         let mut last = SimulatorError::Invalid("no attempt was made".into());
-        let mut next = messages.to_vec();
         for attempt in 1..=ATTEMPTS {
             let response = tokio::time::timeout(
                 TIMEOUT,
                 self.model
-                    .complete_structured(&invocation, Role::Worker, &next, &schema()),
+                    .complete_structured(&invocation, Role::Worker, &messages, &schema()),
             )
             .await;
             last = match response {
@@ -119,7 +118,7 @@ impl UserSimulator {
                     Err(unusable) => {
                         let described = unusable.describe(attempt);
                         tracing::warn!(run_id = %self.run_id, "unusable user simulator decision: {described}");
-                        next = unusable.retry_messages(&messages);
+                        unusable.append_retry(&mut messages);
                         SimulatorError::Invalid(described)
                     }
                 },
@@ -136,7 +135,7 @@ fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, U
         decision.action = Action::Reply;
     }
     if decision.action != Action::Finish && decision.text.is_empty() {
-        return Err(Unusable::rejected("a reply or answer needs text", content));
+        return Err(Unusable::new("a reply or answer needs text", content));
     }
     Ok(decision)
 }
@@ -213,6 +212,47 @@ mod tests {
             requests[1][2].content,
             text("Let me think about what the user would say.")
         );
+    }
+
+    #[tokio::test]
+    async fn retries_append_to_the_history_already_sent() {
+        // Given: two different unusable answers in a row (prose; a tool call with no text),
+        // then a proper decision.
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text("Let me think about what the user would say."),
+            crate::test_support::tool("secret_tool_name", serde_json::json!({"k": "secret_input"})),
+            crate::test_support::decision("reply", "go on"),
+        ]);
+
+        // When: the next step is requested.
+        let decision = simulator(&model).decide(&[], &[], None).await.unwrap();
+
+        // Then: each request is the previous one plus the new rejected answer (when it had
+        // text) and a request to answer again; the tool call is named only by its kind.
+        assert_eq!(decision.text, "go on");
+        let requests = model.requests();
+        assert_eq!(requests.iter().map(Vec::len).collect::<Vec<_>>(), [2, 4, 5]);
+        crate::test_support::assert_prefix_kept(&requests);
+        let resent = serde_json::to_string(&requests[2]).unwrap();
+        assert!(resent.contains("only tool_use"), "{resent}");
+        assert!(!resent.contains("secret_tool_name"), "{resent}");
+        assert!(!resent.contains("secret_input"), "{resent}");
+    }
+
+    #[tokio::test]
+    async fn two_decisions_in_one_answer_are_asked_again() {
+        // Given: an example decision followed by the real one.
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text(
+                "Example: {\"action\":\"finish\",\"text\":\"\",\"reason\":\"e\"}\nMine: {\"action\":\"reply\",\"text\":\"x\",\"reason\":\"r\"}",
+            ),
+            crate::test_support::decision("reply", "go on"),
+        ]);
+
+        // When / Then: neither is taken, and the second answer is used.
+        let decision = simulator(&model).decide(&[], &[], None).await.unwrap();
+        assert_eq!(decision.text, "go on");
+        assert_eq!(model.requests().len(), 2);
     }
 
     #[tokio::test]
