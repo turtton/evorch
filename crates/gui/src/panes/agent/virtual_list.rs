@@ -8,6 +8,7 @@ struct MeasuredRow {
     revision: u64,
     height: f32,
     settled: bool,
+    frame_nr: u64,
 }
 
 #[derive(Clone, Default)]
@@ -129,17 +130,23 @@ impl VirtualList {
             // The scope's rect excludes its parent's trailing item spacing.
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
+            let frame_nr = ui.ctx().cumulative_frame_nr();
             let unchanged =
                 previous.is_some_and(|row| row.revision == revision && row.height == measured);
+            // Repeated layout passes within one frame do not advance
+            // animation time, so they cannot establish a stable height.
+            let stable =
+                unchanged && previous.is_some_and(|row| row.settled || row.frame_nr != frame_nr);
             self.heights.insert(
                 entry_id,
                 MeasuredRow {
                     revision,
                     height: measured,
-                    settled: unchanged && !pending,
+                    settled: stable && !pending,
+                    frame_nr,
                 },
             );
-            if !unchanged {
+            if !unchanged || (!stable && !pending) {
                 // Keep measuring changing geometry (including animations),
                 // even offscreen. Pending I/O alone waits for its producer's
                 // wake-up rather than creating a continuous repaint loop.
@@ -212,6 +219,38 @@ mod tests {
         // Prune an evicted row; revisiting a view window measures it again.
         assert_eq!(layout(&ctx, 360.0, 1..21).0, 0);
         assert_eq!(layout(&ctx, 360.0, 0..21).0, 1);
+    }
+
+    #[test]
+    fn discarded_passes_do_not_finalize_heights_before_the_next_frame() {
+        let ctx = egui::Context::default();
+        set_transcript_virtualization_for_tests(&ctx, true);
+        let mut measurements = Vec::new();
+        for frame in 0..3 {
+            let mut drawn = 0;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let id = ui.id().with("multipass-list");
+                let mut list = VirtualList::load(ui, id, 0..1);
+                let viewport = egui::Rect::from_min_max(
+                    egui::pos2(0.0, -2_000.0),
+                    egui::pos2(640.0, -1_000.0),
+                );
+                list.row(ui, viewport, 0, 0, |ui| {
+                    drawn += 1;
+                    ui.label("offscreen row");
+                });
+                list.store(ui, id);
+                if frame == 0 && ui.ctx().current_pass_index() == 0 {
+                    ui.ctx()
+                        .request_discard("exercise same-frame remeasurement");
+                }
+            });
+            output.textures_delta.clear();
+            measurements.push(drawn);
+        }
+        // Two same-frame passes cannot prove stability: animation time has
+        // not advanced. A later frame must measure before spacers take over.
+        assert_eq!(measurements, [2, 1, 0]);
     }
 }
 
