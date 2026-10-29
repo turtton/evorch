@@ -55,6 +55,7 @@ pub(crate) struct GrepArgs {
     max_hits: Option<usize>,
     #[serde(default = "super::yes")]
     collapse_repeats: bool,
+    #[serde(default, deserialize_with = "super::empty_as_none")]
     cursor: Option<String>,
 }
 

@@ -38,11 +38,14 @@ pub(crate) struct ReadArgs {
     thread: String,
     #[serde(default)]
     view: View,
+    #[serde(default, deserialize_with = "super::empty_as_none")]
     run: Option<String>,
+    #[serde(default, deserialize_with = "super::empty_as_none")]
     around: Option<String>,
     before: Option<usize>,
     after: Option<usize>,
     max_bytes: Option<usize>,
+    #[serde(default, deserialize_with = "super::empty_as_none")]
     cursor: Option<String>,
 }
 
