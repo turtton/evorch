@@ -250,7 +250,7 @@ macro_rules! save_methods {
         pub fn save_agent_features(
             &self,
             path: &Path,
-            features: crate::AgentFeatures,
+            features: &crate::AgentFeatures,
         ) -> Result<(), ConfigError> {
             crate::save_agent_features::save_agent_features_in_scope(path, features, self.scope())
         }

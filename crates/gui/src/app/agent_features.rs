@@ -1,5 +1,8 @@
 use super::WorkbenchState;
-use crate::model::agent_features::{AGENT_FEATURES, AgentFeaturesSettings};
+use crate::model::agent_features::{
+    AGENT_FEATURES, AgentFeaturesSettings, FeatureDetail, run_js_scope_roles, scope_listed,
+    set_scope,
+};
 use crate::model::tasks::AgentRunSource;
 use crate::theme::{
     text::{h3, muted},
@@ -52,6 +55,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             ui.checkbox((feature.switch)(&mut self.agent_features.draft), feature.label);
                             ui.label(muted(feature.description));
                             ui.label(muted(format!("Default: {default}. {}", feature.applies)));
+                            if feature.detail == Some(FeatureDetail::RunJsScopes) {
+                                let enabled = self.agent_features.draft.run_js_enabled;
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    render_run_js_scopes(ui, &mut self.agent_features.draft.run_js_scopes);
+                                });
+                            }
                         }
                     });
                 });
@@ -74,7 +83,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn save_agent_features(&mut self) {
-        let features = self.agent_features.draft;
+        let features = self.agent_features.draft.clone();
         let result = self
             .provider_settings_path
             .as_ref()
@@ -84,14 +93,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
                 config::LayeredSaveContext::new(&self.user_settings_options())
-                    .save_agent_features(path, features)
+                    .save_agent_features(path, &features)
                     .map_err(|error| error.to_string())
             });
         if let Err(error) = result {
             self.agent_features.error = Some(error);
             return;
         }
-        self.agent_features.saved = features;
         self.sandbox_settings.config.web_tools_enabled = features.web_tools_enabled;
         self.sink.submit(
             crate::model::commands::WorkbenchCommand::SetWebToolsEnabled {
@@ -104,11 +112,48 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // started keep the tool specs they sent (prompt cache contract).
             runtime.set_run_js_settings(config::RunJsConfig {
                 enabled: features.run_js_enabled,
+                scopes: features.run_js_scopes.clone(),
                 ..runtime.run_js_settings()
             });
         }
+        self.agent_features.saved = features;
         self.agent_features.error = None;
         self.agent_features.open = false;
         self.push_notice("Agent features saved — they apply to runs started from now");
+    }
+}
+
+/// The roles (and their categories) `run_js` is offered to. A role covers all
+/// its categories and runs without one; its category rows then show as covered.
+fn render_run_js_scopes(ui: &mut egui::Ui, scopes: &mut Vec<String>) {
+    ui.label(muted(
+        "Offered to (a role covers all its categories and runs without one; role:category covers that category only):",
+    ));
+    for role in run_js_scope_roles() {
+        let role_label = if role.categories.is_empty() {
+            role.key.to_owned()
+        } else {
+            format!("{} (all categories)", role.key)
+        };
+        let mut role_listed = scope_listed(scopes, role.key);
+        if ui.checkbox(&mut role_listed, role_label).changed() {
+            set_scope(scopes, role.key, role_listed);
+        }
+        if role.categories.is_empty() {
+            continue;
+        }
+        ui.indent(("run-js-scope-categories", role.key), |ui| {
+            ui.add_enabled_ui(!role_listed, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for category in &role.categories {
+                        let scope = role.category_scope(category);
+                        let mut listed = role_listed || scope_listed(scopes, &scope);
+                        if ui.checkbox(&mut listed, scope.as_str()).changed() {
+                            set_scope(scopes, &scope, listed);
+                        }
+                    }
+                });
+            });
+        });
     }
 }

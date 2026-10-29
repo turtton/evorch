@@ -33,9 +33,10 @@ fn saving_agent_features_keeps_other_run_js_and_sandbox_keys() {
     LayeredSaveContext::new(&options)
         .save_agent_features(
             &path,
-            AgentFeatures {
+            &AgentFeatures {
                 web_tools_enabled: false,
                 run_js_enabled: true,
+                ..AgentFeatures::default()
             },
         )
         .unwrap();
@@ -61,7 +62,7 @@ fn saving_agent_features_keeps_other_run_js_and_sandbox_keys() {
 
     // When: switching both back.
     LayeredSaveContext::new(&options)
-        .save_agent_features(&path, AgentFeatures::default())
+        .save_agent_features(&path, &AgentFeatures::default())
         .unwrap();
 
     // Then: the defaults load while the limits stay.
@@ -83,11 +84,12 @@ fn saving_agent_features_creates_missing_sections() {
     let features = AgentFeatures {
         web_tools_enabled: true,
         run_js_enabled: true,
+        ..AgentFeatures::default()
     };
 
     // When: saving the switches.
     LayeredSaveContext::new(&options)
-        .save_agent_features(&path, features)
+        .save_agent_features(&path, &features)
         .unwrap();
 
     // Then: they reload with run_js limits left at their defaults.
@@ -107,6 +109,7 @@ fn run_js_switch_is_refused_where_it_would_not_apply() {
     let features = AgentFeatures {
         web_tools_enabled: true,
         run_js_enabled: true,
+        ..AgentFeatures::default()
     };
     // Given: a project file, which may not set [tools], and a user drop-in that
     // overrides the main user file.
@@ -129,7 +132,7 @@ fn run_js_switch_is_refused_where_it_would_not_apply() {
 
         // When: saving run_js on into that file.
         let error = LayeredSaveContext::new(&options)
-            .save_agent_features(path, features)
+            .save_agent_features(path, &features)
             .unwrap_err();
 
         // Then: the save names the setting and leaves the file unchanged.
@@ -154,13 +157,14 @@ fn saving_agent_features_keeps_the_comments_on_both_switches() {
     let flipped = AgentFeatures {
         web_tools_enabled: false,
         run_js_enabled: true,
+        ..AgentFeatures::default()
     };
 
     // When / Then: changing both values, and then saving them unchanged, keeps
     // every comment next to the updated values.
     for _ in 0..2 {
         LayeredSaveContext::new(&options)
-            .save_agent_features(&path, flipped)
+            .save_agent_features(&path, &flipped)
             .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -175,5 +179,106 @@ fn saving_agent_features_keeps_the_comments_on_both_switches() {
             AgentFeatures::from_config(&Config::load_strict(&options).unwrap()),
             flipped
         );
+    }
+}
+
+#[test]
+fn saving_run_js_scopes_rewrites_the_list_in_place_and_keeps_the_comments() {
+    // Given: a user file with commented scopes and neighbouring keys.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[tools.run_js]\nenabled = true\n# scopes before\nscopes = [\"worker:deep\"] # scopes after\nmax_tool_calls = 50\n",
+    );
+    let options = user_options(root.path());
+    let features = AgentFeatures {
+        run_js_enabled: true,
+        run_js_scopes: vec!["worker".into(), "reviewer:plan-review".into()],
+        ..AgentFeatures::default()
+    };
+
+    // When: saving other scopes.
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &features)
+        .unwrap();
+
+    // Then: they load, and the comments and the other key stay.
+    let loaded = Config::load_strict(&options).unwrap();
+    assert_eq!(loaded.tools.run_js.scopes, features.run_js_scopes);
+    assert_eq!(loaded.tools.run_js.max_tool_calls, 50);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("# scopes before\nscopes = ["), "{text}");
+    assert!(text.contains("] # scopes after\n"), "{text}");
+
+    // When: saving the same scopes again.
+    let before = std::fs::read_to_string(&path).unwrap();
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &features)
+        .unwrap();
+
+    // Then: the file is byte-identical.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn run_js_scopes_are_created_only_when_they_differ_from_the_default() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(&path, "version = 3\n");
+    let options = user_options(root.path());
+
+    // When: saving the default scopes.
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &AgentFeatures::default())
+        .unwrap();
+    // Then: no scopes key is written.
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("scopes"));
+
+    // When: saving other scopes, including an empty list.
+    for scopes in [vec!["explorer".to_owned()], Vec::new()] {
+        let features = AgentFeatures {
+            run_js_scopes: scopes.clone(),
+            ..AgentFeatures::default()
+        };
+        LayeredSaveContext::new(&options)
+            .save_agent_features(&path, &features)
+            .unwrap();
+        // Then: they reload as saved.
+        assert_eq!(
+            Config::load_strict(&options).unwrap().tools.run_js.scopes,
+            scopes
+        );
+    }
+}
+
+#[test]
+fn run_js_scopes_that_are_invalid_or_overridden_are_refused_without_writing() {
+    // Given: a user file and a drop-in that pins different scopes.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(&path, "version = 3\n");
+    put(
+        &root.path().join("user/config.d/tools.toml"),
+        "[tools.run_js]\nscopes = [\"advisor\"]\n",
+    );
+    let options = user_options(root.path());
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    for scopes in [vec!["worker".to_owned()], vec!["wroker".to_owned()]] {
+        // When: saving scopes the drop-in overrides, or that name no role.
+        let error = LayeredSaveContext::new(&options)
+            .save_agent_features(
+                &path,
+                &AgentFeatures {
+                    run_js_scopes: scopes,
+                    ..AgentFeatures::default()
+                },
+            )
+            .unwrap_err();
+
+        // Then: the save names the setting and leaves the file unchanged.
+        assert!(error.to_string().contains("tools.run_js.scopes"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }

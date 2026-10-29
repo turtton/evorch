@@ -87,6 +87,7 @@ evorch inspect --db <path> events --run <run-id> [--limit <n>]     # 既定 limi
 
 - `--db` は `inspect` では**サブコマンドの直前**に置く（`inspect --db <path> run …`）。
 - `--db` を付けた run だけ stderr に `run_id: <id>` を出す。`--run-js-enabled` は `[tools.run_js] enabled` の上書き。
+- **run_js を出すロールとカテゴリ（`[tools.run_js] scopes`）**: 既定の `scopes` は `["worker:deep", "worker:high-reasoning"]` だけで、`evorch run --role worker`（カテゴリ無し）には `run_js` が出ない。評価では `evorch run` に `--category` を足さず、overlay の `config.d/zz-worker.toml` で `[tools.run_js] scopes = ["worker"]` を指定して Worker の全カテゴリとカテゴリ無しに出す。`--category` で Worker に deep などのカテゴリ overlay とカテゴリのモデル割り当てが掛かると、これまでの評価と条件が変わるためである。`--run-js-enabled` は全体のスイッチだけを上書きし、`scopes` には触れない。
 - `--user-config` は元の `~/.config/evorch` にフォールバックしない。overlay に必要な設定をすべて入れる。
 
 ### 1. 事前準備（1 回だけ）
@@ -107,7 +108,7 @@ $EVAL/evals/run-js/scripts/make-overlay.sh <profile> <model-id> <effort> <outdir
 ```
 
 - `<outdir>/config.toml` — 利用者の `config.toml` のコピー（元は `$EVORCH_CONFIG_SRC`、既定 `${XDG_CONFIG_HOME:-~/.config}/evorch`）。秘密値は含まれない。
-- `<outdir>/config.d/zz-worker.toml` — 候補が 1 件だけの評価専用 route `eval-pinned`（`profile` と `model` を明示）と、`[agents.worker]` / `models = [{ route = "eval-pinned", reasoning_effort = "<effort>" }]`。5 つの overlay の違いは Worker のモデルと provider だけ。
+- `<outdir>/config.d/zz-worker.toml` — 候補が 1 件だけの評価専用 route `eval-pinned`（`profile` と `model` を明示）と、`[agents.worker]` / `models = [{ route = "eval-pinned", reasoning_effort = "<effort>" }]`、`[tools.run_js]` の `scopes = ["worker"]`（上記）。5 つの overlay の違いは Worker のモデルと provider だけ。
 - provider の固定: 利用者の `config.toml` の route（`gpt-luna+fast` など）は `codex-work` が先頭候補で、そのままだと `*-work` に解決される。設定の深マージは配列を置き換えるので、既存 route を上書きせず別名の route を足している。候補が 1 件なので他 profile へのフェイルオーバーも起きない。`<profile>` は `codex-personal` / `claude-personal` のみ受け付け、`config.toml` に定義があることも確認する。
 - 生成物はリポジトリにコミットしない（このリポジトリの作業ツリー内への出力は拒否する）。`run-one.sh` は run ごとに作って後で消すので、通常は手で作らない。
 

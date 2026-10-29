@@ -139,6 +139,21 @@ impl Role {
         }
     }
 
+    /// The key of this role in `agents.<role>` and in `tools.run_js.scopes`.
+    pub const fn config_key(&self) -> &'static str {
+        match self {
+            Role::Orchestrator => "orchestrator",
+            Role::Explorer => "explorer",
+            Role::Worker => "worker",
+            Role::Reviewer => "reviewer",
+            Role::WebResearcher => "web_researcher",
+            Role::Planner => "planner",
+            Role::Advisor => "advisor",
+            Role::MultimodalLooker => "multimodal_looker",
+            Role::Evaluator => "evaluator",
+        }
+    }
+
     /// ADR 0002 のケイパビリティ行列を返す。
     pub fn capabilities(&self) -> RoleCapabilities {
         let mut capabilities = match self {

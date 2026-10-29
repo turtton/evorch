@@ -67,12 +67,26 @@ pub(crate) fn apply_run_js_specs(
 }
 
 impl LoopState {
-    /// Whether this run may use `run_js`: switched on, not a team run.
-    pub(super) fn run_js_offered(&self) -> bool {
+    /// Whether `run_js` is switched on and scoped to this run's role and
+    /// category (`tools.run_js.scopes`), and this is not a team run. The role's
+    /// capability is checked separately, by the tool list and the policy.
+    fn run_js_in_scope(&self) -> bool {
         self.task.config.team.is_none()
+            && self.runtime().is_some_and(|runtime| {
+                runtime.run_js_offered_to(self.task.role, self.task.config.category.as_deref())
+            })
+    }
+
+    /// Whether this run may call `run_js` now: it is in scope under the current
+    /// settings and the tool was in the list the run started with. A setting
+    /// turned on later does not add the tool to a run; one turned off refuses
+    /// calls at once.
+    pub(super) fn run_js_offered(&self) -> bool {
+        self.run_js_in_scope()
             && self
-                .runtime()
-                .is_some_and(|runtime| runtime.run_js_enabled())
+                .tool_specs
+                .iter()
+                .any(|spec| spec.name == tools::tools::run_js::NAME)
     }
 
     pub(super) fn apply_run_js(&mut self) {
@@ -80,7 +94,7 @@ impl LoopState {
             .runtime()
             .map(|runtime| runtime.run_js_settings())
             .unwrap_or_default();
-        let offered = self.run_js_offered();
+        let offered = self.run_js_in_scope();
         apply_run_js_specs(&mut self.tool_specs, offered, &settings);
     }
 

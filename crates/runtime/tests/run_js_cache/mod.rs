@@ -58,7 +58,24 @@ fn description<'a>(request: &'a Value, name: &str) -> &'a str {
         .unwrap()
 }
 
+/// run_js switched `enabled` and scoped to `scopes`.
+fn scoped(enabled: bool, scopes: &[&str]) -> config::RunJsConfig {
+    config::RunJsConfig {
+        enabled,
+        scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+        ..config::RunJsConfig::default()
+    }
+}
+
 fn harness(enabled: bool, script: Vec<ScriptedResponse>, launcher: WorkerLauncher) -> Harness {
+    harness_with(scoped(enabled, &["worker"]), script, launcher)
+}
+
+fn harness_with(
+    settings: config::RunJsConfig,
+    script: Vec<ScriptedResponse>,
+    launcher: WorkerLauncher,
+) -> Harness {
     harness_with_model(
         Wire::ChatCompletions,
         MODEL,
@@ -73,7 +90,7 @@ fn harness(enabled: bool, script: Vec<ScriptedResponse>, launcher: WorkerLaunche
         ],
         None,
         0.5,
-        |config| config.tools.run_js.enabled = enabled,
+        |config| config.tools.run_js = settings,
     )
 }
 
@@ -310,6 +327,25 @@ struct Switched {
 /// input-derived cache and append-only wire checks.
 async fn switch_run_js_during_a_run(
     enabled: bool,
+    script: Vec<ScriptedResponse>,
+    next_run: Vec<ScriptedResponse>,
+) -> Switched {
+    switch_settings_during_a_run(
+        scoped(enabled, &["worker"]),
+        |settings| config::RunJsConfig {
+            enabled: !enabled,
+            ..settings
+        },
+        script,
+        next_run,
+    )
+    .await
+}
+
+/// The same with any change of the run_js settings (its switch or its scopes).
+async fn switch_settings_during_a_run(
+    start: config::RunJsConfig,
+    switch: impl FnOnce(config::RunJsConfig) -> config::RunJsConfig,
     mut script: Vec<ScriptedResponse>,
     next_run: Vec<ScriptedResponse>,
 ) -> Switched {
@@ -317,7 +353,7 @@ async fn switch_run_js_during_a_run(
     let (gate, arrived) = mock_openai::ResponseGate::new();
     script[0] = script[0].clone().with_gate(gate.clone());
     script.extend(next_run);
-    let mut harness = harness(enabled, script, worker(&directory.path().join("unused")));
+    let mut harness = harness_with(start, script, worker(&directory.path().join("unused")));
     let _release = ReleaseOnDrop(gate.clone());
 
     let run =
@@ -327,10 +363,9 @@ async fn switch_run_js_during_a_run(
     tokio::task::spawn_blocking(move || arrived.recv().unwrap())
         .await
         .unwrap();
-    harness.runtime.set_run_js_settings(config::RunJsConfig {
-        enabled: !enabled,
-        ..harness.runtime.run_js_settings()
-    });
+    harness
+        .runtime
+        .set_run_js_settings(switch(harness.runtime.run_js_settings()));
     gate.release();
     let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
     let switched = requests(&harness);
@@ -424,4 +459,99 @@ async fn switching_run_js_on_during_a_run_keeps_its_tools_and_wire_prefix() {
             run_js_description::SHELL_HINT
         )
     );
+}
+
+/// Narrowing the scopes away from a running run keeps the definitions it already
+/// sent, refuses its later calls, and leaves run_js out of the next run.
+#[tokio::test]
+async fn narrowing_the_scopes_during_a_run_keeps_its_tools_and_wire_prefix() {
+    let switched = switch_settings_during_a_run(
+        scoped(true, &["worker"]),
+        |settings| config::RunJsConfig {
+            scopes: vec!["explorer".into()],
+            ..settings
+        },
+        vec![read_response(0), run_js_response(1), text_response("done")],
+        vec![text_response("next")],
+    )
+    .await;
+
+    assert_eq!(switched.run.len(), 3);
+    assert_same_tools(&switched.run);
+    assert!(tool_names(&switched.run[0]).contains(&"run_js".to_owned()));
+    let refused = tool_result(&switched.run[2], "call-1");
+    assert!(refused.contains("run_js is not enabled"), "{refused}");
+    assert!(!tool_names(&switched.next_run[0]).contains(&"run_js".to_owned()));
+}
+
+/// Widening the scopes to a running run does not add run_js to it; the next
+/// run has it.
+#[tokio::test]
+async fn widening_the_scopes_during_a_run_keeps_its_tools_and_wire_prefix() {
+    let switched = switch_settings_during_a_run(
+        scoped(true, &["explorer"]),
+        |settings| config::RunJsConfig {
+            scopes: vec!["worker".into()],
+            ..settings
+        },
+        vec![read_response(0), run_js_response(1), text_response("done")],
+        vec![text_response("next")],
+    )
+    .await;
+
+    assert_eq!(switched.run.len(), 3);
+    assert_same_tools(&switched.run);
+    for request in &switched.run {
+        assert!(!request["tools"].to_string().contains("run_js"));
+    }
+    let refused = tool_result(&switched.run[2], "call-1");
+    assert!(refused.contains("run_js is not enabled"), "{refused}");
+    assert!(tool_names(&switched.next_run[0]).contains(&"run_js".to_owned()));
+}
+
+/// The tool names of the first request of a run of `role` with `category`
+/// under `scopes`, after the run passes the input-derived cache checks.
+async fn tools_offered_to(scopes: &[&str], role: Role, category: Option<&str>) -> Vec<String> {
+    let directory = tempfile::tempdir().unwrap();
+    let mut harness = harness_with(
+        scoped(true, scopes),
+        vec![read_response(3), read_response(4), text_response("done")],
+        worker(&directory.path().join("unused")),
+    );
+    let run = harness.runtime.delegate_background(
+        role,
+        "work".into(),
+        RunConfig {
+            category: category.map(str::to_owned),
+            ..RunConfig::default()
+        },
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    verify_trace(&harness, run, &events, 0);
+    tool_names(&requests(&harness)[0])
+}
+
+/// A scope names a role (every category and none) or a role with one category.
+#[tokio::test]
+async fn run_js_is_offered_only_to_the_roles_and_categories_in_the_scopes() {
+    let defaults = ["worker:deep", "worker:high-reasoning"];
+    let offered = |names: &[String]| names.contains(&"run_js".to_owned());
+
+    for (scopes, role, category, expected) in [
+        (&defaults[..], Role::Worker, Some("deep"), true),
+        (&defaults[..], Role::Worker, Some("high-reasoning"), true),
+        (&defaults[..], Role::Worker, None, false),
+        (&defaults[..], Role::Worker, Some("quick"), false),
+        (&["worker"][..], Role::Worker, None, true),
+        (&["worker"][..], Role::Worker, Some("quick"), true),
+        (&["worker:deep"][..], Role::Worker, Some("deep"), true),
+        (&[][..], Role::Worker, Some("deep"), false),
+    ] {
+        let names = tools_offered_to(scopes, role, category).await;
+        assert_eq!(
+            offered(&names),
+            expected,
+            "{scopes:?} for {role:?} {category:?}"
+        );
+    }
 }
