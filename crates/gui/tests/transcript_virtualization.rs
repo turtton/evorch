@@ -29,16 +29,15 @@ fn harness(model: TranscriptModel, force: Option<bool>) -> Harness<'static, Stat
 fn build_harness(model: TranscriptModel, force: Option<bool>) -> Harness<'static, State> {
     Harness::builder()
         .with_size(egui::vec2(640.0, 480.0))
-        .build_ui_state(
-            |ui, state| {
-                gui::theme::install(ui.ctx());
-                if let Some(force) = state.force {
-                    set_transcript_virtualization_for_tests(ui.ctx(), force);
-                }
-                transcript_body(ui, &state.model);
-            },
-            State { model, force },
-        )
+        .build_ui_state(draw_transcript, State { model, force })
+}
+
+fn draw_transcript(ui: &mut egui::Ui, state: &mut State) {
+    gui::theme::install(ui.ctx());
+    if let Some(force) = state.force {
+        set_transcript_virtualization_for_tests(ui.ctx(), force);
+    }
+    transcript_body(ui, &state.model);
 }
 
 fn content_height(harness: &Harness<'_, State>) -> f32 {
@@ -136,6 +135,47 @@ fn offscreen_stream_growth_updates_the_extent_before_scrolling_back() {
 }
 
 #[test]
+fn task_prompt_reordering_invalidates_both_slots_without_unsorting_ids() {
+    use gui::model::transcript::TranscriptEntry;
+
+    let mut model = TranscriptModel::new();
+    model.push_notice("subagent worker started");
+    let notice_id = model.visible_entry_id(0);
+    let notice_revision = model.entry_revision(notice_id).unwrap();
+    let event = Event::new(LifecycleEvent::TaskPromptPublished {
+        run_id: "prompt-run".into(),
+        parent_run_id: Some("parent-run".into()),
+        agent_name: "worker".into(),
+        role: "worker".into(),
+        prompt: "delegated instruction".into(),
+    });
+    model.apply(&event);
+    let ids: Vec<_> = model.visible_entry_ids().collect();
+    assert_eq!(ids[0], notice_id);
+    assert!(ids[0] < ids[1], "ID lookup remains sorted after reordering");
+    assert_eq!(model.entry_revision(ids[0]), Some(notice_revision + 1));
+    assert_eq!(model.entry_revision(ids[1]), Some(1));
+    assert!(
+        matches!(&model.entries()[0], TranscriptEntry::UserMessage { text, .. }
+        if text == "delegated instruction")
+    );
+    assert!(
+        matches!(&model.entries()[1], TranscriptEntry::Notice { text }
+        if text == "subagent worker started")
+    );
+    let revisions: Vec<_> = ids.iter().map(|id| model.entry_revision(*id)).collect();
+    model.apply(&event);
+    assert_eq!(model.visible_entry_ids().collect::<Vec<_>>(), ids);
+    assert_eq!(
+        ids.iter()
+            .map(|id| model.entry_revision(*id))
+            .collect::<Vec<_>>(),
+        revisions,
+        "replaying an unchanged instruction does not invalidate either slot"
+    );
+}
+
+#[test]
 fn offscreen_tool_completion_remeasures_its_expanded_card() {
     let mut model = TranscriptModel::new();
     tool_start(&mut model, "read", "read", None);
@@ -144,7 +184,10 @@ fn offscreen_tool_completion_remeasures_its_expanded_card() {
     harness.get_by_label_contains("Read offscreen.rs").click();
     harness.run_steps(3);
     add_history(&mut harness.state_mut().model);
-    harness.run_steps(3);
+    // The new scrollbar changes the width: measure twice at that width,
+    // then observe the offscreen row being skipped. The running spinner
+    // requests repaints indefinitely, so Harness::run cannot settle it.
+    harness.run_steps(4);
     assert!(
         harness
             .query_by_label_contains("Read offscreen.rs")
@@ -166,7 +209,20 @@ fn offscreen_thinking_end_remeasures_the_automatically_collapsed_body() {
         delta: "thinking paragraph\n\n".repeat(30),
     }));
     add_history(&mut model);
-    let mut harness = harness(model, Some(true));
+    // Simulated frames smaller than the 200ms collapse animation expose
+    // intermediate heights; the default kittest step is already 250ms.
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 480.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_max_steps(32)
+        .build_ui_state(
+            draw_transcript,
+            State {
+                model,
+                force: Some(true),
+            },
+        );
+    harness.run();
     assert!(harness.query_by_label("thinking").is_none());
     let before = content_height(&harness);
     harness

@@ -353,6 +353,10 @@ impl TranscriptModel {
                     // The spawn notice arrives first, but the run's instruction leads its transcript.
                     if only_start_notice && self.entries.len() == 2 {
                         self.entries.swap(0, 1);
+                        // Keep allocated IDs sorted for ID lookup; both slots
+                        // now contain different displayed content.
+                        self.entry_meta[0].revision += 1;
+                        self.entry_meta[1].revision += 1;
                     }
                 }
             }

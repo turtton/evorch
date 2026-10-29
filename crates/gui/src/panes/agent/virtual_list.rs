@@ -1,5 +1,5 @@
 //! Measured, variable-height transcript rows. Unknown rows are never estimated:
-//! the first pass (and a width change) lays out every row once.
+//! cold/width-change passes measure every row until its height settles.
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 struct MeasuredRow {
     revision: u64,
     height: f32,
+    settled: bool,
 }
 
 #[derive(Clone, Default)]
@@ -19,6 +20,21 @@ pub(super) struct VirtualList {
 
 fn override_id() -> egui::Id {
     egui::Id::new("transcript-virtualization-test-override")
+}
+
+fn measurement_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::new("transcript-layout-pending").with(ctx.viewport_id())
+}
+
+/// A renderer awaiting external layout data must not publish a final height.
+/// The enclosing measurement propagates this through nested child renderers.
+pub(crate) fn mark_pending_layout(ctx: &egui::Context) {
+    let id = measurement_id(ctx);
+    ctx.data_mut(|data| {
+        if data.get_temp::<bool>(id).is_some() {
+            data.insert_temp(id, true);
+        }
+    });
 }
 
 /// Internal test hook: kittest enables AccessKit, which normally requires the
@@ -78,39 +94,55 @@ impl VirtualList {
         revision: u64,
         draw: impl FnOnce(&mut egui::Ui),
     ) {
-        let height = self
-            .heights
-            .get(&entry_id)
-            .filter(|row| row.revision == revision)
-            .map(|row| row.height);
+        let previous = self.heights.get(&entry_id).copied();
+        let height = previous.map(|row| row.height);
         let top = ui.cursor().top();
         let skip = self.enabled
+            && previous.is_some_and(|row| row.revision == revision && row.settled)
             && height
                 .is_some_and(|height| top + height < viewport.top() || top > viewport.bottom());
         // An explicit ID also severs egui's parent auto-ID counter dependency:
         // eviction or consolidation of earlier rows must not lose selection.
         let scope = self.scope_id.expect("list loaded").with(entry_id);
+        let mut pending = false;
         let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
             if skip {
                 ui.add_space(height.unwrap_or_default());
             } else {
+                let measurement = measurement_id(ui.ctx());
+                let outer = ui.data_mut(|data| {
+                    let outer = data.get_temp::<bool>(measurement);
+                    data.insert_temp(measurement, false);
+                    outer
+                });
                 draw(ui);
+                pending = ui.data_mut(|data| {
+                    let pending = data.remove_temp::<bool>(measurement).unwrap_or(false);
+                    if let Some(outer) = outer {
+                        data.insert_temp(measurement, outer || pending);
+                    }
+                    pending
+                });
             }
         });
         if !skip {
             // The scope's rect excludes its parent's trailing item spacing.
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
+            let unchanged =
+                previous.is_some_and(|row| row.revision == revision && row.height == measured);
             self.heights.insert(
                 entry_id,
                 MeasuredRow {
                     revision,
                     height: measured,
+                    settled: unchanged && !pending,
                 },
             );
-            if height != Some(measured) {
-                // ScrollArea updates its sticky offset after laying out the
-                // contents; paint that new offset on the next frame.
+            if !unchanged {
+                // Keep measuring changing geometry (including animations),
+                // even offscreen. Pending I/O alone waits for its producer's
+                // wake-up rather than creating a continuous repaint loop.
                 ui.ctx().request_repaint();
             }
         }
@@ -135,7 +167,7 @@ mod tests {
             |ui| {
                 let id = ui.id().with("list");
                 let mut list = VirtualList::load(ui, id, entries.clone());
-                // All rows are offscreen. Only unmeasured ones may draw.
+                // All rows are offscreen. Only unsettled ones may draw.
                 let viewport = egui::Rect::from_min_max(
                     egui::pos2(0.0, -2_000.0),
                     egui::pos2(width, -1_000.0),
@@ -164,13 +196,16 @@ mod tests {
         set_transcript_virtualization_for_tests(&ctx, true);
         let (cold, expected) = layout(&ctx, 640.0, 0..20);
         assert_eq!(cold, 20);
-        let (warm, actual) = layout(&ctx, 640.0, 0..20);
-        assert_eq!(warm, 0);
+        let (settling, actual) = layout(&ctx, 640.0, 0..20);
+        assert_eq!(settling, 20);
         assert_eq!(actual, expected);
+        assert_eq!(layout(&ctx, 640.0, 0..20).0, 0);
 
         // Appended offscreen rows must still be measured, not estimated.
         assert_eq!(layout(&ctx, 640.0, 0..21).0, 1);
+        assert_eq!(layout(&ctx, 640.0, 0..21).0, 1);
         assert_eq!(layout(&ctx, 640.0, 0..21).0, 0);
+        assert_eq!(layout(&ctx, 360.0, 0..21).0, 21);
         assert_eq!(layout(&ctx, 360.0, 0..21).0, 21);
         assert_eq!(layout(&ctx, 360.0, 0..21).0, 0);
 
@@ -179,3 +214,6 @@ mod tests {
         assert_eq!(layout(&ctx, 360.0, 0..21).0, 1);
     }
 }
+
+#[cfg(test)]
+mod preview_tests;

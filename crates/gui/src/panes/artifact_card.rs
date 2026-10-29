@@ -162,6 +162,7 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
         ui.label(RichText::new(caption).color(palette().TEXT_MUTED));
     }
     if !available {
+        crate::panes::agent::mark_pending_layout(ui.ctx());
         ui.label(
             RichText::new(format!(
                 "Artifact unavailable: {} (file missing or inaccessible)",
@@ -239,6 +240,7 @@ fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response
             Some(ui.add(image))
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
+            crate::panes::agent::mark_pending_layout(ui.ctx());
             preview_note(ui, "Loading preview…");
             None
         }
@@ -268,6 +270,7 @@ fn html_snapshot(
             }
         }
         SnapshotState::Pending => {
+            crate::panes::agent::mark_pending_layout(ui.ctx());
             preview_note(ui, "Rendering preview…");
             // The host drains snapshot requests after the card has rendered.
             let id = ui.id().with(("snapshot-requested", &artifact.sha256));

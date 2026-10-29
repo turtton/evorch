@@ -26,6 +26,7 @@ mod queue;
 mod sandbox_review;
 mod thinking;
 mod virtual_list;
+pub(crate) use virtual_list::mark_pending_layout;
 #[doc(hidden)]
 pub use virtual_list::{set_transcript_virtualization_for_tests, transcript_layout_for_tests};
 
