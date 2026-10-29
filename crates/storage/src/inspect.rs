@@ -12,6 +12,7 @@ use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Map, Value, json};
 
 use crate::improvement::{ImprovementCandidate, ImprovementStatus};
+use crate::repo::event::select::{IDS_BY_RUN_SQL, has_unbackfilled, normalize, push_ids};
 use crate::{Database, StorageError};
 
 /// Columns holding JSON text that are expanded in inspection output.
@@ -37,7 +38,8 @@ pub struct InspectEvent {
 /// Which events to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventScope<'a> {
-    /// Events whose payload names this run in any `run_id` field.
+    /// Events attributed to this run by their `run_id` column, plus orchestrator
+    /// events and unconverted rows whose payload names it in any `run_id` field.
     Run(&'a str),
     /// Events persisted in the inclusive wall-clock window.
     Window { from_ns: i64, to_ns: i64 },
@@ -84,17 +86,43 @@ impl Database {
         let mut truncated = false;
         match scope {
             EventScope::Run(run_id) => {
-                // The leading quote keeps `"parent_run_id"` from matching; the JSON check
-                // below drops matches inside string values.
-                let needle = format!("\"run_id\":{}", Value::String(run_id.into()));
-                let mut statement = self.conn.prepare(
-                    "SELECT id, session_id, wall_clock_ns, kind, payload FROM events
-                     WHERE instr(payload, ?1) > 0 ORDER BY id DESC",
+                let transaction = self.conn.unchecked_transaction()?;
+                let mut candidates = Vec::new();
+                push_ids(
+                    &transaction,
+                    IDS_BY_RUN_SQL,
+                    [run_id],
+                    false,
+                    &mut candidates,
                 )?;
-                let mut rows = statement.query([needle])?;
-                while let Some(row) = rows.next()? {
+                // Task progress names its run in a field the column does not carry.
+                push_ids(
+                    &transaction,
+                    "SELECT id FROM events WHERE kind = 'Orchestrator'",
+                    [],
+                    true,
+                    &mut candidates,
+                )?;
+                if has_unbackfilled(&transaction)? {
+                    // Any string value equal to the run narrows the scan; the checks
+                    // below decide.
+                    let needle = Value::String(run_id.into()).to_string();
+                    push_ids(
+                        &transaction,
+                        "SELECT id FROM events WHERE subkind IS NULL AND instr(payload, ?1) > 0",
+                        [needle],
+                        true,
+                        &mut candidates,
+                    )?;
+                }
+                let mut statement = transaction.prepare(
+                    "SELECT id, session_id, wall_clock_ns, kind, payload FROM events WHERE id = ?1",
+                )?;
+                for candidate in normalize(candidates).iter().rev() {
+                    let mut rows = statement.query([candidate.id])?;
+                    let Some(row) = rows.next()? else { continue };
                     let event = event_row(row)?;
-                    if !names_run(&event.payload, run_id) {
+                    if candidate.confirm && !attributed_to_run(&event.payload, run_id) {
                         continue;
                     }
                     if events.len() == limit {
@@ -384,6 +412,14 @@ fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {
         kind: row.get(3)?,
         payload: serde_json::from_str(&payload).unwrap_or(Value::String(payload)),
     })
+}
+
+/// Whether the payload names the run in a `run_id` field, or the event is
+/// attributed to it as stored events are by their `run_id` column.
+fn attributed_to_run(payload: &Value, run_id: &str) -> bool {
+    names_run(payload, run_id)
+        || serde_json::from_value::<event_bus::EventKind>(payload.clone())
+            .is_ok_and(|kind| kind.primary_run_id() == Some(run_id))
 }
 
 fn names_run(value: &Value, run_id: &str) -> bool {
