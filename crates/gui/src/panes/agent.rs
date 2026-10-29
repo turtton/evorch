@@ -27,7 +27,7 @@ mod sandbox_review;
 mod thinking;
 mod virtual_list;
 #[doc(hidden)]
-pub use virtual_list::set_transcript_virtualization_for_tests;
+pub use virtual_list::{set_transcript_virtualization_for_tests, transcript_layout_for_tests};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentIdentity<'a> {
@@ -188,6 +188,42 @@ fn latest_shell_job_entries(
         .collect()
 }
 
+/// Only hash mutation counters, not large markdown/tool-output strings. A
+/// parent's layout also depends on its nested children and live shell state.
+fn row_revision(
+    model: &TranscriptModel,
+    indices: impl Iterator<Item = usize>,
+    latest_jobs: &std::collections::HashMap<
+        crate::model::transcript::shell_jobs::ShellJobKey,
+        usize,
+    >,
+    layout_revision: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut revision = std::hash::DefaultHasher::new();
+    layout_revision.hash(&mut revision);
+    for index in indices {
+        let id = model.visible_entry_id(index);
+        id.hash(&mut revision);
+        model.entry_revision(id).hash(&mut revision);
+        model.thinking_is_streaming(id).hash(&mut revision);
+        let job = crate::panes::transcript_tool::resolved_shell_job_key(
+            &model.visible_entries()[index],
+            model.shell_jobs(),
+        );
+        job.hash(&mut revision);
+        if let Some(key) = job {
+            model
+                .shell_jobs()
+                .get_key(&key)
+                .map(|job| job.revision())
+                .hash(&mut revision);
+            (latest_jobs.get(&key) == Some(&index)).hash(&mut revision);
+        }
+    }
+    revision.finish()
+}
+
 pub fn transcript_body(ui: &mut egui::Ui, model: &TranscriptModel) {
     transcript_body_with_repo_root(ui, model, None);
 }
@@ -242,14 +278,14 @@ fn run_detail_body(
         pane_id.with(("run", run_id))
     } else {
         // Standalone transcripts may have no thread or run identity.
-        pane_id.with(("transcript", model as *const TranscriptModel as usize))
+        pane_id.with(("transcript", model.cache_identity()))
     };
     let cache_key = model_id.with("entry-heights");
     let own_branch = model.last_branch_entry_id();
     if branch.is_some() {
         branch::confirm_modal(ui, branch_action);
     }
-    egui::ScrollArea::vertical()
+    let output = egui::ScrollArea::vertical()
         .id_salt(model_id)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
@@ -263,13 +299,18 @@ fn run_detail_body(
                 branch::start_versions(ui, model, branch, branch_action);
             }
             let entries = model.visible_entries();
-            let first = model.visible_entry_id(0);
-            let mut list = virtual_list::VirtualList::load(
-                ui,
-                cache_key,
-                first,
-                first.saturating_add(entries.len()),
-            );
+            let mut list =
+                virtual_list::VirtualList::load(ui, cache_key, model.visible_entry_ids());
+            use std::hash::{Hash, Hasher};
+            let mut layout_revision = std::hash::DefaultHasher::new();
+            model.cache_identity().hash(&mut layout_revision);
+            for row in task_rows {
+                (&row.run_id, &row.name, &row.role).hash(&mut layout_revision);
+            }
+            branch
+                .map(|branch| branch.rewind_block)
+                .hash(&mut layout_revision);
+            let layout_revision = layout_revision.finish();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
             let mut folded_until = 0;
@@ -292,7 +333,14 @@ fn run_detail_body(
                             model.shell_jobs(),
                         );
                 }
-                list.row(ui, viewport, entry_id, |ui| {
+                let revision = row_revision(
+                    model,
+                    (entry_idx..folded_until.max(entry_idx + 1))
+                        .chain(nesting.children(entry_idx).iter().copied()),
+                    &latest_job_entry,
+                    layout_revision,
+                );
+                list.row(ui, viewport, entry_id, revision, |ui| {
                     if let TranscriptEntry::TurnEnd { .. } = entry {
                         // Run detail panes show history only; turn actions belong to threads.
                         if let Some(branch) = branch {
@@ -468,8 +516,9 @@ fn run_detail_body(
                 crate::panes::ledger::ledger_section(ui, identity.run_id, identity.ledger);
             }
             requests.and_then(|requests| requests.show(ui))
-        })
-        .inner
+        });
+    virtual_list::record_layout(ui, output.content_size, output.state.offset);
+    output.inner
 }
 
 /// Single-line lifecycle entries render as a muted icon line, not a card.

@@ -37,7 +37,7 @@ type DraftKey = (Option<String>, usize);
 
 #[derive(Debug, Clone)]
 struct Draft {
-    /// Stable entry ID (`first_entry_id` based), shifted as entries are removed.
+    /// Allocated once; removals never change another draft's identity.
     entry: usize,
     /// Unredacted tail of the arguments; never leaves the model.
     raw: String,
@@ -52,15 +52,6 @@ pub(super) struct DraftIndex {
 impl DraftIndex {
     pub(super) fn entry_removed(&mut self, id: usize) {
         self.drafts.retain(|_, draft| draft.entry != id);
-        for draft in self.drafts.values_mut() {
-            if draft.entry > id {
-                draft.entry -= 1;
-            }
-        }
-    }
-
-    pub(super) fn entries_evicted(&mut self, first_entry_id: usize) {
-        self.drafts.retain(|_, draft| draft.entry >= first_entry_id);
     }
 
     fn keys_of(&self, run_id: Option<&str>) -> Vec<DraftKey> {
@@ -125,7 +116,7 @@ impl TranscriptModel {
         };
         let raw = tail(fragment.arguments_delta, RAW_WINDOW_BYTES).to_owned();
         let arguments = preview(&raw);
-        let entry = self.first_entry_id + self.entries.len();
+        let entry = self.next_entry_id;
         self.push(TranscriptEntry::Tool {
             run_id: fragment.run_id.map(str::to_owned),
             tool_name: name.to_owned(),
@@ -145,7 +136,7 @@ impl TranscriptModel {
             parent_call_id: None,
         });
         // A zero-capacity transcript keeps no entries and so no drafts.
-        if self.entries.len() + self.first_entry_id > entry {
+        if self.next_entry_id > entry {
             self.drafts.drafts.insert(key, Draft { entry, raw });
         }
     }
@@ -159,6 +150,7 @@ impl TranscriptModel {
             draft.raw = tail(&draft.raw, RAW_WINDOW_BYTES).to_owned();
         }
         let shown = preview(tail(&draft.raw, RAW_WINDOW_BYTES));
+        self.entry_meta[position].revision += 1;
         if let TranscriptEntry::Tool {
             tool_name,
             call_id,
@@ -184,13 +176,15 @@ impl TranscriptModel {
     pub(super) fn response_completed(&mut self, run_id: &str) {
         self.discard_matching(Some(run_id), |sealed| sealed);
         for key in self.drafts.keys_of(Some(run_id)) {
-            if let Some(position) = self.draft_position(&key)
-                && let TranscriptEntry::Tool {
+            if let Some(position) = self.draft_position(&key) {
+                self.entry_meta[position].revision += 1;
+                if let TranscriptEntry::Tool {
                     status: ToolStatus::Drafting { sealed, .. },
                     ..
                 } = &mut self.entries[position]
-            {
-                *sealed = true;
+                {
+                    *sealed = true;
+                }
             }
         }
     }
@@ -263,6 +257,7 @@ impl TranscriptModel {
         };
         self.drafts.drafts.remove(&key);
         let pending = self.take_pending_reviews(run_id, call_id);
+        self.entry_meta[position].revision += 1;
         if let TranscriptEntry::Tool {
             tool_name: name,
             call_id: id,
@@ -285,7 +280,7 @@ impl TranscriptModel {
     /// draft (an approval request reuses the card) or left the transcript.
     fn draft_position(&self, key: &DraftKey) -> Option<usize> {
         let draft = self.drafts.drafts.get(key)?;
-        let position = draft.entry.checked_sub(self.first_entry_id)?;
+        let position = self.entry_index(draft.entry)?;
         matches!(
             self.entries.get(position),
             Some(TranscriptEntry::Tool {

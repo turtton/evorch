@@ -1,13 +1,20 @@
 //! Measured, variable-height transcript rows. Unknown rows are never estimated:
 //! the first pass (and a width change) lays out every row once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Copy)]
+struct MeasuredRow {
+    revision: u64,
+    height: f32,
+}
 
 #[derive(Clone, Default)]
 pub(super) struct VirtualList {
-    heights: HashMap<usize, f32>,
+    heights: HashMap<usize, MeasuredRow>,
     width: f32,
     enabled: bool,
+    scope_id: Option<egui::Id>,
 }
 
 fn override_id() -> egui::Id {
@@ -22,8 +29,23 @@ pub fn set_transcript_virtualization_for_tests(ctx: &egui::Context, enabled: boo
     ctx.data_mut(|data| data.insert_temp(override_id(), enabled));
 }
 
+/// Content extent and scroll offset of the last transcript drawn with the test
+/// override. This observes layout even when the changed row is offscreen.
+#[doc(hidden)]
+pub fn transcript_layout_for_tests(ctx: &egui::Context) -> Option<(egui::Vec2, egui::Vec2)> {
+    ctx.data(|data| data.get_temp(override_id().with("layout")))
+}
+
+pub(super) fn record_layout(ui: &egui::Ui, content: egui::Vec2, offset: egui::Vec2) {
+    ui.data_mut(|data| {
+        if data.get_temp::<bool>(override_id()).is_some() {
+            data.insert_temp(override_id().with("layout"), (content, offset));
+        }
+    });
+}
+
 impl VirtualList {
-    pub(super) fn load(ui: &egui::Ui, id: egui::Id, first: usize, end: usize) -> Self {
+    pub(super) fn load(ui: &egui::Ui, id: egui::Id, entries: impl Iterator<Item = usize>) -> Self {
         let enabled = ui
             .data(|data| data.get_temp::<bool>(override_id()))
             .unwrap_or_else(|| ui.ctx().accesskit_node_builder(ui.id(), |_| ()).is_none());
@@ -38,10 +60,9 @@ impl VirtualList {
             cache.width = width;
         }
         cache.enabled = enabled;
-        // Entry IDs survive capacity eviction and view-window changes.
-        cache
-            .heights
-            .retain(|entry, _| (first..end).contains(entry));
+        cache.scope_id = Some(id);
+        let retained: HashSet<_> = entries.collect();
+        cache.heights.retain(|entry, _| retained.contains(entry));
         cache
     }
 
@@ -54,16 +75,22 @@ impl VirtualList {
         ui: &mut egui::Ui,
         viewport: egui::Rect,
         entry_id: usize,
+        revision: u64,
         draw: impl FnOnce(&mut egui::Ui),
     ) {
-        let height = self.heights.get(&entry_id).copied();
+        let height = self
+            .heights
+            .get(&entry_id)
+            .filter(|row| row.revision == revision)
+            .map(|row| row.height);
         let top = ui.cursor().top();
         let skip = self.enabled
             && height
                 .is_some_and(|height| top + height < viewport.top() || top > viewport.bottom());
-        // Always create the scope, including skipped rows, so a variable
-        // number of widgets in one row cannot change later rows' auto IDs.
-        let response = ui.push_id(entry_id, |ui| {
+        // An explicit ID also severs egui's parent auto-ID counter dependency:
+        // eviction or consolidation of earlier rows must not lose selection.
+        let scope = self.scope_id.expect("list loaded").with(entry_id);
+        let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
             if skip {
                 ui.add_space(height.unwrap_or_default());
             } else {
@@ -74,7 +101,13 @@ impl VirtualList {
             // The scope's rect excludes its parent's trailing item spacing.
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
-            self.heights.insert(entry_id, measured);
+            self.heights.insert(
+                entry_id,
+                MeasuredRow {
+                    revision,
+                    height: measured,
+                },
+            );
             if height != Some(measured) {
                 // ScrollArea updates its sticky offset after laying out the
                 // contents; paint that new offset on the next frame.
@@ -101,14 +134,14 @@ mod tests {
             },
             |ui| {
                 let id = ui.id().with("list");
-                let mut list = VirtualList::load(ui, id, entries.start, entries.end);
+                let mut list = VirtualList::load(ui, id, entries.clone());
                 // All rows are offscreen. Only unmeasured ones may draw.
                 let viewport = egui::Rect::from_min_max(
                     egui::pos2(0.0, -2_000.0),
                     egui::pos2(width, -1_000.0),
                 );
                 for entry in entries.clone() {
-                    list.row(ui, viewport, entry, |ui| {
+                    list.row(ui, viewport, entry, 0, |ui| {
                         drawn += 1;
                         ui.add_space(3.0);
                         ui.label("variable height\nsecond line");
