@@ -33,7 +33,7 @@ pub use network_guard::{
     NetworkGuardError,
 };
 pub use origin::{ContentOrigin, derive_content_origin};
-pub use result::{Progress, ToolImage, ToolResult};
+pub use result::{CutOffTold, Progress, RuntimeOnly, ToolImage, ToolResult};
 pub use sanitize::escape_control_markers;
 pub use search::{
     ExaKeylessProvider, McpToolSuccess, McpTransport, NetworkGuardMcpTransport,
@@ -43,7 +43,8 @@ pub use search::{
 };
 pub use shell_handles::{MAX_RESTORED_HANDLE_FLOOR, set_shell_job_handle_dir};
 pub use tool::{BuiltinTool, Permissions, Tool, ToolExecutionMode};
+pub use tools::run_js::{ChildCall, ChildOutcome, RunJsHost};
 pub use tools::{
     ApplyPatch, BROWSER_TOOL_NAMES, BrowserTool, BrowserToolOptions, Edit, GitDiff, Grep,
-    GuardPolicy, Read, Shell, WebFetch, WebSearch, Write, browser_tools,
+    GuardPolicy, Read, RunJs, Shell, WebFetch, WebSearch, Write, browser_tools,
 };

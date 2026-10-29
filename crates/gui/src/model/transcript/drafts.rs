@@ -142,6 +142,7 @@ impl TranscriptModel {
                 sealed: false,
             },
             reviews: Vec::new(),
+            parent_call_id: None,
         });
         // A zero-capacity transcript keeps no entries and so no drafts.
         if self.entries.len() + self.first_entry_id > entry {

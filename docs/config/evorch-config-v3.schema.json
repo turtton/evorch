@@ -239,6 +239,13 @@
           "executable": null,
           "max_pages": 8,
           "max_tabs": 4
+        },
+        "run_js": {
+          "default_timeout_ms": 30000,
+          "enabled": false,
+          "max_timeout_ms": 300000,
+          "max_tool_calls": 1000,
+          "memory_limit_mib": 64
         }
       }
     },
@@ -1603,6 +1610,46 @@
       },
       "additionalProperties": false
     },
+    "RunJsConfig": {
+      "description": "The `run_js` code-mode tool (ADR 0039). Off by default: the tool is offered\nonly when `enabled` is set, so default requests keep their tool list.",
+      "type": "object",
+      "properties": {
+        "default_timeout_ms": {
+          "description": "Time limit of one call when it passes no `timeout_ms`. Waiting for the\ntool calls made inside the code counts.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30000,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Offers `run_js` to the roles that may use it.",
+          "type": "boolean",
+          "default": false
+        },
+        "max_timeout_ms": {
+          "description": "Largest `timeout_ms` a call may ask for.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300000,
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "description": "Tool calls the code may make in one `run_js` call. A page of a file that a\nresult offered as its `next` (how `readText` assembles a longer file) does not\ncount the first time the code asks for it.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1000,
+          "minimum": 0
+        },
+        "memory_limit_mib": {
+          "description": "Memory limit of the JavaScript engine, in MiB.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 64,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "SandboxConfig": {
       "type": "object",
       "properties": {
@@ -1756,6 +1803,16 @@
             "executable": null,
             "max_pages": 8,
             "max_tabs": 4
+          }
+        },
+        "run_js": {
+          "$ref": "#/$defs/RunJsConfig",
+          "default": {
+            "default_timeout_ms": 30000,
+            "enabled": false,
+            "max_timeout_ms": 300000,
+            "max_tool_calls": 1000,
+            "memory_limit_mib": 64
           }
         }
       },

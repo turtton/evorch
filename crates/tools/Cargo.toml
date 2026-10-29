@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 browser = { path = "../browser" }
 config = { path = "../config" }
+futures-util = { workspace = true }
 dom_smoothie = { workspace = true }
 event-bus = { path = "../event-bus" }
 flate2 = { workspace = true }

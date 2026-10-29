@@ -166,6 +166,7 @@ impl TranscriptModel {
                         is_error: false,
                         status: ToolStatus::Denied { reason },
                         reviews: vec![review],
+                        parent_call_id: None,
                     });
                     return true;
                 }
@@ -297,6 +298,7 @@ mod tests {
             call_id: "call-1".into(),
             input: None,
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         })
     }
 

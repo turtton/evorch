@@ -251,6 +251,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
                 is_error: true,
                 detail: None,
                 run_id: Some("run-1".to_owned()),
+                parent_call_id: None,
             },
             10,
         ),

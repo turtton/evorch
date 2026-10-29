@@ -179,6 +179,7 @@ fn persisted_tool_event_copy_masks_arguments_output_and_metadata() {
             call_id: "call-1".into(),
             input: Some(json!({"new_string":SECRET})),
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ToolCompleted {
             tool_name: "read".into(),
@@ -187,6 +188,7 @@ fn persisted_tool_event_copy_masks_arguments_output_and_metadata() {
             output: Some(SECRET.into()),
             detail: Some(json!({"source":SECRET})),
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         }),
     ];
     for event in &events {

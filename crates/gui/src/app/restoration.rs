@@ -231,6 +231,7 @@ mod tests {
                 call_id: "call-1".into(),
                 tool_name: "shell".into(),
                 input: None,
+                parent_call_id: None,
             })
         };
         state.apply_events([tool("run-2")]);

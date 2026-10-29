@@ -83,6 +83,7 @@ async fn reasoning_run_and_semantic_boundaries_preserve_order() {
             call_id: "b:1".into(),
             input: None,
             run_id: Some("b".into()),
+            parent_call_id: None,
         }),
         delta(Some("b"), "after tool", true),
         boundary,

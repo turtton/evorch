@@ -58,6 +58,7 @@ fn assert_calls(
             call_id,
             input: actual_input,
             run_id,
+            ..
         } = lifecycle[index * 2]
         else {
             panic!("start before completion")

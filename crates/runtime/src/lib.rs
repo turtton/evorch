@@ -105,8 +105,8 @@ pub use run::{
 pub use run_store::RunStore;
 pub use runtime::{
     AgentRuntime, FollowUpStatus, FollowUpWithdrawalError, ProjectModelResolver,
-    ProjectSlugResolver, SandboxFactory, WeakAgentRuntime, WorkspaceMounts, production_executor,
-    production_executor_with_config, production_executor_with_host_tools,
+    ProjectSlugResolver, RunWait, SandboxFactory, WeakAgentRuntime, WorkspaceMounts,
+    production_executor, production_executor_with_config, production_executor_with_host_tools,
 };
 pub use skill::{
     SkillDiagnostic, SkillEntry, SkillFrontmatter, SkillLoadError, SkillRegistry,

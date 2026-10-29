@@ -24,6 +24,8 @@ mod review_evidence_tests;
 mod review_skills;
 #[cfg(test)]
 mod review_skills_tests;
+mod run_js_accounting;
+mod run_js_host;
 mod stop_context;
 mod team;
 mod tool_calls;
@@ -52,6 +54,7 @@ use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
+pub(crate) use run_js_host::apply_run_js_specs;
 pub(crate) use tool_calls::{
     append_subagent_context_note, retain_backed_tools, standard_tool_specs, visible_tool_specs,
 };
@@ -123,6 +126,25 @@ const MAX_MODEL_SWITCHES: u32 = 16;
 /// A registry wait this long is reported as the run's owner-registry activity.
 const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How many times a run is reminded of shell jobs nobody has looked at before it is
+/// stopped for ignoring them.
+const MAX_UNOBSERVED_JOB_REMINDERS: u32 = 3;
+
+/// Reminders in all before a run is stopped, however the jobs came and went.
+const MAX_TOTAL_JOB_REMINDERS: u32 = 10;
+
+/// The reminder for a model that ended its turn with shell jobs unobserved.
+fn unobserved_jobs_reminder(jobs: &[String]) -> String {
+    let named = if jobs.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", jobs.join(", "))
+    };
+    format!(
+        "Shell jobs are still running or their results were not read{named}. Poll them with shell action:poll and their job_id, or stop them with action:stop, before finishing."
+    )
+}
+
 pub(crate) struct LoopState {
     pub(crate) thread_id: Option<String>,
     pub(crate) turn: providers::RequestTurnContext,
@@ -164,6 +186,17 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
+    /// Set by the `run_js` host when something a program started may still be running
+    /// and could not be stopped. From then on no tool runs, and finalization retains
+    /// the workspace like it does for shell jobs it could not drain.
+    run_js_unconfirmed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Reminders in a row about unobserved shell jobs, restarted when one of the jobs
+    /// reminded of was dealt with.
+    unobserved_job_reminders: u32,
+    /// All reminders about unobserved shell jobs this run.
+    total_job_reminders: u32,
+    /// The jobs the last reminder named.
+    reminded_jobs: std::collections::BTreeSet<String>,
     /// Child questions a `wait` already reported to this run; a wait returns
     /// early only for questions not in this set.
     pub(crate) reported_questions: std::collections::HashSet<String>,
@@ -240,6 +273,10 @@ impl LoopState {
             escalation_detector: EscalationDetector::default(),
             budget: crate::budget_tracker::BudgetCounters::default(),
             identical_calls: identical_calls::IdenticalCalls::default(),
+            run_js_unconfirmed: Arc::default(),
+            unobserved_job_reminders: 0,
+            total_job_reminders: 0,
+            reminded_jobs: std::collections::BTreeSet::new(),
             reported_questions: std::collections::HashSet::new(),
             last_tool: None,
             retracted_delegates: retracted_delegates::RetractedDelegates::default(),
@@ -585,6 +622,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .runtime()
             .is_some_and(|runtime| runtime.artifact_pages().is_some());
         retain_backed_tools(&mut state.tool_specs, artifact_pages);
+        state.apply_run_js();
         if !is_restored {
             state.add_team_tools();
         }
@@ -1330,7 +1368,41 @@ impl LoopState {
                         .executor
                         .has_unobserved_shell_jobs(&self.task.run_id.to_string())
                     {
-                        self.context.push_user("Shell jobs are still running. Poll their results or stop them before finishing.");
+                        // The model keeps answering without dealing with the jobs; asking
+                        // again with the same words would never end. Name them, and stop the
+                        // run when naming them did not help. Only a job being dealt with
+                        // (read, stopped, acknowledged) restarts the count: other tool calls,
+                        // failed ones included, do not, and the total is capped as well.
+                        let jobs = self
+                            .shared
+                            .executor
+                            .unobserved_shell_job_summaries(&self.task.run_id.to_string());
+                        let handles: std::collections::BTreeSet<String> = jobs
+                            .iter()
+                            .filter_map(|job| job.split(' ').next().map(str::to_owned))
+                            .collect();
+                        if self.reminded_jobs.difference(&handles).next().is_some() {
+                            self.unobserved_job_reminders = 0;
+                        }
+                        self.reminded_jobs = handles;
+                        self.unobserved_job_reminders += 1;
+                        self.total_job_reminders += 1;
+                        if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS
+                            || self.total_job_reminders > MAX_TOTAL_JOB_REMINDERS
+                        {
+                            let reminders =
+                                if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS {
+                                    format!("{MAX_UNOBSERVED_JOB_REMINDERS} reminders")
+                                } else {
+                                    format!("{MAX_TOTAL_JOB_REMINDERS} reminders in all")
+                                };
+                            self.finish_error(format!(
+                                "shell jobs stayed unobserved after {reminders}: {}",
+                                jobs.join(", ")
+                            ));
+                            return;
+                        }
+                        self.context.push_user(&unobserved_jobs_reminder(&jobs));
                         continue;
                     }
                     if self.flush_aside() {

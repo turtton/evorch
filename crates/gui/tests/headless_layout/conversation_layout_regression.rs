@@ -163,6 +163,7 @@ fn sandbox_review_and_following_reply_wrap_inside_narrow_transcript() {
                         call_id: "call-secret".into(),
                         input: Some(serde_json::json!({"command": "curl example.com"})),
                         run_id: Some(run_id.clone()),
+                        parent_call_id: None,
                     }));
                 }
                 model.apply(&sandbox_review(severity, &verdict, Some(&run_id)));

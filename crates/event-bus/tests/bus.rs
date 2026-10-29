@@ -27,6 +27,7 @@ fn sample_event(index: usize) -> Event {
             tool_name: "read".to_string(),
             call_id: format!("call-{index}"),
             run_id: None,
+            parent_call_id: None,
         }
         .into(),
     };

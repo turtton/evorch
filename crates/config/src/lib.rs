@@ -69,7 +69,7 @@ pub use types::{
     ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
     SandboxConfig, SelfImprovementConfig, SummarizerKind, WorkerBindingConfig, gpt_generation,
 };
-pub use types::{BrowserToolsConfig, ToolsConfig};
+pub use types::{BrowserToolsConfig, RunJsConfig, ToolsConfig};
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
 pub use types::{

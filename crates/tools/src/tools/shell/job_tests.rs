@@ -801,3 +801,111 @@ async fn synchronous_capacity_failure_is_immediate_without_spawning_or_leaking_o
     assert!(!directory.path().join("must-not-start").exists());
     shell.drain_shell_jobs("private-owner").await.unwrap();
 }
+
+#[tokio::test]
+async fn a_command_started_inside_run_js_streams_output_while_the_caller_waits() {
+    let shell = shell();
+    let bus = Arc::new(event_bus::EventBus::new(256));
+    let mut events = bus.subscribe();
+    shell.set_event_bus(Arc::clone(&bus));
+    let child = ToolExecutionContext {
+        run_id: "owner".into(),
+        call_id: Some("parent/1".into()),
+        parent_call_id: Some("parent".into()),
+        shell_wait_policy: crate::executor::ShellWaitPolicy::UntilTerminal,
+        ..Default::default()
+    };
+    // A plain synchronous call exposes no job, so it publishes nothing.
+    let plain = ToolExecutionContext {
+        parent_call_id: None,
+        call_id: Some("plain".into()),
+        ..child.clone()
+    };
+    let result = shell
+        .execute_with_context(&plain, json!({"command":"echo quiet"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "exit_code: 0\nquiet\n");
+
+    let result = shell
+        .execute_with_context(&child, json!({"command":"echo step one; echo step two"}))
+        .await
+        .unwrap();
+    // The model-facing result is still the complete synchronous result.
+    assert_eq!(result.content, "exit_code: 0\nstep one\nstep two\n");
+
+    let mut log = String::new();
+    loop {
+        let event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
+            call_id,
+            run_id,
+            chunk,
+            status,
+            exit_code,
+            ..
+        }) = events.recv().await.expect("bus event").kind
+        else {
+            continue;
+        };
+        assert_eq!(
+            call_id.as_deref(),
+            Some("parent/1"),
+            "only the child streams"
+        );
+        assert_eq!(run_id.as_deref(), Some("owner"));
+        log.push_str(&chunk);
+        if status != "running" {
+            assert_eq!(exit_code, Some(0));
+            break;
+        }
+    }
+    assert_eq!(log, "step one\nstep two\n");
+}
+
+#[tokio::test]
+async fn a_cut_off_child_is_observed_once_its_program_result_was_delivered_not_before() {
+    let shell = shell();
+    let child = |call: &str, parent: &str| ToolExecutionContext {
+        run_id: "owner".into(),
+        call_id: Some(call.into()),
+        parent_call_id: Some(parent.into()),
+        shell_wait_policy: crate::executor::ShellWaitPolicy::UntilTerminal,
+        ..Default::default()
+    };
+    // Two programs each started a long command; both were cut off (their futures dropped).
+    for (call, parent) in [("parent/1", "parent"), ("other/1", "other")] {
+        let ctx = child(call, parent);
+        let mut started = Box::pin(shell.execute_with_context(&ctx, json!({"command":"sleep 30"})));
+        assert!(futures_util::poll!(started.as_mut()).is_pending());
+        drop(started);
+    }
+
+    shell
+        .drain_child_shell_jobs("owner", "parent")
+        .await
+        .unwrap();
+    // Stopped, but nobody was told what became of it.
+    assert!(shell.has_unobserved_shell_jobs("owner"));
+    let before = shell.unobserved_shell_job_summaries("owner");
+    assert_eq!(before.len(), 2, "{before:?}");
+    assert!(
+        before.iter().any(|line| line.contains("not pollable")),
+        "a command started by a program cannot be polled: {before:?}"
+    );
+
+    // A call number the result did not name acknowledges nothing.
+    shell.observe_child_shell_jobs("owner", "parent", &[2]);
+    assert_eq!(shell.unobserved_shell_job_summaries("owner").len(), 2);
+    shell.observe_child_shell_jobs("owner", "parent", &[1]);
+
+    // Only that program's job is acknowledged; the other program's still counts (its own
+    // result must say what became of it).
+    let after = shell.unobserved_shell_job_summaries("owner");
+    assert_eq!(after.len(), 1, "{after:?}");
+    shell
+        .drain_child_shell_jobs("owner", "other")
+        .await
+        .unwrap();
+    shell.observe_child_shell_jobs("owner", "other", &[1]);
+    assert!(!shell.has_unobserved_shell_jobs("owner"));
+}

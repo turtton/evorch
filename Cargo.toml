@@ -41,6 +41,8 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics", "trace"] }
 portable-pty = "0.9"
 regex = "1"
+# QuickJS-NG bindings for the run_js worker (ADR 0039).
+rquickjs = { version = "0.14", features = ["futures"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rcgen = "0.14"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

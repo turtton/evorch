@@ -114,6 +114,7 @@ async fn a_delegate_card_names_the_agent_and_a_draft_shows_its_progress() {
         input: Some(json!({"name": "worker-w1", "prompt": "fix the bug",
             "target": {"role": "worker"}})),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
     let entries = registry.run("run-1").unwrap().entries();
     assert_eq!(entries.len(), 1);

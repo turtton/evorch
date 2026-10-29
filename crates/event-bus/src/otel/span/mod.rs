@@ -18,7 +18,7 @@
 //! | `run:{run_id}` | `AgentRunStarted` | run 終端 (`AgentRunStateChanged` to=Done/Error) | `evorch.run {agent_name}` | Internal | `agent:{parent_run_id}` or root |
 //! | `agent:{run_id}` | `AgentRunStarted` | run 終端 | `invoke_agent {agent_name}` | Client | `run:{run_id}` |
 //! | `request:{request_id}` | `RequestStarted` (run_id=Some) | `RequestCompleted` / `RequestFailed` | `chat {model}` | Client | `agent:{run_id}` |
-//! | `tool:{call_id}` | `ToolStarted` (run_id=Some) | `ToolCompleted` | `execute_tool {tool_name}` | Internal | `agent:{run_id}` |
+//! | `tool:{call_id}` | `ToolStarted` (run_id=Some) | `ToolCompleted` | `execute_tool {tool_name}` | Internal | `tool:{parent_call_id}` (open 時) or `agent:{run_id}` |
 //!
 //! session↔run のリンクは存在しないため、session span の parent を run に
 //! 偽装しない (独立 root)。

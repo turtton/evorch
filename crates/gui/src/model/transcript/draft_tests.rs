@@ -35,6 +35,7 @@ fn started(call: &str, name: &str) -> Event {
         call_id: call.into(),
         input: Some(json!({"path": "a.rs"})),
         run_id: Some(RUN.into()),
+        parent_call_id: None,
     })
 }
 
@@ -396,6 +397,7 @@ fn waiting_with_nothing_in_flight_is_idle_and_drops_sealed_drafts() {
         output: None,
         detail: None,
         run_id: Some(RUN.into()),
+        parent_call_id: None,
     }));
 
     // When: the run waits for input.

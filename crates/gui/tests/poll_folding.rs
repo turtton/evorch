@@ -18,6 +18,7 @@ fn call(
         call_id: id.into(),
         input: Some(input),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: tool.into(),
@@ -26,6 +27,7 @@ fn call(
         output: Some(output.into()),
         detail: None,
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
 }
 
@@ -106,6 +108,7 @@ fn other_tools_and_a_running_poll_never_fold() {
         call_id: "d".into(),
         input: Some(json!({"run_id": "run-2"})),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     }));
 
     // Then: ordinary tools stay separate, and the running poll is its own card

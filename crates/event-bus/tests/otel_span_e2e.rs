@@ -204,6 +204,7 @@ fn event_sequence() -> Vec<Event> {
                 tool_name: "read".to_owned(),
                 call_id: "call-1".to_owned(),
                 run_id: Some("run-1".to_owned()),
+                parent_call_id: None,
             },
         ),
         event(
@@ -215,6 +216,7 @@ fn event_sequence() -> Vec<Event> {
                 is_error: false,
                 detail: None,
                 run_id: Some("run-1".to_owned()),
+                parent_call_id: None,
             },
         ),
         event(

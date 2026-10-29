@@ -779,6 +779,11 @@ pub enum ToolEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// このツール呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+        ///
+        /// 親を持たない通常の呼び出しと旧形式ペイロードでは欠落し、`None` として読む。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// ツール呼び出しが完了した。
     ToolCompleted {
@@ -803,6 +808,11 @@ pub enum ToolEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// このツール呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+        ///
+        /// 親を持たない通常の呼び出しと旧形式ペイロードでは欠落し、`None` として読む。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// Redacted live output of an asynchronous shell job, batched for display.
     /// Live progress only: the output artifact remains the durable record.
@@ -1681,6 +1691,7 @@ mod tests {
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
                     run_id: None,
+                    parent_call_id: None,
                 }
                 .into(),
             ),
@@ -1693,6 +1704,7 @@ mod tests {
                     is_error: true,
                     detail: None,
                     run_id: None,
+                    parent_call_id: None,
                 }
                 .into(),
             ),
@@ -1990,6 +2002,7 @@ mod tests {
                 is_error: false,
                 detail: Some(serde_json::json!({ "request_id": "req-1" })),
                 run_id: None,
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
                 output: None,
@@ -1998,6 +2011,7 @@ mod tests {
                 is_error: true,
                 detail: None,
                 run_id: None,
+                parent_call_id: None,
             }),
         ];
 
@@ -2055,6 +2069,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parent_call_id_is_optional_in_tool_payloads() {
+        // Given: parent_call_id を持たない旧形式のペイロードと、持つペイロード。
+        let legacy = [
+            serde_json::json!({"kind": "ToolStarted", "payload": {
+                "tool_name": "read", "call_id": "c1/0", "run_id": "r1"
+            }}),
+            serde_json::json!({"kind": "ToolCompleted", "payload": {
+                "tool_name": "read", "call_id": "c1/0", "run_id": "r1", "is_error": false
+            }}),
+        ];
+        // When/Then: 旧形式は None として読め、書き戻しでも項目を出さない。
+        for payload in legacy {
+            let event: ToolEvent = serde_json::from_value(payload).unwrap();
+            match &event {
+                ToolEvent::ToolStarted { parent_call_id, .. }
+                | ToolEvent::ToolCompleted { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, &None)
+                }
+                other => panic!("unexpected tool event: {other:?}"),
+            }
+            assert!(
+                serde_json::to_value(event).unwrap()["payload"]
+                    .get("parent_call_id")
+                    .is_none()
+            );
+        }
+        // When/Then: 値を持つペイロードは往復で保持される。
+        let child = serde_json::json!({"kind": "ToolStarted", "payload": {
+            "tool_name": "read", "call_id": "c1/0", "run_id": "r1", "parent_call_id": "c1"
+        }});
+        let event: ToolEvent = serde_json::from_value(child.clone()).unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap(), child);
+    }
+
     // Given: detail フィールドを含まない旧形式の ToolCompleted ペイロード (v0.1 で保存された JSON)。
     // When: 旧形式 JSON をデシリアライズする。
     // Then: detail が None として復元され、SCHEMA_VERSION 1 のまま読み続けられる。
@@ -2090,6 +2139,7 @@ mod tests {
                 is_error: false,
                 detail: None,
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }
@@ -2867,6 +2917,7 @@ mod tests {
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }
@@ -2910,6 +2961,7 @@ mod tests {
                 is_error: false,
                 detail: Some(serde_json::json!({ "request_id": "req-1" })),
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }

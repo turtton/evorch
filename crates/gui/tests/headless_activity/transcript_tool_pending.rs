@@ -10,6 +10,7 @@ fn started() -> Event {
         call_id: "pending".into(),
         input: Some(serde_json::json!({"file": "."})),
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     })
 }
 
@@ -21,6 +22,7 @@ fn completed() -> Event {
         detail: None,
         is_error: false,
         run_id: Some("run-1".into()),
+        parent_call_id: None,
     })
 }
 

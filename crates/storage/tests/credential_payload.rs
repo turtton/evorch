@@ -50,6 +50,7 @@ fn event_kinds() -> [EventKind; 14] {
             call_id: "c".into(),
             run_id: None,
             input: None,
+            parent_call_id: None,
         }
         .into(),
         ToolEvent::ToolCompleted {
@@ -59,6 +60,7 @@ fn event_kinds() -> [EventKind; 14] {
             detail: None,
             output: None,
             run_id: None,
+            parent_call_id: None,
         }
         .into(),
         UsageEvent::Usage {

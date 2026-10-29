@@ -21,7 +21,9 @@ use crate::result::ToolResult;
 use crate::sanitize::{escape_control_markers, escape_control_markers_in_value};
 use crate::schema;
 use crate::tool::{BuiltinTool, Permissions, Tool, ToolExecutionMode};
-use crate::tools::{ApplyPatch, Edit, GitDiff, Grep, Read, Shell, WebFetch, WebSearch, Write};
+use crate::tools::{
+    ApplyPatch, Edit, GitDiff, Grep, Read, RunJs, Shell, WebFetch, WebSearch, Write,
+};
 
 mod prepared;
 mod specs;
@@ -106,8 +108,13 @@ pub struct ToolExecutionContext {
     /// 実行元スレッドの識別子。スレッド相関が利用できない場合は `None`。
     pub thread_id: Option<String>,
     pub call_id: Option<String>,
+    /// この呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+    /// `ToolStarted` / `ToolCompleted` へ stamp する。通常の呼び出しでは `None`。
+    pub parent_call_id: Option<String>,
     pub shell_wait_policy: ShellWaitPolicy,
     pub shell_input: Option<Arc<dyn ShellInputControl>>,
+    /// Runs the tool calls a `run_js` program makes. Set by the runtime for `run_js` only.
+    pub run_js_host: Option<Arc<dyn crate::tools::run_js::RunJsHost>>,
 }
 
 impl PartialEq for ToolExecutionContext {
@@ -115,6 +122,7 @@ impl PartialEq for ToolExecutionContext {
         self.run_id == other.run_id
             && self.thread_id == other.thread_id
             && self.call_id == other.call_id
+            && self.parent_call_id == other.parent_call_id
             && self.shell_wait_policy == other.shell_wait_policy
     }
 }
@@ -252,7 +260,7 @@ impl ToolExecutor {
             None => shell,
         };
         let [edit, write, apply_patch] = executor.post_edit_tools();
-        let standard: [Arc<dyn Tool>; 7] = [
+        let standard: [Arc<dyn Tool>; 8] = [
             Arc::new(Read),
             edit,
             write,
@@ -260,6 +268,7 @@ impl ToolExecutor {
             Arc::new(Grep),
             Arc::new(shell),
             Arc::new(GitDiff::new(sandbox)),
+            Arc::new(RunJs::new()),
         ];
         for tool in standard {
             executor
@@ -417,6 +426,41 @@ impl ToolExecutor {
         } else {
             Ok(())
         }
+    }
+
+    /// Stops the shell jobs started by the `run_js` call `parent_call_id` and waits
+    /// until their processes are gone; the run's other jobs keep running.
+    pub async fn drain_child_shell_jobs(
+        &self,
+        run_id: &str,
+        parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        if let Some(shell) = self.tools.get("shell") {
+            shell
+                .tool
+                .drain_child_shell_jobs(run_id, parent_call_id)
+                .await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Acknowledges the finished shell jobs of the `run_js` call `parent_call_id` that its
+    /// result named as cut off (child call numbers `seqs`), once that result has reached
+    /// the model (see `Tool::observe_child_shell_jobs`).
+    pub fn observe_child_shell_jobs(&self, run_id: &str, parent_call_id: &str, seqs: &[u32]) {
+        if let Some(shell) = self.tools.get("shell") {
+            shell
+                .tool
+                .observe_child_shell_jobs(run_id, parent_call_id, seqs);
+        }
+    }
+
+    /// One line per running or unread shell job of the run.
+    pub fn unobserved_shell_job_summaries(&self, run_id: &str) -> Vec<String> {
+        self.tools.get("shell").map_or_else(Vec::new, |shell| {
+            shell.tool.unobserved_shell_job_summaries(run_id)
+        })
     }
 
     /// Release terminal handles after durable side-effect markers have been saved.
@@ -774,6 +818,7 @@ impl ToolExecutor {
             call_id: call_id.to_string(),
             input: Some(args.clone()),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         };
         debug_assert!(
             matches!(
@@ -915,6 +960,23 @@ impl ToolExecutor {
                 }
                 let content = escape_control_markers(&result.content);
                 let detail = result.detail.map(escape_control_markers_in_value);
+                // Only a call a run_js program made keeps the whole text; it is as
+                // trustworthy as `content`, so it gets the same marker escaping.
+                let runtime_only = result.runtime_only.and_then(|only| {
+                    let only = crate::result::RuntimeOnly {
+                        whole_text: only
+                            .whole_text
+                            .filter(|_| ctx.parent_call_id.is_some())
+                            .map(|text| escape_control_markers(&text)),
+                        // Escaped like `content`, which it must still end with.
+                        cut_off_told: only.cut_off_told.map(|told| crate::result::CutOffTold {
+                            seqs: told.seqs,
+                            summary_line: escape_control_markers(&told.summary_line),
+                        }),
+                    };
+                    (only.whole_text.is_some() || only.cut_off_told.is_some())
+                        .then(|| Box::new(only))
+                });
                 let result = ToolResult {
                     content,
                     is_error: result.is_error,
@@ -922,6 +984,7 @@ impl ToolExecutor {
                     origin: result.origin,
                     progress: result.progress,
                     idle_wait_ms: result.idle_wait_ms,
+                    runtime_only,
                     images: result.images,
                 };
                 self.emit_completed(ctx, tool_name, call_id, Ok(&result));
@@ -952,6 +1015,7 @@ impl ToolExecutor {
             }),
             detail: result.ok().and_then(|result| result.detail.clone()),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         };
         debug_assert!(
             matches!(
@@ -1240,6 +1304,7 @@ mod tests {
                 origin: ContentOrigin::ToolTrusted,
                 progress: None,
                 idle_wait_ms: 0,
+                runtime_only: None,
                 images: Vec::new(),
             })
         }

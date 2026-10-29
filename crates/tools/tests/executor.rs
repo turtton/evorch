@@ -80,6 +80,57 @@ fn init_repo() -> tempfile::TempDir {
     dir
 }
 
+// Given: parent_call_id を持つ文脈 / When: read の実行と、事前検証で失敗した呼び出しの報告 / Then: 両方の Started / Completed が親の call_id を stamp する
+#[tokio::test]
+async fn executor_stamps_parent_call_id_on_lifecycle_events() {
+    let (_bus, executor, mut receiver) = setup_executor();
+    let dir = tempdir().expect("一時ディレクトリの作成に失敗");
+    let path = dir.path().join("sample.txt");
+    std::fs::write(&path, "hello\n").expect("テストファイルの書き込みに失敗");
+    let ctx = ToolExecutionContext {
+        parent_call_id: Some("parent-1".into()),
+        ..test_ctx("run-7")
+    };
+
+    executor
+        .execute(
+            &ctx,
+            "read",
+            "parent-1/0",
+            serde_json::json!({ "path": path.display().to_string() }),
+        )
+        .await
+        .expect("既存ファイルの読み取りは成功する");
+    executor.report_invalid_call(
+        &ctx,
+        "read",
+        "parent-1/1",
+        serde_json::json!({}),
+        &ToolError::InvalidArgs {
+            detail: "path is required".into(),
+        },
+    );
+
+    for expected_call in ["parent-1/0", "parent-1/0", "parent-1/1", "parent-1/1"] {
+        let event = receiver.recv().await.expect("イベントを受信できる");
+        let (call_id, parent) = match tool_event(&event) {
+            ToolEvent::ToolStarted {
+                call_id,
+                parent_call_id,
+                ..
+            }
+            | ToolEvent::ToolCompleted {
+                call_id,
+                parent_call_id,
+                ..
+            } => (call_id, parent_call_id),
+            other => panic!("unexpected tool event: {other:?}"),
+        };
+        assert_eq!(call_id, expected_call);
+        assert_eq!(parent.as_deref(), Some("parent-1"));
+    }
+}
+
 // Given: 標準ツールを登録した実行器と一時ファイル / When: read を実行 / Then: ToolStarted → ToolCompleted(is_error=false) の順で両イベントのペイロードが受信できる
 #[tokio::test]
 async fn executor_emits_started_then_completed_with_payload() {
@@ -108,6 +159,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             tool_name: "read".to_string(),
             call_id: "call-1".to_string(),
             run_id: Some("run-7".to_string()),
+            parent_call_id: None,
         }
     );
     let second = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -120,6 +172,7 @@ async fn executor_emits_started_then_completed_with_payload() {
             is_error: false,
             detail: result.detail.clone(),
             run_id: Some("run-7".to_string()),
+            parent_call_id: None,
         }
     );
 }
@@ -152,6 +205,7 @@ async fn executor_unknown_tool_is_error_without_events() {
         tool_name: "sentinel".to_string(),
         call_id: "sentinel".to_string(),
         run_id: None,
+        parent_call_id: None,
     }));
 
     let first = receiver.recv().await.expect("センチネルを受信できる");
@@ -162,6 +216,7 @@ async fn executor_unknown_tool_is_error_without_events() {
             input: None,
             call_id: "sentinel".to_string(),
             run_id: None,
+            parent_call_id: None,
         }
     );
 }
@@ -197,6 +252,7 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-missing".to_string(),
             input: Some(serde_json::json!({})),
             run_id: Some("run-9".to_string()),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -209,6 +265,7 @@ async fn executor_invalid_args_emit_completed_error() {
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
+            parent_call_id: None,
         }
     );
 
@@ -235,6 +292,7 @@ async fn executor_invalid_args_emit_completed_error() {
             call_id: "call-extra".to_string(),
             input: Some(serde_json::json!({ "path": path.display().to_string(), "extra": 1 })),
             run_id: Some("run-9".to_string()),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("4 件目のイベントを受信できる");
@@ -247,6 +305,7 @@ async fn executor_invalid_args_emit_completed_error() {
             is_error: true,
             detail: None,
             run_id: Some("run-9".to_string()),
+            parent_call_id: None,
         }
     );
 }
@@ -283,6 +342,7 @@ async fn executor_tool_error_emits_completed_error() {
             call_id: "call-1".to_string(),
             run_id: Some("run-11".to_string()),
             input: Some(serde_json::json!({ "path": missing.display().to_string() })),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -295,6 +355,7 @@ async fn executor_tool_error_emits_completed_error() {
             detail: None,
             run_id: Some("run-11".to_string()),
             output: Some(error.to_string()),
+            parent_call_id: None,
         }
     );
 }
@@ -332,6 +393,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
             call_id: "call-1".to_string(),
             run_id: Some("run-42".to_string()),
             input: Some(serde_json::json!({ "path": path.display().to_string() })),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -344,6 +406,7 @@ async fn executor_stamps_context_run_id_on_tool_events() {
             detail: result.detail.clone(),
             run_id: Some("run-42".to_string()),
             output: Some(result.content.clone()),
+            parent_call_id: None,
         }
     );
 }
@@ -410,6 +473,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             input: Some(serde_json::json!({ "command": "exit 3" })),
             call_id: "call-1".to_string(),
             run_id: Some("run-13".to_string()),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -422,6 +486,7 @@ async fn executor_shell_nonzero_exit_flags_is_error_in_event() {
             is_error: true,
             detail: None,
             run_id: Some("run-13".to_string()),
+            parent_call_id: None,
         }
     );
 }
@@ -513,6 +578,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
                 tool_name: name.to_string(),
                 call_id: "call-web".to_string(),
                 run_id: Some("run-20".to_string()),
+                parent_call_id: None,
             }
         );
         let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -525,6 +591,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
                 is_error: true,
                 detail: None,
                 run_id: Some("run-20".to_string()),
+                parent_call_id: None,
             }
         );
     }
@@ -551,6 +618,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
             call_id: "call-read".to_string(),
             input: Some(serde_json::json!({ "path": path.display().to_string() })),
             run_id: Some("run-20".to_string()),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("4 件目のイベントを受信できる");
@@ -563,6 +631,7 @@ async fn with_web_tools_registers_web_search_and_web_fetch_with_real_schemas() {
             is_error: false,
             detail: result.detail.clone(),
             run_id: Some("run-20".to_string()),
+            parent_call_id: None,
         }
     );
 }
@@ -781,6 +850,7 @@ async fn executor_emits_tool_completed_with_detail() {
             input: Some(serde_json::json!({})),
             call_id: "call-1".to_string(),
             run_id: Some("run-15".to_string()),
+            parent_call_id: None,
         }
     );
     let completed = receiver.recv().await.expect("2 件目のイベントを受信できる");
@@ -796,6 +866,7 @@ async fn executor_emits_tool_completed_with_detail() {
                 "query": "evorch"
             })),
             run_id: Some("run-15".to_string()),
+            parent_call_id: None,
         }
     );
 }

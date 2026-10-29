@@ -24,6 +24,7 @@ fn events_for_job(job: &str) -> Vec<Event> {
             call_id: "start".into(),
             input: Some(json!({"command": "cargo nextest run", "yield_ms": 0})),
             run_id: None,
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ToolCompleted {
             tool_name: "shell".into(),
@@ -32,6 +33,7 @@ fn events_for_job(job: &str) -> Vec<Event> {
             output: Some(format!("shell job: {job}\nstatus: running\ncursor: 0\n")),
             detail: Some(json!({"shell_job": {"job_id": job, "status": "running"}})),
             run_id: None,
+            parent_call_id: None,
         }),
         Event::new(ToolEvent::ShellJobOutput {
             job_uid: None,
@@ -122,6 +124,7 @@ fn same_handle_in_two_subagent_runs_is_visible_and_opens_the_right_log() {
                 call_id: "start".into(),
                 input: Some(json!({"command": format!("command-{index}")})),
                 run_id: Some(run.into()),
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
                 tool_name: "shell".into(),
@@ -130,6 +133,7 @@ fn same_handle_in_two_subagent_runs_is_visible_and_opens_the_right_log() {
                 output: Some("returned output\n".into()),
                 detail: Some(json!({"shell_job": {"job_id": "job-0", "status": "running"}})),
                 run_id: Some(run.into()),
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ShellJobOutput {
                 job_uid: None,

@@ -738,7 +738,20 @@ impl LoopState {
                 mailbox: Arc::clone(&self.task.mailbox),
                 parent: self.task.parent.map(|parent| parent.to_string()),
             })),
+            parent_call_id: None,
+            run_js_host: None,
         };
+        if self.stop_for_run_js_unconfirmed() {
+            return false;
+        }
+        let js_host = self.run_js_host(&ctx);
+        let ctx = ToolExecutionContext {
+            run_js_host: js_host
+                .clone()
+                .map(|host| host as Arc<dyn tools::tools::run_js::RunJsHost>),
+            ..ctx
+        };
+        let mut repeated_child = None;
         let mut rule_targets = Vec::new();
         let mut shell_cwds = Vec::new();
         let mut remaining = tool_uses.into_iter().peekable();
@@ -790,6 +803,10 @@ impl LoopState {
                         }
                     })
                 };
+                if name == tools::tools::run_js::NAME && !self.run_js_offered() {
+                    permission = permission
+                        .and_then(|()| Err("run_js is not enabled for this run".to_owned()));
+                }
                 // providers::StreamAccumulator turns unparsable arguments into null; tools
                 // only take objects, so name the cause instead of a schema mismatch.
                 if input.is_null() {
@@ -1040,6 +1057,7 @@ impl LoopState {
                     let mut cancel = self.channels.cancel_rx.clone();
                     let bus = Arc::clone(&self.shared.bus);
                     let run_id = ctx.run_id.clone();
+                    let parent_call_id = ctx.parent_call_id.clone();
                     let handle = tasks.spawn(async move {
                             let ready = tokio::select! {
                                 biased;
@@ -1051,6 +1069,7 @@ impl LoopState {
                                     bus.emit(Event::new(event_bus::ToolEvent::ToolCompleted {
                                         tool_name: name.clone(), call_id: id.clone(), is_error: true,
                                         output: Some(reason.into()), detail: None, run_id: Some(run_id.clone()),
+                                        parent_call_id: parent_call_id.clone(),
                                     }));
                                     ReadyCall::Executed(ToolResult::error(reason))
                                 },
@@ -1080,6 +1099,7 @@ impl LoopState {
                                         output: Some(result.content.clone()),
                                         detail: None,
                                         run_id: Some(ctx.run_id.clone()),
+                                        parent_call_id: ctx.parent_call_id.clone(),
                                     },
                                 ));
                                 completed.push((
@@ -1222,29 +1242,59 @@ impl LoopState {
                             &self.shared.escalation,
                         )
                     {
-                        let run_id = self.caller_run_id().to_string();
-                        if EscalationDetector::is_no_progress_trigger(&trigger) {
-                            self.shared.bus.emit(Event::new(DiagnosticEvent {
-                                source: "escalation_detector".into(),
-                                severity: DiagnosticSeverity::Warning,
-                                code: diagnostic_codes::NO_PROGRESS.into(),
-                                detail: crate::escalation::detector::no_progress_detail(
-                                    &trigger,
-                                    &name,
-                                    &input,
-                                    error_class,
-                                ),
-                                run_id: Some(run_id.clone()),
-                                thread_id: None,
-                                call_id: Some(id.clone()),
-                            }));
+                        self.propose_escalation(trigger, &name, &input, &id, error_class);
+                    }
+                    // Calls a run_js program made count like calls made directly: the
+                    // detector sees them (edit loops, error streaks), the budget and the
+                    // repeat guard too. They come from the host's own record, which the
+                    // result's detail (owned by the interface, replaceable by the output
+                    // limiter) cannot change.
+                    let children = match (&js_host, name == tools::tools::run_js::NAME) {
+                        (Some(host), true) => host.take_records(&id),
+                        _ => Vec::new(),
+                    };
+                    let mut accounting = super::run_js_accounting::ChildAccounting::new();
+                    for child in &children {
+                        let accounted = accounting.observe(child);
+                        let paths = if matches!(child.name.as_str(), "edit" | "write") {
+                            child.paths.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        if let Some(trigger) = self.escalation_detector.observe_weighted(
+                            &ToolObservation {
+                                tool: child.name.as_str(),
+                                paths,
+                                is_error: child.is_error,
+                            },
+                            &self.shared.escalation,
+                            accounted.weight,
+                        ) {
+                            self.propose_escalation(trigger, &child.name, &child.input, &id, None);
                         }
-                        self.shared
-                            .bus
-                            .emit(Event::new(LifecycleEvent::EscalationProposed {
-                                run_id,
-                                trigger,
-                            }));
+                        let limit = self.task.config.budget.max_identical_tool_call_repeats;
+                        if self
+                            .identical_calls
+                            .observe_child(&child.name, &child.input, limit)
+                            && repeated_child.is_none()
+                        {
+                            repeated_child = Some((
+                                format!("{id}/{}", child.seq),
+                                child.name.clone(),
+                                child.input.clone(),
+                            ));
+                        }
+                        if !child.is_error {
+                            if accounted.counts_as_read
+                                && let Some(path) = child.paths.first()
+                            {
+                                self.budget.read(path);
+                            }
+                            self.budget.mark_progress();
+                            if matches!(child.name.as_str(), "read" | "edit" | "write") {
+                                rule_targets.extend(child.paths.iter().cloned());
+                            }
+                        }
                     }
                     if observed && !result.is_error {
                         if name == "read"
@@ -1266,11 +1316,38 @@ impl LoopState {
                     {
                         shell_cwds.push(PathBuf::from(cwd));
                     }
+                    // The cut-off commands a run_js result names are acknowledged when that
+                    // result goes into the history: the model has then been told they may
+                    // have partly run. Only what the tool itself recorded counts: the commands
+                    // it named on its summary line, if the result still ends with that line.
+                    // Text a program or a file name could fill is not looked at. A run that
+                    // was stopped or cancelled, a failed task or an error in handling the
+                    // output has no such record and leaves them unobserved, as does a command
+                    // that could not be confirmed stopped.
+                    if name == tools::tools::run_js::NAME {
+                        let seqs = tools::tools::run_js::acknowledged_cut_off(&result);
+                        if !seqs.is_empty() {
+                            self.shared.executor.observe_child_shell_jobs(
+                                &self.task.run_id.to_string(),
+                                &id,
+                                &seqs,
+                            );
+                        }
+                    }
                     self.context.push_tool_result(id, result);
                     self.publish_message_count();
                 }
+                // Results are recorded first, so the model-facing history keeps the
+                // run_js text; then nothing else runs.
+                if self.stop_for_run_js_unconfirmed() {
+                    return false;
+                }
                 if let Some((id, name, input, error)) = stalled {
                     self.stop_identical_calls(&id, &name, &input, error, true);
+                    return false;
+                }
+                if let Some((id, name, input)) = repeated_child.take() {
+                    self.stop_identical_calls(&id, &name, &input, None, false);
                     return false;
                 }
                 // A completed parallel wave belongs to one assistant tool batch.
@@ -1301,6 +1378,39 @@ impl LoopState {
             self.append_allowed_instructions(routed.allowed);
         }
         true
+    }
+
+    fn propose_escalation(
+        &mut self,
+        trigger: event_bus::EscalationTrigger,
+        name: &str,
+        input: &Value,
+        call_id: &str,
+        error_class: Option<ToolErrorClass>,
+    ) {
+        let run_id = self.caller_run_id().to_string();
+        if EscalationDetector::is_no_progress_trigger(&trigger) {
+            self.shared.bus.emit(Event::new(DiagnosticEvent {
+                source: "escalation_detector".into(),
+                severity: DiagnosticSeverity::Warning,
+                code: diagnostic_codes::NO_PROGRESS.into(),
+                detail: crate::escalation::detector::no_progress_detail(
+                    &trigger,
+                    name,
+                    input,
+                    error_class,
+                ),
+                run_id: Some(run_id.clone()),
+                thread_id: None,
+                call_id: Some(call_id.to_owned()),
+            }));
+        }
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::EscalationProposed {
+                run_id,
+                trigger,
+            }));
     }
 
     fn shared_call(&self, call: &BatchCall) -> bool {
@@ -1577,7 +1687,7 @@ fn call_rule_targets(name: &str, input: &Value) -> Vec<PathBuf> {
 
 /// Whether a call to `name` may run in one wave with its neighbors. File
 /// writers, apply_patch included, and exclusive tools always run alone.
-fn shares_wave(executor: &tools::ToolExecutor, name: &str) -> bool {
+pub(super) fn shares_wave(executor: &tools::ToolExecutor, name: &str) -> bool {
     !is_meta_op(name)
         && !matches!(name, "task_claim" | "task_complete" | "finding_append")
         && !executor
