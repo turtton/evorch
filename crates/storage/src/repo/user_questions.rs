@@ -60,11 +60,23 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<UserQuestion>, StorageE
     json.map(|s| hydrate(conn, &s)).transpose()
 }
 
+/// What a caller needs when the question already has an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerMode {
+    /// Repeating the stored answer succeeds; a different one is rejected.
+    Idempotent,
+    /// Succeeds only for the answer that is stored by this call. Any earlier answer,
+    /// even an identical one, fails with [`StorageError::QuestionAlreadyAnswered`],
+    /// so the caller knows it was not the one who answered.
+    FirstOnly,
+}
+
 pub fn answer(
     conn: &Connection,
     id: &str,
     answer: &str,
     origin: &AnswerOrigin,
+    mode: AnswerMode,
 ) -> Result<(), StorageError> {
     if answer.trim().is_empty() || answer.len() > 4096 {
         return Err(invalid("answer must be 1..4096 bytes"));
@@ -77,6 +89,9 @@ pub fn answer(
     SecretGuard::from_env().check_text("user_question", "answer", answer)?;
     let mut question = get(conn, id)?.ok_or_else(|| invalid("unknown question"))?;
     if let Some(previous) = &question.answer {
+        if mode == AnswerMode::FirstOnly {
+            return Err(StorageError::QuestionAlreadyAnswered);
+        }
         return if previous == answer {
             Ok(())
         } else {
@@ -93,6 +108,9 @@ pub fn answer(
         params![id, payload],
     )?;
     if updated != 1 {
+        if mode == AnswerMode::FirstOnly {
+            return Err(StorageError::QuestionAlreadyAnswered);
+        }
         return Err(invalid("question answer changed during checked update"));
     }
     Ok(())
