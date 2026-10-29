@@ -117,6 +117,7 @@ async fn same_run_restore_reconciles_old_receipts_before_inserting_the_new_input
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     };
     handle
         .append_host_input_accepted(&[], &[], None, &old)

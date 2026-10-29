@@ -330,6 +330,16 @@ impl RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn review_attachment_acceptances_for_lineage(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<storage::ReviewEvidenceRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .review_attachment_acceptances_for_lineage(run_ids)
+    }
+
     pub(crate) fn review_evidence_for_lineage(
         &self,
         run_ids: &[String],
@@ -371,6 +381,7 @@ pub(crate) fn materialize_review_context(
     let mut lineage = store.review_lineage_ancestors(&id)?;
     lineage.push(id.clone());
     let rows = store.review_evidence_for_lineage(&lineage)?;
+    let acceptances = store.review_attachment_acceptances_for_lineage(&lineage)?;
     if lineage.len() == 1 && rows.is_empty() {
         return Err(StorageError::Serialization(
             "review lineage is unavailable for legacy run".into(),
@@ -390,10 +401,9 @@ pub(crate) fn materialize_review_context(
     Ok(ReviewRunContext {
         root_run_id: roots.remove(0),
         lineage_run_ids: lineage,
-        user_requests: std::sync::Arc::new(Mutex::new(SharedUserRequests::from(
-            rows.into_iter()
-                .map(request_from_evidence)
-                .collect::<Vec<_>>(),
+        user_requests: std::sync::Arc::new(Mutex::new(SharedUserRequests::restored(
+            rows.into_iter().map(request_from_evidence).collect(),
+            acceptances.into_iter().map(request_from_evidence).collect(),
         ))),
         delegation_chain: Vec::new(),
         loaded_skills: Vec::new(),
@@ -442,12 +452,15 @@ pub(crate) fn resync_review_context(
         }
         lineage.sort();
         lineage.dedup();
-        store.review_evidence_for_lineage(&lineage)
+        let rows = store.review_evidence_for_lineage(&lineage)?;
+        let acceptances = store.review_attachment_acceptances_for_lineage(&lineage)?;
+        Ok((rows, acceptances))
     })();
     shared.evidence_revision += 1;
     match result {
-        Ok(rows) => {
+        Ok((rows, acceptances)) => {
             shared.requests = rows.into_iter().map(request_from_evidence).collect();
+            shared.attached = acceptances.into_iter().map(request_from_evidence).collect();
             shared.synced = true;
             Ok(())
         }
@@ -668,5 +681,56 @@ mod review_tests {
         let request = request_from_evidence(row);
         assert_eq!(request.text, "use @review");
         assert_eq!(request.attachments, vec![attachment("review", "steps")]);
+    }
+
+    #[test]
+    fn acceptances_keep_order_and_repeats_of_one_immutable_evidence_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("acceptances.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let store = RunStore::open(&config, storage.handle()).unwrap();
+        let root = crate::run_ids::RunIds::default().next();
+        let target = root.to_string();
+        let row = |body: &str| {
+            evidence_row_with_attachments(
+                &target,
+                &target,
+                "host_chat",
+                "use @demo",
+                vec![attachment("demo", body)],
+            )
+        };
+        // The same words and skill, then the skill changed, then the first again.
+        for (index, body) in ["first", "second", "first"].into_iter().enumerate() {
+            let row = row(body);
+            let receipt = storage::HostInputReceipt {
+                prompt_id: format!("prompt-{index}"),
+                run_id: target.clone(),
+                root_run_id: target.clone(),
+                text: "use @demo".into(),
+                image_count: 0,
+                status: storage::HostInputStatus::Accepted,
+                reason: None,
+                accepted_at_ns: 1,
+                status_at_ns: 1,
+                evidence_id: Some(row.id.clone()),
+            };
+            store
+                .handle
+                .append_host_input_accepted(&[row], &[], None, &receipt)
+                .unwrap();
+        }
+        let review = materialize_review_context(&store, root).unwrap();
+        // Evidence is immutable and keyed by content: the repeat is not a new row.
+        assert_eq!(review.requests().0.len(), 2);
+        let bodies: Vec<_> = review
+            .attached_requests()
+            .iter()
+            .map(|request| request.attachments[0].body.clone())
+            .collect();
+        assert_eq!(bodies, ["first", "second", "first"]);
     }
 }

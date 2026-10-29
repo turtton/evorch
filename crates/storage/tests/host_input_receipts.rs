@@ -27,6 +27,7 @@ fn receipt(id: &str, run: &str, status: HostInputStatus) -> HostInputReceipt {
         reason: None,
         accepted_at_ns: 10,
         status_at_ns: 10,
+        evidence_id: None,
     }
 }
 

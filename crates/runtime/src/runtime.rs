@@ -616,6 +616,7 @@ impl AgentRuntime {
                     reason: None,
                     accepted_at_ns: now,
                     status_at_ns: now,
+                    evidence_id: Some(row.id.clone()),
                 },
             )
             .map_err(|error| Self::review_error(run_id, error))?;

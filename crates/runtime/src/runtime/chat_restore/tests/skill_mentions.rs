@@ -29,6 +29,13 @@ impl Skills {
         let skills = tempfile::tempdir().unwrap();
         write_skill(skills.path(), "demo", BODY);
         write_skill(skills.path(), "other", "Other steps.\n");
+        for letter in 'a'..='g' {
+            write_skill(
+                skills.path(),
+                &format!("skill-{letter}"),
+                &format!("Steps of {letter}.\n"),
+            );
+        }
         let dir = tempfile::tempdir().unwrap();
         let config = storage::StorageConfig {
             db_path: dir.path().join("mentions.sqlite3"),
@@ -59,6 +66,56 @@ impl Skills {
             },
             _skills: skills,
         }
+    }
+
+    fn skills_dir(&self) -> &std::path::Path {
+        self._skills.path()
+    }
+
+    /// A waiting chat run that accepts follow-ups.
+    async fn waiting_chat(&self) -> RunId {
+        let run = self
+            .runtime()
+            .delegate_chat(
+                "mentions",
+                Role::Worker,
+                "start".into(),
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        super::admission_retry::waiting(self.runtime(), run).await;
+        run
+    }
+
+    /// The `(name, text)` pairs the reviewer would see as loaded skills: from
+    /// the live review context and from one rebuilt out of storage.
+    fn reviewed_skills(&self, run: RunId) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        let store = self.runtime().shared.run_store.get().unwrap();
+        let live = self.runtime().chat_review_context(store, run).unwrap();
+        let restored = crate::run_store::materialize_review_context(store, run).unwrap();
+        let skills = |context: crate::escalation_review::ReviewRunContext| {
+            let (context, _) = crate::escalation_review::review_context(context, None).unwrap();
+            let value = serde_json::to_value(&context).unwrap();
+            value["loaded_skills"]
+                .as_array()
+                .map(|skills| {
+                    skills
+                        .iter()
+                        .map(|skill| {
+                            (
+                                skill["name"].as_str().unwrap().to_owned(),
+                                skill["text"].as_str().unwrap().to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        (skills(live), skills(restored))
     }
 
     fn runtime(&self) -> &AgentRuntime {
@@ -384,5 +441,70 @@ async fn the_published_instruction_names_the_typed_words_and_the_skills() {
     assert_eq!(published.0, attached(typed, &[("demo", BODY)]));
     assert_eq!(published.1.as_deref(), Some(typed));
     assert_eq!(published.2, ["demo"]);
+    skills.runtime().wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_repeated_attachment_keeps_its_recency_across_a_restore() {
+    let skills = Skills::new();
+    let run = skills.waiting_chat().await;
+    // Seven different skills, then the first one again, word for word.
+    let mut sent = Vec::new();
+    for (index, letter) in ('a'..='g').chain(['a']).enumerate() {
+        let typed = format!("use @skill-{letter}");
+        skills
+            .runtime()
+            .continue_goal(
+                run,
+                typed.clone(),
+                Skills::mentioning(&[&format!("skill-{letter}")], &format!("repeat-{index}")),
+            )
+            .unwrap();
+        sent.push(typed);
+    }
+    let (live, restored) = skills.reviewed_skills(run);
+    let names: Vec<_> = live.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "skill-c", "skill-d", "skill-e", "skill-f", "skill-g", "skill-a"
+        ]
+    );
+    // The same evidence row is stored once, but the restored view agrees.
+    assert_eq!(restored, live);
+    skills
+        .runtime()
+        .stop(run, crate::StopScope::SelfOnly)
+        .unwrap();
+    skills.runtime().wait(run).await.unwrap();
+}
+
+#[tokio::test]
+async fn attaching_one_skill_with_a_changed_body_and_back_keeps_the_latest_after_a_restore() {
+    let skills = Skills::new();
+    let run = skills.waiting_chat().await;
+    // The same words and skill name three times, the skill's body changing
+    // between them.
+    for (index, body) in ["First steps.\n", "Second steps.\n", "First steps.\n"]
+        .into_iter()
+        .enumerate()
+    {
+        write_skill(skills.skills_dir(), "demo", body);
+        skills
+            .runtime()
+            .continue_goal(
+                run,
+                "use @demo".into(),
+                Skills::mentioning(&["demo"], &format!("flip-{index}")),
+            )
+            .unwrap();
+    }
+    let (live, restored) = skills.reviewed_skills(run);
+    assert_eq!(live, [("demo".to_owned(), "First steps.".to_owned())]);
+    assert_eq!(restored, live);
+    skills
+        .runtime()
+        .stop(run, crate::StopScope::SelfOnly)
+        .unwrap();
     skills.runtime().wait(run).await.unwrap();
 }

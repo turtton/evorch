@@ -61,6 +61,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     }]));
     let mut state = WorkbenchState::new(runtime, &UiSettings::default())
         .unwrap()

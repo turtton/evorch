@@ -86,7 +86,9 @@ pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
 pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary};
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
-pub use host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
+pub use host_input::{
+    HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
+};
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, StoredAgentMessage};
 pub use repo::event::StoredEvent;

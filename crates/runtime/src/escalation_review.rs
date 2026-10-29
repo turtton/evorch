@@ -170,6 +170,12 @@ pub struct ReferenceContext {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SharedUserRequests {
     pub(crate) requests: Vec<UserRequest>,
+    /// One entry per accepted message that attached skills, in the order the
+    /// messages were accepted. Evidence is keyed by content, so the same
+    /// words and skills sent again are one evidence row; they are still two
+    /// acceptances here, and a restore rebuilds this list from the receipts.
+    #[serde(skip)]
+    pub(crate) attached: Vec<UserRequest>,
     pub(crate) evidence_revision: u64,
     pub(crate) synced: bool,
 }
@@ -178,6 +184,7 @@ impl Default for SharedUserRequests {
     fn default() -> Self {
         Self {
             requests: Vec::new(),
+            attached: Vec::new(),
             evidence_revision: 0,
             synced: true,
         }
@@ -187,18 +194,33 @@ impl Default for SharedUserRequests {
 impl SharedUserRequests {
     pub(crate) fn add_request(&mut self, request: UserRequest) {
         if !request.text.trim().is_empty() {
+            if !request.attachments.is_empty() {
+                self.attached.push(request.clone());
+            }
             self.requests.push(request);
             self.evidence_revision += 1;
+        }
+    }
+
+    /// Requests read back from storage: `attached` is the acceptance order the
+    /// receipts kept, repeats included.
+    pub(crate) fn restored(requests: Vec<UserRequest>, attached: Vec<UserRequest>) -> Self {
+        Self {
+            requests,
+            attached,
+            ..Self::default()
         }
     }
 }
 
 impl From<Vec<UserRequest>> for SharedUserRequests {
     fn from(requests: Vec<UserRequest>) -> Self {
-        Self {
-            requests,
-            ..Self::default()
-        }
+        let attached = requests
+            .iter()
+            .filter(|request| !request.attachments.is_empty())
+            .cloned()
+            .collect();
+        Self::restored(requests, attached)
     }
 }
 
@@ -318,6 +340,21 @@ impl ReviewRunContext {
             .count()
     }
 
+    /// The accepted messages of this run's lineage that attached skills, in the
+    /// order they were accepted.
+    pub(crate) fn attached_requests(&self) -> Vec<UserRequest> {
+        let shared = self
+            .user_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared
+            .attached
+            .iter()
+            .filter(|request| self.lineage_run_ids.contains(&request.target_run_id))
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn requests(&self) -> (Vec<UserRequest>, u64, bool) {
         let shared = self
             .user_requests
@@ -395,7 +432,7 @@ pub(crate) fn review_context(
     if !synced {
         return Err(ReviewError::Unsynced);
     }
-    let attached = attached_skill_views(&real_user_requests);
+    let attached = attached_skill_views(&run.attached_requests());
     let project_rules = rules.and_then(|rules| {
         if rules.trust() != crate::rules::ProjectTrust::Approved {
             return None;

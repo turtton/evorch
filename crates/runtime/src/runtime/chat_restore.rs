@@ -299,6 +299,7 @@ impl AgentRuntime {
                     reason: None,
                     accepted_at_ns: now,
                     status_at_ns: now,
+                    evidence_id: None,
                 });
             }
             // Persist atomically with the notices, retaining call diagnostics and
@@ -352,6 +353,12 @@ impl AgentRuntime {
             restored.pending_reference_id = None;
             record.config_json = serde_json::to_string(&descriptor)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
+        }
+        // The receipt names the evidence it stands for (its final key).
+        if let Some(row) = evidence.first() {
+            for receipt in &mut host_input.inserts {
+                receipt.evidence_id = Some(row.id.clone());
+            }
         }
         {
             let mut shared = review
@@ -713,6 +720,7 @@ impl AgentRuntime {
                             reason: None,
                             accepted_at_ns: now,
                             status_at_ns: now,
+                            evidence_id: Some(row.id.clone()),
                         },
                     )
                 }

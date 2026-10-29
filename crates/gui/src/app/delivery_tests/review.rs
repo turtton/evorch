@@ -37,6 +37,7 @@ pub(super) fn receipt(status: storage::HostInputStatus) -> storage::HostInputRec
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     }
 }
 

@@ -4,7 +4,7 @@ use crate::StorageError;
 use crate::host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
 
 const COLUMNS: &str = "prompt_id, run_id, root_run_id, text, image_count, status, reason, \
-                       accepted_at_ns, status_at_ns";
+                       accepted_at_ns, status_at_ns, evidence_id";
 
 /// Canonical JSON array of distinct, non-empty prompt IDs in first-seen order.
 pub(crate) fn normalized_ids(json: &str) -> Result<String, StorageError> {
@@ -26,7 +26,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
     receipt.validate()?;
     let image_count = i64::from(receipt.image_count);
     conn.execute(
-        &format!("INSERT INTO host_input_receipts ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"),
+        &format!("INSERT INTO host_input_receipts ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
         params![
             receipt.prompt_id,
             receipt.run_id,
@@ -37,6 +37,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
             receipt.reason,
             receipt.accepted_at_ns,
             receipt.status_at_ns,
+            receipt.evidence_id,
         ],
     )?;
     Ok(())
@@ -195,5 +196,44 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostInputReceipt> {
         reason: row.get(6)?,
         accepted_at_ns: row.get(7)?,
         status_at_ns: row.get(8)?,
+        evidence_id: row.get(9)?,
     })
+}
+
+/// What each given submission recorded, in request order; IDs without a
+/// receipt are skipped. A submission without evidence has no skills.
+pub(crate) fn origins(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<Vec<crate::HostInputOrigin>, StorageError> {
+    let ids = serde_json::to_string(ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "SELECT receipt.prompt_id, receipt.text, evidence.attachments_json \
+         FROM json_each(?1) AS requested \
+         JOIN host_input_receipts AS receipt ON receipt.prompt_id = requested.value \
+         LEFT JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
+         ORDER BY requested.key",
+    )?;
+    let rows = statement.query_map([ids], |row| {
+        let attachments: Option<String> = row.get(2)?;
+        Ok((row.get(0)?, row.get(1)?, attachments))
+    })?;
+    rows.map(|row| {
+        let (prompt_id, text, attachments) = row?;
+        let attachments: Vec<crate::EvidenceAttachment> = match attachments {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|error| StorageError::Serialization(error.to_string()))?,
+            None => Vec::new(),
+        };
+        Ok(crate::HostInputOrigin {
+            prompt_id,
+            text,
+            skills: attachments
+                .into_iter()
+                .map(|attachment| attachment.name)
+                .collect(),
+        })
+    })
+    .collect()
 }
