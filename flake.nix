@@ -286,6 +286,10 @@
                 *) ln -s "$entry" $app/ ;;
               esac
             done
+            # run_js starts `evorch js-worker` from the evorch beside the running
+            # executable (ADR 0039), so the CLI is linked next to the GUI. The
+            # worker's sandbox mounts the link's target, the store's evorch.
+            ln -s ${evorch}/bin/evorch $app/evorch
             # The Evaluator starts `evorch eval run`, which this build leaves out.
             makeWrapper $app/evorch-gui $out/bin/evorch-gui-cef \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}" \
@@ -296,6 +300,16 @@
             runHook preInstallCheck
             # Every CEF symlink must resolve into cefDist.
             test -z "$(find "$out/libexec/evorch-gui-cef" -xtype l)"
+            # The run_js worker is the evorch beside the GUI executable. Start it
+            # as that path resolves (the Nix build sandbox has no bubblewrap) and
+            # run a program through it.
+            worker="$(readlink -f "$out/libexec/evorch-gui-cef/evorch")"
+            test -f "$worker"
+            test "$worker" = "${evorch}/bin/evorch"
+            printf '%s\n' '{"type":"run","code":"return 6 * 7;","timeout_ms":5000,"memory_limit_bytes":67108864,"tools":[]}' \
+              | env -u LD_LIBRARY_PATH "$out/libexec/evorch-gui-cef/evorch" js-worker > js-worker.out
+            cat js-worker.out
+            grep -q '"type":"done".*"value":42' js-worker.out
             for binary in evorch-gui evorch-cef-helper libcef.so; do
               env -u LD_LIBRARY_PATH ${pkgs.stdenv.cc.bintools.dynamicLinker} --list \
                 "$out/libexec/evorch-gui-cef/$binary" > /dev/null
