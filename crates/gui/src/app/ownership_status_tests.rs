@@ -437,6 +437,8 @@ fn an_unchanged_result_is_collected_by_the_next_pass_without_waking_the_ui() {
     assert_eq!(status.snapshot, Some(owned_with_expiry(true, 2)));
     assert!(status.in_flight);
     assert_eq!(status.last_probe, Some(t2));
+    // Let the third probe finish so the worker never reports to a dropped receiver.
+    results_queued.recv().unwrap();
     // Displayed one probe interval after its observation it is not yet stale.
     let observation = status.last_observed.unwrap();
     assert!(!status.stale(observation + PROBE_INTERVAL));
