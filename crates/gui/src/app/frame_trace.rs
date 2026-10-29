@@ -26,11 +26,12 @@ pub(super) fn record_pane_time(ctx: &egui::Context, pane: String, elapsed: Durat
     }
     ctx.data_mut(|data| {
         let id = egui::Id::new(PANE_MEASUREMENTS_ID);
-        let mut measurements = data.get_temp::<PaneMeasurements>(id).unwrap_or_default();
-        let measurement = measurements.entry(pane).or_default();
+        let measurement = data
+            .get_temp_mut_or_default::<PaneMeasurements>(id)
+            .entry(pane)
+            .or_default();
         measurement.total += elapsed;
         measurement.samples += 1;
-        data.insert_temp(id, measurements);
     });
 }
 
@@ -289,9 +290,7 @@ fn echo_frame_count(
 ) -> u32 {
     immediate_frame_causes
         .iter()
-        .filter(|causes| {
-            !causes.is_empty() && causes.iter().all(|cause| delayed_causes.contains(cause))
-        })
+        .filter(|causes| causes.iter().all(|cause| delayed_causes.contains(cause)))
         .count() as u32
 }
 
@@ -322,6 +321,20 @@ mod tests {
             causes: causes.iter().map(|cause| (*cause).to_owned()).collect(),
             panes: BTreeMap::new(),
         }
+    }
+
+    fn pass_with_panes(
+        ms: u64,
+        immediate: bool,
+        causes: &[&str],
+        panes: &[(&str, Duration, u32)],
+    ) -> PassRecord {
+        let mut pass = pass(ms, immediate, causes);
+        pass.panes = panes
+            .iter()
+            .map(|(pane, duration, samples)| ((*pane).to_owned(), (*duration, *samples)))
+            .collect();
+        pass
     }
 
     #[test]
@@ -364,20 +377,65 @@ mod tests {
     }
 
     #[test]
-    fn a_new_window_starts_empty_after_each_summary() {
+    fn delayed_echo_and_pane_measurements_reset_after_each_window() {
         let start = Instant::now();
         let mut trace = FrameTrace::new(start);
         assert!(
             trace
-                .record(start + WINDOW, pass(10, true, &["a.rs:1"]))
-                .is_some()
+                .record(
+                    start,
+                    pass_with_panes(
+                        10,
+                        true,
+                        &["echo.rs:1"],
+                        &[("Same title (panel-1)", Duration::from_millis(9), 3)],
+                    ),
+                )
+                .is_none()
+        );
+        let first = trace
+            .record(
+                start + WINDOW,
+                pass_with_panes(
+                    10,
+                    false,
+                    &["echo.rs:1"],
+                    &[("Same title (panel-1)", Duration::from_millis(3), 1)],
+                ),
+            )
+            .expect("first window");
+        assert_eq!(
+            first.delayed_causes,
+            BTreeSet::from(["echo.rs:1".to_owned()])
+        );
+        assert_eq!(first.echo_frames, 1);
+        assert_eq!(
+            first.panes,
+            vec![("Same title (panel-1)".to_owned(), Duration::from_millis(3))]
         );
         let next = trace
-            .record(start + WINDOW * 2, pass(10, false, &[]))
+            .record(
+                start + WINDOW * 2,
+                pass_with_panes(
+                    10,
+                    false,
+                    &["later.rs:2"],
+                    &[("Fresh title (panel-2)", Duration::from_millis(8), 2)],
+                ),
+            )
             .expect("second window");
         assert_eq!(next.frames, 1);
         assert_eq!(next.immediate_frames, 0);
+        assert_eq!(next.echo_frames, 0);
         assert!(next.causes.is_empty());
+        assert_eq!(
+            next.delayed_causes,
+            BTreeSet::from(["later.rs:2".to_owned()])
+        );
+        assert_eq!(
+            next.panes,
+            vec![("Fresh title (panel-2)".to_owned(), Duration::from_millis(4))]
+        );
     }
 
     #[test]
@@ -412,7 +470,7 @@ mod tests {
             BTreeSet::from(["immediate.rs:2".to_owned()]),
             BTreeSet::new(),
         ];
-        assert_eq!(echo_frame_count(&immediate, &delayed), 1);
+        assert_eq!(echo_frame_count(&immediate, &delayed), 2);
 
         let summary = FrameSummary {
             seconds: 5.0,
@@ -502,5 +560,86 @@ mod tests {
             .expect("window elapsed");
         assert_eq!(summary.echo_frames, 1);
         assert_eq!(summary.causes_line(), "1x same.rs:1");
+    }
+
+    #[test]
+    fn an_immediate_frame_with_no_causes_is_counted_as_an_echo() {
+        let start = Instant::now();
+        let mut trace = FrameTrace::new(start);
+        assert!(trace.record(start, pass(10, true, &[])).is_none());
+        let summary = trace
+            .record(start + WINDOW, pass(10, false, &[]))
+            .expect("window elapsed");
+        assert_eq!(summary.immediate_frames, 1);
+        assert_eq!(summary.echo_frames, 1);
+    }
+
+    #[test]
+    fn pane_samples_are_weighted_and_identical_titles_keep_distinct_panel_ids() {
+        let start = Instant::now();
+        let mut trace = FrameTrace::new(start);
+        assert!(
+            trace
+                .record(
+                    start,
+                    pass_with_panes(
+                        10,
+                        false,
+                        &[],
+                        &[
+                            ("Shared title (panel-1)", Duration::from_millis(9), 3),
+                            ("Shared title (panel-2)", Duration::from_millis(10), 1),
+                        ],
+                    ),
+                )
+                .is_none()
+        );
+        let summary = trace
+            .record(
+                start + WINDOW,
+                pass_with_panes(
+                    10,
+                    false,
+                    &[],
+                    &[("Shared title (panel-1)", Duration::from_millis(3), 1)],
+                ),
+            )
+            .expect("window elapsed");
+        assert_eq!(
+            summary.panes,
+            vec![
+                (
+                    "Shared title (panel-2)".to_owned(),
+                    Duration::from_millis(10)
+                ),
+                (
+                    "Shared title (panel-1)".to_owned(),
+                    Duration::from_millis(3)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn taking_pane_measurements_removes_them_from_the_egui_context() {
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<PaneMeasurements>(egui::Id::new(PANE_MEASUREMENTS_ID))
+                .insert(
+                    "Pane (panel-1)".to_owned(),
+                    PaneMeasurement {
+                        total: Duration::from_millis(12),
+                        samples: 3,
+                    },
+                );
+        });
+        assert_eq!(
+            take_pane_measurements(&ctx).get("Pane (panel-1)"),
+            Some(&PaneMeasurement {
+                total: Duration::from_millis(12),
+                samples: 3,
+            })
+        );
+        assert!(take_pane_measurements(&ctx).is_empty());
     }
 }
