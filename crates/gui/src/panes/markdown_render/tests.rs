@@ -6,6 +6,7 @@ use crate::theme::tokens::palette;
 
 mod link_menu;
 mod nested;
+mod prepare_cache;
 
 fn assert_narrow_content(source: String, prose: bool) {
     // Given: a narrow message area inside a wider viewport, as in a dock pane.
