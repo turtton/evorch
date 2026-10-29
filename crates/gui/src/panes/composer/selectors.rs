@@ -74,5 +74,9 @@ pub(crate) fn sandbox_mode(
             "always deny",
             "Requests to run commands or access files outside the sandbox are always denied. The sandbox itself stays on.",
         ),
+        config::EscalationApproval::Yolo => (
+            "yolo",
+            "Dangerous: always allow execution and file access outside the sandbox without review or asking you. The sandbox still applies to everything else.",
+        ),
     }
 }

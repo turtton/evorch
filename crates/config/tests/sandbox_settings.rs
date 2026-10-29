@@ -93,11 +93,12 @@ fn approval_mode_deserializes_auto_and_legacy_quick_alias() {
 }
 
 #[test]
-fn escalation_approval_parses_user_and_off_values() {
+fn escalation_approval_parses_user_off_and_yolo_values() {
     // Given: each kebab-case escalation approval value on disk.
     for (value, expected) in [
         ("user", EscalationApproval::User),
         ("off", EscalationApproval::Off),
+        ("yolo", EscalationApproval::Yolo),
     ] {
         let text = format!("[sandbox]\nescalation_approval = \"{value}\"\n");
 
@@ -109,6 +110,42 @@ fn escalation_approval_parses_user_and_off_values() {
         // Then: the selected value survives the round trip.
         assert_eq!(reparsed.sandbox.escalation_approval, expected);
     }
+}
+
+#[test]
+fn save_sandbox_round_trips_every_approval_mode_through_the_file() {
+    for mode in [
+        EscalationApproval::Auto,
+        EscalationApproval::User,
+        EscalationApproval::Off,
+        EscalationApproval::Yolo,
+    ] {
+        let tmp = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(tmp.path().join(".evorch")).expect("config directory");
+        let path = tmp.path().join(".evorch/config.toml");
+
+        save_sandbox(
+            &path,
+            SandboxConfig {
+                escalation_approval: mode,
+                ..Default::default()
+            },
+        )
+        .expect("save sandbox");
+        let config = Config::load_strict(&LoadOptions {
+            user_config_dir: Some(tmp.path().join(".evorch")),
+            read_env: false,
+            ..Default::default()
+        })
+        .expect("strict load");
+
+        assert_eq!(config.sandbox.escalation_approval, mode);
+    }
+    assert_eq!(
+        SandboxConfig::default().escalation_approval,
+        EscalationApproval::Auto,
+        "yolo must never become the default"
+    );
 }
 
 #[test]

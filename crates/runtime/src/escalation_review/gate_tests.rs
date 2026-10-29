@@ -418,3 +418,56 @@ async fn critical_approvals_ask_the_user_even_without_deny_fallback() {
         assert_eq!(model.observed().await.len(), 1);
     }
 }
+
+// Given: yolo mode, with and without deny fallback / When: a shell or file escalation is
+// requested / Then: it is approved with neither the reviewer nor the user consulted, and the
+// only record is an info diagnostic naming the unreviewed yolo approval.
+#[tokio::test]
+async fn yolo_approves_shell_and_file_access_without_review_or_prompt() {
+    for fallback in [false, true] {
+        for file_access in [false, true] {
+            let (gate, model) = fixture(
+                EscalationApproval::Yolo,
+                fallback,
+                Some(r#"{"approve":false}"#),
+            );
+            let mut rx = gate.bus.subscribe();
+            let decision = if file_access {
+                gate.decide_file_access(&context(), &file_request()).await
+            } else {
+                gate.decide(&context(), "pwd", "inspect").await
+            };
+            assert!(matches!(decision, EscalationDecision::Approve));
+            assert!(model.observed().await.is_empty());
+
+            // Everything the gate emitted precedes this sentinel on the same bus.
+            gate.bus.emit(Event::new(event_bus::DiagnosticEvent {
+                source: "test".into(),
+                severity: event_bus::DiagnosticSeverity::Info,
+                code: "sentinel".into(),
+                detail: String::new(),
+                run_id: None,
+                thread_id: None,
+                call_id: None,
+            }));
+            let mut diagnostics = Vec::new();
+            loop {
+                match rx.recv().await.expect("event").kind {
+                    EventKind::Diagnostic(diagnostic) if diagnostic.code == "sentinel" => break,
+                    EventKind::Diagnostic(diagnostic) => diagnostics.push(diagnostic),
+                    other => panic!("yolo emitted an unexpected event: {other:?}"),
+                }
+            }
+            let [diagnostic] = diagnostics.as_slice() else {
+                panic!("exactly one decision record, got {diagnostics:?}")
+            };
+            assert_eq!(diagnostic.source, "sandbox");
+            assert_eq!(diagnostic.code, "escalation_review");
+            assert_eq!(diagnostic.severity, event_bus::DiagnosticSeverity::Info);
+            assert_eq!(diagnostic.detail, event_bus::event::ESCALATION_VERDICT_YOLO);
+            assert_ne!(diagnostic.detail, "approved");
+            assert_eq!(diagnostic.run_id.as_deref(), Some("run-review"));
+            assert_eq!(diagnostic.call_id.as_deref(), Some("call-review"));
+        }
+    }
+}

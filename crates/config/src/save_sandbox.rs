@@ -25,6 +25,7 @@ pub(crate) fn save_sandbox_in_scope(
         crate::EscalationApproval::Auto => "auto",
         crate::EscalationApproval::User => "user",
         crate::EscalationApproval::Off => "off",
+        crate::EscalationApproval::Yolo => "yolo",
     };
     section.insert("escalation_approval", toml_edit::value(escalation_approval));
     section.insert(

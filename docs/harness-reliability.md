@@ -78,7 +78,11 @@ by the same gate as shell escalation, under `sandbox.escalation_approval` and
 `escalate_to_user_on_deny`: `off` denies every outside access, `user` asks the
 user (approval input `kind: "file_access"` with the tool, canonical `path`,
 `access`, justification and change), and `auto` asks the escalation reviewer,
-falling back to the user on a decline when configured. An approval the
+falling back to the user on a decline when configured. `yolo` approves every
+outside access without consulting the reviewer or the user and records an Info
+`escalation_review` diagnostic worded `approved without review (yolo mode)`,
+so it is never mistaken for a reviewed approval; the consecutive-denial breaker
+is neither advanced nor reset by it. An approval the
 reviewer rates critical-risk goes to the user for the final decision,
 whatever `escalate_to_user_on_deny` says. The one exception is a shell
 command whose verdict carries `procedure_step: verified` with at least medium

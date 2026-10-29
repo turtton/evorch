@@ -818,9 +818,14 @@
           ]
         },
         {
-          "description": "`quick` is a load-time migration alias only; the generated schema intentionally\nlists only `auto`, `user`, and `off`. Runtime compatibility is not schema compatibility.",
+          "description": "`quick` is a load-time migration alias only; the generated schema intentionally\nlists only `auto`, `user`, `off`, and `yolo`. Runtime compatibility is not schema compatibility.",
           "type": "string",
           "const": "auto"
+        },
+        {
+          "description": "Approves every request to run outside the sandbox without any review or\nuser prompt. Dangerous: the sandbox itself stays on for ordinary commands.",
+          "type": "string",
+          "const": "yolo"
         }
       ]
     },

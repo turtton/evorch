@@ -108,11 +108,12 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
         call_id: None,
         ..Default::default()
     };
-    // When: Off -> Auto -> Off is applied to the same executor.
-    for (mode, expected_wraps) in [
-        (EscalationApproval::Off, 0),
-        (EscalationApproval::Auto, 1),
-        (EscalationApproval::Off, 1),
+    // When: Off -> Auto -> Off -> Yolo is applied to the same executor.
+    for (mode, expected_wraps, expected_reviews) in [
+        (EscalationApproval::Off, 0, 0),
+        (EscalationApproval::Auto, 1, 1),
+        (EscalationApproval::Off, 1, 1),
+        (EscalationApproval::Yolo, 2, 1),
     ] {
         runtime.set_sandbox_escalation(mode, false);
         let result = executor
@@ -126,7 +127,7 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
             )
             .await
             .expect("execute");
-        // Then: only the enabled call reviews and wraps, while Off is denied by the installed gate.
+        // Then: Auto reviews and wraps, Yolo wraps without any review, and Off is denied by the installed gate.
         match mode {
             EscalationApproval::Off => {
                 assert!(result.is_error);
@@ -136,13 +137,13 @@ async fn off_mode_composes_gate_anyway_and_auto_enable_takes_effect_without_rebu
                     result.content
                 );
             }
-            EscalationApproval::Auto => {
+            EscalationApproval::Auto | EscalationApproval::Yolo => {
                 assert!(!result.is_error);
                 assert_eq!(result.content, "exit_code: 0\ncomposed");
             }
             EscalationApproval::User => unreachable!("not part of this scenario"),
         }
         assert_eq!(*wraps.lock().expect("probe"), expected_wraps);
-        assert_eq!(model.observed().await.len(), expected_wraps);
+        assert_eq!(model.observed().await.len(), expected_reviews);
     }
 }
