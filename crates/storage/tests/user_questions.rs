@@ -1,5 +1,5 @@
 use event_bus::{AnswerOrigin, UserQuestion};
-use storage::{Database, Storage, StorageConfig};
+use storage::{AnswerMode, Database, Storage, StorageConfig, StorageError};
 
 fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
     let dir = tempfile::tempdir().unwrap();
@@ -25,6 +25,49 @@ fn question(id: u64) -> UserQuestion {
         answer: None,
         answer_origin: None,
     }
+}
+
+#[test]
+fn first_only_answers_report_any_earlier_answer_and_store_nothing() {
+    let (_dir, storage, database, _config) = fixture();
+    let question = question(1);
+    storage.handle().create_user_question(&question).unwrap();
+    let answer = |text: &str| {
+        storage.handle().answer_user_question_with_mode(
+            &question.id,
+            text,
+            &AnswerOrigin::Host,
+            AnswerMode::FirstOnly,
+        )
+    };
+
+    assert!(answer("first").is_ok());
+    assert!(matches!(
+        answer("first"),
+        Err(StorageError::QuestionAlreadyAnswered)
+    ));
+    assert!(matches!(
+        answer("second"),
+        Err(StorageError::QuestionAlreadyAnswered)
+    ));
+    assert!(matches!(
+        storage.handle().answer_user_question_with_mode(
+            "unknown",
+            "x",
+            &AnswerOrigin::Host,
+            AnswerMode::FirstOnly,
+        ),
+        Err(error) if !matches!(error, StorageError::QuestionAlreadyAnswered)
+    ));
+    assert_eq!(
+        database
+            .user_question(&question.id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("first")
+    );
 }
 
 #[test]

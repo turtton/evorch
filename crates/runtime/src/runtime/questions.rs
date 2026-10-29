@@ -1,6 +1,7 @@
 //! Durable, non-blocking clarification requests. These never grant tool permissions.
 use crate::{AgentRuntime, RunId};
 use event_bus::{AgentRunPhase, AnswerOrigin, Event, ToolEvent, UserQuestion};
+use storage::{AnswerMode, StorageError};
 
 #[cfg(test)]
 #[path = "questions_tests.rs"]
@@ -15,6 +16,16 @@ pub enum RunWait {
     Ended(AgentRunPhase),
     /// The run is `Waiting` while blocking questions to the user have no answer.
     BlockedOnUser(Vec<UserQuestion>),
+}
+
+/// How an answer submitted with [`AgentRuntime::answer_user_question_if_pending`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerOutcome {
+    /// This call stored the answer.
+    Recorded(Box<UserQuestion>),
+    /// The question had been answered before this call, by anyone and with any text,
+    /// and nothing was stored.
+    AlreadyAnswered,
 }
 
 impl AgentRuntime {
@@ -236,12 +247,43 @@ impl AgentRuntime {
         self.answer_question(id, answer, AnswerOrigin::Host)
     }
 
+    /// Host-facing answer API for a caller that must not answer a question twice. Unlike
+    /// [`Self::answer_user_question`], an earlier answer is reported as
+    /// [`AnswerOutcome::AlreadyAnswered`] even when it has the same text, so the caller
+    /// knows it did not give the answer the run receives. The decision is made by the
+    /// storage write itself, not by a check before it, so an answer that lands at the
+    /// same time cannot be mistaken for this one. Every other failure stays an `Err`.
+    ///
+    /// # Errors
+    /// Unknown question, missing storage, a stale or unavailable mutation authority,
+    /// and persistence failures.
+    pub fn answer_user_question_if_pending(
+        &self,
+        id: &str,
+        answer: &str,
+    ) -> Result<AnswerOutcome, String> {
+        self.answer_question_with_mode(id, answer, AnswerOrigin::Host, AnswerMode::FirstOnly)
+    }
+
     fn answer_question(
         &self,
         id: &str,
         answer: &str,
         origin: AnswerOrigin,
     ) -> Result<UserQuestion, String> {
+        match self.answer_question_with_mode(id, answer, origin, AnswerMode::Idempotent)? {
+            AnswerOutcome::Recorded(question) => Ok(*question),
+            AnswerOutcome::AlreadyAnswered => Err("question already answered".into()),
+        }
+    }
+
+    fn answer_question_with_mode(
+        &self,
+        id: &str,
+        answer: &str,
+        origin: AnswerOrigin,
+        mode: AnswerMode,
+    ) -> Result<AnswerOutcome, String> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
         let trusted_user = origin == AnswerOrigin::Host;
@@ -319,6 +361,9 @@ impl AgentRuntime {
             .user_question(id)
             .map_err(|error| error.to_string())?
             .ok_or("question disappeared")?;
+        if mode == AnswerMode::FirstOnly && question.answer.is_some() {
+            return Ok(AnswerOutcome::AlreadyAnswered);
+        }
         if question.answer.as_deref() == Some(answer) {
             let mut repaired = false;
             for (_, review) in &targets {
@@ -338,7 +383,7 @@ impl AgentRuntime {
                     .question_version
                     .send_modify(|version| *version = version.wrapping_add(1));
             }
-            return Ok(question);
+            return Ok(AnswerOutcome::Recorded(Box::new(question)));
         }
         if trusted_user {
             let mut recipients = recipients;
@@ -365,15 +410,21 @@ impl AgentRuntime {
                     Ok(row)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            store
+            let stored = store
                 .handle
-                .answer_user_question_with_evidence(id, answer, &origin, &evidence)
-                .map_err(|error| error.to_string())?;
+                .answer_user_question_with_evidence_and_mode(id, answer, &origin, &evidence, mode);
+            if matches!(stored, Err(StorageError::QuestionAlreadyAnswered)) {
+                return Ok(AnswerOutcome::AlreadyAnswered);
+            }
+            stored.map_err(|error| error.to_string())?;
         } else {
-            store
+            let stored = store
                 .handle
-                .answer_user_question(id, answer, &origin)
-                .map_err(|error| error.to_string())?;
+                .answer_user_question_with_mode(id, answer, &origin, mode);
+            if matches!(stored, Err(StorageError::QuestionAlreadyAnswered)) {
+                return Ok(AnswerOutcome::AlreadyAnswered);
+            }
+            stored.map_err(|error| error.to_string())?;
         }
         drop(guards);
         let mut reflection_error = None;
@@ -405,7 +456,7 @@ impl AgentRuntime {
         self.shared
             .question_version
             .send_modify(|version| *version = version.wrapping_add(1));
-        Ok(question)
+        Ok(AnswerOutcome::Recorded(Box::new(question)))
     }
 
     /// True if the original requester or an explicitly linked continuation is live.

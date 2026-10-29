@@ -73,23 +73,30 @@ impl Harness {
     }
 
     async fn drive(&self, budget: &EvalBudgetConfig) -> ReplayOutcome {
+        self.drive_via(budget, &self.runtime).await
+    }
+
+    async fn drive_via(&self, budget: &EvalBudgetConfig, desk: &dyn Desk) -> ReplayOutcome {
         let simulator = UserSimulator::new(
             Arc::clone(&self.user) as Arc<dyn runtime::AgentModel>,
             &self.thread.thread_id,
         );
-        drive(Replay {
-            runtime: &self.runtime,
-            bus: &self.bus,
-            thread: &self.thread,
-            simulator: &simulator,
-            budget,
-            chat: RunConfig {
-                conversation: true,
-                interactive: true,
-                keep_alive: true,
-                ..RunConfig::default()
+        drive_with(
+            Replay {
+                runtime: &self.runtime,
+                bus: &self.bus,
+                thread: &self.thread,
+                simulator: &simulator,
+                budget,
+                chat: RunConfig {
+                    conversation: true,
+                    interactive: true,
+                    keep_alive: true,
+                    ..RunConfig::default()
+                },
             },
-        })
+            desk,
+        )
         .await
     }
 
@@ -112,6 +119,33 @@ impl Harness {
                 serde_json::from_str(text).unwrap()
             })
             .collect()
+    }
+}
+
+/// A question store that lets someone else answer at the one moment the driver cannot
+/// see coming: after its last check that the question still waits, as it sends its own
+/// answer.
+struct AnsweredJustBefore<'a> {
+    runtime: &'a AgentRuntime,
+    other_answer: &'a str,
+    interrupted: std::sync::atomic::AtomicBool,
+}
+
+impl Desk for AnsweredJustBefore<'_> {
+    fn is_answered(&self, id: &str) -> bool {
+        self.runtime.is_answered(id)
+    }
+
+    fn answer(&self, id: &str, text: &str) -> Result<AnswerOutcome, String> {
+        if !self
+            .interrupted
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.runtime
+                .answer_user_question(id, self.other_answer)
+                .unwrap();
+        }
+        self.runtime.answer(id, text)
     }
 }
 
@@ -618,4 +652,100 @@ fn a_missed_answer_event_is_made_up_from_the_question_store() {
         ["q-2"]
     );
     assert!(state.answered.contains("q-1"));
+}
+
+#[tokio::test]
+async fn a_question_answered_after_the_last_check_is_dropped_not_failed() {
+    // Given: for each other answer (different from, and identical to, the simulated
+    // user's), a question that is answered by someone else after the driver's last
+    // check and before its own answer is stored.
+    for other_answer in ["main.rs", "lib.rs"] {
+        let harness = Harness::new(
+            [
+                tool("ask_user", serde_json::json!({"title": "Which file?"})),
+                text("asked"),
+            ],
+            10,
+            [decision("answer", "lib.rs"), decision("finish", "")],
+        );
+        let desk = AnsweredJustBefore {
+            runtime: &harness.runtime,
+            other_answer,
+            interrupted: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        // When: the replay runs.
+        let outcome = harness.drive_via(&EvalBudgetConfig::default(), &desk).await;
+
+        // Then: the simulated user's answer is dropped without failing the replay, and
+        // it is neither recorded as the user's answer nor counted as a user turn.
+        assert_eq!(
+            outcome.status,
+            Status::Completed,
+            "{other_answer}: {}",
+            outcome.reason
+        );
+        assert!(
+            !outcome
+                .conversation
+                .iter()
+                .any(|entry| matches!(entry, Entry::Answer { .. })),
+            "{other_answer}: {:?}",
+            outcome.conversation
+        );
+        assert_eq!(outcome.user_turns, 1, "{other_answer}");
+        let payloads = harness.simulator_payloads();
+        assert_eq!(payloads.len(), 2, "{other_answer}");
+        assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_answer_in_the_original_conversation_is_replayed_by_one_simulated_answer() {
+    // Given: an original conversation in which the user answered a question, replayed
+    // against an agent that asks it again.
+    let mut harness = Harness::new(
+        [
+            tool("ask_user", serde_json::json!({"title": "Which file?"})),
+            text("asked"),
+        ],
+        10,
+        [decision("answer", "lib.rs"), decision("finish", "")],
+    );
+    harness.thread.turns = vec![
+        turn(UserTurnKind::InitialPrompt, "fix the bug"),
+        UserTurn {
+            kind: UserTurnKind::Answer,
+            text: "lib.rs".into(),
+            question: Some("Which file?".into()),
+            reference: None,
+        },
+    ];
+
+    // When: the replay runs.
+    let outcome = harness.drive(&EvalBudgetConfig::default()).await;
+
+    // Then: the simulated user saw the recorded answer as context and the pending
+    // question, and answered it exactly once: one stored answer, one answer entry, one
+    // user turn, one answer delivered to the agent.
+    assert_eq!(outcome.status, Status::Completed, "{}", outcome.reason);
+    let payloads = harness.simulator_payloads();
+    assert_eq!(
+        payloads[0]["original_user_messages"][1],
+        serde_json::json!({"kind": "answer", "text": "lib.rs", "question": "Which file?"})
+    );
+    assert_eq!(payloads[0]["pending_question"]["title"], "Which file?");
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
+    let answers: Vec<_> = outcome
+        .conversation
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Answer { .. }))
+        .collect();
+    assert_eq!(answers.len(), 1, "{:?}", outcome.conversation);
+    assert_eq!(outcome.user_turns, 2);
+    let delivered = sent_texts(&harness.agent)
+        .iter()
+        .filter(|text| text.contains("[user-answer id="))
+        .count();
+    assert_eq!(delivered, 1);
 }

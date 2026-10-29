@@ -70,12 +70,19 @@ enum Command {
     DeleteEvalSample(String, ReplyTx<bool>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
-    AnswerUserQuestion(String, String, event_bus::AnswerOrigin, ReplyTx),
+    AnswerUserQuestion(
+        String,
+        String,
+        event_bus::AnswerOrigin,
+        crate::AnswerMode,
+        ReplyTx,
+    ),
     AnswerUserQuestionWithEvidence(
         String,
         String,
         event_bus::AnswerOrigin,
         Vec<crate::ReviewEvidenceRow>,
+        crate::AnswerMode,
         ReplyTx,
     ),
     UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
@@ -263,8 +270,20 @@ impl StorageHandle {
         answer: &str,
         origin: &event_bus::AnswerOrigin,
     ) -> Result<(), StorageError> {
+        self.answer_user_question_with_mode(id, answer, origin, crate::AnswerMode::Idempotent)
+    }
+
+    /// Like [`Self::answer_user_question`], with the caller's choice of what an earlier
+    /// answer means; see [`crate::AnswerMode`].
+    pub fn answer_user_question_with_mode(
+        &self,
+        id: &str,
+        answer: &str,
+        origin: &event_bus::AnswerOrigin,
+        mode: crate::AnswerMode,
+    ) -> Result<(), StorageError> {
         self.request(|reply| {
-            Command::AnswerUserQuestion(id.into(), answer.into(), origin.clone(), reply)
+            Command::AnswerUserQuestion(id.into(), answer.into(), origin.clone(), mode, reply)
         })
     }
 
@@ -276,12 +295,33 @@ impl StorageHandle {
         origin: &event_bus::AnswerOrigin,
         evidence: &[crate::ReviewEvidenceRow],
     ) -> Result<(), StorageError> {
+        self.answer_user_question_with_evidence_and_mode(
+            id,
+            answer,
+            origin,
+            evidence,
+            crate::AnswerMode::Idempotent,
+        )
+    }
+
+    /// Like [`Self::answer_user_question_with_evidence`], with the caller's choice of
+    /// what an earlier answer means; see [`crate::AnswerMode`]. No evidence is stored
+    /// when the question was already answered in `FirstOnly` mode.
+    pub fn answer_user_question_with_evidence_and_mode(
+        &self,
+        id: &str,
+        answer: &str,
+        origin: &event_bus::AnswerOrigin,
+        evidence: &[crate::ReviewEvidenceRow],
+        mode: crate::AnswerMode,
+    ) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::AnswerUserQuestionWithEvidence(
                 id.into(),
                 answer.into(),
                 origin.clone(),
                 evidence.to_vec(),
+                mode,
                 reply,
             )
         })
