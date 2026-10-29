@@ -1,6 +1,8 @@
 //! Markdown presentation for transcript text.
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Arc;
 
 use egui::Ui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -8,11 +10,51 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::theme::tokens::palette;
 
+mod cache;
 mod table;
+
+use cache::PreparedCache;
 
 enum Block {
     Code(String),
     Table(table::Table),
+}
+
+/// Source-derived layout input for the viewer, independent of the frame.
+///
+/// Preparing it parses the whole message, so it is cached across frames.
+struct Prepared {
+    markdown: String,
+    blocks: Vec<(String, Block)>,
+}
+
+impl Prepared {
+    /// Heap bytes held, used to bound the cache.
+    fn bytes(&self) -> usize {
+        let block_bytes = |(id, block): &(String, Block)| {
+            id.len()
+                + match block {
+                    Block::Code(code) => code.len(),
+                    Block::Table(table) => table
+                        .header
+                        .iter()
+                        .chain(table.rows.iter().flatten())
+                        .map(String::len)
+                        .sum(),
+                }
+        };
+        self.markdown.len() + self.blocks.iter().map(block_bytes).sum::<usize>()
+    }
+}
+
+thread_local! {
+    static PREPARED: RefCell<PreparedCache> = RefCell::new(PreparedCache::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of full preprocessing passes run on this thread.
+    static PREPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub fn render_markdown(ui: &mut Ui, source: &str, id_salt: &str) {
@@ -28,8 +70,6 @@ pub fn render_markdown_with_base(
     root: Option<&Path>,
 ) {
     super::file_viewer::install_image_loader(ui.ctx());
-    let source = prepare_local_images(source, base);
-    let source = source.as_str();
     let (link_base, link_root) = (base.map(Path::to_path_buf), root.map(Path::to_path_buf));
     let link_menu = move |ui: &mut Ui, destination: &str| {
         show_link_menu(ui, destination, link_base.as_deref(), link_root.as_deref());
@@ -44,80 +84,15 @@ pub fn render_markdown_with_base(
         ui.set_width(width);
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         let mut cache = CommonMarkCache::default();
-        let mut start = 0;
-        let mut block_start = None;
-        let mut blocks = Vec::new();
-        let mut markdown = String::new();
-        let mut block = String::new();
-        let mut table = table::Table::default();
-        let mut in_head = false;
-        let mut fence = String::from("~~~");
-        while source.contains(&fence) {
-            fence.push('~');
-        }
-        let mut marker = String::from("evorch-scroll");
-        while source.contains(&marker) {
-            marker.push('-');
-        }
-        for (event, range) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
-            match event {
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    block_start = Some((range.start, TagEnd::CodeBlock));
-                    block.push_str(&fence);
-                    if let pulldown_cmark::CodeBlockKind::Fenced(language) = kind {
-                        block.push_str(&language);
-                    }
-                    block.push('\n');
-                }
-                Event::Start(Tag::Table(_)) => {
-                    block_start = Some((range.start, TagEnd::Table));
-                }
-                Event::Start(Tag::TableHead) => in_head = true,
-                Event::End(TagEnd::TableHead) => in_head = false,
-                Event::Start(Tag::TableRow) => table.rows.push(Vec::new()),
-                Event::Start(Tag::TableCell) => {
-                    let cell = table::cell_source(&source[range]);
-                    match table.rows.last_mut() {
-                        Some(row) if !in_head => row.push(cell),
-                        _ => table.header.push(cell),
-                    }
-                }
-                Event::Text(text) if matches!(block_start, Some((_, TagEnd::CodeBlock))) => {
-                    block.push_str(&text);
-                }
-                Event::End(end @ (TagEnd::CodeBlock | TagEnd::Table)) => {
-                    if let Some((open, _)) = block_start.take() {
-                        if end == TagEnd::CodeBlock {
-                            if !block.ends_with('\n') {
-                                block.push('\n');
-                            }
-                            block.push_str(&fence);
-                        }
-                        // Replace only this element; retain the enclosing list/quote syntax
-                        // so the viewer lays out all surrounding prose in one normal pass.
-                        markdown.push_str(&source[start..open]);
-                        let placeholder = format!("<!--{marker}-{}-->", blocks.len());
-                        markdown.push_str(&placeholder);
-                        markdown.push('\n');
-                        let content = if end == TagEnd::Table {
-                            Block::Table(std::mem::take(&mut table))
-                        } else {
-                            Block::Code(std::mem::take(&mut block))
-                        };
-                        blocks.push((placeholder, content));
-                        start = range.end;
-                    }
-                }
-                _ => {}
-            }
-        }
-        markdown.push_str(&source[start..]);
+        let prepared = prepared_markdown(source, base);
         let table_link_menu = link_menu.clone();
+        let markdown = prepared.markdown.as_str();
+        let html_blocks = Arc::clone(&prepared);
         CommonMarkViewer::new()
             .link_menu_fn(Some(&link_menu))
             .render_html_fn(Some(&move |ui, html| {
                 if let Some((id, Block::Table(table))) =
-                    blocks.iter().find(|(id, _)| html.trim() == id)
+                    html_blocks.blocks.iter().find(|(id, _)| html.trim() == id)
                 {
                     table::show(
                         ui,
@@ -128,7 +103,7 @@ pub fn render_markdown_with_base(
                     );
                     ui.end_row();
                 } else if let Some((id, Block::Code(block))) =
-                    blocks.iter().find(|(id, _)| html.trim() == id)
+                    html_blocks.blocks.iter().find(|(id, _)| html.trim() == id)
                 {
                     let width = ui.available_width().min(width);
                     ui.allocate_ui_with_layout(
@@ -172,8 +147,94 @@ pub fn render_markdown_with_base(
                     CommonMarkViewer::new().show(ui, &mut CommonMarkCache::default(), html);
                 }
             }))
-            .show(ui, &mut cache, &markdown);
+            .show(ui, &mut cache, markdown);
     });
+}
+
+/// Cached [`prepare`] result for `source`, which must be rendered every frame.
+fn prepared_markdown(source: &str, base: Option<&Path>) -> Arc<Prepared> {
+    PREPARED.with(|cache| {
+        cache
+            .borrow_mut()
+            .get_or_prepare(source, base, || prepare(source, base))
+    })
+}
+
+/// Rewrites local images and splits code blocks and tables out of `source`.
+fn prepare(source: &str, base: Option<&Path>) -> Prepared {
+    #[cfg(test)]
+    PREPARE_COUNT.with(|count| count.set(count.get() + 1));
+    let source = prepare_local_images(source, base);
+    let source = source.as_str();
+    let mut start = 0;
+    let mut block_start = None;
+    let mut blocks = Vec::new();
+    let mut markdown = String::new();
+    let mut block = String::new();
+    let mut table = table::Table::default();
+    let mut in_head = false;
+    let mut fence = String::from("~~~");
+    while source.contains(&fence) {
+        fence.push('~');
+    }
+    let mut marker = String::from("evorch-scroll");
+    while source.contains(&marker) {
+        marker.push('-');
+    }
+    for (event, range) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                block_start = Some((range.start, TagEnd::CodeBlock));
+                block.push_str(&fence);
+                if let pulldown_cmark::CodeBlockKind::Fenced(language) = kind {
+                    block.push_str(&language);
+                }
+                block.push('\n');
+            }
+            Event::Start(Tag::Table(_)) => {
+                block_start = Some((range.start, TagEnd::Table));
+            }
+            Event::Start(Tag::TableHead) => in_head = true,
+            Event::End(TagEnd::TableHead) => in_head = false,
+            Event::Start(Tag::TableRow) => table.rows.push(Vec::new()),
+            Event::Start(Tag::TableCell) => {
+                let cell = table::cell_source(&source[range]);
+                match table.rows.last_mut() {
+                    Some(row) if !in_head => row.push(cell),
+                    _ => table.header.push(cell),
+                }
+            }
+            Event::Text(text) if matches!(block_start, Some((_, TagEnd::CodeBlock))) => {
+                block.push_str(&text);
+            }
+            Event::End(end @ (TagEnd::CodeBlock | TagEnd::Table)) => {
+                if let Some((open, _)) = block_start.take() {
+                    if end == TagEnd::CodeBlock {
+                        if !block.ends_with('\n') {
+                            block.push('\n');
+                        }
+                        block.push_str(&fence);
+                    }
+                    // Replace only this element; retain the enclosing list/quote syntax
+                    // so the viewer lays out all surrounding prose in one normal pass.
+                    markdown.push_str(&source[start..open]);
+                    let placeholder = format!("<!--{marker}-{}-->", blocks.len());
+                    markdown.push_str(&placeholder);
+                    markdown.push('\n');
+                    let content = if end == TagEnd::Table {
+                        Block::Table(std::mem::take(&mut table))
+                    } else {
+                        Block::Code(std::mem::take(&mut block))
+                    };
+                    blocks.push((placeholder, content));
+                    start = range.end;
+                }
+            }
+            _ => {}
+        }
+    }
+    markdown.push_str(&source[start..]);
+    Prepared { markdown, blocks }
 }
 
 fn show_link_menu(ui: &mut Ui, destination: &str, base: Option<&Path>, root: Option<&Path>) {
