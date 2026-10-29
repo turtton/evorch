@@ -104,21 +104,38 @@ again, and a seed that starts a successor of an escalated run saves the source
 run's names. Builtin and user skills are always shown; repository skills only
 while the project is approved; skills from allowed directories are never
 recorded. A body is cut at 16 KiB and the newest 6 are kept. Skills are
-procedures, like project rules, and never widen authorization. The user's
-`@skill` bodies that a host appended to a message as `<skill name="…">` blocks
-are shown apart from the user's words, as `user_mention` skills, when the
-trailing blocks are unambiguous (a body ends at its first end marker and holds
-no start marker); anything else, and every answer to a question, stays whole
-in `real_user_requests`. A body is written with its `</skill>` and
-`<skill name=` markers escaped (`<\/skill>`) and read back unescaped, so a
-skill whose text holds those markers still splits; only newly expanded
-messages are affected, and sent history is never rewritten. A well-formed
-skill block written by hand at the end of a message is treated as an
-attachment, so the reviewer does not receive it as the user's words. Newly
-expanded messages store and send escaped skill bodies to the agent. The
-reviewer receives the unescaped bodies in `loaded_skills`. Previously stored
-or sent messages are not rewritten, and the GUI keeps displaying and editing
-the typed text apart from the skill attachments.
+procedures, like project rules, and never widen authorization.
+
+The skills a user attached to a message with `@skill` mentions come from the
+runtime, not from the message text. The host sends the typed words and the
+names of the mentioned skills (`ChatSubmission.skills`, `RunConfig::skill_mentions`).
+The runtime reads each body once when it accepts the message, before any
+evidence or receipt is written, and keeps three things apart: the typed words
+(review evidence, host-input receipts and goals), the prompt the agent
+receives (the typed words followed by one `<skill name="…">` block per skill,
+bodies written with their `</skill>` and `<skill name=` markers escaped as
+`<\/skill>`, byte for byte what the agent has always received), and the
+attachments (name, scope and body, stored beside the evidence in
+`review_evidence.attachments_json`, each body bounded to 256 KiB and checked
+for secrets). An unreadable or unavailable skill refuses the whole message:
+nothing is recorded or sent and the composer keeps it. A repository skill of
+an untrusted project is never attached; its mention stays plain text.
+
+The reviewer receives the attachments as `loaded_skills` entries with
+`loaded_by: "user_mention"`, `trust: "user-attached"`, the skill's real scope
+and a body cut at 16 KiB, and the user's words stay whole in
+`real_user_requests`. Nothing is parsed out of text, so a `<skill>` block
+written by hand, a body that holds block markers and every answer to a
+question remain the user's words. A user may attach at most 6 skills to the
+reviewer's view (the newest are kept, and a later message attaching the same
+skill replaces the earlier one); this limit is separate from the 6 skills the
+agent loaded, and a user attachment replaces an agent-loaded skill of the
+same name. The saved conversation keeps the sent prompt as it was, and a
+restore, fork or rewind never expands mentions again. Evidence saved before
+attachments existed is not migrated: its skill blocks stay inside the user's
+words. The GUI keeps the typed words and the skill names, so a message shows
+its skill chips also after a restart, and a run's published instruction
+(`TaskPromptPublished`) names the typed words and skills beside the prompt.
 
 The `shell` tool description gained a sentence about splitting host-access work
 from sandbox work. Tool specs are fixed when a run starts, so only new
