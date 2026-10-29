@@ -140,3 +140,40 @@ fn run_js_switch_is_refused_where_it_would_not_apply() {
         assert_eq!(std::fs::read_to_string(path).unwrap(), before);
     }
 }
+
+#[test]
+fn saving_agent_features_keeps_the_comments_on_both_switches() {
+    // Given: both switches with a comment line before and a comment after them.
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[sandbox]\n# web before\nweb_tools_enabled = true # web after\n\n[tools.run_js]\n# run_js before\nenabled = false # run_js after\nmax_tool_calls = 50\n",
+    );
+    let options = user_options(root.path());
+    let flipped = AgentFeatures {
+        web_tools_enabled: false,
+        run_js_enabled: true,
+    };
+
+    // When / Then: changing both values, and then saving them unchanged, keeps
+    // every comment next to the updated values.
+    for _ in 0..2 {
+        LayeredSaveContext::new(&options)
+            .save_agent_features(&path, flipped)
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# web before\nweb_tools_enabled = false # web after\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("# run_js before\nenabled = true # run_js after\n"),
+            "{text}"
+        );
+        assert_eq!(
+            AgentFeatures::from_config(&Config::load_strict(&options).unwrap()),
+            flipped
+        );
+    }
+}

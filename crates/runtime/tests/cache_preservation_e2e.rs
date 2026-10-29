@@ -12,6 +12,8 @@ mod read_alias_cache;
 #[path = "run_js_cache/mod.rs"]
 mod run_js_cache;
 mod support;
+#[path = "web_tools_cache/mod.rs"]
+mod web_tools_cache;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};
@@ -461,6 +463,19 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         .filter(|request| request.path == harness.wire.path())
         .map(|request| request.body)
         .collect::<Vec<_>>();
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    verify_trace_of(harness, run, events, compactions, &requests);
+}
+
+/// [`verify_trace`] for a run whose wire requests are exactly `requests`, so a
+/// later run of the same runtime can follow it on the same mock.
+fn verify_trace_of(
+    harness: &Harness,
+    run: RunId,
+    events: &[Event],
+    compactions: usize,
+    requests: &[Value],
+) {
     let protocol = harness.wire.protocol();
     let mut starts = Vec::new();
     let mut completed = std::collections::HashMap::new();
@@ -512,7 +527,6 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
     assert_eq!(requests.len(), starts.len());
     assert_eq!(requests.len(), completed.len());
     assert!(requests.len() >= 3);
-    assert_eq!(harness.mock.remaining_scripts(), 0);
     let mut total_input = 0;
     let mut total_cached = 0;
     for (index, (request_id, checkpoint)) in starts.iter().enumerate() {

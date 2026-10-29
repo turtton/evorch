@@ -82,7 +82,8 @@ fn not_effective(path: &str, reason: &str) -> ConfigError {
     crate::save::invalid_field(path, &format!("the saved value would not apply: {reason}"))
 }
 
-/// Sets `key` in the table at `tables`, creating missing tables.
+/// Sets `key` in the table at `tables`, creating missing tables. An existing
+/// value is updated in place so the comments around it stay.
 fn set_key(
     doc: &mut DocumentMut,
     tables: &[&str],
@@ -107,6 +108,17 @@ fn set_key(
             .as_table_like_mut()
             .ok_or_else(|| crate::save::invalid_field(&path, "must be a table"))?;
     }
-    table.insert(key, toml_edit::value(enabled));
+    match table.get_mut(key) {
+        Some(Item::Value(value)) => {
+            if value.as_bool() != Some(enabled) {
+                let decor = value.decor().clone();
+                *value = toml_edit::Value::from(enabled);
+                *value.decor_mut() = decor;
+            }
+        }
+        _ => {
+            table.insert(key, toml_edit::value(enabled));
+        }
+    }
     Ok(())
 }
