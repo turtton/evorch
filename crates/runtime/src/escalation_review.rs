@@ -138,6 +138,11 @@ pub(crate) struct UserRequest {
     /// Which stored evidence this input is. Not sent to the reviewer.
     #[serde(skip)]
     pub(crate) evidence: EvidenceRef,
+    /// Skill bodies the host expanded from the user's `@name` mentions in
+    /// `text`. They travel beside the words, never inside them, and reach the
+    /// reviewer as loaded skills rather than as user input.
+    #[serde(skip)]
+    pub(crate) attachments: Vec<storage::EvidenceAttachment>,
 }
 
 /// The stored evidence row behind a user input; unset for an input that only
@@ -226,6 +231,7 @@ impl ReviewRunContext {
             in_reply_to: None,
             reference_context: None,
             evidence: EvidenceRef::default(),
+            attachments: Vec::new(),
         });
     }
 
@@ -263,6 +269,7 @@ impl ReviewRunContext {
                 )),
                 kind: Some("user_answer".into()),
             },
+            attachments: Vec::new(),
         });
     }
 
@@ -1060,6 +1067,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1133,6 +1141,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1294,6 +1303,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1382,6 +1392,7 @@ mod tests {
                 in_reply_to: None,
                 reference_context: None,
                 evidence: EvidenceRef::default(),
+                attachments: Vec::new(),
             }]
             .into(),
         ));
@@ -1414,6 +1425,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1593,6 +1605,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),

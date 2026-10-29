@@ -5,17 +5,20 @@ use rusqlite::{Connection, Row, params};
 use crate::{ReviewEvidenceRow, StorageError};
 
 const COLUMNS: &str = "id, root_run_id, target_run_id, kind, text, in_reply_to_question_id, \
-                      in_reply_to_title, reference_kind, reference_context, created_at_ns";
+                      in_reply_to_title, reference_kind, reference_context, created_at_ns, \
+                      attachments_json";
 
 pub fn insert(conn: &Connection, rows: &[ReviewEvidenceRow]) -> Result<(), StorageError> {
     let mut statement = conn.prepare(
         "INSERT OR IGNORE INTO review_evidence \
          (id, root_run_id, target_run_id, kind, text, in_reply_to_question_id, \
-          in_reply_to_title, reference_kind, reference_context, created_at_ns) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+          in_reply_to_title, reference_kind, reference_context, created_at_ns, attachments_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
     for row in rows {
         row.validate()?;
+        let attachments = serde_json::to_string(&row.attachments)
+            .map_err(|error| StorageError::Serialization(error.to_string()))?;
         statement.execute(params![
             row.id,
             row.root_run_id,
@@ -27,6 +30,7 @@ pub fn insert(conn: &Connection, rows: &[ReviewEvidenceRow]) -> Result<(), Stora
             row.reference_kind,
             row.reference_context,
             row.created_at_ns,
+            attachments,
         ])?;
     }
     Ok(())
@@ -67,6 +71,10 @@ fn list(
 }
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<ReviewEvidenceRow> {
+    let attachments: String = row.get(10)?;
+    let attachments = serde_json::from_str(&attachments).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(ReviewEvidenceRow {
         id: row.get(0)?,
         root_run_id: row.get(1)?,
@@ -77,6 +85,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ReviewEvidenceRow> {
         in_reply_to_title: row.get(6)?,
         reference_kind: row.get(7)?,
         reference_context: row.get(8)?,
+        attachments,
         created_at_ns: row.get(9)?,
     })
 }

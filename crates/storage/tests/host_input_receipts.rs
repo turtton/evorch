@@ -41,6 +41,7 @@ fn evidence(id: &str, run: &str, text: &str) -> ReviewEvidenceRow {
         in_reply_to_title: None,
         reference_kind: None,
         reference_context: None,
+        attachments: Vec::new(),
         created_at_ns: 1,
     }
 }

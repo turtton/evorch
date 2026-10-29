@@ -40,6 +40,7 @@ fn request(text: &str, id: &str) -> UserRequest {
             id: Some(id.into()),
             kind: Some("host_chat".into()),
         },
+        attachments: Vec::new(),
     }
 }
 

@@ -91,7 +91,7 @@ pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, StoredAgentMessage};
 pub use repo::event::StoredEvent;
 pub use repo::user_questions::AnswerMode;
-pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
+pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
 pub use writer::{
     Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,

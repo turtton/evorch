@@ -28,6 +28,17 @@ impl AssistantReferenceRow {
     }
 }
 
+/// A skill body the host expanded from the user's `@name` mention. It is kept
+/// apart from the user's own words in [`ReviewEvidenceRow::text`], so a reader
+/// can tell what the user typed from what the runtime read on the user's behalf.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceAttachment {
+    pub name: String,
+    /// Where the skill came from (`user`, `repo`, `builtin`, ...).
+    pub scope: String,
+    pub body: String,
+}
+
 /// Immutable evidence supplied by the host or user for a review target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewEvidenceRow {
@@ -43,6 +54,8 @@ pub struct ReviewEvidenceRow {
     pub in_reply_to_title: Option<String>,
     pub reference_kind: Option<String>,
     pub reference_context: Option<String>,
+    /// Skill bodies expanded from the user's `@name` mentions in `text`.
+    pub attachments: Vec<EvidenceAttachment>,
     pub created_at_ns: i64,
 }
 
@@ -61,11 +74,21 @@ impl ReviewEvidenceRow {
     /// Rejects secret-bearing or oversized evidence without truncation or redaction.
     pub fn validate(&self) -> Result<(), crate::StorageError> {
         let guard = crate::entity::SecretGuard::from_env();
+        let attachments = self.attachments.iter().flat_map(|attachment| {
+            [
+                ("attachment_name", Some(attachment.name.as_str())),
+                ("attachment_scope", Some(attachment.scope.as_str())),
+                ("attachment_body", Some(attachment.body.as_str())),
+            ]
+        });
         for (field, text) in [
             ("text", Some(self.text.as_str())),
             ("in_reply_to_title", self.in_reply_to_title.as_deref()),
             ("reference_context", self.reference_context.as_deref()),
-        ] {
+        ]
+        .into_iter()
+        .chain(attachments)
+        {
             if let Some(text) = text {
                 if text.len() > 256 * 1024 {
                     return Err(crate::StorageError::Serialization(format!(

@@ -1,8 +1,8 @@
 //! Review evidence and lineage persistence through the single-writer boundary.
 
 use storage::{
-    AssistantReferenceRow, Database, LineageEdge, ReviewEvidenceRow, RunContextRecord, Storage,
-    StorageConfig, StorageError,
+    AssistantReferenceRow, Database, EvidenceAttachment, LineageEdge, ReviewEvidenceRow,
+    RunContextRecord, Storage, StorageConfig, StorageError,
 };
 
 fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
@@ -242,6 +242,7 @@ fn evidence(id: &str, target: &str, root: &str, created_at_ns: i64) -> ReviewEvi
         in_reply_to_title: Some("Choose scope".into()),
         reference_kind: Some("assistant_turn".into()),
         reference_context: Some("The previous assistant turn".into()),
+        attachments: Vec::new(),
         created_at_ns,
     }
 }
@@ -326,6 +327,75 @@ fn evidence_is_idempotent_and_queries_preserve_full_rows_across_reopen() {
             .review_evidence_for_root("root")
             .unwrap(),
         expected
+    );
+}
+
+fn attachment(name: &str, body: &str) -> EvidenceAttachment {
+    EvidenceAttachment {
+        name: name.into(),
+        scope: "user".into(),
+        body: body.into(),
+    }
+}
+
+#[test]
+fn attachments_are_kept_beside_the_words_and_survive_reopen() {
+    let (_dir, storage, database, config) = fixture();
+    let mut with_skills = evidence("skills", "child", "root", 1);
+    with_skills.attachments = vec![
+        attachment("review", "Check </skill> markers\nline two"),
+        attachment("docs", &"界".repeat(100)),
+    ];
+    let plain = evidence("plain", "child", "root", 2);
+    storage
+        .handle()
+        .record_review_evidence(&[with_skills.clone(), plain.clone()])
+        .unwrap();
+    assert_eq!(
+        database.review_evidence_for_target("child").unwrap(),
+        vec![with_skills.clone(), plain.clone()]
+    );
+    assert!(plain.attachments.is_empty());
+    storage.close();
+    assert_eq!(
+        Database::open(&config)
+            .unwrap()
+            .review_evidence_for_root("root")
+            .unwrap(),
+        vec![with_skills, plain]
+    );
+}
+
+#[test]
+fn an_attachment_body_is_bounded_and_secret_checked_like_the_words() {
+    let (_dir, storage, database, _config) = fixture();
+    let mut oversize = evidence("oversize", "child", "root", 1);
+    oversize.attachments = vec![attachment("big", &"x".repeat(256 * 1024 + 1))];
+    assert!(matches!(
+        storage.handle().record_review_evidence(&[oversize]),
+        Err(StorageError::Serialization(_))
+    ));
+    let secret = format!("sk-{}", "a".repeat(32));
+    let mut leaking = evidence("leaking", "child", "root", 2);
+    leaking.attachments = vec![attachment("leak", &secret)];
+    let error = storage
+        .handle()
+        .record_review_evidence(&[leaking])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StorageError::SecretDetected {
+            entity: "review_evidence",
+            field: "attachment_body",
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains(&secret));
+    assert!(
+        database
+            .review_evidence_for_root("root")
+            .unwrap()
+            .is_empty()
     );
 }
 
