@@ -796,11 +796,11 @@ pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
 /// The final output of the delegated runs, apart from the root's conversation.
 /// Runs of a swapped (focus) role come first with a longer excerpt, so a swapped
 /// child role is judged on what it returned. Later runs win when over the cap.
-fn delegated_outputs(run: &LoadedRun, swapped: &[SwappedRole]) -> Vec<serde_json::Value> {
+fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_json::Value> {
     let is_focus = |role: &str| {
         roles::address(role).is_some_and(|address| swapped.iter().any(|s| s.role == address))
     };
-    let children = metrics::child_outputs(&run.record);
+    let children = metrics::child_outputs(record);
     let (focus, other): (Vec<_>, Vec<_>) = children.iter().partition(|child| is_focus(&child.role));
     let mut entries = Vec::new();
     for (children, max, chars, focused) in [
@@ -839,7 +839,7 @@ fn side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
             CONVERSATION_TAIL,
             ENTRY_CHARS,
         ),
-        "delegated_outputs": delegated_outputs(run, swapped),
+        "delegated_outputs": delegated_outputs(&run.record, swapped),
         "diff": bounded_diff(&run.diff),
         "verification": run.summary.verification,
         "metrics": compact_metrics(&run.summary.metrics),
@@ -852,7 +852,7 @@ fn process_side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
         "status": run.summary.status,
         "status_reason": run.summary.reason,
         "metrics": compact_metrics(&run.summary.metrics),
-        "delegated_outputs": delegated_outputs(run, swapped),
+        "delegated_outputs": delegated_outputs(&run.record, swapped),
         "timeline": metrics::timeline(&run.record),
     })
 }

@@ -74,17 +74,41 @@ fn judge_answers() -> Vec<Step> {
     ]
 }
 
+fn started(run: &str, parent: Option<&str>, role: &str) -> Event {
+    Event::new(LifecycleEvent::AgentRunStarted {
+        run_id: run.into(),
+        parent_run_id: parent.map(str::to_owned),
+        agent_name: role.into(),
+        role: role.into(),
+    })
+}
+
+fn said(run: &str, text: &str) -> Event {
+    Event::new(MessageEvent::MessageCompleted {
+        run_id: run.into(),
+        text: text.into(),
+    })
+}
+
+fn finished(run: &str, text: &str) -> Event {
+    Event::new(MessageEvent::FinalResultPublished {
+        run_id: run.into(),
+        text: text.into(),
+    })
+}
+
+fn ended(run: &str, to: AgentRunPhase) -> Event {
+    Event::new(LifecycleEvent::AgentRunStateChanged {
+        run_id: run.into(),
+        from: AgentRunPhase::Running,
+        to,
+        reason: None,
+    })
+}
+
 /// A root run that delegated to a worker, which finished with `result`, and to
 /// an explorer, which only answered in a message.
 fn delegation(label: &str, result: &str) -> Vec<Event> {
-    let started = |run: &str, parent: Option<&str>, role: &str| {
-        Event::new(LifecycleEvent::AgentRunStarted {
-            run_id: run.into(),
-            parent_run_id: parent.map(str::to_owned),
-            agent_name: role.into(),
-            role: role.into(),
-        })
-    };
     vec![
         started("root", None, "orchestrator"),
         started(&format!("{label}-worker"), Some("root"), "worker"),
@@ -114,6 +138,31 @@ fn delegation(label: &str, result: &str) -> Vec<Event> {
     ]
 }
 
+/// root (orchestrator) -> worker -> reviewer, where the reviewer never calls
+/// `finish` and answered several times, the last answer being blank; and a scout
+/// that only produced a blank answer.
+fn nested_delegation(label: &str, verdict: &str) -> Vec<Event> {
+    let (worker, reviewer, scout) = (
+        format!("{label}-worker"),
+        format!("{label}-reviewer"),
+        format!("{label}-scout"),
+    );
+    vec![
+        started("root", None, "orchestrator"),
+        started(&worker, Some("root"), "worker"),
+        started(&reviewer, Some(&worker), "reviewer"),
+        started(&scout, Some("root"), "explorer"),
+        said(&reviewer, "first impression"),
+        said(&reviewer, verdict),
+        said(&reviewer, "  \n "),
+        said(&scout, "   "),
+        said(&worker, "worker draft"),
+        finished(&worker, &format!("{label} worker report")),
+        ended(&reviewer, AgentRunPhase::Stopped),
+        ended(&worker, AgentRunPhase::Done),
+    ]
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     judges: Arc<Mutex<Vec<Arc<ScriptedModel>>>>,
@@ -124,6 +173,17 @@ impl Fixture {
     /// uses a priced API model and hit a DNS failure; the candidate ran on a Claude
     /// subscription, called an unpriced model, and exhausted its budget.
     fn new(problem: Option<&str>, config: &str) -> Self {
+        Self::delegating(problem, config, "worker", delegation)
+    }
+
+    /// [`Fixture::new`] swapping `swapped` and with the runs `delegations` gives
+    /// for each side's label and final result.
+    fn delegating(
+        problem: Option<&str>,
+        config: &str,
+        swapped: &str,
+        delegations: fn(&str, &str) -> Vec<Event>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let fixture = Self {
             root,
@@ -165,7 +225,7 @@ impl Fixture {
             verify: Some("cargo test --offline".into()),
             candidate_overlay: Some("[agents.worker]\nmodels = [{ route = \"claude\" }]\n".into()),
             swapped_roles: vec![SwappedRole {
-                role: "worker".into(),
+                role: swapped.into(),
                 baseline: vec![model("api", ProviderTypeConfig::OpenAi, "gpt-9")],
                 candidate: vec![model(
                     "claude",
@@ -204,7 +264,7 @@ impl Fixture {
                 parent_call_id: None,
             }),
         ];
-        dns.extend(delegation("baseline", "baseline worker report"));
+        dns.extend(delegations("baseline", "baseline verdict"));
         fixture.run(
             BASELINE,
             Status::Completed,
@@ -237,7 +297,7 @@ impl Fixture {
                 stderr_tail: "test failed".into(),
                 error: None,
             },
-            &delegation("candidate", "candidate worker report"),
+            &delegations("candidate", "candidate verdict"),
             vec![
                 usage("c1", "claude", "claude-sonnet-9", "agent", 1_000_000),
                 usage("c2", "local", "mystery", "agent", 10),
@@ -445,7 +505,7 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
     assert_eq!(delegated[0]["focus"], true);
     assert_eq!(delegated[0]["delegated_by"], "orchestrator");
     assert_eq!(delegated[0]["phase"], "Done");
-    assert_eq!(delegated[0]["final_output"], "baseline worker report");
+    assert_eq!(delegated[0]["final_output"], "baseline verdict");
     assert_eq!(delegated[1]["role"], "explorer");
     assert_eq!(delegated[1]["focus"], false);
     assert_eq!(
@@ -455,11 +515,11 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
     assert_eq!(delegated.as_array().unwrap().len(), 2);
     assert_eq!(
         requests[1]["A"]["delegated_outputs"][0]["final_output"],
-        "candidate worker report"
+        "candidate verdict"
     );
     assert_eq!(
         requests[2]["candidate"]["delegated_outputs"][0]["final_output"],
-        "candidate worker report"
+        "candidate verdict"
     );
 
     // Then: both files are written, the JSON holds the same report, and judgments are cached.
@@ -573,4 +633,256 @@ async fn several_threads_are_tabulated_side_by_side_without_a_ranking() {
     );
     assert!(lines[3].starts_with("| thread-2 | - | - | - | - | - |"));
     assert_eq!(lines.len(), 4);
+}
+
+fn swapped(role: &str) -> Vec<SwappedRole> {
+    vec![SwappedRole {
+        role: role.into(),
+        baseline: Vec::new(),
+        candidate: Vec::new(),
+    }]
+}
+
+fn record(events: Vec<Event>) -> RunRecord {
+    RunRecord {
+        requests: Vec::new(),
+        events,
+    }
+}
+
+/// `count` runs of `role` below the root, `<role>1` .. `<role>N`, each answering `text`.
+fn runs_of(role: &str, count: usize, text: &str) -> Vec<Event> {
+    (1..=count)
+        .flat_map(|n| {
+            let run = format!("{role}{n}");
+            [started(&run, Some("root"), role), said(&run, text)]
+        })
+        .collect()
+}
+
+fn run_ids(entries: &[serde_json::Value]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|entry| entry["run_id"].as_str().unwrap_or("-"))
+        .collect()
+}
+
+#[tokio::test]
+async fn nested_delegations_reach_both_the_comparison_and_the_analysis() {
+    // Given: a reviewer two levels below the root (root -> worker -> reviewer) is the swapped
+    // role; it never calls finish, and a scout only produced a blank answer.
+    let fixture = Fixture::delegating(None, CONFIG, "reviewer", nested_delegation);
+    let deps = fixture.deps(judge_answers_without_problem()).await;
+
+    // When: the directory is reported.
+    report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the reviewer comes first as the focus, attributed to the worker that delegated
+    // to it, with its last non-blank answer; the worker is not a focus and reports its
+    // finish result; the scout has no output; and the root text stays in the conversation.
+    let requests = fixture.judge_requests();
+    assert_eq!(requests.len(), 3);
+    let expect = |side: &serde_json::Value, label: &str| {
+        let delegated = side["delegated_outputs"].as_array().unwrap();
+        assert_eq!(
+            run_ids(delegated),
+            [
+                format!("{label}-reviewer"),
+                format!("{label}-worker"),
+                format!("{label}-scout")
+            ]
+        );
+        let reviewer = &delegated[0];
+        assert_eq!(reviewer["role"], "reviewer");
+        assert_eq!(reviewer["focus"], true);
+        assert_eq!(reviewer["delegated_by"], "worker");
+        assert_eq!(reviewer["phase"], "Stopped");
+        assert_eq!(reviewer["final_output"], format!("{label} verdict"));
+        let worker = &delegated[1];
+        assert_eq!(worker["focus"], false);
+        assert_eq!(worker["delegated_by"], "orchestrator");
+        assert_eq!(worker["phase"], "Done");
+        assert_eq!(worker["final_output"], format!("{label} worker report"));
+        let scout = &delegated[2];
+        assert_eq!(scout["delegated_by"], "orchestrator");
+        assert!(scout["phase"].is_null() && scout["final_output"].is_null());
+    };
+    expect(&requests[0]["A"], "baseline");
+    expect(&requests[0]["B"], "candidate");
+    expect(&requests[1]["A"], "candidate");
+    expect(&requests[2]["baseline"], "baseline");
+    expect(&requests[2]["candidate"], "candidate");
+    assert!(
+        requests[0]["A"]["conversation"]
+            .to_string()
+            .contains("baseline answer")
+    );
+    assert!(
+        !requests[0]["A"]["conversation"]
+            .to_string()
+            .contains("verdict")
+    );
+}
+
+fn judge_answers_without_problem() -> Vec<Step> {
+    vec![
+        verdicts(["B", "A", "tie", "A", "B"], false),
+        verdicts(["A", "B", "tie", "A", "A"], false),
+        analysis(),
+    ]
+}
+
+#[test]
+fn delegated_output_excerpts_are_cut_at_the_limit_on_a_character_boundary() {
+    // Given: a focus output (three-byte characters) and another output (four-byte
+    // characters), each exactly at its limit, one character over it, and far over it.
+    let at = |role: &str, run: &str, chars: usize, unit: &str| {
+        [
+            started(run, Some("root"), role),
+            finished(run, &unit.repeat(chars)),
+        ]
+    };
+    let events: Vec<Event> = [
+        at("worker", "focus-at", FOCUS_OUTPUT_CHARS, "あ"),
+        at("worker", "focus-over", FOCUS_OUTPUT_CHARS + 1, "あ"),
+        at("worker", "focus-far", FOCUS_OUTPUT_CHARS * 3, "あ"),
+        at("explorer", "other-at", OTHER_OUTPUT_CHARS, "😀"),
+        at("explorer", "other-over", OTHER_OUTPUT_CHARS + 1, "😀"),
+        at("explorer", "other-far", OTHER_OUTPUT_CHARS * 3, "😀"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    // When: the outputs are bounded for the judge.
+    let entries = delegated_outputs(&record(events), &swapped("worker"));
+
+    // Then: an output at the limit is untouched, one over it keeps exactly the limit's
+    // characters with a marker that counts them, and nothing is split inside a character.
+    let output = |run: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["run_id"] == run)
+            .and_then(|entry| entry["final_output"].as_str())
+            .unwrap()
+    };
+    let cut = |run: &str, unit: &str, limit: usize, total: usize| {
+        let text = output(run);
+        let marker = format!("\n[... truncated: {limit} of {total} characters shown ...]");
+        assert_eq!(text, format!("{}{marker}", unit.repeat(limit)), "{run}");
+    };
+    assert_eq!(output("focus-at"), "あ".repeat(FOCUS_OUTPUT_CHARS));
+    cut(
+        "focus-over",
+        "あ",
+        FOCUS_OUTPUT_CHARS,
+        FOCUS_OUTPUT_CHARS + 1,
+    );
+    cut(
+        "focus-far",
+        "あ",
+        FOCUS_OUTPUT_CHARS,
+        FOCUS_OUTPUT_CHARS * 3,
+    );
+    assert_eq!(output("other-at"), "😀".repeat(OTHER_OUTPUT_CHARS));
+    cut(
+        "other-over",
+        "😀",
+        OTHER_OUTPUT_CHARS,
+        OTHER_OUTPUT_CHARS + 1,
+    );
+    cut(
+        "other-far",
+        "😀",
+        OTHER_OUTPUT_CHARS,
+        OTHER_OUTPUT_CHARS * 3,
+    );
+    let focus_flags: Vec<_> = entries.iter().map(|entry| entry["focus"].clone()).collect();
+    assert_eq!(
+        focus_flags,
+        [true, true, true, false, false, false].map(serde_json::Value::from)
+    );
+}
+
+#[test]
+fn delegated_outputs_keep_the_newest_runs_of_each_group_and_count_the_rest() {
+    // Given: exactly the cap of focus runs and of other runs.
+    let at_cap = [
+        runs_of("worker", DELEGATED_FOCUS_MAX, "w"),
+        runs_of("explorer", DELEGATED_OTHER_MAX, "e"),
+    ]
+    .concat();
+
+    // When / Then: nothing is omitted and the focus runs come before the others.
+    let entries = delegated_outputs(&record(at_cap), &swapped("worker"));
+    assert_eq!(entries.len(), DELEGATED_FOCUS_MAX + DELEGATED_OTHER_MAX);
+    assert!(entries.iter().all(|entry| entry["kind"].is_null()));
+    assert_eq!(run_ids(&entries)[0], "worker1");
+    assert_eq!(run_ids(&entries)[DELEGATED_FOCUS_MAX], "explorer1");
+
+    // Given: one focus run and three other runs over the caps.
+    let over_cap = [
+        runs_of("worker", DELEGATED_FOCUS_MAX + 1, "w"),
+        runs_of("explorer", DELEGATED_OTHER_MAX + 3, "e"),
+    ]
+    .concat();
+
+    // When: they are bounded.
+    let entries = delegated_outputs(&record(over_cap), &swapped("worker"));
+
+    // Then: the oldest runs are dropped, each group is followed by its own omitted count,
+    // and the focus group still comes first.
+    let mut expected: Vec<String> = (2..=DELEGATED_FOCUS_MAX + 1)
+        .map(|n| format!("worker{n}"))
+        .collect();
+    expected.push("-".into());
+    expected.extend((4..=DELEGATED_OTHER_MAX + 3).map(|n| format!("explorer{n}")));
+    expected.push("-".into());
+    assert_eq!(run_ids(&entries), expected);
+    let omitted = |index: usize| {
+        let entry = &entries[index];
+        (
+            entry["kind"].clone(),
+            entry["focus"].clone(),
+            entry["runs"].clone(),
+        )
+    };
+    assert_eq!(
+        omitted(DELEGATED_FOCUS_MAX),
+        ("omitted".into(), true.into(), 1.into())
+    );
+    assert_eq!(
+        omitted(entries.len() - 1),
+        ("omitted".into(), false.into(), 3.into())
+    );
+}
+
+#[test]
+fn a_run_without_a_usable_answer_has_no_output_and_the_root_is_never_listed() {
+    // Given: the root answers, a child answers only with whitespace, another child ends
+    // with an error without answering, and a third answers twice without calling finish.
+    let events = vec![
+        started("root", None, "orchestrator"),
+        said("root", "root text"),
+        started("blank", Some("root"), "explorer"),
+        said("blank", " \n\t "),
+        started("failed", Some("root"), "worker"),
+        ended("failed", AgentRunPhase::Error),
+        started("chatty", Some("root"), "reviewer"),
+        said("chatty", "first"),
+        said("chatty", "second"),
+        said("chatty", ""),
+    ];
+
+    // When: the delegated outputs are read.
+    let entries = delegated_outputs(&record(events), &[]);
+
+    // Then: only the children are listed, none is a focus without swapped roles, blank
+    // answers are no output, the phase is kept, and the last non-blank answer wins.
+    assert_eq!(run_ids(&entries), ["blank", "failed", "chatty"]);
+    assert!(entries.iter().all(|entry| entry["focus"] == false));
+    assert!(entries[0]["final_output"].is_null());
+    assert!(entries[1]["final_output"].is_null());
+    assert_eq!(entries[1]["phase"], "Error");
+    assert_eq!(entries[2]["final_output"], "second");
 }
