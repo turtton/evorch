@@ -365,6 +365,7 @@ async fn run_js_is_offered_and_runs_for_a_scoped_category() {
         },
         vec![run_js_call("js-1"), finish()],
     );
+    let mut events = fixture.bus.subscribe();
     let id = fixture.runtime.delegate_background(
         Role::Worker,
         "work".into(),
@@ -374,11 +375,23 @@ async fn run_js_is_offered_and_runs_for_a_scoped_category() {
         },
     );
     fixture.runtime.wait(id).await.unwrap();
+    let events = drain_events(&mut events).await;
 
     // Then: run_js is offered to that run and its call runs.
     let offered = fixture.model.observed_tools().await;
     assert!(offered[0].iter().any(|spec| spec.name == "run_js"));
+    assert_eq!(started(&events, "run_js").len(), 1);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Tool(ToolEvent::ToolCompleted {
+            tool_name,
+            call_id,
+            is_error: false,
+            ..
+        }) if tool_name == "run_js" && call_id == "js-1"
+    )));
     let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("ok"), "{text}");
     assert!(!text.contains("not enabled"), "{text}");
 }
 

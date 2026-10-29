@@ -222,6 +222,119 @@ fn saving_run_js_scopes_rewrites_the_list_in_place_and_keeps_the_comments() {
 }
 
 #[test]
+fn saving_multiline_run_js_scopes_keeps_element_and_trailing_comments() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[tools.run_js]\nenabled = true\nscopes = [\n    # deep worker\n    \"worker:deep\",\n    # high reasoning worker\n    \"worker:high-reasoning\",\n    # end of scopes\n]\n",
+    );
+    let options = user_options(root.path());
+
+    // Appending a scope keeps the existing values' decor and multiline style.
+    let added = AgentFeatures {
+        run_js_enabled: true,
+        run_js_scopes: vec![
+            "worker:deep".into(),
+            "worker:high-reasoning".into(),
+            "reviewer:plan-review".into(),
+        ],
+        ..AgentFeatures::default()
+    };
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &added)
+        .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("# deep worker\n    \"worker:deep\","),
+        "{text}"
+    );
+    assert!(
+        text.contains("# high reasoning worker\n    \"worker:high-reasoning\","),
+        "{text}"
+    );
+    assert!(text.contains("\n    \"reviewer:plan-review\","), "{text}");
+    assert!(text.contains("# end of scopes\n]"), "{text}");
+    let parsed = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert!(
+        parsed["tools"]["run_js"]["scopes"]
+            .as_array()
+            .unwrap()
+            .trailing_comma()
+    );
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        added.run_js_scopes
+    );
+
+    // Removing the first scope does not disturb the retained element or the
+    // array's trailing comment/comma.
+    let removed = AgentFeatures {
+        run_js_enabled: true,
+        run_js_scopes: vec![
+            "worker:high-reasoning".into(),
+            "reviewer:plan-review".into(),
+        ],
+        ..AgentFeatures::default()
+    };
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &removed)
+        .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("# deep worker"),
+        "the removed entry's comment should be removed with it: {text}"
+    );
+    assert!(
+        text.contains("# high reasoning worker\n    \"worker:high-reasoning\","),
+        "{text}"
+    );
+    assert!(text.contains("\n    \"reviewer:plan-review\","), "{text}");
+    assert!(text.contains("# end of scopes\n]"), "{text}");
+    let parsed = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert!(
+        parsed["tools"]["run_js"]["scopes"]
+            .as_array()
+            .unwrap()
+            .trailing_comma()
+    );
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        removed.run_js_scopes
+    );
+
+    let removed_last = AgentFeatures {
+        run_js_enabled: true,
+        run_js_scopes: vec!["worker:high-reasoning".into()],
+        ..AgentFeatures::default()
+    };
+    LayeredSaveContext::new(&options)
+        .save_agent_features(&path, &removed_last)
+        .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("# high reasoning worker\n    \"worker:high-reasoning\","),
+        "{text}"
+    );
+    assert!(!text.contains("reviewer:plan-review"), "{text}");
+    assert!(text.contains("# end of scopes\n]"), "{text}");
+    let parsed = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert!(
+        parsed["tools"]["run_js"]["scopes"]
+            .as_array()
+            .unwrap()
+            .trailing_comma()
+    );
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        removed_last.run_js_scopes
+    );
+}
+
+#[test]
 fn run_js_scopes_are_created_only_when_they_differ_from_the_default() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("user/config.toml");

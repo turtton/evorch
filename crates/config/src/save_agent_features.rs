@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Item, RawString, Table, Value};
 
 use crate::{Config, ConfigError};
 
@@ -54,6 +54,9 @@ pub(crate) fn save_agent_features_in_scope(
     scope: crate::save_context::SaveScope<'_>,
 ) -> Result<(), ConfigError> {
     let mut doc = crate::save::read_document(path)?;
+    // Array decor may refer to spans in the original document. Keep its text
+    // available while adding formatted values to the parsed array.
+    let source = doc.to_string();
     set_key(
         &mut doc,
         &["sandbox"],
@@ -66,7 +69,7 @@ pub(crate) fn save_agent_features_in_scope(
         "enabled",
         features.run_js_enabled,
     )?;
-    set_scopes(&mut doc, &features.run_js_scopes)?;
+    set_scopes(&mut doc, &features.run_js_scopes, &source)?;
     let checked = crate::save::checked_text_for_save(path, &doc, scope)?;
     let effective = AgentFeatures::from_config(checked.config());
     if effective.web_tools_enabled != features.web_tools_enabled {
@@ -99,19 +102,12 @@ fn not_effective(path: &str, reason: &str) -> ConfigError {
     crate::save::invalid_field(path, &format!("the saved value would not apply: {reason}"))
 }
 
-fn set_scopes(doc: &mut DocumentMut, scopes: &[String]) -> Result<(), ConfigError> {
+fn set_scopes(doc: &mut DocumentMut, scopes: &[String], source: &str) -> Result<(), ConfigError> {
     for scope in scopes {
         crate::validate_run_js_scope(scope)
             .map_err(|message| crate::save::invalid_field("tools.run_js.scopes", &message))?;
     }
     let table = table_at(doc, &["tools", "run_js"])?;
-    let wanted = || {
-        let mut array = toml_edit::Array::new();
-        for scope in scopes {
-            array.push(scope.as_str());
-        }
-        array
-    };
     match table.get_mut("scopes") {
         Some(Item::Value(toml_edit::Value::Array(current))) => {
             let same = current.len() == scopes.len()
@@ -119,11 +115,78 @@ fn set_scopes(doc: &mut DocumentMut, scopes: &[String]) -> Result<(), ConfigErro
                     .iter()
                     .zip(scopes)
                     .all(|(have, want)| have.as_str() == Some(want));
-            if !same {
-                let decor = current.decor().clone();
-                let mut array = wanted();
-                *array.decor_mut() = decor;
-                *current = array;
+            if same {
+                return Ok(());
+            }
+
+            let old_trailing = raw_text(current.trailing(), source)
+                .unwrap_or_default()
+                .to_owned();
+            let last_scope = current
+                .get(current.len().saturating_sub(1))
+                .filter(|_| !current.is_empty())
+                .and_then(Value::as_str);
+            let last_scope_count = last_scope.map_or(0, |last_scope| {
+                current
+                    .iter()
+                    .filter(|value| value.as_str() == Some(last_scope))
+                    .count()
+            });
+            let last_scope_wanted = last_scope.is_some_and(|last_scope| {
+                scopes
+                    .iter()
+                    .filter(|scope| scope.as_str() == last_scope)
+                    .count()
+                    >= last_scope_count
+            });
+            let removed_last_suffix = if last_scope_wanted {
+                None
+            } else {
+                current
+                    .get(current.len().saturating_sub(1))
+                    .filter(|_| !current.is_empty())
+                    .and_then(|last| last.decor().suffix())
+                    .and_then(|suffix| raw_text(suffix, source))
+                    .filter(|suffix| suffix.contains('#'))
+                    .map(str::to_owned)
+            };
+            let mut wanted_counts = std::collections::HashMap::new();
+            for scope in scopes {
+                *wanted_counts.entry(scope.as_str()).or_insert(0usize) += 1;
+            }
+            current.retain(|value| {
+                let Some(scope) = value.as_str() else {
+                    return false;
+                };
+                let Some(count) = wanted_counts.get_mut(scope) else {
+                    return false;
+                };
+                if *count == 0 {
+                    false
+                } else {
+                    *count -= 1;
+                    true
+                }
+            });
+            if let Some(removed_last_suffix) = removed_last_suffix {
+                current.set_trailing(format!("{removed_last_suffix}{old_trailing}"));
+            }
+
+            let new_value_prefix = value_prefix(current, source);
+            for (index, scope) in scopes.iter().enumerate() {
+                if current.get(index).and_then(Value::as_str) == Some(scope) {
+                    continue;
+                }
+                if let Some(existing_index) = (index + 1..current.len()).find(|&candidate| {
+                    current.get(candidate).and_then(Value::as_str) == Some(scope)
+                }) {
+                    let existing = current.remove(existing_index);
+                    current.insert_formatted(index, existing);
+                } else {
+                    let mut value = Value::from(scope.as_str());
+                    value.decor_mut().set_prefix(new_value_prefix.as_str());
+                    current.push_formatted(value);
+                }
             }
         }
         Some(_) => {
@@ -134,11 +197,82 @@ fn set_scopes(doc: &mut DocumentMut, scopes: &[String]) -> Result<(), ConfigErro
         }
         None => {
             if scopes != crate::DEFAULT_RUN_JS_SCOPES {
-                table.insert("scopes", toml_edit::value(wanted()));
+                let mut array = toml_edit::Array::new();
+                for scope in scopes {
+                    array.push(scope.as_str());
+                }
+                table.insert("scopes", toml_edit::value(array));
             }
         }
     }
     Ok(())
+}
+
+/// Gets the source text for parser-backed decor without losing owned decor.
+fn raw_text<'a>(raw: &'a RawString, source: &'a str) -> Option<&'a str> {
+    raw.as_str()
+        .or_else(|| raw.span().and_then(|span| source.get(span)))
+}
+
+/// Whitespace to use before an appended scope, excluding any comments attached
+/// to an existing value. This keeps inline and multiline arrays in their style.
+fn value_prefix(array: &toml_edit::Array, source: &str) -> String {
+    if let Some(last) = array.iter().last() {
+        return last
+            .decor()
+            .prefix()
+            .and_then(|prefix| raw_text(prefix, source))
+            .map(prefix_whitespace)
+            .unwrap_or_else(|| " ".to_owned());
+    }
+
+    raw_text(array.trailing(), source)
+        .map(empty_array_prefix)
+        .unwrap_or_default()
+}
+
+fn prefix_whitespace(prefix: &str) -> String {
+    if let Some(newline) = prefix.rfind('\n') {
+        let indentation = prefix[newline + 1..]
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .collect::<String>();
+        let line_ending = if newline > 0 && prefix.as_bytes()[newline - 1] == b'\r' {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        format!("{line_ending}{indentation}")
+    } else if prefix
+        .chars()
+        .all(|character| matches!(character, ' ' | '\t'))
+    {
+        prefix.to_owned()
+    } else {
+        " ".to_owned()
+    }
+}
+
+fn empty_array_prefix(trailing: &str) -> String {
+    if let Some(newline) = trailing.find('\n') {
+        let indentation = trailing[newline + 1..]
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .collect::<String>();
+        let line_ending = if newline > 0 && trailing.as_bytes()[newline - 1] == b'\r' {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        format!("{line_ending}{indentation}")
+    } else if trailing
+        .chars()
+        .all(|character| matches!(character, ' ' | '\t'))
+    {
+        trailing.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 /// The table at `tables`, created when missing, with implicit parents.
