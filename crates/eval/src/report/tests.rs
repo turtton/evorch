@@ -607,6 +607,31 @@ async fn judge_failures_are_reported_and_never_cached() {
 }
 
 #[tokio::test]
+async fn an_unusable_process_analysis_leaves_the_verdicts_and_tally_intact() {
+    // Given: both comparisons are usable but the process analysis never is.
+    let fixture = Fixture::new(Some("the worker ignored the failing test"), CONFIG);
+    let mut answers = judge_answers();
+    answers.truncate(2);
+    let deps = fixture.deps(answers).await;
+
+    // When: the directory is reported.
+    let reports = report(fixture.args(false), &deps).await.unwrap();
+
+    // Then: the verdicts and their tally are those of the usable comparisons, the failed
+    // analysis is named with the answer that was returned, and only it is left uncached.
+    let report = &reports[0];
+    assert_eq!(report.pairs[0].verdicts.len(), 5);
+    assert!(report.pairs[0].judging_error.is_none());
+    assert!(report.pairs[0].process.is_none());
+    let error = report.pairs[0].process_error.as_deref().unwrap();
+    assert!(error.contains("unusable answer"), "{error}");
+    assert!(error.contains("done"), "{error}");
+    assert_eq!(report.tally[0].candidate_wins, 1);
+    assert_eq!(report.tally[1].baseline_wins, 1);
+    assert_eq!(fixture.judgments().len(), 2);
+}
+
+#[tokio::test]
 async fn several_threads_are_tabulated_side_by_side_without_a_ranking() {
     // Given: reports of two threads.
     let fixture = Fixture::new(Some("the worker ignored the failing test"), CONFIG);

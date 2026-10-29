@@ -16,6 +16,7 @@ pub mod roles;
 pub mod runner;
 pub mod simulator;
 pub mod source;
+mod structured;
 #[cfg(test)]
 mod test_support;
 pub mod verify;

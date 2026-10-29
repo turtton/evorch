@@ -127,6 +127,23 @@ impl AgentModel for ScriptedModel {
     }
 }
 
+/// Every request must send the previous one unchanged and then more: by message, and as the
+/// canonical serde representation of the messages. The bytes a provider receives are checked
+/// at the HTTP boundary in `tests/structured_retry_cache.rs`.
+pub(crate) fn assert_prefix_kept(requests: &[Vec<Message>]) {
+    let wire = |messages: &[Message]| serde_json::to_string(messages).unwrap();
+    for pair in requests.windows(2) {
+        assert!(pair[1].len() > pair[0].len(), "a retry only appends");
+        assert_eq!(pair[1][..pair[0].len()], pair[0][..]);
+        let previous = wire(&pair[0]);
+        let previous = previous.trim_end_matches(']');
+        assert!(
+            wire(&pair[1]).starts_with(previous),
+            "the sent bytes were changed by a retry"
+        );
+    }
+}
+
 /// The simulated user's scripted decisions as the JSON the model would return.
 pub(crate) fn decision(action: &str, text: &str) -> Step {
     Step::Text(

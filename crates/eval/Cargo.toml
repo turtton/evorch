@@ -24,6 +24,7 @@ routing = { path = "../routing" }
 runtime = { path = "../runtime" }
 rustix = { version = "1", features = ["process"] }
 sandbox = { path = "../sandbox" }
+secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
@@ -36,6 +37,8 @@ tracing = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
 
 [dev-dependencies]
+mock-openai = { path = "../mock-openai" }
 tempfile = { workspace = true }
+test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
