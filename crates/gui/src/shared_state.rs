@@ -257,7 +257,7 @@ enum Control {
 
 /// A [`FeedPoller`] running on its own thread. Dropping it stops the thread.
 pub struct FeedWorker {
-    batches: mpsc::Receiver<FeedBatch>,
+    batches: Option<mpsc::Receiver<FeedBatch>>,
     control: mpsc::Sender<Control>,
     foreign_active: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -270,6 +270,17 @@ impl FeedWorker {
     /// Fails when the polling thread cannot be spawned.
     pub fn spawn(
         mut poller: FeedPoller,
+        repaint: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_source(move || poller.poll_once(), repaint)
+    }
+
+    /// [`Self::spawn`] over any source of batches.
+    ///
+    /// # Errors
+    /// Fails when the polling thread cannot be spawned.
+    pub fn spawn_source(
+        mut poll: impl FnMut() -> Result<FeedBatch, StorageError> + Send + 'static,
         repaint: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> std::io::Result<Self> {
         let (batch_tx, batches) = mpsc::sync_channel(16);
@@ -291,7 +302,7 @@ impl FeedWorker {
                         Ok(Control::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    match poller.poll_once() {
+                    match poll() {
                         Ok(batch) => {
                             backlog = batch.backlog;
                             if batch.is_empty() {
@@ -313,7 +324,7 @@ impl FeedWorker {
                 }
             })?;
         Ok(Self {
-            batches,
+            batches: Some(batches),
             control,
             foreign_active,
             thread: Some(thread),
@@ -322,7 +333,7 @@ impl FeedWorker {
 
     /// Takes the next queued batch without waiting.
     pub fn try_next(&self) -> Option<FeedBatch> {
-        self.batches.try_recv().ok()
+        self.batches.as_ref()?.try_recv().ok()
     }
 
     /// Tells the worker whether a run owned elsewhere is in progress, which
@@ -334,6 +345,9 @@ impl FeedWorker {
 
 impl Drop for FeedWorker {
     fn drop(&mut self) {
+        // A worker blocked on a full queue never reads its control channel;
+        // without a receiver its send fails and it leaves the loop.
+        drop(self.batches.take());
         let _ = self.control.send(Control::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

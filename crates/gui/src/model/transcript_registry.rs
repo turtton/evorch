@@ -403,6 +403,14 @@ impl TranscriptRegistry {
         self.bind_thread_root(thread, run);
     }
 
+    /// Drops what was shown for `run` while no conversation owned it, ahead of
+    /// replaying its events under the conversation that does.
+    pub(crate) fn forget_run(&mut self, run: &str) {
+        self.runs.remove(run);
+        self.compaction_checkpoints
+            .retain(|(checkpoint_run, _)| checkpoint_run != run);
+    }
+
     pub fn bind_run(&mut self, run: &str, thread: &str) {
         self.thread_roots
             .retain(|owner, root| owner == thread || root != run);

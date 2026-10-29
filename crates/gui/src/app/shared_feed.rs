@@ -14,13 +14,14 @@ use workspace_ui::ThreadRunPhase;
 
 use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
-use crate::shared_state::{
-    FeedBatch, FeedConfig, FeedPoller, FeedWorker, ReleasedRun, ReleasedThread,
-};
+use crate::shared_state::{FeedBatch, FeedConfig, FeedPoller, FeedWorker, ReleasedRun};
 
 /// How long events of a conversation unknown to the sidebar wait for the
 /// sidebar that introduces it before being folded without it.
 const UNKNOWN_THREAD_GRACE: Duration = Duration::from_secs(10);
+
+/// Events replayed per conversation when its earlier history is recovered.
+const REHYDRATE_EVENT_LIMIT: usize = 100_000;
 
 pub(super) enum SharedFeed {
     Worker(FeedWorker),
@@ -33,7 +34,10 @@ pub(super) struct SharedFeedState {
     /// Events not folded yet, oldest first.
     pub pending: std::collections::VecDeque<Event>,
     pub blocked_since: Option<Instant>,
-    pub released: Vec<ReleasedThread>,
+    /// How the runs of threads other processes released last ended, by thread.
+    pub released_runs: std::collections::BTreeMap<String, Vec<ReleasedRun>>,
+    /// The database the feed follows.
+    pub db_path: Option<std::path::PathBuf>,
     /// Runs whose events came from other processes.
     pub foreign_runs: std::collections::BTreeSet<String>,
 }
@@ -48,6 +52,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         own_stream: String,
         repaint: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Self {
+        self.shared_feed.db_path = Some(db_path.clone());
         let config = self.feed_config(db_path, own_stream);
         match FeedPoller::open(config).and_then(|poller| {
             FeedWorker::spawn(poller, repaint)
@@ -68,6 +73,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db_path: std::path::PathBuf,
         own_stream: String,
     ) -> Result<Self, storage::StorageError> {
+        self.shared_feed.db_path = Some(db_path.clone());
         let config = self.feed_config(db_path, own_stream);
         self.shared_feed.feed = Some(SharedFeed::Manual(Box::new(FeedPoller::open(config)?)));
         Ok(self)
@@ -120,8 +126,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// Whether a run another process executes is still going.
-    fn foreign_work_active(&self) -> bool {
+    /// Whether a run another process executes is still going, which keeps
+    /// following on its fast cadence.
+    pub fn foreign_work_active(&self) -> bool {
         self.shared_feed.foreign_runs.iter().any(|run| {
             matches!(
                 self.phases.get(run),
@@ -146,7 +153,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.import_shared_sidebar();
         }
         self.shared_feed.pending.extend(batch.events);
-        self.shared_feed.released.extend(batch.released);
+        for thread in batch.released {
+            self.shared_feed
+                .released_runs
+                .insert(thread.thread_id, thread.runs);
+        }
         self.fold_pending_shared();
     }
 
@@ -179,8 +190,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.transcripts.select_thread(active);
         if self.shared_feed.pending.is_empty() {
             self.shared_feed.blocked_since = None;
-            let released = std::mem::take(&mut self.shared_feed.released);
-            self.settle_released_threads(released);
+            self.shared_feed.released_runs.clear();
         }
     }
 
@@ -230,7 +240,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 run_id: run_id.clone(),
                 context_len: *context_len,
             })),
-            EventKind::Ownership(_) => self.ownership_status.invalidate(),
+            EventKind::Ownership(ownership) => {
+                self.ownership_status.invalidate();
+                if matches!(
+                    ownership.action,
+                    event_bus::OwnershipAction::Released | event_bus::OwnershipAction::Handoff
+                ) {
+                    self.settle_released_thread(&ownership.thread_id);
+                }
+            }
             _ => {}
         }
         self.telemetry.apply_event(event);
@@ -240,49 +258,117 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.receipt_reconciliation.dirty = true;
     }
 
-    /// An owner that released a thread executes none of its runs any more:
-    /// runs still shown as active end as their last snapshot says, else Stopped.
-    fn settle_released_threads(&mut self, released: Vec<ReleasedThread>) {
-        for thread in released {
-            if self.thread_owned_here(&thread.thread_id) {
-                continue;
-            }
-            let mut runs = thread.runs;
-            if let Some(record) = self
-                .sidebar
-                .threads
-                .iter()
-                .find(|record| record.id.to_string() == thread.thread_id)
-            {
-                let extra: Vec<ReleasedRun> = record
-                    .run_ids
-                    .iter()
-                    .filter(|run_id| !runs.iter().any(|run| &run.run_id == *run_id))
-                    .map(|run_id| ReleasedRun {
-                        run_id: run_id.clone(),
-                        terminal_phase: None,
-                    })
-                    .collect();
-                runs.extend(extra);
-            }
-            for run in runs {
-                let Some(phase) = self.phases.get_mut(&run.run_id) else {
-                    continue;
-                };
-                if !matches!(
+    /// An owner that released a thread executes none of its runs any more.
+    /// Called where the release sits in the event order, so only the runs
+    /// shown as active at that point end: as their last snapshot says, else
+    /// Stopped. Runs a later owner starts are folded afterwards.
+    fn settle_released_thread(&mut self, thread_id: &str) {
+        if self.thread_owned_here(thread_id) {
+            return;
+        }
+        let ended = self.shared_feed.released_runs.get(thread_id);
+        let active: Vec<String> = self
+            .phases
+            .iter()
+            .filter(|(run, phase)| {
+                matches!(
                     phase,
                     ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
-                ) {
+                ) && self.thread_for_run(run).as_deref() == Some(thread_id)
+            })
+            .map(|(run, _)| run.clone())
+            .collect();
+        for run in active {
+            let settled = ended
+                .and_then(|runs| runs.iter().find(|ended| ended.run_id == run))
+                .and_then(|ended| ended.terminal_phase.as_deref());
+            let settled = match settled {
+                Some("Done") => ThreadRunPhase::Done,
+                Some("Error") => ThreadRunPhase::Error,
+                _ => ThreadRunPhase::Stopped,
+            };
+            self.phases.insert(run.clone(), settled);
+            self.transcripts.interrupt_run_tools(&run);
+        }
+    }
+
+    /// Conversations that just became known and whose runs were already shown
+    /// without one: replay those runs' events from the database so the
+    /// conversation's transcript has what happened before it was known.
+    pub(super) fn rehydrate_threads(&mut self, threads: &[(String, Vec<String>)]) {
+        let path = self.shared_feed.db_path.clone().or_else(|| {
+            self.memory
+                .config
+                .as_ref()
+                .map(|config| config.db_path.clone())
+        });
+        let Some(path) = path else {
+            tracing::warn!(
+                "earlier events of newly known conversations cannot be loaded: no database"
+            );
+            return;
+        };
+        let db = match storage::Database::open_read_only(&path) {
+            Ok(db) => db,
+            Err(error) => {
+                tracing::warn!(%error, "earlier events of newly known conversations cannot be loaded");
+                return;
+            }
+        };
+        let active = self.sidebar.active_thread.as_ref().map(ToString::to_string);
+        self.transcripts.select_thread(None);
+        for (thread, runs) in threads {
+            let (events, truncated) = match db.events_for_runs(runs, 0, REHYDRATE_EVENT_LIMIT) {
+                Ok(found) => found,
+                Err(error) => {
+                    tracing::warn!(%error, thread, "earlier events of a conversation cannot be loaded");
                     continue;
                 }
-                *phase = match run.terminal_phase.as_deref() {
-                    Some("Done") => ThreadRunPhase::Done,
-                    Some("Error") => ThreadRunPhase::Error,
-                    _ => ThreadRunPhase::Stopped,
-                };
-                self.transcripts.interrupt_run_tools(&run.run_id);
+            };
+            if truncated {
+                tracing::warn!(thread, "earlier events of a conversation were cut off");
+            }
+            for run in runs {
+                self.transcripts.forget_run(run);
+            }
+            let mut messages: Vec<_> = self
+                .history
+                .iter()
+                .filter(|message| &message.thread_id == thread && message.shown_as_sent())
+                .cloned()
+                .collect();
+            messages.sort_by_key(|message| message.at);
+            let mut messages = messages.into_iter().peekable();
+            for stored in events {
+                while messages
+                    .peek()
+                    .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
+                {
+                    if let Some(message) = messages.next() {
+                        self.restore_user_message(message);
+                    }
+                }
+                self.apply_conversation_event(&stored.event);
+            }
+            for message in messages {
+                self.restore_user_message(message);
             }
         }
+        self.transcripts.select_thread(active);
+    }
+
+    /// After a restart's replay, runs still shown as active belong to other
+    /// processes: nothing of this one runs yet.
+    pub(super) fn note_restored_active_runs(&mut self) {
+        let active = self.phases.iter().filter(|(_, phase)| {
+            matches!(
+                phase,
+                ThreadRunPhase::Running | ThreadRunPhase::Pending | ThreadRunPhase::Waiting
+            )
+        });
+        self.shared_feed
+            .foreign_runs
+            .extend(active.map(|(run, _)| run.clone()));
     }
 
     fn thread_owned_here(&self, thread_id: &str) -> bool {

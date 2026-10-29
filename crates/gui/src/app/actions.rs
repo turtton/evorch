@@ -563,7 +563,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         if let Err(error) = self.persist_history() {
-            tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
+            if error.is::<super::shared_sidebar::SaveDeferred>() {
+                tracing::debug!(path = %path.display(), "sidebar save deferred: file locked");
+            } else {
+                tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
+            }
         }
     }
 

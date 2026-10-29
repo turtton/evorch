@@ -2,7 +2,7 @@
 //! without its own rows, and without losing or repeating any.
 
 use event_bus::{Event, EventKind, LifecycleEvent};
-use gui::shared_state::{FeedConfig, FeedPoller, FeedWorker, PAGE_SIZE, POLL_ROW_LIMIT};
+use gui::shared_state::{FeedBatch, FeedConfig, FeedPoller, FeedWorker, PAGE_SIZE, POLL_ROW_LIMIT};
 use storage::{Storage, StorageConfig};
 use tempfile::TempDir;
 
@@ -181,5 +181,36 @@ fn the_worker_queues_batches_signals_a_repaint_and_stops_on_drop() {
     assert_eq!(seen, ["from-elsewhere"]);
 
     // And: dropping the worker stops its thread
+    drop(worker);
+}
+
+#[test]
+fn dropping_a_worker_whose_queue_is_full_returns() {
+    // Given: a worker that always has another batch, with a GUI that never takes any
+    let (signal, signalled) = std::sync::mpsc::channel();
+    let repaint: std::sync::Arc<dyn Fn() + Send + Sync> = {
+        let signal = std::sync::Mutex::new(signal);
+        std::sync::Arc::new(move || {
+            let _ = signal.lock().expect("signal").send(());
+        })
+    };
+    let worker = FeedWorker::spawn_source(
+        || {
+            Ok(FeedBatch {
+                events: vec![started("again")],
+                backlog: true,
+                ..FeedBatch::default()
+            })
+        },
+        Some(repaint),
+    )
+    .expect("worker");
+
+    // When: the queue (16 batches) is full and the worker is blocked sending the next
+    for _ in 0..16 {
+        signalled.recv().expect("repaint signal");
+    }
+
+    // Then: dropping the worker still stops it (a deadlock is caught by the runner's watchdog)
     drop(worker);
 }

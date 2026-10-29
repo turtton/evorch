@@ -7,7 +7,7 @@
 //! processes saved reaches this process's state through
 //! [`WorkbenchState::import_shared_sidebar`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use super::history::{ComposerDraft, HistorySidebar, HistorySidebarRef, UserMessa
 use crate::model::tasks::AgentRunSource;
 use crate::shared_state::FileStamp;
 
-const LOCK_ATTEMPTS: u32 = 20;
+const LOCK_ATTEMPTS: u32 = 3;
 const LOCK_RETRY: Duration = Duration::from_millis(5);
 
 /// What this process knows about the shared file.
@@ -29,6 +29,8 @@ pub(super) struct SharedSidebar {
     stamp: Option<FileStamp>,
     /// A save merged in changes this process's state does not hold yet.
     import_pending: bool,
+    /// A save found the file locked by another process and must be repeated.
+    save_deferred: bool,
 }
 
 impl SharedSidebar {
@@ -41,39 +43,47 @@ impl SharedSidebar {
     }
 }
 
+/// The shared file is being written by another process; the save waits.
+#[derive(Debug)]
+pub(super) struct SaveDeferred;
+
+impl std::fmt::Display for SaveDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the shared sidebar is locked by another process")
+    }
+}
+
+impl std::error::Error for SaveDeferred {}
+
 /// Holds an exclusive lock on `<file>.lock` until dropped.
 struct SidebarLock(#[allow(dead_code)] std::fs::File);
 
 impl SidebarLock {
-    /// A save does not wait forever on a stuck holder: after a few attempts it
-    /// proceeds unlocked, accepting a rare lost update over a frozen window.
-    fn acquire(path: &Path) -> Option<Self> {
-        let mut name = path.file_name()?.to_os_string();
+    /// Saves are not made without the lock: a few short attempts, then the save
+    /// is deferred. The UI thread waits at most a few milliseconds.
+    fn acquire(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut name = path
+            .file_name()
+            .ok_or("the sidebar path has no file name")?
+            .to_os_string();
         name.push(".lock");
-        let file = match std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(path.with_file_name(name))
-        {
-            Ok(file) => file,
-            Err(error) => {
-                tracing::warn!(%error, "sidebar lock file unavailable; saving without the lock");
-                return None;
-            }
-        };
-        for _ in 0..LOCK_ATTEMPTS {
+            .open(path.with_file_name(name))?;
+        for attempt in 0..LOCK_ATTEMPTS {
             match file.try_lock() {
-                Ok(()) => return Some(Self(file)),
-                Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_RETRY),
-                Err(std::fs::TryLockError::Error(error)) => {
-                    tracing::warn!(%error, "sidebar lock failed; saving without the lock");
-                    return None;
+                Ok(()) => return Ok(Self(file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if attempt + 1 < LOCK_ATTEMPTS {
+                        std::thread::sleep(LOCK_RETRY);
+                    }
                 }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        tracing::warn!("sidebar lock is held elsewhere; saving without the lock");
-        None
+        Err(Box::new(SaveDeferred))
     }
 }
 
@@ -157,12 +167,48 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error:
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    /// Records `bytes` as the shared file's content this process has read.
+    /// The sidebar this process starts from is the base of later merges.
     pub(super) fn shared_sidebar_baseline(&self, bytes: Vec<u8>, stamp: Option<FileStamp>) {
         let mut shared = self.shared_sidebar.borrow_mut();
         shared.base = Some(bytes);
         shared.stamp = stamp;
         shared.import_pending = false;
+    }
+
+    /// After a restart's restore took the messages and drafts from the file:
+    /// the base keeps the sidebar this process started from, which may be
+    /// older than the file, and the stamp is unknown, so the next save or
+    /// import merges whatever another process saved in between.
+    pub(super) fn shared_sidebar_restored(&self) {
+        let mut shared = self.shared_sidebar.borrow_mut();
+        let mut base = shared
+            .base
+            .as_deref()
+            .and_then(|bytes| parse(bytes).ok())
+            .unwrap_or_default();
+        base.user_messages.clone_from(&self.history);
+        base.composer_drafts.clone_from(&self.composer_drafts);
+        shared.base = serde_json::to_vec_pretty(&HistorySidebarRef {
+            sidebar: &base.sidebar,
+            user_messages: &base.user_messages,
+            composer_drafts: &base.composer_drafts,
+        })
+        .ok();
+        shared.stamp = None;
+        shared.import_pending = true;
+    }
+
+    /// Repeats a save that found the file locked.
+    pub fn flush_deferred_sidebar_save(&mut self) {
+        let deferred = self.shared_sidebar.borrow().save_deferred;
+        if deferred {
+            self.save_sidebar();
+        }
+    }
+
+    /// Whether a save is waiting for another process to release the file.
+    pub fn sidebar_save_deferred(&self) -> bool {
+        self.shared_sidebar.borrow().save_deferred
     }
 
     /// Writes `local` (this process's serialised state) to `path`, merging in
@@ -172,7 +218,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         path: &Path,
         local: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let _lock = SidebarLock::acquire(path);
+        let _lock = match SidebarLock::acquire(path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if error.is::<SaveDeferred>() {
+                    self.shared_sidebar.borrow_mut().save_deferred = true;
+                }
+                return Err(error);
+            }
+        };
         let mut shared = self.shared_sidebar.borrow_mut();
         let mut output = None;
         let current = FileStamp::of(path);
@@ -191,6 +245,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         write_atomically(path, output.as_deref().unwrap_or(&local))?;
         shared.stamp = FileStamp::of(path);
         shared.import_pending = output.is_some();
+        shared.save_deferred = false;
         shared.base = Some(local);
         Ok(())
     }
@@ -276,6 +331,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|thread| known.get(&thread.id).is_none_or(|old| *old != *thread))
             .map(|thread| thread.id.to_string())
             .collect();
+        let bound_before: BTreeSet<&String> = before
+            .sidebar
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.run_ids)
+            .collect();
+        let late_bound: Vec<(String, Vec<String>)> = merged
+            .sidebar
+            .threads
+            .iter()
+            .filter_map(|thread| {
+                let shown_unbound = thread
+                    .run_ids
+                    .iter()
+                    .any(|run| !bound_before.contains(run) && self.transcripts.run(run).is_some());
+                shown_unbound.then(|| (thread.id.to_string(), thread.run_ids.clone()))
+            })
+            .collect();
         let mut shown: BTreeMap<String, bool> = before
             .user_messages
             .iter()
@@ -285,7 +358,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .user_messages
             .iter()
             .filter(|message| {
-                shown.remove(&message_key(message)) != Some(true) && message.shown_as_sent()
+                shown.remove(&message_key(message)) != Some(true)
+                    && message.shown_as_sent()
+                    && !late_bound
+                        .iter()
+                        .any(|(thread, _)| thread == &message.thread_id)
             })
             .cloned()
             .collect();
@@ -319,6 +396,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         for message in appeared {
             self.restore_user_message(message);
+        }
+        if !late_bound.is_empty() {
+            self.rehydrate_threads(&late_bound);
         }
         self.rebuild_delivery_rows();
         self.refresh_draft_banner();

@@ -219,14 +219,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .map(|q| (q.id.clone(), q))
             .collect();
         if let Some(path) = &self.sidebar_path {
-            let stamp = crate::shared_state::FileStamp::of(path);
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let saved: HistorySidebar = serde_json::from_slice(&bytes)
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
-                    self.shared_sidebar_baseline(bytes, stamp);
                     self.history = saved.user_messages;
                     self.composer_drafts = saved.composer_drafts;
+                    self.shared_sidebar_restored();
                     let ids: Vec<_> = self
                         .history
                         .iter()
@@ -389,6 +388,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         })?;
         self.note_replayed_event(replayed_to);
+        self.note_restored_active_runs();
         self.reconcile_restored_phases(db, registry_path);
         let ids: Vec<_> = self
             .history
