@@ -13,6 +13,8 @@ pub(super) struct OwnershipActionError {
 }
 
 const SHUTDOWN: &str = "Shutdown";
+/// Cadence at which a requested shutdown polls for active turns and quiescence.
+const SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn chat_permit(&mut self, thread: &str) -> Result<Option<OwnerPermit>, String> {
@@ -174,6 +176,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
         // Keep the header row allocated even without a host; native QA and embedders depend on the stable layout.
+        let mut checked_at = None;
         ui.horizontal_wrapped(|ui| {
             let Some(host) = self.ownership.clone() else {
                 return;
@@ -189,6 +192,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             if let Some(thread) = thread {
                 let now = Instant::now();
+                checked_at = Some(now);
                 self.ownership_status.refresh(
                     host.clone(),
                     &thread,
@@ -203,8 +207,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         self.ownership_shutdown_ui(ui, &host);
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(250));
+        // Wake only when something time-driven is due; probe results that change
+        // the display wake the UI themselves. Draining polls the host each pass.
+        let mut delay = checked_at.map(|now| self.ownership_status.next_check_in(now));
+        if self.shutdown_requested && !self.close_in_flight {
+            delay = Some(delay.map_or(SHUTDOWN_POLL, |delay| delay.min(SHUTDOWN_POLL)));
+        }
+        if let Some(delay) = delay {
+            // egui fires `predicted_dt` early to avoid overshooting; land on the deadline.
+            let frame = ui.ctx().input(|input| {
+                std::time::Duration::try_from_secs_f32(input.predicted_dt).unwrap_or_default()
+            });
+            ui.ctx().request_repaint_after(delay + frame);
+        }
     }
 
     fn ownership_controls_ui(

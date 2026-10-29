@@ -218,8 +218,8 @@ fn blocked_probe_keeps_refresh_nonblocking_and_coalesces_thread_changes() {
     status.accept_result(result, "first", true);
     assert_eq!(status.display(observed_at).access, "read-only");
     assert!(!status.stale(observed_at));
-    assert!(status.stale(observed_at + CONTENTION_GRACE));
-    assert!(status.display(observed_at + CONTENTION_GRACE).warning);
+    assert!(status.stale(observed_at + STALE_AFTER));
+    assert!(status.display(observed_at + STALE_AFTER).warning);
 }
 
 #[test]
@@ -249,4 +249,126 @@ fn readonly_change_and_action_invalidation_discard_pending_write_results() {
     status.observe("thread", Ok(owned(false)), now);
     assert!(!status.stale(now));
     assert!(!status.display(now).warning);
+}
+
+fn owned_with_expiry(writable: bool, expires_at: u64) -> OwnershipSnapshot {
+    let OwnershipSnapshot::Owned {
+        mut owner,
+        writable,
+    } = owned(writable)
+    else {
+        unreachable!()
+    };
+    owner.lease.expires_at = expires_at;
+    OwnershipSnapshot::Owned { owner, writable }
+}
+
+/// Run egui passes until no repaint is pending.
+fn settle(ctx: &egui::Context) {
+    while ctx.has_requested_repaint() {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+    }
+}
+
+#[test]
+fn only_a_changed_or_urgent_probe_result_requests_a_repaint() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(
+        OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    );
+    let (script, outcomes) = mpsc::channel::<Result<OwnershipSnapshot, RegistryError>>();
+    let worker = ProbeWorker::start(move |_, _, _| outcomes.recv().unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    // The worker requests the repaint before it sends the result, so the
+    // answer is already visible once the result has been received.
+    let probe = |outcome: Result<OwnershipSnapshot, RegistryError>, urgent: bool| {
+        settle(&ctx);
+        script.send(outcome).unwrap();
+        worker
+            .requests
+            .send(ProbeRequest {
+                revision: 0,
+                thread: "thread".into(),
+                readonly: false,
+                host: host.clone(),
+                repaint: ctx.clone(),
+                urgent,
+            })
+            .unwrap();
+        worker.results.recv().unwrap();
+        ctx.has_requested_repaint()
+    };
+    // The first result has nothing to be equal to.
+    assert!(probe(Ok(owned(true)), false));
+    // Same ownership twice, even with a renewed lease: nothing to redraw.
+    assert!(!probe(Ok(owned(true)), false));
+    assert!(!probe(Ok(owned_with_expiry(true, 1)), false));
+    // An unknown, stale or superseded display needs even an unchanged result.
+    assert!(probe(Ok(owned(true)), true));
+    assert!(probe(Ok(owned(false)), false));
+    assert!(probe(Ok(OwnershipSnapshot::Unowned), false));
+    // A missing owner row is the same observation as Unowned.
+    assert!(!probe(Err(RegistryError::Absent), false));
+    // A repeated failure is shown the same way; recovery is a change.
+    assert!(probe(Err(sql_error(rusqlite::ffi::SQLITE_BUSY)), false));
+    assert!(!probe(Err(sql_error(rusqlite::ffi::SQLITE_BUSY)), false));
+    assert!(probe(Ok(OwnershipSnapshot::Unowned), false));
+}
+
+#[test]
+fn next_check_is_the_earliest_of_probe_stale_and_grace_deadlines() {
+    let now = Instant::now();
+    let ago = |millis| now - Duration::from_millis(millis);
+    let after = Duration::from_millis;
+    let mut status = OwnershipStatus::default();
+    // Nothing probed yet: poll for the pending result, never spin.
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+    status.observe("thread", Ok(owned(true)), now);
+    status.mark_probe_outstanding(ago(900));
+    assert_eq!(status.next_check_in(now), after(100));
+    // An overdue probe falls back to polling instead of repainting at once.
+    status.mark_probe_outstanding(ago(1500));
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+    status.mark_probe_outstanding(now);
+    assert_eq!(status.next_check_in(now), PROBE_INTERVAL);
+    // The snapshot turns stale before the next probe.
+    status.observe("thread", Ok(owned(true)), now - STALE_AFTER + after(200));
+    assert_eq!(status.next_check_in(now), after(200));
+    // A contention failure reaches its grace before that.
+    status.observe(
+        "thread",
+        Err(sql_error(rusqlite::ffi::SQLITE_BUSY)),
+        ago(850),
+    );
+    assert_eq!(status.next_check_in(now), after(150));
+    status.observe("thread", Ok(owned(true)), now);
+    status.observe(
+        "thread",
+        Err(sql_error(rusqlite::ffi::SQLITE_BUSY)),
+        ago(900),
+    );
+    assert_eq!(status.next_check_in(now), after(100));
+    // Already-warning states have no time-driven change left.
+    status.observe("thread", Ok(owned(true)), now);
+    status.observe("thread", Err(RegistryError::ReaderPoisoned), now);
+    assert_eq!(status.next_check_in(now), PROBE_INTERVAL);
+    status.invalidate();
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+}
+
+#[test]
+fn an_unchanged_result_is_not_stale_when_the_next_probe_pass_collects_it() {
+    // Unchanged results are only collected at the next probe pass, so the
+    // displayed age is a whole probe interval and must stay within the grace.
+    let now = Instant::now();
+    let mut status = OwnershipStatus::default();
+    status.observe("thread", Ok(owned(true)), now);
+    assert!(!status.stale(now + PROBE_INTERVAL + CONTENTION_GRACE / 2));
+    assert!(status.stale(now + STALE_AFTER));
 }
