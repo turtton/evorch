@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::conversation::Entry;
 use crate::source::UserTurn;
+use crate::structured::{self, ATTEMPTS, Unusable};
 
-const ATTEMPTS: usize = 3;
 const TIMEOUT: Duration = Duration::from_secs(300);
 
 const INSTRUCTION: &str = "You play the user of a coding agent while one of the user's past conversations is replayed to evaluate the agent. You receive the original user's messages from that conversation in order, and the replay's conversation so far as the user saw it. Choose the user's next step:
@@ -103,11 +103,12 @@ impl UserSimulator {
             turn: None,
         };
         let mut last = SimulatorError::Invalid("no attempt was made".into());
-        for _ in 0..ATTEMPTS {
+        let mut next = messages.to_vec();
+        for attempt in 1..=ATTEMPTS {
             let response = tokio::time::timeout(
                 TIMEOUT,
                 self.model
-                    .complete_structured(&invocation, Role::Worker, &messages, &schema()),
+                    .complete_structured(&invocation, Role::Worker, &next, &schema()),
             )
             .await;
             last = match response {
@@ -115,7 +116,12 @@ impl UserSimulator {
                 Ok(Err(error)) => SimulatorError::Model(error.to_string()),
                 Ok(Ok(response)) => match parse(&response.message.content, pending.is_some()) {
                     Ok(decision) => return Ok(decision),
-                    Err(error) => error,
+                    Err(unusable) => {
+                        let described = unusable.describe(attempt);
+                        tracing::warn!(run_id = %self.run_id, "unusable user simulator decision: {described}");
+                        next = unusable.retry_messages(&messages);
+                        SimulatorError::Invalid(described)
+                    }
                 },
             };
         }
@@ -123,34 +129,14 @@ impl UserSimulator {
     }
 }
 
-/// The JSON a structured answer holds, without a surrounding code fence.
-pub(crate) fn json_text(content: &[ContentBlock]) -> String {
-    let text: String = content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    text.trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .to_owned()
-}
-
-fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, SimulatorError> {
-    let mut decision: Decision = serde_json::from_str(&json_text(content))
-        .map_err(|error| SimulatorError::Invalid(error.to_string()))?;
+fn parse(content: &[ContentBlock], question_pending: bool) -> Result<Decision, Unusable> {
+    let mut decision: Decision = structured::parse(content)?;
     decision.text = decision.text.trim().to_owned();
     if decision.action == Action::Answer && !question_pending {
         decision.action = Action::Reply;
     }
     if decision.action != Action::Finish && decision.text.is_empty() {
-        return Err(SimulatorError::Invalid(
-            "a reply or answer needs text".into(),
-        ));
+        return Err(Unusable::rejected("a reply or answer needs text", content));
     }
     Ok(decision)
 }
@@ -199,5 +185,66 @@ mod tests {
         assert_eq!(parse(&text(finish), false).unwrap().action, Action::Finish);
         assert!(parse(&text(empty), false).is_err());
         assert!(parse(&text("not json"), false).is_err());
+    }
+
+    fn simulator(model: &Arc<crate::test_support::ScriptedModel>) -> UserSimulator {
+        UserSimulator::new(Arc::clone(model) as Arc<dyn AgentModel>, "thread-1")
+    }
+
+    #[tokio::test]
+    async fn an_unusable_decision_is_asked_again_with_the_rejected_answer() {
+        // Given: a model that first wraps the decision in prose without a usable object, then
+        // answers properly.
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text("Let me think about what the user would say."),
+            crate::test_support::decision("reply", "go on"),
+        ]);
+
+        // When: the next step is requested.
+        let decision = simulator(&model).decide(&[], &[], None).await.unwrap();
+
+        // Then: the second request carries the rejected answer and the correction request.
+        assert_eq!(decision.text, "go on");
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].len(), 2);
+        assert_eq!(requests[1].len(), 4);
+        assert_eq!(
+            requests[1][2].content,
+            text("Let me think about what the user would say.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decision_surrounded_by_prose_is_used_without_asking_again() {
+        // Given: a model that explains itself around the decision object.
+        let model = crate::test_support::ScriptedModel::new([crate::test_support::text(
+            "Sure.\n{\"action\":\"finish\",\"text\":\"\",\"reason\":\"done\"}\nThat is all.",
+        )]);
+
+        // When / Then: the decision is read from the first request.
+        let decision = simulator(&model).decide(&[], &[], None).await.unwrap();
+        assert_eq!(decision.action, Action::Finish);
+        assert_eq!(model.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_decision_that_stays_unusable_fails_with_the_answer_and_attempts() {
+        // Given: a model that never returns an object.
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text("first refusal"),
+            crate::test_support::text("second refusal"),
+            crate::test_support::text("third refusal"),
+        ]);
+
+        // When: the next step is requested.
+        let error = simulator(&model).decide(&[], &[], None).await.unwrap_err();
+
+        // Then: every attempt was made and the error shows the last answer.
+        assert_eq!(model.requests().len(), ATTEMPTS);
+        let message = error.to_string();
+        assert!(message.contains("unusable decision"), "{message}");
+        assert!(message.contains("third refusal"), "{message}");
+        assert!(message.contains("attempt 3 of 3"), "{message}");
     }
 }

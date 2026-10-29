@@ -12,9 +12,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::cost::RequestUsage;
-use crate::simulator::json_text;
+use crate::structured::{self, ATTEMPTS, Unusable};
 
-const ATTEMPTS: usize = 3;
 const TIMEOUT: Duration = Duration::from_secs(600);
 /// The judge's binding is invoked through the orchestrator slot.
 pub const ROLE: Role = Role::Orchestrator;
@@ -230,26 +229,34 @@ impl Judge {
         let mut requests = self.bus.subscribe();
         let mut last = JudgeError::Invalid("no attempt was made".into());
         let mut answer = None;
-        for _ in 0..ATTEMPTS {
+        let mut next = messages.to_vec();
+        for attempt in 1..=ATTEMPTS {
             let response = tokio::time::timeout(
                 TIMEOUT,
                 self.model
-                    .complete_structured(&invocation, ROLE, &messages, schema),
+                    .complete_structured(&invocation, ROLE, &next, schema),
             )
             .await;
             last = match response {
                 Err(_) => JudgeError::TimedOut(TIMEOUT),
                 Ok(Err(error)) => JudgeError::Model(error.to_string()),
                 Ok(Ok(response)) => {
-                    match serde_json::from_str::<T>(&json_text(&response.message.content))
-                        .map_err(|error| error.to_string())
-                        .and_then(|value| validate(&value).map(|()| value))
-                    {
+                    let content = &response.message.content;
+                    match structured::parse::<T>(content).and_then(|value| {
+                        validate(&value)
+                            .map(|()| value)
+                            .map_err(|reason| Unusable::rejected(reason, content))
+                    }) {
                         Ok(value) => {
                             answer = Some(value);
                             break;
                         }
-                        Err(error) => JudgeError::Invalid(error),
+                        Err(unusable) => {
+                            let described = unusable.describe(attempt);
+                            tracing::warn!(run_id = %self.run_id, "unusable judge answer: {described}");
+                            next = unusable.retry_messages(&messages);
+                            JudgeError::Invalid(described)
+                        }
                     }
                 }
             };
@@ -404,5 +411,62 @@ mod tests {
         let flipped = verdicts(&[("problem", Winner::A)]);
         let results = aggregate(&both, &flipped, &[PROBLEM_ASPECT]);
         assert_eq!(results[0].winner, Preferred::Candidate);
+    }
+
+    fn judge(model: &Arc<crate::test_support::ScriptedModel>) -> Judge {
+        Judge::new(
+            Arc::clone(model) as Arc<dyn AgentModel>,
+            Arc::new(EventBus::new(16)),
+            "thread-1",
+        )
+    }
+
+    const ANALYSIS: &str = r#"{"time_and_tokens":"a","detours":"b","delegation":"c","swapped_roles":"d","difference":"e"}"#;
+
+    #[tokio::test]
+    async fn an_analysis_with_prose_around_it_or_asked_again_is_used() {
+        // Given: an answer that introduces the object, then one that is rejected before a
+        // proper object.
+        let wrapped = crate::test_support::ScriptedModel::new([crate::test_support::text(
+            &format!("Here is my analysis:\n```json\n{ANALYSIS}\n```"),
+        )]);
+        let retried = crate::test_support::ScriptedModel::new([
+            crate::test_support::text("I will analyse the replays now."),
+            crate::test_support::text(ANALYSIS),
+        ]);
+
+        // When: the analysis is requested.
+        let from_wrapped = judge(&wrapped).analyze(&serde_json::json!({})).await;
+        let from_retried = judge(&retried).analyze(&serde_json::json!({})).await;
+
+        // Then: both give the analysis; the retry showed the rejected answer.
+        assert_eq!(from_wrapped.result.unwrap().difference, "e");
+        assert_eq!(wrapped.requests().len(), 1);
+        assert_eq!(from_retried.result.unwrap().difference, "e");
+        let requests = retried.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_comparison_missing_an_aspect_is_asked_again_and_then_fails_with_the_cause() {
+        // Given: answers that always omit the efficiency verdict.
+        let partial = r#"{"requirement":{"winner":"A","reason":"r"},"correctness":{"winner":"A","reason":"r"},"scope":{"winner":"A","reason":"r"}}"#;
+        let model = crate::test_support::ScriptedModel::new([
+            crate::test_support::text(partial),
+            crate::test_support::text(partial),
+            crate::test_support::text(partial),
+        ]);
+
+        // When: the comparison is requested.
+        let judged = judge(&model)
+            .compare(&serde_json::json!({}), &aspects(false))
+            .await;
+
+        // Then: it fails after every attempt, naming the missing aspect.
+        assert_eq!(model.requests().len(), ATTEMPTS);
+        let message = judged.result.unwrap_err().to_string();
+        assert!(message.contains("no verdict for efficiency"), "{message}");
+        assert!(message.contains("attempt 3 of 3"), "{message}");
     }
 }
