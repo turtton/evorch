@@ -219,6 +219,10 @@ fn saving_run_js_scopes_rewrites_the_list_in_place_and_keeps_the_comments() {
 
     // Then: the file is byte-identical.
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        features.run_js_scopes
+    );
 }
 
 #[test]
@@ -331,6 +335,152 @@ fn saving_multiline_run_js_scopes_keeps_element_and_trailing_comments() {
     assert_eq!(
         Config::load_strict(&options).unwrap().tools.run_js.scopes,
         removed_last.run_js_scopes
+    );
+}
+
+#[test]
+fn run_js_scopes_follow_the_requested_gui_edit_order() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[tools.run_js]\nenabled = true\nscopes = [\"worker:deep\", \"worker:high-reasoning\"]\n",
+    );
+    let options = user_options(root.path());
+    let edit_sequence = [
+        vec!["worker:deep"],
+        vec!["worker:deep", "worker:quick"],
+        vec!["worker:deep", "worker:quick", "worker:high-reasoning"],
+    ];
+
+    // Removing and re-adding categories in the UI must keep their visible
+    // order, including when a newly selected scope belongs between old ones.
+    for scopes in edit_sequence {
+        let scopes = scopes.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        LayeredSaveContext::new(&options)
+            .save_agent_features(
+                &path,
+                &AgentFeatures {
+                    run_js_enabled: true,
+                    run_js_scopes: scopes.clone(),
+                    ..AgentFeatures::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            Config::load_strict(&options).unwrap().tools.run_js.scopes,
+            scopes
+        );
+    }
+}
+
+#[test]
+fn new_run_js_scopes_keep_the_requested_beginning_middle_or_end_position() {
+    let ordered_scopes = [
+        vec!["worker:quick", "worker:deep", "worker:high-reasoning"],
+        vec!["worker:deep", "worker:quick", "worker:high-reasoning"],
+        vec!["worker:deep", "worker:high-reasoning", "worker:quick"],
+    ];
+
+    for ordered_scopes in ordered_scopes {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("user/config.toml");
+        put(
+            &path,
+            "version = 3\n[tools.run_js]\nenabled = true\nscopes = [\"worker:deep\", \"worker:high-reasoning\"]\n",
+        );
+        let options = user_options(root.path());
+        let expected = ordered_scopes
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        LayeredSaveContext::new(&options)
+            .save_agent_features(
+                &path,
+                &AgentFeatures {
+                    run_js_enabled: true,
+                    run_js_scopes: expected.clone(),
+                    ..AgentFeatures::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            Config::load_strict(&options).unwrap().tools.run_js.scopes,
+            expected
+        );
+    }
+}
+
+#[test]
+fn removing_a_scope_keeps_the_previous_values_comma_comment() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[tools.run_js]\nenabled = true\nscopes = [\n    \"worker:deep\", # keep this explanation\n    \"worker:high-reasoning\",\n]\n",
+    );
+    let options = user_options(root.path());
+
+    LayeredSaveContext::new(&options)
+        .save_agent_features(
+            &path,
+            &AgentFeatures {
+                run_js_enabled: true,
+                run_js_scopes: vec!["worker:deep".into()],
+                ..AgentFeatures::default()
+            },
+        )
+        .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("\"worker:deep\", # keep this explanation\n"),
+        "{text}"
+    );
+    assert!(!text.contains("worker:high-reasoning"), "{text}");
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        ["worker:deep"]
+    );
+}
+
+#[test]
+fn reordering_scopes_keeps_comments_with_their_values() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user/config.toml");
+    put(
+        &path,
+        "version = 3\n[tools.run_js]\nenabled = true\nscopes = [\n    # deep worker\n    \"worker:deep\", # deep explanation\n    # high reasoning worker\n    \"worker:high-reasoning\",\n    # end of scopes\n]\n",
+    );
+    let options = user_options(root.path());
+
+    LayeredSaveContext::new(&options)
+        .save_agent_features(
+            &path,
+            &AgentFeatures {
+                run_js_enabled: true,
+                run_js_scopes: vec!["worker:high-reasoning".into(), "worker:deep".into()],
+                ..AgentFeatures::default()
+            },
+        )
+        .unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("# high reasoning worker\n    \"worker:high-reasoning\","),
+        "{text}"
+    );
+    assert!(
+        text.contains("# deep worker\n    \"worker:deep\", # deep explanation\n"),
+        "{text}"
+    );
+    assert!(text.contains("# end of scopes\n]"), "{text}");
+    assert_eq!(
+        Config::load_strict(&options).unwrap().tools.run_js.scopes,
+        ["worker:high-reasoning", "worker:deep"]
     );
 }
 

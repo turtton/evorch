@@ -119,75 +119,101 @@ fn set_scopes(doc: &mut DocumentMut, scopes: &[String], source: &str) -> Result<
                 return Ok(());
             }
 
-            let old_trailing = raw_text(current.trailing(), source)
+            let had_trailing_comma = current.trailing_comma();
+            let mut trailing = raw_text(current.trailing(), source)
                 .unwrap_or_default()
                 .to_owned();
-            let last_scope = current
-                .get(current.len().saturating_sub(1))
-                .filter(|_| !current.is_empty())
-                .and_then(Value::as_str);
-            let last_scope_count = last_scope.map_or(0, |last_scope| {
-                current
-                    .iter()
-                    .filter(|value| value.as_str() == Some(last_scope))
-                    .count()
-            });
-            let last_scope_wanted = last_scope.is_some_and(|last_scope| {
-                scopes
-                    .iter()
-                    .filter(|scope| scope.as_str() == last_scope)
-                    .count()
-                    >= last_scope_count
-            });
-            let removed_last_suffix = if last_scope_wanted {
-                None
-            } else {
-                current
-                    .get(current.len().saturating_sub(1))
-                    .filter(|_| !current.is_empty())
-                    .and_then(|last| last.decor().suffix())
-                    .and_then(|suffix| raw_text(suffix, source))
-                    .filter(|suffix| suffix.contains('#'))
-                    .map(str::to_owned)
-            };
-            let mut wanted_counts = std::collections::HashMap::new();
-            for scope in scopes {
-                *wanted_counts.entry(scope.as_str()).or_insert(0usize) += 1;
-            }
-            current.retain(|value| {
-                let Some(scope) = value.as_str() else {
-                    return false;
-                };
-                let Some(count) = wanted_counts.get_mut(scope) else {
-                    return false;
-                };
-                if *count == 0 {
-                    false
-                } else {
-                    *count -= 1;
-                    true
+            let new_value_prefix = value_prefix(current, source);
+            let opening_value_prefix = opening_value_prefix(current, source);
+            let mut entries = current
+                .iter()
+                .cloned()
+                .map(|value| ScopeEntry::from_value(value, source))
+                .collect::<Vec<_>>();
+
+            // toml_edit stores a comment after a comma in the next value's
+            // prefix. Associate the comment with the preceding value before
+            // reordering or deleting entries.
+            for index in 1..entries.len() {
+                if let Some((comment, line_ending, prefix)) =
+                    split_comma_comment(&entries[index].prefix)
+                {
+                    entries[index - 1].trailing_comment = Some((comment, line_ending));
+                    entries[index].prefix = prefix;
                 }
-            });
-            if let Some(removed_last_suffix) = removed_last_suffix {
-                current.set_trailing(format!("{removed_last_suffix}{old_trailing}"));
             }
 
-            let new_value_prefix = value_prefix(current, source);
-            for (index, scope) in scopes.iter().enumerate() {
-                if current.get(index).and_then(Value::as_str) == Some(scope) {
-                    continue;
-                }
-                if let Some(existing_index) = (index + 1..current.len()).find(|&candidate| {
-                    current.get(candidate).and_then(Value::as_str) == Some(scope)
-                }) {
-                    let existing = current.remove(existing_index);
-                    current.insert_formatted(index, existing);
-                } else {
-                    let mut value = Value::from(scope.as_str());
-                    value.decor_mut().set_prefix(new_value_prefix.as_str());
-                    current.push_formatted(value);
+            // A comment before the closing bracket can instead be part of the
+            // final value's suffix (without a trailing comma).
+            for entry in &mut entries {
+                let suffix = entry
+                    .value
+                    .decor()
+                    .suffix()
+                    .and_then(|suffix| raw_text(suffix, source))
+                    .unwrap_or_default();
+                if let Some((comment, line_ending, after_comment)) = split_comma_comment(suffix) {
+                    entry.trailing_comment = Some((comment, line_ending));
+                    entry.value.decor_mut().set_suffix("");
+                    trailing = format!("{after_comment}{trailing}");
                 }
             }
+
+            // Keep a comment immediately following the array's trailing
+            // comma attached to the last original value. Comments on later
+            // lines remain array-level trailing decor.
+            if let (Some(last), Some((comment, line_ending, after_comment))) =
+                (entries.last_mut(), split_comma_comment(&trailing))
+            {
+                trailing = format!("{line_ending}{after_comment}");
+                last.trailing_comment = Some((comment, line_ending));
+            }
+
+            let mut remaining = entries.into_iter().map(Some).collect::<Vec<_>>();
+            let mut ordered = Vec::with_capacity(scopes.len());
+            for scope in scopes {
+                if let Some(index) = remaining.iter().position(|entry| {
+                    entry.as_ref().and_then(|entry| entry.value.as_str()) == Some(scope)
+                }) {
+                    ordered.push(remaining[index].take().expect("entry was found"));
+                } else {
+                    let prefix = if ordered.is_empty() {
+                        &opening_value_prefix
+                    } else {
+                        &new_value_prefix
+                    };
+                    ordered.push(ScopeEntry::new(scope, prefix));
+                }
+            }
+
+            current.clear();
+            let mut previous_comment = None;
+            for (index, mut entry) in ordered.into_iter().enumerate() {
+                let entry_prefix = if index > 0 && entry.prefix.is_empty() {
+                    &new_value_prefix
+                } else {
+                    &entry.prefix
+                };
+                let prefix = if index == 0 {
+                    entry_prefix.to_owned()
+                } else {
+                    prefix_after_comment(previous_comment.as_ref(), entry_prefix)
+                };
+                entry.value.decor_mut().set_prefix(prefix);
+                previous_comment = entry.trailing_comment.clone();
+                current.push_formatted(entry.value);
+            }
+
+            let mut trailing_comma = had_trailing_comma;
+            if let Some((comment, line_ending)) = previous_comment {
+                if !line_ends_comment(&trailing) {
+                    trailing = format!("{line_ending}{trailing}");
+                }
+                trailing = format!("{comment}{trailing}");
+                trailing_comma = true;
+            }
+            current.set_trailing(trailing);
+            current.set_trailing_comma(trailing_comma);
         }
         Some(_) => {
             return Err(crate::save::invalid_field(
@@ -208,6 +234,77 @@ fn set_scopes(doc: &mut DocumentMut, scopes: &[String], source: &str) -> Result<
     Ok(())
 }
 
+struct ScopeEntry {
+    value: Value,
+    prefix: String,
+    trailing_comment: Option<(String, String)>,
+}
+
+impl ScopeEntry {
+    fn from_value(value: Value, source: &str) -> Self {
+        let prefix = value
+            .decor()
+            .prefix()
+            .and_then(|prefix| raw_text(prefix, source))
+            .unwrap_or_default()
+            .to_owned();
+        Self {
+            value,
+            prefix,
+            trailing_comment: None,
+        }
+    }
+
+    fn new(scope: &str, prefix: &str) -> Self {
+        Self {
+            value: Value::from(scope),
+            prefix: prefix.to_owned(),
+            trailing_comment: None,
+        }
+    }
+}
+
+/// Splits a line-end comment from whitespace decor, retaining its line ending.
+fn split_comma_comment(text: &str) -> Option<(String, String, String)> {
+    let newline = text.find('\n')?;
+    let line_end = if newline > 0 && text.as_bytes()[newline - 1] == b'\r' {
+        newline - 1
+    } else {
+        newline
+    };
+    let line = &text[..line_end];
+    let comment_start = line.find('#')?;
+    if !line[..comment_start]
+        .chars()
+        .all(|character| matches!(character, ' ' | '\t'))
+    {
+        return None;
+    }
+
+    Some((
+        line.to_owned(),
+        text[line_end..newline + 1].to_owned(),
+        text[newline + 1..].to_owned(),
+    ))
+}
+
+fn prefix_after_comment(trailing_comment: Option<&(String, String)>, prefix: &str) -> String {
+    let Some((comment, line_ending)) = trailing_comment else {
+        return prefix.to_owned();
+    };
+
+    if line_ends_comment(prefix) {
+        format!("{comment}{prefix}")
+    } else {
+        format!("{comment}{line_ending}{prefix}")
+    }
+}
+
+fn line_ends_comment(text: &str) -> bool {
+    text.find('\n')
+        .is_some_and(|newline| !text[..newline].contains('#'))
+}
+
 /// Gets the source text for parser-backed decor without losing owned decor.
 fn raw_text<'a>(raw: &'a RawString, source: &'a str) -> Option<&'a str> {
     raw.as_str()
@@ -223,7 +320,23 @@ fn value_prefix(array: &toml_edit::Array, source: &str) -> String {
             .prefix()
             .and_then(|prefix| raw_text(prefix, source))
             .map(prefix_whitespace)
+            .filter(|prefix| !prefix.is_empty())
             .unwrap_or_else(|| " ".to_owned());
+    }
+
+    raw_text(array.trailing(), source)
+        .map(empty_array_prefix)
+        .unwrap_or_default()
+}
+
+fn opening_value_prefix(array: &toml_edit::Array, source: &str) -> String {
+    if let Some(first) = array.iter().next() {
+        return first
+            .decor()
+            .prefix()
+            .and_then(|prefix| raw_text(prefix, source))
+            .map(prefix_whitespace)
+            .unwrap_or_default();
     }
 
     raw_text(array.trailing(), source)
