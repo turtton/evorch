@@ -218,8 +218,8 @@ fn blocked_probe_keeps_refresh_nonblocking_and_coalesces_thread_changes() {
     status.accept_result(result, "first", true);
     assert_eq!(status.display(observed_at).access, "read-only");
     assert!(!status.stale(observed_at));
-    assert!(status.stale(observed_at + CONTENTION_GRACE));
-    assert!(status.display(observed_at + CONTENTION_GRACE).warning);
+    assert!(status.stale(observed_at + STALE_AFTER));
+    assert!(status.display(observed_at + STALE_AFTER).warning);
 }
 
 #[test]
@@ -249,4 +249,220 @@ fn readonly_change_and_action_invalidation_discard_pending_write_results() {
     status.observe("thread", Ok(owned(false)), now);
     assert!(!status.stale(now));
     assert!(!status.display(now).warning);
+}
+
+fn owned_with_expiry(writable: bool, expires_at: u64) -> OwnershipSnapshot {
+    let OwnershipSnapshot::Owned {
+        mut owner,
+        writable,
+    } = owned(writable)
+    else {
+        unreachable!()
+    };
+    owner.lease.expires_at = expires_at;
+    OwnershipSnapshot::Owned { owner, writable }
+}
+
+/// Run egui passes until no repaint is pending.
+fn settle(ctx: &egui::Context) {
+    while ctx.has_requested_repaint() {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+    }
+}
+
+#[test]
+fn only_a_changed_or_urgent_probe_result_requests_a_repaint() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(
+        OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    );
+    let (script, outcomes) = mpsc::channel::<Result<OwnershipSnapshot, RegistryError>>();
+    let worker = ProbeWorker::start(move |_, _, _| outcomes.recv().unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    // The worker requests the repaint before it sends the result, so the
+    // answer is already visible once the result has been received.
+    let probe = |outcome: Result<OwnershipSnapshot, RegistryError>, urgent: bool| {
+        settle(&ctx);
+        script.send(outcome).unwrap();
+        worker
+            .requests
+            .send(ProbeRequest {
+                revision: 0,
+                thread: "thread".into(),
+                readonly: false,
+                host: host.clone(),
+                repaint: ctx.clone(),
+                urgent,
+            })
+            .unwrap();
+        worker.results.recv().unwrap();
+        ctx.has_requested_repaint()
+    };
+    // The first result has nothing to be equal to.
+    assert!(probe(Ok(owned(true)), false));
+    // Same ownership twice, even with a renewed lease: nothing to redraw.
+    assert!(!probe(Ok(owned(true)), false));
+    assert!(!probe(Ok(owned_with_expiry(true, 1)), false));
+    // An unknown, stale or superseded display needs even an unchanged result.
+    assert!(probe(Ok(owned(true)), true));
+    assert!(probe(Ok(owned(false)), false));
+    assert!(probe(Ok(OwnershipSnapshot::Unowned), false));
+    // A missing owner row is the same observation as Unowned.
+    assert!(!probe(Err(RegistryError::Absent), false));
+    // A repeated failure is shown the same way; recovery is a change.
+    assert!(probe(Err(sql_error(rusqlite::ffi::SQLITE_BUSY)), false));
+    assert!(!probe(Err(sql_error(rusqlite::ffi::SQLITE_BUSY)), false));
+    assert!(probe(Ok(OwnershipSnapshot::Unowned), false));
+}
+
+#[test]
+fn next_check_is_the_earliest_of_probe_stale_and_grace_deadlines() {
+    let now = Instant::now();
+    let ago = |millis| now - Duration::from_millis(millis);
+    let after = Duration::from_millis;
+    let mut status = OwnershipStatus::default();
+    // Nothing probed yet: poll for the pending result, never spin.
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+    status.observe("thread", Ok(owned(true)), now);
+    status.mark_probe_outstanding(ago(900));
+    assert_eq!(status.next_check_in(now), after(100));
+    // An overdue probe falls back to polling instead of repainting at once.
+    status.mark_probe_outstanding(ago(1500));
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+    status.mark_probe_outstanding(now);
+    assert_eq!(status.next_check_in(now), PROBE_INTERVAL);
+    // The snapshot turns stale before the next probe.
+    status.observe("thread", Ok(owned(true)), now - STALE_AFTER + after(200));
+    assert_eq!(status.next_check_in(now), after(200));
+    // A contention failure reaches its grace before that.
+    status.observe(
+        "thread",
+        Err(sql_error(rusqlite::ffi::SQLITE_BUSY)),
+        ago(850),
+    );
+    assert_eq!(status.next_check_in(now), after(150));
+    status.observe("thread", Ok(owned(true)), now);
+    status.observe(
+        "thread",
+        Err(sql_error(rusqlite::ffi::SQLITE_BUSY)),
+        ago(900),
+    );
+    assert_eq!(status.next_check_in(now), after(100));
+    // Already-warning states have no time-driven change left.
+    status.observe("thread", Ok(owned(true)), now);
+    status.observe("thread", Err(RegistryError::ReaderPoisoned), now);
+    assert_eq!(status.next_check_in(now), PROBE_INTERVAL);
+    status.invalidate();
+    assert_eq!(status.next_check_in(now), RESULT_RECHECK);
+}
+
+#[test]
+fn an_unchanged_result_is_not_stale_when_the_next_probe_pass_collects_it() {
+    // Unchanged results are only collected at the next probe pass, so the
+    // displayed age is a whole probe interval and must stay within the grace.
+    let now = Instant::now();
+    let mut status = OwnershipStatus::default();
+    status.observe("thread", Ok(owned(true)), now);
+    assert!(!status.stale(now + PROBE_INTERVAL + CONTENTION_GRACE / 2));
+    assert!(status.stale(now + STALE_AFTER));
+}
+
+fn test_host(dir: &tempfile::TempDir) -> Arc<OwnerHost> {
+    Arc::new(
+        OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    )
+}
+
+/// A status wired to a real worker. Its probe reports ownership of the thread
+/// as writable exactly when the request is not read-only, with a lease expiry
+/// that counts the probes so each result can be told apart. The receiver
+/// yields once per result queued for the UI.
+fn status_with_worker() -> (OwnershipStatus, mpsc::Receiver<()>) {
+    let probes = std::sync::atomic::AtomicU64::new(0);
+    let (queued, results_queued) = mpsc::channel();
+    let worker = ProbeWorker::start_notifying(
+        move |_, _, readonly| {
+            let nth = probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            Ok(owned_with_expiry(!readonly, nth))
+        },
+        move || queued.send(()).unwrap(),
+    )
+    .unwrap();
+    let mut status = OwnershipStatus {
+        worker: Some(worker),
+        ..Default::default()
+    };
+    status.select_thread(Some("thread"));
+    (status, results_queued)
+}
+
+#[test]
+fn an_unchanged_result_is_collected_by_the_next_pass_without_waking_the_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(&dir);
+    let ctx = egui::Context::default();
+    let (mut status, results_queued) = status_with_worker();
+    // The first result has an unknown display, so it wakes the UI.
+    let t0 = Instant::now();
+    status.refresh(host.clone(), "thread", false, &ctx, t0);
+    assert!(status.in_flight);
+    results_queued.recv().unwrap();
+    status.refresh(host.clone(), "thread", false, &ctx, t0);
+    assert!(!status.in_flight);
+    assert_eq!(status.snapshot, Some(owned_with_expiry(true, 1)));
+    assert!(ctx.has_requested_repaint());
+    settle(&ctx);
+    // The next probe pass sends a probe whose result will not change anything.
+    let t1 = t0 + PROBE_INTERVAL;
+    status.refresh(host.clone(), "thread", false, &ctx, t1);
+    assert!(status.in_flight);
+    assert_eq!(status.last_probe, Some(t1));
+    results_queued.recv().unwrap();
+    // The result is queued, yet nothing was requested.
+    assert!(!ctx.has_requested_repaint());
+    // The following probe pass collects it and probes again on schedule.
+    let t2 = t1 + PROBE_INTERVAL;
+    status.refresh(host, "thread", false, &ctx, t2);
+    assert_eq!(status.snapshot, Some(owned_with_expiry(true, 2)));
+    assert!(status.in_flight);
+    assert_eq!(status.last_probe, Some(t2));
+    // Let the third probe finish so the worker never reports to a dropped receiver.
+    results_queued.recv().unwrap();
+    // Displayed one probe interval after its observation it is not yet stale.
+    let observation = status.last_observed.unwrap();
+    assert!(!status.stale(observation + PROBE_INTERVAL));
+    assert!(status.stale(observation + STALE_AFTER));
+}
+
+#[test]
+fn a_result_for_a_superseded_readonly_state_is_dropped_and_the_latest_one_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(&dir);
+    let ctx = egui::Context::default();
+    let (mut status, results_queued) = status_with_worker();
+    let t0 = Instant::now();
+    status.refresh(host.clone(), "thread", false, &ctx, t0);
+    results_queued.recv().unwrap();
+    // The UI now wants a read-only view. The writable answer is dropped when
+    // collected, and the same pass asks again with the latest conditions.
+    let t1 = t0 + Duration::from_millis(1);
+    status.refresh(host.clone(), "thread", true, &ctx, t1);
+    assert!(status.snapshot.is_none());
+    assert!(status.in_flight);
+    assert_eq!(status.last_probe, Some(t1));
+    results_queued.recv().unwrap();
+    status.refresh(host, "thread", true, &ctx, t1);
+    assert_eq!(status.snapshot, Some(owned_with_expiry(false, 2)));
+    assert_eq!(status.display(t1).access, "read-only");
 }

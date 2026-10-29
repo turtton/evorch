@@ -3,10 +3,17 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use runtime::ownership::{OwnerHost, RegistryError, ThreadOwner};
+use runtime::ownership::{OwnerHost, OwnerState, RegistryError, ThreadOwner};
 
-const CONTENTION_GRACE: Duration = Duration::from_secs(1);
-const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+pub(super) const CONTENTION_GRACE: Duration = Duration::from_secs(1);
+/// Probe cadence. A change made by another process shows up within this delay.
+const PROBE_INTERVAL: Duration = Duration::from_millis(1000);
+/// A snapshot is stale once it is older than a probe cycle plus the grace. An
+/// unchanged result is collected by the next probe pass rather than by a
+/// repaint, so its age is about `PROBE_INTERVAL` whenever it is displayed.
+pub(super) const STALE_AFTER: Duration = PROBE_INTERVAL.saturating_add(CONTENTION_GRACE);
+/// Re-check cadence while a probe is outstanding or its result is pending pickup.
+const RESULT_RECHECK: Duration = Duration::from_millis(250);
 const SLOW_PROBE: Duration = Duration::from_millis(200);
 const SLOW_PROBE_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -16,6 +23,43 @@ struct ProbeRequest {
     readonly: bool,
     host: Arc<OwnerHost>,
     repaint: egui::Context,
+    /// The display may change on any result (unknown, stale or superseded).
+    urgent: bool,
+}
+
+/// What the header shows for a probe result. Heartbeat renewals change the
+/// lease expiry without changing this, so they must not wake the UI.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeOutcome {
+    Unowned,
+    Owned {
+        owner_id: String,
+        generation: u64,
+        state: OwnerState,
+        writable: bool,
+    },
+    Failure {
+        contention: bool,
+        detail: String,
+    },
+}
+
+impl ProbeOutcome {
+    fn of(result: &Result<OwnershipSnapshot, RegistryError>) -> Self {
+        match result {
+            Ok(OwnershipSnapshot::Owned { owner, writable }) => Self::Owned {
+                owner_id: owner.lease.owner_id.clone(),
+                generation: owner.lease.generation,
+                state: owner.state,
+                writable: *writable,
+            },
+            Ok(OwnershipSnapshot::Unowned) | Err(RegistryError::Absent) => Self::Unowned,
+            Err(error) => Self::Failure {
+                contention: error.is_contention(),
+                detail: error.to_string(),
+            },
+        }
+    }
 }
 
 struct ProbeResult {
@@ -34,9 +78,21 @@ struct ProbeWorker {
 
 impl ProbeWorker {
     fn start(
+        probe: impl FnMut(&OwnerHost, &str, bool) -> Result<OwnershipSnapshot, RegistryError>
+        + Send
+        + 'static,
+    ) -> Result<Self, RegistryError> {
+        Self::start_notifying(probe, || {})
+    }
+
+    /// Like `start`, and calls `sent` once each result is queued for the UI.
+    /// An unchanged result raises no repaint, so this is the only completion
+    /// event for it.
+    fn start_notifying(
         mut probe: impl FnMut(&OwnerHost, &str, bool) -> Result<OwnershipSnapshot, RegistryError>
         + Send
         + 'static,
+        mut sent: impl FnMut() + Send + 'static,
     ) -> Result<Self, RegistryError> {
         let (requests, receiver) = mpsc::sync_channel::<ProbeRequest>(1);
         let (sender, results) = mpsc::sync_channel(1);
@@ -44,6 +100,7 @@ impl ProbeWorker {
             .name("ownership-display".into())
             .spawn(move || {
                 let mut last_slow_log: Option<Instant> = None;
+                let mut last_sent: Option<ProbeOutcome> = None;
                 while let Ok(request) = receiver.recv() {
                     let started = Instant::now();
                     let result = probe(&request.host, &request.thread, request.readonly);
@@ -61,6 +118,15 @@ impl ProbeWorker {
                         );
                         last_slow_log = Some(observed_at);
                     }
+                    // Wake the UI only for a result it would display differently.
+                    // An unchanged one waits in the channel for the next probe
+                    // pass. Request the repaint first: egui paints two passes
+                    // for it, so the result is queued before the second one.
+                    let outcome = ProbeOutcome::of(&result);
+                    if request.urgent || last_sent.as_ref() != Some(&outcome) {
+                        request.repaint.request_repaint();
+                    }
+                    last_sent = Some(outcome);
                     if sender
                         .send(ProbeResult {
                             revision: request.revision,
@@ -73,7 +139,7 @@ impl ProbeWorker {
                     {
                         break;
                     }
-                    request.repaint.request_repaint();
+                    sent();
                 }
             })?;
         Ok(Self { requests, results })
@@ -181,6 +247,7 @@ impl OwnershipStatus {
             readonly,
             host,
             repaint: repaint.clone(),
+            urgent: self.invalidated || self.snapshot.is_none() || self.stale(now),
         };
         match self.worker.as_ref().unwrap().requests.try_send(request) {
             Ok(()) => self.in_flight = true,
@@ -213,7 +280,7 @@ impl OwnershipStatus {
             && (self.invalidated
                 || self
                     .last_observed
-                    .is_some_and(|last| now.saturating_duration_since(last) >= CONTENTION_GRACE))
+                    .is_some_and(|last| now.saturating_duration_since(last) >= STALE_AFTER))
     }
 
     pub fn observe(
@@ -245,6 +312,43 @@ impl OwnershipStatus {
                 });
             }
         }
+    }
+
+    /// Time until the display needs a pass again without any other event:
+    /// the next probe, a snapshot turning stale, or a contention failure
+    /// reaching its grace. A pending result is picked up by the probe pass.
+    pub fn next_check_in(&self, now: Instant) -> Duration {
+        let until = |deadline: Instant| {
+            deadline
+                .checked_duration_since(now)
+                .filter(|d| !d.is_zero())
+        };
+        let probe = self
+            .last_probe
+            .and_then(|last| until(last + PROBE_INTERVAL))
+            .unwrap_or(RESULT_RECHECK);
+        let stale = (self.snapshot.is_some() && !self.invalidated)
+            .then_some(self.last_observed)
+            .flatten()
+            .and_then(|last| until(last + STALE_AFTER));
+        let grace = self
+            .failure
+            .as_ref()
+            .filter(|failure| failure.contention)
+            .and_then(|failure| until(failure.since + CONTENTION_GRACE));
+        [Some(probe), stale, grace]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(probe)
+    }
+
+    /// Pretend a probe was sent at `at` and has not answered, so tests can
+    /// run the header without starting a worker.
+    #[cfg(test)]
+    pub(super) fn mark_probe_outstanding(&mut self, at: Instant) {
+        self.in_flight = true;
+        self.last_probe = Some(at);
     }
 
     pub fn display(&self, now: Instant) -> OwnershipDisplay {
