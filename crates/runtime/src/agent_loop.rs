@@ -15,6 +15,8 @@ mod host_inputs;
 mod identical_calls;
 mod messages;
 mod observability;
+#[cfg(test)]
+mod observed_completion_tests;
 mod questions;
 mod retracted_delegates;
 #[cfg(test)]
@@ -35,7 +37,7 @@ use agents::Role;
 use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tools::ToolExecutor;
 
 use crate::base_context::{self, InitialSystemPromptError};
@@ -91,7 +93,7 @@ pub(crate) struct RunHandoff {
 pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
-    pub(crate) inbox_rx: mpsc::Receiver<crate::runtime::user_inbox::UserInput>,
+    pub(crate) inbox_rx: crate::runtime::user_inbox::InboxReceiver,
     pub(crate) user_inbox: Arc<crate::runtime::user_inbox::UserInbox>,
     pub(crate) cancel_rx: watch::Receiver<RunInterrupt>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
@@ -926,6 +928,7 @@ impl LoopState {
             // Resolve D3 and scope before manual/automatic/window compaction so
             // no preparation request can see the previous route's reasoning.
             let preparation_invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -1040,6 +1043,7 @@ impl LoopState {
                 }
             }
             let invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -1512,9 +1516,9 @@ impl LoopState {
                         }
                         continue;
                     }
-                    let seq = message.4;
-                    self.take_user_input(message);
-                    self.channels.user_inbox.consumed_through(seq);
+                    if !self.take_user_input(message) {
+                        continue;
+                    }
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();
@@ -1665,10 +1669,13 @@ impl LoopState {
 
     fn snapshot_diagnostic(&self, error: &impl std::fmt::Display) {
         self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
-            source: "run_context".into(), severity: event_bus::DiagnosticSeverity::Warning,
+            source: "run_context".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::CONTEXT_SNAPSHOT_FAILED.into(),
-            detail: format!("復元用コンテキストを保存できませんでした。以前の有効なチェックポイントがあれば保持します: {error}"),
-            run_id: Some(self.task.run_id.to_string()), thread_id: None, call_id: None,
+            detail: format!("Could not save the conversation checkpoint: {error}"),
+            run_id: Some(self.task.run_id.to_string()),
+            thread_id: None,
+            call_id: None,
         }));
     }
 
@@ -1861,7 +1868,7 @@ impl LoopState {
             severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::OWNERSHIP_REGISTRY_WAIT.into(),
             detail: format!(
-                "The owner registry stayed locked for over {} s; the run waits for it instead of failing.",
+                "Waiting for the owner registry (locked for over {} s)",
                 OWNERSHIP_WAIT_NOTICE.as_secs()
             ),
             run_id: Some(self.task.run_id.to_string()),

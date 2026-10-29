@@ -81,12 +81,30 @@ async fn breaker_only_host_answers_not_delegation_or_parent_answers_lift_suspens
             .suspension(child, review.visible_request_count())
             .is_some()
     );
+    // The parent's answer is recorded as such, and survives a fresh runtime on the same store.
+    let parent_origin = AnswerOrigin::ParentAgent {
+        answered_by_run_id: root.to_string(),
+    };
+    let reopened = self::runtime(&config, storage.handle());
+    for reader in [&runtime, &reopened] {
+        let stored = reader.user_question(&agent_question.id).unwrap().unwrap();
+        assert_eq!(stored.answer.as_deref(), Some("parent says yes"));
+        assert_eq!(stored.answer_origin, Some(parent_origin.clone()));
+    }
     let host_question = runtime
         .request_user_question(root, "Narrower scope?".into(), vec![], false)
         .unwrap();
     runtime
         .answer_user_question(&host_question.id, "Use the narrower scope")
         .unwrap();
+    assert_eq!(
+        reopened
+            .user_question(&host_question.id)
+            .unwrap()
+            .unwrap()
+            .answer_origin,
+        Some(AnswerOrigin::Host)
+    );
     assert_eq!(review.visible_request_count(), generation + 1);
     assert!(
         runtime

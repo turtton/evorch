@@ -122,7 +122,7 @@ fn add_project(
     ui.label(h3("New project"));
     let submitted = path_input(ui, path, PATH_LABEL, picker_busy, action);
     if let Some(error) = error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     let trimmed = path.trim();
     ui.horizontal(|ui| {
@@ -163,7 +163,7 @@ fn review_project(
     }
     ui.label(muted(TRUST_HINT));
     if let Some(error) = error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     ui.horizontal(|ui| {
         let confirm = |trust| ProjectDialogAction::Confirm {
@@ -371,7 +371,7 @@ fn project_settings(
     }
 
     if let Some(error) = error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
     ui.add_space(SP_2);
     if ui.button("Close").clicked() {

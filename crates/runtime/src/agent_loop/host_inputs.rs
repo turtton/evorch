@@ -76,11 +76,15 @@ impl HostInputLedger {
 impl LoopState {
     /// The one place host and internal input enters the context: adopt its
     /// identity, append it with its images, and note a tracked host input.
-    pub(crate) fn take_user_input(&mut self, input: crate::runtime::user_inbox::UserInput) {
+    pub(crate) fn take_user_input(&mut self, input: crate::runtime::user_inbox::UserInput) -> bool {
+        if !self.channels.user_inbox.claim(input.4) {
+            return false;
+        }
         let tracked = crate::runtime::user_inbox::tracked_prompt_id(&input).map(String::from);
         let (text, images, trusted_user, prompt_id, _) = input;
         self.accept_input_identity(trusted_user, prompt_id);
         self.append_user_message(&text, images, tracked);
+        true
     }
 
     /// Append a user message without changing the request turn.

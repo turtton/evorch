@@ -165,6 +165,15 @@ pub trait CommandSink: Send {
         Ok(Vec::new())
     }
 
+    /// Withdraw an accepted input before it enters the live agent context.
+    fn withdraw_follow_up(
+        &mut self,
+        _thread: &str,
+        _prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        Err(runtime::FollowUpWithdrawalError::Unknown.into())
+    }
+
     /// Runtime receipt observation, not an acknowledgement of command acceptance.
     fn follow_up_status(&self, _thread: &str) -> Option<runtime::FollowUpStatus> {
         None
@@ -202,6 +211,20 @@ pub trait CommandSink: Send {
         _run: &str,
     ) -> Result<Option<runtime::base_context::RunContextView>, String> {
         Ok(None)
+    }
+
+    /// Searches `project`'s threads by title and body off the UI thread; the
+    /// answer arrives on the receiver. `cursor` continues a search that examined
+    /// only part of the project. `None` without a live runtime; a request
+    /// superseded by a newer one is dropped, which disconnects its receiver.
+    fn search_threads(
+        &self,
+        _project: std::path::PathBuf,
+        _query: String,
+        _limit: usize,
+        _cursor: Option<String>,
+    ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
+        None
     }
 
     fn set_default_cwd(&mut self, _cwd: Option<std::path::PathBuf>) -> Result<(), String> {

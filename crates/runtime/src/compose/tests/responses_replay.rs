@@ -87,6 +87,7 @@ fn fixture() -> (RoutedModel, Arc<ReplayClient>) {
 }
 fn invocation(model: &str) -> AgentInvocationContext {
     AgentInvocationContext {
+        attempts: None,
         run_id: "replay-run".into(),
         model_preference: Some(crate::ModelPreference {
             profile: "local".into(),

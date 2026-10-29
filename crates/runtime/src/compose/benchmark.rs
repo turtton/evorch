@@ -17,6 +17,7 @@ pub(super) fn freeze(
         ));
     }
     let invocation = AgentInvocationContext {
+        attempts: None,
         model_preference: Some(settings.preference.clone()),
         ..Default::default()
     };
@@ -82,6 +83,7 @@ struct Frozen {
 impl Frozen {
     fn invocation(&self, invocation: &AgentInvocationContext) -> AgentInvocationContext {
         AgentInvocationContext {
+            attempts: None,
             model_preference: Some(self.settings.preference.clone()),
             ..invocation.clone()
         }

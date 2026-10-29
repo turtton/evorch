@@ -262,6 +262,17 @@ fn render_kimi(
     );
 }
 
+/// A quota error line in English; when the wording had to be translated the
+/// original follows on a second line (hover popups cannot nest another hover).
+fn quota_error_line(raw: &str) -> String {
+    let shown = crate::model::failure_text::english(raw);
+    if shown == raw {
+        format!("Quota error: {shown}")
+    } else {
+        format!("Quota error: {shown}\n{raw}")
+    }
+}
+
 fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T>, view: View) {
     if view == View::Bars {
         // The profile picker already reads "<service> · <profile> · unavailable".
@@ -270,12 +281,20 @@ fn unavailable<T: QuotaData>(ui: &mut egui::Ui, name: &str, state: &QuotaState<T
     if view == View::Details {
         ui.label(muted(format!("{name} · {}", status(state))));
         if let Some(error) = &state.error {
-            ui.label(muted(format!("Quota error: {error}")));
+            quota_error_label(ui, &error.to_string());
         }
         return;
     }
     let mut details = vec![format!("{name} quota {}", status(state))];
-    details.extend(state.error.iter().map(ToString::to_string));
+    details.extend(state.error.iter().map(|error| {
+        let raw = error.to_string();
+        let shown = crate::model::failure_text::english(&raw);
+        if shown == raw {
+            shown
+        } else {
+            format!("{shown}\n{raw}")
+        }
+    }));
     minimized(ui, name, &format!("{name} · {}", status(state)), &details);
 }
 
@@ -295,13 +314,22 @@ fn show_expanded(
     if stale {
         details.push("Stale · quota refresh failed".into());
     }
-    if let Some(error) = error {
-        details.push(format!("Quota error: {error}"));
-    }
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
     for detail in details {
         ui.label(muted(detail));
+    }
+    if let Some(error) = error {
+        quota_error_label(ui, &error.to_string());
+    }
+}
+
+/// The error as an English label with the original in its hover.
+fn quota_error_label(ui: &mut egui::Ui, raw: &str) {
+    let line = quota_error_line(raw);
+    let response = ui.label(muted(line.lines().next().unwrap_or_default()));
+    if crate::model::failure_text::english(raw) != raw {
+        response.on_hover_text(raw);
     }
 }
 
@@ -318,7 +346,7 @@ fn render(
         details.push("Stale · quota refresh failed".into());
     }
     if let Some(error) = error {
-        details.push(format!("Quota error: {error}"));
+        details.push(quota_error_line(&error.to_string()));
     }
     let suffix = if stale { " · stale" } else { "" };
     if let Some(name) = name {
@@ -459,6 +487,21 @@ fn render_subscription(
 
 #[cfg(test)]
 mod tests {
+    // Given: a quota error whose wording is Japanese, and one in English
+    // When: formatted for the footer / Then: English first, the original kept only when translated
+    #[test]
+    fn quota_error_lines_translate_and_keep_the_original() {
+        assert_eq!(
+            super::quota_error_line("HTTP error"),
+            "Quota error: HTTP error"
+        );
+        let raw = "モデル呼び出しに失敗しました: HTTP 500";
+        assert_eq!(
+            super::quota_error_line(raw),
+            format!("Quota error: Model call failed: HTTP 500\n{raw}")
+        );
+    }
+
     use super::*;
 
     #[test]

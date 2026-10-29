@@ -102,6 +102,7 @@ impl AgentRuntime {
         if let Some(event) = legacy {
             self.shared.bus.emit(Event::new(event));
         }
+        let notice = child.completion_notice.clone();
         let Some(parent) = child.parent else { return };
         let Some(recipient) = runs.get(&parent) else {
             return;
@@ -127,7 +128,10 @@ impl AgentRuntime {
         // a cancelled parent was discarded with its subtree.
         let hold = |runtime: &Self| {
             if !parent_cancelled {
-                runtime.hold_message(parent, message.clone());
+                runtime.hold_queued_message(
+                    parent,
+                    crate::mailbox::QueuedMessage::completion(message.clone(), notice.clone()),
+                );
                 runtime.schedule_wake(parent);
             }
         };
@@ -139,7 +143,10 @@ impl AgentRuntime {
             AgentRunPhase::Waiting => DeliveryDisposition::Wake,
             AgentRunPhase::Pending | AgentRunPhase::Running => DeliveryDisposition::Aside,
         };
-        match recipient.mailbox.try_push_completion(message.clone()) {
+        match recipient
+            .mailbox
+            .try_push_completion(message.clone(), notice.clone())
+        {
             Ok(()) => {
                 self.shared
                     .sent

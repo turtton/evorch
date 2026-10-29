@@ -583,3 +583,53 @@ fn marking_unknown_changes_only_accepted_receipts_of_the_run() {
             .is_err()
     );
 }
+
+#[test]
+fn withdrawn_is_terminal_and_survives_reopen_and_reconciliation() {
+    let (_dir, storage, database, config) = fixture();
+    let handle = storage.handle();
+    handle
+        .append_host_input_accepted(
+            &[],
+            &[],
+            None,
+            &receipt("withdraw", "run-1", HostInputStatus::Accepted),
+        )
+        .unwrap();
+    let withdrawn = HostInputTransition::new("withdraw", HostInputStatus::Withdrawn, None);
+    assert_eq!(
+        handle
+            .transition_host_inputs(std::slice::from_ref(&withdrawn))
+            .unwrap(),
+        [withdrawn]
+    );
+    assert_eq!(
+        status(&database, "withdraw"),
+        Some(HostInputStatus::Withdrawn)
+    );
+    assert!(
+        handle
+            .transition_host_inputs(&[HostInputTransition::new(
+                "withdraw",
+                HostInputStatus::Delivered,
+                None
+            )])
+            .unwrap()
+            .is_empty()
+    );
+    let write = HostInputWrite {
+        reconcile_reason: Some("restored".into()),
+        ..Default::default()
+    };
+    handle
+        .upsert_run_context_with_receipts(&context("run-1", "[]"), &write)
+        .unwrap();
+    drop(database);
+    drop(handle);
+    drop(storage);
+    let reopened = Database::open(&config).unwrap();
+    assert_eq!(
+        status(&reopened, "withdraw"),
+        Some(HostInputStatus::Withdrawn)
+    );
+}

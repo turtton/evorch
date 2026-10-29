@@ -97,7 +97,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     ui.label(muted("Tool visibility is set when a run starts. Disabling blocks Web tool calls in existing runs too. Enabling exposes tools to new runs."));
                 });
                 if let Some(error) = &self.sandbox_settings.error {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {

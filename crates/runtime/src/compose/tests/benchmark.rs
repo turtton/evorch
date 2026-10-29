@@ -276,6 +276,7 @@ async fn benchmark_never_silently_strips_tools() {
     .unwrap();
     let model = Arc::new(model);
     let invocation = AgentInvocationContext {
+        attempts: None,
         model_preference: Some(crate::ModelPreference {
             profile: "local".into(),
             model: Some("custom".into()),

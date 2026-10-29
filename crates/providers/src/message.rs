@@ -289,7 +289,94 @@ pub struct ObservationContext {
     /// Prompt provenance carried outside canonical messages and provider model input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<RequestTurnContext>,
+    /// Where the provider attempts made for this call are noted, for a caller
+    /// that must later say which attempts served it. Observation only: never
+    /// part of a wire request. Two logs always compare equal, so contexts that
+    /// both carry one are equal regardless of its contents.
+    #[serde(skip)]
+    pub attempts: Option<AttemptLog>,
 }
+
+/// One provider attempt made for a call, as its observer saw it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    /// The attempt's `request_id`, shared with its provider events and its
+    /// `usage_requests` row.
+    pub request_id: String,
+    pub provider: String,
+    pub profile: Option<String>,
+    pub protocol: String,
+    pub model: String,
+    pub streaming: bool,
+    pub outcome: AttemptOutcome,
+}
+
+/// How an attempt ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    /// Started and not finished when the log was read.
+    Pending,
+    Completed {
+        finish_reason: String,
+    },
+    Failed {
+        failure: event_bus::ProviderFailureKind,
+    },
+}
+
+/// Shared, append-only note of the attempts made under one [`ObservationContext`].
+#[derive(Clone, Default)]
+pub struct AttemptLog(std::sync::Arc<std::sync::Mutex<Vec<AttemptRecord>>>);
+
+impl AttemptLog {
+    /// The attempts so far, in the order they started.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<AttemptRecord> {
+        self.lock().clone()
+    }
+
+    /// Notes a started attempt. Provider adapters call this through their observer.
+    pub fn started(&self, record: AttemptRecord) {
+        self.lock().push(record);
+    }
+
+    /// Notes how the attempt `request_id` ended.
+    pub fn finished(&self, request_id: &str, outcome: AttemptOutcome) {
+        if let Some(record) = self
+            .lock()
+            .iter_mut()
+            .find(|record| record.request_id == request_id)
+        {
+            record.outcome = outcome;
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<AttemptRecord>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl std::fmt::Debug for AttemptLog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AttemptLog")
+            .field("attempts", &self.lock().len())
+            .finish()
+    }
+}
+
+/// A log is a side channel, not part of what a context says: which attempts it
+/// holds never makes two contexts differ. (Whether a context has one still does.)
+impl PartialEq for AttemptLog {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for AttemptLog {}
 
 /// Runtime-attested logical input, retained across its tool rounds and retries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

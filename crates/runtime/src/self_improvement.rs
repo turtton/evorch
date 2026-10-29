@@ -145,6 +145,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // providers/cursor: the configured effort does not fit the model's fixed
         // variant, or the account catalog was unavailable; config/provider dependent.
         PROVIDER_MODEL_ROUTE => TransientOrExternal,
+        // Catalog/version lookups depend on external availability; evidence only.
+        PROVIDER_CATALOG_FETCH => TransientOrExternal,
         // budget_tracker: user-configured execution limits, not harness defects.
         BUDGET_WARNING | BUDGET_EXHAUSTED => TransientOrExternal,
         // providers/cache: unchanged wire prefix but reduced provider cache retention.
@@ -160,7 +162,7 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         // run_context: successful checkpoint is routine telemetry.
         CONTEXT_CHECKPOINT_SAVED => Ignored,
         // sandbox/network/MCP: access decisions and scope policy, not internal faults.
-        ESCALATION_REVIEW | TOOL_CALL_ACCESS | SCOPE_DENIED => Ignored,
+        ESCALATION_REVIEW | ESCALATION_REVIEW_MANIFEST | TOOL_CALL_ACCESS | SCOPE_DENIED => Ignored,
         // LSP and MCP: diagnostics from external tools/user code, no harness attribution.
         PUBLISH_DIAGNOSTICS | TOOL_RESULT => Ignored,
         // Browser errors may be site/action/environment dependent; no harness attribution.

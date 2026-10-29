@@ -5,6 +5,8 @@ use crate::RuntimeError;
 
 #[derive(Serialize)]
 pub(crate) struct RunOutput {
+    #[serde(skip)]
+    pub(crate) completion_notice: Option<std::sync::Arc<crate::mailbox::CompletionNotice>>,
     run_id: String,
     phase: AgentRunPhase,
     status: OutputStatus,
@@ -31,6 +33,28 @@ enum OutputStatus {
 }
 
 impl AgentRuntime {
+    /// Only output actually returned by a model-facing tool acknowledges a receipt.
+    /// The snapshot's receipt, not today's registry entry, fixes the generation.
+    pub(crate) fn observe_completion(&self, notice: &crate::mailbox::CompletionNotice) {
+        let Some(recipient) = notice.recipient else {
+            return;
+        };
+        let runs = lock_runs(&self.shared.runs);
+        tracing::trace!(%recipient, child = %notice.child, generation = notice.generation, "child output observed");
+        notice.observe();
+        if let Some(entry) = runs.get(&recipient) {
+            entry.mailbox.discard_observed_completions();
+        }
+        let mut held = self
+            .shared
+            .held_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = held.get_mut(&recipient) {
+            queue.retain(|message| !message.observed());
+        }
+    }
+
     /// Live phase and terminal reason of a registered run, with no relation check.
     /// Only for runs whose conversation the caller is already authorized to read
     /// (ADR 0041 thread tools); `run_output` keeps its parent/child rule.
@@ -68,6 +92,7 @@ impl AgentRuntime {
                     Some(Ok(())) => return Err(unknown_run(target)),
                 };
                 return Ok(RunOutput {
+                    completion_notice: None,
                     run_id: target.to_string(),
                     phase,
                     status,
@@ -113,10 +138,12 @@ impl AgentRuntime {
                 phase,
                 AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
             );
+        let completion_notice = finished_child.then(|| entry.completion_notice.clone());
         // Saved state is read without holding the runs lock.
         drop(runs);
         let availability = finished_child.then(|| self.continuation_availability(caller, target));
         Ok(RunOutput {
+            completion_notice,
             run_id: target.to_string(),
             phase,
             status,

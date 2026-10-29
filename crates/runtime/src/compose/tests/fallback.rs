@@ -205,6 +205,7 @@ async fn fallback_emits_from_to_on_streaming_and_nonstreaming_paths() {
         let mut rx = bus.subscribe();
         model.event_bus = Some(bus.clone());
         let invocation = AgentInvocationContext {
+            attempts: None,
             turn: Some(providers::RequestTurnContext {
                 origin: Some("human".into()),
                 prompt_index: Some(7),
@@ -326,6 +327,7 @@ async fn explicit_preference_never_falls_back_on_timeout() {
     // Given
     let (model, requests) = fixture(vec![Some(ProviderError::Timeout), None]);
     let invocation = AgentInvocationContext {
+        attempts: None,
         turn: None,
         run_id: "session".into(),
         category: None,
@@ -353,6 +355,7 @@ async fn explicit_preference_never_falls_back_on_http_400() {
         None,
     ]);
     let invocation = AgentInvocationContext {
+        attempts: None,
         turn: None,
         run_id: "session".into(),
         category: None,

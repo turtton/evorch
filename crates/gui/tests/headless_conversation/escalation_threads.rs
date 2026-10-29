@@ -464,7 +464,7 @@ fn escalation_summary_stays_in_child_and_source_is_unchanged_on_start_done_or_er
             assert!(matches!(state.transcript().entries().first(),
                 Some(TranscriptEntry::UserMessage { text }) if text == "Coordinate the implementation"));
             assert_eq!(state.transcript().entries().iter().filter(|entry| matches!(entry,
-                TranscriptEntry::Notice { text } if text == "Worker task からの escalation: Coordination required\nImplement the feature"
+                TranscriptEntry::Notice { text } if text == "Escalated from Worker task: Coordination required\nImplement the feature"
             )).count(), 1);
             if phase == AgentRunPhase::Error {
                 assert!(
@@ -503,6 +503,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 options: Vec::new(),
                 blocking: true,
                 answer: None,
+                answer_origin: None,
             },
         })]);
     }
@@ -525,6 +526,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 options: Vec::new(),
                 blocking: true,
                 answer: Some("Use the existing API".into()),
+                answer_origin: None,
             },
         })]);
     gui.run();
@@ -544,6 +546,7 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
                 options: Vec::new(),
                 blocking: true,
                 answer: None,
+                answer_origin: None,
             },
         })]);
     gui.run();

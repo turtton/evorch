@@ -271,3 +271,52 @@ fn refresh_failure_keeps_loaded_catalog() {
         Some(64_000)
     );
 }
+
+#[test]
+fn cursor_rows_name_the_docs_or_api_equivalent_origin() {
+    // Given: a catalog that lists the public API model but not Cursor's suffixed ID.
+    let dir = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        dir.path().join("models-dev.json"),
+        format!(
+            r#"{{"fetched_at":{now},"api":{{"anthropic":{{"models":{{"claude-opus-5-5":{{"id":"claude-opus-5-5","limit":{{"context":1000000,"output":64000}},"cost":{{"input":4.0,"output":20.0}}}}}}}},"openai":{{"models":{{"gpt-5":{{"id":"gpt-5","limit":{{"context":400000,"output":128000}},"cost":{{"input":1.25,"output":10.0}}}}}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let catalog = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(catalog::ModelCatalog::load_or_refresh(dir.path()))
+        .unwrap();
+    let presets = presets();
+    let sources = MetadataSources {
+        presets: &presets,
+        catalog: Some(&catalog),
+    };
+    let cursor = Some(config::ProviderTypeConfig::Cursor);
+    let labels = |id: &str| sources.labels(&ModelEntryConfig::enabled(id), "cursor", cursor);
+
+    // When/Then: an undocumented variant shows the API model's values as API-equivalent,
+    // Cursor's own model shows the docs, and a documented third-party model keeps the
+    // API prices but Cursor's window.
+    let api = "models.dev, API-equivalent";
+    assert_eq!(
+        labels("gpt-5-high"),
+        [
+            format!("400000 ctx ({api})"),
+            format!("128000 max output ({api})"),
+            format!("$1.25/M input ({api})"),
+            format!("$10/M output ({api})"),
+        ]
+    );
+    let opus = labels("claude-opus-5-5-high");
+    assert_eq!(opus[0], "300000 ctx (Cursor docs)");
+    assert_eq!(opus[2], format!("$4/M input ({api})"));
+    let composer = labels("composer-2.5-fast");
+    assert_eq!(composer[0], "200000 ctx (Cursor docs)");
+    assert_eq!(composer[2], "$3/M input (Cursor docs)");
+    assert_eq!(composer[3], "$15/M output (Cursor docs)");
+}

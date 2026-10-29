@@ -11,7 +11,9 @@ use event_bus::{
 };
 
 use crate::error::ProviderError;
-use crate::message::{FinishReason, ObservationContext, Usage};
+use crate::message::{
+    AttemptLog, AttemptOutcome, AttemptRecord, FinishReason, ObservationContext, Usage,
+};
 use crate::stream::StreamEvent;
 
 mod cache;
@@ -123,6 +125,17 @@ impl AttemptObserver {
     pub(crate) fn emit_started(&mut self) {
         self.started_at = tokio::time::Instant::now();
         self.started_emitted = true;
+        if let Some(log) = self.attempt_log() {
+            log.started(AttemptRecord {
+                request_id: self.request_id.clone(),
+                provider: self.provider.clone(),
+                profile: self.profile.clone(),
+                protocol: self.protocol.to_string(),
+                model: self.model.clone(),
+                streaming: self.streaming,
+                outcome: AttemptOutcome::Pending,
+            });
+        }
         self.emit(ProviderEvent::RequestStarted {
             request_id: self.request_id.clone(),
             provider: self.provider.clone(),
@@ -175,6 +188,7 @@ impl AttemptObserver {
             FinishReason::ContentFilter => "content_filter".to_string(),
             FinishReason::Other(reason) => reason,
         };
+        let finish_reason_label = finish_reason.clone();
         self.emit(ProviderEvent::RequestCompleted {
             request_id: self.request_id.clone(),
             provider: self.provider.clone(),
@@ -194,6 +208,14 @@ impl AttemptObserver {
             service_tier: self.service_tier,
         });
         self.terminal_emitted = true;
+        if let Some(log) = self.attempt_log() {
+            log.finished(
+                &self.request_id,
+                AttemptOutcome::Completed {
+                    finish_reason: finish_reason_label,
+                },
+            );
+        }
     }
 
     /// attempt 異常終了を発行する。
@@ -220,6 +242,15 @@ impl AttemptObserver {
             detail,
         });
         self.terminal_emitted = true;
+        if let Some(log) = self.attempt_log() {
+            log.finished(&self.request_id, AttemptOutcome::Failed { failure });
+        }
+    }
+
+    fn attempt_log(&self) -> Option<&AttemptLog> {
+        self.observation
+            .as_ref()
+            .and_then(|context| context.attempts.as_ref())
     }
 
     fn elapsed_ms(&self) -> u64 {
@@ -287,7 +318,10 @@ fn failure_kind(error: &ProviderError) -> ProviderFailureKind {
 
 impl Drop for AttemptObserver {
     fn drop(&mut self) {
-        if self.started_emitted && !self.terminal_emitted && self.bus.is_some() {
+        if self.started_emitted
+            && !self.terminal_emitted
+            && (self.bus.is_some() || self.attempt_log().is_some())
+        {
             self.emit_failed_kind(ProviderFailureKind::Other, None);
         }
     }

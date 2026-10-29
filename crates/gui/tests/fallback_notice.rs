@@ -29,5 +29,5 @@ fn fallback_notice_is_visible_in_real_conversation() {
     let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
     harness.run();
     // Then
-    assert!(harness.has_label("Fallback: kimi/k3 → neuralwatt/kimi-k3 (previous provider failed)"));
+    assert!(harness.has_label("Fallback: kimi/k3 → neuralwatt/kimi-k3 (timed out)"));
 }

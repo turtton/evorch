@@ -119,6 +119,7 @@ async fn send(
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 run_id: "run".into(),
                 purpose,
                 ..Default::default()

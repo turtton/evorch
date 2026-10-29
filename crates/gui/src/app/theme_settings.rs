@@ -97,7 +97,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                 }
                 if let Some(error) = &self.theme_settings.error {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
                 close = ui.button("Close").clicked();
             });

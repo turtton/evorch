@@ -95,6 +95,437 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+fn preflight_config(fixture: &Fixture, base_url: String) -> Config {
+    let mut config = Config::default();
+    config.providers.insert(
+        "primary".into(),
+        config::ProviderProfileConfig {
+            provider_type: config::ProviderTypeConfig::OpenAiCompatible,
+            api_protocol: config::ApiProtocolConfig::OpenAiCompletions,
+            base_url,
+            default_model: "gpt-4o".into(),
+            models: ["gpt-4o", "missing"]
+                .into_iter()
+                .map(config::types::provider::ModelEntryConfig::enabled)
+                .collect(),
+            credential: config::CredentialRefConfig::Env { var: "KEY".into() },
+            ..Default::default()
+        },
+    );
+    for role in ["worker", "reviewer"] {
+        config.routing.routes.insert(
+            role.into(),
+            vec![config::RouteCandidateConfig {
+                profile: "primary".into(),
+                model: Some("gpt-4o".into()),
+                auto: false,
+            }],
+        );
+    }
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    config
+}
+
+#[tokio::test]
+async fn preflight_checks_candidate_child_roles_before_starting_any_baseline() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+    let mut config = preflight_config(&fixture, server.uri());
+    // A post-capture project override must not contaminate the snapshot preflight.
+    let mut late = config.role_profile_config(None).unwrap();
+    late.routing.routes.get_mut("worker").unwrap()[0].model = Some("missing".into());
+    config.role_profiles.insert("post_capture".into(), late);
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let project_config = fixture.recorded.source.root().join(".evorch");
+    std::fs::create_dir_all(&project_config).unwrap();
+    std::fs::write(
+        project_config.join("config.toml"),
+        "role_profile = 'post_capture'\n",
+    )
+    .unwrap();
+    let live = load_config(
+        Some(fixture.user.path()),
+        Some(&fixture.recorded.source.root()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(roles::role_models(&live, "worker")[0].model, "missing");
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some(
+        "[routing.routes]\nreviewer = [{ profile = \"primary\", model = \"missing\" }]\n",
+    ));
+    let output = args.output.clone().unwrap();
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    assert!(
+        report["checks"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not advertised"),
+        "{report}"
+    );
+    assert_eq!(report["checks"][1]["label"], CANDIDATE);
+    assert!(!output.join("runs").exists());
+    let manifest = read_json(&output.join(output::MANIFEST_FILE));
+    assert_eq!(manifest["runs"], serde_json::json!([]));
+    assert!(manifest["finished_at"].is_string());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+    let reports = crate::report::report(
+        crate::ReportArgs {
+            dirs: vec![output.clone()],
+            user_config_dir: Some(fixture.user.path().into()),
+            ..Default::default()
+        },
+        &crate::ReportDeps {
+            env: Arc::new(routing::MapEnv::default()),
+            judge: Some(Arc::new(|_| panic!("no failed preflight may be judged"))),
+            credentials: None,
+            catalog: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(reports[0].pairs.is_empty());
+    assert!(reports[0].warnings.iter().any(|warning| warning.kind
+        == crate::report::WarningKind::PreflightFailed
+        && warning.message.contains("missing")));
+    let markdown = std::fs::read_to_string(output.join(output::REPORT_MARKDOWN_FILE)).unwrap();
+    assert!(markdown.contains("no samples compared"), "{markdown}");
+}
+
+#[tokio::test]
+async fn preflight_checks_user_simulator_before_starting_replays() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut config = preflight_config(&fixture, server.uri());
+    config.routing.routes.insert(
+        "simulator".into(),
+        vec![config::RouteCandidateConfig {
+            profile: "primary".into(),
+            model: Some("missing".into()),
+            auto: false,
+        }],
+    );
+    config.eval.user_simulator = Some(config::RoleBindingConfig {
+        models: vec![config::ChainEntryConfig::route("simulator")],
+        ..Default::default()
+    });
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(None);
+    let output = args.output.clone().unwrap();
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("user_simulator"), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    assert!(report["checks"][1]["error"].is_string(), "{report}");
+    assert!(!output.join("runs").exists());
+}
+
+fn conversation_only_config(fixture: &Fixture, base_url: String) -> Config {
+    let mut config = preflight_config(fixture, base_url);
+    let chat = config.routing.routes.remove("worker").unwrap();
+    config.routing.routes.insert("chat".into(), chat);
+    config.agents.worker.categories.insert(
+        CategoryId::Conversation.to_string(),
+        config::CategoryBindingConfig {
+            models: vec![config::ChainEntryConfig::route("chat")],
+            ..Default::default()
+        },
+    );
+    config
+}
+
+#[tokio::test]
+async fn preflight_simulator_base_cannot_be_masked_by_conversation_category() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    let config = conversation_only_config(&fixture, server.uri());
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(None);
+    let dir = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    assert!(error.to_string().contains("user_simulator"), "{error}");
+    let evidence = read_json(&dir.join(preflight::REPORT_FILE));
+    assert!(evidence["checks"][0]["error"].is_null(), "{evidence}");
+    assert_eq!(
+        evidence["checks"][0]["bindings"],
+        serde_json::json!([{"role": "worker", "category": "conversation"}])
+    );
+    assert_eq!(evidence["checks"][1]["label"], "user_simulator");
+    assert_eq!(
+        evidence["checks"][1]["bindings"],
+        serde_json::json!([{"role": "worker", "category": null}])
+    );
+    assert!(
+        evidence["checks"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("worker"),
+        "{evidence}"
+    );
+    assert_eq!(
+        read_json(&dir.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!dir.join("runs").exists());
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the conversation binding was verified"
+    );
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn preflight_accepts_explicit_simulator_with_conversation_only_worker() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut config = conversation_only_config(&fixture, server.uri());
+    config.eval.user_simulator = Some(config::RoleBindingConfig {
+        models: vec![config::ChainEntryConfig::route("chat")],
+        ..Default::default()
+    });
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let database = storage::Database::open_read_only(&fixture.recorded.config.db_path).unwrap();
+    let thread = OriginalThread::load(&database, "thread-1").unwrap();
+    let context = Context {
+        identity: CommitIdentity::from_host(&thread.source_toplevel),
+        thread,
+        user_config_dir: Some(fixture.user.path().into()),
+        budget: config.eval.budget.clone(),
+        verify: None,
+        verify_timeout: verify::DEFAULT_TIMEOUT,
+        simulator: simulator_config(&config).0,
+        trust: ProjectTrust::Unapproved,
+        credentials: Arc::clone(deps.credentials.as_ref().unwrap()),
+        deps,
+    };
+    let evidence = preflight::check(
+        &context,
+        &[(BASELINE, None)],
+        &fixture.user.path().join("out"),
+    )
+    .await;
+    assert!(evidence.failure().is_none(), "{:?}", evidence.failure());
+    let evidence = serde_json::to_value(evidence).unwrap();
+    assert_eq!(evidence["checks"][1]["label"], "user_simulator");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn preflight_changed_child_base_cannot_be_masked_by_a_category() {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    let mut config = preflight_config(&fixture, server.uri());
+    config.routing.routes.remove("reviewer");
+    config.agents.reviewer.categories.insert(
+        "tool-execution".into(),
+        config::CategoryBindingConfig {
+            models: vec![config::ChainEntryConfig::route("worker")],
+            ..Default::default()
+        },
+    );
+    std::fs::write(
+        fixture.user.path().join("config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some("[agents.reviewer.generation]\ntemperature = 0.5\n"));
+    let dir = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| panic!("no replay may start"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let evidence = read_json(&dir.join(preflight::REPORT_FILE));
+    for check in &evidence["checks"].as_array().unwrap()[..2] {
+        assert!(
+            check["error"].as_str().unwrap().contains("reviewer"),
+            "{evidence}"
+        );
+    }
+    assert_eq!(
+        read_json(&dir.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!dir.join("runs").exists());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+async fn rejects_undefined_route_before_replay(overlay: &str, role: &str) {
+    let fixture = Fixture::new().await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"id": "gpt-4o"}]})),
+        )
+        .mount(&server)
+        .await;
+    preflight_config(&fixture, server.uri());
+    let mut deps = fixture.deps(vec![], vec![]);
+    deps.models = None;
+    deps.env = Arc::new(routing::MapEnv::from_iter([("KEY", "fixture-secret")]));
+    let args = fixture.args(Some(overlay));
+    let output = args.output.clone().unwrap();
+
+    let error = run(args, deps, |_| {
+        panic!("no baseline or candidate replay may start")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, EvalError::Preflight { .. }), "{error}");
+    let report = read_json(&output.join(preflight::REPORT_FILE));
+    assert!(report["checks"][0]["error"].is_null(), "{report}");
+    let reason = report["checks"][1]["error"].as_str().unwrap();
+    assert!(reason.contains("typo") && reason.contains(role), "{report}");
+    assert_eq!(report["checks"][1]["label"], CANDIDATE);
+    assert_eq!(
+        read_json(&output.join(output::MANIFEST_FILE))["runs"],
+        serde_json::json!([])
+    );
+    assert!(!output.join("runs").exists());
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the valid baseline catalog was checked"
+    );
+    assert!(
+        requests.iter().all(|request| request.method == "GET"),
+        "no inference requests: {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_child_head_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.reviewer]\nmodels = [{ route = 'typo' }]\n",
+        "reviewer",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_child_fallback_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.reviewer]\nmodels = [{ route = 'reviewer' }, { route = 'typo' }]\n",
+        "reviewer",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn preflight_rejects_undefined_category_fallback_before_any_replay() {
+    rejects_undefined_route_before_replay(
+        "[agents.worker.categories.quick]\nmodels = [{ route = 'worker' }, { route = 'typo' }]\n",
+        "worker",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn baseline_and_candidate_replays_each_leave_their_results() {
     // Given: a recorded thread, an agent that writes a file, and a user who then finishes.

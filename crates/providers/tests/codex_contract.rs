@@ -100,6 +100,15 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(wiremock::matchers::query_param("client_version", "0.156.1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"models": [{"slug": "gpt-4o"}]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
         .and(header("version", "0.156.1"))
@@ -121,7 +130,11 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
     )
     .expect("Codex client can be built");
 
-    // When: two turns are sent by the same client.
+    // Catalog preflight pins the same version later used by both inference turns.
+    assert_eq!(
+        client.list_models(&ProviderAuth::new("")).await.unwrap(),
+        Some(vec!["gpt-4o".into()])
+    );
     for _ in 0..2 {
         let response = client
             .send(&ProviderAuth::new(""), &request())
@@ -134,7 +147,7 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
     // happens once without receiving any Codex credentials.
     server.verify().await;
     let requests = server.received_requests().await.expect("requests recorded");
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let discovery = requests
         .iter()
         .find(|request| request.url.path() == "/releases")
@@ -292,7 +305,7 @@ async fn stream_parallel_tool_calls_recover_final_arguments() {
         CodexConfig {
             base_url: server.uri(),
             auth_base_url: server.uri(),
-            event_bus: Some(bus),
+            event_bus: Some(Arc::clone(&bus)),
             client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
                 version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
                 warning: None,
@@ -328,12 +341,22 @@ async fn stream_parallel_tool_calls_recover_final_arguments() {
         ]
     );
     assert_eq!(response.finish_reason, FinishReason::ToolUse);
-    while let Ok(event) = tokio::time::timeout(Duration::from_millis(10), diagnostics.recv()).await
-    {
-        assert!(!matches!(
-            event.expect("event receiver must not lag").kind,
-            event_bus::EventKind::Diagnostic(_)
-        ));
+    bus.emit(event_bus::Event::new(
+        event_bus::MessageEvent::MessageDelta {
+            delta: "stream complete".into(),
+            run_id: None,
+        },
+    ));
+    loop {
+        let event = diagnostics
+            .recv()
+            .await
+            .expect("event receiver must not lag");
+        if matches!(&event.kind, event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) if delta == "stream complete")
+        {
+            break;
+        }
+        assert!(!matches!(event.kind, event_bus::EventKind::Diagnostic(_)));
     }
 }
 

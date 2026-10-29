@@ -38,3 +38,4 @@ workspace-ui = { path = "../workspace-ui" }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock = { workspace = true }

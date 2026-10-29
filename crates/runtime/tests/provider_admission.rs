@@ -92,7 +92,7 @@ fn runtime(urls: &[(&str, String)], bus: &Arc<EventBus>) -> AgentRuntime {
     )
 }
 
-async fn assert_rejected(urls: &[(&str, String)], preference: Option<ModelPreference>) {
+async fn assert_rejected(urls: &[(&str, String)], preference: Option<ModelPreference>) -> String {
     let bus = Arc::new(EventBus::new(64));
     let runtime = runtime(urls, &bus);
     let mut events = bus.subscribe();
@@ -111,7 +111,8 @@ async fn assert_rejected(urls: &[(&str, String)], preference: Option<ModelPrefer
         runtime.list_agents().is_empty(),
         "failed admission registered a worker"
     );
-    assert!(matches!(result, Err(RuntimeError::Model { .. })));
+    assert!(matches!(&result, Err(RuntimeError::Model { .. })));
+    let reason = result.unwrap_err().to_string();
     bus.emit(Event::new(MessageEvent::MessageDelta {
         delta: String::new(),
         run_id: None,
@@ -123,6 +124,23 @@ async fn assert_rejected(urls: &[(&str, String)], preference: Option<ModelPrefer
             _ => {}
         }
     }
+    reason
+}
+
+#[tokio::test]
+async fn catalog_rate_limit_is_not_model_absence_and_starts_no_worker() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/models"))
+        .respond_with(wiremock::ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let reason = assert_rejected(&[("primary", server.uri())], None).await;
+    assert!(reason.contains("429"), "{reason}");
+    assert!(!reason.contains("not advertised"), "{reason}");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
 }
 
 #[tokio::test]

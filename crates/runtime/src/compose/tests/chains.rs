@@ -134,6 +134,7 @@ async fn replacing_the_model_carries_pins_over() {
     let result = switchable
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 run_id: "run-1".into(),
                 ..Default::default()
             },
@@ -203,6 +204,7 @@ fn advisor_model(errors: Vec<Option<ProviderError>>) -> (RoutedModel, Vec<Reques
 #[tokio::test]
 async fn legacy_oracle_fallback_snapshot_resumes_on_the_same_model() {
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "old-run".into(),
         ..Default::default()
     };

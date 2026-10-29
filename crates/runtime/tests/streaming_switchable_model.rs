@@ -89,6 +89,7 @@ profile = "local"
     for role in [Role::Orchestrator, Role::Worker] {
         for (path, model) in [("direct", &routed), ("switchable", &switchable)] {
             let invocation = AgentInvocationContext {
+                attempts: None,
                 run_id: format!("{role:?}-{path}"),
                 ..AgentInvocationContext::default()
             };

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use event_bus::{Event, EventBus, LifecycleEvent, OrchestratorEvent};
 use runtime::{AgentRuntime, RunConfig, RunId, RunStore};
@@ -53,10 +52,7 @@ impl Recorded {
 
     async fn turn(&self, events: &mut event_bus::EventReceiver, run: RunId) {
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
-                .await
-                .expect("turn completion")
-                .expect("event bus open");
+            let event = events.recv().await.expect("event bus open");
             if let event_bus::EventKind::Lifecycle(LifecycleEvent::TurnCompleted { run_id, .. }) =
                 event.kind
                 && run_id == run.to_string()

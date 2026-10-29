@@ -159,12 +159,19 @@ impl Database {
         let mut event_kinds = BTreeMap::<String, u64>::new();
         let (events, _) = self.inspect_events(EventScope::Run(run_id), 10_000)?;
         let mut diagnostics = Vec::new();
+        let mut manifest_events = Vec::new();
         for event in events {
             *event_kinds.entry(event.kind.clone()).or_default() += 1;
-            if event.kind == "Diagnostic" {
+            if event.kind != "Diagnostic" {
+                continue;
+            }
+            if is_review_manifest(&event.payload) {
+                manifest_events.push(event);
+            } else {
                 diagnostics.push(event_json(&event));
             }
         }
+        let review_manifests = self.review_manifests_json(&manifest_events)?;
         let candidate_pattern = format!("%{}%", Value::String(run_id.into()));
         Ok(json!({
             "run_id": run_id,
@@ -179,12 +186,129 @@ impl Database {
             )?,
             "event_kinds": event_kinds,
             "diagnostics": diagnostics,
+            "review_manifests": review_manifests,
             "improvement_candidates": self.json_rows(
                 "SELECT candidate_id, project, code, title, status, occurrences FROM improvement_candidates
                  WHERE run_id = ?1 OR recent_run_ids LIKE ?2 ORDER BY created_at_ns",
                 &[run_id, &candidate_pattern],
             )?,
         }))
+    }
+
+    /// The escalation review records among `events`: each manifest with the
+    /// continuation events of its user-request list joined back in, and the
+    /// ledger rows of the provider attempts it names. The manifest keeps the
+    /// attempts itself; the ledger rows are extra detail while they are retained.
+    fn review_manifests_json(&self, events: &[InspectEvent]) -> Result<Vec<Value>, StorageError> {
+        let detail = |event: &InspectEvent| -> Option<Value> {
+            serde_json::from_str(event.payload["payload"]["detail"].as_str()?).ok()
+        };
+        struct Part {
+            index: u64,
+            count: u64,
+            refs: Vec<Value>,
+        }
+        let mut parts = BTreeMap::<String, Vec<Part>>::new();
+        for event in events {
+            if let Some(part) =
+                detail(event).and_then(|detail| detail.get("manifest_part").cloned())
+                && let (Some(id), Some(index), Some(count), Some(refs)) = (
+                    part["review_id"].as_str(),
+                    part["index"].as_u64(),
+                    part["count"].as_u64(),
+                    part["user_requests"].as_array(),
+                )
+            {
+                parts.entry(id.to_owned()).or_default().push(Part {
+                    index,
+                    count,
+                    refs: refs.clone(),
+                });
+            }
+        }
+        let mut manifests = Vec::new();
+        for event in events {
+            let parsed = detail(event);
+            if parsed
+                .as_ref()
+                .is_some_and(|d| d.get("manifest_part").is_some())
+            {
+                continue;
+            }
+            let mut manifest = parsed;
+            let mut complete = Value::Null;
+            if let Some(manifest) = manifest.as_mut() {
+                let id = manifest["review_id"].as_str().map(str::to_owned);
+                if let (Some(id), Some(context)) = (id, manifest["context"].as_object_mut()) {
+                    let expected = context
+                        .get("user_request_parts")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let found = parts.get(&id).map_or(&[][..], Vec::as_slice);
+                    // One event per index is joined; a repeated index,
+                    // a gap, or a part that disagrees on the count leaves the
+                    // list incomplete rather than guessed.
+                    let mut by_index = BTreeMap::new();
+                    let mut repeated = false;
+                    for part in found {
+                        repeated |= by_index.insert(part.index, part).is_some();
+                    }
+                    let consecutive = by_index.keys().copied().eq(0..expected);
+                    let counts_agree = found.iter().all(|part| part.count == expected);
+                    let count = context.get("user_request_count").and_then(Value::as_u64);
+                    if let Some(Value::Array(refs)) = context.get_mut("user_requests") {
+                        for part in by_index.values() {
+                            refs.extend(part.refs.iter().cloned());
+                        }
+                        complete = json!(
+                            !repeated
+                                && consecutive
+                                && counts_agree
+                                && count == Some(refs.len() as u64)
+                        );
+                    }
+                }
+            }
+            let request_ids: Vec<String> = manifest
+                .as_ref()
+                .and_then(|manifest| manifest["attempts"].as_array())
+                .map(|attempts| {
+                    attempts
+                        .iter()
+                        .filter_map(|attempt| attempt["request_id"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ledger = if request_ids.is_empty() {
+                Vec::new()
+            } else {
+                let marks = vec!["?"; request_ids.len()].join(",");
+                let ids: Vec<&str> = request_ids.iter().map(String::as_str).collect();
+                self.json_rows(
+                    &format!(
+                        "SELECT request_id, at_ns, provider, profile, model, status, failure,
+                                input_tokens, output_tokens, cache_read_tokens, cost_usd
+                         FROM usage_requests WHERE request_id IN ({marks}) ORDER BY at_ns"
+                    ),
+                    &ids,
+                )?
+            };
+            let diagnostic = &event.payload["payload"];
+            manifests.push(json!({
+                "event_id": event.id,
+                "wall_clock_ns": event.wall_clock_ns,
+                "severity": diagnostic["severity"],
+                "thread_id": diagnostic["thread_id"],
+                "call_id": diagnostic["call_id"],
+                // A record that could not be made, or one this build cannot
+                // read, is shown as stored.
+                "detail": if manifest.is_some() { Value::Null } else { diagnostic["detail"].clone() },
+                "manifest": manifest,
+                "user_requests_complete": complete,
+                "usage_requests": ledger,
+            }));
+        }
+        Ok(manifests)
     }
 
     /// Newest candidates first across every project unless one is named; limit is capped at 1000.
@@ -243,6 +367,12 @@ pub fn event_json(event: &InspectEvent) -> Value {
         "kind": event.kind,
         "payload": event.payload,
     })
+}
+
+/// Whether a stored diagnostic is a sandbox escalation review manifest.
+fn is_review_manifest(payload: &Value) -> bool {
+    let diagnostic = &payload["payload"];
+    diagnostic["source"] == "sandbox" && diagnostic["code"] == "escalation_review_manifest"
 }
 
 fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {

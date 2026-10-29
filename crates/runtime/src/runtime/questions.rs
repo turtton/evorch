@@ -1,6 +1,6 @@
 //! Durable, non-blocking clarification requests. These never grant tool permissions.
 use crate::{AgentRuntime, RunId};
-use event_bus::{AgentRunPhase, Event, ToolEvent, UserQuestion};
+use event_bus::{AgentRunPhase, AnswerOrigin, Event, ToolEvent, UserQuestion};
 
 #[cfg(test)]
 #[path = "questions_tests.rs"]
@@ -112,6 +112,7 @@ impl AgentRuntime {
             options,
             blocking,
             answer: None,
+            answer_origin: None,
         };
         let permit = self
             .entry(run)
@@ -196,7 +197,13 @@ impl AgentRuntime {
             .map(|permit| permit.mutation_guard())
             .transpose()
             .map_err(|error| error.to_string())?;
-        let question = self.answer_question(id, answer, false)?;
+        let question = self.answer_question(
+            id,
+            answer,
+            AnswerOrigin::ParentAgent {
+                answered_by_run_id: caller.to_string(),
+            },
+        )?;
         Ok((child, question))
     }
 
@@ -226,15 +233,18 @@ impl AgentRuntime {
     /// Host-facing answer API. A live run must still have current mutation authority.
     /// Offline answers are persisted for explicit conversation resumption, never replaying tools.
     pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<UserQuestion, String> {
-        self.answer_question(id, answer, true)
+        self.answer_question(id, answer, AnswerOrigin::Host)
     }
 
     fn answer_question(
         &self,
         id: &str,
         answer: &str,
-        trusted_user: bool,
+        origin: AnswerOrigin,
     ) -> Result<UserQuestion, String> {
+        // Only a host answer is the user's word and becomes review evidence; a
+        // parent agent's answer never does, whatever it relays.
+        let trusted_user = origin == AnswerOrigin::Host;
         let question = self.user_question(id)?.ok_or("unknown question")?;
         let store = self
             .shared
@@ -357,12 +367,12 @@ impl AgentRuntime {
                 .collect::<Result<Vec<_>, String>>()?;
             store
                 .handle
-                .answer_user_question_with_evidence(id, answer, &evidence)
+                .answer_user_question_with_evidence(id, answer, &origin, &evidence)
                 .map_err(|error| error.to_string())?;
         } else {
             store
                 .handle
-                .answer_user_question(id, answer)
+                .answer_user_question(id, answer, &origin)
                 .map_err(|error| error.to_string())?;
         }
         drop(guards);
@@ -386,6 +396,7 @@ impl AgentRuntime {
         }
         let mut question = question;
         question.answer = Some(answer.into());
+        question.answer_origin = Some(origin);
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {
@@ -456,12 +467,7 @@ impl AgentRuntime {
         messages: &[providers::Message],
         question: &UserQuestion,
     ) -> bool {
-        let text = format!(
-            "[user-answer id={}]\nQuestion: {}\nAnswer: {}",
-            question.id,
-            question.title,
-            question.answer.as_deref().unwrap_or_default()
-        );
+        let text = question.answer_message();
         messages.iter().any(|message| message.role == providers::Role::User && message.content.iter().any(|block| matches!(block, providers::ContentBlock::Text {text:existing} if existing == &text)))
     }
 

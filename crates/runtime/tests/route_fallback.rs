@@ -79,6 +79,7 @@ async fn http_failure_switches_provider_and_keeps_session_on_fallback() {
     )
     .unwrap();
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "http-session".into(),
         ..Default::default()
     };

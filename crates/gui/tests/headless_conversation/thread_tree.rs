@@ -153,7 +153,7 @@ fn thread_status_icons_follow_state_and_question_priority() {
                 error
             );
             assert!(harness.query_by_label("?").is_none());
-            for label in ["Active", "Stopped (resumable)", "Waiting", "Done"] {
+            for label in ["Active", "Stopped", "Waiting", "Done"] {
                 assert!(
                     harness
                         .query_by_label(&format!("Thread status: {label}"))
@@ -320,9 +320,33 @@ fn family_rows_keep_title_and_actions_separate_at_minimum_width() {
     assert!(root_toggle.right() <= root_title.left());
     assert!(root_title.right() <= root_pin.left());
     assert!(root_pin.right() <= archive.left());
-    let child_title = gui.label_rects("↳ Child")[0];
-    let child_pin = gui.label_rects("★")[0];
-    assert!(child_title.right() <= child_pin.left());
+    // Only a displayed root can be pinned: children, even with a stale pin, show no Pin.
+    assert!(gui.has_label("↳ Child"));
+    assert!(!gui.has_label("★"));
+    assert_eq!(gui.count_labels("☆"), 1);
+}
+
+#[test]
+fn toggling_pin_on_a_child_thread_is_a_noop() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut gui = fixture(temp.path());
+    gui.run();
+    let before = gui.state().sidebar().clone();
+    // Stale or direct actions on a child must not change it; a root still toggles.
+    gui.state_mut().toggle_pin(ThreadId::new("child")).unwrap();
+    gui.state_mut()
+        .toggle_pin(ThreadId::new("grandchild"))
+        .unwrap();
+    assert_eq!(gui.state().sidebar(), &before);
+    gui.state_mut().toggle_pin(ThreadId::new("root")).unwrap();
+    let root = gui
+        .state()
+        .sidebar()
+        .threads
+        .iter()
+        .find(|thread| thread.id == ThreadId::new("root"))
+        .unwrap();
+    assert!(root.pinned);
 }
 
 #[test]
@@ -399,7 +423,7 @@ fn family_archive_and_restore_preserve_each_branch_expansion() {
     assert_eq!(gui.count_labels("Archive"), 1);
     assert!(!gui.has_label("Pause"));
     assert!(!gui.has_label("Resume"));
-    assert!(gui.has_label("★"));
+    assert!(!gui.has_label("★"));
     let saved = workspace_ui::load_sidebar(&temp.path().join("sidebar.json")).unwrap();
     assert!(saved.threads.iter().all(|thread| !thread.archived));
 }

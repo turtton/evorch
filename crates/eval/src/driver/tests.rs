@@ -366,6 +366,7 @@ fn user_visible_questions_are_tracked_until_answered() {
         options: vec!["a".into()],
         blocking: true,
         answer: None,
+        answer_origin: None,
     };
     let answered = UserQuestion {
         answer: Some("a".into()),

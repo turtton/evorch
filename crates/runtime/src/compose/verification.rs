@@ -11,6 +11,8 @@ enum RouteFailure {
 impl RoutedModel {
     /// Verify every composed profile, including cross-role fallbacks and explicit selections.
     /// Results, including failures, are retained until this composition is replaced.
+    /// Degraded absence fails early and requires a new composition; refreshing a
+    /// running client's version would invalidate its prompt-cache affinity.
     pub async fn verify_candidates(&self) -> BTreeSet<String> {
         self.verification
             .get_or_init(|| async {
@@ -126,7 +128,11 @@ impl RoutedModel {
             .and_then(|results| results.get(&route.profile))
         {
             Some(Ok(models)) if models.iter().any(|model| model == base) => return None,
-            Some(Ok(_)) => "model is not advertised by provider".to_owned(),
+            Some(Ok(_)) => self
+                .providers
+                .get(&route.profile)
+                .and_then(|provider| provider.client.catalog_degradation())
+                .unwrap_or_else(|| "model is not advertised by provider".to_owned()),
             Some(Err(error)) => error.to_string(),
             None => "profile was not verified".to_owned(),
         };
@@ -134,6 +140,65 @@ impl RoutedModel {
             "profile={} model={}: {failure}",
             route.profile, route.model_id
         )))
+    }
+
+    /// Resolve one preflight binding using the same router and chat-chain checks
+    /// as admission. A scratch affinity keeps this read-only with respect to any
+    /// already-running session. Every fallback must resolve, not just the head.
+    pub fn preflight_chain(
+        &self,
+        key: &str,
+        entries: &[config::ChainEntryConfig],
+    ) -> Result<Vec<routing::ResolvedRoute>, crate::RuntimeError> {
+        let error = |error| crate::RuntimeError::Model {
+            reason: format!("preflight binding `{key}`: {error}"),
+        };
+        let chain = self.router.chain(key, entries).map_err(error)?;
+        self.ensure_chat_chain(&chain)?;
+        self.router
+            .resolve_chain(
+                &mut routing::SessionAffinity::default(),
+                "preflight",
+                &chain,
+            )
+            .map_err(error)?;
+        Ok(chain
+            .members()
+            .iter()
+            .map(|member| member.target.clone())
+            .collect())
+    }
+
+    /// Strict evaluation gate: degraded catalogs cannot start a comparison, even
+    /// when they contain the model. This sends no inference requests.
+    pub async fn preflight_routes(
+        &self,
+        routes: &[routing::ResolvedRoute],
+    ) -> Result<(), crate::RuntimeError> {
+        self.verify_candidates().await;
+        for route in routes {
+            let failure = match self.route_failure(route) {
+                Some(RouteFailure::Unlisted(reason) | RouteFailure::Unavailable(reason)) => {
+                    Some(reason)
+                }
+                None => self
+                    .providers
+                    .get(&route.profile)
+                    .and_then(|provider| provider.client.catalog_degradation())
+                    .map(|reason| {
+                        format!(
+                            "profile={} model={}: {reason}",
+                            route.profile, route.model_id
+                        )
+                    }),
+            };
+            if let Some(reason) = failure {
+                return Err(crate::RuntimeError::Model {
+                    reason: self.scrub(&route.profile, &reason),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Warns once per composition about configured routes that fallback will pass over.

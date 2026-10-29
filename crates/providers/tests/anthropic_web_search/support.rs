@@ -82,6 +82,7 @@ pub fn request() -> HostedWebSearchRequest {
         max_results: None,
         reasoning_effort: None,
         observation: Some(ObservationContext {
+            attempts: None,
             run_id: "search-run".into(),
             ..Default::default()
         }),

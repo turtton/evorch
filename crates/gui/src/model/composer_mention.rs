@@ -352,17 +352,12 @@ fn score(entry: &MentionEntry, query: &str) -> Option<(u8, usize, usize)> {
             1
         } else if search.contains(query) {
             2
-        } else if is_subsequence(search, query) {
+        } else if crate::model::fuzzy::is_subsequence(search, query) {
             3
         } else {
             return None;
         };
     Some((tier, depth, search.len()))
-}
-
-fn is_subsequence(haystack: &str, needle: &str) -> bool {
-    let mut chars = haystack.chars();
-    needle.chars().all(|wanted| chars.any(|c| c == wanted))
 }
 
 /// Finds an `@token` that starts at a word boundary and contains `cursor` (a byte offset).

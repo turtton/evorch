@@ -49,6 +49,7 @@ impl AgentRuntime {
             watch::channel(restored.messages.len() + usize::from(!history_only));
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
+        let inbox_rx = crate::runtime::user_inbox::InboxReceiver::new(inbox_rx, &user_inbox);
         let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
@@ -138,6 +139,13 @@ impl AgentRuntime {
                 parent,
                 escalated_from: None,
                 completion_relayed,
+                completion_notice: crate::mailbox::CompletionNotice::new(
+                    parent,
+                    run_id,
+                    self.shared
+                        .next_completion_generation
+                        .fetch_add(1, Ordering::Relaxed),
+                ),
                 phase_tx,
                 phase_rx,
                 message_count_rx,

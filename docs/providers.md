@@ -115,7 +115,18 @@ advertise it, select an available model and set it as the profile default.
 Cursor uses its native Connect agent transport; tool requests are handed to
 evorch's runtime for execution.
 Choose Cursor's thinking, effort, and fast variants from the refreshed model
-list; the selected variant determines these settings.
+list; the selected variant determines these settings. The chat model picker
+therefore offers no separate effort step for Cursor.
+
+Cursor usage is priced as an API equivalent (Cursor is a subscription).
+Suffixes such as `-high`, `-fast` and `-thinking` are stripped from the model
+ID, and the model family (`claude-*` → anthropic, `gpt-*`/`o*` → openai,
+`gemini-*` → google, `grok-*` → xai) selects the models.dev entry whose prices
+and limits are used. Cursor's own models (Composer, Grok 4.5/4.6/4.7) use the
+rates published on [Models & Pricing](https://cursor.com/docs/models-and-pricing),
+including the `-fast` lane; Cursor's documented context windows apply too.
+Prices set on a model entry in the TOML take precedence, and the provider
+settings show where each limit and price came from.
 
 Claude supports text and tool calls, and preserves signed thinking returned by
 the provider across tool continuations and saved history. Subscription profiles
@@ -124,6 +135,24 @@ Sonnet 4.6 and Opus 4.6/4.7; unsupported model/effort combinations fail before
 inference. Agent Roles and the chat model picker offer the effort levels
 supported by the selected subscription model. Models that require thinking
 do not offer `none`, and unrecognized models have no effort selector.
+
+API-key profiles (`type = "anthropic"`) send the same `thinking` and
+`output_config.effort` mapping when a route or the model picker selects a
+reasoning effort and the model supports it (the capability table is shared with
+subscription profiles; Claude Code's `context_management` beta is not sent, so
+no `anthropic-beta` header is needed). Nothing is sent when no effort is
+selected, so default behavior is unchanged, and an effort the model does not
+support (or an unrecognized model ID, such as a gateway alias) is omitted with
+a warning instead of failing the request. Enabled thinking requires the default
+temperature, so a custom `temperature` with a thinking effort is rejected
+before inference.
+
+Prompt cache: within a run, keep the model and effort fixed. Anthropic renders
+the resolved effort and thinking configuration into the cached prefix, so
+changing the effort between requests is an explicit cache boundary: the cache
+restarts on the first request after the change, and continuations that keep the
+new effort reuse it again. `cache_prefix_contract` and `claude_cache_e2e` pin
+this contract. Switching efforts mid-run is not a history replacement.
 See the [Anthropic stream contract](anthropic-stream-events.md)
 for supported events and signature replay boundaries. Cursor does not expose
 temperature, output-token limits, or service-tier controls.

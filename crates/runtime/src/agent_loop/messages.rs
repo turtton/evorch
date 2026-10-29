@@ -19,11 +19,15 @@ impl LoopState {
     }
 
     pub(crate) fn has_pending_user_messages(&self) -> bool {
-        !self.pending_user_messages.is_empty()
+        self.pending_user_messages
+            .iter()
+            .any(|message| self.channels.user_inbox.is_pending(message.4))
     }
 
     pub(crate) fn queue_user_message(&mut self, message: crate::runtime::user_inbox::UserInput) {
-        self.pending_user_messages.push(message);
+        if self.channels.user_inbox.is_pending(message.4) {
+            self.pending_user_messages.push(message);
+        }
     }
 
     pub(super) fn flush_user_messages(&mut self) -> bool {
@@ -64,17 +68,10 @@ impl LoopState {
                 true
             }
         });
-        let received = !messages.is_empty();
-        let through = messages
-            .iter()
-            .filter(|message| message.2)
-            .map(|message| message.4)
-            .max()
-            .unwrap_or(0);
+        let mut received = false;
         for message in messages {
-            self.take_user_input(message);
+            received |= self.take_user_input(message);
         }
-        self.channels.user_inbox.consumed_through(through);
         if received {
             self.publish_message_count();
             self.resumed = true;
@@ -143,13 +140,13 @@ mod shell_handoff_tests {
         let (_cancel, cancelled) = tokio::sync::watch::channel(crate::RunInterrupt::None);
         let (_runtime, mut state) = super::super::delegate_cleanup_tests::fixture(cancelled);
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        state.channels.inbox_rx = receiver;
+        state.channels.inbox_rx = receiver.into();
         let inbox = Arc::new(crate::runtime::user_inbox::UserInbox::default());
         state.channels.user_inbox = inbox.clone();
         let first = inbox.begin_wait();
         let parallel = inbox.begin_wait();
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 sender.try_send(("before cut".into(), vec![], true, Some("one".into()), seq))
             })
             .unwrap();
@@ -160,7 +157,7 @@ mod shell_handoff_tests {
         assert!(requested);
         let _new_wait = inbox.begin_wait();
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 sender.try_send(("after cut".into(), vec![], true, Some("two".into()), seq))
             })
             .unwrap();
@@ -179,12 +176,100 @@ mod shell_handoff_tests {
         assert_eq!(history.matches("before cut").count(), 1);
         assert_eq!(history.matches("after cut").count(), 1);
     }
+
+    #[tokio::test]
+    async fn withdrawal_after_cut_and_after_wait_drain_never_enters_context() {
+        let (_cancel, cancelled) = tokio::sync::watch::channel(crate::RunInterrupt::None);
+        let (_runtime, mut state) = super::super::delegate_cleanup_tests::fixture(cancelled);
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        state.channels.inbox_rx = receiver.into();
+        let inbox = state.channels.user_inbox.clone();
+        for id in ["from-wait", "from-channel", "keep"] {
+            inbox
+                .enqueue(Some(id), |seq| {
+                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                })
+                .unwrap();
+        }
+        // Simulate meta/runs/waiting having drained one input into LoopState;
+        // the other remains in mpsc. Neither has entered the context.
+        let input = state.channels.inbox_rx.recv().await.unwrap();
+        state.queue_user_message(input);
+        inbox.request_next_turn();
+        let (cut, requested) = inbox.seal_for_next_request();
+        assert!(requested);
+        inbox.withdraw("from-channel", || Ok(())).unwrap();
+        inbox.withdraw("from-wait", || Ok(())).unwrap();
+        assert!(!state.has_pending_user_messages());
+        assert!(state.flush_user_messages_through(cut));
+        assert!(state.host_inputs().contains("keep"));
+        assert!(!state.host_inputs().contains("from-channel"));
+        assert!(!state.host_inputs().contains("from-wait"));
+        let context = serde_json::to_string(&state.context.messages).unwrap();
+        assert!(!context.contains("from-channel") && !context.contains("from-wait"));
+        assert_eq!(inbox.status().pending, 0);
+        assert_eq!(
+            inbox.withdraw("keep", || panic!("already adopted")),
+            Err(crate::FollowUpWithdrawalError::AlreadyConsumed.into())
+        );
+    }
 }
 
 #[cfg(test)]
 mod waiting_cut_tests {
     use super::super::delegate_cleanup_tests;
     use crate::runtime::user_inbox::SendPausePoint;
+
+    #[tokio::test]
+    async fn wait_ignores_withdrawn_input_until_a_real_terminal_event() {
+        let (_cancel, cancelled) = tokio::sync::watch::channel(crate::RunInterrupt::None);
+        let (runtime, mut state) = delegate_cleanup_tests::started_fixture(cancelled).await;
+        let parent = state.caller_run_id();
+        let child = runtime
+            .delegate_background_as_child(
+                parent,
+                crate::Role::Worker,
+                "child",
+                crate::RunConfig::default(),
+            )
+            .unwrap();
+        state
+            .transition(event_bus::AgentRunPhase::Running, None)
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        state.channels.inbox_rx = receiver.into();
+        let inbox = state.channels.user_inbox.clone();
+        inbox
+            .enqueue(Some("withdraw"), |seq| {
+                sender.try_send((
+                    "never inject".into(),
+                    vec![],
+                    true,
+                    Some("withdraw".into()),
+                    seq,
+                ))
+            })
+            .unwrap();
+        inbox.withdraw("withdraw", || Ok(())).unwrap();
+        {
+            let wait = crate::meta::dispatch(
+                &mut state,
+                "wait",
+                serde_json::json!({"run_ids":[child.to_string()]}),
+            );
+            tokio::pin!(wait);
+            assert!(futures_util::poll!(&mut wait).is_pending());
+            runtime.cancel(child).unwrap();
+            runtime.wait(child).await.unwrap();
+            let result = wait.await.result;
+            assert!(!result.is_error, "{}", result.content);
+            let result: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+            assert_eq!(result["user_input_ready"], false);
+        }
+        assert!(!state.has_pending_user_messages());
+        runtime.cancel(parent).unwrap();
+        runtime.wait(parent).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enqueue_between_cut_and_drain_resumes_local_pending_without_another_event() {
@@ -194,13 +279,13 @@ mod waiting_cut_tests {
             .transition(event_bus::AgentRunPhase::Running, None)
             .unwrap();
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        state.channels.inbox_rx = receiver;
+        state.channels.inbox_rx = receiver.into();
         let inbox = state.channels.user_inbox.clone();
         let pause = inbox.pause_next_send(SendPausePoint::AfterRequestCut);
         let enqueuer = std::thread::spawn(move || {
             pause.reached.recv().unwrap();
             inbox
-                .enqueue(|seq| {
+                .enqueue(None, |seq| {
                     sender.try_send((
                         "after last cut".into(),
                         vec![],
@@ -216,11 +301,7 @@ mod waiting_cut_tests {
         assert!(!state.flush_aside());
         let _sender = enqueuer.join().unwrap();
         assert_eq!(state.pending_user_messages.len(), 1);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), state.wait_for_input())
-                .await
-                .unwrap()
-        );
+        assert!(state.wait_for_input().await);
         assert!(state.pending_user_messages.is_empty());
         assert_eq!(state.channels.user_inbox.status().pending, 0);
         assert!(state.host_inputs().contains("late"));

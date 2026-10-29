@@ -265,7 +265,7 @@ async fn pending_question_survives_cancel_and_storage_reopen() {
     assert_eq!(db.pending_user_questions().unwrap(), vec![question.clone()]);
     storage
         .handle()
-        .answer_user_question(&question.id, "resume later")
+        .answer_user_question(&question.id, "resume later", &event_bus::AnswerOrigin::Host)
         .unwrap();
     assert_eq!(
         db.user_question(&question.id)
@@ -687,6 +687,7 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
             options: vec![],
             blocking: true,
             answer: None,
+            answer_origin: None,
         };
         storage.handle().create_user_question(&question).unwrap();
         let path = dir.path().join("owners.db");

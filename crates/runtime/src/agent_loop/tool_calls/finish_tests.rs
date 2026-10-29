@@ -134,7 +134,7 @@ impl tools::Tool for CompletedShellHandoff {
             drop(receiver.take());
         }
         self.inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 self.sender.try_send((
                     "reserved followup".into(),
                     vec![],
@@ -183,7 +183,7 @@ async fn shell_then_finish_preserves_simultaneous_and_post_receiver_input_once()
             )
             .unwrap();
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        state.channels.inbox_rx = receiver;
+        state.channels.inbox_rx = receiver.into();
         let mut executor = ToolExecutor::new(state.shared.bus.clone());
         executor
             .register(Arc::new(CompletedShellHandoff {

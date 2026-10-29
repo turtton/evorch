@@ -74,6 +74,7 @@ async fn native_client_hello_and_http_header_order_match_and_connection_is_reuse
         let mut request = post(&transport, &url);
         if index > 0 {
             let observation = crate::ObservationContext {
+                attempts: None,
                 run_id: if index == 1 { "child" } else { "nested" }.into(),
                 turn: Some(crate::RequestTurnContext {
                     parent_subagent_id: (index == 2).then(|| "child".into()),

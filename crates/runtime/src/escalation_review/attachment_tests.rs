@@ -68,6 +68,7 @@ fn attached_skills_join_the_recorded_ones_within_the_cap() {
             scope: crate::skill::SkillScope::Builtin,
             loaded_by: LoadedBy::SkillLoad,
             text: "steps".into(),
+            truncated: false,
         });
     }
     run.add_user_request("run-1", &expanded(TYPED, &[("s3", BODY), ("new", BODY)]));
@@ -138,6 +139,7 @@ fn an_answer_to_a_question_is_never_split() {
         options: vec![],
         blocking: true,
         answer: None,
+        answer_origin: None,
     };
     let answer = expanded("yes", &[("demo", BODY)]);
     run.add_user_answer("run-1", &question, &answer);

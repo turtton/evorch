@@ -212,7 +212,7 @@ pub fn role_settings_modal(
                     });
             });
             if let Some(error) = &model.error {
-                ui.colored_label(palette().ERROR_FG, error);
+                crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
             }
             if busy {
                 ui.label(muted("Saving and reloading runtime..."));

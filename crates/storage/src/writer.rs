@@ -70,8 +70,14 @@ enum Command {
     DeleteEvalSample(String, ReplyTx<bool>),
     CreateUserQuestion(event_bus::UserQuestion, ReplyTx),
     BindUserQuestions(String, String, Vec<String>, ReplyTx),
-    AnswerUserQuestion(String, String, ReplyTx),
-    AnswerUserQuestionWithEvidence(String, String, Vec<crate::ReviewEvidenceRow>, ReplyTx),
+    AnswerUserQuestion(String, String, event_bus::AnswerOrigin, ReplyTx),
+    AnswerUserQuestionWithEvidence(
+        String,
+        String,
+        event_bus::AnswerOrigin,
+        Vec<crate::ReviewEvidenceRow>,
+        ReplyTx,
+    ),
     UpsertRunContext(crate::RunContextRecord, ReplyTx<crate::RunContextReceipt>),
     AppendIndexedNote(String, String, ReplyTx<crate::thread_index::NoteReceipt>),
     SaveSnapshotBundle(Box<crate::thread_index::SnapshotWrite>, SnapshotReplyTx),
@@ -251,8 +257,15 @@ impl StorageHandle {
         })
     }
     /// First answer wins; retrying the same answer is idempotent.
-    pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<(), StorageError> {
-        self.request(|reply| Command::AnswerUserQuestion(id.into(), answer.into(), reply))
+    pub fn answer_user_question(
+        &self,
+        id: &str,
+        answer: &str,
+        origin: &event_bus::AnswerOrigin,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::AnswerUserQuestion(id.into(), answer.into(), origin.clone(), reply)
+        })
     }
 
     /// Atomically persists a host answer and all recipient evidence, first answer wins.
@@ -260,12 +273,14 @@ impl StorageHandle {
         &self,
         id: &str,
         answer: &str,
+        origin: &event_bus::AnswerOrigin,
         evidence: &[crate::ReviewEvidenceRow],
     ) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::AnswerUserQuestionWithEvidence(
                 id.into(),
                 answer.into(),
+                origin.clone(),
                 evidence.to_vec(),
                 reply,
             )

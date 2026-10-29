@@ -98,6 +98,56 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .unwrap_or_default();
     }
 
+    /// Runtime withdrawal is authoritative. Never restore/delete a message that
+    /// has already entered the context, even if this frame still showed Queued.
+    pub(super) fn withdraw_queued_follow_up(&mut self, index: usize, edit: bool) {
+        let Some(id) = self
+            .composer
+            .queued
+            .get(index)
+            .filter(|item| !item.undelivered)
+            .map(|item| item.submission_id.clone())
+        else {
+            return;
+        };
+        let Some(thread) = self
+            .history
+            .iter()
+            .find(|message| message.id == id)
+            .map(|message| message.thread_id.clone())
+        else {
+            return;
+        };
+        match self.sink.withdraw_follow_up(&thread, &id) {
+            Ok(()) => {
+                if edit {
+                    self.move_withdrawn_to_composer(&id);
+                } else {
+                    self.history.retain(|message| message.id != id);
+                    self.queued_images.remove(&id);
+                    if let Err(error) = self.persist_history() {
+                        self.push_notice(format!("Could not save deletion: {error}"));
+                    }
+                }
+                self.rebuild_delivery_rows();
+            }
+            Err(runtime::RuntimeError::FollowUpWithdrawal(
+                runtime::FollowUpWithdrawalError::AlreadyConsumed,
+            )) => {
+                if let Some(message) = self.history.iter().find(|message| message.id == id) {
+                    self.transcripts
+                        .push_host_input(&thread, &id, message.prompt.clone());
+                }
+                if self.mark_delivered(&[id]) {
+                    self.save_sidebar();
+                }
+                self.rebuild_delivery_rows();
+                self.push_notice("Message already delivered; it cannot be edited or deleted.");
+            }
+            Err(error) => self.push_notice(format!("Could not withdraw message: {error}")),
+        }
+    }
+
     /// Put an undelivered follow-up back into the composer to edit and resend.
     pub(super) fn restore_queued_follow_up(&mut self, index: usize) {
         let Some(id) = self
@@ -136,7 +186,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .find(|message| message.id == id)
                 .unwrap()
                 .resolution = None;
-            self.push_notice(format!("状態を保存できませんでした: {error}"));
+            self.push_notice(format!("Could not save state: {error}"));
             return;
         }
         self.rebuild_delivery_rows();

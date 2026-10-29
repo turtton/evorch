@@ -56,13 +56,21 @@ pub fn render(
 
     if !sidebar.projects.is_empty() {
         ui.add_space(SP_1);
-        if ghost_icon_button(ui, icons::PLUS, "Add project").clicked() {
-            *action = Some(SidebarAction::OpenAddProject);
-        }
+        ui.horizontal(|ui| {
+            if ghost_icon_button(ui, icons::PLUS, "Add project").clicked() {
+                *action = Some(SidebarAction::OpenAddProject);
+            }
+            if ghost_icon_button(ui, icons::MAGNIFYING_GLASS, "Search threads")
+                .on_hover_text("Search threads (Ctrl+K)")
+                .clicked()
+            {
+                *action = Some(SidebarAction::OpenThreadSearch);
+            }
+        });
     }
 
     if let Some(error) = &pane_state.error {
-        ui.colored_label(palette().ERROR_FG, error);
+        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
     }
 }
 

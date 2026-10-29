@@ -93,8 +93,8 @@ fn undefined_binding_shows_warning_and_route_create_button() {
     harness.click_label("Explorer");
     harness.run();
     // Then: the warning is actionable without blocking save.
-    assert!(harness.has_label("未定義 (route なし)"));
-    assert!(harness.has_label("route を作成"));
+    assert!(harness.has_label("Undefined (no route)"));
+    assert!(harness.has_label("Create route"));
     harness.click_label("Save role settings");
     harness.step();
     finish(&mut harness);
@@ -197,7 +197,7 @@ fn route_create_from_role_settings_opens_prefilled_routing_modal() {
     harness.click_label("Explorer");
     harness.run();
     // When: using the actual cross-modal action.
-    harness.click_label("route を作成");
+    harness.click_label("Create route");
     harness.run();
     // Then: only routing is open and the logical name is preserved in its new row.
     assert!(!harness.state().role_settings().open);

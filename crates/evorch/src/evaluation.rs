@@ -9,7 +9,7 @@ use std::time::Duration;
 use eval::{EvalArgs, Isolation, ReportArgs, ReportDeps, RunReport, RunnerDeps};
 use routing::EnvLookup;
 
-pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <dir>] [--db <path>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--no-report]
+pub const USAGE: &str = "usage: evorch eval run --thread <thread-id> [--candidate <overlay.toml>] [--repeat <n>] [--output <dir>] [--db <path>] [--user-config <dir>] [--problem <text>] [--verify <command>] [--verify-timeout <secs>] [--report|--no-report]
        evorch eval report --output <dir> [--output <dir> ...] [--user-config <dir>] [--rejudge]
 `eval run` replays the thread <n> times (default eval.repeat_target) under the user's
 configuration, then <n> times with the candidate overlay merged over it. The overlay is a
@@ -48,8 +48,8 @@ fn parse_run(mut argv: impl Iterator<Item = String>) -> Result<Command, String> 
     let mut thread = None;
     let mut report = true;
     while let Some(flag) = argv.next() {
-        if flag == "--no-report" {
-            report = false;
+        if matches!(flag.as_str(), "--report" | "--no-report") {
+            report = flag == "--report";
             continue;
         }
         let value = argv.next().ok_or_else(|| USAGE.to_owned())?;
@@ -132,28 +132,45 @@ pub async fn run(command: Command, env: Arc<dyn EnvLookup>) -> Result<String, St
                 credentials: None,
                 catalog: catalog.clone(),
             };
-            let evaluation = eval::run(args, deps, |report| println!("{}", summary(report)))
-                .await
-                .map_err(|error| error.to_string())?;
-            let results = format!("Results in {}", evaluation.dir.display());
+            let result = eval::run(args, deps, |report| println!("{}", summary(report))).await;
+            let (dir, failure) = match result {
+                Ok(evaluation) => (evaluation.dir, None),
+                Err(error) => {
+                    // A failed preflight still owns a complete manifest and
+                    // evidence. Report them, but never turn failure into success.
+                    let eval::EvalError::Preflight { report: path, .. } = &error else {
+                        return Err(error.to_string());
+                    };
+                    if !report {
+                        return Err(error.to_string());
+                    }
+                    let dir = path.parent().ok_or_else(|| error.to_string())?.to_owned();
+                    (dir, Some(error.to_string()))
+                }
+            };
+            let results = failure
+                .clone()
+                .unwrap_or_else(|| format!("Results in {}", dir.display()));
             if !report {
                 return Ok(results);
             }
             let args = ReportArgs {
-                dirs: vec![evaluation.dir.clone()],
+                dirs: vec![dir.clone()],
                 user_config_dir,
                 rejudge: false,
             };
             eval::report(args, &report_deps(env))
                 .await
                 .map_err(|error| format!("{results}; the report failed: {error}"))?;
-            Ok(format!(
+            let message = format!(
                 "{results}\nReport in {}",
-                evaluation
-                    .dir
-                    .join(eval::output::REPORT_MARKDOWN_FILE)
-                    .display()
-            ))
+                dir.join(eval::output::REPORT_MARKDOWN_FILE).display()
+            );
+            if failure.is_some() {
+                Err(message)
+            } else {
+                Ok(message)
+            }
         }
         Command::Report(args) => {
             let dirs = args.dirs.clone();

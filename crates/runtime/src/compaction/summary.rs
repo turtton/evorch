@@ -171,6 +171,7 @@ impl ModelSummarizer {
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
         let invocation = AgentInvocationContext {
+            attempts: None,
             turn: self.turn.clone(),
             category: self.category.clone(),
             model_preference: self.model_preference.clone(),

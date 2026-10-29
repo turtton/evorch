@@ -57,6 +57,7 @@ fn pending_question_button_emits_thread_action_with_run_fallback() {
                     options: vec![],
                     blocking: true,
                     answer: None,
+                    answer_origin: None,
                 },
             }),
             |_| None,
@@ -122,6 +123,7 @@ fn question_notification_opens_owning_thread_and_conversation() {
                 options: vec!["JSON".into()],
                 blocking: true,
                 answer: None,
+                answer_origin: None,
             },
         })]);
         state.open_agent_pane("other-run");

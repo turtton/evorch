@@ -213,9 +213,24 @@ pub fn phase_label(phase: ThreadRunPhase) -> &'static str {
         ThreadRunPhase::Waiting => "Waiting for input",
         ThreadRunPhase::Done => "Done",
         ThreadRunPhase::Error => "Failed",
-        ThreadRunPhase::Stopped => "Stopped (resumable)",
+        ThreadRunPhase::Stopped => "Stopped",
     }
 }
+
+/// Hover text for a phase: its label, plus how to continue when that is not obvious.
+pub fn phase_hint(phase: ThreadRunPhase) -> &'static str {
+    match phase {
+        ThreadRunPhase::Stopped => STOPPED_HINT,
+        ThreadRunPhase::Pending
+        | ThreadRunPhase::Running
+        | ThreadRunPhase::Waiting
+        | ThreadRunPhase::Done
+        | ThreadRunPhase::Error => phase_label(phase),
+    }
+}
+
+/// How to resume a stopped run; shown on hover instead of a banner.
+pub const STOPPED_HINT: &str = "Stopped — send a message or /continue to resume";
 
 pub fn agent_phase_label(phase: AgentRunPhase) -> &'static str {
     phase_label(match phase {

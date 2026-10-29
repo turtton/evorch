@@ -914,7 +914,10 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
         assert!(usage[index + 1].1 >= usage[index].0);
     }
     assert_eq!(
-        requests[3].to_string().matches("[user-answer id=").count(),
+        requests[3]
+            .to_string()
+            .matches("[parent-answer id=")
+            .count(),
         1
     );
     assert!(requests[3].to_string().contains("Use scope A"));
@@ -923,6 +926,86 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
         harness.runtime.wait(parent).await.unwrap(),
         AgentRunPhase::Error
     );
+}
+
+#[tokio::test]
+async fn observed_child_completion_preserves_the_wire_prefix_without_an_extra_turn() {
+    for tool in ["wait", "run_output"] {
+        let read = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut h = harness_with_read(
+            vec![
+                read_response(0),
+                text_response("child result"),
+                ScriptedResponse::tool_call(
+                    "observe",
+                    MODEL,
+                    0,
+                    "observe",
+                    tool,
+                    [if tool == "wait" {
+                        json!({"run_ids":["run-2"]}).to_string()
+                    } else {
+                        json!({"run_id":"run-2"}).to_string()
+                    }],
+                ),
+                text_response("The child result is already known"),
+            ],
+            1_000_000,
+            read.clone(),
+        );
+        h.runtime = h.runtime.with_sequential_run_ids();
+        let parent = h.runtime.delegate_background(
+            Role::Orchestrator,
+            "Coordinate child".into(),
+            RunConfig::default(),
+        );
+        read.started.notified().await;
+        let child = h
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, "Child work", RunConfig::default())
+            .unwrap();
+        assert_eq!(h.runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+        read.release.notify_one();
+        assert_eq!(h.runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+        let events = through_phase(&mut h.receiver, parent, AgentRunPhase::Done).await;
+        let requests: Vec<_> = h
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .map(|request| request.body)
+            .collect();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(h.mock.remaining_scripts(), 0);
+        for (previous, next) in [(0, 2), (2, 3)] {
+            assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next])
+                .unwrap();
+        }
+        assert!(requests[3].to_string().contains("child result"));
+        assert!(!requests[3].to_string().contains("[agent-message"));
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Provider(ProviderEvent::RequestCompleted {
+                    run_id: Some(run),
+                    input_tokens,
+                    cache_read_tokens,
+                    ..
+                }) if run == &parent.to_string() => Some((*input_tokens, *cache_read_tokens)),
+                EventKind::Diagnostic(d) if d.code == "CacheRegression" => panic!("{d:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 3);
+        for pair in usage.windows(2) {
+            assert!(pair[0].0 > 0);
+            assert!(pair[1].1 >= pair[0].0);
+        }
+    }
 }
 
 #[tokio::test]
@@ -2351,7 +2434,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     media_type: "image/png".into(),
                     data: "aW1hZ2U=".into(),
                 }],
-                None,
+                Some(format!("delivered-{expedite}")),
             )
             .unwrap();
         review_storage.attach(&harness.runtime);
@@ -2379,6 +2462,36 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     .next_turn_requested
             );
         }
+        let withdrawn_ids = [
+            format!("withdraw-middle-{expedite}"),
+            format!("withdraw-tail-{expedite}"),
+        ];
+        for id in &withdrawn_ids {
+            harness
+                .runtime
+                .send_message_with_images(
+                    run,
+                    format!("never deliver {id}"),
+                    vec![DelegateImage {
+                        media_type: "image/png".into(),
+                        data: "d2l0aGRyYXdu".into(),
+                    }],
+                    Some(id.clone()),
+                )
+                .unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 4);
+        for id in &withdrawn_ids {
+            harness.runtime.withdraw_follow_up(run, id).unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 2);
+        let receipts = harness.runtime.host_input_receipts(&withdrawn_ids).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.status == storage::HostInputStatus::Withdrawn)
+        );
         assert_eq!(
             harness
                 .mock
@@ -2391,6 +2504,12 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         read.release.notify_one();
         let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
         harness.runtime.wait(run).await.unwrap();
+        assert_eq!(
+            harness
+                .runtime
+                .withdraw_follow_up(run, &format!("delivered-{expedite}")),
+            Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into())
+        );
         assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 0);
         assert!(
             !harness
@@ -2407,6 +2526,13 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .map(|r| &r.body)
             .collect::<Vec<_>>();
         assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !body.to_string().contains("never deliver")
+                    && !body.to_string().contains("d2l0aGRyYXdu"))
+        );
+
         assert_eq!(
             bodies[1].to_string().contains("first queued follow-up"),
             expedite

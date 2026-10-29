@@ -71,6 +71,7 @@ async fn compaction_preserves_routing_generation_tools_and_observation() {
         input_schema: serde_json::json!({"type":"object"}),
     }];
     let invocation = AgentInvocationContext {
+        attempts: None,
         run_id: "run-compact".into(),
         ..Default::default()
     };
@@ -115,6 +116,7 @@ async fn compaction_respects_explicit_preference_and_propagates_failure_without_
         },
     );
     let invocation = AgentInvocationContext {
+        attempts: None,
         model_preference: Some(crate::ModelPreference {
             profile: "preferred".into(),
             model: None,

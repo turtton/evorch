@@ -203,6 +203,7 @@ fn request(messages: Vec<Message>, replay: Option<ResponsesReplayContext>) -> Ch
         service_tier: None,
         output_schema: None,
         observation: Some(providers::ObservationContext {
+            attempts: None,
             turn: None,
             run_id: "run-1".into(),
             purpose: Default::default(),

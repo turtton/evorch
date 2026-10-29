@@ -246,7 +246,7 @@ impl<V: AgentView> AgentBrowserSurface for AgentBrowserPane<V> {
                     ui.label(muted(format!("Showing the active tab {tab}")));
                 }
                 if let Some(error) = self.view.error() {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
             } else {
                 ui.label(muted("The page was closed."));

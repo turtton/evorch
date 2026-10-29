@@ -8,6 +8,7 @@
 mod conversation;
 mod cursor;
 mod grep;
+mod host;
 pub(super) mod normalize;
 mod read;
 mod search;
@@ -17,6 +18,7 @@ pub(super) mod visibility;
 
 #[cfg(test)]
 pub(super) use grep::GrepArgs;
+pub use host::{HOST_SEARCH_MAX_LIMIT, HostSearchIndex, HostThreadHit, HostThreadSearch};
 #[cfg(test)]
 pub(super) use read::ReadArgs;
 #[cfg(test)]

@@ -84,7 +84,7 @@ fn disposable(candidate: &Candidate) -> bool {
     // Unknown or corrupt records are not safe to classify as disposable.
     matches!(serde_json::from_str::<EventKind>(&candidate.payload),
         Ok(EventKind::Diagnostic(event))
-        if event.source != "sandbox" || event.code != "escalation_review")
+        if !event.is_escalation_audit())
 }
 
 fn process_batch(
