@@ -1,21 +1,26 @@
-//! Bound both the original event count and bytes, even when deltas are merged.
+//! Bound both the original event count and bytes, even when reasoning fragments are merged.
 
-use std::{io, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 
 use event_bus::{Event, EventKind, MessageEvent};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+    time::Instant,
+};
 
 use super::{PersistencePolicy, StorageBridgeMonitor, WriteRequest, monitor::PendingRegistration};
 
 pub(super) const WRITE_QUEUE_CAPACITY: usize = 16_384;
 const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+/// How often the bridge checks pending reasoning for expiry.
 pub(super) const COALESCE_INTERVAL: Duration = Duration::from_millis(100);
-pub(super) const MAX_COALESCED_EVENTS: usize = 256;
-pub(super) const MAX_COALESCED_BYTES: usize = 32 * 1024;
+/// A reasoning row is written no later than this after its first fragment.
+pub(super) const MAX_COALESCE_AGE: Duration = Duration::from_secs(5);
+/// Payload bytes per merged row, further capped by the storage event-size limit.
+pub(super) const MAX_COALESCED_BYTES: usize = 64 * 1024;
 
 pub(super) struct QueuedEvent {
     pub(super) event: Box<Event>,
-    source_events: usize,
     payload_bytes: usize,
     // Decrement observations before releasing capacity to a waiting producer.
     registration: PendingRegistration,
@@ -25,8 +30,7 @@ pub(super) struct QueuedEvent {
 
 impl QueuedEvent {
     fn can_merge(&self, next: &Event, max_payload_bytes: usize) -> bool {
-        self.source_events < MAX_COALESCED_EVENTS
-            && self.event.meta.schema_version == next.meta.schema_version
+        self.event.meta.schema_version == next.meta.schema_version
             && same_accounting_day(&self.event, next)
             && matching_delta(&self.event, next).is_some_and(|delta| {
                 self.payload_bytes
@@ -39,17 +43,23 @@ impl QueuedEvent {
         let delta = matching_delta(&self.event, &other.event).expect("compatible delta");
         self.payload_bytes += json_len(delta) - 2;
         match &mut self.event.kind {
-            EventKind::Message(
-                MessageEvent::MessageDelta { delta: text, .. }
-                | MessageEvent::ReasoningDelta { delta: text, .. },
-            ) => text.push_str(delta),
-            _ => unreachable!("only deltas can coalesce"),
+            EventKind::Message(MessageEvent::ReasoningDelta { delta: text, .. }) => {
+                text.push_str(delta);
+            }
+            _ => unreachable!("only reasoning deltas can coalesce"),
         }
-        self.source_events += other.source_events;
         self.event_permit.merge(other.event_permit);
         self.byte_permit.merge(other.byte_permit);
         self.registration.merge(other.registration);
     }
+}
+
+/// One run's accumulating reasoning row.
+struct PendingReasoning {
+    queued: QueuedEvent,
+    since: Instant,
+    /// Arrival order of the row's first fragment; rows are written in this order.
+    order: u64,
 }
 
 // Merged rows retain the first timestamp, so crossing midnight would charge
@@ -64,42 +74,22 @@ fn same_accounting_day(first: &Event, next: &Event) -> bool {
 }
 
 fn matching_delta<'a>(first: &Event, next: &'a Event) -> Option<&'a str> {
-    match (&first.kind, &next.kind) {
-        (
-            EventKind::Message(MessageEvent::MessageDelta {
-                run_id: Some(a), ..
-            }),
-            EventKind::Message(MessageEvent::MessageDelta {
-                run_id: Some(b),
-                delta,
-            }),
-        )
-        | (
-            EventKind::Message(MessageEvent::ReasoningDelta {
-                run_id: Some(a), ..
-            }),
-            EventKind::Message(MessageEvent::ReasoningDelta {
-                run_id: Some(b),
-                delta,
-            }),
-        ) if a == b => Some(delta),
-        _ => None,
-    }
+    let (a, _) = reasoning_delta(first)?;
+    let (b, delta) = reasoning_delta(next)?;
+    (a == b).then_some(delta)
 }
 
-fn is_delta(event: &Event) -> bool {
-    matches!(
-        &event.kind,
-        EventKind::Message(
-            MessageEvent::MessageDelta {
-                run_id: Some(_),
-                ..
-            } | MessageEvent::ReasoningDelta {
-                run_id: Some(_),
-                ..
-            }
-        )
-    )
+/// The run and text of an attributable reasoning fragment, the only event kind
+/// that coalesces. Unattributed fragments cannot be ordered against a run's
+/// boundaries, so they are written as they arrive.
+fn reasoning_delta(event: &Event) -> Option<(&str, &str)> {
+    match &event.kind {
+        EventKind::Message(MessageEvent::ReasoningDelta {
+            run_id: Some(run),
+            delta,
+        }) => Some((run, delta)),
+        _ => None,
+    }
 }
 
 // Count JSON escapes without allocating another full serialized payload or
@@ -126,7 +116,9 @@ fn json_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
 
 pub(super) struct EventQueue {
     requests: mpsc::Sender<WriteRequest>,
-    pending: Option<QueuedEvent>,
+    /// Reasoning rows still accumulating, one per run.
+    pending: BTreeMap<String, PendingReasoning>,
+    next_order: u64,
     event_budget: Arc<Semaphore>,
     byte_budget: Arc<Semaphore>,
     monitor: StorageBridgeMonitor,
@@ -143,7 +135,8 @@ impl EventQueue {
     ) -> Self {
         Self {
             requests,
-            pending: None,
+            pending: BTreeMap::new(),
+            next_order: 0,
             event_budget: Arc::new(Semaphore::new(WRITE_QUEUE_CAPACITY)),
             byte_budget: Arc::new(Semaphore::new(WRITE_QUEUE_BYTES)),
             monitor,
@@ -153,15 +146,27 @@ impl EventQueue {
     }
 
     pub(super) async fn push(&mut self, event: Event) -> Result<(), ()> {
+        // The retry replays the response from its start. The marker is not
+        // stored, but the failed attempt's reasoning must end its own row.
+        if let EventKind::Message(MessageEvent::StreamRetried { run_id: Some(run) }) = &event.kind {
+            self.flush_run(run).await?;
+        }
         if self.policy.skip(&event, &self.monitor) {
             return Ok(());
         }
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| !pending.can_merge(&event, self.max_coalesced_bytes))
-        {
-            self.flush().await?;
+        let delta_run = reasoning_delta(&event).map(|(run, _)| run.to_owned());
+        match &delta_run {
+            Some(run) => {
+                if self.pending.get(run).is_some_and(|pending| {
+                    !pending.queued.can_merge(&event, self.max_coalesced_bytes)
+                }) {
+                    self.flush_run(run).await?;
+                }
+            }
+            // Every other event is a boundary for the runs it belongs to: their
+            // reasoning is written first so row order matches live order. Other
+            // runs keep accumulating.
+            None => self.flush_boundary_runs(&event).await?,
         }
         let serialized_bytes = json_len(&event);
         // A single over-budget event is admitted exclusively and then subjected
@@ -170,7 +175,7 @@ impl EventQueue {
         let permits = match self.try_reserve(bytes) {
             Some(permits) => permits,
             None => {
-                // Pending deltas own permits too. Send them before waiting so
+                // Pending reasoning owns permits too. Send it before waiting so
                 // the writer can release capacity, avoiding a partial-batch deadlock.
                 self.flush().await?;
                 let acquire = async {
@@ -202,24 +207,34 @@ impl EventQueue {
         let payload_bytes = json_len(&event.kind);
         let next = QueuedEvent {
             event: Box::new(event),
-            source_events: 1,
             payload_bytes,
             event_permit: permits.0,
             byte_permit: permits.1,
             registration: self.monitor.register(serialized_bytes),
         };
-        if let Some(pending) = &mut self.pending {
-            pending.merge(next);
+        let Some(run) = delta_run else {
+            return self.send(next).await;
+        };
+        if let Some(pending) = self.pending.get_mut(&run) {
+            pending.queued.merge(next);
             self.monitor.coalesced();
         } else {
-            self.pending = Some(next);
+            self.pending.insert(
+                run.clone(),
+                PendingReasoning {
+                    queued: next,
+                    since: Instant::now(),
+                    order: self.next_order,
+                },
+            );
+            self.next_order += 1;
         }
-        if self.pending.as_ref().is_some_and(|pending| {
-            !is_delta(&pending.event)
-                || pending.source_events == MAX_COALESCED_EVENTS
-                || pending.payload_bytes >= self.max_coalesced_bytes
-        }) {
-            self.flush().await?;
+        if self
+            .pending
+            .get(&run)
+            .is_some_and(|pending| pending.queued.payload_bytes >= self.max_coalesced_bytes)
+        {
+            self.flush_run(&run).await?;
         }
         Ok(())
     }
@@ -234,12 +249,53 @@ impl EventQueue {
         Some((events, bytes))
     }
 
+    async fn send(&self, event: QueuedEvent) -> Result<(), ()> {
+        self.requests
+            .send(WriteRequest::Event(event))
+            .await
+            .map_err(|_| ())
+    }
+
+    async fn flush_boundary_runs(&mut self, event: &Event) -> Result<(), ()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        for run in event_bus::event_run_ids(std::slice::from_ref(event)) {
+            self.flush_run(&run).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_run(&mut self, run: &str) -> Result<(), ()> {
+        match self.pending.remove(run) {
+            Some(pending) => self.send(pending.queued).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Write every accumulating row, oldest first.
     pub(super) async fn flush(&mut self) -> Result<(), ()> {
-        if let Some(event) = self.pending.take() {
-            self.requests
-                .send(WriteRequest::Event(event))
-                .await
-                .map_err(|_| ())?;
+        let mut rows: Vec<_> = std::mem::take(&mut self.pending).into_values().collect();
+        rows.sort_by_key(|row| row.order);
+        for row in rows {
+            self.send(row.queued).await?;
+        }
+        Ok(())
+    }
+
+    /// Write rows whose first fragment is at least [`MAX_COALESCE_AGE`] old, so
+    /// a quiet run's reasoning reaches storage without waiting for its boundary.
+    pub(super) async fn flush_expired(&mut self) -> Result<(), ()> {
+        let now = Instant::now();
+        let mut expired: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, row)| now.saturating_duration_since(row.since) >= MAX_COALESCE_AGE)
+            .map(|(run, row)| (row.order, run.clone()))
+            .collect();
+        expired.sort();
+        for (_, run) in expired {
+            self.flush_run(&run).await?;
         }
         Ok(())
     }

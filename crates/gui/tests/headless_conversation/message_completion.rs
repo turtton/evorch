@@ -1,7 +1,7 @@
 use event_bus::{Event, MessageEvent, ToolEvent};
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
 use gui::model::transcript_registry::TranscriptRegistry;
-use recorder::storage_bridge::StorageBridge;
+use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 
 fn delta(run: &str, text: &str) -> Event {
     Event::new(MessageEvent::MessageDelta {
@@ -48,6 +48,15 @@ fn completed_answer_repairs_missing_deltas_in_live_and_persisted_history() {
     storage.close();
 
     let db = storage::Database::open(&config).unwrap();
+    assert!(
+        !db.events_all_ordered()
+            .unwrap()
+            .iter()
+            .any(|stored| matches!(
+                stored.event.kind,
+                event_bus::EventKind::Message(MessageEvent::MessageDelta { .. })
+            ))
+    );
     let mut replayed = TranscriptRegistry::new();
     replayed.bind_thread_root("thread", "run");
     replayed.select_thread(Some("thread".into()));
@@ -58,6 +67,127 @@ fn completed_answer_repairs_missing_deltas_in_live_and_persisted_history() {
         for model in [registry.thread(), registry.run("run").unwrap()] {
             assert_eq!(model.entries(), &[answer("run", "first missing last")]);
         }
+    }
+}
+
+fn thought(run: &str, text: &str) -> Event {
+    Event::new(MessageEvent::ReasoningDelta {
+        run_id: Some(run.into()),
+        delta: text.into(),
+    })
+}
+
+fn tool_started(run: &str) -> Event {
+    Event::new(ToolEvent::ToolStarted {
+        run_id: Some(run.into()),
+        tool_name: "read".into(),
+        call_id: format!("{run}:call"),
+        input: None,
+        parent_call_id: None,
+    })
+}
+
+#[test]
+fn concurrent_runs_restore_answers_from_completion_and_reasoning_from_merged_rows() {
+    // Given: two runs streaming at once through the real owned bridge.
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("history.sqlite3"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(1024));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        |handle| StorageBridge::new(handle, "session"),
+        std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
+    let runs = ["run-a", "run-b"];
+    let mut events = Vec::new();
+    for round in 0..3 {
+        for run in runs {
+            events.push(thought(run, &format!("{run} plan {round} ")));
+        }
+    }
+    for run in runs {
+        events.push(tool_started(run));
+    }
+    for round in 0..3 {
+        for run in runs {
+            events.push(thought(run, &format!("{run} review {round} ")));
+        }
+    }
+    for round in 0..3 {
+        for run in runs {
+            events.push(delta(run, &format!("{run} part {round} ")));
+        }
+    }
+    for run in runs {
+        events.push(completed(run, &format!("{run} answer")));
+    }
+    let mut live = TranscriptRegistry::new();
+    for event in &events {
+        live.apply(event);
+        bus.emit(event.clone());
+    }
+
+    // When: the bridge persists the stream and the history is replayed.
+    owner.flush().unwrap();
+    owner.shutdown();
+    drop(owner);
+    let db = storage::Database::open(&config).unwrap();
+    let rows = db.events_all_ordered().unwrap();
+    let mut replayed = TranscriptRegistry::new();
+    for stored in &rows {
+        replayed.apply(&stored.event);
+    }
+
+    // Then: no streamed answer text is stored, each reasoning stretch is one
+    // row, and the restored transcripts match the live ones entry for entry.
+    let kinds = |run: &str| -> Vec<&'static str> {
+        rows.iter()
+            .filter_map(|stored| match &stored.event.kind {
+                event_bus::EventKind::Message(MessageEvent::ReasoningDelta {
+                    run_id: Some(id),
+                    ..
+                }) if id == run => Some("reasoning"),
+                event_bus::EventKind::Message(MessageEvent::MessageCompleted {
+                    run_id, ..
+                }) if run_id == run => Some("completed"),
+                event_bus::EventKind::Tool(ToolEvent::ToolStarted {
+                    run_id: Some(id), ..
+                }) if id == run => Some("tool"),
+                event_bus::EventKind::Message(MessageEvent::MessageDelta { .. }) => {
+                    panic!("streamed answer text must not be stored")
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    for run in runs {
+        assert_eq!(kinds(run), ["reasoning", "tool", "reasoning", "completed"]);
+        let restored = replayed.run(run).unwrap().entries();
+        assert_eq!(restored, live.run(run).unwrap().entries(), "{run}");
+        assert_eq!(
+            restored.last(),
+            Some(&answer(run, &format!("{run} answer")))
+        );
+        let reasoning: Vec<_> = restored
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Reasoning { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning,
+            [
+                format!("{run} plan 0 {run} plan 1 {run} plan 2 "),
+                format!("{run} review 0 {run} review 1 {run} review 2 ")
+            ]
+        );
     }
 }
 

@@ -23,7 +23,7 @@ fn fixture() -> (tempfile::TempDir, Storage, Database) {
 }
 
 fn delta(text: &str) -> Event {
-    Event::new(MessageEvent::MessageDelta {
+    Event::new(MessageEvent::ReasoningDelta {
         run_id: Some("run".into()),
         delta: text.into(),
     })
@@ -74,18 +74,9 @@ fn owned_shutdown_drains_partial_delta_with_a_continuously_live_producer() {
     result.expect("live producer must not prevent bounded shutdown");
     closer.join().unwrap();
     let stored = db.events_all_ordered().unwrap();
-    // Heartbeats are skipped, but a live producer can cause persisted lag faults.
-    // Only those faults are outside the exactly-once delta assertion.
-    let events: Vec<_> = stored
-        .iter()
-        .filter(|row| {
-            !matches!(
-                row.event.kind,
-                event_bus::EventKind::Fault(event_bus::FaultEvent::SubscriberLagged { .. })
-            )
-        })
-        .map(|row| &row.event)
-        .collect();
+    // Heartbeats are skipped and lag faults are not persisted, so only the
+    // pending fragment remains, exactly once.
+    let events: Vec<_> = stored.iter().map(|row| &row.event).collect();
     assert_eq!(events, [&event]);
     assert_eq!(monitor.snapshot().pending_events, 0);
     assert_eq!(monitor.snapshot().failed_events, 0);

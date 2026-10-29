@@ -231,7 +231,11 @@ impl MutationFences {
     }
 }
 
-pub(crate) fn event_run_ids(events: &[Event]) -> Vec<String> {
+/// Run (or session/task) IDs an event is attributed to, in first-seen order and
+/// without duplicates. This is the same attribution the mutation fences use, so
+/// consumers that must order work per run (such as the storage bridge) agree
+/// with the authority checks on which runs an event belongs to.
+pub fn event_run_ids(events: &[Event]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut run_ids = Vec::new();
     for event in events {

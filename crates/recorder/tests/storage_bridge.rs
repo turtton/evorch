@@ -185,7 +185,7 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
     let mut expected = Vec::new();
     for batch in 0..40 {
         for token in 0..16 {
-            let event = Event::new(event_bus::MessageEvent::MessageDelta {
+            let event = Event::new(event_bus::MessageEvent::ReasoningDelta {
                 run_id: Some("run".into()),
                 delta: format!("{batch}:{token} "),
             });
@@ -218,7 +218,7 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
         events
             .iter()
             .map(|event| match &event.kind {
-                event_bus::EventKind::Message(event_bus::MessageEvent::MessageDelta {
+                event_bus::EventKind::Message(event_bus::MessageEvent::ReasoningDelta {
                     run_id,
                     delta,
                 }) => {

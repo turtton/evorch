@@ -6,7 +6,7 @@ pub mod bus;
 mod fencing;
 pub use fencing::{
     MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
-    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
+    MutationGuardCheck, MutationGuardTryCheck, MutationValidator, event_run_ids,
 };
 pub mod event;
 pub mod orchestrator;

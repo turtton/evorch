@@ -27,6 +27,10 @@ struct Inner {
     coalesced_events: AtomicU64,
     skipped_heartbeats: AtomicU64,
     skipped_diagnostics: AtomicU64,
+    skipped_message_deltas: AtomicU64,
+    skipped_run_progress: AtomicU64,
+    skipped_subscriber_lags: AtomicU64,
+    lagged_events: AtomicU64,
     failed_events: AtomicU64,
     #[cfg(test)]
     changes: TestChanges,
@@ -64,6 +68,16 @@ pub struct StorageBridgeSnapshot {
     pub coalesced_events: u64,
     pub skipped_heartbeats: u64,
     pub skipped_diagnostics: u64,
+    /// `MessageDelta` events left to the durable `MessageCompleted` text.
+    pub skipped_message_deltas: u64,
+    /// `RunProgress` events, which are live display only.
+    pub skipped_run_progress: u64,
+    /// `SubscriberLagged` faults. The bus still logs each episode; only the
+    /// durable row is dropped.
+    pub skipped_subscriber_lags: u64,
+    /// Events the lagged subscribers reported as dropped, summed over the
+    /// skipped `SubscriberLagged` faults.
+    pub lagged_events: u64,
     /// Failed storage requests, including stale-generation rejection.
     pub failed_events: u64,
 }
@@ -105,6 +119,10 @@ impl StorageBridgeMonitor {
             coalesced_events: self.0.coalesced_events.load(Ordering::Relaxed),
             skipped_heartbeats: self.0.skipped_heartbeats.load(Ordering::Relaxed),
             skipped_diagnostics: self.0.skipped_diagnostics.load(Ordering::Relaxed),
+            skipped_message_deltas: self.0.skipped_message_deltas.load(Ordering::Relaxed),
+            skipped_run_progress: self.0.skipped_run_progress.load(Ordering::Relaxed),
+            skipped_subscriber_lags: self.0.skipped_subscriber_lags.load(Ordering::Relaxed),
+            lagged_events: self.0.lagged_events.load(Ordering::Relaxed),
             failed_events: self.0.failed_events.load(Ordering::Relaxed),
         }
     }
@@ -127,6 +145,23 @@ impl StorageBridgeMonitor {
 
     pub(super) fn skipped_diagnostic(&self) {
         self.0.skipped_diagnostics.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn skipped_message_delta(&self) {
+        self.0
+            .skipped_message_deltas
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn skipped_run_progress(&self) {
+        self.0.skipped_run_progress.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn skipped_subscriber_lag(&self, skipped: u64) {
+        self.0
+            .skipped_subscriber_lags
+            .fetch_add(1, Ordering::Relaxed);
+        self.0.lagged_events.fetch_add(skipped, Ordering::Relaxed);
     }
 
     pub(super) fn coalesced(&self) {

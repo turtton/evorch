@@ -103,7 +103,15 @@ fn events_appended_before_gui_close_survive_restart() {
     original.composer_mut().input = "new question".into();
     original.submit_composer();
     // When: the real bridge acknowledges events, then the GUI and writer close.
-    for event in reply("new-run", "one", "new answer") {
+    // Streamed answer text is live-only; the completed message is what persists.
+    let completion = Event::new(MessageEvent::MessageCompleted {
+        run_id: "new-run".into(),
+        text: "new answer".into(),
+    });
+    for event in reply("new-run", "one", "new answer")
+        .into_iter()
+        .chain([completion])
+    {
         let result = bridge.handle_event(&event);
         assert!(
             result.is_ok(),

@@ -7,7 +7,7 @@ async fn small_storage_limit_splits_batches_but_rejects_an_oversized_original() 
     // Given: a cap fitting exactly two escaped deltas when measured like storage.
     let chunk = "chunk \"with\" \n🦀 ";
     let delta = |text: String| {
-        Event::new(event_bus::MessageEvent::MessageDelta {
+        Event::new(event_bus::MessageEvent::ReasoningDelta {
             run_id: Some("limited".into()),
             delta: text,
         })
@@ -47,7 +47,7 @@ async fn small_storage_limit_splits_batches_but_rejects_an_oversized_original() 
     let mut actual = String::new();
     for row in stored {
         assert!(serde_json::to_vec(&row.event.kind).unwrap().len() as u64 <= max_event_bytes);
-        let EventKind::Message(event_bus::MessageEvent::MessageDelta { run_id, delta }) =
+        let EventKind::Message(event_bus::MessageEvent::ReasoningDelta { run_id, delta }) =
             row.event.kind
         else {
             panic!("expected delta")
@@ -66,14 +66,14 @@ async fn small_storage_limit_splits_batches_but_rejects_an_oversized_original() 
 #[tokio::test]
 async fn midnight_deltas_keep_separate_rows_and_independent_daily_budgets() {
     // Given: adjacent deltas 20 ms apart, on opposite sides of UTC midnight.
-    let mut before = Event::new(event_bus::MessageEvent::MessageDelta {
+    let mut before = Event::new(event_bus::MessageEvent::ReasoningDelta {
         run_id: Some("midnight".into()),
         delta: "before".into(),
     });
     before.meta.wall_clock = UNIX_EPOCH + Duration::from_millis(86_400_000 - 10);
     let mut after = before.clone();
     after.meta.wall_clock = UNIX_EPOCH + Duration::from_millis(86_400_000 + 10);
-    let EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) = &mut after.kind
+    let EventKind::Message(event_bus::MessageEvent::ReasoningDelta { delta, .. }) = &mut after.kind
     else {
         unreachable!()
     };
@@ -127,7 +127,7 @@ async fn invalid_timestamp_deltas_remain_independently_rejected() {
     let monitor = bridge.monitor();
     let task = spawn_test_bridge(&bus, bridge, Duration::from_secs(60));
 
-    let mut valid = Event::new(event_bus::MessageEvent::MessageDelta {
+    let mut valid = Event::new(event_bus::MessageEvent::ReasoningDelta {
         run_id: Some("run".into()),
         delta: "accepted".into(),
     });

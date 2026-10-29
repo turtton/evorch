@@ -337,7 +337,7 @@ fn responses_native_state_never_reaches_transcripts_panes_or_recorded_events() {
         .collect();
     assert!(
         persisted.iter().any(|event| event.contains("final answer")),
-        "the recorder must have persisted the visible delta"
+        "the recorder must have persisted the completed visible message"
     );
     for event in persisted.iter().chain(
         events

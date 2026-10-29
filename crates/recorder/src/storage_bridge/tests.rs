@@ -280,7 +280,7 @@ fn metrics_can_be_disabled_without_disabling_conversation_persistence() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_single_delta_flushes_on_deadline_and_shutdown_drains_the_tail() {
+async fn a_single_reasoning_fragment_flushes_on_deadline_and_shutdown_drains_the_tail() {
     let (_dir, storage, db) = fixture();
     let bus = Arc::new(EventBus::new(32));
     let bridge = StorageBridge::new(storage.handle(), "session");
@@ -290,17 +290,17 @@ async fn a_single_delta_flushes_on_deadline_and_shutdown_drains_the_tail() {
         shutdown.await.unwrap();
     });
 
-    let event = Event::new(event_bus::MessageEvent::MessageDelta {
+    let event = Event::new(event_bus::MessageEvent::ReasoningDelta {
         run_id: Some("run".into()),
         delta: "deadline".into(),
     });
     bus.emit(event.clone());
     monitor.wait_for(|state| state.pending_events == 1).await;
     assert_eq!(monitor.snapshot().persisted_events, 0);
-    tokio::time::advance(COALESCE_INTERVAL).await;
+    tokio::time::advance(coalescing::MAX_COALESCE_AGE).await;
     monitor.wait_for(|state| state.persisted_events == 1).await;
     assert_eq!(db.events_all_ordered().unwrap()[0].event, event);
-    bus.emit(Event::new(event_bus::MessageEvent::MessageDelta {
+    bus.emit(Event::new(event_bus::MessageEvent::ReasoningDelta {
         run_id: Some("run".into()),
         delta: "tail".into(),
     }));
@@ -312,7 +312,7 @@ async fn a_single_delta_flushes_on_deadline_and_shutdown_drains_the_tail() {
     let events = db.events_all_ordered().unwrap();
     assert_eq!(events.len(), 2);
     assert!(matches!(&events[1].event.kind,
-        EventKind::Message(event_bus::MessageEvent::MessageDelta { delta, .. }) if delta == "tail"));
+        EventKind::Message(event_bus::MessageEvent::ReasoningDelta { delta, .. }) if delta == "tail"));
     assert_eq!(monitor.snapshot().pending_events, 0);
     assert_eq!(monitor.snapshot().oldest_pending_age, Duration::ZERO);
 }
@@ -338,7 +338,7 @@ async fn coalesced_delta_still_checks_the_generation_at_storage_write() {
     );
     for text in ["first", "second"] {
         queue
-            .push(Event::new(event_bus::MessageEvent::MessageDelta {
+            .push(Event::new(event_bus::MessageEvent::ReasoningDelta {
                 run_id: Some("run".into()),
                 delta: text.into(),
             }))
@@ -433,7 +433,7 @@ async fn real_owner_handoff_still_rejects_an_already_queued_old_generation() {
         storage.handle().max_event_bytes(),
     );
     queue
-        .push(Event::new(event_bus::MessageEvent::MessageDelta {
+        .push(Event::new(event_bus::MessageEvent::ReasoningDelta {
             run_id: Some("run".into()),
             delta: "queued by old owner".into(),
         }))

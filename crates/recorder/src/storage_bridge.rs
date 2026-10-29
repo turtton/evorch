@@ -3,8 +3,8 @@
 use std::{future::Future, sync::Arc, task::Poll, time::Duration};
 
 use event_bus::{
-    DiagnosticSeverity, Event, EventBus, EventKind, MessageEvent, OwnershipAction, RecvError,
-    ToolEvent, UsageAggregator,
+    DiagnosticSeverity, Event, EventBus, EventKind, FaultEvent, LifecycleEvent, MessageEvent,
+    OwnershipAction, RecvError, ToolEvent, UsageAggregator,
 };
 use storage::{StorageError, StorageHandle};
 
@@ -62,6 +62,25 @@ impl PersistencePolicy {
             // Live shell output is display-only; the job's output artifact is
             // the durable record.
             EventKind::Tool(ToolEvent::ShellJobOutput { .. }) => true,
+            // The response text is durable as MessageCompleted, which carries
+            // the full accepted text; replay never needs the streamed fragments.
+            EventKind::Message(MessageEvent::MessageDelta { .. }) => {
+                monitor.skipped_message_delta();
+                true
+            }
+            // Progress ticks are live display only; the run's state transitions
+            // and ledger rows are the durable record.
+            EventKind::Lifecycle(LifecycleEvent::RunProgress { .. }) => {
+                monitor.skipped_run_progress();
+                true
+            }
+            // The bus already logs each lag episode and live subscribers still
+            // see the fault. Persisting it let a saturated subscriber write one
+            // row per episode, and nothing reads those rows back.
+            EventKind::Fault(FaultEvent::SubscriberLagged { skipped, .. }) => {
+                monitor.skipped_subscriber_lag(*skipped);
+                true
+            }
             // Tool calls still being composed are display-only; the accepted
             // response and ToolStarted/ToolCompleted are the durable record.
             EventKind::Message(
@@ -217,10 +236,14 @@ enum BridgeInput {
 
 /// Persists events without blocking the caller's runtime, flushing on ticks and shutdown.
 ///
-/// Adjacent deltas from one run coalesce for at most 100 ms (256 originals or
-/// 32 KiB of payload per row, capped by the configured event-size limit).
-/// All semantic boundaries flush preceding deltas. The original
-/// event bus remains untouched; merged rows retain the first delta's timestamp.
+/// Reasoning fragments coalesce per run, in the same accounting day, into one
+/// row of up to 64 KiB of payload (capped by the configured event-size limit).
+/// A row is written when the run's next event of any other kind arrives (ahead
+/// of that event), when it fills, when it is 5 s old, or on flush and shutdown;
+/// runs accumulate independently, so interleaved runs still merge. Streamed
+/// answer text, run progress and lag faults are not stored (see
+/// [`StorageBridgeSnapshot`]). The original event bus remains untouched; merged
+/// rows retain the first fragment's timestamp.
 /// `flush_every` must be nonzero. Dropping the last producer drains the bridge.
 pub async fn run(bus: Arc<EventBus>, bridge: StorageBridge, flush_every: Duration) {
     run_until_shutdown(bus, bridge, flush_every, std::future::pending()).await;
@@ -368,7 +391,7 @@ async fn run_subscribed(
             BridgeInput::DeltaTick => {
                 draining = bus_lifetime.strong_count() == 0;
                 monitor.warn_if_backlogged();
-                queue.flush().await
+                queue.flush_expired().await
             }
         };
         if result.is_err() {
@@ -424,6 +447,10 @@ mod tests;
 #[cfg(test)]
 #[path = "storage_bridge/limit_tests.rs"]
 mod limit_tests;
+
+#[cfg(test)]
+#[path = "storage_bridge/run_coalescing_tests.rs"]
+mod run_coalescing_tests;
 
 #[cfg(test)]
 #[path = "storage_bridge/usage_ledger_tests.rs"]
