@@ -6,6 +6,7 @@
 //! cannot be used is described by [`Unusable`]. Everything it keeps of the answer has been
 //! redacted and bounded, because it reaches reports, logs and the next request.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use providers::{ContentBlock, Message};
@@ -45,8 +46,8 @@ pub(crate) struct Unusable {
     /// The redacted, bounded text of the answer; empty when it held none.
     answer: String,
     answer_chars: usize,
-    /// The kinds of the non-text blocks the answer held; their content is never kept.
-    other_blocks: Vec<&'static str>,
+    /// How many non-text blocks of each kind the answer held; their content is never kept.
+    other_blocks: Vec<(&'static str, usize)>,
 }
 
 impl Unusable {
@@ -72,8 +73,8 @@ impl Unusable {
                 "the answer was empty".to_owned()
             } else {
                 format!(
-                    "the answer held no text, only {} block(s)",
-                    self.other_blocks.join(", ")
+                    "the answer held no text, only {}",
+                    block_summary(&self.other_blocks)
                 )
             }
         } else {
@@ -104,7 +105,10 @@ impl Unusable {
             });
         }
         let seen = if self.answer.is_empty() && !self.other_blocks.is_empty() {
-            format!(" (it held no text, only {})", self.other_blocks.join(", "))
+            format!(
+                " (it held no text, only {})",
+                block_summary(&self.other_blocks)
+            )
         } else {
             String::new()
         };
@@ -132,21 +136,30 @@ fn text_of(content: &[ContentBlock]) -> String {
         .to_owned()
 }
 
-fn other_blocks(content: &[ContentBlock]) -> Vec<&'static str> {
-    content
+fn other_blocks(content: &[ContentBlock]) -> Vec<(&'static str, usize)> {
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for block in content {
+        let kind = match block {
+            ContentBlock::Text { .. } => continue,
+            ContentBlock::Image { .. } => "image",
+            ContentBlock::Reasoning { .. } | ContentBlock::ResponsesReasoning { .. } => "reasoning",
+            ContentBlock::Anthropic { .. } => "anthropic",
+            ContentBlock::Compaction { .. } => "compaction",
+            ContentBlock::ToolUse { .. } => "tool_use",
+            ContentBlock::ToolResult { .. } => "tool_result",
+        };
+        *counts.entry(kind).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// `reasoning x3, tool_use x1`: one entry per kind, so its size does not grow with the answer.
+fn block_summary(blocks: &[(&'static str, usize)]) -> String {
+    blocks
         .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { .. } => None,
-            ContentBlock::Image { .. } => Some("image"),
-            ContentBlock::Reasoning { .. } | ContentBlock::ResponsesReasoning { .. } => {
-                Some("reasoning")
-            }
-            ContentBlock::Anthropic { .. } => Some("anthropic"),
-            ContentBlock::Compaction { .. } => Some("compaction"),
-            ContentBlock::ToolUse { .. } => Some("tool_use"),
-            ContentBlock::ToolResult { .. } => Some("tool_result"),
-        })
-        .collect()
+        .map(|(kind, count)| format!("{kind} x{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The `T` an answer holds: the whole text, or else the one JSON object in it that reads
@@ -165,10 +178,18 @@ pub(crate) fn parse<T: DeserializeOwned>(content: &[ContentBlock]) -> Result<T, 
     };
     let mut found = Vec::new();
     let mut resume = 0;
-    for (start, _) in unfenced.match_indices('{').take(MAX_OBJECT_STARTS) {
+    let mut tried = 0;
+    let mut unchecked = false;
+    for (start, _) in unfenced.match_indices('{') {
+        // Braces inside an object already read are not candidates and cost no budget.
         if start < resume {
             continue;
         }
+        if tried == MAX_OBJECT_STARTS {
+            unchecked = true;
+            break;
+        }
+        tried += 1;
         let mut values = serde_json::Deserializer::from_str(&unfenced[start..]).into_iter::<T>();
         if let Some(Ok(value)) = values.next() {
             resume = start + values.byte_offset();
@@ -177,6 +198,11 @@ pub(crate) fn parse<T: DeserializeOwned>(content: &[ContentBlock]) -> Result<T, 
     }
     match found.len() {
         0 => Err(Unusable::new(&whole.to_string(), content)),
+        // Only an answer searched to its end proves that the object is the only one.
+        1 if unchecked => Err(Unusable::new(
+            "the answer has too many braces to confirm it holds only one JSON object",
+            content,
+        )),
         1 => Ok(found.remove(0)),
         count => Err(Unusable::new(
             &format!("the answer holds {count} JSON objects that fit the required schema"),
@@ -292,6 +318,61 @@ mod tests {
         assert!(error.describe(1).contains("2 JSON objects"));
         assert!(parse::<Answer>(&text(&repeated)).is_err());
         assert_eq!(parse::<Answer>(&text(&other_shape)).unwrap(), answer("x"));
+    }
+
+    #[test]
+    fn braces_inside_a_read_object_cost_no_search_budget() {
+        // Given: an object whose text holds more braces than the search budget, then another.
+        let braces = "{".repeat(MAX_OBJECT_STARTS + 6);
+        let raw = format!("{{\"value\":\"{braces}\"}} and {OBJECT}");
+
+        // When / Then: the second object is still found, so the answer is ambiguous.
+        let error = parse::<Answer>(&text(&raw)).unwrap_err();
+        assert!(error.describe(1).contains("2 JSON objects"), "{error:?}");
+    }
+
+    #[test]
+    fn an_answer_not_searched_to_its_end_is_not_taken_as_unique() {
+        // Given: an object, more unreadable braces than the budget, then a second object;
+        // and the same object followed only by that many braces.
+        let junk = "{x ".repeat(MAX_OBJECT_STARTS + 6);
+        let hidden = format!("{OBJECT} {junk} {{\"value\":\"y\"}}");
+        let unfinished = format!("{OBJECT} {junk}");
+
+        // When / Then: neither is taken, and the reason says why.
+        for raw in [hidden, unfinished] {
+            let error = parse::<Answer>(&text(&raw)).unwrap_err();
+            assert!(error.describe(1).contains("too many braces"), "{error:?}");
+        }
+        assert_eq!(
+            parse::<Answer>(&text(&format!("{OBJECT} {{x }}"))).unwrap(),
+            answer("x")
+        );
+    }
+
+    #[test]
+    fn the_non_text_summary_has_one_entry_per_kind() {
+        // Given: an answer of thousands of reasoning blocks and a few tool calls.
+        let mut blocks: Vec<ContentBlock> = (0..5_000)
+            .map(|_| ContentBlock::Reasoning { text: "t".into() })
+            .collect();
+        blocks.extend((0..3).map(|n| ContentBlock::ToolUse {
+            id: n.to_string(),
+            name: "shell".into(),
+            input: serde_json::json!({}),
+        }));
+
+        // When: it is rejected.
+        let unusable = parse::<Answer>(&blocks).unwrap_err();
+
+        // Then: the diagnostic and the retry count kinds instead of listing blocks.
+        let described = unusable.describe(1);
+        assert!(
+            described.contains("reasoning x5000, tool_use x3"),
+            "{described}"
+        );
+        assert!(described.chars().count() < 300, "{described}");
+        assert!(appended(&unusable).contains("reasoning x5000, tool_use x3"));
     }
 
     #[test]
