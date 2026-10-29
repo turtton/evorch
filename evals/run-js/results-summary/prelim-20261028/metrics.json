@@ -1,0 +1,4345 @@
+{
+  "generated_at": "2026-10-28T10:17:20.779Z",
+  "runs": [
+    {
+      "model": "claude-opus",
+      "task": "t1-survey",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zq0wn096v2stvd5tfxtz3",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 62.759,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 10,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 255029,
+        "cache_read_tokens": 221639,
+        "cache_write_tokens": 33368,
+        "output_tokens": 3701,
+        "reasoning_tokens": 561,
+        "cost_usd": 0.2852758,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.2852758
+      },
+      "tools": {
+        "top_level_calls": 9,
+        "top_level_errors": 0,
+        "by_name": {
+          "run_js": 5,
+          "read": 1,
+          "shell": 2,
+          "write": 1
+        },
+        "child_executed": 18,
+        "child_by_tool": {
+          "shell": 4,
+          "read": 14
+        }
+      },
+      "run_js": {
+        "calls": 5,
+        "code_chars": 2251,
+        "output_bytes": 0,
+        "return_bytes": 32324,
+        "child_calls": 18,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 1,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 2,
+        "control_calls": 0,
+        "child_commands": 4,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 1,
+        "interp_inline_by_lang": {
+          "python": 1
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 2,
+        "bands": {
+          "1": 0,
+          "2-3": 2,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 2,
+          "mean": 127.5,
+          "median": 127.5,
+          "p90": 132.7,
+          "max": 134
+        },
+        "lines": {
+          "n": 2,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 2,
+          "mean": 0.5,
+          "median": 0.5,
+          "p90": 0.9,
+          "max": 1
+        },
+        "chain_ops": {
+          "n": 2,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "segments": {
+          "n": 2,
+          "mean": 2.5,
+          "median": 2.5,
+          "p90": 2.9,
+          "max": 3
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-opus",
+      "task": "t2-aggregate",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zsfsvnm8jrbwwwc3bakkw",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 24.058,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 4,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 55403,
+        "cache_read_tokens": 52339,
+        "cache_write_tokens": 3054,
+        "output_tokens": 1783,
+        "reasoning_tokens": 264,
+        "cost_usd": 0.061437799999999994,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.061437799999999994
+      },
+      "tools": {
+        "top_level_calls": 3,
+        "top_level_errors": 1,
+        "by_name": {
+          "shell": 3
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 3,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 1,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 3,
+        "interp_inline_by_lang": {
+          "awk": 2,
+          "python": 1
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 2,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 3
+        },
+        "chars": {
+          "n": 3,
+          "mean": 491.6666666666667,
+          "median": 163,
+          "p90": 977.4000000000001,
+          "max": 1181
+        },
+        "lines": {
+          "n": 3,
+          "mean": 8.333333333333334,
+          "median": 1,
+          "p90": 18.6,
+          "max": 23
+        },
+        "pipes": {
+          "n": 3,
+          "mean": 6,
+          "median": 4,
+          "p90": 8.8,
+          "max": 10
+        },
+        "chain_ops": {
+          "n": 3,
+          "mean": 2.3333333333333335,
+          "median": 3,
+          "p90": 3,
+          "max": 3
+        },
+        "segments": {
+          "n": 3,
+          "mean": 10.333333333333334,
+          "median": 8,
+          "p90": 13.600000000000001,
+          "max": 15
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-opus",
+      "task": "t3-rename",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zv3qrtg9rp7kma0yv1n25",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 117.786,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 12,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 276721,
+        "cache_read_tokens": 259979,
+        "cache_write_tokens": 16716,
+        "output_tokens": 3360,
+        "reasoning_tokens": 715,
+        "cost_usd": 0.20287980000000005,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.20287980000000005
+      },
+      "tools": {
+        "top_level_calls": 13,
+        "top_level_errors": 1,
+        "by_name": {
+          "grep": 1,
+          "shell": 8,
+          "run_js": 1,
+          "read": 1,
+          "edit": 1,
+          "git_diff": 1
+        },
+        "child_executed": 15,
+        "child_by_tool": {
+          "read": 10,
+          "edit": 5
+        }
+      },
+      "run_js": {
+        "calls": 1,
+        "code_chars": 565,
+        "output_bytes": 0,
+        "return_bytes": 102,
+        "child_calls": 15,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 5,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 6,
+        "control_calls": 2,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 6,
+        "bands": {
+          "1": 0,
+          "2-3": 1,
+          "4-7": 5,
+          "8+": 0
+        },
+        "chars": {
+          "n": 6,
+          "mean": 198.66666666666666,
+          "median": 207,
+          "p90": 300.5,
+          "max": 321
+        },
+        "lines": {
+          "n": 6,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 6,
+          "mean": 1.8333333333333333,
+          "median": 2,
+          "p90": 2,
+          "max": 2
+        },
+        "chain_ops": {
+          "n": 6,
+          "mean": 2.1666666666666665,
+          "median": 2,
+          "p90": 3.5,
+          "max": 4
+        },
+        "segments": {
+          "n": 6,
+          "mean": 5,
+          "median": 5,
+          "p90": 6.5,
+          "max": 7
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-opus",
+      "task": "t4-build-test",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zz2125hkjcmsqv1dzas70",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 25.875,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 6,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 104785,
+        "cache_read_tokens": 96776,
+        "cache_write_tokens": 7995,
+        "output_tokens": 1862,
+        "reasoning_tokens": 63,
+        "cost_usd": 0.09662620000000001,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.09662620000000001
+      },
+      "tools": {
+        "top_level_calls": 8,
+        "top_level_errors": 0,
+        "by_name": {
+          "read": 1,
+          "shell": 4,
+          "edit": 1,
+          "write": 2
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 4,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 4,
+        "bands": {
+          "1": 1,
+          "2-3": 2,
+          "4-7": 0,
+          "8+": 1
+        },
+        "chars": {
+          "n": 4,
+          "mean": 113,
+          "median": 89,
+          "p90": 209.8,
+          "max": 256
+        },
+        "lines": {
+          "n": 4,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 4,
+          "mean": 1.5,
+          "median": 1.5,
+          "p90": 2.7,
+          "max": 3
+        },
+        "chain_ops": {
+          "n": 4,
+          "mean": 1.25,
+          "median": 0.5,
+          "p90": 3.1000000000000005,
+          "max": 4
+        },
+        "segments": {
+          "n": 4,
+          "mean": 3.75,
+          "median": 3,
+          "p90": 6.500000000000001,
+          "max": 8
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-opus",
+      "task": "t5-single-edit",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m61010r0m9xvr58j5whf297z",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 10.556,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 3,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 40258,
+        "cache_read_tokens": 38161,
+        "cache_write_tokens": 2089,
+        "output_tokens": 468,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.027469200000000003,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.027469200000000003
+      },
+      "tools": {
+        "top_level_calls": 2,
+        "top_level_errors": 0,
+        "by_name": {
+          "read": 1,
+          "edit": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-opus",
+      "task": "t6-debug-fix",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6101ncs8dd7keyn32gymyxc",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 46.174,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 7,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 135064,
+        "cache_read_tokens": 122504,
+        "cache_write_tokens": 12544,
+        "output_tokens": 2440,
+        "reasoning_tokens": 335,
+        "cost_usd": 0.1360848,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.1360848
+      },
+      "tools": {
+        "top_level_calls": 8,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 3,
+          "read": 2,
+          "edit": 2,
+          "write": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 3,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 3,
+        "bands": {
+          "1": 0,
+          "2-3": 1,
+          "4-7": 0,
+          "8+": 2
+        },
+        "chars": {
+          "n": 3,
+          "mean": 234,
+          "median": 170,
+          "p90": 404.4,
+          "max": 463
+        },
+        "lines": {
+          "n": 3,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 3,
+          "mean": 1.6666666666666667,
+          "median": 2,
+          "p90": 2.8,
+          "max": 3
+        },
+        "chain_ops": {
+          "n": 3,
+          "mean": 3.3333333333333335,
+          "median": 4,
+          "p90": 4.8,
+          "max": 5
+        },
+        "segments": {
+          "n": 3,
+          "mean": 6,
+          "median": 8,
+          "p90": 8,
+          "max": 8
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t1-survey",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zrgnrrg6a9n6yt0efy7n4",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 40.369,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 7,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 127230,
+        "cache_read_tokens": 104079,
+        "cache_write_tokens": 23135,
+        "output_tokens": 2011,
+        "reasoning_tokens": 148,
+        "cost_usd": 0.0987953,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.0987953
+      },
+      "tools": {
+        "top_level_calls": 7,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 7
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 7,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 1,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 2,
+        "interp_inline_by_lang": {
+          "awk": 1,
+          "python": 1
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 6,
+        "bands": {
+          "1": 0,
+          "2-3": 1,
+          "4-7": 3,
+          "8+": 3
+        },
+        "chars": {
+          "n": 7,
+          "mean": 244.57142857142858,
+          "median": 174,
+          "p90": 445.0000000000001,
+          "max": 598
+        },
+        "lines": {
+          "n": 7,
+          "mean": 2.142857142857143,
+          "median": 1,
+          "p90": 4.200000000000003,
+          "max": 9
+        },
+        "pipes": {
+          "n": 7,
+          "mean": 2,
+          "median": 2,
+          "p90": 3.4000000000000004,
+          "max": 4
+        },
+        "chain_ops": {
+          "n": 7,
+          "mean": 3.7142857142857144,
+          "median": 3,
+          "p90": 5.800000000000001,
+          "max": 7
+        },
+        "segments": {
+          "n": 7,
+          "mean": 6.714285714285714,
+          "median": 6,
+          "p90": 10.4,
+          "max": 11
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t2-aggregate",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zss2x5cpvfe4zvzw1jvc0",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 24.194,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 3,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 42037,
+        "cache_read_tokens": 38597,
+        "cache_write_tokens": 3432,
+        "output_tokens": 1350,
+        "reasoning_tokens": 101,
+        "cost_usd": 0.0298154,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.0298154
+      },
+      "tools": {
+        "top_level_calls": 2,
+        "top_level_errors": 0,
+        "by_name": {
+          "run_js": 1,
+          "shell": 1
+        },
+        "child_executed": 1,
+        "child_by_tool": {
+          "shell": 1
+        }
+      },
+      "run_js": {
+        "calls": 1,
+        "code_chars": 231,
+        "output_bytes": 0,
+        "return_bytes": 422,
+        "child_calls": 1,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 1,
+        "control_calls": 0,
+        "child_commands": 1,
+        "heredoc_cmds": 1,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 1,
+        "interp_inline_by_lang": {
+          "python": 1
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 1,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 1,
+          "mean": 1025,
+          "median": 1025,
+          "p90": 1025,
+          "max": 1025
+        },
+        "lines": {
+          "n": 1,
+          "mean": 25,
+          "median": 25,
+          "p90": 25,
+          "max": 25
+        },
+        "pipes": {
+          "n": 1,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 1,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "segments": {
+          "n": 1,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t3-rename",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zwjmvfgbz5t6k1nx3em8n",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 19.374,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 4,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 68211,
+        "cache_read_tokens": 60949,
+        "cache_write_tokens": 7252,
+        "output_tokens": 970,
+        "reasoning_tokens": 139,
+        "cost_usd": 0.0400398,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.0400398
+      },
+      "tools": {
+        "top_level_calls": 3,
+        "top_level_errors": 0,
+        "by_name": {
+          "grep": 1,
+          "shell": 2
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 2,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 2,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 1,
+          "8+": 1
+        },
+        "chars": {
+          "n": 2,
+          "mean": 257.5,
+          "median": 257.5,
+          "p90": 366.70000000000005,
+          "max": 394
+        },
+        "lines": {
+          "n": 2,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 2,
+          "mean": 2,
+          "median": 2,
+          "p90": 2.8,
+          "max": 3
+        },
+        "chain_ops": {
+          "n": 2,
+          "mean": 3.5,
+          "median": 3.5,
+          "p90": 4.7,
+          "max": 5
+        },
+        "segments": {
+          "n": 2,
+          "mean": 6.5,
+          "median": 6.5,
+          "p90": 8.5,
+          "max": 9
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t4-build-test",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m610016v5kh32qd53kksk2rd",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 24.87,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 6,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 100956,
+        "cache_read_tokens": 94088,
+        "cache_write_tokens": 6854,
+        "output_tokens": 1563,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.051610600000000006,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.051610600000000006
+      },
+      "tools": {
+        "top_level_calls": 7,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 5,
+          "edit": 1,
+          "write": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 5,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 5,
+        "bands": {
+          "1": 0,
+          "2-3": 2,
+          "4-7": 3,
+          "8+": 0
+        },
+        "chars": {
+          "n": 5,
+          "mean": 116.8,
+          "median": 103,
+          "p90": 166.2,
+          "max": 195
+        },
+        "lines": {
+          "n": 5,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 5,
+          "mean": 0.8,
+          "median": 1,
+          "p90": 1.6,
+          "max": 2
+        },
+        "chain_ops": {
+          "n": 5,
+          "mean": 2.2,
+          "median": 3,
+          "p90": 3,
+          "max": 3
+        },
+        "segments": {
+          "n": 5,
+          "mean": 4,
+          "median": 4,
+          "p90": 5.6,
+          "max": 6
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t5-single-edit",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m61013hzbzsvrgt80p6dzw9p",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 13.234,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 3,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 40254,
+        "cache_read_tokens": 38178,
+        "cache_write_tokens": 2068,
+        "output_tokens": 425,
+        "reasoning_tokens": 24,
+        "cost_usd": 0.017071600000000003,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.017071600000000003
+      },
+      "tools": {
+        "top_level_calls": 2,
+        "top_level_errors": 0,
+        "by_name": {
+          "read": 1,
+          "edit": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t6-debug-fix",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m610374kbaneb73krmcdw4n7",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 41.672,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 8,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 150263,
+        "cache_read_tokens": 139101,
+        "cache_write_tokens": 11144,
+        "output_tokens": 1672,
+        "reasoning_tokens": 286,
+        "cost_usd": 0.0724362,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.0724362
+      },
+      "tools": {
+        "top_level_calls": 8,
+        "top_level_errors": 1,
+        "by_name": {
+          "shell": 7,
+          "grep": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 7,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 1,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 6,
+        "bands": {
+          "1": 0,
+          "2-3": 3,
+          "4-7": 4,
+          "8+": 0
+        },
+        "chars": {
+          "n": 7,
+          "mean": 182.57142857142858,
+          "median": 114,
+          "p90": 346.8000000000001,
+          "max": 579
+        },
+        "lines": {
+          "n": 7,
+          "mean": 1.5714285714285714,
+          "median": 1,
+          "p90": 2.6000000000000014,
+          "max": 5
+        },
+        "pipes": {
+          "n": 7,
+          "mean": 1,
+          "median": 1,
+          "p90": 1.4000000000000004,
+          "max": 2
+        },
+        "chain_ops": {
+          "n": 7,
+          "mean": 1.5714285714285714,
+          "median": 2,
+          "p90": 2,
+          "max": 2
+        },
+        "segments": {
+          "n": 7,
+          "mean": 3.7142857142857144,
+          "median": 4,
+          "p90": 5,
+          "max": 5
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t1-survey",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zpv5xb54wxh13hrt8y691",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 53.784,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 7,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 80866,
+        "cache_read_tokens": 50176,
+        "cache_write_tokens": 0,
+        "output_tokens": 960,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.405076,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.405076
+      },
+      "tools": {
+        "top_level_calls": 6,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 3,
+          "run_js": 3
+        },
+        "child_executed": 26,
+        "child_by_tool": {
+          "read": 24,
+          "write": 1,
+          "shell": 1
+        }
+      },
+      "run_js": {
+        "calls": 3,
+        "code_chars": 2123,
+        "output_bytes": 45469,
+        "return_bytes": 0,
+        "child_calls": 26,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 1,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 3,
+        "control_calls": 0,
+        "child_commands": 1,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 3,
+        "bands": {
+          "1": 0,
+          "2-3": 1,
+          "4-7": 2,
+          "8+": 0
+        },
+        "chars": {
+          "n": 3,
+          "mean": 167.33333333333334,
+          "median": 124,
+          "p90": 232.8,
+          "max": 260
+        },
+        "lines": {
+          "n": 3,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 3,
+          "mean": 0.3333333333333333,
+          "median": 0,
+          "p90": 0.8,
+          "max": 1
+        },
+        "chain_ops": {
+          "n": 3,
+          "mean": 2.3333333333333335,
+          "median": 2,
+          "p90": 2.8,
+          "max": 3
+        },
+        "segments": {
+          "n": 3,
+          "mean": 3.6666666666666665,
+          "median": 4,
+          "p90": 4,
+          "max": 4
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t2-aggregate",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zrz4kwb5tnv8sw9f25yvj",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 69.268,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 7,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 57802,
+        "cache_read_tokens": 47744,
+        "cache_write_tokens": 0,
+        "output_tokens": 1443,
+        "reasoning_tokens": 272,
+        "cost_usd": 0.220474,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.220474
+      },
+      "tools": {
+        "top_level_calls": 6,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 3,
+          "run_js": 3
+        },
+        "child_executed": 86,
+        "child_by_tool": {
+          "read": 83,
+          "write": 2,
+          "shell": 1
+        }
+      },
+      "run_js": {
+        "calls": 3,
+        "code_chars": 2386,
+        "output_bytes": 5338,
+        "return_bytes": 0,
+        "child_calls": 86,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 2,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 3,
+        "control_calls": 0,
+        "child_commands": 1,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 2,
+        "bands": {
+          "1": 0,
+          "2-3": 2,
+          "4-7": 1,
+          "8+": 0
+        },
+        "chars": {
+          "n": 3,
+          "mean": 139,
+          "median": 112,
+          "p90": 222.4,
+          "max": 250
+        },
+        "lines": {
+          "n": 3,
+          "mean": 1.3333333333333333,
+          "median": 1,
+          "p90": 1.8,
+          "max": 2
+        },
+        "pipes": {
+          "n": 3,
+          "mean": 1,
+          "median": 1,
+          "p90": 1.8,
+          "max": 2
+        },
+        "chain_ops": {
+          "n": 3,
+          "mean": 1.3333333333333333,
+          "median": 1,
+          "p90": 1.8,
+          "max": 2
+        },
+        "segments": {
+          "n": 3,
+          "mean": 3.6666666666666665,
+          "median": 3,
+          "p90": 4.6,
+          "max": 5
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t3-rename",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zthvsjz85rqfer6qn699f",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 61.045,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 8,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 94578,
+        "cache_read_tokens": 79104,
+        "cache_write_tokens": 0,
+        "output_tokens": 998,
+        "reasoning_tokens": 31,
+        "cost_usd": 0.283744,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.283744
+      },
+      "tools": {
+        "top_level_calls": 7,
+        "top_level_errors": 1,
+        "by_name": {
+          "shell": 3,
+          "run_js": 4
+        },
+        "child_executed": 45,
+        "child_by_tool": {
+          "shell": 14,
+          "edit": 7,
+          "git_diff": 1,
+          "read": 23
+        }
+      },
+      "run_js": {
+        "calls": 4,
+        "code_chars": 2272,
+        "output_bytes": 32117,
+        "return_bytes": 0,
+        "child_calls": 45,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 1,
+          "host_rejected": 0,
+          "child_tool_error": 3,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 5,
+        "error_runs": 1
+      },
+      "shell": {
+        "commands": 2,
+        "control_calls": 1,
+        "child_commands": 14,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 2,
+        "bands": {
+          "1": 1,
+          "2-3": 1,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 2,
+          "mean": 57,
+          "median": 57,
+          "p90": 74.6,
+          "max": 79
+        },
+        "lines": {
+          "n": 2,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 2,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 2,
+          "mean": 0.5,
+          "median": 0.5,
+          "p90": 0.9,
+          "max": 1
+        },
+        "segments": {
+          "n": 2,
+          "mean": 1.5,
+          "median": 1.5,
+          "p90": 1.9,
+          "max": 2
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t4-build-test",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zyvp0f5aphzs3q7pabhjy",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 62.662,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 11,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 122297,
+        "cache_read_tokens": 108544,
+        "cache_write_tokens": 0,
+        "output_tokens": 1361,
+        "reasoning_tokens": 28,
+        "cost_usd": 0.31412400000000007,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.31412400000000007
+      },
+      "tools": {
+        "top_level_calls": 10,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 5,
+          "run_js": 1,
+          "read": 2,
+          "apply_patch": 2
+        },
+        "child_executed": 3,
+        "child_by_tool": {
+          "read": 2,
+          "shell": 1
+        }
+      },
+      "run_js": {
+        "calls": 1,
+        "code_chars": 272,
+        "output_bytes": 9339,
+        "return_bytes": 0,
+        "child_calls": 3,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 3,
+        "control_calls": 2,
+        "child_commands": 1,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 3,
+        "bands": {
+          "1": 1,
+          "2-3": 2,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 3,
+          "mean": 62,
+          "median": 57,
+          "p90": 98.6,
+          "max": 109
+        },
+        "lines": {
+          "n": 3,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 3,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 3,
+          "mean": 1.3333333333333333,
+          "median": 2,
+          "p90": 2,
+          "max": 2
+        },
+        "segments": {
+          "n": 3,
+          "mean": 2.3333333333333335,
+          "median": 3,
+          "p90": 3,
+          "max": 3
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t5-single-edit",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m61010d7mewfh9hcew80spg8",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 19.67,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 4,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 28994,
+        "cache_read_tokens": 20992,
+        "cache_write_tokens": 0,
+        "output_tokens": 315,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.11676199999999998,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.11676199999999998
+      },
+      "tools": {
+        "top_level_calls": 3,
+        "top_level_errors": 0,
+        "by_name": {
+          "read": 1,
+          "apply_patch": 1,
+          "git_diff": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t6-debug-fix",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6101mzffy7ehkfe7nsz0sq6",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 81.028,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 13,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 206462,
+        "cache_read_tokens": 181888,
+        "cache_write_tokens": 0,
+        "output_tokens": 1179,
+        "reasoning_tokens": 48,
+        "cost_usd": 0.48657799999999995,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.48657799999999995
+      },
+      "tools": {
+        "top_level_calls": 12,
+        "top_level_errors": 3,
+        "by_name": {
+          "shell": 5,
+          "run_js": 2,
+          "read": 3,
+          "apply_patch": 2
+        },
+        "child_executed": 7,
+        "child_by_tool": {
+          "read": 5,
+          "git_diff": 1,
+          "shell": 1
+        }
+      },
+      "run_js": {
+        "calls": 2,
+        "code_chars": 360,
+        "output_bytes": 27502,
+        "return_bytes": 0,
+        "child_calls": 7,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 5,
+        "control_calls": 0,
+        "child_commands": 1,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 5,
+        "bands": {
+          "1": 2,
+          "2-3": 2,
+          "4-7": 1,
+          "8+": 0
+        },
+        "chars": {
+          "n": 5,
+          "mean": 64.2,
+          "median": 60,
+          "p90": 88.4,
+          "max": 90
+        },
+        "lines": {
+          "n": 5,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 5,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 5,
+          "mean": 1.4,
+          "median": 2,
+          "p90": 2.6,
+          "max": 3
+        },
+        "segments": {
+          "n": 5,
+          "mean": 2.4,
+          "median": 3,
+          "p90": 3.6,
+          "max": 4
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t1-survey",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zpv6g4q0akgwqtj10kfmw",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 57.326,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 12,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 204563,
+        "cache_read_tokens": 180736,
+        "cache_write_tokens": 0,
+        "output_tokens": 2489,
+        "reasoning_tokens": 311,
+        "cost_usd": 0.010869120000000001,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.010869120000000001
+      },
+      "tools": {
+        "top_level_calls": 15,
+        "top_level_errors": 2,
+        "by_name": {
+          "shell": 12,
+          "grep": 1,
+          "read": 1,
+          "run_js": 1
+        },
+        "child_executed": 1,
+        "child_by_tool": {
+          "write": 1
+        }
+      },
+      "run_js": {
+        "calls": 1,
+        "code_chars": 1363,
+        "output_bytes": 0,
+        "return_bytes": 1478,
+        "child_calls": 1,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 1,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 12,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 1,
+        "interp_inline_by_lang": {
+          "python": 1
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 12,
+        "bands": {
+          "1": 6,
+          "2-3": 4,
+          "4-7": 2,
+          "8+": 0
+        },
+        "chars": {
+          "n": 12,
+          "mean": 128.58333333333334,
+          "median": 114,
+          "p90": 219,
+          "max": 286
+        },
+        "lines": {
+          "n": 12,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 12,
+          "mean": 0.08333333333333333,
+          "median": 0,
+          "p90": 0,
+          "max": 1
+        },
+        "chain_ops": {
+          "n": 12,
+          "mean": 1.0833333333333333,
+          "median": 1,
+          "p90": 2.9000000000000004,
+          "max": 4
+        },
+        "segments": {
+          "n": 12,
+          "mean": 2,
+          "median": 1.5,
+          "p90": 3.9000000000000004,
+          "max": 5
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t2-aggregate",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zrsjkks01x68hqyhdgwz2",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 21.771,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 3,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 24141,
+        "cache_read_tokens": 20992,
+        "cache_write_tokens": 0,
+        "output_tokens": 1129,
+        "reasoning_tokens": 234,
+        "cost_usd": 0.00217864,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.00217864
+      },
+      "tools": {
+        "top_level_calls": 2,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 2
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 2,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 2,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 2,
+        "interp_inline_by_lang": {
+          "python": 2
+        },
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 1,
+          "2-3": 1,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 2,
+          "mean": 1010.5,
+          "median": 1010.5,
+          "p90": 1241.3000000000002,
+          "max": 1299
+        },
+        "lines": {
+          "n": 2,
+          "mean": 21.5,
+          "median": 21.5,
+          "p90": 27.5,
+          "max": 29
+        },
+        "pipes": {
+          "n": 2,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 2,
+          "mean": 0.5,
+          "median": 0.5,
+          "p90": 0.9,
+          "max": 1
+        },
+        "segments": {
+          "n": 2,
+          "mean": 2,
+          "median": 2,
+          "p90": 2.8,
+          "max": 3
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t3-rename",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105mez7qx9sdf4w7f4q70j",
+      "status": "error",
+      "verify": "pass",
+      "duration_s": 19.554,
+      "terminal_phase": "Error",
+      "usage": {
+        "requests": 4,
+        "requests_failed": 1,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 24149,
+        "cache_read_tokens": 6528,
+        "cache_write_tokens": 0,
+        "output_tokens": 645,
+        "reasoning_tokens": 182,
+        "cost_usd": 0.0042997600000000006,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 1,
+        "total_cost_usd": 0.0042997600000000006
+      },
+      "tools": {
+        "top_level_calls": 4,
+        "top_level_errors": 0,
+        "by_name": {
+          "shell": 4
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 4,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 4,
+        "bands": {
+          "1": 3,
+          "2-3": 1,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 4,
+          "mean": 78,
+          "median": 72.5,
+          "p90": 129.20000000000002,
+          "max": 149
+        },
+        "lines": {
+          "n": 4,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 4,
+          "mean": 0.25,
+          "median": 0,
+          "p90": 0.7000000000000002,
+          "max": 1
+        },
+        "chain_ops": {
+          "n": 4,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "segments": {
+          "n": 4,
+          "mean": 1.25,
+          "median": 1,
+          "p90": 1.7000000000000002,
+          "max": 2
+        }
+      },
+      "notes": [
+        "1 件のリクエストに費用がない（未知の価格）"
+      ]
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t4-build-test",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60zxg98kes40wvvqq5y9txs",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 43.804,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 11,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 124666,
+        "cache_read_tokens": 97536,
+        "cache_write_tokens": 0,
+        "output_tokens": 2114,
+        "reasoning_tokens": 233,
+        "cost_usd": 0.009490720000000001,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.009490720000000001
+      },
+      "tools": {
+        "top_level_calls": 14,
+        "top_level_errors": 1,
+        "by_name": {
+          "shell": 6,
+          "read": 3,
+          "apply_patch": 3,
+          "git_diff": 2
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 6,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 6,
+        "bands": {
+          "1": 6,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 6,
+          "mean": 28.166666666666668,
+          "median": 25,
+          "p90": 40.5,
+          "max": 51
+        },
+        "lines": {
+          "n": 6,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 6,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 6,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "segments": {
+          "n": 6,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t5-single-edit",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m60znavxv0wy90nvdbkghyn3",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 22.443,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 4,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 29149,
+        "cache_read_tokens": 13952,
+        "cache_write_tokens": 0,
+        "output_tokens": 305,
+        "reasoning_tokens": 43,
+        "cost_usd": 0.0036234400000000003,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.0036234400000000003
+      },
+      "tools": {
+        "top_level_calls": 3,
+        "top_level_errors": 0,
+        "by_name": {
+          "read": 1,
+          "apply_patch": 1,
+          "git_diff": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t6-debug-fix",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6101hw9zcpq7k89jv68k4bf",
+      "status": "ok",
+      "verify": "pass",
+      "duration_s": 66.978,
+      "terminal_phase": "Done",
+      "usage": {
+        "requests": 12,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 182973,
+        "cache_read_tokens": 106752,
+        "cache_write_tokens": 0,
+        "output_tokens": 2067,
+        "reasoning_tokens": 650,
+        "cost_usd": 0.019446240000000004,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0.019446240000000004
+      },
+      "tools": {
+        "top_level_calls": 14,
+        "top_level_errors": 3,
+        "by_name": {
+          "shell": 4,
+          "read": 4,
+          "apply_patch": 4,
+          "grep": 1,
+          "git_diff": 1
+        },
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 4,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 4,
+        "bands": {
+          "1": 3,
+          "2-3": 1,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 4,
+          "mean": 34.25,
+          "median": 35,
+          "p90": 35,
+          "max": 35
+        },
+        "lines": {
+          "n": 4,
+          "mean": 1,
+          "median": 1,
+          "p90": 1,
+          "max": 1
+        },
+        "pipes": {
+          "n": 4,
+          "mean": 0,
+          "median": 0,
+          "p90": 0,
+          "max": 0
+        },
+        "chain_ops": {
+          "n": 4,
+          "mean": 0.25,
+          "median": 0,
+          "p90": 0.7000000000000002,
+          "max": 1
+        },
+        "segments": {
+          "n": 4,
+          "mean": 1.25,
+          "median": 1,
+          "p90": 1.7000000000000002,
+          "max": 2
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t1-survey",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105f7gskexyty7ekjty1y9",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.46,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t2-aggregate",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105f8a4ckxzn7ejg5m471t",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.232,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t3-rename",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105f7gv6vatsd59cf83gne",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.514,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t4-build-test",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105mnf8764hd87medhb5x4",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.467,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t5-single-edit",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105mqbb9pmd546r57v203w",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.465,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t6-debug-fix",
+      "rep": "1",
+      "run_js_enabled": true,
+      "run_id": "run-01m6105t9p8mjxt0kqnwq6v95h",
+      "status": "error",
+      "verify": "fail",
+      "duration_s": 4.053,
+      "terminal_phase": null,
+      "usage": {
+        "requests": 0,
+        "requests_failed": 0,
+        "aux_requests": 0,
+        "aux_purposes": {},
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0,
+        "aux_cost_usd": 0,
+        "unpriced_requests": 0,
+        "total_cost_usd": 0
+      },
+      "tools": {
+        "top_level_calls": 0,
+        "top_level_errors": 0,
+        "by_name": {},
+        "child_executed": 0,
+        "child_by_tool": {}
+      },
+      "run_js": {
+        "calls": 0,
+        "code_chars": 0,
+        "output_bytes": 0,
+        "return_bytes": 0,
+        "child_calls": 0,
+        "child_calls_omitted": 0,
+        "errors": {
+          "js_exception": 0,
+          "host_rejected": 0,
+          "child_tool_error": 0,
+          "timeout": 0,
+          "limit_hit": 0,
+          "pre_run_error": 0
+        },
+        "limit_hit_kinds": {},
+        "written_paths": 0,
+        "error_runs": 0
+      },
+      "shell": {
+        "commands": 0,
+        "control_calls": 0,
+        "child_commands": 0,
+        "heredoc_cmds": 0,
+        "here_string_cmds": 0,
+        "interp_inline_cmds": 0,
+        "interp_inline_by_lang": {},
+        "interp_file_runs": 0,
+        "oneliner_cmds": 0,
+        "bands": {
+          "1": 0,
+          "2-3": 0,
+          "4-7": 0,
+          "8+": 0
+        },
+        "chars": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "lines": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "pipes": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "chain_ops": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        },
+        "segments": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "p90": null,
+          "max": null
+        }
+      },
+      "notes": []
+    }
+  ],
+  "aggregate": [
+    {
+      "model": "claude-opus",
+      "task": "t1-survey",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 10,
+        "aux_requests": 0,
+        "input": 255029,
+        "cache_read": 221639,
+        "cache_write": 33368,
+        "output": 3701,
+        "reasoning": 561,
+        "cost_usd": 0.2852758,
+        "total_cost_usd": 0.2852758,
+        "duration_s": 62.759,
+        "tool_calls": 9,
+        "run_js_calls": 5,
+        "child_calls": 18,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 32324,
+        "shell_cmds": 2,
+        "heredoc_cmds": 0,
+        "interp_cmds": 1,
+        "pipes_max": 1,
+        "chain_max": 1,
+        "chars_median": 127.5
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t1-survey",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 7,
+        "aux_requests": 0,
+        "input": 127230,
+        "cache_read": 104079,
+        "cache_write": 23135,
+        "output": 2011,
+        "reasoning": 148,
+        "cost_usd": 0.0987953,
+        "total_cost_usd": 0.0987953,
+        "duration_s": 40.369,
+        "tool_calls": 7,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 7,
+        "heredoc_cmds": 1,
+        "interp_cmds": 2,
+        "pipes_max": 4,
+        "chain_max": 7,
+        "chars_median": 174
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t1-survey",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 7,
+        "aux_requests": 0,
+        "input": 80866,
+        "cache_read": 50176,
+        "cache_write": 0,
+        "output": 960,
+        "reasoning": 0,
+        "cost_usd": 0.405076,
+        "total_cost_usd": 0.405076,
+        "duration_s": 53.784,
+        "tool_calls": 6,
+        "run_js_calls": 3,
+        "child_calls": 26,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 45469,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 3,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 1,
+        "chain_max": 3,
+        "chars_median": 124
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t1-survey",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 12,
+        "aux_requests": 0,
+        "input": 204563,
+        "cache_read": 180736,
+        "cache_write": 0,
+        "output": 2489,
+        "reasoning": 311,
+        "cost_usd": 0.010869120000000001,
+        "total_cost_usd": 0.010869120000000001,
+        "duration_s": 57.326,
+        "tool_calls": 15,
+        "run_js_calls": 1,
+        "child_calls": 1,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 1478,
+        "shell_cmds": 12,
+        "heredoc_cmds": 0,
+        "interp_cmds": 1,
+        "pipes_max": 1,
+        "chain_max": 4,
+        "chars_median": 114
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t1-survey",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.46,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-opus",
+      "task": "t2-aggregate",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 4,
+        "aux_requests": 0,
+        "input": 55403,
+        "cache_read": 52339,
+        "cache_write": 3054,
+        "output": 1783,
+        "reasoning": 264,
+        "cost_usd": 0.061437799999999994,
+        "total_cost_usd": 0.061437799999999994,
+        "duration_s": 24.058,
+        "tool_calls": 3,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 3,
+        "heredoc_cmds": 1,
+        "interp_cmds": 3,
+        "pipes_max": 10,
+        "chain_max": 3,
+        "chars_median": 163
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t2-aggregate",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 3,
+        "aux_requests": 0,
+        "input": 42037,
+        "cache_read": 38597,
+        "cache_write": 3432,
+        "output": 1350,
+        "reasoning": 101,
+        "cost_usd": 0.0298154,
+        "total_cost_usd": 0.0298154,
+        "duration_s": 24.194,
+        "tool_calls": 2,
+        "run_js_calls": 1,
+        "child_calls": 1,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 422,
+        "shell_cmds": 1,
+        "heredoc_cmds": 1,
+        "interp_cmds": 1,
+        "pipes_max": 0,
+        "chain_max": 0,
+        "chars_median": 1025
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t2-aggregate",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 7,
+        "aux_requests": 0,
+        "input": 57802,
+        "cache_read": 47744,
+        "cache_write": 0,
+        "output": 1443,
+        "reasoning": 272,
+        "cost_usd": 0.220474,
+        "total_cost_usd": 0.220474,
+        "duration_s": 69.268,
+        "tool_calls": 6,
+        "run_js_calls": 3,
+        "child_calls": 86,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 5338,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 3,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 2,
+        "chain_max": 2,
+        "chars_median": 112
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t2-aggregate",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 3,
+        "aux_requests": 0,
+        "input": 24141,
+        "cache_read": 20992,
+        "cache_write": 0,
+        "output": 1129,
+        "reasoning": 234,
+        "cost_usd": 0.00217864,
+        "total_cost_usd": 0.00217864,
+        "duration_s": 21.771,
+        "tool_calls": 2,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 2,
+        "heredoc_cmds": 2,
+        "interp_cmds": 2,
+        "pipes_max": 0,
+        "chain_max": 1,
+        "chars_median": 1010.5
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t2-aggregate",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.232,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-opus",
+      "task": "t3-rename",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 12,
+        "aux_requests": 0,
+        "input": 276721,
+        "cache_read": 259979,
+        "cache_write": 16716,
+        "output": 3360,
+        "reasoning": 715,
+        "cost_usd": 0.20287980000000005,
+        "total_cost_usd": 0.20287980000000005,
+        "duration_s": 117.786,
+        "tool_calls": 13,
+        "run_js_calls": 1,
+        "child_calls": 15,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 102,
+        "shell_cmds": 6,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 2,
+        "chain_max": 4,
+        "chars_median": 207
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t3-rename",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 4,
+        "aux_requests": 0,
+        "input": 68211,
+        "cache_read": 60949,
+        "cache_write": 7252,
+        "output": 970,
+        "reasoning": 139,
+        "cost_usd": 0.0400398,
+        "total_cost_usd": 0.0400398,
+        "duration_s": 19.374,
+        "tool_calls": 3,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 2,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 3,
+        "chain_max": 5,
+        "chars_median": 257.5
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t3-rename",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 8,
+        "aux_requests": 0,
+        "input": 94578,
+        "cache_read": 79104,
+        "cache_write": 0,
+        "output": 998,
+        "reasoning": 31,
+        "cost_usd": 0.283744,
+        "total_cost_usd": 0.283744,
+        "duration_s": 61.045,
+        "tool_calls": 7,
+        "run_js_calls": 4,
+        "child_calls": 45,
+        "run_js_js_exception": 1,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 32117,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 2,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 0,
+        "chain_max": 1,
+        "chars_median": 57
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t3-rename",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 4,
+        "aux_requests": 0,
+        "input": 24149,
+        "cache_read": 6528,
+        "cache_write": 0,
+        "output": 645,
+        "reasoning": 182,
+        "cost_usd": 0.0042997600000000006,
+        "total_cost_usd": 0.0042997600000000006,
+        "duration_s": 19.554,
+        "tool_calls": 4,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 4,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 1,
+        "chain_max": 0,
+        "chars_median": 72.5
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t3-rename",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.514,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-opus",
+      "task": "t4-build-test",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 6,
+        "aux_requests": 0,
+        "input": 104785,
+        "cache_read": 96776,
+        "cache_write": 7995,
+        "output": 1862,
+        "reasoning": 63,
+        "cost_usd": 0.09662620000000001,
+        "total_cost_usd": 0.09662620000000001,
+        "duration_s": 25.875,
+        "tool_calls": 8,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 4,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 3,
+        "chain_max": 4,
+        "chars_median": 89
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t4-build-test",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 6,
+        "aux_requests": 0,
+        "input": 100956,
+        "cache_read": 94088,
+        "cache_write": 6854,
+        "output": 1563,
+        "reasoning": 0,
+        "cost_usd": 0.051610600000000006,
+        "total_cost_usd": 0.051610600000000006,
+        "duration_s": 24.87,
+        "tool_calls": 7,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 5,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 2,
+        "chain_max": 3,
+        "chars_median": 103
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t4-build-test",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 11,
+        "aux_requests": 0,
+        "input": 122297,
+        "cache_read": 108544,
+        "cache_write": 0,
+        "output": 1361,
+        "reasoning": 28,
+        "cost_usd": 0.31412400000000007,
+        "total_cost_usd": 0.31412400000000007,
+        "duration_s": 62.662,
+        "tool_calls": 10,
+        "run_js_calls": 1,
+        "child_calls": 3,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 9339,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 3,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 0,
+        "chain_max": 2,
+        "chars_median": 57
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t4-build-test",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 11,
+        "aux_requests": 0,
+        "input": 124666,
+        "cache_read": 97536,
+        "cache_write": 0,
+        "output": 2114,
+        "reasoning": 233,
+        "cost_usd": 0.009490720000000001,
+        "total_cost_usd": 0.009490720000000001,
+        "duration_s": 43.804,
+        "tool_calls": 14,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 6,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 0,
+        "chain_max": 0,
+        "chars_median": 25
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t4-build-test",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.467,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-opus",
+      "task": "t5-single-edit",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 3,
+        "aux_requests": 0,
+        "input": 40258,
+        "cache_read": 38161,
+        "cache_write": 2089,
+        "output": 468,
+        "reasoning": 0,
+        "cost_usd": 0.027469200000000003,
+        "total_cost_usd": 0.027469200000000003,
+        "duration_s": 10.556,
+        "tool_calls": 2,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t5-single-edit",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 3,
+        "aux_requests": 0,
+        "input": 40254,
+        "cache_read": 38178,
+        "cache_write": 2068,
+        "output": 425,
+        "reasoning": 24,
+        "cost_usd": 0.017071600000000003,
+        "total_cost_usd": 0.017071600000000003,
+        "duration_s": 13.234,
+        "tool_calls": 2,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t5-single-edit",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 4,
+        "aux_requests": 0,
+        "input": 28994,
+        "cache_read": 20992,
+        "cache_write": 0,
+        "output": 315,
+        "reasoning": 0,
+        "cost_usd": 0.11676199999999998,
+        "total_cost_usd": 0.11676199999999998,
+        "duration_s": 19.67,
+        "tool_calls": 3,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t5-single-edit",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 4,
+        "aux_requests": 0,
+        "input": 29149,
+        "cache_read": 13952,
+        "cache_write": 0,
+        "output": 305,
+        "reasoning": 43,
+        "cost_usd": 0.0036234400000000003,
+        "total_cost_usd": 0.0036234400000000003,
+        "duration_s": 22.443,
+        "tool_calls": 3,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t5-single-edit",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.465,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    },
+    {
+      "model": "claude-opus",
+      "task": "t6-debug-fix",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 7,
+        "aux_requests": 0,
+        "input": 135064,
+        "cache_read": 122504,
+        "cache_write": 12544,
+        "output": 2440,
+        "reasoning": 335,
+        "cost_usd": 0.1360848,
+        "total_cost_usd": 0.1360848,
+        "duration_s": 46.174,
+        "tool_calls": 8,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 3,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 3,
+        "chain_max": 5,
+        "chars_median": 170
+      }
+    },
+    {
+      "model": "claude-sonnet",
+      "task": "t6-debug-fix",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 8,
+        "aux_requests": 0,
+        "input": 150263,
+        "cache_read": 139101,
+        "cache_write": 11144,
+        "output": 1672,
+        "reasoning": 286,
+        "cost_usd": 0.0724362,
+        "total_cost_usd": 0.0724362,
+        "duration_s": 41.672,
+        "tool_calls": 8,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 7,
+        "heredoc_cmds": 1,
+        "interp_cmds": 0,
+        "pipes_max": 2,
+        "chain_max": 2,
+        "chars_median": 114
+      }
+    },
+    {
+      "model": "gpt-astra",
+      "task": "t6-debug-fix",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 13,
+        "aux_requests": 0,
+        "input": 206462,
+        "cache_read": 181888,
+        "cache_write": 0,
+        "output": 1179,
+        "reasoning": 48,
+        "cost_usd": 0.48657799999999995,
+        "total_cost_usd": 0.48657799999999995,
+        "duration_s": 81.028,
+        "tool_calls": 12,
+        "run_js_calls": 2,
+        "child_calls": 7,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 27502,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 5,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 0,
+        "chain_max": 3,
+        "chars_median": 60
+      }
+    },
+    {
+      "model": "gpt-luna-fast",
+      "task": "t6-debug-fix",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 1,
+      "verify_known": 1,
+      "mean": {
+        "requests": 12,
+        "aux_requests": 0,
+        "input": 182973,
+        "cache_read": 106752,
+        "cache_write": 0,
+        "output": 2067,
+        "reasoning": 650,
+        "cost_usd": 0.019446240000000004,
+        "total_cost_usd": 0.019446240000000004,
+        "duration_s": 66.978,
+        "tool_calls": 14,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 4,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": 0,
+        "chain_max": 1,
+        "chars_median": 35
+      }
+    },
+    {
+      "model": "gpt-sol",
+      "task": "t6-debug-fix",
+      "run_js_enabled": true,
+      "runs": 1,
+      "verify_pass": 0,
+      "verify_known": 1,
+      "mean": {
+        "requests": 0,
+        "aux_requests": 0,
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cost_usd": 0,
+        "total_cost_usd": 0,
+        "duration_s": 4.053,
+        "tool_calls": 0,
+        "run_js_calls": 0,
+        "child_calls": 0,
+        "run_js_js_exception": 0,
+        "run_js_host_rejected": 0,
+        "run_js_timeout": 0,
+        "run_js_limit_hit": 0,
+        "run_js_output_bytes": 0,
+        "run_js_return_bytes": 0,
+        "shell_cmds": 0,
+        "heredoc_cmds": 0,
+        "interp_cmds": 0,
+        "pipes_max": null,
+        "chain_max": null,
+        "chars_median": null
+      }
+    }
+  ]
+}

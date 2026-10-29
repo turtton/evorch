@@ -4,6 +4,20 @@ ADR 0039（`intents/evorch/decisions/0039-js-code-mode-tool.md`）の「評価 /
 
 各課題のプロンプトは `run_js` の使用を指示しない（自然に使うかを見る）。課題ごとに「正解で exit 0、未着手で exit 1」になる検証コマンドを付けてある。
 
+## 保存する集計結果
+
+`results/` は `.git/info/exclude` で引き続き追跡対象外とし、DB・ログ・timeline・`inspect-*.json` などの生データはコミットしない。再利用できる集計だけを `results-summary/<round>/` に置く。ここには各ラウンドの `metrics.md` / `metrics.json`、r4 の `aggregate.md`、r5 の `compare.md` を収録する。秘密値、overlay 内容、keyring 情報、利用者固有の絶対パスは含めない。
+
+各ラウンドは ADR 0039 の評価で、題材の固定コミットは `4391a7e5`。実装 commit はすべて PR #397 の `feat/run-js-prototype` 上のもの。PR は `c5950c79` に squash merge 済みで、以下に記した各実装 commit は `main` の履歴には含まれない。
+
+| ラウンド | 実装 commit | 課題 | モデル | rep 数 / 条件 |
+|---|---|---|---|---|
+| `prelim-20261028` (r1) | `c19ab7b0` | v1 | 5 候補（`claude-opus` / `claude-sonnet` / `gpt-astra` / `gpt-luna-fast` / `gpt-sol`） | 1（30 run。`gpt-sol` は全件 provider error） |
+| `r2-20261028` (r2) | `46f0068c` | v2 | `claude-opus` / `claude-sonnet` / `gpt-astra` / `gpt-luna-fast` | 1（24 run） |
+| `r3-20261028` (r3) | `92cc2027` | v3 | 同上 | 1、部分実行（13 run: 全モデル t1〜t3、luna のみ t5。暴走で停止） |
+| `r4-20261029` | `f139cccb` | v3、`run_js` 有効 | 同上 | 3（72 run、effort high） |
+| `r5-nojs-20261029` | `f139cccb` | v3、`run_js` 無効 | 同上 | 3（72 run、effort high） |
+
 ## 課題一覧
 
 予備実行（`results/prelim-20261028/`）は、どの run も 3〜13 リクエスト・2 分以内で終わった。v2 に重くした 2 回目の観察（`results/r2-20261028/`）でも 5〜22 リクエストで、`run_js` の効果（ターン数の削減）を測れる規模にならなかった。モデルは集計・改名を 1 本のスクリプト（python / awk / sed）で片づけるので、「ファイルや箇所の数」を増やしただけでは往復が増えない。そこで **v3** は、素直な解き方（`run_js` なし）で 1 run あたり 20〜35 リクエストになるように、往復が**増えざるをえない**形にした:
