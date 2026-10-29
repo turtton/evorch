@@ -317,7 +317,7 @@ pub fn fill_label(
 /// How often a visible spinner moves. egui's `Spinner` asks for a repaint every
 /// frame, which rebuilds the whole workbench at the display rate while anything
 /// is running; this keeps the animation at a fraction of that cost.
-pub const SPINNER_FRAME: std::time::Duration = std::time::Duration::from_millis(100);
+pub const SPINNER_FRAME: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// A loading spinner the size of the style's interactive height.
 #[track_caller]
@@ -428,10 +428,9 @@ mod tests {
             super::spinner(ui);
         });
         // Then: it waits for its next animation step; egui's own spinner would not.
-        assert!(
-            delay > std::time::Duration::ZERO && delay <= super::SPINNER_FRAME,
-            "{delay:?}"
-        );
+        // egui wakes `predicted_dt` early so a frame does not overshoot its target.
+        let predicted = std::time::Duration::from_secs_f32(egui::RawInput::default().predicted_dt);
+        assert_eq!(delay, super::SPINNER_FRAME - predicted);
         let egui_delay = repaint_delay(&ctx, |ui| {
             ui.add(egui::Spinner::new());
         });
