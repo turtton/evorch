@@ -1,0 +1,136 @@
+{
+ "crates": {
+  "agents": {
+   "rs_files": 6,
+   "rs_lines": 924,
+   "test_attrs": 28
+  },
+  "apply-patch": {
+   "rs_files": 16,
+   "rs_lines": 4991,
+   "test_attrs": 94
+  },
+  "browser": {
+   "rs_files": 13,
+   "rs_lines": 5606,
+   "test_attrs": 42
+  },
+  "browser-cef": {
+   "rs_files": 17,
+   "rs_lines": 3993,
+   "test_attrs": 17
+  },
+  "catalog": {
+   "rs_files": 6,
+   "rs_lines": 927,
+   "test_attrs": 22
+  },
+  "config": {
+   "rs_files": 88,
+   "rs_lines": 19657,
+   "test_attrs": 423
+  },
+  "eval": {
+   "rs_files": 30,
+   "rs_lines": 11188,
+   "test_attrs": 63
+  },
+  "event-bus": {
+   "rs_files": 43,
+   "rs_lines": 12711,
+   "test_attrs": 175
+  },
+  "evorch": {
+   "rs_files": 20,
+   "rs_lines": 5059,
+   "test_attrs": 36
+  },
+  "gui": {
+   "rs_files": 444,
+   "rs_lines": 113821,
+   "test_attrs": 1702
+  },
+  "mock-openai": {
+   "rs_files": 15,
+   "rs_lines": 4577,
+   "test_attrs": 64
+  },
+  "model": {
+   "rs_files": 11,
+   "rs_lines": 1833,
+   "test_attrs": 26
+  },
+  "providers": {
+   "rs_files": 196,
+   "rs_lines": 43395,
+   "test_attrs": 607
+  },
+  "recorder": {
+   "rs_files": 16,
+   "rs_lines": 3334,
+   "test_attrs": 46
+  },
+  "routing": {
+   "rs_files": 27,
+   "rs_lines": 6565,
+   "test_attrs": 108
+  },
+  "runtime": {
+   "rs_files": 442,
+   "rs_lines": 156024,
+   "test_attrs": 1973
+  },
+  "sandbox": {
+   "rs_files": 19,
+   "rs_lines": 5261,
+   "test_attrs": 98
+  },
+  "secret-guard": {
+   "rs_files": 2,
+   "rs_lines": 604,
+   "test_attrs": 10
+  },
+  "storage": {
+   "rs_files": 132,
+   "rs_lines": 43810,
+   "test_attrs": 478
+  },
+  "test-support": {
+   "rs_files": 1,
+   "rs_lines": 117,
+   "test_attrs": 2
+  },
+  "tools": {
+   "rs_files": 117,
+   "rs_lines": 30933,
+   "test_attrs": 509
+  },
+  "workspace-ui": {
+   "rs_files": 27,
+   "rs_lines": 4790,
+   "test_attrs": 84
+  }
+ },
+ "largest_files": [
+  {
+   "path": "crates/runtime/tests/cache_preservation_e2e.rs",
+   "lines": 4530
+  },
+  {
+   "path": "crates/runtime/src/runtime.rs",
+   "lines": 4125
+  },
+  {
+   "path": "crates/event-bus/src/event.rs",
+   "lines": 2929
+  },
+  {
+   "path": "crates/gui/src/runtime_sink.rs",
+   "lines": 2833
+  },
+  {
+   "path": "crates/storage/src/writer/index/tests.rs",
+   "lines": 2441
+  }
+ ]
+}

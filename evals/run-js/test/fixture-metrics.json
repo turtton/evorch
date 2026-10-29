@@ -1,0 +1,1258 @@
+{
+ "description": "synthetic inspect-format fixture for metrics.mjs",
+ "runs": [
+  {
+   "label": {
+    "model": "gpt-sol",
+    "task": "t1-survey",
+    "rep": "1"
+   },
+   "result": {
+    "model": "gpt-sol",
+    "task": "t1-survey",
+    "rep": "1",
+    "run_js_enabled": true,
+    "run_id": "run-fixture-1",
+    "status": "ok",
+    "verify": "pass",
+    "duration_ms": 95000
+   },
+   "run": {
+    "db": "/x/run.db",
+    "result": {
+     "run_id": "run-fixture-1",
+     "context": {
+      "role": "Worker",
+      "terminal_phase": "Done"
+     },
+     "children": [],
+     "usage_requests": [
+      {
+       "request_id": "run-fixture-1-req-0",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": null,
+       "status": "ok",
+       "input_tokens": 1000,
+       "output_tokens": 100,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 500,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-1",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 2000,
+       "output_tokens": 101,
+       "cache_read_tokens": 800,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-2",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 3000,
+       "output_tokens": 102,
+       "cache_read_tokens": 1600,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-3",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 4000,
+       "output_tokens": 103,
+       "cache_read_tokens": 2400,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-4",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 5000,
+       "output_tokens": 104,
+       "cache_read_tokens": 3200,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-5",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 6000,
+       "output_tokens": 105,
+       "cache_read_tokens": 4000,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-1-req-9",
+       "at_ns": 1800000000000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-1",
+       "role": "worker",
+       "purpose": "title",
+       "status": "ok",
+       "input_tokens": 50,
+       "output_tokens": 109,
+       "cache_read_tokens": 7200,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.001
+      }
+     ],
+     "event_kinds": {}
+    }
+   },
+   "events": {
+    "db": "/x/run.db",
+    "result": {
+     "scope": {
+      "run_id": "run-fixture-1"
+     },
+     "truncated_older": false,
+     "events": [
+      {
+       "id": 1,
+       "session_id": null,
+       "wall_clock_ns": 1800000000500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c1",
+          "input": {
+           "path": "a.rs"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 2,
+       "session_id": null,
+       "wall_clock_ns": 1800000001000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c1",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 3,
+       "session_id": null,
+       "wall_clock_ns": 1800000001500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c2",
+          "input": {
+           "code": "const f = await tools.grep({pattern: \"x\"}); return f;"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 4,
+       "session_id": null,
+       "wall_clock_ns": 1800000002000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c2",
+          "is_error": false,
+          "output": "out",
+          "detail": {
+           "run_js": {
+            "calls": [
+             {
+              "seq": 1,
+              "name": "grep",
+              "is_error": false,
+              "paths": []
+             },
+             {
+              "seq": 2,
+              "name": "read",
+              "is_error": false,
+              "paths": []
+             },
+             {
+              "seq": 3,
+              "name": "read",
+              "is_error": false,
+              "paths": []
+             }
+            ],
+            "calls_omitted": 0,
+            "output_bytes": 300,
+            "return_bytes": 2000,
+            "timed_out": false,
+            "limit_hit": null,
+            "written_paths": []
+           }
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 5,
+       "session_id": null,
+       "wall_clock_ns": 1800000002500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "grep",
+          "call_id": "c2/1",
+          "input": {},
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 6,
+       "session_id": null,
+       "wall_clock_ns": 1800000003000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "grep",
+          "call_id": "c2/1",
+          "is_error": false,
+          "output": "out",
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 7,
+       "session_id": null,
+       "wall_clock_ns": 1800000003500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c2/2",
+          "input": {},
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 8,
+       "session_id": null,
+       "wall_clock_ns": 1800000004000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c2/2",
+          "is_error": false,
+          "output": "out",
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 9,
+       "session_id": null,
+       "wall_clock_ns": 1800000004500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c2/3",
+          "input": {},
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 10,
+       "session_id": null,
+       "wall_clock_ns": 1800000005000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c2/3",
+          "is_error": false,
+          "output": "out",
+          "parent_call_id": "c2"
+         }
+        }
+       }
+      },
+      {
+       "id": 11,
+       "session_id": null,
+       "wall_clock_ns": 1800000005500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c3",
+          "input": {
+           "code": "throw new Error(\"x\")"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 12,
+       "session_id": null,
+       "wall_clock_ns": 1800000006000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c3",
+          "is_error": true,
+          "output": "out",
+          "detail": {
+           "run_js": {
+            "calls": [],
+            "calls_omitted": 0,
+            "output_bytes": 120,
+            "return_bytes": 40,
+            "timed_out": false,
+            "limit_hit": null,
+            "written_paths": []
+           }
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 13,
+       "session_id": null,
+       "wall_clock_ns": 1800000006500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c4",
+          "input": {
+           "code": "await tools.edit({}); await tools.shell({command:\"cargo test\"})"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 14,
+       "session_id": null,
+       "wall_clock_ns": 1800000007000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "run_js",
+          "call_id": "c4",
+          "is_error": false,
+          "output": "out",
+          "detail": {
+           "run_js": {
+            "calls": [
+             {
+              "seq": 1,
+              "name": "edit",
+              "is_error": true,
+              "paths": []
+             },
+             {
+              "seq": 2,
+              "name": "shell",
+              "is_error": true,
+              "paths": []
+             },
+             {
+              "seq": 3,
+              "name": "read",
+              "is_error": false,
+              "paths": []
+             }
+            ],
+            "calls_omitted": 0,
+            "output_bytes": 120,
+            "return_bytes": 40,
+            "timed_out": false,
+            "limit_hit": null,
+            "written_paths": []
+           }
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 15,
+       "session_id": null,
+       "wall_clock_ns": 1800000007500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c4/2",
+          "input": {
+           "command": "cargo test"
+          },
+          "parent_call_id": "c4"
+         }
+        }
+       }
+      },
+      {
+       "id": 16,
+       "session_id": null,
+       "wall_clock_ns": 1800000008000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c4/2",
+          "is_error": true,
+          "output": "out",
+          "parent_call_id": "c4"
+         }
+        }
+       }
+      },
+      {
+       "id": 17,
+       "session_id": null,
+       "wall_clock_ns": 1800000008500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c4/3",
+          "input": {},
+          "parent_call_id": "c4"
+         }
+        }
+       }
+      },
+      {
+       "id": 18,
+       "session_id": null,
+       "wall_clock_ns": 1800000009000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "read",
+          "call_id": "c4/3",
+          "is_error": false,
+          "output": "out",
+          "parent_call_id": "c4"
+         }
+        }
+       }
+      },
+      {
+       "id": 19,
+       "session_id": null,
+       "wall_clock_ns": 1800000009500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c5",
+          "input": {
+           "command": "python3 - <<'PY'\nimport json\nprint(1 | 2)\nPY"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 20,
+       "session_id": null,
+       "wall_clock_ns": 1800000010000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c5",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 21,
+       "session_id": null,
+       "wall_clock_ns": 1800000010500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c6",
+          "input": {
+           "command": "grep -rn foo crates | sort | uniq -c | head -n 20"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 22,
+       "session_id": null,
+       "wall_clock_ns": 1800000011000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c6",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 23,
+       "session_id": null,
+       "wall_clock_ns": 1800000011500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c7",
+          "input": {
+           "action": "poll",
+           "job_id": "job-1"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 24,
+       "session_id": null,
+       "wall_clock_ns": 1800000012000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-1",
+          "tool_name": "shell",
+          "call_id": "c7",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "label": {
+    "model": "claude-opus",
+    "task": "t3-rename",
+    "rep": "1"
+   },
+   "result": {
+    "model": "claude-opus",
+    "task": "t3-rename",
+    "rep": "1",
+    "run_js_enabled": true,
+    "run_id": "run-fixture-2",
+    "status": "ok",
+    "verify": "fail",
+    "duration_ms": 180000
+   },
+   "run": {
+    "db": "/x/run.db",
+    "result": {
+     "run_id": "run-fixture-2",
+     "context": {
+      "role": "Worker",
+      "terminal_phase": "Done"
+     },
+     "children": [],
+     "usage_requests": [
+      {
+       "request_id": "run-fixture-2-req-0",
+       "at_ns": 1800000012000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-2",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 1000,
+       "output_tokens": 100,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 500,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-2-req-1",
+       "at_ns": 1800000012000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-2",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 2000,
+       "output_tokens": 101,
+       "cache_read_tokens": 800,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-2-req-2",
+       "at_ns": 1800000012000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-2",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 3000,
+       "output_tokens": 102,
+       "cache_read_tokens": 1600,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-2-req-3",
+       "at_ns": 1800000012000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-2",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 4000,
+       "output_tokens": 103,
+       "cache_read_tokens": 2400,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      }
+     ],
+     "event_kinds": {}
+    }
+   },
+   "events": {
+    "db": "/x/run.db",
+    "result": {
+     "scope": {
+      "run_id": "run-fixture-2"
+     },
+     "truncated_older": false,
+     "events": [
+      {
+       "id": 25,
+       "session_id": null,
+       "wall_clock_ns": 1800000012500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d1",
+          "input": {
+           "command": "grep -rln OldName crates/apply-patch | xargs sed -i 's/OldName/NewName/g' && cargo test -p apply-patch 2>&1 | tail -n 30"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 26,
+       "session_id": null,
+       "wall_clock_ns": 1800000013000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d1",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 27,
+       "session_id": null,
+       "wall_clock_ns": 1800000013500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d2",
+          "input": {
+           "command": "node -e 'console.log(require(\"fs\").readdirSync(\".\").length)'"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 28,
+       "session_id": null,
+       "wall_clock_ns": 1800000014000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d2",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 29,
+       "session_id": null,
+       "wall_clock_ns": 1800000014500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d3",
+          "input": {
+           "command": "ls | awk '{print $1}'; cat x <<EOF\nhi\nEOF"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 30,
+       "session_id": null,
+       "wall_clock_ns": 1800000015000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "shell",
+          "call_id": "d3",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 31,
+       "session_id": null,
+       "wall_clock_ns": 1800000015500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d4",
+          "input": {
+           "code": "while(true){}",
+           "timeout_ms": 1000
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 32,
+       "session_id": null,
+       "wall_clock_ns": 1800000016000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d4",
+          "is_error": true,
+          "output": "out",
+          "detail": {
+           "run_js": {
+            "calls": [],
+            "calls_omitted": 0,
+            "output_bytes": 120,
+            "return_bytes": 40,
+            "timed_out": true,
+            "limit_hit": "timeout",
+            "written_paths": []
+           }
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 33,
+       "session_id": null,
+       "wall_clock_ns": 1800000016500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d5",
+          "input": {
+           "code": "for(;;) await tools.read({path:\"a\"})"
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 34,
+       "session_id": null,
+       "wall_clock_ns": 1800000017000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d5",
+          "is_error": true,
+          "output": "out",
+          "detail": {
+           "run_js": {
+            "calls": [
+             {
+              "seq": 1,
+              "name": "read",
+              "is_error": false,
+              "paths": []
+             }
+            ],
+            "calls_omitted": 0,
+            "output_bytes": 120,
+            "return_bytes": 40,
+            "timed_out": false,
+            "limit_hit": "tool_calls",
+            "written_paths": []
+           }
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 35,
+       "session_id": null,
+       "wall_clock_ns": 1800000017500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d6",
+          "input": {
+           "timeout_ms": 0
+          }
+         }
+        }
+       }
+      },
+      {
+       "id": 36,
+       "session_id": null,
+       "wall_clock_ns": 1800000018000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "run_js",
+          "call_id": "d6",
+          "is_error": true,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 37,
+       "session_id": null,
+       "wall_clock_ns": 1800000018500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "read",
+          "call_id": "d5/1",
+          "input": {},
+          "parent_call_id": "d5"
+         }
+        }
+       }
+      },
+      {
+       "id": 38,
+       "session_id": null,
+       "wall_clock_ns": 1800000019000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-2",
+          "tool_name": "read",
+          "call_id": "d5/1",
+          "is_error": false,
+          "output": "out",
+          "parent_call_id": "d5"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "label": {
+    "model": "gpt-astra",
+    "task": "t5-single-edit",
+    "rep": "1"
+   },
+   "result": {
+    "model": "gpt-astra",
+    "task": "t5-single-edit",
+    "rep": "1",
+    "run_js_enabled": false,
+    "run_id": "run-fixture-3",
+    "status": "ok",
+    "verify": "pass",
+    "duration_ms": 20000
+   },
+   "run": {
+    "db": "/x/run.db",
+    "result": {
+     "run_id": "run-fixture-3",
+     "context": {
+      "role": "Worker",
+      "terminal_phase": "Done"
+     },
+     "children": [],
+     "usage_requests": [
+      {
+       "request_id": "run-fixture-3-req-0",
+       "at_ns": 1800000019000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-3",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 1000,
+       "output_tokens": 100,
+       "cache_read_tokens": 0,
+       "cache_write_tokens": 500,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      },
+      {
+       "request_id": "run-fixture-3-req-1",
+       "at_ns": 1800000019000000000,
+       "provider": "p",
+       "model": "m",
+       "run_id": "run-fixture-3",
+       "role": "worker",
+       "purpose": "agent",
+       "status": "ok",
+       "input_tokens": 2000,
+       "output_tokens": 101,
+       "cache_read_tokens": 800,
+       "cache_write_tokens": 0,
+       "reasoning_tokens": 50,
+       "cost_usd": 0.01
+      }
+     ],
+     "event_kinds": {}
+    }
+   },
+   "events": {
+    "db": "/x/run.db",
+    "result": {
+     "scope": {
+      "run_id": "run-fixture-3"
+     },
+     "truncated_older": false,
+     "events": [
+      {
+       "id": 39,
+       "session_id": null,
+       "wall_clock_ns": 1800000019500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-3",
+          "tool_name": "grep",
+          "call_id": "e1",
+          "input": {}
+         }
+        }
+       }
+      },
+      {
+       "id": 40,
+       "session_id": null,
+       "wall_clock_ns": 1800000020000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-3",
+          "tool_name": "grep",
+          "call_id": "e1",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      },
+      {
+       "id": 41,
+       "session_id": null,
+       "wall_clock_ns": 1800000020500000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolStarted",
+         "payload": {
+          "run_id": "run-fixture-3",
+          "tool_name": "edit",
+          "call_id": "e2",
+          "input": {}
+         }
+        }
+       }
+      },
+      {
+       "id": 42,
+       "session_id": null,
+       "wall_clock_ns": 1800000021000000000,
+       "kind": "Tool",
+       "payload": {
+        "kind": "Tool",
+        "payload": {
+         "kind": "ToolCompleted",
+         "payload": {
+          "run_id": "run-fixture-3",
+          "tool_name": "edit",
+          "call_id": "e2",
+          "is_error": false,
+          "output": "out"
+         }
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,13 @@
+diff --git a/crates/agents/src/role.rs b/crates/agents/src/role.rs
+index d5f97479..d49e2163 100644
+--- a/crates/agents/src/role.rs
++++ b/crates/agents/src/role.rs
+@@ -112,7 +112,7 @@ impl Role {
+             "Reviewer" => Ok(Self::Reviewer),
+             "WebResearcher" => Ok(Self::WebResearcher),
+             "Planner" => Ok(Self::Planner),
+-            "Advisor" | "advisor" | "Oracle" | "oracle" => Ok(Self::Advisor),
++            "Advisor" | "advisor" | "Oracle" => Ok(Self::Advisor),
+             "MultimodalLooker" => Ok(Self::MultimodalLooker),
+             "Evaluator" => Ok(Self::Evaluator),
+             _ => Err(UnknownRole {

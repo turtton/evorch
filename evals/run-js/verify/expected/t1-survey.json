@@ -1,0 +1,11 @@
+[
+ {"name": "apply_patch", "execution_mode": "Exclusive", "fs_read": true, "fs_write": true, "process_spawn": false, "network": false, "worker_allowed": true},
+ {"name": "edit", "execution_mode": "Exclusive", "fs_read": true, "fs_write": true, "process_spawn": false, "network": false, "worker_allowed": true},
+ {"name": "git_diff", "execution_mode": "Shared", "fs_read": true, "fs_write": false, "process_spawn": true, "network": false, "worker_allowed": true},
+ {"name": "grep", "execution_mode": "Shared", "fs_read": true, "fs_write": false, "process_spawn": false, "network": false, "worker_allowed": true},
+ {"name": "read", "execution_mode": "Shared", "fs_read": true, "fs_write": false, "process_spawn": false, "network": false, "worker_allowed": true},
+ {"name": "shell", "execution_mode": "Exclusive", "fs_read": true, "fs_write": true, "process_spawn": true, "network": false, "worker_allowed": true},
+ {"name": "web_fetch", "execution_mode": "Shared", "fs_read": false, "fs_write": false, "process_spawn": false, "network": true, "worker_allowed": false},
+ {"name": "web_search", "execution_mode": "Shared", "fs_read": false, "fs_write": false, "process_spawn": false, "network": true, "worker_allowed": false},
+ {"name": "write", "execution_mode": "Exclusive", "fs_read": true, "fs_write": true, "process_spawn": false, "network": false, "worker_allowed": true}
+]

@@ -1,0 +1,234 @@
+{
+ "crates": {
+  "agents": {
+   "rs_files": 6,
+   "rs_lines": 924,
+   "test_attrs": 28,
+   "src_lines": 290,
+   "tests_lines": 634,
+   "other_lines": 0
+  },
+  "apply-patch": {
+   "rs_files": 16,
+   "rs_lines": 4991,
+   "test_attrs": 94,
+   "src_lines": 3658,
+   "tests_lines": 1333,
+   "other_lines": 0
+  },
+  "browser": {
+   "rs_files": 13,
+   "rs_lines": 5606,
+   "test_attrs": 42,
+   "src_lines": 4578,
+   "tests_lines": 1028,
+   "other_lines": 0
+  },
+  "browser-cef": {
+   "rs_files": 17,
+   "rs_lines": 3993,
+   "test_attrs": 17,
+   "src_lines": 3503,
+   "tests_lines": 490,
+   "other_lines": 0
+  },
+  "catalog": {
+   "rs_files": 6,
+   "rs_lines": 927,
+   "test_attrs": 22,
+   "src_lines": 900,
+   "tests_lines": 27,
+   "other_lines": 0
+  },
+  "config": {
+   "rs_files": 88,
+   "rs_lines": 19657,
+   "test_attrs": 423,
+   "src_lines": 10630,
+   "tests_lines": 9011,
+   "other_lines": 16
+  },
+  "eval": {
+   "rs_files": 30,
+   "rs_lines": 11188,
+   "test_attrs": 63,
+   "src_lines": 11188,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "event-bus": {
+   "rs_files": 43,
+   "rs_lines": 12711,
+   "test_attrs": 175,
+   "src_lines": 10936,
+   "tests_lines": 1775,
+   "other_lines": 0
+  },
+  "evorch": {
+   "rs_files": 20,
+   "rs_lines": 5059,
+   "test_attrs": 36,
+   "src_lines": 3627,
+   "tests_lines": 1432,
+   "other_lines": 0
+  },
+  "gui": {
+   "rs_files": 444,
+   "rs_lines": 113821,
+   "test_attrs": 1702,
+   "src_lines": 67263,
+   "tests_lines": 46558,
+   "other_lines": 0
+  },
+  "mock-openai": {
+   "rs_files": 15,
+   "rs_lines": 4577,
+   "test_attrs": 64,
+   "src_lines": 2738,
+   "tests_lines": 1839,
+   "other_lines": 0
+  },
+  "model": {
+   "rs_files": 11,
+   "rs_lines": 1833,
+   "test_attrs": 26,
+   "src_lines": 1391,
+   "tests_lines": 442,
+   "other_lines": 0
+  },
+  "providers": {
+   "rs_files": 196,
+   "rs_lines": 43395,
+   "test_attrs": 607,
+   "src_lines": 29505,
+   "tests_lines": 13890,
+   "other_lines": 0
+  },
+  "recorder": {
+   "rs_files": 16,
+   "rs_lines": 3334,
+   "test_attrs": 46,
+   "src_lines": 2975,
+   "tests_lines": 359,
+   "other_lines": 0
+  },
+  "routing": {
+   "rs_files": 27,
+   "rs_lines": 6565,
+   "test_attrs": 108,
+   "src_lines": 3426,
+   "tests_lines": 3139,
+   "other_lines": 0
+  },
+  "runtime": {
+   "rs_files": 442,
+   "rs_lines": 156024,
+   "test_attrs": 1973,
+   "src_lines": 97820,
+   "tests_lines": 55282,
+   "other_lines": 2922
+  },
+  "sandbox": {
+   "rs_files": 19,
+   "rs_lines": 5261,
+   "test_attrs": 98,
+   "src_lines": 3999,
+   "tests_lines": 1262,
+   "other_lines": 0
+  },
+  "secret-guard": {
+   "rs_files": 2,
+   "rs_lines": 604,
+   "test_attrs": 10,
+   "src_lines": 604,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "storage": {
+   "rs_files": 132,
+   "rs_lines": 43810,
+   "test_attrs": 478,
+   "src_lines": 32452,
+   "tests_lines": 10014,
+   "other_lines": 1344
+  },
+  "test-support": {
+   "rs_files": 1,
+   "rs_lines": 117,
+   "test_attrs": 2,
+   "src_lines": 117,
+   "tests_lines": 0,
+   "other_lines": 0
+  },
+  "tools": {
+   "rs_files": 117,
+   "rs_lines": 30933,
+   "test_attrs": 509,
+   "src_lines": 17287,
+   "tests_lines": 13646,
+   "other_lines": 0
+  },
+  "workspace-ui": {
+   "rs_files": 27,
+   "rs_lines": 4790,
+   "test_attrs": 84,
+   "src_lines": 2399,
+   "tests_lines": 2391,
+   "other_lines": 0
+  }
+ },
+ "density_top5": [
+  {
+   "crate": "config",
+   "per_1k": 21.52
+  },
+  {
+   "crate": "tools",
+   "per_1k": 16.45
+  },
+  {
+   "crate": "gui",
+   "per_1k": 14.95
+  },
+  {
+   "crate": "providers",
+   "per_1k": 13.99
+  },
+  {
+   "crate": "event-bus",
+   "per_1k": 13.77
+  }
+ ],
+ "shared_basenames": [
+  {
+   "name": "tests.rs",
+   "crate_count": 11,
+   "file_count": 62,
+   "total_lines": 30085
+  },
+  {
+   "name": "error.rs",
+   "crate_count": 9,
+   "file_count": 12,
+   "total_lines": 1493
+  },
+  {
+   "name": "types.rs",
+   "crate_count": 5,
+   "file_count": 6,
+   "total_lines": 1115
+  },
+  {
+   "name": "session.rs",
+   "crate_count": 5,
+   "file_count": 6,
+   "total_lines": 971
+  },
+  {
+   "name": "ownership.rs",
+   "crate_count": 5,
+   "file_count": 7,
+   "total_lines": 510
+  }
+ ]
+}
