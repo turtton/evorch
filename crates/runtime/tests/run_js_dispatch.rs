@@ -347,6 +347,69 @@ async fn enabled_run_js_is_offered_with_generated_declarations() {
     );
 }
 
+/// Runs a worker whose first reply is `first`, switching run_js from `initial`
+/// to `!initial` while the model holds its first request, the way the GUI's
+/// Agent features settings switch a live runtime. Returns the tool lists of the
+/// two requests.
+async fn switch_run_js_mid_run(
+    initial: bool,
+    first: providers::ChatResponse,
+) -> (Arc<ScriptedModel>, Vec<Vec<providers::ToolSpec>>) {
+    let bus = Arc::new(EventBus::new(256));
+    let mut executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    executor
+        .register(Arc::new(RunJs::with_launcher(worker("exit 0"))))
+        .unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let model = Arc::new(ScriptedModel::gated(
+        [Ok(first), Ok(finish())],
+        Arc::clone(&gate),
+    ));
+    let runtime = AgentRuntime::new(Arc::clone(&bus), Arc::new(executor), model.clone());
+    runtime.set_run_js_settings(config::RunJsConfig {
+        enabled: initial,
+        ..config::RunJsConfig::default()
+    });
+    let run = runtime.delegate_background(Role::Worker, "task".into(), RunConfig::default());
+    model.wait_for_request(0).await;
+    runtime.set_run_js_settings(config::RunJsConfig {
+        enabled: !initial,
+        ..runtime.run_js_settings()
+    });
+    gate.notify_one();
+    model.wait_for_request(1).await;
+    gate.notify_one();
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let offered = model.observed_tools().await;
+    (model, offered)
+}
+
+#[tokio::test]
+async fn switching_run_js_during_a_run_keeps_the_tool_list_it_already_sent() {
+    // Given / When: run_js is switched off while an enabled run waits for the model.
+    let (model, offered) = switch_run_js_mid_run(true, run_js_call("js-1")).await;
+
+    // Then: the next request repeats the sent tool list, and the call is refused.
+    assert!(offered[0].iter().any(|spec| spec.name == "run_js"));
+    assert_eq!(offered[0], offered[1]);
+    let text = result_text(&model, "js-1").await;
+    assert!(text.contains("run_js is not enabled"), "{text}");
+
+    // Given / When: run_js is switched on while a disabled run waits for the model.
+    let (_, offered) = switch_run_js_mid_run(
+        false,
+        tool_response("read-1", "read", json!({"path": "missing.txt"})),
+    )
+    .await;
+
+    // Then: the run keeps its tool list without run_js.
+    assert!(offered[0].iter().all(|spec| spec.name != "run_js"));
+    assert_eq!(offered[0], offered[1]);
+}
+
 #[tokio::test]
 async fn calls_beyond_the_limit_fail_and_are_reported() {
     let script = format!(

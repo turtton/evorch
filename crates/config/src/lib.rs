@@ -14,6 +14,7 @@ mod migrate;
 pub mod presets;
 pub mod prompt_sources;
 pub mod save;
+mod save_agent_features;
 mod save_agents;
 mod save_codex;
 mod save_context;
@@ -37,6 +38,7 @@ pub use save::{
     OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
     validate_openai_compatible_provider_input,
 };
+pub use save_agent_features::{AgentFeatures, save_agent_features};
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
     CodexModelIntent, CodexProviderInput, delete_provider, save_codex_provider,

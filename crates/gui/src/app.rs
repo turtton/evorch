@@ -2,6 +2,7 @@
 
 mod actions;
 mod agent_browser;
+mod agent_features;
 mod attention;
 mod auto_grouping;
 pub mod auto_title;

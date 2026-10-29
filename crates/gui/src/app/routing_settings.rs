@@ -65,6 +65,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn show_routing_settings(&mut self) {
         self.provider_settings.open = false;
         self.sandbox_settings.open = false;
+        self.agent_features.open = false;
         self.self_improvement_settings.open = false;
         self.close_theme_settings();
         self.role_settings.open = false;

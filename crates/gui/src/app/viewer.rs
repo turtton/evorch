@@ -355,6 +355,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
+        self.render_agent_features(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());
         self.render_storage_settings(ui.ctx());
         if self.routing_settings.open {
