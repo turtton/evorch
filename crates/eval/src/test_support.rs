@@ -14,6 +14,13 @@ pub(crate) enum Step {
     },
     /// Never answers, as a provider that hangs would.
     Hang,
+    /// Holds the request until `release` is notified, after telling `entered` that it
+    /// arrived, and then answers with `then`. Lets a test act while a request is in flight.
+    Gated {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        then: Box<Step>,
+    },
 }
 
 pub(crate) fn text(text: &str) -> Step {
@@ -92,9 +99,19 @@ impl AgentModel for ScriptedModel {
         _: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        let step = self.steps.lock().unwrap().pop_front();
+        let mut step = self.steps.lock().unwrap().pop_front();
+        if let Some(Step::Gated {
+            entered,
+            release,
+            then,
+        }) = step
+        {
+            entered.notify_one();
+            release.notified().await;
+            step = Some(*then);
+        }
         let (content, finish_reason) = match step {
-            Some(Step::Hang) => std::future::pending().await,
+            Some(Step::Hang | Step::Gated { .. }) => std::future::pending().await,
             Some(Step::Tool { name, input }) => (
                 vec![ContentBlock::ToolUse {
                     id: format!("call-{}", self.requests.lock().unwrap().len()),

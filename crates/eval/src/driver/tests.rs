@@ -219,6 +219,7 @@ async fn questions_from_the_root_are_answered_by_the_simulated_user() {
         Entry::Answer { title, text, .. } if title == "Which file?" && text == "lib.rs"
     )));
     assert_eq!(outcome.user_turns, 2);
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
     assert!(
         harness
             .runtime
@@ -226,6 +227,60 @@ async fn questions_from_the_root_are_answered_by_the_simulated_user() {
             .iter()
             .all(|agent| agent.phase == AgentRunPhase::Stopped)
     );
+}
+
+#[tokio::test]
+async fn a_question_answered_while_the_user_decides_is_not_answered_again() {
+    // Given: an agent that asks a question, and a simulated user whose answer is still
+    // being decided when the question is answered by someone else.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let harness = Harness::new(
+        [
+            tool("ask_user", serde_json::json!({"title": "Which file?"})),
+            text("asked"),
+        ],
+        10,
+        [
+            Step::Gated {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                then: Box::new(decision("answer", "lib.rs")),
+            },
+            decision("finish", ""),
+        ],
+    );
+    let interloper = async {
+        entered.notified().await;
+        let requests = harness.user.requests();
+        let Some(ContentBlock::Text { text }) = requests[0][1].content.first() else {
+            panic!("simulator payload");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        let id = payload["pending_question"]["id"].as_str().unwrap();
+        harness.runtime.answer_user_question(id, "main.rs").unwrap();
+        release.notify_one();
+    };
+
+    // When: the replay runs and the other answer lands before the decision is returned.
+    let budget = EvalBudgetConfig::default();
+    let (outcome, ()) = tokio::join!(harness.drive(&budget), interloper);
+
+    // Then: the stale decision is dropped instead of failing the replay with
+    // `question already answered`, and the question is not shown to the user again.
+    assert_eq!(outcome.status, Status::Completed, "{}", outcome.reason);
+    assert!(
+        !outcome
+            .conversation
+            .iter()
+            .any(|entry| matches!(entry, Entry::Answer { .. })),
+        "{:?}",
+        outcome.conversation
+    );
+    assert_eq!(outcome.user_turns, 1);
+    let payloads = harness.simulator_payloads();
+    assert_eq!(payloads.len(), 2);
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
 }
 
 #[tokio::test]
@@ -492,4 +547,75 @@ async fn events_a_small_bus_overwrote_before_the_observer_stops_are_counted() {
     // Then: at least the two overwritten events are counted. Lag handling in
     // `recv` emits its own fault event, which can overwrite one more slot.
     assert!(observed.lagged_events >= 2, "{}", observed.lagged_events);
+}
+
+fn root_question(id: &str, answer: Option<&str>) -> UserQuestion {
+    UserQuestion {
+        id: id.into(),
+        run_id: "root".into(),
+        root_run_id: "root".into(),
+        root_name: "chat:Worker:thread-1".into(),
+        recipient_run_ids: Vec::new(),
+        title: "Which file?".into(),
+        options: Vec::new(),
+        blocking: true,
+        answer: answer.map(Into::into),
+        answer_origin: None,
+    }
+}
+
+#[test]
+fn an_answered_question_never_becomes_pending_again() {
+    // Given: an observer and a question the driver answered itself.
+    let bus = EventBus::new(8);
+    let mut observed = Observed {
+        root: Some("root".into()),
+        ..Observed::default()
+    };
+    let update = |question| Event::new(ToolEvent::UserQuestionUpdated { question });
+    observed.observe(&update(root_question("q-1", None)), &bus);
+    observed.mark_answered("q-1");
+    assert!(observed.pending.is_empty());
+
+    // When: the question is announced unanswered again, then reported answered late.
+    observed.observe(&update(root_question("q-1", None)), &bus);
+    observed.observe(&update(root_question("q-1", Some("a"))), &bus);
+
+    // Then: it stays out of the pending list and is shown in the conversation once.
+    assert!(observed.pending.is_empty());
+    assert_eq!(observed.conversation.len(), 1);
+}
+
+#[test]
+fn a_missed_answer_event_is_made_up_from_the_question_store() {
+    // Given: two pending questions, one of which the store already holds an answer for
+    // (its answer event was skipped by an observer that fell behind the bus).
+    let bus = EventBus::new(8);
+    let state = Mutex::new(Observed {
+        root: Some("root".into()),
+        ..Observed::default()
+    });
+    for id in ["q-1", "q-2"] {
+        lock(&state).observe(
+            &Event::new(ToolEvent::UserQuestionUpdated {
+                question: root_question(id, None),
+            }),
+            &bus,
+        );
+    }
+
+    // When: pending questions are reconciled with the store.
+    reconcile_answered(&state, |id| id == "q-1");
+
+    // Then: only the unanswered question is left to ask the simulated user about.
+    let state = lock(&state);
+    assert_eq!(
+        state
+            .pending
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q-2"]
+    );
+    assert!(state.answered.contains("q-1"));
 }
