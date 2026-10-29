@@ -69,6 +69,46 @@ impl CommandSink for RefusingRuntime {
     }
 }
 
+/// A runtime that accepts every chat and records the skills it attached itself.
+struct RecordingRuntime;
+
+impl CommandSink for RecordingRuntime {
+    fn has_host_input_receipts(&self) -> bool {
+        true
+    }
+
+    fn host_input_receipts(
+        &self,
+        _: &[String],
+    ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
+        Some(Ok(Vec::new()))
+    }
+
+    fn host_input_origins(
+        &self,
+        ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
+        Some(Ok(ids
+            .iter()
+            .map(|id| storage::HostInputOrigin {
+                prompt_id: id.clone(),
+                text: "use @git-best-practices please".into(),
+                skills: vec!["git-best-practices".into()],
+            })
+            .collect()))
+    }
+
+    fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        match command {
+            WorkbenchCommand::SendChat(chat) => vec![LoopEvent::ChatAccepted {
+                thread_id: chat.thread_id,
+                run_id: "run-1".into(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
 fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
     harness.input_mut().events.push(Event::Text(text.into()));
     harness.run();
@@ -199,6 +239,33 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
             if chat.text == typed && chat.skills == ["review"]));
     assert!(harness.has_label(&format!("You: {typed}")));
     assert!(harness.has_label(&format!("{} skill: review", gui::theme::icons::SPARKLE)));
+}
+
+#[test]
+fn the_bubble_shows_the_skills_the_runtime_recorded_for_the_accepted_message() {
+    // Given: a runtime that records the message with a skill the composer did not name.
+    let temp = tempfile::tempdir().expect("root");
+    let state = workbench_state(temp.path(), &[], TrustState::Approved)
+        .with_command_sink(Box::new(RecordingRuntime));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a message with no mention is sent and accepted.
+    type_text(&mut harness, "use @git-best-practices please");
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: the chip comes from the runtime's record, which also fills the saved history.
+    assert!(harness.has_label(&format!(
+        "{} skill: git-best-practices",
+        gui::theme::icons::SPARKLE
+    )));
+    assert!(harness.state().transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::UserMessage { skills, .. } if skills == &["git-best-practices".to_owned()]
+    )));
 }
 
 #[test]

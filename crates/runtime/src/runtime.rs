@@ -2193,6 +2193,27 @@ impl AgentRuntime {
         }
     }
 
+    /// What the runtime recorded for each given submission: the host's own
+    /// words and the names of the skills it attached, as fixed when it accepted
+    /// the message. Hosts show this rather than their own copy. Submissions
+    /// without a receipt are skipped; without storage there are none.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn host_input_origins(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<storage::HostInputOrigin>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => {
+                // Order this read after every acceptance already queued.
+                store.handle.host_input_receipts(prompt_ids)?;
+                store.host_input_origins(prompt_ids)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Mark a run's accepted receipts `Unknown` when the host has proven that
     /// no live incarnation can still read them (for example an orphaned run
     /// found at startup through the owner registry).

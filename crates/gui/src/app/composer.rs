@@ -285,14 +285,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 if let Some(chat) = title_chat {
                                     self.start_auto_title(chat);
                                 }
+                                // The runtime's record of the accepted message is the
+                                // source of the bubble, the queue row and the saved history.
+                                let (shown, skills) = self
+                                    .adopt_runtime_origin(&submission_id)
+                                    .unwrap_or_else(|| (text.into(), skills));
                                 match queued {
                                     Some(thread) => {
-                                        self.queue_follow_up(
-                                            &thread,
-                                            submission_id,
-                                            text.into(),
-                                            skills,
-                                        );
+                                        self.queue_follow_up(&thread, submission_id, shown, skills);
                                     }
                                     None if durable => {
                                         // Receipts decide the outcome. Keyed by the
@@ -300,7 +300,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                         self.transcripts.push_host_input(
                                             &submission_thread,
                                             &submission_id,
-                                            text.into(),
+                                            shown,
                                             skills,
                                         );
                                         self.save_sidebar();
@@ -310,7 +310,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                         // avoids a duplicate bubble.
                                         self.transcripts.push_thread(
                                             TranscriptEntry::UserMessage {
-                                                text: text.into(),
+                                                text: shown,
                                                 skills,
                                             },
                                         );

@@ -162,6 +162,14 @@ pub trait CommandSink: Send {
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
         None
     }
+    /// What the runtime recorded for each submission it accepted: the words and
+    /// the attached skill names. `None` only for non-runtime sinks/fixtures.
+    fn host_input_origins(
+        &self,
+        _ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
+        None
+    }
     /// Return only IDs that the generation-guarded storage operation changed.
     fn mark_unreachable_host_inputs(
         &self,

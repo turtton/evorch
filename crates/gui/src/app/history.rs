@@ -342,6 +342,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.seed_branches(None);
+        self.adopt_recorded_origins(db);
         let mut messages = self.history.clone();
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
@@ -679,6 +680,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         candidates
+    }
+
+    /// Replaces each saved message's words and skill names with what the
+    /// runtime recorded when it accepted the submission, so a bubble never
+    /// shows a copy the runtime did not receive. Messages the runtime has no
+    /// record of (never accepted) keep the saved copy.
+    fn adopt_recorded_origins(&mut self, db: &storage::Database) {
+        let ids: Vec<String> = self
+            .history
+            .iter()
+            .filter(|message| !message.id.is_empty())
+            .map(|message| message.id.clone())
+            .collect();
+        let Ok(origins) = db.host_input_origins(&ids) else {
+            return;
+        };
+        for origin in origins {
+            if let Some(message) = self
+                .history
+                .iter_mut()
+                .find(|message| message.id == origin.prompt_id)
+            {
+                message.text = origin.text;
+                message.skills = origin.skills;
+            }
+        }
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {

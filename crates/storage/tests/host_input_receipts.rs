@@ -635,3 +635,66 @@ fn withdrawn_is_terminal_and_survives_reopen_and_reconciliation() {
         Some(HostInputStatus::Withdrawn)
     );
 }
+
+#[test]
+fn origins_report_the_words_and_skill_names_each_submission_recorded() {
+    let (_dir, storage, database, _config) = fixture();
+    let handle = storage.handle();
+    let mut with_skills = evidence("evidence-skills", "run-origin", "use @a and @b");
+    with_skills.attachments = ["a", "b"]
+        .into_iter()
+        .map(|name| storage::EvidenceAttachment {
+            name: name.into(),
+            scope: "user".into(),
+            body: format!("{name} steps"),
+        })
+        .collect();
+    let mut first = receipt("prompt-skills", "run-origin", HostInputStatus::Accepted);
+    first.text = "use @a and @b".into();
+    first.evidence_id = Some(with_skills.id.clone());
+    handle
+        .append_host_input_accepted(&[with_skills], &[], None, &first)
+        .unwrap();
+    let plain = evidence("evidence-plain", "run-origin", "plain words");
+    let mut second = receipt("prompt-plain", "run-origin", HostInputStatus::Accepted);
+    second.text = "plain words".into();
+    second.evidence_id = Some(plain.id.clone());
+    handle
+        .append_host_input_accepted(&[plain], &[], None, &second)
+        .unwrap();
+    // A receipt that names no evidence has no skills.
+    let bare = receipt("prompt-bare", "run-origin", HostInputStatus::Accepted);
+    handle
+        .append_host_input_accepted(&[], &[], None, &bare)
+        .unwrap();
+
+    let ids = [
+        "prompt-bare".to_owned(),
+        "missing".to_owned(),
+        "prompt-skills".to_owned(),
+        "prompt-plain".to_owned(),
+    ];
+    let origins = database.host_input_origins(&ids).unwrap();
+    let summary: Vec<_> = origins
+        .iter()
+        .map(|origin| {
+            (
+                origin.prompt_id.as_str(),
+                origin.text.as_str(),
+                origin.skills.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("prompt-bare", "message prompt-bare", Vec::<String>::new()),
+            (
+                "prompt-skills",
+                "use @a and @b",
+                vec!["a".to_owned(), "b".to_owned()]
+            ),
+            ("prompt-plain", "plain words", Vec::new()),
+        ]
+    );
+}

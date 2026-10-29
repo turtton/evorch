@@ -24,6 +24,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
+    /// Takes the words and skill names the runtime recorded for a submission it
+    /// accepted as the message's own, saving them, and returns them. The
+    /// composer's copy is only a fallback for a sink that records nothing.
+    pub(super) fn adopt_runtime_origin(&mut self, id: &str) -> Option<(String, Vec<String>)> {
+        let origin = self
+            .sink
+            .host_input_origins(&[id.to_owned()])?
+            .ok()?
+            .into_iter()
+            .find(|origin| origin.prompt_id == id)?;
+        let message = self.history.iter_mut().find(|message| message.id == id)?;
+        let changed = message.text != origin.text || message.skills != origin.skills;
+        message.text.clone_from(&origin.text);
+        message.skills.clone_from(&origin.skills);
+        if changed && let Err(error) = self.persist_history() {
+            self.push_notice(format!("Could not save the recorded message: {error}"));
+        }
+        Some((origin.text, origin.skills))
+    }
+
     pub(super) fn mark_delivered(&mut self, ids: &[String]) -> bool {
         let mut changed = false;
         for message in &mut self.history {

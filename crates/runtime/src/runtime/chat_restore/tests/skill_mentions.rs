@@ -508,3 +508,45 @@ async fn attaching_one_skill_with_a_changed_body_and_back_keeps_the_latest_after
         .unwrap();
     skills.runtime().wait(run).await.unwrap();
 }
+
+#[tokio::test]
+async fn the_runtime_reports_what_it_recorded_for_each_accepted_submission() {
+    let skills = Skills::new();
+    let run = skills.waiting_chat().await;
+    skills
+        .runtime()
+        .continue_goal(
+            run,
+            "use @demo".into(),
+            Skills::mentioning(&["demo"], "with"),
+        )
+        .unwrap();
+    skills
+        .runtime()
+        .continue_goal(run, "no skill".into(), Skills::mentioning(&[], "without"))
+        .unwrap();
+    let origins = skills
+        .runtime()
+        .host_input_origins(&["with".into(), "without".into(), "unknown".into()])
+        .unwrap();
+    let summary: Vec<_> = origins
+        .into_iter()
+        .map(|origin| (origin.prompt_id, origin.text, origin.skills))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "with".to_owned(),
+                "use @demo".to_owned(),
+                vec!["demo".to_owned()]
+            ),
+            ("without".to_owned(), "no skill".to_owned(), Vec::new()),
+        ]
+    );
+    skills
+        .runtime()
+        .stop(run, crate::StopScope::SelfOnly)
+        .unwrap();
+    skills.runtime().wait(run).await.unwrap();
+}

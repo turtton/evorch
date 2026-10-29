@@ -185,6 +185,12 @@ impl CommandSink for RuntimeCommandSink {
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
         Some(self.runtime.host_input_receipts(ids))
     }
+    fn host_input_origins(
+        &self,
+        ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
+        Some(self.runtime.host_input_origins(ids))
+    }
     fn mark_unreachable_host_inputs(
         &self,
         run: &str,

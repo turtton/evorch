@@ -330,6 +330,16 @@ impl RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn host_input_origins(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<storage::HostInputOrigin>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .host_input_origins(prompt_ids)
+    }
+
     pub(crate) fn review_attachment_acceptances_for_lineage(
         &self,
         run_ids: &[String],
