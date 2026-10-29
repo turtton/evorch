@@ -245,6 +245,17 @@ macro_rules! save_methods {
         }
 
         /// # Errors
+        /// Rejects invalid settings, switches another layer would override, or
+        /// I/O failures before writing.
+        pub fn save_agent_features(
+            &self,
+            path: &Path,
+            features: crate::AgentFeatures,
+        ) -> Result<(), ConfigError> {
+            crate::save_agent_features::save_agent_features_in_scope(path, features, self.scope())
+        }
+
+        /// # Errors
         /// Rejects invalid input, final model kinds, or I/O failures before writing.
         pub fn save_self_improvement(
             &self,

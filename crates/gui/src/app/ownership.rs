@@ -78,6 +78,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     ui.close();
                 }
                 if ui
+                    .button("Agent features")
+                    .on_hover_text("Turn agent tools such as web tools and run_js on or off")
+                    .clicked()
+                {
+                    self.open_agent_features();
+                    ui.close();
+                }
+                if ui
                     .button("Storage")
                     .on_hover_text("Diagnostic history and database usage")
                     .clicked()

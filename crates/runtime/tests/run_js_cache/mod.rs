@@ -16,7 +16,7 @@ use tools::tools::run_js::{WorkerLauncher, description as run_js_description};
 
 use super::{
     BulkRead, Harness, MODEL, Wire, harness_with_model, read_response, text_response,
-    through_phase, verify_trace,
+    through_phase, verify_trace, verify_trace_of,
 };
 
 /// A `sh` worker speaking the protocol: it reads a large file through the host,
@@ -286,4 +286,142 @@ async fn disabled_run_js_leaves_the_other_tool_definitions_unchanged() {
         hinted["function"]["description"] = Value::String(original.to_owned());
         assert_eq!(&hinted, before, "{name} differs beyond its description");
     }
+}
+
+/// Releases the mock's held response before it joins its workers, also on panic.
+struct ReleaseOnDrop(mock_openai::ResponseGate);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// The wire requests of a run whose run_js switch flipped while it was waiting
+/// for its first response, and of the next run started on the same runtime.
+struct Switched {
+    run: Vec<Value>,
+    next_run: Vec<Value>,
+}
+
+/// Starts a worker run with run_js `enabled`, switches it to `!enabled` while the
+/// mock holds the first response (as the GUI's Agent features settings switch a
+/// live runtime), then starts one more run. The switched run must pass the
+/// input-derived cache and append-only wire checks.
+async fn switch_run_js_during_a_run(
+    enabled: bool,
+    mut script: Vec<ScriptedResponse>,
+    next_run: Vec<ScriptedResponse>,
+) -> Switched {
+    let directory = tempfile::tempdir().unwrap();
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    script[0] = script[0].clone().with_gate(gate.clone());
+    script.extend(next_run);
+    let mut harness = harness(enabled, script, worker(&directory.path().join("unused")));
+    let _release = ReleaseOnDrop(gate.clone());
+
+    let run =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "work".into(), RunConfig::default());
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    harness.runtime.set_run_js_settings(config::RunJsConfig {
+        enabled: !enabled,
+        ..harness.runtime.run_js_settings()
+    });
+    gate.release();
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    let switched = requests(&harness);
+    verify_trace_of(&harness, run, &events, 0, &switched);
+
+    let next =
+        harness
+            .runtime
+            .delegate_background(Role::Worker, "next".into(), RunConfig::default());
+    through_phase(&mut harness.receiver, next, AgentRunPhase::Done).await;
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let next_run = requests(&harness).split_off(switched.len());
+    Switched {
+        run: switched,
+        next_run,
+    }
+}
+
+fn assert_same_tools(requests: &[Value]) {
+    let first = serde_json::to_string(&requests[0]["tools"]).unwrap();
+    for request in &requests[1..] {
+        assert_eq!(serde_json::to_string(&request["tools"]).unwrap(), first);
+    }
+}
+
+fn tool_result<'a>(request: &'a Value, call_id: &str) -> &'a str {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+        .unwrap_or_else(|| panic!("result of {call_id} in the history"))["content"]
+        .as_str()
+        .unwrap()
+}
+
+/// Switching run_js off keeps the definitions the run already sent, refuses its
+/// later calls, and leaves run_js out of the next run.
+#[tokio::test]
+async fn switching_run_js_off_during_a_run_keeps_its_tools_and_wire_prefix() {
+    let switched = switch_run_js_during_a_run(
+        true,
+        vec![read_response(0), run_js_response(1), text_response("done")],
+        vec![text_response("next")],
+    )
+    .await;
+
+    assert_eq!(switched.run.len(), 3);
+    assert_same_tools(&switched.run);
+    let shell_hinted = format!(
+        "{}{}",
+        shell().description(),
+        run_js_description::SHELL_HINT
+    );
+    for request in &switched.run {
+        assert!(tool_names(request).contains(&"run_js".to_owned()));
+        assert_eq!(description(request, "shell"), shell_hinted);
+    }
+    let refused = tool_result(&switched.run[2], "call-1");
+    assert!(refused.contains("run_js is not enabled"), "{refused}");
+
+    let next = &switched.next_run[0];
+    assert!(!tool_names(next).contains(&"run_js".to_owned()));
+    assert_eq!(description(next, "shell"), shell().description());
+}
+
+/// Switching run_js on leaves the running run without it and offers it to the
+/// next run.
+#[tokio::test]
+async fn switching_run_js_on_during_a_run_keeps_its_tools_and_wire_prefix() {
+    let switched = switch_run_js_during_a_run(
+        false,
+        vec![read_response(0), read_response(1), text_response("done")],
+        vec![text_response("next")],
+    )
+    .await;
+
+    assert_eq!(switched.run.len(), 3);
+    assert_same_tools(&switched.run);
+    for request in &switched.run {
+        assert!(!request["tools"].to_string().contains("run_js"));
+    }
+
+    let next = &switched.next_run[0];
+    assert!(tool_names(next).contains(&"run_js".to_owned()));
+    assert_eq!(
+        description(next, "shell"),
+        format!(
+            "{}{}",
+            shell().description(),
+            run_js_description::SHELL_HINT
+        )
+    );
 }

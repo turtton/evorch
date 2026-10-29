@@ -94,8 +94,7 @@ fn chatbox_button_opens_modal_with_approval_controls() {
     // When: clicking the chatbox sandbox button.
     harness.click_label("Sandbox: auto review");
     harness.run();
-    // Then: Web tool visibility and shell approval controls are available in the modal.
-    assert!(harness.has_label("Enable web tools"));
+    // Then: shell approval controls are available in the modal.
     for label in [
         "Ask me when auto review denies a request",
         "auto review",

@@ -278,6 +278,7 @@ fn standalone_save_entry_points_are_confined_to_explicit_config_api_adapters() {
         "config/src/lib.rs",
         "config/src/save_context.rs",
         "config/src/save.rs",
+        "config/src/save_agent_features.rs",
         "config/src/save_agents.rs",
         "config/src/save_codex.rs",
         "config/src/save_role_profiles.rs",

@@ -368,7 +368,7 @@ fn gui_unrelated_settings_actions_validate_all_profiles_without_losing_layer_con
             if sandbox {
                 harness.state_mut().open_sandbox_settings();
                 harness.run();
-                harness.click_label("Enable web tools");
+                harness.click_label("ask me");
                 harness.click_label("Save sandbox");
                 harness.run();
                 assert_eq!(harness.has_label("Save sandbox"), invalid);

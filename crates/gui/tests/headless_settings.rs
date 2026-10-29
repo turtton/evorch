@@ -1,6 +1,8 @@
 //! Related GUI settings contracts share a test binary to reduce repeated linking.
 //! Each module keeps its own fixtures; nextest still runs each test in a separate process.
 
+#[path = "headless_settings/agent_features_headless.rs"]
+mod agent_features_headless;
 #[path = "headless_settings/composer_role.rs"]
 mod composer_role;
 #[path = "headless_settings/gpt_metrics.rs"]
