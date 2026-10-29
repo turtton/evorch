@@ -472,3 +472,24 @@ fn a_completed_replay_without_a_report_names_the_gap() {
     assert_eq!(missing_report(Status::Completed, &answered), None);
     assert_eq!(missing_report(Status::Incomplete, &missing), None);
 }
+
+#[tokio::test]
+async fn events_a_small_bus_overwrote_before_the_observer_stops_are_counted() {
+    // Given: an observer on a capacity-2 bus that has not run yet while four
+    // events arrive, so two are overwritten before it reads or stops.
+    let bus = Arc::new(EventBus::new(2));
+    let observer = Observer::start(&bus);
+    for index in 0..4 {
+        bus.emit(Event::new(MessageEvent::MessageCompleted {
+            run_id: "root".into(),
+            text: index.to_string(),
+        }));
+    }
+
+    // When: the observer stops, by its normal lag handling or its final drain.
+    let observed = observer.finish().await;
+
+    // Then: at least the two overwritten events are counted. Lag handling in
+    // `recv` emits its own fault event, which can overwrite one more slot.
+    assert!(observed.lagged_events >= 2, "{}", observed.lagged_events);
+}

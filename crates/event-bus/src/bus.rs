@@ -185,8 +185,15 @@ impl EventReceiver {
     /// Overwritten slots consume the snapshot budget too. No fault events are
     /// emitted during shutdown, avoiding an event-feedback loop while draining.
     pub fn drain_pending_snapshot(&mut self) -> Vec<Event> {
+        self.drain_pending_snapshot_counting_lag().0
+    }
+
+    /// [`Self::drain_pending_snapshot`] that also returns how many events were
+    /// overwritten before the drain could read them.
+    pub fn drain_pending_snapshot_counting_lag(&mut self) -> (Vec<Event>, u64) {
         let mut remaining = self.rx.len();
         let mut events = Vec::new();
+        let mut lagged = 0_u64;
         while remaining > 0 {
             match self.rx.try_recv() {
                 Ok(event) => {
@@ -197,6 +204,7 @@ impl EventReceiver {
                     }
                 }
                 Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    lagged = lagged.saturating_add(skipped);
                     remaining =
                         remaining.saturating_sub(usize::try_from(skipped).unwrap_or(usize::MAX));
                 }
@@ -205,7 +213,7 @@ impl EventReceiver {
                 ) => break,
             }
         }
-        events
+        (events, lagged)
     }
 
     /// 次のイベントを受信する。
@@ -333,6 +341,29 @@ mod tests {
         assert!(matches!(&events[0].kind,
             EventKind::Lifecycle(LifecycleEvent::Started { session_id }) if session_id == "2"));
         assert!(receiver.drain_pending_snapshot().is_empty());
+    }
+
+    #[test]
+    fn shutdown_snapshot_reports_how_many_overwritten_events_it_could_not_read() {
+        // Given: a receiver that fell two events behind a capacity-2 bus.
+        let bus = EventBus::new(2);
+        let mut receiver = bus.subscribe();
+        for index in 0..4 {
+            bus.emit(Event::new(LifecycleEvent::Started {
+                session_id: index.to_string(),
+            }));
+        }
+
+        // When: the pending events are drained with the lag counted.
+        let (events, lagged) = receiver.drain_pending_snapshot_counting_lag();
+
+        // Then: the retained events are returned and the overwritten ones counted once.
+        assert_eq!(events.len(), 2);
+        assert_eq!(lagged, 2);
+        assert_eq!(
+            receiver.drain_pending_snapshot_counting_lag(),
+            (Vec::new(), 0)
+        );
     }
 
     #[tokio::test]

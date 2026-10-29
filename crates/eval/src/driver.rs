@@ -264,8 +264,10 @@ impl Observer {
                         Err(event_bus::RecvError::Closed) => break,
                     },
                     _ = &mut stopped => {
+                        let (pending, skipped) = receiver.drain_pending_snapshot_counting_lag();
                         let mut state = lock(&observed);
-                        for event in receiver.drain_pending_snapshot() {
+                        state.lagged_events = state.lagged_events.saturating_add(skipped);
+                        for event in pending {
                             state.observe(&event, &bus);
                         }
                         break;
