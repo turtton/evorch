@@ -175,6 +175,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn ownership_ui(&mut self, ui: &mut egui::Ui) {
+        self.ownership_ui_at(ui, Instant::now());
+    }
+
+    /// `ownership_ui` at an explicit `now`, so display and repaint deadlines
+    /// can be checked against a fixed logical time.
+    pub(super) fn ownership_ui_at(&mut self, ui: &mut egui::Ui, now: Instant) {
         // Keep the header row allocated even without a host; native QA and embedders depend on the stable layout.
         let mut checked_at = None;
         ui.horizontal_wrapped(|ui| {
@@ -191,7 +197,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.ownership_action_error = None;
             }
             if let Some(thread) = thread {
-                let now = Instant::now();
                 checked_at = Some(now);
                 self.ownership_status.refresh(
                     host.clone(),

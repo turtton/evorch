@@ -372,3 +372,101 @@ fn an_unchanged_result_is_not_stale_when_the_next_probe_pass_collects_it() {
     assert!(!status.stale(now + PROBE_INTERVAL + CONTENTION_GRACE / 2));
     assert!(status.stale(now + STALE_AFTER));
 }
+
+fn test_host(dir: &tempfile::TempDir) -> Arc<OwnerHost> {
+    Arc::new(
+        OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    )
+}
+
+/// A status wired to a real worker whose probe reports ownership of `thread`
+/// as writable exactly when the request is not read-only.
+fn status_with_worker() -> OwnershipStatus {
+    let worker = ProbeWorker::start(|_, _, readonly| Ok(owned(!readonly))).unwrap();
+    let mut status = OwnershipStatus {
+        worker: Some(worker),
+        ..Default::default()
+    };
+    status.select_thread(Some("thread"));
+    status
+}
+
+/// Run UI passes at the logical time `now` until the outstanding probe has
+/// been collected. The worker emits no event for an unchanged result (that is
+/// the point), so the completion is only observable through `refresh` itself.
+fn refresh_until_collected(
+    status: &mut OwnershipStatus,
+    host: &Arc<OwnerHost>,
+    ctx: &egui::Context,
+    readonly: bool,
+    now: Instant,
+) {
+    while status.in_flight {
+        status.refresh(host.clone(), "thread", readonly, ctx, now);
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn an_unchanged_result_is_collected_by_the_next_pass_without_waking_the_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(&dir);
+    let ctx = egui::Context::default();
+    let mut status = status_with_worker();
+    // The first result has an unknown display, so it wakes the UI.
+    let t0 = Instant::now();
+    status.refresh(host.clone(), "thread", false, &ctx, t0);
+    assert!(status.in_flight);
+    refresh_until_collected(&mut status, &host, &ctx, false, t0);
+    assert_eq!(status.snapshot, Some(owned(true)));
+    assert!(ctx.has_requested_repaint());
+    settle(&ctx);
+    let first_observation = status.last_observed.unwrap();
+    // The next probe pass sends a probe whose result will not change anything.
+    let t1 = t0 + PROBE_INTERVAL;
+    status.refresh(host.clone(), "thread", false, &ctx, t1);
+    assert!(status.in_flight);
+    assert_eq!(status.last_probe, Some(t1));
+    refresh_until_collected(&mut status, &host, &ctx, false, t1);
+    // The worker finished before refresh collected it, yet nothing was requested.
+    assert!(!ctx.has_requested_repaint());
+    // The collecting pass recorded the new observation and freed the probe slot.
+    let observation = status.last_observed.unwrap();
+    assert!(observation > first_observation);
+    assert!(!status.in_flight);
+    // Displayed one probe interval after its observation it is not yet stale.
+    assert!(!status.stale(observation + PROBE_INTERVAL));
+    assert!(status.stale(observation + STALE_AFTER));
+    // Probing continues at the usual cadence.
+    let t2 = t1 + PROBE_INTERVAL;
+    status.refresh(host, "thread", false, &ctx, t2);
+    assert!(status.in_flight);
+    assert_eq!(status.last_probe, Some(t2));
+}
+
+#[test]
+fn a_result_for_a_superseded_readonly_state_is_dropped_and_the_latest_one_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(&dir);
+    let ctx = egui::Context::default();
+    let mut status = status_with_worker();
+    let t0 = Instant::now();
+    status.refresh(host.clone(), "thread", false, &ctx, t0);
+    // The UI now wants a read-only view. The writable answer is dropped when
+    // collected, and the same pass asks again with the latest conditions.
+    let t1 = t0 + Duration::from_millis(1);
+    while status.last_probe != Some(t1) {
+        status.refresh(host.clone(), "thread", true, &ctx, t1);
+        std::thread::yield_now();
+    }
+    assert!(status.snapshot.is_none());
+    assert!(status.in_flight);
+    refresh_until_collected(&mut status, &host, &ctx, true, t1);
+    assert_eq!(status.snapshot, Some(owned(false)));
+    assert_eq!(status.display(t1).access, "read-only");
+}

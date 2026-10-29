@@ -345,41 +345,39 @@ fn repeated_quiesce_ticks_do_not_write_unchanged_sidebar_while_draining() {
     );
 }
 
-/// Run the header through `run_ui` and return the repaint delay it asked for,
-/// bracketed by the clock readings that must contain its internal `now`.
-fn header_repaint_delay(state: &mut WorkbenchState<DemoSource>) -> (Duration, Instant, Instant) {
+/// Run the header through `run_ui` at the logical time `now` and return the
+/// repaint delay it asked for.
+fn header_repaint_delay(state: &mut WorkbenchState<DemoSource>, now: Instant) -> Duration {
     let ctx = egui::Context::default();
-    let mut bracket = None;
+    let mut delay = Duration::MAX;
     // The first passes settle egui's own start-up repaints.
     for _ in 0..3 {
-        let before = Instant::now();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| state.ownership_ui(ui));
-        let after = Instant::now();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            state.ownership_ui_at(ui, now)
+        });
         output.textures_delta.clear();
-        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
-        bracket = Some((delay, before, after));
+        delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
     }
-    bracket.unwrap()
+    delay
 }
 
 #[test]
 fn next_repaint_is_requested_for_the_contention_grace_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(host(&dir));
-    let anchor = Instant::now();
-    let since = anchor - Duration::from_millis(300);
+    // `now` is only a logical origin; the header never reads the clock here.
+    let now = Instant::now();
+    let since = now - Duration::from_millis(300);
     let status = &mut state.ownership_status;
     status.select_thread(Some("thread"));
     status.observe("thread", Ok(snapshot("owner", true)), since);
     status.observe("thread", Err(busy(rusqlite::ffi::SQLITE_BUSY)), since);
-    status.mark_probe_outstanding(anchor);
+    status.mark_probe_outstanding(now);
     // The grace deadline is earlier than the next probe and the stale deadline.
-    let deadline = since + CONTENTION_GRACE;
-    let (delay, before, after) = header_repaint_delay(&mut state);
-    assert!(after < deadline, "the test was stalled past its deadline");
-    assert!(
-        deadline - after <= delay && delay <= deadline - before,
-        "{delay:?} is not the time to {deadline:?} within {before:?}..{after:?}"
+    // egui is asked for the deadline plus `predicted_dt` and wakes that early.
+    assert_eq!(
+        header_repaint_delay(&mut state, now),
+        since + CONTENTION_GRACE - now
     );
 }
 
@@ -388,8 +386,14 @@ fn no_repaint_is_requested_without_a_host_or_a_selected_thread() {
     let dir = tempfile::tempdir().unwrap();
     let mut no_host =
         WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default()).unwrap();
-    assert_eq!(header_repaint_delay(&mut no_host).0, Duration::MAX);
+    assert_eq!(
+        header_repaint_delay(&mut no_host, Instant::now()),
+        Duration::MAX
+    );
     let mut no_thread = state(host(&dir));
     no_thread.sidebar.active_thread = None;
-    assert_eq!(header_repaint_delay(&mut no_thread).0, Duration::MAX);
+    assert_eq!(
+        header_repaint_delay(&mut no_thread, Instant::now()),
+        Duration::MAX
+    );
 }
