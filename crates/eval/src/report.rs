@@ -32,6 +32,10 @@ const DIFF_BYTES: usize = 60_000;
 const ENTRY_CHARS: usize = 2_000;
 const CONVERSATION_HEAD: usize = 20;
 const CONVERSATION_TAIL: usize = 40;
+const FOCUS_OUTPUT_CHARS: usize = 3_000;
+const OTHER_OUTPUT_CHARS: usize = 800;
+const DELEGATED_FOCUS_MAX: usize = 10;
+const DELEGATED_OTHER_MAX: usize = 10;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportArgs {
@@ -585,11 +589,12 @@ async fn judge_pair(
             Order::BaselineFirst => (baseline, candidate),
             Order::CandidateFirst => (candidate, baseline),
         };
+        let swapped = &manifest.swapped_roles;
         let payload = serde_json::json!({
             "original_user_messages": manifest.original_turns,
             "problem": manifest.problem,
-            "A": side(first),
-            "B": side(second),
+            "A": side(first, swapped),
+            "B": side(second, swapped),
         });
         match cached_or_judge(
             context,
@@ -626,8 +631,8 @@ async fn judge_pair(
     let payload = serde_json::json!({
         "problem": manifest.problem,
         "swapped_roles": swapped,
-        "baseline": process_side(baseline),
-        "candidate": process_side(candidate),
+        "baseline": process_side(baseline, &manifest.swapped_roles),
+        "candidate": process_side(candidate, &manifest.swapped_roles),
     });
     let process = cached_or_judge(
         context,
@@ -788,7 +793,43 @@ pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
     })
 }
 
-fn side(run: &LoadedRun) -> serde_json::Value {
+/// The final output of the delegated runs, apart from the root's conversation.
+/// Runs of a swapped (focus) role come first with a longer excerpt, so a swapped
+/// child role is judged on what it returned. Later runs win when over the cap.
+fn delegated_outputs(record: &RunRecord, swapped: &[SwappedRole]) -> Vec<serde_json::Value> {
+    let is_focus = |role: &str| {
+        roles::address(role).is_some_and(|address| swapped.iter().any(|s| s.role == address))
+    };
+    let children = metrics::child_outputs(record);
+    let (focus, other): (Vec<_>, Vec<_>) = children.iter().partition(|child| is_focus(&child.role));
+    let mut entries = Vec::new();
+    for (children, max, chars, focused) in [
+        (focus, DELEGATED_FOCUS_MAX, FOCUS_OUTPUT_CHARS, true),
+        (other, DELEGATED_OTHER_MAX, OTHER_OUTPUT_CHARS, false),
+    ] {
+        let omitted = children.len().saturating_sub(max);
+        entries.extend(children.iter().skip(omitted).map(|child| {
+            serde_json::json!({
+                "run_id": child.run_id,
+                "role": child.role,
+                "delegated_by": child.parent_role,
+                "focus": focused,
+                "phase": child.phase.map(|phase| format!("{phase:?}")),
+                "final_output": child.final_output.as_deref().map(|text| clip(text, chars)),
+            })
+        }));
+        if omitted > 0 {
+            entries.push(serde_json::json!({
+                "kind": "omitted",
+                "focus": focused,
+                "runs": omitted,
+            }));
+        }
+    }
+    entries
+}
+
+fn side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
@@ -798,6 +839,7 @@ fn side(run: &LoadedRun) -> serde_json::Value {
             CONVERSATION_TAIL,
             ENTRY_CHARS,
         ),
+        "delegated_outputs": delegated_outputs(&run.record, swapped),
         "diff": bounded_diff(&run.diff),
         "verification": run.summary.verification,
         "metrics": compact_metrics(&run.summary.metrics),
@@ -805,11 +847,12 @@ fn side(run: &LoadedRun) -> serde_json::Value {
     })
 }
 
-fn process_side(run: &LoadedRun) -> serde_json::Value {
+fn process_side(run: &LoadedRun, swapped: &[SwappedRole]) -> serde_json::Value {
     serde_json::json!({
         "status": run.summary.status,
         "status_reason": run.summary.reason,
         "metrics": compact_metrics(&run.summary.metrics),
+        "delegated_outputs": delegated_outputs(&run.record, swapped),
         "timeline": metrics::timeline(&run.record),
     })
 }

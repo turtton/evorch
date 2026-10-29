@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use event_bus::{
-    AgentRunPhase, Event, EventKind, LifecycleEvent, ProviderEvent, ToolEvent,
+    AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ProviderEvent, ToolEvent,
     event::diagnostic_codes,
 };
 use serde::{Deserialize, Serialize};
@@ -253,6 +253,79 @@ impl RunMetrics {
         }
         metrics
     }
+}
+
+/// One delegated (non-root) run of a replay and what it handed back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildOutput {
+    pub run_id: String,
+    pub parent_role: String,
+    pub role: String,
+    pub agent_name: String,
+    /// The phase the run ended in, when it ended.
+    pub phase: Option<AgentRunPhase>,
+    /// The result its `finish` published, else its last accepted response.
+    pub final_output: Option<String>,
+}
+
+/// The delegated runs of a record in start order, each with its final output.
+/// The root run's text is the conversation the user saw and is not repeated here.
+pub fn child_outputs(record: &RunRecord) -> Vec<ChildOutput> {
+    let mut children: Vec<ChildOutput> = Vec::new();
+    let mut run_roles: HashMap<&str, &str> = HashMap::new();
+    // The last response of each run, used when it published no `finish` result.
+    let mut responses: HashMap<&str, &str> = HashMap::new();
+    let mut results: HashMap<&str, &str> = HashMap::new();
+    for event in &record.events {
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id,
+                parent_run_id,
+                agent_name,
+                role,
+            }) => {
+                run_roles.insert(run_id, role);
+                if let Some(parent) = parent_run_id {
+                    children.push(ChildOutput {
+                        run_id: run_id.clone(),
+                        parent_role: role_of(&run_roles, Some(parent)),
+                        role: role.clone(),
+                        agent_name: agent_name.clone(),
+                        phase: None,
+                        final_output: None,
+                    });
+                }
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. })
+                if matches!(
+                    to,
+                    AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
+                ) =>
+            {
+                if let Some(child) = children.iter_mut().find(|child| &child.run_id == run_id) {
+                    child.phase = Some(*to);
+                }
+            }
+            EventKind::Message(MessageEvent::MessageCompleted { run_id, text })
+                if !text.trim().is_empty() =>
+            {
+                responses.insert(run_id, text);
+            }
+            EventKind::Message(MessageEvent::FinalResultPublished { run_id, text })
+                if !text.trim().is_empty() =>
+            {
+                results.insert(run_id, text);
+            }
+            _ => {}
+        }
+    }
+    for child in &mut children {
+        child.final_output = results
+            .get(child.run_id.as_str())
+            .or_else(|| responses.get(child.run_id.as_str()))
+            .map(|text| (*text).to_owned());
+    }
+    children
 }
 
 pub(crate) fn clip(text: &str, chars: usize) -> String {
