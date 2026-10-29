@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use event_bus::{
-    AgentRunPhase, Event, EventBus, LifecycleEvent, MessageEvent, OwnershipAction, OwnershipEvent,
-    ToolEvent,
+    AgentRunPhase, Event, EventBus, FaultEvent, LifecycleEvent, MessageEvent, OwnershipAction,
+    OwnershipEvent, ProviderEvent, ProviderFailureKind, SkillDiagnosticKind, ToolEvent,
 };
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
@@ -959,4 +959,190 @@ fn a_tool_call_split_by_the_restart_is_shown_once_and_completed() {
         calls[0],
         TranscriptEntry::Tool { output: Some(output), .. } if output == "ok"
     ));
+}
+
+fn fault_event() -> Event {
+    Event::new(FaultEvent::SkillDiagnostic {
+        kind: SkillDiagnosticKind::Shadowed,
+        skill: "demo".into(),
+        scope: "repo".into(),
+        detail: "overridden".into(),
+    })
+}
+
+fn failed_event() -> Event {
+    Event::new(LifecycleEvent::Failed {
+        session_id: "elsewhere".into(),
+        reason: "boom".into(),
+    })
+}
+
+fn request_failed_without_run() -> Event {
+    Event::new(ProviderEvent::RequestFailed {
+        request_id: "request-1".into(),
+        provider: "provider-a".into(),
+        profile: None,
+        protocol: "openai-chat-completions".into(),
+        model: "model-a".into(),
+        streaming: true,
+        duration_ms: 42,
+        failure: ProviderFailureKind::Transport,
+        run_id: None,
+        purpose: None,
+        detail: None,
+    })
+}
+
+fn entries_debug(state: &WorkbenchState<DemoSource>) -> String {
+    format!("{:?}", state.transcript().entries())
+}
+
+#[test]
+fn events_without_a_conversation_never_reach_the_open_thread_when_queued_events_are_retried() {
+    // Given: B has a local thread open; another window works in a thread B does not know yet
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let local = a.open_thread(&shared, "Local");
+    let mut b = open_window(&shared, "evorch-gui:b");
+    b.state.switch_thread(local).expect("open the local thread");
+    let private = shared.dir.path().join("private.json");
+    std::fs::copy(shared.sidebar(), &private).expect("copy sidebar");
+    let mut h = open_window_with_sidebar(&shared, "evorch-gui:h", private.clone());
+    let remote = h.state.create_thread("Remote").expect("thread");
+    let entries_before = entries_debug(&b.state);
+
+    // When: its run starts and then events that belong to no run arrive; B holds them all
+    h.emit(run_started("r1", &remote));
+    h.emit(fault_event());
+    h.emit(failed_event());
+    h.emit(request_failed_without_run());
+    b.state.poll_shared_feed();
+    assert_eq!(entries_debug(&b.state), entries_before);
+
+    // And: the sidebar is published and the held events are retried without a new batch
+    std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
+    b.state.retry_pending_shared_events();
+
+    // Then: the thread open in B did not receive any of them
+    assert_eq!(entries_debug(&b.state), entries_before);
+    assert!(
+        !b.state
+            .transcript()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Error { .. }))
+    );
+    b.state.poll_shared_feed();
+    assert_eq!(entries_debug(&b.state), entries_before);
+}
+
+#[test]
+fn a_conversation_that_changes_root_shows_every_reply_however_the_events_are_split() {
+    // Given: B1, B2 and a restarted window all know thread T, whose first root has answered
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let thread = a.open_thread(&shared, "Alpha");
+    a.host.start(&thread.to_string()).expect("A owns it");
+    a.emit(run_started("r0", &thread));
+    a.emit(phase("r0", AgentRunPhase::Pending, AgentRunPhase::Running));
+    a.emit(reply("r0", "earlier reply"));
+    let mut b1 = open_window(&shared, "evorch-gui:b1");
+    let mut b2 = open_window(&shared, "evorch-gui:b2");
+    b1.state.switch_thread(thread.clone()).expect("open");
+    b2.state.switch_thread(thread.clone()).expect("open");
+
+    // When: the first root's last reply, the release, and a second root's run are persisted;
+    // B2 follows after every event, B1 once at the end
+    let events = [
+        reply("r0", "old root last reply"),
+        ownership(&thread, "owner-a", 1, OwnershipAction::Released),
+        run_started("r1", &thread),
+        phase("r1", AgentRunPhase::Pending, AgentRunPhase::Running),
+        reply("r1", "new root reply"),
+    ];
+    for event in events {
+        a.emit(event);
+        b2.state.poll_shared_feed();
+    }
+    b1.state.poll_shared_feed();
+    let mut restarted = open_window(&shared, "evorch-gui:c");
+    restarted.state.switch_thread(thread).expect("open");
+
+    // Then: every window shows the same three replies in order
+    let expected = ["earlier reply", "old root last reply", "new root reply"];
+    for window in [&b1, &b2, &restarted] {
+        assert_eq!(texts(&window.state), expected);
+    }
+    assert_eq!(entries_debug(&b1.state), entries_debug(&b2.state));
+    assert_eq!(entries_debug(&b1.state), entries_debug(&restarted.state));
+    assert_eq!(b1.state.thread_phases(), b2.state.thread_phases());
+}
+
+/// Everything one window shows of thread T after following `events`, `chunk` at a
+/// time. The first `restored` events are persisted before the window starts.
+fn follow_in_chunks(
+    events: &[fn(&ThreadId) -> Event],
+    restored: usize,
+    chunk: usize,
+) -> (String, String) {
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let thread = a.open_thread(&shared, "Alpha");
+    a.host.start(&thread.to_string()).expect("A owns it");
+    for make in &events[..restored] {
+        a.emit(make(&thread));
+    }
+    let mut b = open_window(&shared, "evorch-gui:b");
+    b.state.switch_thread(thread.clone()).expect("open");
+    for part in events[restored..].chunks(chunk) {
+        for make in part {
+            a.emit(make(&thread));
+        }
+        b.state.poll_shared_feed();
+    }
+    (
+        entries_debug(&b.state),
+        format!("{:?}", b.state.thread_phases()),
+    )
+}
+
+#[test]
+fn what_is_shown_does_not_depend_on_how_the_events_were_split_into_polls() {
+    let events: Vec<fn(&ThreadId) -> Event> = vec![
+        |t| run_started("r0", t),
+        |_| phase("r0", AgentRunPhase::Pending, AgentRunPhase::Running),
+        |_| tool_event(false),
+        |_| tool_event(true),
+        |_| reply("r0", "first"),
+        |_| turn_completed("r0", 1),
+        |t| ownership(t, "owner-a", 1, OwnershipAction::Released),
+        |t| ownership(t, "owner-d", 2, OwnershipAction::Claimed),
+        |t| run_started("r1", t),
+        |_| phase("r1", AgentRunPhase::Pending, AgentRunPhase::Running),
+        |_| {
+            Event::new(MessageEvent::MessageDelta {
+                run_id: Some("r1".into()),
+                delta: "x".into(),
+            })
+        },
+        |_| {
+            Event::new(MessageEvent::MessageDelta {
+                run_id: Some("r1".into()),
+                delta: "y".into(),
+            })
+        },
+        |_| reply("r1", "second"),
+        |_| turn_completed("r1", 2),
+        |_| phase("r1", AgentRunPhase::Running, AgentRunPhase::Done),
+    ];
+    for restored in [0, 2, 6] {
+        let everything_at_once = follow_in_chunks(&events, restored, events.len());
+        for chunk in [1, 2, 3, 4, 7] {
+            assert_eq!(
+                follow_in_chunks(&events, restored, chunk),
+                everything_at_once,
+                "{restored} events restored, then polls of {chunk}"
+            );
+        }
+    }
 }

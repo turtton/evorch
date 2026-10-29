@@ -31,6 +31,9 @@ pub struct TranscriptRegistry {
     call_index: BTreeMap<String, String>,
     ambiguous_calls: BTreeSet<String>,
     compaction_checkpoints: BTreeSet<(String, String)>,
+    /// Events of other processes are being shown: nothing may be delivered to
+    /// the open thread or the unowned fallback on their behalf.
+    foreign_scope: bool,
 }
 
 impl Default for TranscriptRegistry {
@@ -76,6 +79,7 @@ impl TranscriptRegistry {
             call_index: BTreeMap::new(),
             ambiguous_calls: BTreeSet::new(),
             compaction_checkpoints: BTreeSet::new(),
+            foreign_scope: false,
         }
     }
 
@@ -321,6 +325,9 @@ impl TranscriptRegistry {
         for key in route {
             match key {
                 TranscriptKey::Thread => {
+                    if self.foreign_scope && owner.is_none() {
+                        continue;
+                    }
                     let model = match owner.as_ref().or({
                         if attributed {
                             None
@@ -401,6 +408,17 @@ impl TranscriptRegistry {
             self.threads.insert(thread.into(), transcript);
         }
         self.bind_thread_root(thread, run);
+    }
+
+    /// While set, events that no conversation owns are not shown anywhere.
+    /// Returns the previous setting, to restore when the scope ends.
+    pub(crate) fn set_foreign_scope(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.foreign_scope, on)
+    }
+
+    /// The conversation a run is bound to, if any.
+    pub(crate) fn run_thread(&self, run: &str) -> Option<&str> {
+        self.run_threads.get(run).map(String::as_str)
     }
 
     /// Drops what was shown for `run` while no conversation owned it, ahead of

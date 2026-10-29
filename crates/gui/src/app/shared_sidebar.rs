@@ -368,24 +368,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.history = merged.user_messages;
         self.composer_drafts = merged.composer_drafts;
 
-        let threads: Vec<(String, Vec<String>, Option<String>)> = self
+        // Runs this process does not know yet are bound to their conversation.
+        // Known runs and every conversation's current root keep following the
+        // event order: a root changes when its start event is folded, not when
+        // a newer sidebar says so, or earlier events would be misattributed.
+        let threads: Vec<(String, Vec<String>)> = self
             .sidebar
             .threads
             .iter()
-            .map(|thread| {
-                (
-                    thread.id.to_string(),
-                    thread.run_ids.clone(),
-                    thread.root_run_id.clone(),
-                )
-            })
+            .map(|thread| (thread.id.to_string(), thread.run_ids.clone()))
             .collect();
-        for (thread, runs, root) in threads {
+        for (thread, runs) in threads {
             for run in &runs {
-                self.transcripts.bind_run(run, &thread);
-            }
-            if let Some(root) = root {
-                self.transcripts.bind_thread_root(&thread, &root);
+                if self.transcripts.run_thread(run).is_none() {
+                    self.transcripts.bind_run(run, &thread);
+                }
             }
         }
         for thread in &new_threads {

@@ -121,9 +121,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         self.poll_shared_feed();
-        if !self.shared_feed.pending.is_empty() {
-            self.fold_pending_shared();
-        }
+        self.retry_pending_shared_events();
     }
 
     /// Whether a run another process executes is still going, which keeps
@@ -161,11 +159,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.fold_pending_shared();
     }
 
+    /// Folds the queued events of other processes in order, stopping at one that
+    /// waits for the sidebar. Run once per frame while events are queued.
+    pub fn retry_pending_shared_events(&mut self) {
+        if !self.shared_feed.pending.is_empty() {
+            self.fold_pending_shared();
+        }
+    }
+
     fn fold_pending_shared(&mut self) {
-        let active = self.sidebar.active_thread.as_ref().map(ToString::to_string);
-        // Events no run binding attributes would otherwise land in the open
-        // thread's transcript.
-        self.transcripts.select_thread(None);
+        // Events no conversation owns are dropped, never shown in the open one.
+        let outer = self.transcripts.set_foreign_scope(true);
         let mut imported = false;
         while let Some(fed) = self.shared_feed.pending.front() {
             if self.waits_for_sidebar(&fed.event) {
@@ -188,7 +192,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.shown_through_event = self.shown_through_event.max(fed.id);
             }
         }
-        self.transcripts.select_thread(active);
+        self.transcripts.set_foreign_scope(outer);
         if self.shared_feed.pending.is_empty() {
             self.shared_feed.blocked_since = None;
             self.shared_feed.released_runs.clear();
@@ -318,8 +322,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 return;
             }
         };
-        let active = self.sidebar.active_thread.as_ref().map(ToString::to_string);
-        self.transcripts.select_thread(None);
+        let outer = self.transcripts.set_foreign_scope(true);
         for (thread, runs) in threads {
             let (events, truncated) = match db.events_for_runs(runs, 0, REHYDRATE_EVENT_LIMIT) {
                 Ok(found) => found,
@@ -361,7 +364,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.restore_user_message(message);
             }
         }
-        self.transcripts.select_thread(active);
+        self.transcripts.set_foreign_scope(outer);
     }
 
     /// After a restart's replay, runs still shown as active belong to other
