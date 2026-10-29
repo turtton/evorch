@@ -8,7 +8,7 @@ use browser::agent::PageAgent;
 use browser_cef::AgentPage;
 use runtime::artifacts::{ArtifactPage, ArtifactPages};
 
-use super::RuntimeRequestSender;
+use super::runtime_requests::RuntimeRequestSender;
 
 /// Each page has its own renderer process, so only a few runs inspect at once.
 const MAX_PAGES: usize = 4;

@@ -1,7 +1,7 @@
 //! In-app HTML artifact previews on CEF off-screen rendering (ADR 0034 B).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use browser_cef::offline::ArtifactBundle;
@@ -14,7 +14,9 @@ use crate::model::artifact_opener::ArtifactOpener;
 use crate::model::html_snapshots::{HtmlSnapshots, SnapshotWorker, read_html};
 
 mod agent_pages;
+mod runtime_requests;
 pub use agent_pages::CefArtifactPages;
+use runtime_requests::RuntimeRequests;
 
 const DEFAULT_SIZE: [f32; 2] = [960.0, 640.0];
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -37,40 +39,9 @@ pub struct HtmlPreviewWindows {
     page_timeout: Duration,
     agent_pages: Option<Arc<CefArtifactPages>>,
     runtime_config: RuntimeConfig,
-    runtime_requests: Receiver<RuntimeRequest>,
-    runtime_request_tx: Sender<RuntimeRequest>,
+    runtime_requests: RuntimeRequests,
     // Declared last so it drops after every browser has closed.
     runtime: Option<CefRuntime>,
-}
-
-type RuntimeRequest = Sender<Result<(), String>>;
-
-/// Blocking callers ask the GUI thread to initialize CEF, never initialize it
-/// themselves. Dropping the GUI's receiver also releases pending callers.
-#[derive(Clone)]
-pub(super) struct RuntimeRequestSender {
-    requests: Sender<RuntimeRequest>,
-    ctx: egui::Context,
-    timeout: Duration,
-}
-
-impl RuntimeRequestSender {
-    fn ensure_runtime(&self) -> Result<(), String> {
-        let (reply, response) = mpsc::channel();
-        self.requests
-            .send(reply)
-            .map_err(|_| "the GUI is shutting down".to_owned())?;
-        // Wake even an idle window: agents must not depend on user input.
-        self.ctx.request_repaint();
-        response
-            .recv_timeout(self.timeout)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => {
-                    "the GUI did not initialize CEF in time".to_owned()
-                }
-                mpsc::RecvTimeoutError::Disconnected => "the GUI is shutting down".to_owned(),
-            })?
-    }
 }
 
 struct Preview {
@@ -87,7 +58,6 @@ impl HtmlPreviewWindows {
         fallback: Arc<dyn ArtifactOpener>,
         snapshots: Arc<HtmlSnapshots>,
     ) -> Self {
-        let (runtime_request_tx, runtime_requests) = mpsc::channel();
         Self {
             previews: Vec::new(),
             requests: Some(requests),
@@ -100,8 +70,7 @@ impl HtmlPreviewWindows {
             page_timeout: PAGE_TIMEOUT,
             agent_pages: None,
             runtime_config: RuntimeConfig::offline(),
-            runtime_requests,
-            runtime_request_tx,
+            runtime_requests: RuntimeRequests::new(),
             runtime: None,
         }
     }
@@ -111,16 +80,21 @@ impl HtmlPreviewWindows {
         Arc::clone(&self.snapshots).install(ctx);
     }
 
+    /// Services initialization on the GUI thread even when eframe skips `ui`
+    /// for a hidden/minimized window. This does not paint or open preview UI.
+    pub fn logic(&mut self) {
+        for request in self.runtime_requests.take_pending() {
+            request.respond_with(|| self.ensure_runtime());
+        }
+    }
+
     pub fn render(&mut self, ctx: &egui::Context) {
         let requested: Vec<PathBuf> = self
             .requests
             .as_ref()
             .map(|requests| requests.try_iter().collect())
             .unwrap_or_default();
-        let requests: Vec<_> = self.runtime_requests.try_iter().collect();
-        for reply in requests {
-            let _ = reply.send(self.ensure_runtime());
-        }
+        self.logic();
         for path in requested {
             if let Err(error) = self.open(&path, ctx.pixels_per_point()) {
                 tracing::warn!(%error, path = %path.display(), "HTML preview unavailable");
@@ -177,11 +151,7 @@ impl HtmlPreviewWindows {
             ));
         }
         let timeout = self.page_timeout;
-        let initializer = RuntimeRequestSender {
-            requests: self.runtime_request_tx.clone(),
-            ctx: ctx.clone(),
-            timeout,
-        };
+        let initializer = self.runtime_requests.sender(ctx, timeout);
         Ok(Arc::clone(self.agent_pages.get_or_insert_with(|| {
             Arc::new(CefArtifactPages::new(timeout, initializer))
         })))
@@ -194,7 +164,7 @@ impl HtmlPreviewWindows {
         if let Some(error) = &self.init_error {
             return Err(error.clone());
         }
-        match CefRuntime::initialize(self.runtime_config.clone()) {
+        let result = match CefRuntime::initialize(self.runtime_config.clone()) {
             Ok(runtime) => {
                 self.runtime = Some(runtime);
                 Ok(())
@@ -204,7 +174,9 @@ impl HtmlPreviewWindows {
                 self.init_error = Some(error.clone());
                 Err(error)
             }
-        }
+        };
+        self.runtime_requests.finish(result.clone());
+        result
     }
 
     fn open(&mut self, path: &Path, pixels_per_point: f32) -> Result<(), String> {
@@ -296,6 +268,7 @@ mod tests {
     use crate::model::artifact_opener::{HtmlPreviewOpener, PortalArtifactOpener};
     use crate::model::html_snapshots::SnapshotState;
     use runtime::artifacts::ArtifactPages;
+    use std::sync::mpsc;
 
     fn idle_context() -> egui::Context {
         let ctx = egui::Context::default();
@@ -312,18 +285,6 @@ mod tests {
             requests,
             Arc::new(PortalArtifactOpener),
             Arc::new(HtmlSnapshots::new(dir.join("snapshots"))),
-        )
-    }
-
-    fn initializer(ctx: egui::Context) -> (RuntimeRequestSender, Receiver<RuntimeRequest>) {
-        let (requests, receiver) = mpsc::channel();
-        (
-            RuntimeRequestSender {
-                requests,
-                ctx,
-                timeout: Duration::MAX,
-            },
-            receiver,
         )
     }
 
@@ -347,61 +308,6 @@ mod tests {
         assert!(pages.page("run").is_none());
     }
 
-    #[test]
-    fn initialization_requests_wake_gui_and_relay_each_response() {
-        let ctx = idle_context();
-        let (wake, repaint) = mpsc::channel();
-        ctx.set_request_repaint_callback(move |_| {
-            let _ = wake.send(());
-        });
-        let (initializer, requests) = initializer(ctx);
-        std::thread::scope(|scope| {
-            let first = scope.spawn(|| initializer.ensure_runtime());
-            repaint.recv().unwrap();
-            let first_reply = requests.recv().unwrap();
-            let second = scope.spawn(|| initializer.ensure_runtime());
-            requests
-                .recv()
-                .unwrap()
-                .send(Err("initialization failed".into()))
-                .unwrap();
-            first_reply.send(Ok(())).unwrap();
-            assert_eq!(first.join().unwrap(), Ok(()));
-            assert_eq!(second.join().unwrap(), Err("initialization failed".into()));
-        });
-    }
-
-    #[test]
-    fn initialization_waiters_are_released_when_gui_shuts_down() {
-        let (initializer, requests) = initializer(egui::Context::default());
-        std::thread::scope(|scope| {
-            let pending = scope.spawn(|| initializer.ensure_runtime());
-            let reply = requests.recv().unwrap();
-            drop(requests);
-            drop(reply);
-            assert_eq!(
-                pending.join().unwrap(),
-                Err("the GUI is shutting down".into())
-            );
-        });
-        assert_eq!(
-            initializer.ensure_runtime(),
-            Err("the GUI is shutting down".into())
-        );
-    }
-
-    #[test]
-    fn initialization_request_uses_the_page_timeout() {
-        let (mut initializer, _requests) = initializer(egui::Context::default());
-        // No GUI processes the queued request; a zero budget deterministically
-        // exercises the production deadline without a wall-clock test wait.
-        initializer.timeout = Duration::ZERO;
-        assert_eq!(
-            initializer.ensure_runtime(),
-            Err("the GUI did not initialize CEF in time".into())
-        );
-    }
-
     #[tokio::test]
     async fn page_open_returns_initialization_error_without_opening_cef() {
         let dir = tempfile::tempdir().unwrap();
@@ -421,7 +327,7 @@ mod tests {
         let opening =
             tokio::spawn(async move { opening_pages.open("run", b"<h1>mock</h1>".to_vec()).await });
         repaint.recv().await.unwrap();
-        windows.render(&ctx);
+        let _ = ctx.run_logic(&Default::default(), |_| windows.logic());
         let error = opening.await.unwrap().err().unwrap();
         assert_eq!(Some(&error), windows.init_error.as_ref());
         assert!(pages.page("run").is_none());
@@ -466,6 +372,39 @@ mod tests {
         windows.open(&html, 1.0).unwrap();
         assert!(windows.runtime.is_some());
         assert_eq!(windows.previews.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "needs the CEF runtime and EVORCH_CEF_HELPER; see docs/browser.md"]
+    fn logic_only_initializes_then_opens_again_without_any_gui_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut windows = windows(dir.path());
+        let ctx = idle_context();
+        windows.page_timeout = Duration::MAX;
+        let pages = windows.artifact_pages(&ctx).unwrap();
+        let (wake, repaint) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let first_pages = Arc::clone(&pages);
+        let first =
+            tokio.spawn(async move { first_pages.open("first", b"<h1>first</h1>".to_vec()).await });
+        repaint.recv().unwrap();
+        assert!(windows.runtime.is_none());
+        let _ = ctx.run_logic(&Default::default(), |_| windows.logic());
+        assert!(tokio.block_on(first).unwrap().is_ok());
+        assert!(windows.runtime.is_some());
+        // No logic/ui call services this second open: initialized pages must
+        // not wait for even a minimized GUI to process another request.
+        assert!(
+            tokio
+                .block_on(pages.open("second", b"<h1>second</h1>".to_vec()))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -753,8 +692,7 @@ document.getElementById("info").addEventListener("mouseover", () => {
         let phase = loop {
             match events.recv().unwrap() {
                 GuiEvent::Repaint => {
-                    ctx.run_ui(Default::default(), |ui| windows.render(ui.ctx()))
-                        .drop_without_applying_deltas();
+                    let _ = ctx.run_logic(&Default::default(), |_| windows.logic());
                 }
                 GuiEvent::Finished(phase) => break phase,
             }

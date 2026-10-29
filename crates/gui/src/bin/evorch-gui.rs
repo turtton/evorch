@@ -1231,6 +1231,8 @@ impl Drop for GuiStorageResources {
 impl eframe::App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workbench.logic(ctx, frame);
+        #[cfg(feature = "cef")]
+        self.html_previews.logic();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

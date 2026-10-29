@@ -40,6 +40,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=skill_hot_reload_cache)
       | binary(=thread_tools_cache)))
   | (package(=tools) & binary(=bounded_output))
+  | (package(=gui) & binary(=artifact_pages_cache))
 '
 IO_CONTRACT_FILTER='
   (package(=storage) & binary(=io_contracts))
