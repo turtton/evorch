@@ -604,7 +604,7 @@ impl UsageLoader {
             .spawn(move || {
                 let _ = sender.send(UsageDataset::load(&config, range));
                 if let Some(context) = repaint {
-                    context.request_repaint();
+                    crate::repaint::coalesced(&context);
                 }
             });
         match spawned {

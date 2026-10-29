@@ -19,6 +19,7 @@ pub mod logging;
 pub mod model;
 pub mod panes;
 pub mod pty;
+pub mod repaint;
 pub mod runtime_sink;
 pub mod shared_state;
 pub mod terminal;

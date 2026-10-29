@@ -374,6 +374,19 @@ async fn codex_release_failure_missing_model_is_degraded_not_unadvertised() {
             .to_string();
         assert!(error.contains("degraded"), "{error}");
         assert!(!error.contains("not advertised"), "{error}");
+        let preflight_error = model
+            .preflight_routes(&[routing::ResolvedRoute {
+                profile: "codex".into(),
+                model_id: "gpt-4o".into(),
+            }])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(preflight_error.contains("degraded"), "{preflight_error}");
+        assert!(
+            !preflight_error.contains("not advertised"),
+            "{preflight_error}"
+        );
         assert!(
             server
                 .received_requests()
@@ -435,12 +448,13 @@ async fn catalog_diagnostics(
 }
 
 #[tokio::test]
-async fn codex_preflight_rejects_degraded_present_model_and_new_composition_recovers() {
+async fn codex_preflight_warns_for_advertised_model_when_version_lookup_degrades() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
+    // GitHub's unauthenticated rate limit answers 403.
     Mock::given(path("/releases"))
-        .respond_with(ResponseTemplate::new(503))
+        .respond_with(ResponseTemplate::new(403))
         .expect(1)
         .mount(&server)
         .await;
@@ -452,32 +466,34 @@ async fn codex_preflight_rejects_degraded_present_model_and_new_composition_reco
             providers::CodexCatalogVersionResolver::new(format!("{}/releases", server.uri())),
         ))
     };
+    let bus = Arc::new(EventBus::new(32));
+    let mut receiver = bus.subscribe();
     let model = codex_model_with_version(
         &server,
         Arc::clone(&store),
         FRESH_ID_TOKEN,
         resolver(),
-        None,
+        Some(Arc::clone(&bus)),
     );
-    let invocation = AgentInvocationContext {
-        model_preference: Some(ModelPreference {
-            profile: "codex".into(),
-            model: None,
-            reasoning_effort: None,
-        }),
-        ..Default::default()
-    };
     let routes = [routing::ResolvedRoute {
         profile: "codex".into(),
         model_id: "gpt-4o".into(),
     }];
-    assert!(model.admit(&invocation, Role::Reviewer).await.is_ok());
-    let error = model
-        .preflight_routes(&routes)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("degraded"), "{error}");
+    model.preflight_routes(&routes).await.unwrap();
+    let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
+    let warning = diagnostics
+        .iter()
+        .find(|event| event.code == event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE)
+        .expect("degradation is reported as a warning");
+    assert_eq!(warning.severity, event_bus::DiagnosticSeverity::Warning);
+    for field in ["profile=codex", "model=gpt-4o", "degraded", "http_403"] {
+        assert!(warning.detail.contains(field), "{field}: {warning:?}");
+    }
+    for diagnostic in &diagnostics {
+        for secret in ["access-token", "refresh-token", FRESH_ID_TOKEN] {
+            assert!(!diagnostic.detail.contains(secret), "{diagnostic:?}");
+        }
+    }
     server.verify().await;
     server.reset().await;
     Mock::given(path("/releases"))
@@ -497,9 +513,7 @@ async fn codex_preflight_rejects_degraded_present_model_and_new_composition_reco
         .expect(1)
         .mount(&server)
         .await;
-    // An existing client never refreshes underneath already-sent requests. A new
-    // resolver here models recovery after the shared resolver's tested backoff.
-    assert!(model.preflight_routes(&routes).await.is_err());
+    // A new resolver models recovery after the shared resolver's tested backoff.
     let bus = Arc::new(EventBus::new(32));
     let mut receiver = bus.subscribe();
     let recovered = codex_model_with_version(
@@ -509,8 +523,9 @@ async fn codex_preflight_rejects_degraded_present_model_and_new_composition_reco
         resolver(),
         Some(Arc::clone(&bus)),
     );
-    assert!(recovered.preflight_routes(&routes).await.is_ok());
+    recovered.preflight_routes(&routes).await.unwrap();
     let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let catalog = &diagnostics[0];
     assert_eq!(catalog.severity, event_bus::DiagnosticSeverity::Info);
     assert!(

@@ -331,6 +331,17 @@ fn yes() -> bool {
     true
 }
 
+/// Deserializes an optional string argument, treating an empty string like an
+/// omitted one. Model clients commonly fill every schema property, sending `""`
+/// for the ones they have nothing to pass.
+fn empty_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.filter(|text| !text.is_empty()))
+}
+
 fn check_pattern(pattern: &str) -> Result<(), String> {
     if pattern.trim().is_empty() || pattern.len() > MAX_PATTERN_BYTES {
         return Err(format!(
