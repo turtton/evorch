@@ -80,6 +80,7 @@ fn harness(copies: Arc<Copies>) -> Harness<'static, Pane> {
         [800, 600],
         1.0,
         Dialogs::Ask,
+        30,
     )
     .expect("browser");
     let pane = Pane {

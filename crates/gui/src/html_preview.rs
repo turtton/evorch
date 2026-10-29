@@ -1,7 +1,7 @@
 //! In-app HTML artifact previews on CEF off-screen rendering (ADR 0034 B).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use browser_cef::offline::ArtifactBundle;
@@ -22,7 +22,7 @@ const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Preview windows for the paths [`crate::model::artifact_opener::HtmlPreviewOpener`]
 /// queues, the renderer for card snapshots and the pages agents inspect
-/// artifacts in. CEF starts on the first request or on [`Self::artifact_pages`];
+/// artifacts in. CEF starts only on the first preview, snapshot or page request;
 /// if it cannot, the receiver is dropped, every artifact goes to `fallback` and
 /// snapshots fail.
 pub struct HtmlPreviewWindows {
@@ -36,8 +36,41 @@ pub struct HtmlPreviewWindows {
     snapshot_worker: Option<SnapshotWorker>,
     page_timeout: Duration,
     agent_pages: Option<Arc<CefArtifactPages>>,
+    runtime_config: RuntimeConfig,
+    runtime_requests: Receiver<RuntimeRequest>,
+    runtime_request_tx: Sender<RuntimeRequest>,
     // Declared last so it drops after every browser has closed.
     runtime: Option<CefRuntime>,
+}
+
+type RuntimeRequest = Sender<Result<(), String>>;
+
+/// Blocking callers ask the GUI thread to initialize CEF, never initialize it
+/// themselves. Dropping the GUI's receiver also releases pending callers.
+#[derive(Clone)]
+pub(super) struct RuntimeRequestSender {
+    requests: Sender<RuntimeRequest>,
+    ctx: egui::Context,
+    timeout: Duration,
+}
+
+impl RuntimeRequestSender {
+    fn ensure_runtime(&self) -> Result<(), String> {
+        let (reply, response) = mpsc::channel();
+        self.requests
+            .send(reply)
+            .map_err(|_| "the GUI is shutting down".to_owned())?;
+        // Wake even an idle window: agents must not depend on user input.
+        self.ctx.request_repaint();
+        response
+            .recv_timeout(self.timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    "the GUI did not initialize CEF in time".to_owned()
+                }
+                mpsc::RecvTimeoutError::Disconnected => "the GUI is shutting down".to_owned(),
+            })?
+    }
 }
 
 struct Preview {
@@ -54,6 +87,7 @@ impl HtmlPreviewWindows {
         fallback: Arc<dyn ArtifactOpener>,
         snapshots: Arc<HtmlSnapshots>,
     ) -> Self {
+        let (runtime_request_tx, runtime_requests) = mpsc::channel();
         Self {
             previews: Vec::new(),
             requests: Some(requests),
@@ -65,6 +99,9 @@ impl HtmlPreviewWindows {
             snapshot_worker: None,
             page_timeout: PAGE_TIMEOUT,
             agent_pages: None,
+            runtime_config: RuntimeConfig::offline(),
+            runtime_requests,
+            runtime_request_tx,
             runtime: None,
         }
     }
@@ -80,6 +117,10 @@ impl HtmlPreviewWindows {
             .as_ref()
             .map(|requests| requests.try_iter().collect())
             .unwrap_or_default();
+        let requests: Vec<_> = self.runtime_requests.try_iter().collect();
+        for reply in requests {
+            let _ = reply.send(self.ensure_runtime());
+        }
         for path in requested {
             if let Err(error) = self.open(&path, ctx.pixels_per_point()) {
                 tracing::warn!(%error, path = %path.display(), "HTML preview unavailable");
@@ -125,13 +166,24 @@ impl HtmlPreviewWindows {
             .ok_or_else(|| "the snapshot worker did not start".into())
     }
 
-    /// Starts CEF and returns the pages agents inspect artifacts in. Call it on
-    /// the thread that drops this value: CEF shuts down where it started.
-    pub fn artifact_pages(&mut self) -> Result<Arc<CefArtifactPages>, String> {
-        self.ensure_runtime()?;
+    /// Registers pages without starting CEF. Tool availability is decided once,
+    /// using only this lightweight helper check; initialization errors are
+    /// returned by the first tool call, not by changing the tool schema.
+    pub fn artifact_pages(&mut self, ctx: &egui::Context) -> Result<Arc<CefArtifactPages>, String> {
+        if !self.runtime_config.helper_path.is_file() {
+            return Err(format!(
+                "CEF helper not found at {}",
+                self.runtime_config.helper_path.display()
+            ));
+        }
         let timeout = self.page_timeout;
+        let initializer = RuntimeRequestSender {
+            requests: self.runtime_request_tx.clone(),
+            ctx: ctx.clone(),
+            timeout,
+        };
         Ok(Arc::clone(self.agent_pages.get_or_insert_with(|| {
-            Arc::new(CefArtifactPages::new(timeout))
+            Arc::new(CefArtifactPages::new(timeout, initializer))
         })))
     }
 
@@ -142,7 +194,7 @@ impl HtmlPreviewWindows {
         if let Some(error) = &self.init_error {
             return Err(error.clone());
         }
-        match CefRuntime::initialize(RuntimeConfig::offline()) {
+        match CefRuntime::initialize(self.runtime_config.clone()) {
             Ok(runtime) => {
                 self.runtime = Some(runtime);
                 Ok(())
@@ -167,6 +219,7 @@ impl HtmlPreviewWindows {
             size,
             pixels_per_point,
             Dialogs::Ask,
+            30,
         )?;
         self.next_id += 1;
         self.previews.push(Preview {
@@ -242,6 +295,178 @@ mod tests {
     use super::*;
     use crate::model::artifact_opener::{HtmlPreviewOpener, PortalArtifactOpener};
     use crate::model::html_snapshots::SnapshotState;
+    use runtime::artifacts::ArtifactPages;
+
+    fn idle_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            ctx.run_ui(Default::default(), |_| {})
+                .drop_without_applying_deltas();
+        }
+        ctx
+    }
+
+    fn windows(dir: &Path) -> HtmlPreviewWindows {
+        let (_opener, requests) = HtmlPreviewOpener::new(Arc::new(PortalArtifactOpener));
+        HtmlPreviewWindows::new(
+            requests,
+            Arc::new(PortalArtifactOpener),
+            Arc::new(HtmlSnapshots::new(dir.join("snapshots"))),
+        )
+    }
+
+    fn initializer(ctx: egui::Context) -> (RuntimeRequestSender, Receiver<RuntimeRequest>) {
+        let (requests, receiver) = mpsc::channel();
+        (
+            RuntimeRequestSender {
+                requests,
+                ctx,
+                timeout: Duration::MAX,
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn registration_and_idle_render_do_not_initialize_cef() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut windows = windows(dir.path());
+        let ctx = egui::Context::default();
+        windows.runtime_config.helper_path = dir.path().join("helper");
+        assert!(windows.artifact_pages(&ctx).is_err());
+        // Deliberately not an executable: registration must only check is_file.
+        std::fs::write(&windows.runtime_config.helper_path, "").unwrap();
+        let pages = windows.artifact_pages(&ctx).unwrap();
+        assert!(Arc::ptr_eq(&pages, &windows.artifact_pages(&ctx).unwrap()));
+        windows.render(&ctx);
+        assert!(windows.runtime.is_none());
+        assert!(windows.init_error.is_none());
+        assert!(windows.snapshot_worker.is_none());
+        drop(windows);
+        // The registry can outlive a GUI that never initialized CEF.
+        assert!(pages.page("run").is_none());
+    }
+
+    #[test]
+    fn initialization_requests_wake_gui_and_relay_each_response() {
+        let ctx = idle_context();
+        let (wake, repaint) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        let (initializer, requests) = initializer(ctx);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| initializer.ensure_runtime());
+            repaint.recv().unwrap();
+            let first_reply = requests.recv().unwrap();
+            let second = scope.spawn(|| initializer.ensure_runtime());
+            requests
+                .recv()
+                .unwrap()
+                .send(Err("initialization failed".into()))
+                .unwrap();
+            first_reply.send(Ok(())).unwrap();
+            assert_eq!(first.join().unwrap(), Ok(()));
+            assert_eq!(second.join().unwrap(), Err("initialization failed".into()));
+        });
+    }
+
+    #[test]
+    fn initialization_waiters_are_released_when_gui_shuts_down() {
+        let (initializer, requests) = initializer(egui::Context::default());
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| initializer.ensure_runtime());
+            let reply = requests.recv().unwrap();
+            drop(requests);
+            drop(reply);
+            assert_eq!(
+                pending.join().unwrap(),
+                Err("the GUI is shutting down".into())
+            );
+        });
+        assert_eq!(
+            initializer.ensure_runtime(),
+            Err("the GUI is shutting down".into())
+        );
+    }
+
+    #[test]
+    fn initialization_request_uses_the_page_timeout() {
+        let (mut initializer, _requests) = initializer(egui::Context::default());
+        // No GUI processes the queued request; a zero budget deterministically
+        // exercises the production deadline without a wall-clock test wait.
+        initializer.timeout = Duration::ZERO;
+        assert_eq!(
+            initializer.ensure_runtime(),
+            Err("the GUI did not initialize CEF in time".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn page_open_returns_initialization_error_without_opening_cef() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut windows = windows(dir.path());
+        let ctx = idle_context();
+        windows.runtime_config.helper_path = dir.path().join("helper");
+        std::fs::write(&windows.runtime_config.helper_path, "").unwrap();
+        windows.page_timeout = Duration::MAX;
+        let pages = windows.artifact_pages(&ctx).unwrap();
+        // Missing helpers fail before any CEF API call, even in this CEF build.
+        std::fs::remove_file(&windows.runtime_config.helper_path).unwrap();
+        let (wake, mut repaint) = tokio::sync::mpsc::unbounded_channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        let opening_pages = Arc::clone(&pages);
+        let opening =
+            tokio::spawn(async move { opening_pages.open("run", b"<h1>mock</h1>".to_vec()).await });
+        repaint.recv().await.unwrap();
+        windows.render(&ctx);
+        let error = opening.await.unwrap().err().unwrap();
+        assert_eq!(Some(&error), windows.init_error.as_ref());
+        assert!(pages.page("run").is_none());
+        std::fs::write(&windows.runtime_config.helper_path, "").unwrap();
+        assert!(Arc::ptr_eq(&pages, &windows.artifact_pages(&ctx).unwrap()));
+        assert!(windows.runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_page_open_is_released_when_uninitialized_gui_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut windows = windows(dir.path());
+        let ctx = idle_context();
+        windows.runtime_config.helper_path = dir.path().join("helper");
+        std::fs::write(&windows.runtime_config.helper_path, "").unwrap();
+        windows.page_timeout = Duration::MAX;
+        let pages = windows.artifact_pages(&ctx).unwrap();
+        let (wake, mut repaint) = tokio::sync::mpsc::unbounded_channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        let opening =
+            tokio::spawn(async move { pages.open("run", b"<h1>mock</h1>".to_vec()).await });
+        repaint.recv().await.unwrap();
+        drop(windows);
+        assert_eq!(
+            opening.await.unwrap().err().unwrap(),
+            "the GUI is shutting down"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the CEF runtime and EVORCH_CEF_HELPER; see docs/browser.md"]
+    fn preview_starts_cef_on_first_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut windows = windows(dir.path());
+        let ctx = egui::Context::default();
+        let _pages = windows.artifact_pages(&ctx).unwrap();
+        assert!(windows.runtime.is_none());
+        let html = dir.path().join("mock.html");
+        std::fs::write(&html, "<!doctype html><h1>mock</h1>").unwrap();
+        windows.open(&html, 1.0).unwrap();
+        assert!(windows.runtime.is_some());
+        assert_eq!(windows.previews.len(), 1);
+    }
 
     #[test]
     #[ignore = "needs the CEF runtime and EVORCH_CEF_HELPER; see docs/browser.md"]
@@ -423,7 +648,18 @@ document.getElementById("info").addEventListener("mouseover", () => {
         );
         // nextest's slow-timeout bounds the page; it has no other deadline.
         windows.page_timeout = Duration::MAX;
-        let pages = windows.artifact_pages().unwrap();
+        enum GuiEvent {
+            Repaint,
+            Finished(runtime::AgentRunPhase),
+        }
+        let ctx = idle_context();
+        let (wake, events) = mpsc::channel();
+        let repaint = wake.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = repaint.send(GuiEvent::Repaint);
+        });
+        let pages = windows.artifact_pages(&ctx).unwrap();
+        assert!(windows.runtime.is_none());
 
         let artifact = |results: &Results| -> serde_json::Value {
             serde_json::from_str::<serde_json::Value>(&results[0].1).unwrap()["artifact_id"].clone()
@@ -486,13 +722,14 @@ document.getElementById("info").addEventListener("mouseover", () => {
             .enable_all()
             .build()
             .unwrap();
-        let phase = tokio.block_on(async {
+        let agent_script = Arc::clone(&script);
+        tokio.spawn(async move {
             let bus = Arc::new(event_bus::EventBus::new(1024));
             let executor = tools::ToolExecutor::new(Arc::clone(&bus));
             executor.set_default_cwd(workspace.clone());
             let store =
                 runtime::artifacts::ArtifactStore::new(dir.path().join("artifacts")).unwrap();
-            let agents = runtime::AgentRuntime::new(bus, Arc::new(executor), script.clone())
+            let agents = runtime::AgentRuntime::new(bus, Arc::new(executor), agent_script)
                 .with_artifact_store(Arc::new(store));
             agents.set_artifact_pages(pages);
             let run = agents.reserve_run_id();
@@ -508,8 +745,20 @@ document.getElementById("info").addEventListener("mouseover", () => {
                     ..Default::default()
                 },
             );
-            agents.wait(run).await.unwrap()
+            let phase = agents.wait(run).await.unwrap();
+            wake.send(GuiEvent::Finished(phase)).unwrap();
         });
+        // The GUI thread services repaint/initialization events while the agent
+        // runs; completion is explicit rather than a fixed render-loop timeout.
+        let phase = loop {
+            match events.recv().unwrap() {
+                GuiEvent::Repaint => {
+                    ctx.run_ui(Default::default(), |ui| windows.render(ui.ctx()))
+                        .drop_without_applying_deltas();
+                }
+                GuiEvent::Finished(phase) => break phase,
+            }
+        };
         drop(tokio);
         drop(windows);
 
