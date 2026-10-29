@@ -149,3 +149,50 @@ fn excluded_session_rows_advance_the_cursor_without_being_returned() {
     assert!(second.events.is_empty());
     assert_eq!((second.scanned, second.last_id), (2, 4));
 }
+
+#[test]
+fn events_of_runs_can_be_read_in_pages_bounded_by_ids() {
+    // Given: replies of two runs interleaved (ids 1..=9, run r1 on the odd ones)
+    let dir = TempDir::new().expect("temp dir");
+    let config = StorageConfig {
+        db_path: dir.path().join("pages.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    for index in 1..=9 {
+        let run = if index % 2 == 1 { "r1" } else { "r2" };
+        storage
+            .handle()
+            .append_stream_event(
+                "s",
+                &Event::new(event_bus::MessageEvent::MessageCompleted {
+                    run_id: run.into(),
+                    text: format!("m{index}"),
+                }),
+                None,
+            )
+            .expect("append");
+    }
+    let reader = Database::open_read_only(&config.db_path).expect("read-only open");
+    let runs = ["r1".to_owned()];
+
+    // When: r1's events are read through id 8, 2 at a time, each page after the last ID of the previous
+    let mut ids = Vec::new();
+    let mut after = 0;
+    loop {
+        let (page, more) = reader
+            .events_for_runs_between(&runs, after, 8, 2)
+            .expect("page");
+        ids.extend(page.iter().map(|stored| stored.id));
+        let Some(last) = page.last().map(|stored| stored.id) else {
+            break;
+        };
+        if !more {
+            break;
+        }
+        after = last;
+    }
+
+    // Then: every matching event up to the bound arrives once, in order
+    assert_eq!(ids, [1, 3, 5, 7]);
+}

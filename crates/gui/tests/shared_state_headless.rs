@@ -1146,3 +1146,39 @@ fn what_is_shown_does_not_depend_on_how_the_events_were_split_into_polls() {
         }
     }
 }
+
+#[test]
+fn recovering_a_long_history_reads_it_in_pages_without_losing_the_latest_replies() {
+    // Given: A answered many times in a thread whose sidebar B lacks, and B restarted
+    // with a recovery page of 3 events, much smaller than the history
+    let shared = Shared::new();
+    let private = shared.dir.path().join("private.json");
+    let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    let before: Vec<String> = (1..=8).map(|n| format!("reply {n}")).collect();
+    for text in &before {
+        a.emit(reply("run-a", text));
+    }
+    let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
+        state.with_rehydrate_page_size(3)
+    });
+    let after: Vec<String> = (9..=10).map(|n| format!("reply {n}")).collect();
+    for text in &after {
+        a.emit(reply("run-a", text));
+    }
+
+    // When: the sidebar is published and B follows
+    std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
+    b.state.poll_shared_feed();
+    b.state.switch_thread(thread).expect("open");
+
+    // Then: every reply appears once, in order, including the latest one before the cut
+    let expected: Vec<String> = before.into_iter().chain(after).collect();
+    assert_eq!(texts(&b.state), expected);
+}

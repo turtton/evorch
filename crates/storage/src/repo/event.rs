@@ -269,18 +269,32 @@ pub fn list_for_runs(
     from_ns: i64,
     limit: usize,
 ) -> Result<(Vec<StoredEvent>, bool), StorageError> {
+    list_for_runs_between(conn, run_ids, from_ns, 0, i64::MAX, limit)
+}
+
+/// [`list_for_runs`] restricted to events with `after_id < id <= through_id`, so
+/// that a long history can be read page by page with the last ID of a page as
+/// the next `after_id`.
+pub fn list_for_runs_between(
+    conn: &Connection,
+    run_ids: &[String],
+    from_ns: i64,
+    after_id: i64,
+    through_id: i64,
+    limit: usize,
+) -> Result<(Vec<StoredEvent>, bool), StorageError> {
     let ids = serde_json::to_string(run_ids)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let runs: std::collections::HashSet<&str> = run_ids.iter().map(String::as_str).collect();
     // The substring check only narrows the scan; the parsed payload decides.
     let mut statement = conn.prepare(
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
-         FROM events WHERE wall_clock_ns >= ?2 AND EXISTS (SELECT 1 FROM json_each(?1) run \
+         FROM events WHERE wall_clock_ns >= ?2 AND id > ?3 AND id <= ?4 AND EXISTS (SELECT 1 FROM json_each(?1) run \
          WHERE instr(payload, '\"run_id\":' || json_quote(run.value)) > 0 \
          OR instr(payload, '\"call_id\":' || rtrim(json_quote(run.value), '\"') || ':') > 0) \
          ORDER BY id ASC",
     )?;
-    let mut rows = statement.query(params![ids, from_ns])?;
+    let mut rows = statement.query(params![ids, from_ns, after_id, through_id])?;
     let mut events = Vec::new();
     while let Some(row) = rows.next()? {
         let payload: String = row.get(6)?;

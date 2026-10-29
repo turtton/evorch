@@ -539,6 +539,22 @@ impl Database {
         event::list_for_runs(&self.conn, run_ids, from_ns, limit)
     }
 
+    /// [`Self::events_for_runs`] over events with `after_id < id <= through_id`.
+    /// Read a long history in pages by passing the last ID of a page, while the
+    /// answer says more matched, as the next `after_id`.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn events_for_runs_between(
+        &self,
+        run_ids: &[String],
+        after_id: i64,
+        through_id: i64,
+        limit: usize,
+    ) -> Result<(Vec<StoredEvent>, bool), StorageError> {
+        event::list_for_runs_between(&self.conn, run_ids, 0, after_id, through_id, limit)
+    }
+
     /// Hands every event to `visit` in ID order, one at a time, so that a
     /// replay never holds the whole history in memory. Events that no longer
     /// decode are skipped, as in [`Self::events_all_ordered`].

@@ -20,8 +20,8 @@ use crate::shared_state::{FedEvent, FeedBatch, FeedConfig, FeedPoller, FeedWorke
 /// sidebar that introduces it before being folded without it.
 const UNKNOWN_THREAD_GRACE: Duration = Duration::from_secs(10);
 
-/// Events replayed per conversation when its earlier history is recovered.
-const REHYDRATE_EVENT_LIMIT: usize = 100_000;
+/// Events read at a time when a conversation's earlier history is recovered.
+const REHYDRATE_PAGE: usize = 5_000;
 
 pub(super) enum SharedFeed {
     Worker(FeedWorker),
@@ -38,11 +38,21 @@ pub(super) struct SharedFeedState {
     pub released_runs: std::collections::BTreeMap<String, Vec<ReleasedRun>>,
     /// The database the feed follows.
     pub db_path: Option<std::path::PathBuf>,
+    /// Events read at a time when recovering a conversation's earlier history.
+    pub rehydrate_page: Option<usize>,
     /// Runs whose events came from other processes.
     pub foreign_runs: std::collections::BTreeSet<String>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Reads this many events at a time when recovering a conversation's
+    /// earlier history (default 5000), which bounds the memory that takes.
+    #[must_use]
+    pub fn with_rehydrate_page_size(mut self, events: usize) -> Self {
+        self.shared_feed.rehydrate_page = Some(events);
+        self
+    }
+
     /// Follows the shared database on a background thread; `own_stream` is the
     /// stream this process persists under, whose rows are already shown live.
     /// Call after [`Self::restore_history`], which fixes where following starts.
@@ -323,17 +333,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         };
         let outer = self.transcripts.set_foreign_scope(true);
+        let shown_through = self.shown_through_event;
+        let page = self
+            .shared_feed
+            .rehydrate_page
+            .unwrap_or(REHYDRATE_PAGE)
+            .max(1);
         for (thread, runs) in threads {
-            let (events, truncated) = match db.events_for_runs(runs, 0, REHYDRATE_EVENT_LIMIT) {
-                Ok(found) => found,
-                Err(error) => {
-                    tracing::warn!(%error, thread, "earlier events of a conversation cannot be loaded");
-                    continue;
-                }
-            };
-            if truncated {
-                tracing::warn!(thread, "earlier events of a conversation were cut off");
-            }
             for run in runs {
                 self.transcripts.forget_run(run);
             }
@@ -345,20 +351,40 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .collect();
             messages.sort_by_key(|message| message.at);
             let mut messages = messages.into_iter().peekable();
-            let shown_through = self.shown_through_event;
-            for stored in events
-                .into_iter()
-                .filter(|stored| stored.id <= shown_through)
-            {
-                while messages
-                    .peek()
-                    .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
-                {
-                    if let Some(message) = messages.next() {
-                        self.restore_user_message(message);
+            // Read through what is already shown, a page at a time; whatever
+            // follows is folded by the feed.
+            let mut after = 0;
+            loop {
+                let (events, more) = match db.events_for_runs_between(
+                    runs,
+                    after,
+                    shown_through,
+                    page,
+                ) {
+                    Ok(found) => found,
+                    Err(error) => {
+                        tracing::warn!(%error, thread, "earlier events of a conversation cannot be loaded");
+                        break;
                     }
+                };
+                let Some(last) = events.last().map(|stored| stored.id) else {
+                    break;
+                };
+                for stored in events {
+                    while messages
+                        .peek()
+                        .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
+                    {
+                        if let Some(message) = messages.next() {
+                            self.restore_user_message(message);
+                        }
+                    }
+                    self.apply_conversation_event(&stored.event);
                 }
-                self.apply_conversation_event(&stored.event);
+                if !more {
+                    break;
+                }
+                after = last;
             }
             for message in messages {
                 self.restore_user_message(message);
