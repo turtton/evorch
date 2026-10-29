@@ -1388,6 +1388,113 @@ async fn continue_completed_turn_waits_without_input_then_real_followup_reuses_w
 }
 
 #[tokio::test]
+async fn mention_follow_ups_keep_the_wire_prefix_and_the_users_words_apart() {
+    use runtime::skill::{append_skill_attachment, build_standard_registry};
+
+    // The composed runtime discovers skills itself; a bundled one needs no files.
+    const SKILL: &str = "git-best-practices";
+    let registry = build_standard_registry(None);
+    let body = registry.load_body(SKILL).unwrap();
+    let scope = registry.get(SKILL).unwrap().scope.as_str();
+    let mut harness = harness(
+        vec![
+            text_response("started"),
+            text_response("live"),
+            text_response("restored"),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+    let mention = |ids: &str| RunConfig {
+        skill_mentions: vec![SKILL.into()],
+        initial_prompt_id: Some(ids.into()),
+        ..Default::default()
+    };
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Keep this original task".into(),
+        RunConfig {
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    // A follow-up sent while the run waits.
+    let live = "Also follow @git-best-practices while running";
+    harness
+        .runtime
+        .continue_goal(run, live.into(), mention("live"))
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+    // A continuation after the run stopped.
+    let restored = "And again with @git-best-practices after the stop";
+    harness
+        .runtime
+        .continue_goal(run, restored.into(), mention("restored"))
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+    verify_trace(&harness, run, &events, 0);
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1])
+            .expect("a mention follow-up leaves the sent prefix alone");
+        assert_eq!(pair[0]["tools"], pair[1]["tools"]);
+        assert_eq!(pair[0]["messages"][0], pair[1]["messages"][0]);
+    }
+    // The agent is sent each message with the skill appended, once.
+    let expanded = |typed: &str| {
+        let mut text = typed.to_owned();
+        append_skill_attachment(&mut text, SKILL, &body);
+        text
+    };
+    let users: Vec<_> = requests[2]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        users,
+        [
+            "Keep this original task".to_owned(),
+            expanded(live),
+            expanded(restored)
+        ]
+    );
+    // The review evidence keeps the words and the skills apart.
+    let evidence = storage::Database::open(&config)
+        .unwrap()
+        .review_evidence_for_target(&run.to_string())
+        .unwrap();
+    for typed in [live, restored] {
+        let row = evidence.iter().find(|row| row.text == typed).unwrap();
+        assert_eq!(row.attachments.len(), 1);
+        assert_eq!(row.attachments[0].name, SKILL);
+        assert_eq!(row.attachments[0].scope, scope);
+        assert_eq!(row.attachments[0].body, body.trim_end());
+    }
+}
+
+#[tokio::test]
 async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_prefix() {
     let mut harness = harness(
         vec![

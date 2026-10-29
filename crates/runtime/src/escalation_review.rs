@@ -21,7 +21,7 @@ pub(crate) use denial_streak::{CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, Denial
 pub use gate::{EvidenceStamp, SandboxEscalationGate};
 pub use loaded_skills::LoadedSkillRef;
 pub(crate) use loaded_skills::{LoadedBy, LoadedSkill, LoadedSkillView};
-use loaded_skills::{detach_attached_skills, merge_views};
+use loaded_skills::{attached_skill_views, merge_views};
 pub(crate) use manifest::ManifestSink;
 use manifest::{Audit, ContextAudit, ReviewKind};
 pub use manifest::{
@@ -391,11 +391,11 @@ pub(crate) fn review_context(
     run: ReviewRunContext,
     rules: Option<&crate::rules::RulesSource>,
 ) -> Result<(ReviewContext, EvidenceStamp), ReviewError> {
-    let (mut real_user_requests, revision, synced) = run.requests();
+    let (real_user_requests, revision, synced) = run.requests();
     if !synced {
         return Err(ReviewError::Unsynced);
     }
-    let attached = detach_attached_skills(&mut real_user_requests);
+    let attached = attached_skill_views(&real_user_requests);
     let project_rules = rules.and_then(|rules| {
         if rules.trust() != crate::rules::ProjectTrust::Approved {
             return None;
