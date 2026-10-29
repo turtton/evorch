@@ -91,7 +91,7 @@ details, which shrink to a scroll viewport of at least ROW_DENSE; one
 transcript row stays visible. Only in-progress procedures use TEXT and a
 half-filled circle; pending (circle) and completed (check) use TEXT_MUTED.
 The sandbox button shows a shield and the escalation mode (auto review, ask me,
-always deny), explained on hover. Stop halts the current run; a stopped run with
+always deny, yolo), explained on hover. Stop halts the current run; a stopped run with
 live subagents shows Stop subagents for the subtree. Both tooltips name the scope.
 Stopped runs stay resumable; there is no separate discard control.
 Follow-ups sent while a run is busy wait in the band above goal and procedures,

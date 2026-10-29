@@ -258,6 +258,30 @@ async fn user_mode_approval_resets_auto_streak() {
 }
 
 #[tokio::test]
+async fn yolo_approval_neither_counts_nor_resets_and_ignores_suspension() {
+    let fixture = Fixture::new(true);
+    fixture.suspend().await;
+    let (reviewed, asked) = (fixture.reviewed(), fixture.asked());
+    *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Yolo, true);
+
+    // Yolo approves even a run the breaker suspended, without review or prompt.
+    assert!(matches!(
+        fixture
+            .gate
+            .decide(&fixture.ctx, "inspection", "inspect")
+            .await,
+        EscalationDecision::Approve
+    ));
+    assert_eq!((fixture.reviewed(), fixture.asked()), (reviewed, asked));
+
+    // The streak is untouched: returning to auto is still suspended.
+    assert_eq!(fixture.denials(&fixture.ctx), CONSECUTIVE_DENIAL_LIMIT);
+    *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Auto, true);
+    let decision = fixture.decide(Ok(ReviewVerdict::Approve), true).await;
+    assert!(refused_without_review(&decision), "{}", describe(&decision));
+}
+
+#[tokio::test]
 async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
     let mut fixture = Fixture::new(true);
     fixture

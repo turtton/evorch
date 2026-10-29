@@ -6,7 +6,7 @@ use std::{
 };
 
 use config::EscalationApproval;
-use event_bus::event::diagnostic_codes;
+use event_bus::event::{ESCALATION_VERDICT_YOLO, diagnostic_codes};
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use sandbox::approval::{ApprovalGate, ApprovalOutcome};
 use tools::{
@@ -215,7 +215,8 @@ impl SandboxEscalationGate {
     }
 
     /// Applies `sandbox.escalation_approval` identically for every escalation
-    /// kind: off denies, user asks, auto reviews and may fall back to the user.
+    /// kind: off denies, user asks, auto reviews and may fall back to the user,
+    /// yolo approves without review or prompt.
     /// Approval is void if the settings change while the decision is pending.
     /// After [`CONSECUTIVE_DENIAL_LIMIT`] consecutive reviewer denials, auto
     /// refuses without review until the user sends new input.
@@ -233,6 +234,13 @@ impl SandboxEscalationGate {
         HF: Future<Output = EscalationDecision>,
     {
         let settings = self.settings.lock().ok().map(|settings| *settings);
+        if matches!(settings, Some((EscalationApproval::Yolo, _))) {
+            // Neither reviewer nor user is consulted, nothing is pending that
+            // settings or context could invalidate, and the denial breaker is
+            // left untouched: this approval is not evidence of a valid review.
+            self.diagnose(ctx, DiagnosticSeverity::Info, ESCALATION_VERDICT_YOLO);
+            return EscalationDecision::Approve;
+        }
         let starting_stamp = self.current_stamp(ctx);
         let mut reviewed_stamp = None;
         // Capture the input generation in every mode: a valid human approval
@@ -247,6 +255,7 @@ impl SandboxEscalationGate {
             Some((EscalationApproval::Off, _)) => EscalationDecision::Deny {
                 reason: format!("{label} is disabled"),
             },
+            Some((EscalationApproval::Yolo, _)) => EscalationDecision::Approve,
             Some((EscalationApproval::User, _)) => human().await,
             Some((EscalationApproval::Auto, fallback)) => {
                 if let Some(decision) = self.suspended_decision(ctx, label, &streak) {

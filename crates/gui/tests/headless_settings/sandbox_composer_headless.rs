@@ -100,6 +100,7 @@ fn chatbox_button_opens_modal_with_approval_controls() {
         "auto review",
         "ask me",
         "always deny",
+        "yolo",
     ] {
         assert!(harness.has_label(label), "missing modal control: {label}");
     }

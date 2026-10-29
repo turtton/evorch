@@ -158,6 +158,11 @@ impl DiagnosticEvent {
 /// example a panic location). Consumers that group occurrences keep sites apart.
 pub const DIAGNOSTIC_SITE_PREFIX: &str = "site=";
 
+/// `ESCALATION_REVIEW` verdict recorded when `sandbox.escalation_approval = "yolo"`
+/// approved a request with neither automatic review nor a user prompt. It is
+/// distinct from the plain `approved` verdict of a reviewed approval.
+pub const ESCALATION_VERDICT_YOLO: &str = "approved without review (yolo mode)";
+
 /// Stable diagnostic codes shared by execution producers and consumers.
 ///
 /// Every `DiagnosticEvent` producer names its code through these constants, and

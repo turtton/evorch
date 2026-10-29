@@ -83,6 +83,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             config::EscalationApproval::Auto,
                             config::EscalationApproval::User,
                             config::EscalationApproval::Off,
+                            config::EscalationApproval::Yolo,
                         ] {
                             let (label, explanation) = crate::panes::composer::sandbox_mode(
                                 mode,

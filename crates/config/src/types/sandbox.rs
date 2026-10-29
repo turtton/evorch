@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum EscalationApproval {
     /// `quick` is a load-time migration alias only; the generated schema intentionally
-    /// lists only `auto`, `user`, and `off`. Runtime compatibility is not schema compatibility.
+    /// lists only `auto`, `user`, `off`, and `yolo`. Runtime compatibility is not schema compatibility.
     #[default]
     #[serde(alias = "quick")]
     Auto,
     User,
     Off,
+    /// Approves every request to run outside the sandbox without any review or
+    /// user prompt. Dangerous: the sandbox itself stays on for ordinary commands.
+    Yolo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

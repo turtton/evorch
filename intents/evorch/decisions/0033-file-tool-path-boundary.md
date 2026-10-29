@@ -18,7 +18,7 @@ shell には、呼び出しごとに sandbox を外してもらう経路がす�
 
 - 引数に `sandbox_access: "network" | "unsandboxed"` と `justification` を付けて呼ぶ。既定は `"isolated"`（sandbox の中で実行）である。
 - `ShellEscalationGate` が 1 回ごとに審査し、承認されたときだけ sandbox なしで実行する。
-- 審査の方法は `sandbox.escalation_approval` で決まる。`auto` は別のモデルによる自動審査、`user` は利用者の承認、`off` は常に拒否である。`escalate_to_user_on_deny` で、自動審査の拒否を利用者に回せる。
+- 審査の方法は `sandbox.escalation_approval` で決まる。`auto` は別のモデルによる自動審査、`user` は利用者の承認、`off` は常に拒否、`yolo` は審査も確認もなしの無条件許可（後から追加した危険なモード）である。`escalate_to_user_on_deny` で、自動審査の拒否を利用者に回せる。
 
 ## Decision
 
@@ -35,7 +35,7 @@ shell には、呼び出しごとに sandbox を外してもらう経路がす�
 
 - `read` / `grep` / `write` / `edit` に、shell と同じ名前の引数 `sandbox_access` と `justification` を加える。値は `"isolated"`（既定。境界の中だけ）と `"unsandboxed"`（境界の外を許す）の 2 つとする。ファイルツールはネットワークを使わないので、`"network"` は持たない。
 - `"unsandboxed"` の呼び出しは、shell と同じ審査の gate を通す。`ShellEscalationGate` を shell 専用からツール共通の gate に広げ、審査役にはツール名、対象のパス、理由を渡す。`write` / `edit` の場合は、書き込む内容（長さを制限した差分）も渡す。
-- 審査の方法は shell と共通で、`sandbox.escalation_approval`（`auto` / `user` / `off`）と `escalate_to_user_on_deny` に従う。`off` のときは境界の外へのアクセスをすべて拒否する。
+- 審査の方法は shell と共通で、`sandbox.escalation_approval`（`auto` / `user` / `off` / `yolo`）と `escalate_to_user_on_deny` に従う。`off` のときは境界の外へのアクセスをすべて拒否する。`yolo` のときは審査も利用者への確認もせずに承認し、「審査なしで承認（yolo）」と診断イベントに記録する。
 - 承認は 1 回の呼び出しに限る。同じ場所に何度もアクセスする必要があるなら、そのディレクトリを許可ディレクトリとして登録してもらう。拒否するときのメッセージで、昇格の引数と許可ディレクトリの登録の両方を案内する。
 - 昇格で外れるのはパスの境界だけで、role の権限（[ADR 0002](0002-role-capability-boundaries.md)）は外れない。書き込みツールを持たない role が、昇格で書き込めるようになることはない。
 

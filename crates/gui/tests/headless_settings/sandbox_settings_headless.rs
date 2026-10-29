@@ -67,6 +67,7 @@ fn chatbox_sandbox_button_opens_restored_modal() {
         "auto review",
         "ask me",
         "always deny",
+        "yolo",
     ] {
         assert!(harness.has_label(label), "missing control: {label}");
     }
@@ -133,6 +134,29 @@ fn modal_escalation_change_applies_live_when_saved() {
     let policy = runtime.execution_policy(runtime::Role::Worker);
     assert_eq!(policy.escalation_approval, config::EscalationApproval::User);
     assert!(policy.escalate_to_user_on_deny);
+}
+
+#[test]
+fn modal_yolo_choice_is_persisted_and_applied_live_when_saved() {
+    // Given: auto approval on disk and in the live runtime.
+    let dir = tempfile::tempdir().expect("temp");
+    let (mut harness, runtime) = escalation_fixture(dir.path(), config::SandboxConfig::default());
+    // When: choosing yolo in the modal, then saving.
+    harness.click_label("yolo");
+    harness.run();
+    harness.click_label("Save sandbox");
+    harness.run();
+    // Then: the choice is persisted and applied to the existing runtime.
+    assert_eq!(
+        reload_sandbox(dir.path()).escalation_approval,
+        config::EscalationApproval::Yolo
+    );
+    assert_eq!(
+        runtime
+            .execution_policy(runtime::Role::Worker)
+            .escalation_approval,
+        config::EscalationApproval::Yolo
+    );
 }
 
 #[test]

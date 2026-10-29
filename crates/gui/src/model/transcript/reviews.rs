@@ -23,6 +23,8 @@ impl ToolReview {
             Self::Sandbox { verdict } => {
                 if verdict == "approved" {
                     "Sandbox escape reviewed: approved".into()
+                } else if verdict == event_bus::event::ESCALATION_VERDICT_YOLO {
+                    "Sandbox escape approved without review (yolo mode)".into()
                 } else if let Some(reason) = verdict.strip_prefix("denied: ") {
                     format!("Sandbox escape reviewed: denied: {reason}")
                 } else if let Some(reason) =
@@ -75,7 +77,9 @@ impl ToolReview {
 
     pub fn needs_attention(&self) -> bool {
         match self {
-            Self::Sandbox { verdict } => verdict != "approved",
+            Self::Sandbox { verdict } => {
+                verdict != "approved" && verdict != event_bus::event::ESCALATION_VERDICT_YOLO
+            }
             Self::Network { allowed, .. } => !allowed,
         }
     }
@@ -224,6 +228,11 @@ mod tests {
             (
                 sandbox("approved"),
                 "Sandbox escape reviewed: approved",
+                false,
+            ),
+            (
+                sandbox(event_bus::event::ESCALATION_VERDICT_YOLO),
+                "Sandbox escape approved without review (yolo mode)",
                 false,
             ),
             (
