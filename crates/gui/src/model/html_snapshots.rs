@@ -159,7 +159,7 @@ impl SnapshotWorker {
                 for request in received {
                     let rendered = read_html(&request.path).and_then(&mut render);
                     snapshots.finish(&request.sha256, rendered);
-                    repaint.request_repaint();
+                    crate::repaint::coalesced(&repaint);
                 }
             })
             .map_err(|error| error.to_string())?;

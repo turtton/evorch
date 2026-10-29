@@ -58,7 +58,7 @@ impl AgentView for LiveAgentView {
             let ctx = ctx.clone();
             self.runtime.spawn(async move {
                 while changes.changed().await.is_ok() {
-                    ctx.request_repaint();
+                    crate::repaint::coalesced(&ctx);
                 }
             });
         }
@@ -78,7 +78,7 @@ impl AgentView for LiveAgentView {
         let key = key.to_owned();
         let repaint = ctx.clone();
         self.runtime.spawn(async move {
-            let on_frame = Arc::new(move || repaint.request_repaint());
+            let on_frame = Arc::new(move || crate::repaint::coalesced(&repaint));
             let _ = sender.send(browser.screencast(&key, on_frame).await);
         });
         self.pending = Some(receiver);

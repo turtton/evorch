@@ -864,7 +864,7 @@ fn run() -> Result<(), GuiError> {
         let context_slot = Arc::clone(&repaint_ctx);
         Arc::new(move || {
             if let Some(context) = context_slot.get() {
-                context.request_repaint();
+                gui::repaint::coalesced(context);
             }
         })
     };
