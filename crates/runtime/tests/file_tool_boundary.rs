@@ -323,3 +323,64 @@ async fn escalation_never_grants_a_tool_the_role_lacks() {
     assert!(!output.contains("file access escalation"), "{output}");
     assert!(!target.exists());
 }
+
+// Given: yolo mode and a scripted model that would fail the run if a reviewer were asked
+// When: a Worker reads and greps outside the boundary with `sandbox_access: "unsandboxed"`
+// Then: both succeed, only the agent's own requests reach the model, no approval is requested,
+// and each decision is recorded as an unreviewed yolo approval
+#[tokio::test]
+async fn yolo_mode_allows_outside_reads_without_review_or_approval_request() {
+    let paths = Paths::new();
+    let secret = paths.outside.join("secret.txt");
+    let model = Arc::new(ScriptedModel::new([
+        Ok(tool_response("yolo-read", "read", escalated(&secret))),
+        Ok(tool_response(
+            "yolo-grep",
+            "grep",
+            json!({
+                "pattern": "outside-secret",
+                "path": paths.outside,
+                "sandbox_access": "unsandboxed",
+                "justification": "the user asked to search this directory",
+            }),
+        )),
+        Ok(text_response("done", FinishReason::Stop)),
+    ]));
+    let (runtime, bus) = paths.runtime(model.clone(), EscalationApproval::Yolo);
+    let mut events = bus.subscribe();
+
+    assert_eq!(run(&runtime, Role::Worker).await, AgentRunPhase::Done);
+
+    let observed = model.observed().await;
+    assert_eq!(
+        observed.len(),
+        3,
+        "only the read, grep and final agent turns reached the model; no reviewer request"
+    );
+    assert!(tool_output(&observed, "yolo-read").contains(SECRET));
+    assert!(tool_output(&observed, "yolo-grep").contains(SECRET));
+
+    // The run is over, so every event it emitted is already buffered on the bus.
+    let mut verdicts = Vec::new();
+    for event in events.drain_pending_snapshot() {
+        match event.kind {
+            EventKind::Tool(ToolEvent::ApprovalRequested { .. }) => {
+                panic!("yolo must not request an approval")
+            }
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.source == "sandbox" && diagnostic.code == "escalation_review" =>
+            {
+                verdicts.push((diagnostic.call_id, diagnostic.severity, diagnostic.detail));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        verdicts,
+        ["yolo-read", "yolo-grep"].map(|call| (
+            Some(call.to_owned()),
+            event_bus::DiagnosticSeverity::Info,
+            event_bus::event::ESCALATION_VERDICT_YOLO.to_owned()
+        ))
+    );
+}
