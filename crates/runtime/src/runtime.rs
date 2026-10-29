@@ -15,6 +15,7 @@ mod held_messages;
 mod output;
 mod project;
 mod questions;
+mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 pub use questions::RunWait;
 mod restore_delivery;
@@ -100,6 +101,7 @@ pub(crate) struct Shared {
     execution_hooks: cancellation::TestHooks,
     /// Stop and chat renewal serialize per run, not behind other chats' storage work.
     stop_restore_gates: Mutex<HashMap<RunId, Weak<Mutex<()>>>>,
+    saved_compactions: Mutex<HashSet<RunId>>,
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
@@ -705,6 +707,7 @@ impl AgentRuntime {
                 #[cfg(test)]
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
+                saved_compactions: Mutex::new(HashSet::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
@@ -1026,6 +1029,7 @@ impl AgentRuntime {
                 #[cfg(test)]
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
+                saved_compactions: Mutex::new(HashSet::new()),
                 operator_stops: Mutex::new(HashSet::new()),
                 next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
@@ -2320,6 +2324,9 @@ impl AgentRuntime {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
+        for target in &targets {
+            self.ensure_no_saved_compaction(*target)?;
+        }
         self.goal_work_stopped(run_id);
         let mut admissions = self
             .shared
@@ -2556,6 +2563,7 @@ impl AgentRuntime {
 
     /// run の次のターン境界で手動コンテキスト圧縮を要求する。
     pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.ensure_no_saved_compaction(run_id)?;
         self.validate_run_mutation(run_id)?;
         let entry = self.entry(run_id)?;
         if entry.compaction_busy.load(Ordering::Acquire) {

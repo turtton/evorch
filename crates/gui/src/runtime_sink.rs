@@ -58,6 +58,7 @@ pub struct RuntimeCommandSink {
     thread_roots: BTreeMap<String, PathBuf>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
+    compaction_jobs: BTreeMap<String, saved_compaction::CompactionJob>,
 }
 
 /// Reply channel, project, query, result limit and continuation cursor of a thread search.
@@ -110,6 +111,7 @@ impl RuntimeCommandSink {
             thread_roots: BTreeMap::new(),
             ownership: None,
             search_jobs: crate::model::latest_job::LatestJob::default(),
+            compaction_jobs: BTreeMap::new(),
         }
     }
 
@@ -167,7 +169,12 @@ impl RuntimeCommandSink {
     }
 }
 
+mod saved_compaction;
+
 impl CommandSink for RuntimeCommandSink {
+    fn poll(&mut self) -> Vec<LoopEvent> {
+        self.poll_compactions()
+    }
     fn has_host_input_receipts(&self) -> bool {
         true
     }
@@ -429,6 +436,29 @@ impl RuntimeCommandSink {
         command: WorkbenchCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<LoopEvent> {
+        let thread = match &command {
+            WorkbenchCommand::CompactChat { thread_id }
+            | WorkbenchCommand::StopChat { thread_id }
+            | WorkbenchCommand::StopRun { thread_id, .. } => Some(thread_id),
+            WorkbenchCommand::ContinueChat(chat) => Some(&chat.thread_id),
+            WorkbenchCommand::SendChat(chat) => Some(&chat.thread_id),
+            _ => None,
+        };
+        if let Some(thread) = thread
+            && self.compaction_jobs.contains_key(thread)
+        {
+            let reason = "Context compaction is in progress; try again after it completes".into();
+            if matches!(command, WorkbenchCommand::SendChat(_)) {
+                return vec![LoopEvent::ChatRejected {
+                    thread_id: thread.clone(),
+                    reason,
+                }];
+            }
+            return vec![LoopEvent::ChatNotice {
+                thread_id: thread.clone(),
+                text: reason,
+            }];
+        }
         match command {
             WorkbenchCommand::AnswerUserQuestion {
                 thread_id,
@@ -553,37 +583,7 @@ impl RuntimeCommandSink {
                 }
                 Vec::new()
             }
-            WorkbenchCommand::CompactChat { thread_id } => {
-                let result =
-                    self.chat_runs
-                        .get(&thread_id)
-                        .or_else(|| self.goal_runs.get(&thread_id))
-                        .ok_or_else(|| "No active conversation run to compact".to_owned())
-                        .and_then(|run_id| {
-                            let run = self.runtime.inspect_agent(*run_id).map_err(|error| {
-                                format!("Could not request context compaction: {error}")
-                            })?;
-                            // compact() queues a generation even for a terminal run.
-                            if !matches!(
-                                run.phase,
-                                event_bus::AgentRunPhase::Pending
-                                    | event_bus::AgentRunPhase::Running
-                                    | event_bus::AgentRunPhase::Waiting
-                            ) {
-                                return Err("The conversation run has ended; resume with /continue before requesting compaction".into());
-                            }
-                            self.runtime.compact(*run_id).map_err(|error| {
-                                format!("Could not request context compaction: {error}")
-                            })
-                        });
-                vec![LoopEvent::ChatNotice {
-                    thread_id,
-                    text: match result {
-                        Ok(()) => "Context compaction requested for the next turn boundary".into(),
-                        Err(reason) => reason,
-                    },
-                }]
-            }
+            WorkbenchCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
             WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 let result = self
                     .chat_runs

@@ -42,6 +42,7 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
+        self.ensure_no_saved_compaction(recipient)?;
         let mut live_retry_available = true;
         loop {
             let previous = {

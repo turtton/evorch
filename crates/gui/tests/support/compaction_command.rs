@@ -88,26 +88,18 @@ fn composer_requests_manual_compaction_only_for_selected_root_without_sending_a_
             .runtime
             .send_message(run, "next turn".into())
             .unwrap();
-        fixture
-            .rt
-            .block_on(async {
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    loop {
-                        if let EventKind::Compaction(CompactionEvent::Compacted {
-                            run_id,
-                            reason,
-                            ..
-                        }) = fixture.events.recv().await.unwrap().kind
-                        {
-                            assert_eq!(run_id, selected);
-                            assert_eq!(reason, CompactionReason::Manual);
-                            break;
-                        }
-                    }
-                })
-                .await
-            })
-            .unwrap();
+        fixture.rt.block_on(async {
+            loop {
+                if let EventKind::Compaction(CompactionEvent::Compacted {
+                    run_id, reason, ..
+                }) = fixture.events.recv().await.unwrap().kind
+                {
+                    assert_eq!(run_id, selected);
+                    assert_eq!(reason, CompactionReason::Manual);
+                    break;
+                }
+            }
+        });
         assert_eq!(
             fixture
                 .runtime
@@ -120,7 +112,7 @@ fn composer_requests_manual_compaction_only_for_selected_root_without_sending_a_
 }
 
 #[test]
-fn missing_and_terminal_conversations_report_notices_without_resuming() {
+fn missing_conversations_report_notices_and_terminal_compaction_does_not_resume() {
     for terminal in [
         None,
         Some(AgentRunPhase::Stopped),
@@ -166,7 +158,7 @@ fn missing_and_terminal_conversations_report_notices_without_resuming() {
         notice(
             &state,
             if terminal.is_some() {
-                "The conversation run has ended"
+                "Compacting saved conversation without starting an agent turn"
             } else {
                 "No active conversation run to compact"
             },

@@ -223,6 +223,79 @@ pub(crate) struct LoopState {
     pub(crate) allowed_skill_origins: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
 
+impl LoopState {
+    fn new(
+        task: RunTask,
+        shared: LoopShared,
+        channels: LoopChannels,
+        context: AgentContext,
+        image_model: Arc<dyn AgentModel>,
+        policy: ExecutionPolicy,
+    ) -> Self {
+        let compaction = CompactionLoopState {
+            checkpoint_seq: u32::try_from(context.checkpoints().len()).unwrap_or(u32::MAX),
+            ..Default::default()
+        };
+        Self {
+            thread_id: None,
+            turn: task.turn.clone(),
+            boundary_pending: false,
+            continuity: Default::default(),
+            benchmark: None,
+            benchmark_checked: false,
+            benchmark_replay: false,
+            task,
+            shared,
+            channels,
+            run_state: RunState::new(),
+            context,
+            image_model,
+            policy,
+            tool_specs: Vec::new(),
+            rules_session: None,
+            compaction,
+            last_usage: None,
+            answered_questions: Default::default(),
+            resumed: false,
+            completed_turn_end: None,
+            pending_user_messages: Vec::new(),
+            host_input_ledger: std::sync::Mutex::new(host_inputs::HostInputLedger::restored(
+                Vec::new(),
+            )),
+            initial_prompt_pending: None,
+            goal_wake_pending: false,
+            todo_context_pending: true,
+            todo_context_deferred: false,
+            model_switches: 0,
+            owner_turn_open: false,
+            current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
+            pending_escalation: None,
+            escalation_detector: EscalationDetector::default(),
+            budget: crate::budget_tracker::BudgetCounters::default(),
+            identical_calls: identical_calls::IdenticalCalls::default(),
+            run_js_unconfirmed: Arc::default(),
+            unobserved_job_reminders: 0,
+            total_job_reminders: 0,
+            reminded_jobs: std::collections::BTreeSet::new(),
+            reported_questions: std::collections::HashSet::new(),
+            last_tool: None,
+            retracted_delegates: retracted_delegates::RetractedDelegates::default(),
+            durable_task: None,
+            pending_terminal: None,
+            scratch: None,
+            allowed_directories: None,
+            thread_read_dirs: Vec::new(),
+            worker_base: None,
+            delegated_thread_dirs: Default::default(),
+            told_directories: Default::default(),
+            allowed_instructions: Default::default(),
+            allowed_skill_origins: Default::default(),
+        }
+    }
+}
+
+mod saved_compaction;
+
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
     let project = shared
         .upgrade()
@@ -363,61 +436,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             None => AgentContext::new(task.run_id, task.role),
         }
     };
-    let mut state = LoopState {
-        thread_id,
-        turn: task.turn.clone(),
-        boundary_pending,
-        continuity,
-        benchmark,
-        benchmark_checked: benchmark_replay,
-        benchmark_replay,
-        task,
-        shared: loop_shared,
-        channels,
-        run_state: RunState::new(),
-        context,
-        image_model,
-        policy,
-        tool_specs: Vec::new(),
-        rules_session: None,
-        compaction: CompactionLoopState::default(),
-        last_usage: None,
-        answered_questions: Default::default(),
-        resumed: is_restored,
-        completed_turn_end,
-        pending_user_messages: Vec::new(),
-        host_input_ledger: std::sync::Mutex::new(host_inputs::HostInputLedger::restored(
-            restored_host_inputs,
-        )),
-        initial_prompt_pending: None,
-        goal_wake_pending: false,
-        todo_context_pending: true,
-        todo_context_deferred,
-        model_switches: 0,
-        owner_turn_open: false,
-        current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
-        pending_escalation: None,
-        escalation_detector: EscalationDetector::default(),
-        budget: crate::budget_tracker::BudgetCounters::default(),
-        identical_calls: identical_calls::IdenticalCalls::default(),
-        run_js_unconfirmed: Arc::default(),
-        unobserved_job_reminders: 0,
-        total_job_reminders: 0,
-        reminded_jobs: std::collections::BTreeSet::new(),
-        reported_questions: std::collections::HashSet::new(),
-        last_tool: None,
-        retracted_delegates: retracted_delegates::RetractedDelegates::default(),
-        durable_task: None,
-        pending_terminal: None,
-        scratch: None,
-        allowed_directories: None,
-        thread_read_dirs: Vec::new(),
-        worker_base: None,
-        delegated_thread_dirs: Default::default(),
-        told_directories,
-        allowed_instructions,
-        allowed_skill_origins: Default::default(),
-    };
+    let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
+    state.thread_id = thread_id;
+    state.boundary_pending = boundary_pending;
+    state.continuity = continuity;
+    state.benchmark = benchmark;
+    state.benchmark_checked = benchmark_replay;
+    state.benchmark_replay = benchmark_replay;
+    state.resumed = is_restored;
+    state.completed_turn_end = completed_turn_end;
+    state.host_input_ledger =
+        std::sync::Mutex::new(host_inputs::HostInputLedger::restored(restored_host_inputs));
+    state.todo_context_deferred = todo_context_deferred;
+    state.told_directories = told_directories;
+    state.allowed_instructions = allowed_instructions;
     // The run's own host prompt: already in a restored context (and committed
     // there when the same run resumed), or appended by setup below.
     if let Some(prompt_id) = state.task.initial_prompt_id.clone() {
