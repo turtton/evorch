@@ -400,7 +400,7 @@ fn orchestrator_role_chat_after_error_continues_same_run() {
     let entries = fixture.state.transcripts().thread().entries();
     for expected in ["hello", "続けて"] {
         assert!(entries.iter().any(|entry| matches!(entry,
-            TranscriptEntry::UserMessage { text } if text == expected)));
+            TranscriptEntry::UserMessage { text, .. } if text == expected)));
     }
     let requests = fixture.messages.lock().unwrap();
     assert!(requests[1].starts_with(&original));

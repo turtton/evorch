@@ -557,6 +557,7 @@ impl RuntimeCommandSink {
                         } else {
                             crate::model::composer::ComposerRole::Orchestrator
                         },
+                        skills: Vec::new(),
                     }),
                     permit,
                 );
@@ -749,6 +750,7 @@ impl RuntimeCommandSink {
                         images: Vec::new(),
                         model_preference: None,
                         fork_seed: None,
+                        skills: Vec::new(),
                     },
                     permit,
                     false,
@@ -794,6 +796,7 @@ impl RuntimeCommandSink {
                         images: Vec::new(),
                         // The resume_only path never submits this placeholder as input.
                         text: String::new(),
+                        skills: Vec::new(),
                     },
                     permit,
                     true,
@@ -917,6 +920,11 @@ impl RuntimeCommandSink {
             });
         }
 
+        // The runtime reads the mentioned skills with the new prompt; a resume
+        // sends no prompt and attaches nothing.
+        if !resume_only {
+            initial.skill_mentions.clone_from(&submission.skills);
+        }
         let thread_id = submission.thread_id;
         // New runs of a thread work in its project, even after the active project moved.
         if let Some(root) = submission.project_root {
@@ -1663,6 +1671,7 @@ mod tests {
             thread_id: thread.into(),
             text: "hello again".into(),
             model_preference: None,
+            skills: Vec::new(),
         })
     }
 
@@ -2025,6 +2034,7 @@ mod tests {
                 thread_id: "chat-thread".into(),
                 text: "hello".into(),
                 model_preference: None,
+                skills: Vec::new(),
             },
         ));
         let root = sink.chat_runs["chat-thread"];
@@ -2581,6 +2591,7 @@ mod tests {
                 thread_id: "chat-thread".into(),
                 text: "hello".into(),
                 model_preference: None,
+                skills: Vec::new(),
             })
         };
 
@@ -2697,6 +2708,7 @@ mod tests {
                 thread_id: "chat-thread".into(),
                 text: "hello".into(),
                 model_preference: None,
+                skills: Vec::new(),
             },
         ));
         // Then: the lesson reaches the run's first prompt.

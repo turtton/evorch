@@ -74,7 +74,7 @@ fn user_messages(h: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            gui::model::transcript::TranscriptEntry::UserMessage { text } => Some(text.clone()),
+            gui::model::transcript::TranscriptEntry::UserMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
@@ -122,6 +122,7 @@ fn gui_queue_band_and_send_sooner_track_chat_and_goal_receipts() {
                     images: vec![],
                     composer_role: gui::model::composer::ComposerRole::Worker,
                     model_preference: None,
+                    skills: Vec::new(),
                 }));
                 let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
                     panic!("chat accepted: {events:?}");

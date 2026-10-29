@@ -42,6 +42,8 @@ fn prompt(run: &str, parent: Option<&str>, name: &str, text: &str) -> Event {
         agent_name: name.into(),
         role: "reviewer".into(),
         prompt: text.into(),
+        user_text: None,
+        skills: Vec::new(),
     })
 }
 
@@ -117,7 +119,7 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
         );
         storage.close();
         let expected = original.transcript().entries().to_vec();
-        assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::UserMessage { text } if text == "investigate this")).count(), 1);
+        assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::UserMessage { text, .. } if text == "investigate this")).count(), 1);
         assert_eq!(expected.iter().filter(|entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "found the cause")).count(), 1);
         assert!(expected.iter().any(|entry| matches!(entry, TranscriptEntry::Tool { status: ToolStatus::Succeeded, output: Some(text), .. } if text == "file contents")));
         assert!(
@@ -244,7 +246,7 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
         "result is visible before the terminal event"
     );
     assert!(!live.transcript().entries().iter().any(|entry| matches!(
-        entry, TranscriptEntry::UserMessage { text } if text == "Review the implementation"
+        entry, TranscriptEntry::UserMessage { text, .. } if text == "Review the implementation"
     )));
     // A restore reuses the same run and must not duplicate its initial instruction.
     persist_and_apply(
@@ -273,7 +275,7 @@ fn published_prompt_and_final_result_are_ordered_and_idempotent_live_and_in_repl
             expected
         );
         assert!(
-            matches!(expected.first(), Some(TranscriptEntry::UserMessage { text }) if text == "Review the implementation")
+            matches!(expected.first(), Some(TranscriptEntry::UserMessage { text, .. }) if text == "Review the implementation")
         );
         assert_eq!(
             expected
@@ -347,7 +349,8 @@ fn learning_reviewer_root_prompt_never_appears_in_main_thread_live_or_replay() {
                 .entries(),
             &[
                 TranscriptEntry::UserMessage {
-                    text: "Review this completed run for learning".into()
+                    text: "Review this completed run for learning".into(),
+                    skills: Vec::new(),
                 },
                 TranscriptEntry::Message {
                     text: "Learning review complete".into(),

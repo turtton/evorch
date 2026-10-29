@@ -9,9 +9,10 @@ pub(super) struct UserMessage {
     pub id: String,
     pub thread_id: String,
     pub text: String,
-    /// The expanded prompt the agent receives; empty in older files.
+    /// Skills the user attached with `@name`; the runtime adds their bodies to
+    /// what the agent receives, and the bubble shows them as chips.
     #[serde(default)]
-    pub prompt: String,
+    pub skills: Vec<String>,
     #[serde(default)]
     pub image_count: usize,
     #[serde(default)]
@@ -86,7 +87,7 @@ impl UserMessage {
         crate::model::composer::QueuedFollowUp {
             submission_id: self.id.clone(),
             text: self.text.clone(),
-            prompt: self.prompt.clone(),
+            skills: self.skills.clone(),
             undelivered: true,
             rejection: match &self.status {
                 DeliveryStatus::Rejected { reason } => Some(format!("Not sent: {reason}")),
@@ -690,8 +691,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !message.shown_as_sent() {
             return;
         }
-        self.transcripts
-            .push_host_input(&message.thread_id, &message.id, message.text);
+        self.transcripts.push_host_input(
+            &message.thread_id,
+            &message.id,
+            message.text,
+            message.skills,
+        );
     }
 
     /// Messages that never reached the agent come back above the composer,

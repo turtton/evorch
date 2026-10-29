@@ -59,6 +59,7 @@ fn send_button_round_trip_issues_send_chat() {
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
             model_preference: None,
+            skills: Vec::new(),
         })]
     );
     assert!(harness.has_label("You: hello agent"));

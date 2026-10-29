@@ -159,65 +159,21 @@ fn completions_are_capped() {
 }
 
 #[test]
-fn skill_mentions_inline_bodies_that_split_back_to_the_typed_text() {
+fn skill_mentions_name_each_skill_once_and_leave_folders_and_unknown_names_as_text() {
     let temp = tempfile::tempdir().expect("root");
     let skills = skill_registry(
         temp.path(),
-        &[
-            ("review", "Check </skill> markers\nline two"),
-            ("docs", "docs body"),
-        ],
+        &[("review", "review body"), ("docs", "docs body")],
     );
     std::fs::create_dir(temp.path().join("docs")).expect("docs folder");
     let typed = "use @review, then @review again on @docs and @unknown";
 
-    let expanded = expand_skill_mentions(typed, Some(temp.path()), &skills).expect("expand");
-
-    // The skill body is attached once; a project folder named like a skill stays a path.
+    // A project folder named like a skill stays a path; the body is the runtime's to read.
     assert_eq!(
-        expanded,
-        format!("{typed}\n\n<skill name=\"review\">\nCheck <\\/skill> markers\nline two\n</skill>")
+        mentioned_skills(typed, Some(temp.path()), &skills),
+        ["review"]
     );
-    assert_eq!(split_skill_attachments(&expanded), (typed, vec!["review"]));
-    assert_eq!(split_skill_attachments(typed), (typed, vec![]));
-    assert_eq!(
-        expand_skill_mentions("plain text", Some(temp.path()), &skills).expect("plain"),
-        "plain text"
-    );
-}
-
-#[test]
-fn skill_bodies_holding_block_markers_still_split_back_to_the_typed_text() {
-    let temp = tempfile::tempdir().expect("root");
-    let bodies = [
-        ("end-marker", "Close with\n</skill>\nthen continue."),
-        ("start-marker", "Example:\n\n<skill name=\"other\">\nnested"),
-        (
-            "both",
-            "a\n</skill>\n\n<skill name=\"x\">\nb\n</skill>\nc <\\/skill> d",
-        ),
-    ];
-    let skills = skill_registry(temp.path(), &bodies);
-    let typed = "run @end-marker @start-marker @both now";
-
-    let expanded = expand_skill_mentions(typed, Some(temp.path()), &skills).expect("expand");
-
-    // The bubble shows the typed text and the chips; an edit starts from the typed text.
-    assert_eq!(
-        split_skill_attachments(&expanded),
-        (typed, vec!["end-marker", "start-marker", "both"])
-    );
-}
-
-#[test]
-fn unreadable_skill_reports_its_name() {
-    let temp = tempfile::tempdir().expect("root");
-    let skills = skill_registry(temp.path(), &[("gone", "body")]);
-    std::fs::remove_file(temp.path().join(".evorch/skills/gone/SKILL.md")).expect("remove");
-    assert_eq!(
-        expand_skill_mentions("run @gone", Some(temp.path()), &skills),
-        Err("gone".into())
-    );
+    assert!(mentioned_skills("plain text", Some(temp.path()), &skills).is_empty());
 }
 
 #[test]
@@ -245,19 +201,12 @@ fn untrusted_mentions_inline_user_and_builtin_skills_and_name_withheld_repo_ones
     let trusted = discover_with_builtin(&[(SkillScope::Repo, repo), user_scope]);
     let typed = "@repo-only @shared @user-only @git-best-practices @docs @unknown @repo-only";
 
-    // When: an untrusted project's skills inline the mentions.
-    let expanded = expand_skill_mentions(typed, Some(root), &untrusted).expect("expand");
+    // When: an untrusted project's skills are attached for the mentions.
+    let attached = mentioned_skills(typed, Some(root), &untrusted);
 
-    // Then: user and builtin skills are inlined, the user `shared` rather than
+    // Then: user and builtin skills are named, the user `shared` rather than
     // the repository one it would lose to in a trusted project.
-    assert_eq!(
-        split_skill_attachments(&expanded),
-        (typed, vec!["shared", "user-only", "git-best-practices"])
-    );
-    assert!(expanded.contains("user shared body"));
-    for withheld in ["repo shared body", "repo only body", "repo docs body"] {
-        assert!(!expanded.contains(withheld), "{withheld}");
-    }
+    assert_eq!(attached, ["shared", "user-only", "git-best-practices"]);
     // Then: only the repository skill a trusted project would inline instead
     // is named, once; the folder stays a path and the unknown name text.
     assert_eq!(

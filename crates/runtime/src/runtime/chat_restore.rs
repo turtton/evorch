@@ -837,6 +837,16 @@ impl AgentRuntime {
         }
         self.goal_user_input(run_id, &host.typed);
         config.initial_prompt_id = prompt_id;
+        if !host.attachments.is_empty() {
+            config.prompt_origin = Some(crate::PromptOrigin {
+                typed: host.typed.clone(),
+                skills: host
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.name.clone())
+                    .collect(),
+            });
+        }
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

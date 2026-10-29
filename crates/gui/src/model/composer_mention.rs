@@ -409,30 +409,21 @@ fn inlines(name: &str, root: Option<&Path>, skills: &SkillRegistry) -> bool {
     skills.get(name).is_some() && !root.is_some_and(|root| root.join(name).exists())
 }
 
-/// Appends the body of every mentioned skill so the agent follows it this turn.
+/// The skills an `@name` mention in `text` attaches, once each in first-seen
+/// order. The runtime reads their bodies when the message is sent, so edits
+/// apply on that send and an unreadable skill refuses it.
 ///
 /// A project path with the same name wins, keeping `@docs` a folder reference.
-///
-/// # Errors
-/// Returns the name of a mentioned skill whose body cannot be read.
-pub fn expand_skill_mentions(
-    text: &str,
-    root: Option<&Path>,
-    skills: &SkillRegistry,
-) -> Result<String, String> {
-    let mut expanded = text.to_owned();
-    for name in mentioned_names(text) {
-        if !inlines(name, root, skills) {
-            continue;
-        }
-        let body = skills.load_body(name).map_err(|_| name.to_owned())?;
-        runtime::skill::append_skill_attachment(&mut expanded, name, &body);
-    }
-    Ok(expanded)
+pub fn mentioned_skills(text: &str, root: Option<&Path>, skills: &SkillRegistry) -> Vec<String> {
+    mentioned_names(text)
+        .into_iter()
+        .filter(|name| inlines(name, root, skills))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The mentioned names, once each in first-seen order, that
-/// [`expand_skill_mentions`] leaves as text with `skills` yet would inline
+/// [`mentioned_skills`] leaves as text with `skills` yet would inline
 /// with `trusted`, the skills the same project reaches once trusted: its
 /// repository skills that its trust withholds.
 pub fn withheld_skill_mentions<'a>(
@@ -445,18 +436,6 @@ pub fn withheld_skill_mentions<'a>(
         .into_iter()
         .filter(|name| !inlines(name, root, skills) && inlines(name, root, trusted))
         .collect()
-}
-
-/// Splits trailing skill blocks added by [`expand_skill_mentions`] from the typed text.
-pub fn split_skill_attachments(text: &str) -> (&str, Vec<&str>) {
-    let (typed, attachments) = runtime::skill::split_skill_attachments(text);
-    (
-        typed,
-        attachments
-            .into_iter()
-            .map(|attachment| attachment.name)
-            .collect(),
-    )
 }
 
 /// `/`-separated form of a native path string.

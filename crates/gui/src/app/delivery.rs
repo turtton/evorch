@@ -116,7 +116,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.transcripts.push_host_input(
                         &message.thread_id,
                         &message.id,
-                        message.prompt.clone(),
+                        message.text.clone(),
+                        message.skills.clone(),
                     );
                 }
             }

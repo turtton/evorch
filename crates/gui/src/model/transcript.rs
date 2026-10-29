@@ -81,6 +81,8 @@ pub enum TranscriptEntry {
     },
     UserMessage {
         text: String,
+        /// Skills attached to the message, shown as chips.
+        skills: Vec<String>,
     },
     Notice {
         text: String,
@@ -229,7 +231,10 @@ impl TranscriptModel {
 
     pub fn push_user_message(&mut self, text: impl Into<String>) {
         self.streaming_messages.clear();
-        self.push(TranscriptEntry::UserMessage { text: text.into() });
+        self.push(TranscriptEntry::UserMessage {
+            text: text.into(),
+            skills: Vec::new(),
+        });
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
@@ -296,17 +301,27 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
-                agent_name, prompt, ..
+                agent_name,
+                prompt,
+                user_text,
+                skills,
+                ..
             }) => {
+                // The words the user typed; skill bodies appear as chips, not text.
+                let shown = user_text.as_ref().unwrap_or(prompt);
                 let first_instruction = self.entries.iter().find_map(|entry| match entry {
-                    TranscriptEntry::UserMessage { text } => Some(text),
+                    TranscriptEntry::UserMessage { text, .. } => Some(text),
                     _ => None,
                 });
-                if first_instruction != Some(prompt) {
+                if first_instruction != Some(shown) {
                     let only_start_notice = matches!(self.entries.as_slice(),
                         [TranscriptEntry::Notice { text }]
                             if text == &format!("subagent {agent_name} started"));
-                    self.push_user_message(prompt.clone());
+                    self.streaming_messages.clear();
+                    self.push(TranscriptEntry::UserMessage {
+                        text: shown.clone(),
+                        skills: skills.clone(),
+                    });
                     // The spawn notice arrives first, but the run's instruction leads its transcript.
                     if only_start_notice && self.entries.len() == 2 {
                         self.entries.swap(0, 1);
@@ -818,12 +833,12 @@ impl TranscriptModel {
         self.entries.get_mut(index)
     }
 
-    pub(crate) fn push_host_input(&mut self, id: &str, text: String) {
+    pub(crate) fn push_host_input(&mut self, id: &str, text: String, skills: Vec<String>) {
         if self.capacity == 0 || (!id.is_empty() && self.host_inputs.contains_key(id)) {
             return;
         }
         let entry_id = self.first_entry_id + self.entries.len();
-        self.push(TranscriptEntry::UserMessage { text });
+        self.push(TranscriptEntry::UserMessage { text, skills });
         if !id.is_empty() {
             self.host_inputs.insert(id.into(), entry_id);
         }
@@ -971,7 +986,10 @@ mod tests {
         assert_eq!(
             model.entries(),
             &[
-                TranscriptEntry::UserMessage { text: "hi".into() },
+                TranscriptEntry::UserMessage {
+                    text: "hi".into(),
+                    skills: Vec::new()
+                },
                 TranscriptEntry::Message {
                     text: "yo".into(),
                     run_id: Some("r1".into())

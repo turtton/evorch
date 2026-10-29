@@ -1401,6 +1401,7 @@ impl AgentRuntime {
             .initial_prompt_id
             .take()
             .filter(|id| !id.is_empty() && !history_only);
+        let prompt_origin = config.prompt_origin.take();
         if let Some(id) = &initial_prompt_id
             && turn.origin.as_deref() == Some("human")
         {
@@ -1669,6 +1670,10 @@ impl AgentRuntime {
                     agent_name: name,
                     role: role.name().to_lowercase(),
                     prompt: task.prompt.clone(),
+                    user_text: prompt_origin.as_ref().map(|origin| origin.typed.clone()),
+                    skills: prompt_origin
+                        .map(|origin| origin.skills)
+                        .unwrap_or_default(),
                 }));
         }
         self.shared

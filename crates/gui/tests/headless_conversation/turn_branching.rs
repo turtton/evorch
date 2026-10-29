@@ -121,7 +121,7 @@ fn texts(model: &TranscriptModel) -> Vec<String> {
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage { text } | TranscriptEntry::Message { text, .. } => {
+            TranscriptEntry::UserMessage { text, .. } | TranscriptEntry::Message { text, .. } => {
                 Some(text.clone())
             }
             TranscriptEntry::Branch { .. } => Some("<branch>".into()),
@@ -143,7 +143,9 @@ fn user_message(gui: &WorkbenchState<DemoSource>, text: &str) -> usize {
     gui.transcript()
         .entries()
         .iter()
-        .position(|entry| matches!(entry, TranscriptEntry::UserMessage { text: t } if t == text))
+        .position(
+            |entry| matches!(entry, TranscriptEntry::UserMessage { text: t, .. } if t == text),
+        )
         .unwrap()
 }
 

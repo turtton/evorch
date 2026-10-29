@@ -99,8 +99,8 @@ pub use prompt::{
 };
 pub use rules::{ProjectTrust, RulesSession, RulesSettings, RulesSource};
 pub use run::{
-    AgentInspection, AgentSummary, DelegateImage, ParseRunIdError, RunConfig, RunId, RunPurpose,
-    WorkspaceInspection,
+    AgentInspection, AgentSummary, DelegateImage, ParseRunIdError, PromptOrigin, RunConfig, RunId,
+    RunPurpose, WorkspaceInspection,
 };
 pub use run_store::RunStore;
 pub use runtime::{

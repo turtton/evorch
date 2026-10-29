@@ -222,6 +222,7 @@ mod tests {
                         text: "keep this draft".into(),
                         model_preference: None,
                         fork_seed: None,
+                        skills: Vec::new(),
                     }
                 )).as_slice(), [LoopEvent::ChatRejected { reason, .. }] if reason.contains("in progress")));
                 (&mut sink.compaction_jobs.get_mut("thread").unwrap().task)

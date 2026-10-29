@@ -191,11 +191,12 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
     harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
 
-    // Then: the agent receives the skill body while the transcript shows the typed text.
+    // Then: the runtime is handed the typed text and the skill's name to read, and the
+    // transcript shows the typed text with a chip.
     let typed = "@src/lib.rs with @review please";
     assert!(matches!(harness.state().issued(),
         [WorkbenchCommand::SendChat(chat)]
-            if chat.text == format!("{typed}\n\n<skill name=\"review\">\nRead every hunk.\n</skill>")));
+            if chat.text == typed && chat.skills == ["review"]));
     assert!(harness.has_label(&format!("You: {typed}")));
     assert!(harness.has_label(&format!("{} skill: review", gui::theme::icons::SPARKLE)));
 }
@@ -247,16 +248,13 @@ fn untrusted_projects_send_repo_skill_mentions_as_plain_text_with_a_notice() {
     harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
 
-    // Then: it is sent with only the builtin skill inlined; the repository
+    // Then: it is sent with only the builtin skill attached; the repository
     // skills stay plain text.
     let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
         panic!("one chat is sent: {:?}", harness.state().issued());
     };
-    assert!(chat.text.starts_with(typed), "{}", chat.text);
-    assert!(chat.text.contains("<skill name=\"git-best-practices\">"));
-    for leaked in ["fixture-skill\">", "FIXTURE BODY"] {
-        assert!(!chat.text.contains(leaked), "{leaked}: {}", chat.text);
-    }
+    assert_eq!(chat.text, typed);
+    assert_eq!(chat.skills, ["git-best-practices"]);
     // Then: a notice below the message names them, says why and how to enable them.
     assert_notice_below_message(
         &harness,
@@ -302,7 +300,7 @@ fn revoking_trust_right_before_a_send_keeps_repo_skills_out_of_it() {
         panic!("one chat is sent: {:?}", harness.state().issued());
     };
     assert_eq!(chat.text, typed);
-    assert!(!chat.text.contains("EVORCH FIXTURE BODY"));
+    assert!(chat.skills.is_empty());
     assert!(harness.state().composer().input.is_empty());
     // Then: the notice explains why it was not expanded.
     harness.run();

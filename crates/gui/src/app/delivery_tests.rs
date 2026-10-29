@@ -10,6 +10,7 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 mod new_run_bubble;
 mod performance;
 mod review;
+mod skills;
 
 #[derive(Default)]
 struct Receipts(Arc<Mutex<Vec<storage::HostInputReceipt>>>);
@@ -49,7 +50,7 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         id: "old".into(),
         thread_id: "thread".into(),
         text: "retry this".into(),
-        prompt: "retry this".into(),
+        skills: Vec::new(),
         at: std::time::SystemTime::now(),
         image_count: 2,
         resent_from: None,

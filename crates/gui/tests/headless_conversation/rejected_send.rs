@@ -124,7 +124,7 @@ fn user_messages(gui: &HeadlessWorkbench<DemoSource>) -> Vec<String> {
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage { text } => Some(text.clone()),
+            TranscriptEntry::UserMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()

@@ -144,13 +144,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         self.push_notice(guidance.clone());
                     }
                     ProviderStatus::Configured => {
-                        let (prompt, withheld_notice) = match self.expand_skill_mentions(text) {
-                            Ok(expansion) => expansion,
-                            Err(notice) => {
-                                self.push_notice(notice);
-                                return;
-                            }
-                        };
+                        let (skills, withheld_notice) = self.attachable_skills(text);
                         let submission = ChatSubmission {
                             submission_id: uuid::Uuid::new_v4().to_string(),
                             fork_seed: self.fork_seed(thread_id),
@@ -168,7 +162,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                 })
                                 .collect(),
                             thread_id: thread_id.to_string(),
-                            text: prompt.clone(),
+                            text: text.into(),
+                            skills: skills.clone(),
                             model_preference: self
                                 .sidebar
                                 .threads
@@ -190,7 +185,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         };
                         let title_chat =
                             self.title_candidate(&submission).then(|| ChatSubmission {
-                                text: text.into(),
+                                skills: Vec::new(),
                                 ..submission.clone()
                             });
                         let previous_history = self.history.clone();
@@ -242,7 +237,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             id: submission.submission_id.clone(),
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
-                            prompt: prompt.clone(),
+                            skills: skills.clone(),
                             at: sent_at,
                             image_count: submission.images.len(),
                             resent_from,
@@ -296,7 +291,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                             &thread,
                                             submission_id,
                                             text.into(),
-                                            prompt,
+                                            skills,
                                         );
                                     }
                                     None if durable => {
@@ -305,15 +300,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                                         self.transcripts.push_host_input(
                                             &submission_thread,
                                             &submission_id,
-                                            prompt,
+                                            text.into(),
+                                            skills,
                                         );
                                         self.save_sidebar();
                                     }
                                     None => {
-                                        // The runtime echoes the expanded prompt; matching it
+                                        // The runtime echoes the typed words; matching them
                                         // avoids a duplicate bubble.
                                         self.transcripts.push_thread(
-                                            TranscriptEntry::UserMessage { text: prompt },
+                                            TranscriptEntry::UserMessage {
+                                                text: text.into(),
+                                                skills,
+                                            },
                                         );
                                         self.mark_delivered(&[submission_id]);
                                         self.save_sidebar();
@@ -460,27 +459,27 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.flush_composer_draft();
     }
 
-    /// Inlines skills written as `@name`, read fresh so edits apply on the next send.
+    /// The skills written as `@name` in `text`, which the runtime reads when it
+    /// accepts the message so edits apply on the next send.
     ///
     /// Like the runtime, an untrusted project's own skills stay out: their
     /// mentions are sent as plain text, and the notice returned beside the
-    /// prompt names them and says how to let them in.
-    fn expand_skill_mentions(&self, text: &str) -> Result<(String, Option<String>), String> {
+    /// names says how to let them in.
+    fn attachable_skills(&self, text: &str) -> (Vec<String>, Option<String>) {
         if !text.contains('@') {
-            return Ok((text.into(), None));
+            return (Vec::new(), None);
         }
         let project = self.active_project();
         let root = project.map(|project| project.repo_root.as_path());
         let repo_skills = repo_skills_admitted(project);
         let skills = mention_skills(root, repo_skills);
-        let prompt = crate::model::composer::expand_skill_mentions(text, root, &skills)
-            .map_err(|name| format!("Could not load skill @{name}"))?;
+        let attached = crate::model::composer::mentioned_skills(text, root, &skills);
         let notice = root.filter(|_| !repo_skills).and_then(|root| {
             let trusted = mention_skills(Some(root), true);
             let withheld = withheld_skill_mentions(text, Some(root), &skills, &trusted);
             (!withheld.is_empty()).then(|| untrusted_skills_notice(&withheld))
         });
-        Ok((prompt, notice))
+        (attached, notice)
     }
 
     pub(super) fn push_notice(&mut self, text: impl Into<String>) {

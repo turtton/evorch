@@ -10,6 +10,7 @@ const BODY: &str = "Step one.\nStep two with a </skill> marker.\n";
 
 struct Skills {
     fixture: Fixture,
+    events: event_bus::EventReceiver,
     _skills: tempfile::TempDir,
 }
 
@@ -35,6 +36,7 @@ impl Skills {
         };
         let storage = storage::Storage::open(config.clone()).unwrap();
         let bus = Arc::new(EventBus::new(128));
+        let events = bus.subscribe();
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus.clone())),
@@ -49,6 +51,7 @@ impl Skills {
             bus,
         )));
         Self {
+            events,
             fixture: Fixture {
                 runtime,
                 storage,
@@ -349,4 +352,37 @@ async fn a_hand_written_skill_block_stays_in_the_users_words() {
     let evidence = skills.evidence(run);
     assert_eq!(evidence[0].text, typed);
     assert!(evidence[0].attachments.is_empty());
+}
+
+#[tokio::test]
+async fn the_published_instruction_names_the_typed_words_and_the_skills() {
+    let mut skills = Skills::new();
+    let typed = "run @demo";
+    let run = skills
+        .runtime()
+        .delegate_chat(
+            "mentions",
+            Role::Worker,
+            typed.into(),
+            Skills::mentioning(&["demo"], "published"),
+        )
+        .unwrap();
+    let published = loop {
+        let event = skills.events.recv().await.unwrap();
+        if let event_bus::EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
+            run_id,
+            prompt,
+            user_text,
+            skills: names,
+            ..
+        }) = event.kind
+            && run_id == run.to_string()
+        {
+            break (prompt, user_text, names);
+        }
+    };
+    assert_eq!(published.0, attached(typed, &[("demo", BODY)]));
+    assert_eq!(published.1.as_deref(), Some(typed));
+    assert_eq!(published.2, ["demo"]);
+    skills.runtime().wait(run).await.unwrap();
 }

@@ -40,7 +40,12 @@ pub struct ChatSubmission {
     #[serde(default)]
     pub images: Vec<runtime::DelegateImage>,
     pub thread_id: String,
+    /// What the user typed. The runtime expands `skills` into the prompt the
+    /// agent sees; the words stay as typed everywhere else.
     pub text: String,
+    /// Names of the skills the user attached with `@name` mentions in `text`.
+    #[serde(default)]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub model_preference: Option<runtime::ModelPreference>,
     /// Completed-turn boundary a forked thread starts from until it saves its own history.
@@ -383,6 +388,7 @@ mod tests {
                 thread_id: thread_id.into(),
                 text: "hi".into(),
                 model_preference: None,
+                skills: Vec::new(),
             }))
         });
         // Then: each acceptance retains its thread and receives a sequential ID.

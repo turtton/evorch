@@ -229,7 +229,7 @@ fn delivered_to_unknown_with_or_without_notification_retracts_only_matching_bubb
         // Identical text is not identity: preserve this unrelated message.
         state
             .transcripts
-            .push_host_input("thread", "other", "retry this".into());
+            .push_host_input("thread", "other", "retry this".into(), Vec::new());
         assert_eq!(
             state
                 .transcripts
