@@ -518,11 +518,10 @@ fn new_command_creates_and_switches_thread() {
     // When: the /new command is submitted.
     submit(&mut harness, "/new");
     // Then: a new thread is active and the composer is cleared.
-    assert_eq!(harness.state().sidebar().threads.len(), 2);
-    assert_eq!(
-        harness.state().sidebar().active_thread,
-        Some(ThreadId::new("thread-2"))
-    );
+    let sidebar = harness.state().sidebar();
+    assert_eq!(sidebar.threads.len(), 2);
+    let created = sidebar.threads.last().expect("created thread").id.clone();
+    assert_eq!(sidebar.active_thread, Some(created));
     assert!(harness.state().composer().input.is_empty());
 }
 

@@ -5,6 +5,7 @@
 
 mod errors;
 mod lineage;
+mod merge;
 mod migrate;
 mod panels;
 mod persist;
@@ -23,6 +24,7 @@ pub use lineage::{
     display_parent, normalize_versions, point_versions, show_version, version_members,
     version_root, visible_version,
 };
+pub use merge::merge_keyed;
 pub use panels::{Panel, PanelId, PanelKind, default_panels, default_panels_v02};
 pub use persist::{
     from_json, load_from, load_settings, load_sidebar, load_workspace, save_settings, save_sidebar,

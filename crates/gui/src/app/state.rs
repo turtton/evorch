@@ -78,6 +78,10 @@ pub struct WorkbenchState<S> {
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
     pub(super) sidebar_path: Option<PathBuf>,
+    pub(super) shared_sidebar: std::cell::RefCell<super::shared_sidebar::SharedSidebar>,
+    pub(super) shared_feed: super::shared_feed::SharedFeedState,
+    /// The last event ID the startup replay reflected.
+    pub(super) restored_event_cursor: i64,
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) receipt_reconciliation: super::delivery::ReceiptReconciliation,
     pub(super) draft_dirty_at: std::cell::Cell<Option<std::time::Instant>>,
@@ -216,6 +220,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             save_path: None,
             sidebar: SidebarState::default(),
             sidebar_path: None,
+            shared_sidebar: Default::default(),
+            shared_feed: Default::default(),
+            restored_event_cursor: 0,
             history: Vec::new(),
             receipt_reconciliation: Default::default(),
             draft_dirty_at: Default::default(),
@@ -394,6 +401,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.transcripts.bind_run(run, &thread.id.to_string());
             }
         }
+        self.shared_sidebar_baseline(
+            serde_json::to_vec_pretty(&super::history::HistorySidebarRef {
+                sidebar: &sidebar,
+                user_messages: &[],
+                composer_drafts: &[],
+            })
+            .unwrap_or_default(),
+            None,
+        );
         self.sidebar = sidebar;
         self.sync_subagent_thread_panes();
         self.refresh_active_thread_workspace();

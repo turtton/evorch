@@ -89,7 +89,7 @@ pub use error::StorageError;
 pub use host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, StoredAgentMessage};
-pub use repo::event::StoredEvent;
+pub use repo::event::{EventPage, StoredEvent};
 pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
 pub use writer::{

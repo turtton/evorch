@@ -64,6 +64,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
+    /// Definitions another process saved were already mirrored by it; record
+    /// them as sent so this process does not write them again.
+    pub(super) fn note_threads_mirrored(&mut self, ids: &[String]) {
+        let Some(link) = self.thread_mirror.as_mut() else {
+            return;
+        };
+        for thread in self
+            .sidebar
+            .threads
+            .iter()
+            .filter(|thread| ids.contains(&thread.id.to_string()))
+        {
+            let root = self
+                .sidebar
+                .projects
+                .iter()
+                .find(|project| project.id == thread.project_id)
+                .and_then(|project| link.canonical_roots.get(&project.repo_root));
+            if let Some(upsert) = thread_upsert(thread, root) {
+                link.mirrored.insert(upsert.thread_id.clone(), upsert);
+            }
+        }
+    }
+
     /// Send the definitions that changed since the last sync, at most once per
     /// [`SYNC_INTERVAL`]. The first sync sends every thread.
     pub(super) fn sync_thread_mirror(&mut self, now: Instant) {

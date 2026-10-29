@@ -14,6 +14,52 @@ impl ThreadId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+
+    /// `thread-` followed by 8 random lowercase Crockford base32 characters (40 bits),
+    /// regenerated while `is_taken` reports a collision, so processes sharing one
+    /// sidebar can create threads without coordinating.
+    pub fn generate(is_taken: impl Fn(&Self) -> bool) -> Self {
+        loop {
+            let candidate = Self(format!("thread-{}", random_suffix()));
+            if !is_taken(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    /// `{base}-{suffix}` with a fresh 8 character random suffix, for branches
+    /// derived from `base`, regenerated while `is_taken` reports a collision.
+    pub fn derived(base: &Self, tag: &str, is_taken: impl Fn(&Self) -> bool) -> Self {
+        loop {
+            let candidate = Self(format!("{}-{tag}-{}", base.0, random_suffix()));
+            if !is_taken(&candidate) {
+                return candidate;
+            }
+        }
+    }
+}
+
+const CROCKFORD_LOWER: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+const SUFFIX_LEN: usize = 8;
+
+fn random_suffix() -> String {
+    let mut bytes = [0_u8; 5];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Without OS entropy fall back to clock and pid bits rather than a
+        // repeating identifier; collisions are still checked by the caller.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let mixed = nanos ^ (u128::from(std::process::id()) << 40);
+        bytes.copy_from_slice(&mixed.to_le_bytes()[..5]);
+    }
+    let bits = bytes
+        .iter()
+        .fold(0_u64, |acc, byte| (acc << 8) | u64::from(*byte));
+    (0..SUFFIX_LEN)
+        .rev()
+        .map(|index| char::from(CROCKFORD_LOWER[((bits >> (index * 5)) & 0x1f) as usize]))
+        .collect()
 }
 
 impl fmt::Display for ThreadId {

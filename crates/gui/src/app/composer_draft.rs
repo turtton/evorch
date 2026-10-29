@@ -139,10 +139,12 @@ mod tests {
         state.persist_composer_draft_at(now + DRAFT_DEBOUNCE * 2);
         assert_eq!(saved_draft(&path), "keep me");
         assert!(state.draft_dirty_at.get().is_none());
-        assert_eq!(
-            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
-            1
-        );
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with(".lock"))
+            .collect();
+        assert_eq!(leftovers, ["sidebar.json"], "no temporary file may remain");
     }
 }
 

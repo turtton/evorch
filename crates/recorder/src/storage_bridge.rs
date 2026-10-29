@@ -75,7 +75,7 @@ impl PersistencePolicy {
 /// Routes bus events to the storage writer.
 pub struct StorageBridge {
     storage: StorageHandle,
-    session_id: &'static str,
+    session_id: String,
     usage: UsageAggregator,
     usage_dirty: bool,
     validator: Option<event_bus::MutationValidator>,
@@ -88,10 +88,13 @@ pub struct StorageBridge {
 }
 
 impl StorageBridge {
-    pub fn new(storage: StorageHandle, session_id: &'static str) -> Self {
+    /// `session_id` is the stream the events are persisted under. GUI processes
+    /// sharing one database use a distinct id each so a follower can recognise
+    /// and skip its own rows.
+    pub fn new(storage: StorageHandle, session_id: impl Into<String>) -> Self {
         Self {
             storage,
-            session_id,
+            session_id: session_id.into(),
             usage: UsageAggregator::new(),
             usage_dirty: false,
             validator: None,
@@ -161,7 +164,7 @@ impl StorageBridge {
         }
         let result =
             self.storage
-                .append_stream_event(self.session_id, event, self.validator.clone());
+                .append_stream_event(&self.session_id, event, self.validator.clone());
         match &result {
             Ok(()) => {
                 self.monitor.persisted();

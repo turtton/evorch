@@ -6,7 +6,8 @@ use crate::entity::{AgentRunRecord, MessageRecord, SessionRecord, TaskRecord};
 use crate::projection;
 use crate::repo::{agent_run, event, message, metrics, run_context, run_ledger, session, task};
 use crate::{
-    Database, RunContextRecord, RunLedgerEntry, SessionSnapshot, StorageError, StoredEvent,
+    Database, EventPage, RunContextRecord, RunLedgerEntry, SessionSnapshot, StorageError,
+    StoredEvent,
 };
 
 /// 永続化済みの AgentMessage 配送です。
@@ -451,6 +452,47 @@ impl Database {
     /// SQLite 操作またはイベントの復元に失敗した場合にエラーを返します。
     pub fn events_all_ordered(&self) -> Result<Vec<StoredEvent>, StorageError> {
         event::list_all_ordered(&self.conn)
+    }
+
+    /// Up to `limit` events with `id > after_id` in ID order, for following the
+    /// log written by other processes. The page's `last_id` also advances past
+    /// rows that no longer decode.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn events_after(&self, after_id: i64, limit: usize) -> Result<EventPage, StorageError> {
+        event::list_after(&self.conn, after_id, limit, None)
+    }
+
+    /// [`Self::events_after`] that passes over the rows of `exclude_session`
+    /// (a process following the log skips its own) without reading them.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn events_after_excluding(
+        &self,
+        after_id: i64,
+        limit: usize,
+        exclude_session: &str,
+    ) -> Result<EventPage, StorageError> {
+        event::list_after(&self.conn, after_id, limit, Some(exclude_session))
+    }
+
+    /// Largest event ID, or 0 for an empty log.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn last_event_id(&self) -> Result<i64, StorageError> {
+        event::last_id(&self.conn)
+    }
+
+    /// SQLite `data_version`: changes whenever another connection commits, and
+    /// is read from shared memory without touching the database file.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn data_version(&self) -> Result<i64, StorageError> {
+        self.pragma_i64("data_version")
     }
 
     /// `EventKind::Orchestrator` events in ID order, such as thread goal and
