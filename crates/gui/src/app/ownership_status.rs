@@ -78,9 +78,21 @@ struct ProbeWorker {
 
 impl ProbeWorker {
     fn start(
+        probe: impl FnMut(&OwnerHost, &str, bool) -> Result<OwnershipSnapshot, RegistryError>
+        + Send
+        + 'static,
+    ) -> Result<Self, RegistryError> {
+        Self::start_notifying(probe, || {})
+    }
+
+    /// Like `start`, and calls `sent` once each result is queued for the UI.
+    /// An unchanged result raises no repaint, so this is the only completion
+    /// event for it.
+    fn start_notifying(
         mut probe: impl FnMut(&OwnerHost, &str, bool) -> Result<OwnershipSnapshot, RegistryError>
         + Send
         + 'static,
+        mut sent: impl FnMut() + Send + 'static,
     ) -> Result<Self, RegistryError> {
         let (requests, receiver) = mpsc::sync_channel::<ProbeRequest>(1);
         let (sender, results) = mpsc::sync_channel(1);
@@ -127,6 +139,7 @@ impl ProbeWorker {
                     {
                         break;
                     }
+                    sent();
                 }
             })?;
         Ok(Self { requests, results })
