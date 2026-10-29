@@ -25,6 +25,9 @@ use header::header_strip;
 mod queue;
 mod sandbox_review;
 mod thinking;
+mod virtual_list;
+#[doc(hidden)]
+pub use virtual_list::set_transcript_virtualization_for_tests;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentIdentity<'a> {
@@ -224,18 +227,49 @@ fn run_detail_body(
 ) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
+    let model_id = if let Some(branch) = branch {
+        pane_id.with(("thread", &branch.thread.id))
+    } else if let Some(identity) = identity {
+        pane_id.with(("run", identity.run_id))
+    } else if let Some(run_id) = model.entries().iter().find_map(|entry| match entry {
+        TranscriptEntry::Message { run_id, .. }
+        | TranscriptEntry::Reasoning { run_id, .. }
+        | TranscriptEntry::Tool { run_id, .. }
+        | TranscriptEntry::SandboxReview { run_id, .. } => run_id.as_deref(),
+        TranscriptEntry::TurnEnd { run_id, .. } => Some(run_id.as_str()),
+        _ => None,
+    }) {
+        pane_id.with(("run", run_id))
+    } else {
+        // Standalone transcripts may have no thread or run identity.
+        pane_id.with(("transcript", model as *const TranscriptModel as usize))
+    };
+    let cache_key = model_id.with("entry-heights");
     let own_branch = model.last_branch_entry_id();
     if branch.is_some() {
         branch::confirm_modal(ui, branch_action);
     }
     egui::ScrollArea::vertical()
+        .id_salt(model_id)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, viewport| {
+            // show_viewport supplies content-relative coordinates, whereas
+            // cursor positions are in screen coordinates.
+            let viewport = viewport
+                .translate(ui.min_rect().min.to_vec2())
+                .expand2(egui::vec2(0.0, viewport.height()));
             if let Some(branch) = branch {
                 branch::start_versions(ui, model, branch, branch_action);
             }
             let entries = model.visible_entries();
+            let first = model.visible_entry_id(0);
+            let mut list = virtual_list::VirtualList::load(
+                ui,
+                cache_key,
+                first,
+                first.saturating_add(entries.len()),
+            );
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
             let nesting = crate::panes::transcript_tool::RunJsNesting::new(entries);
             let mut folded_until = 0;
@@ -243,175 +277,193 @@ fn run_detail_body(
                 if entry_idx < folded_until || nesting.is_nested(entry_idx) {
                     continue;
                 }
+                if branch.is_none() && matches!(entry, TranscriptEntry::TurnEnd { .. }) {
+                    continue;
+                }
                 let entry_id = model.visible_entry_id(entry_idx);
-                if let TranscriptEntry::TurnEnd { .. } = entry {
-                    // Run detail panes show history only; turn actions belong to threads.
-                    if let Some(branch) = branch {
-                        branch::turn_footer(ui, model, entry_id, branch, branch_action);
-                    }
-                    continue;
-                }
-                if let TranscriptEntry::Branch { kind, .. } = entry {
-                    branch::branch_divider(
-                        ui,
-                        *kind,
-                        own_branch == Some(entry_id),
-                        branch,
-                        branch_action,
-                    );
-                    continue;
-                }
-                if crate::panes::transcript_tool::uses_run_js_layout(entry) {
-                    use crate::panes::transcript_tool::{RunJsChild, resolved_shell_job_key};
-                    let children: Vec<_> = nesting
-                        .children(entry_idx)
-                        .iter()
-                        .map(|&index| RunJsChild {
-                            entry: &entries[index],
-                            latest_for_job: resolved_shell_job_key(
-                                &entries[index],
-                                model.shell_jobs(),
-                            )
-                            .is_some_and(|job| latest_job_entry.get(&job) == Some(&index)),
-                        })
-                        .collect();
-                    crate::panes::transcript_tool::run_js_card(
-                        ui,
-                        entry,
-                        &children,
-                        pane_id.with(("tool-entry", entry_id)),
-                        crate::panes::transcript_tool::ToolCardContext {
-                            repo_root,
-                            jobs: model.shell_jobs(),
-                            latest_for_job: false,
-                            agents: task_rows,
-                        },
-                    );
-                    continue;
-                }
-                if matches!(entry, TranscriptEntry::Tool { .. }) {
-                    use crate::panes::transcript_tool::{
-                        card_len, resolved_shell_job_key, tool_card_group,
-                    };
-                    folded_until = entry_idx + card_len(&entries[entry_idx..], model.shell_jobs());
-                    let group = &entries[entry_idx..folded_until];
-                    let latest_for_job = group
-                        .last()
-                        .and_then(|entry| resolved_shell_job_key(entry, model.shell_jobs()))
-                        .is_some_and(|job| latest_job_entry.get(&job) == Some(&(folded_until - 1)));
-                    tool_card_group(
-                        ui,
-                        group,
-                        pane_id.with(("tool-entry", entry_id)),
-                        crate::panes::transcript_tool::ToolCardContext {
-                            repo_root,
-                            jobs: model.shell_jobs(),
-                            latest_for_job,
-                            agents: task_rows,
-                        },
-                    );
-                    continue;
-                }
-                ui.add_space(SP_1);
-                if let TranscriptEntry::Artifacts { presentation } = entry {
-                    crate::panes::artifact_card::show(
-                        ui,
-                        pane_id.with(("artifacts", entry_id)),
-                        presentation,
-                    );
-                    continue;
-                }
-                if let TranscriptEntry::UserMessage { text } = entry {
-                    user_bubble(ui, text);
-                    if let Some(branch) = branch {
-                        branch::edit_row(ui, model, entry_id, branch, branch_action);
-                    }
-                    continue;
-                }
-                if let TranscriptEntry::AgentMessage {
-                    direction,
-                    peer_run_id,
-                    content,
-                    ..
-                } = entry
+                // Determine grouping even for skipped cards: otherwise folded
+                // poll entries would reappear as separate rows.
+                if matches!(entry, TranscriptEntry::Tool { .. })
+                    && !crate::panes::transcript_tool::uses_run_js_layout(entry)
                 {
-                    agent_message::show(ui, *direction, peer_run_id, content, task_rows);
-                    continue;
+                    folded_until = entry_idx
+                        + crate::panes::transcript_tool::card_len(
+                            &entries[entry_idx..],
+                            model.shell_jobs(),
+                        );
                 }
-                if let Some((icon, color)) = event_icon(entry) {
-                    let hover = match entry {
-                        TranscriptEntry::Diagnostic { hover, .. } => Some(hover.as_str()),
-                        _ => None,
-                    };
-                    event_line(ui, icon, &entry_label(entry), color, hover);
-                    continue;
-                }
-                entry_frame(entry).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    match entry {
-                        TranscriptEntry::Message { run_id, .. }
-                        | TranscriptEntry::Reasoning { run_id, .. } => {
-                            if let Some(role) = run_id.as_deref().and_then(|run_id| {
-                                crate::model::tasks::role_for_run(task_rows, run_id)
-                            }) {
-                                role_label(ui, role);
-                            }
+                list.row(ui, viewport, entry_id, |ui| {
+                    if let TranscriptEntry::TurnEnd { .. } = entry {
+                        // Run detail panes show history only; turn actions belong to threads.
+                        if let Some(branch) = branch {
+                            branch::turn_footer(ui, model, entry_id, branch, branch_action);
                         }
-                        TranscriptEntry::Error { .. }
-                        | TranscriptEntry::UserMessage { .. }
-                        | TranscriptEntry::Notice { .. }
-                        | TranscriptEntry::Diagnostic { .. }
-                        | TranscriptEntry::SandboxReview { .. }
-                        | TranscriptEntry::Compaction { .. }
-                        | TranscriptEntry::Tool { .. }
-                        | TranscriptEntry::AgentMessage { .. }
-                        | TranscriptEntry::TurnEnd { .. }
-                        | TranscriptEntry::Artifacts { .. }
-                        | TranscriptEntry::Branch { .. } => {}
+                        return;
                     }
-                    if let TranscriptEntry::Message { text, .. } = entry {
-                        crate::panes::markdown_render::render_markdown_with_base(
+                    if let TranscriptEntry::Branch { kind, .. } = entry {
+                        branch::branch_divider(
                             ui,
-                            text,
-                            &format!("msg-{entry_idx}"),
-                            repo_root,
-                            repo_root,
+                            *kind,
+                            own_branch == Some(entry_id),
+                            branch,
+                            branch_action,
                         );
                         return;
                     }
-                    if let TranscriptEntry::SandboxReview { text, call_id, .. } = entry {
-                        sandbox_review::show(ui, text, call_id.as_deref());
-                        return;
-                    }
-                    if let TranscriptEntry::Compaction { .. } = entry {
-                        compaction::show(ui, pane_id.with(("compaction", entry_id)), entry);
-                        return;
-                    }
-                    if let TranscriptEntry::Reasoning { text, run_id } = entry {
-                        let entry_id = model.visible_entry_id(entry_idx);
-                        thinking::show(
+                    if crate::panes::transcript_tool::uses_run_js_layout(entry) {
+                        use crate::panes::transcript_tool::{RunJsChild, resolved_shell_job_key};
+                        let children: Vec<_> = nesting
+                            .children(entry_idx)
+                            .iter()
+                            .map(|&index| RunJsChild {
+                                entry: &entries[index],
+                                latest_for_job: resolved_shell_job_key(
+                                    &entries[index],
+                                    model.shell_jobs(),
+                                )
+                                .is_some_and(|job| latest_job_entry.get(&job) == Some(&index)),
+                            })
+                            .collect();
+                        crate::panes::transcript_tool::run_js_card(
                             ui,
-                            pane_id.with(("thinking", run_id, entry_id)),
-                            (text, model.thinking_is_streaming(entry_id)),
+                            entry,
+                            &children,
+                            pane_id.with(("tool-entry", entry_id)),
+                            crate::panes::transcript_tool::ToolCardContext {
+                                repo_root,
+                                jobs: model.shell_jobs(),
+                                latest_for_job: false,
+                                agents: task_rows,
+                            },
                         );
                         return;
                     }
-                    let foreground = match entry {
-                        TranscriptEntry::Error { .. }
-                        | TranscriptEntry::Diagnostic {
-                            severity: event_bus::DiagnosticSeverity::Error,
-                            ..
-                        } => palette().ERROR_FG,
-                        TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
-                        _ => palette().TEXT,
-                    };
-                    let response =
-                        ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
-                    if let TranscriptEntry::Diagnostic { hover, .. } = entry {
-                        response.on_hover_text(hover);
+                    if matches!(entry, TranscriptEntry::Tool { .. }) {
+                        use crate::panes::transcript_tool::{
+                            resolved_shell_job_key, tool_card_group,
+                        };
+                        let group = &entries[entry_idx..folded_until];
+                        let latest_for_job = group
+                            .last()
+                            .and_then(|entry| resolved_shell_job_key(entry, model.shell_jobs()))
+                            .is_some_and(|job| {
+                                latest_job_entry.get(&job) == Some(&(folded_until - 1))
+                            });
+                        tool_card_group(
+                            ui,
+                            group,
+                            pane_id.with(("tool-entry", entry_id)),
+                            crate::panes::transcript_tool::ToolCardContext {
+                                repo_root,
+                                jobs: model.shell_jobs(),
+                                latest_for_job,
+                                agents: task_rows,
+                            },
+                        );
+                        return;
                     }
+                    ui.add_space(SP_1);
+                    if let TranscriptEntry::Artifacts { presentation } = entry {
+                        crate::panes::artifact_card::show(
+                            ui,
+                            pane_id.with(("artifacts", entry_id)),
+                            presentation,
+                        );
+                        return;
+                    }
+                    if let TranscriptEntry::UserMessage { text } = entry {
+                        user_bubble(ui, text);
+                        if let Some(branch) = branch {
+                            branch::edit_row(ui, model, entry_id, branch, branch_action);
+                        }
+                        return;
+                    }
+                    if let TranscriptEntry::AgentMessage {
+                        direction,
+                        peer_run_id,
+                        content,
+                        ..
+                    } = entry
+                    {
+                        agent_message::show(ui, *direction, peer_run_id, content, task_rows);
+                        return;
+                    }
+                    if let Some((icon, color)) = event_icon(entry) {
+                        let hover = match entry {
+                            TranscriptEntry::Diagnostic { hover, .. } => Some(hover.as_str()),
+                            _ => None,
+                        };
+                        event_line(ui, icon, &entry_label(entry), color, hover);
+                        return;
+                    }
+                    entry_frame(entry).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        match entry {
+                            TranscriptEntry::Message { run_id, .. }
+                            | TranscriptEntry::Reasoning { run_id, .. } => {
+                                if let Some(role) = run_id.as_deref().and_then(|run_id| {
+                                    crate::model::tasks::role_for_run(task_rows, run_id)
+                                }) {
+                                    role_label(ui, role);
+                                }
+                            }
+                            TranscriptEntry::Error { .. }
+                            | TranscriptEntry::UserMessage { .. }
+                            | TranscriptEntry::Notice { .. }
+                            | TranscriptEntry::Diagnostic { .. }
+                            | TranscriptEntry::SandboxReview { .. }
+                            | TranscriptEntry::Compaction { .. }
+                            | TranscriptEntry::Tool { .. }
+                            | TranscriptEntry::AgentMessage { .. }
+                            | TranscriptEntry::TurnEnd { .. }
+                            | TranscriptEntry::Artifacts { .. }
+                            | TranscriptEntry::Branch { .. } => {}
+                        }
+                        if let TranscriptEntry::Message { text, .. } = entry {
+                            crate::panes::markdown_render::render_markdown_with_base(
+                                ui,
+                                text,
+                                &format!("msg-{entry_id}"),
+                                repo_root,
+                                repo_root,
+                            );
+                            return;
+                        }
+                        if let TranscriptEntry::SandboxReview { text, call_id, .. } = entry {
+                            sandbox_review::show(ui, text, call_id.as_deref());
+                            return;
+                        }
+                        if let TranscriptEntry::Compaction { .. } = entry {
+                            compaction::show(ui, pane_id.with(("compaction", entry_id)), entry);
+                            return;
+                        }
+                        if let TranscriptEntry::Reasoning { text, run_id } = entry {
+                            let entry_id = model.visible_entry_id(entry_idx);
+                            thinking::show(
+                                ui,
+                                pane_id.with(("thinking", run_id, entry_id)),
+                                (text, model.thinking_is_streaming(entry_id)),
+                            );
+                            return;
+                        }
+                        let foreground = match entry {
+                            TranscriptEntry::Error { .. }
+                            | TranscriptEntry::Diagnostic {
+                                severity: event_bus::DiagnosticSeverity::Error,
+                                ..
+                            } => palette().ERROR_FG,
+                            TranscriptEntry::Reasoning { .. } => palette().TEXT_MUTED,
+                            _ => palette().TEXT,
+                        };
+                        let response =
+                            ui.label(egui::RichText::new(entry_label(entry)).color(foreground));
+                        if let TranscriptEntry::Diagnostic { hover, .. } = entry {
+                            response.on_hover_text(hover);
+                        }
+                    });
                 });
             }
+            list.store(ui, cache_key);
             if let Some(identity) = identity {
                 crate::panes::ledger::ledger_section(ui, identity.run_id, identity.ledger);
             }
