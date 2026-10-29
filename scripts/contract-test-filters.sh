@@ -23,6 +23,7 @@ CACHE_CONTRACT_FILTER='
       | (binary(=anthropic_web_search) & test(search_isolated_from_chat_cache_and_claude_response_correlation))
       | (binary(=image_generation_contract) & test(ac4_image_generation_preserves_chat_cache_baseline))
       | (binary(=codex_web_search) & test(hosted_search_does_not_replace_the_chat_cache_baseline))))
+  | (package(=eval) & binary(=structured_retry_cache))
   | (package(=routing) & binary(=claude_identity))
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)

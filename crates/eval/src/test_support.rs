@@ -128,7 +128,8 @@ impl AgentModel for ScriptedModel {
 }
 
 /// Every request must send the previous one unchanged and then more: by message, and as the
-/// serialized bytes a provider would see, which is what a prompt cache can reuse.
+/// canonical serde representation of the messages. The bytes a provider receives are checked
+/// at the HTTP boundary in `tests/structured_retry_cache.rs`.
 pub(crate) fn assert_prefix_kept(requests: &[Vec<Message>]) {
     let wire = |messages: &[Message]| serde_json::to_string(messages).unwrap();
     for pair in requests.windows(2) {
