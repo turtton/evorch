@@ -68,4 +68,47 @@ mod tests {
         // The frame the request scheduled asks for nothing more.
         assert_eq!(pass(&ctx), Duration::MAX);
     }
+
+    #[test]
+    fn a_later_coalesced_request_does_not_postpone_a_shorter_reservation() {
+        let (ctx, delays) = recording_context();
+        let shorter = Duration::from_millis(20);
+        ctx.request_repaint_after(shorter);
+        for _ in 0..3 {
+            coalesced(&ctx);
+        }
+
+        let delays = delays.lock().unwrap();
+        assert_eq!(
+            delays.len(),
+            1,
+            "the later, longer request is not scheduled"
+        );
+        assert!(delays[0] <= shorter);
+    }
+
+    #[test]
+    fn an_immediate_request_overrides_a_coalesced_reservation() {
+        let (ctx, delays) = recording_context();
+        coalesced(&ctx);
+        ctx.request_repaint();
+
+        let delays = delays.lock().unwrap();
+        assert_eq!(delays.len(), 2);
+        assert!(!delays[0].is_zero());
+        assert!(delays[1].is_zero());
+    }
+
+    #[test]
+    fn a_notification_from_another_thread_wakes_an_idle_context() {
+        let (ctx, delays) = recording_context();
+        let worker_ctx = ctx.clone();
+        std::thread::spawn(move || coalesced(&worker_ctx))
+            .join()
+            .expect("notifier thread");
+
+        let delays = delays.lock().unwrap();
+        assert_eq!(delays.len(), 1);
+        assert!(!delays[0].is_zero() && delays[0] <= COALESCE);
+    }
 }

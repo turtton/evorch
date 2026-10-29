@@ -330,3 +330,88 @@ fn expired_guard_handoff_requires_revalidation_without_losing_events() {
     }
     assert!(!expire_delivery(&mut delivery));
 }
+
+/// A pump whose arrival and continuation hooks report on separate channels.
+fn split_pump(
+    runtime: &tokio::runtime::Runtime,
+    bus: &EventBus,
+) -> (EventPump, mpsc::Receiver<()>, mpsc::Receiver<()>) {
+    let hook = |sender: mpsc::Sender<()>| -> super::Repaint {
+        Some(Arc::new(move || {
+            let _ = sender.send(());
+        }))
+    };
+    let (arrival_tx, arrival_rx) = mpsc::channel();
+    let (continuation_tx, continuation_rx) = mpsc::channel();
+    let pump = EventPump::spawn_split(
+        runtime.handle(),
+        bus.subscribe(),
+        hook(arrival_tx),
+        hook(continuation_tx),
+    );
+    (pump, arrival_rx, continuation_rx)
+}
+
+#[test]
+fn a_new_event_wakes_only_the_arrival_hook() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let bus = EventBus::new(8);
+    let (mut pump, arrival, continuation) = split_pump(&runtime, &bus);
+    let expected = event("arrived");
+    bus.emit(expected.clone());
+    arrival.recv().expect("arrival wake-up");
+    assert_eq!(pump.drain(), vec![expected]);
+    assert!(continuation.try_recv().is_err());
+    assert!(arrival.try_recv().is_err());
+}
+
+#[test]
+fn a_backlog_beyond_the_frame_limit_continues_through_the_immediate_hook() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let bus = EventBus::new(MAX_FRAME_EVENTS * 4);
+    let (mut pump, arrival, continuation) = split_pump(&runtime, &bus);
+    let events: Vec<_> = (0..MAX_FRAME_EVENTS + 1).map(event).collect();
+    for event in &events {
+        bus.emit(event.clone());
+    }
+    // One arrival wake-up per event, sent after the event is queued.
+    for _ in &events {
+        arrival.recv().expect("arrival wake-up");
+    }
+    assert_eq!(pump.drain(), events[..MAX_FRAME_EVENTS]);
+    continuation.try_recv().expect("backlog continuation");
+    assert!(arrival.try_recv().is_err());
+    assert_eq!(pump.drain(), events[MAX_FRAME_EVENTS..]);
+}
+
+#[test]
+fn a_validation_retry_continues_through_the_immediate_hook() {
+    use event_bus::MutationGuardAttempt;
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let bus = EventBus::new(8);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let checked = Arc::clone(&attempts);
+    assert!(bus.register_nonblocking_mutation_guard(
+        "retry".into(),
+        Arc::new(|| Some(Box::new(()))),
+        Arc::new(move || if checked.fetch_add(1, Ordering::Relaxed) == 0 {
+            MutationGuardAttempt::Busy
+        } else {
+            MutationGuardAttempt::Acquired(Box::new(()))
+        }),
+    ));
+    let (mut pump, arrival, continuation) = split_pump(&runtime, &bus);
+    let expected = event("retry");
+    bus.emit(expected.clone());
+    arrival.recv().expect("arrival wake-up");
+
+    // The worker meets a busy guard, backs off, and asks for the retry.
+    assert!(pump.drain().is_empty());
+    continuation.recv().expect("retry continuation");
+    // The retry validates the batch and announces it ready.
+    assert!(pump.drain().is_empty());
+    continuation.recv().expect("ready continuation");
+    assert_eq!(pump.drain(), vec![expected]);
+    assert!(arrival.try_recv().is_err());
+}
