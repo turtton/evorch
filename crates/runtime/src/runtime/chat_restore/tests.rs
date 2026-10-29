@@ -8,6 +8,7 @@ mod invalidation;
 mod registration;
 mod resume;
 mod review_authority;
+mod saved_compaction;
 mod shell_handles;
 mod thread_lineage;
 mod thread_start;

@@ -125,6 +125,7 @@ impl AgentRuntime {
         let _stop_guard = stop_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_no_saved_compaction(run_id)?;
         // Stop shares the run-local gate through registration/admission reservation:
         // a delayed automatic wake cannot replace an operator-stopped entry.
         if !operator_resume && self.operator_stopped(run_id) {
@@ -549,6 +550,9 @@ impl AgentRuntime {
                         Some(seed) => Some(self.fork_seed_history(store, seed, role, &config)?),
                     },
                     Some(record) => {
+                        let source = crate::meta::parse_run_id(&record.run_id)
+                            .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+                        self.ensure_no_saved_compaction(source)?;
                         let descriptor: RunRestoreDescriptor =
                             serde_json::from_str(&record.config_json).map_err(|error| {
                                 fail(RunRestoreFailure::CorruptContext(error.to_string()))

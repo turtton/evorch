@@ -116,7 +116,7 @@ pub(crate) async fn compact_now(
     Ok(result)
 }
 
-async fn compact_candidate(
+pub(crate) async fn compact_candidate(
     state: &mut LoopState,
     context: &mut crate::AgentContext,
     reason: CompactionReason,
