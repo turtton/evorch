@@ -1,7 +1,7 @@
 //! Markdown presentation for transcript text.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::Ui;
@@ -20,30 +20,75 @@ enum Block {
     Table(table::Table),
 }
 
-/// Source-derived layout input for the viewer, independent of the frame.
+/// Source-derived layout input for the viewer.
 ///
-/// Preparing it parses the whole message, so it is cached across frames.
+/// Preparing it parses the whole message, so it is cached across frames. The
+/// only filesystem-dependent part is image URI rewriting, so `images` records
+/// what it resolved and [`Prepared::is_current`] checks it before reuse.
 struct Prepared {
     markdown: String,
     blocks: Vec<(String, Block)>,
+    images: Vec<ImageLink>,
+}
+
+/// An image destination from the source and the path it resolved to.
+struct ImageLink {
+    destination: String,
+    path: Option<PathBuf>,
+}
+
+impl ImageLink {
+    fn resolve(destination: &str, base: Option<&Path>) -> Self {
+        Self {
+            destination: destination.to_owned(),
+            path: super::file_viewer::resolve_file_link(destination, base).map(|link| link.path),
+        }
+    }
 }
 
 impl Prepared {
-    /// Heap bytes held, used to bound the cache.
+    /// Whether every image still resolves as it did when this was prepared
+    /// (a symlink may have been retargeted, or a file created).
+    fn is_current(&self, base: Option<&Path>) -> bool {
+        self.images.iter().all(|image| {
+            super::file_viewer::resolve_file_link(&image.destination, base).map(|link| link.path)
+                == image.path
+        })
+    }
+
+    /// Conservative heap bytes held, including container headers and spare
+    /// capacity, so empty cells and many small blocks still count.
     fn bytes(&self) -> usize {
-        let block_bytes = |(id, block): &(String, Block)| {
-            id.len()
+        use std::mem::size_of;
+        let string = |value: &String| size_of::<String>() + value.capacity();
+        let row = |row: &Vec<String>| {
+            size_of::<Vec<String>>()
+                + (row.capacity() - row.len()) * size_of::<String>()
+                + row.iter().map(string).sum::<usize>()
+        };
+        let block = |(id, block): &(String, Block)| {
+            string(id)
+                + size_of::<Block>()
                 + match block {
-                    Block::Code(code) => code.len(),
-                    Block::Table(table) => table
-                        .header
-                        .iter()
-                        .chain(table.rows.iter().flatten())
-                        .map(String::len)
-                        .sum(),
+                    Block::Code(code) => code.capacity(),
+                    Block::Table(table) => {
+                        row(&table.header)
+                            + (table.rows.capacity() - table.rows.len()) * size_of::<Vec<String>>()
+                            + table.rows.iter().map(row).sum::<usize>()
+                    }
                 }
         };
-        self.markdown.len() + self.blocks.iter().map(block_bytes).sum::<usize>()
+        let image = |image: &ImageLink| {
+            string(&image.destination)
+                + size_of::<ImageLink>()
+                + image.path.as_ref().map_or(0, |path| path.as_os_str().len())
+        };
+        size_of::<Self>()
+            + self.markdown.capacity()
+            + (self.blocks.capacity() - self.blocks.len()) * size_of::<(String, Block)>()
+            + self.blocks.iter().map(block).sum::<usize>()
+            + self.images.capacity() * size_of::<ImageLink>()
+            + self.images.iter().map(image).sum::<usize>()
     }
 }
 
@@ -164,7 +209,7 @@ fn prepared_markdown(source: &str, base: Option<&Path>) -> Arc<Prepared> {
 fn prepare(source: &str, base: Option<&Path>) -> Prepared {
     #[cfg(test)]
     PREPARE_COUNT.with(|count| count.set(count.get() + 1));
-    let source = prepare_local_images(source, base);
+    let (source, images) = prepare_local_images(source, base);
     let source = source.as_str();
     let mut start = 0;
     let mut block_start = None;
@@ -234,7 +279,11 @@ fn prepare(source: &str, base: Option<&Path>) -> Prepared {
         }
     }
     markdown.push_str(&source[start..]);
-    Prepared { markdown, blocks }
+    Prepared {
+        markdown,
+        blocks,
+        images,
+    }
 }
 
 fn show_link_menu(ui: &mut Ui, destination: &str, base: Option<&Path>, root: Option<&Path>) {
@@ -256,19 +305,24 @@ fn show_link_menu(ui: &mut Ui, destination: &str, base: Option<&Path>, root: Opt
     }
 }
 
-fn prepare_local_images(source: &str, base: Option<&Path>) -> String {
+fn prepare_local_images(source: &str, base: Option<&Path>) -> (String, Vec<ImageLink>) {
     if base.is_none() {
-        return source.to_owned();
+        return (source.to_owned(), Vec::new());
     }
+    let mut images = Vec::new();
     let mut result = String::new();
     let mut image = None;
     let mut start = 0;
     for (event, range) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
         match event {
             Event::Start(Tag::Image { dest_url, .. }) => {
-                image = super::file_viewer::resolve_file_link(&dest_url, base)
-                    .and_then(|link| super::file_viewer::image_uri(&link.path))
+                let link = ImageLink::resolve(&dest_url, base);
+                image = link
+                    .path
+                    .as_deref()
+                    .and_then(super::file_viewer::image_uri)
                     .map(|uri| (range.start, uri, String::new()));
+                images.push(link);
             }
             Event::Text(text) if image.is_some() => {
                 if let Some((_, _, alt)) = &mut image {
@@ -290,7 +344,7 @@ fn prepare_local_images(source: &str, base: Option<&Path>) -> String {
         }
     }
     result.push_str(&source[start..]);
-    result
+    (result, images)
 }
 
 #[cfg(test)]

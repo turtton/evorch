@@ -2,7 +2,8 @@
 //!
 //! Entries keep the full source and base directory they were prepared from and
 //! a hit requires an exact match, so a hash collision can only cost a miss,
-//! never show another message's content.
+//! never show another message's content. Image links resolve through the
+//! filesystem, so a hit is also checked against what they resolve to now.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -59,11 +60,16 @@ impl PreparedCache {
         let hash = key_hash(source, base);
         self.clock += 1;
         let clock = self.clock;
-        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+        if let Some(index) = self.entries.iter().position(|entry| {
             entry.hash == hash && *entry.source == *source && entry.base.as_deref() == base
         }) {
-            entry.last_used = clock;
-            return Arc::clone(&entry.prepared);
+            let entry = &mut self.entries[index];
+            if entry.prepared.is_current(base) {
+                entry.last_used = clock;
+                return Arc::clone(&entry.prepared);
+            }
+            // Its images now resolve differently; prepare again below.
+            self.bytes -= self.entries.swap_remove(index).bytes;
         }
         let prepared = Arc::new(prepare());
         let bytes = source.len()

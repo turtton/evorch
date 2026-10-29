@@ -104,3 +104,102 @@ fn byte_limit_bounds_memory_and_skips_oversized_entries() {
     assert_eq!(prepare_count() - before, 2);
     assert_eq!(cache.len(), 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn retargeted_image_symlink_is_not_served_from_a_stale_entry() {
+    // Given: `pic.png` is a symlink to `a.png` and a message using it is cached.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for name in ["a.png", "b.png"] {
+        std::fs::write(root.join(name), b"x").unwrap();
+    }
+    let link = root.join("pic.png");
+    std::os::unix::fs::symlink(root.join("a.png"), &link).unwrap();
+    let source = "![pic](pic.png)";
+    let mut cache = PreparedCache::new(8, usize::MAX);
+    let before = prepare_count();
+    let uri =
+        |name: &str| crate::panes::file_viewer::image_uri(&root.join(name)).expect("file uri");
+    let markdown = |cache: &mut PreparedCache| {
+        cache
+            .get_or_prepare(source, Some(&root), || prepare(source, Some(&root)))
+            .markdown
+            .clone()
+    };
+    assert!(markdown(&mut cache).contains(&uri("a.png")));
+    assert!(markdown(&mut cache).contains(&uri("a.png")));
+    assert_eq!(prepare_count() - before, 1, "unchanged link must hit");
+
+    // When: the same source and base now resolve to another file.
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(root.join("b.png"), &link).unwrap();
+
+    // Then: the entry is refreshed instead of reusing the old URI.
+    let refreshed = markdown(&mut cache);
+    assert!(refreshed.contains(&uri("b.png")), "{refreshed}");
+    assert!(!refreshed.contains(&uri("a.png")));
+    assert_eq!(prepare_count() - before, 2);
+    assert_eq!(cache.len(), 1, "stale entry is replaced, not duplicated");
+    markdown(&mut cache);
+    assert_eq!(prepare_count() - before, 2, "refreshed entry hits again");
+}
+
+/// A few KiB of source whose table is padded with empty cells to every row.
+fn wide_table_source(columns: usize, rows: usize) -> String {
+    let mut source = String::new();
+    source.push_str(&format!("|{}\n", "h|".repeat(columns)));
+    source.push_str(&format!("|{}\n", "-|".repeat(columns)));
+    for _ in 0..rows {
+        source.push_str("|x|\n");
+    }
+    source
+}
+
+#[test]
+fn many_empty_cells_count_against_the_byte_budget() {
+    // Given: ~6 KiB of text that parses into columns × rows cells, each at
+    // least one `String` header even when empty.
+    let (columns, rows) = (1000, 200);
+    let source = wide_table_source(columns, rows);
+    assert!(source.len() < 8 * 1024);
+    let cells = columns * (rows + 1);
+    let floor = cells * size_of::<String>();
+
+    // When: the budget is below what those cells hold.
+    let mut small = PreparedCache::new(8, floor / 2);
+    let before = prepare_count();
+    cached(&mut small, &source, None);
+    cached(&mut small, &source, None);
+
+    // Then: it is served but never stored.
+    assert_eq!(small.len(), 0);
+    assert_eq!(prepare_count() - before, 2);
+
+    // And: with enough budget it is stored and accounted for at least the cells.
+    let mut large = PreparedCache::new(8, floor * 4);
+    cached(&mut large, &source, None);
+    assert_eq!(large.len(), 1);
+    assert!(large.bytes() >= floor, "{} < {floor}", large.bytes());
+}
+
+#[test]
+fn many_small_wide_tables_stay_within_the_default_budget() {
+    // Given: many distinct messages that each hold ~190 KiB of empty cells.
+    let mut cache = PreparedCache::default();
+    let per_entry = 100 * 100 * size_of::<String>();
+    let budget = 16 * 1024 * 1024;
+
+    // When: far more of them than the budget allows are rendered.
+    for index in 0..(budget / per_entry) * 3 {
+        cached(
+            &mut cache,
+            &format!("{index}\n\n{}", wide_table_source(100, 99)),
+            None,
+        );
+    }
+
+    // Then: held bytes stay under the budget rather than growing unbounded.
+    assert!(cache.bytes() <= budget, "{}", cache.bytes());
+    assert!(cache.len() < (budget / per_entry) * 2);
+}
