@@ -37,6 +37,21 @@ pub(super) struct Job {
     result: mpsc::Receiver<String>,
 }
 
+impl Job {
+    /// A job whose title has not arrived; the sender stands in for the worker.
+    #[cfg(test)]
+    pub(super) fn pending(thread: ThreadId) -> (Self, mpsc::Sender<String>) {
+        let (sender, result) = mpsc::channel();
+        let job = Self {
+            thread,
+            original: String::new(),
+            fallback: String::new(),
+            result,
+        };
+        (job, sender)
+    }
+}
+
 fn fallback(text: &str) -> String {
     text.trim()
         .lines()

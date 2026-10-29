@@ -137,6 +137,11 @@ impl DiffModel {
         }));
     }
 
+    /// Whether a fetch is running whose result only [`Self::poll`] collects.
+    pub const fn is_busy(&self) -> bool {
+        self.worker.is_some() || self.in_flight.is_some()
+    }
+
     pub fn poll(&mut self) {
         self.poll_at(Instant::now());
     }

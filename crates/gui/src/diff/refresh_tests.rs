@@ -10,7 +10,7 @@ fn request(root: &str, mode: DiffMode) -> DiffRequest {
 
 fn settle(model: &mut DiffModel, now: Instant) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while (model.worker.is_some() || model.in_flight.is_some()) && Instant::now() < deadline {
+    while model.is_busy() && Instant::now() < deadline {
         model.poll_at(now);
         std::thread::yield_now();
     }
@@ -29,7 +29,9 @@ fn visible_mode_loads_immediately_and_respects_refresh_interval() {
         now,
     );
     assert_eq!(model.state(&mode), &DiffState::Loading);
+    assert!(model.is_busy(), "a fetch in flight is only seen by polling");
     settle(&mut model, now);
+    assert!(!model.is_busy());
     let later = Arc::new(FixtureDiffSource::ready("second"));
     model.refresh_if_due(
         later.clone(),

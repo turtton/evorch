@@ -26,6 +26,7 @@ mod ownership_status;
 mod project_dialog;
 mod provider_settings;
 mod questions;
+mod repaint_policy;
 mod restoration;
 mod role_profiles;
 mod role_settings;

@@ -192,6 +192,10 @@ mod tests {
                     matches!(sink.submit(WorkbenchCommand::CompactChat { thread_id: "thread".into() }).as_slice(),
                     [LoopEvent::ChatNotice { text, .. }] if text.starts_with("Compacting saved"))
                 );
+                assert!(
+                    sink.has_background_work(),
+                    "the result is only collected by poll"
+                );
                 for command in [
                     WorkbenchCommand::CompactChat {
                         thread_id: "thread".into(),
@@ -235,6 +239,7 @@ mod tests {
                     } else { text.contains("complete. Use /continue") })
                 );
                 assert!(sink.poll().is_empty());
+                assert!(!sink.has_background_work());
                 assert_eq!(model.0.load(Ordering::SeqCst), before);
                 assert_eq!(runtime.list_agents().len(), count);
                 if !restored_only {
