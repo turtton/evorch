@@ -380,18 +380,22 @@ async fn headless_web_tools_follow_saved_setting_and_cli_override() {
     }
 }
 
-// Given: 保存設定 `[tools.run_js] enabled` と `--run-js-enabled` の組み合わせ
+// Given: 保存設定 `[tools.run_js] enabled` / `scopes` と `--run-js-enabled` の組み合わせ
 // When: worker を headless 実行する
-// Then: モデルへ送る tools 一覧に run_js が出るのは有効なときだけ (既定は出ない)
+// Then: モデルへ送る tools 一覧に run_js が出るのは有効で scopes が worker (カテゴリ無し) を含むときだけ。
+//       既定の scopes (worker:deep / worker:high-reasoning) ではカテゴリ無しの worker に出ない
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_run_js_tool_follows_saved_setting_and_cli_override() {
-    for (saved, override_enabled, expected) in [
-        (None, None, false),
-        (None, Some(false), false),
-        (None, Some(true), true),
-        (Some(true), None, true),
-        (Some(true), Some(false), false),
-        (Some(false), Some(true), true),
+    for (saved, scopes, override_enabled, expected) in [
+        (None, None, None, false),
+        (None, None, Some(false), false),
+        (None, None, Some(true), false),
+        (None, Some("[\"worker\"]"), Some(true), true),
+        (Some(true), None, None, false),
+        (Some(true), Some("[\"explorer\"]"), None, false),
+        (Some(true), Some("[\"worker\"]"), None, true),
+        (Some(true), Some("[\"worker\"]"), Some(false), false),
+        (Some(false), Some("[\"worker\"]"), Some(true), true),
     ] {
         let directory = tempfile::tempdir().expect("project directory");
         let mock = StreamingMockOpenAi::spawn_with_models(
@@ -400,13 +404,19 @@ async fn headless_run_js_tool_follows_saved_setting_and_cli_override() {
             vec![MODEL.to_owned()],
         );
         write_user_config(directory.path(), &mock.base_url());
-        if let Some(enabled) = saved {
+        if saved.is_some() || scopes.is_some() {
             use std::io::Write as _;
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(user_config_path(directory.path()))
                 .expect("open user config");
-            write!(file, "\n[tools.run_js]\nenabled = {enabled}\n").expect("save run_js");
+            write!(file, "\n[tools.run_js]\n").expect("save run_js");
+            if let Some(enabled) = saved {
+                writeln!(file, "enabled = {enabled}").expect("save run_js");
+            }
+            if let Some(scopes) = scopes {
+                writeln!(file, "scopes = {scopes}").expect("save run_js");
+            }
         }
         let mut args = headless_args(
             directory.path().to_path_buf(),
@@ -432,7 +442,7 @@ async fn headless_run_js_tool_follows_saved_setting_and_cli_override() {
                 .iter()
                 .any(|tool| tool["function"]["name"] == "run_js"),
             expected,
-            "saved={saved:?}, override={override_enabled:?}",
+            "saved={saved:?}, scopes={scopes:?}, override={override_enabled:?}",
         );
         assert!(tools.iter().any(|tool| tool["function"]["name"] == "read"));
     }

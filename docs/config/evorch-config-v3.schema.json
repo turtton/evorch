@@ -245,7 +245,11 @@
           "enabled": false,
           "max_timeout_ms": 300000,
           "max_tool_calls": 1000,
-          "memory_limit_mib": 64
+          "memory_limit_mib": 64,
+          "scopes": [
+            "worker:deep",
+            "worker:high-reasoning"
+          ]
         }
       }
     },
@@ -1651,6 +1655,17 @@
           "format": "uint32",
           "default": 64,
           "minimum": 0
+        },
+        "scopes": {
+          "description": "Where `run_js` is offered, when `enabled`. Each entry is a role\n(`\"worker\"`: every category of it and runs without one) or a role with\none category (`\"worker:deep\"`), spelled as in `agents.<role>` and\n`agents.<role>.categories.<name>`. A role without the `run_js`\ncapability never gets it, whatever is listed.",
+          "type": "array",
+          "default": [
+            "worker:deep",
+            "worker:high-reasoning"
+          ],
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -1817,7 +1832,11 @@
             "enabled": false,
             "max_timeout_ms": 300000,
             "max_tool_calls": 1000,
-            "memory_limit_mib": 64
+            "memory_limit_mib": 64,
+            "scopes": [
+              "worker:deep",
+              "worker:high-reasoning"
+            ]
           }
         }
       },

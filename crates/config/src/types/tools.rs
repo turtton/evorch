@@ -33,6 +33,80 @@ pub struct RunJsConfig {
     /// result offered as its `next` (how `readText` assembles a longer file) does not
     /// count the first time the code asks for it.
     pub max_tool_calls: u32,
+    /// Where `run_js` is offered, when `enabled`. Each entry is a role
+    /// (`"worker"`: every category of it and runs without one) or a role with
+    /// one category (`"worker:deep"`), spelled as in `agents.<role>` and
+    /// `agents.<role>.categories.<name>`. A role without the `run_js`
+    /// capability never gets it, whatever is listed.
+    pub scopes: Vec<String>,
+}
+
+/// Roles a `run_js` scope may name, spelled as their `agents.<role>` keys. All
+/// runtime roles are accepted; the ones without the `run_js` capability
+/// (orchestrator, multimodal_looker, evaluator) simply never get the tool.
+pub const RUN_JS_SCOPE_ROLES: &[&str] = &[
+    "orchestrator",
+    "explorer",
+    "worker",
+    "reviewer",
+    "web_researcher",
+    "planner",
+    "advisor",
+    "multimodal_looker",
+    "evaluator",
+];
+
+/// Scopes of the default config: the strongest Worker categories only.
+pub const DEFAULT_RUN_JS_SCOPES: &[&str] = &["worker:deep", "worker:high-reasoning"];
+
+/// Checks one `scopes` entry: a known role, optionally with `:<category>` that
+/// is registered for that role (the rule of `agents.<role>.categories`).
+///
+/// # Errors
+/// Returns what is wrong with `scope`.
+pub fn validate_run_js_scope(scope: &str) -> Result<(), String> {
+    let (role, category) = match scope.split_once(':') {
+        Some((role, category)) => (role, Some(category)),
+        None => (scope, None),
+    };
+    if !RUN_JS_SCOPE_ROLES.contains(&role) {
+        return Err(format!(
+            "unknown role `{role}` in scope `{scope}`, expected one of: {}",
+            RUN_JS_SCOPE_ROLES.join(", ")
+        ));
+    }
+    let Some(category) = category else {
+        return Ok(());
+    };
+    if crate::agent_categories::category_for_role(role, category).is_some() {
+        return Ok(());
+    }
+    let known = crate::agent_categories::categories_for_role(role)
+        .map(|category| category.id.as_str())
+        .collect::<Vec<_>>();
+    Err(if known.is_empty() {
+        format!("role `{role}` has no categories, so `{scope}` is not allowed; use `{role}`")
+    } else {
+        format!(
+            "unknown category `{category}` for role `{role}` in scope `{scope}`, expected one of: {}",
+            known.join(", ")
+        )
+    })
+}
+
+impl RunJsConfig {
+    /// Whether `run_js` is switched on and `scopes` name a run of `role` (its
+    /// `agents.<role>` key) with `category`. Whether the role may use the tool
+    /// at all is its capability, checked by the runtime.
+    pub fn offered_to(&self, role: &str, category: Option<&str>) -> bool {
+        self.enabled
+            && self.scopes.iter().any(|scope| match scope.split_once(':') {
+                None => scope == role,
+                Some((scope_role, scope_category)) => {
+                    scope_role == role && category == Some(scope_category)
+                }
+            })
+    }
 }
 
 impl Default for RunJsConfig {
@@ -43,6 +117,10 @@ impl Default for RunJsConfig {
             max_timeout_ms: 300_000,
             memory_limit_mib: 64,
             max_tool_calls: 1000,
+            scopes: DEFAULT_RUN_JS_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect(),
         }
     }
 }
@@ -134,5 +212,72 @@ mod tests {
             }
         );
         assert!(toml::from_str::<Config>("[tools.run_js]\nunknown = 1").is_err());
+    }
+
+    #[test]
+    fn run_js_scopes_default_to_the_strong_worker_categories() {
+        let config = RunJsConfig {
+            enabled: true,
+            ..RunJsConfig::default()
+        };
+        assert_eq!(config.scopes, ["worker:deep", "worker:high-reasoning"]);
+        assert!(config.offered_to("worker", Some("deep")));
+        assert!(config.offered_to("worker", Some("high-reasoning")));
+        assert!(!config.offered_to("worker", None));
+        assert!(!config.offered_to("worker", Some("quick")));
+        assert!(!config.offered_to("explorer", None));
+        assert!(!config.offered_to("reviewer", Some("plan-review")));
+    }
+
+    #[test]
+    fn a_role_scope_covers_every_category_and_none_while_a_pair_covers_one() {
+        let parse = |scopes: &str| {
+            toml::from_str::<Config>(&format!(
+                "[tools.run_js]\nenabled = true\nscopes = {scopes}"
+            ))
+            .unwrap()
+            .tools
+            .run_js
+        };
+
+        let role = parse("[\"worker\", \"reviewer:plan-review\"]");
+        assert!(role.offered_to("worker", None));
+        assert!(role.offered_to("worker", Some("quick")));
+        assert!(role.offered_to("reviewer", Some("plan-review")));
+        assert!(!role.offered_to("reviewer", None));
+        assert!(!role.offered_to("reviewer", Some("tool-execution")));
+        assert!(!role.offered_to("explorer", None));
+
+        assert!(!parse("[]").offered_to("worker", Some("deep")));
+        let off = RunJsConfig {
+            enabled: false,
+            ..role
+        };
+        assert!(!off.offered_to("worker", None));
+    }
+
+    #[test]
+    fn scope_validation_names_unknown_roles_and_categories() {
+        for valid in [
+            "worker",
+            "worker:deep",
+            "reviewer:plan-review",
+            "web_researcher",
+            "orchestrator",
+        ] {
+            assert_eq!(validate_run_js_scope(valid), Ok(()), "{valid}");
+        }
+        for (invalid, expected) in [
+            ("", "unknown role ``"),
+            ("wroker", "unknown role `wroker`"),
+            ("Worker", "unknown role `Worker`"),
+            ("worker:", "unknown category ``"),
+            ("worker:nope", "unknown category `nope` for role `worker`"),
+            ("worker:plan-review", "unknown category `plan-review`"),
+            ("explorer:deep", "role `explorer` has no categories"),
+        ] {
+            let error = validate_run_js_scope(invalid).unwrap_err();
+            assert!(error.contains(expected), "{invalid}: {error}");
+        }
     }
 }

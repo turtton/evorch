@@ -21,7 +21,7 @@ export DUMMY_LOG=$scratch/dummy.log
 # make-overlay
 "$ev/scripts/make-overlay.sh" codex-personal 'gpt-6-luna+fast' high "$scratch/ovl" >/dev/null
 check "overlay: config.toml コピー" "cmp -s $scratch/cfg/config.toml $scratch/ovl/config.toml"
-check "overlay: zz-worker.toml（候補 1 件の eval-pinned route を Worker に割り当てる）" "[ \"\$(cat $scratch/ovl/config.d/zz-worker.toml)\" = \"\$(printf '[[routing.routes.eval-pinned]]\nprofile = \"codex-personal\"\nmodel = \"gpt-6-luna+fast\"\n\n[agents.worker]\nmodels = [{ route = \"eval-pinned\", reasoning_effort = \"high\" }]')\" ]"
+check "overlay: zz-worker.toml（候補 1 件の eval-pinned route を Worker に割り当てる）" "[ \"\$(cat $scratch/ovl/config.d/zz-worker.toml)\" = \"\$(printf '[[routing.routes.eval-pinned]]\nprofile = \"codex-personal\"\nmodel = \"gpt-6-luna+fast\"\n\n[agents.worker]\nmodels = [{ route = \"eval-pinned\", reasoning_effort = \"high\" }]\n\n[tools.run_js]\nscopes = [\"worker\"]')\" ]"
 check "overlay: リポジトリ内は拒否" "! $ev/scripts/make-overlay.sh codex-personal gpt-sol high $ev/ovl-should-not-exist 2>/dev/null; [ ! -e $ev/ovl-should-not-exist ]"
 check "overlay: 不正な model は拒否" "! $ev/scripts/make-overlay.sh codex-personal 'a\"b' high $scratch/ovl2 2>/dev/null"
 check "overlay: *-work の profile は拒否" "! $ev/scripts/make-overlay.sh codex-work gpt-sol high $scratch/ovl3 2>/dev/null; [ ! -e $scratch/ovl3/config.d ]"

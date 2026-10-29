@@ -301,6 +301,78 @@ async fn preview_lists_what_is_left_out_and_why() {
     assert_eq!(reason("escalate"), Some("Only root runs can escalate"));
 }
 
+// Given: run_js switched on with various scopes
+// When: previewing runs of several roles and categories
+// Then: run_js is listed only where a scope names the role (any category, or none)
+// or the role with that category, and the role may use it at all
+#[tokio::test]
+async fn preview_offers_run_js_only_where_the_scopes_name_the_role_and_category() {
+    let fixture = Fixture::new();
+    let model = Arc::new(ScriptedModel::new([]));
+    let runtime = fixture.runtime(model, ProjectTrust::Approved);
+    let offered = |report: &runtime::base_context::BaseContextReport| {
+        report.tools.iter().any(|tool| tool.name == "run_js")
+    };
+    let allowed = ["orchestrator", "multimodal_looker", "evaluator"];
+
+    for (scopes, role, category, expected) in [
+        (&["worker:deep"][..], Role::Worker, Some("deep"), true),
+        (&["worker:deep"][..], Role::Worker, None, false),
+        (&["worker:deep"][..], Role::Worker, Some("quick"), false),
+        (&["worker"][..], Role::Worker, None, true),
+        (&["worker"][..], Role::Worker, Some("quick"), true),
+        (&["worker"][..], Role::Explorer, None, false),
+        (&["explorer"][..], Role::Explorer, None, true),
+        (
+            &["reviewer:plan-review"][..],
+            Role::Reviewer,
+            Some("plan-review"),
+            true,
+        ),
+        (&["reviewer:plan-review"][..], Role::Reviewer, None, false),
+        (
+            &["web_researcher", "planner", "advisor"][..],
+            Role::Advisor,
+            None,
+            true,
+        ),
+        (&[][..], Role::Worker, Some("deep"), false),
+        (&allowed[..], Role::Orchestrator, None, false),
+        (&allowed[..], Role::Evaluator, None, false),
+        (&allowed[..], Role::MultimodalLooker, None, false),
+    ] {
+        runtime.set_run_js_settings(config::RunJsConfig {
+            enabled: true,
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            ..config::RunJsConfig::default()
+        });
+        let report = runtime
+            .preview_base_context(BaseContextRequest {
+                category: category.map(str::to_owned),
+                ..BaseContextRequest::new(role)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            offered(&report),
+            expected,
+            "{scopes:?} for {role:?} {category:?}"
+        );
+    }
+
+    // Switched off, no scope matters.
+    runtime.set_run_js_settings(config::RunJsConfig {
+        enabled: false,
+        scopes: vec!["worker".into()],
+        ..config::RunJsConfig::default()
+    });
+    let report = runtime
+        .preview_base_context(BaseContextRequest::new(Role::Worker))
+        .await
+        .unwrap();
+    assert!(!offered(&report));
+}
+
 // Given: a finished run with a run store
 // When: reading its context view
 // Then: the persisted history, model and visible tools are returned

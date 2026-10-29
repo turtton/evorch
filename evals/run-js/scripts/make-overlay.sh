@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # モデル別の user-config overlay を作る（Worker のモデルと provider だけが違う設定）。
 #   <outdir>/config.toml                 利用者の config.toml のコピー（秘密値は入っていない。資格情報は keyring）
-#   <outdir>/config.d/zz-worker.toml     評価専用 route `eval-pinned` と [agents.worker] の割り当て
+#   <outdir>/config.d/zz-worker.toml     評価専用 route `eval-pinned` と [agents.worker] の割り当て、[tools.run_js] scopes = ["worker"]
+#                                        （既定の scopes は worker:deep / worker:high-reasoning だけで、カテゴリ無しの `evorch run --role worker` には run_js が出ない。
+#                                          評価の条件を変えないよう Worker の全カテゴリとカテゴリ無しに出す）
 # 使い方: scripts/make-overlay.sh <profile> <model-id> <effort> <outdir>
 #
 # provider の固定: 利用者の config.toml の route（例 gpt-luna+fast）は候補を [codex-work, codex-personal]
@@ -44,6 +46,6 @@ fi
 mkdir -p "$outdir/config.d"
 cp "$src_dir/config.toml" "$outdir/config.toml"
 chmod 600 "$outdir/config.toml"
-printf '[[routing.routes.eval-pinned]]\nprofile = "%s"\nmodel = "%s"\n\n[agents.worker]\nmodels = [{ route = "eval-pinned", reasoning_effort = "%s" }]\n' \
+printf '[[routing.routes.eval-pinned]]\nprofile = "%s"\nmodel = "%s"\n\n[agents.worker]\nmodels = [{ route = "eval-pinned", reasoning_effort = "%s" }]\n\n[tools.run_js]\nscopes = ["worker"]\n' \
   "$profile" "$model" "$effort" > "$outdir/config.d/zz-worker.toml"
 echo "$outdir"
