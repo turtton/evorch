@@ -137,6 +137,7 @@ pub(crate) struct SearchArgs {
     kinds: Option<Vec<SearchKind>>,
     updated_after: Option<i64>,
     limit: Option<usize>,
+    #[serde(default, deserialize_with = "super::empty_as_none")]
     cursor: Option<String>,
 }
 

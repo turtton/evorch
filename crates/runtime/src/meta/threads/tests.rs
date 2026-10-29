@@ -841,6 +841,52 @@ fn grep_ranks_tool_results_last_collapses_repeats_and_pages() {
 }
 
 #[test]
+fn empty_optional_strings_behave_like_omitted_arguments() {
+    let f = Fixture::new();
+    let own = f.own();
+    let cases = [
+        (
+            "thread_read",
+            json!({"thread": "own"}),
+            json!({"run": "", "around": "", "cursor": ""}),
+        ),
+        (
+            "thread_read",
+            json!({"thread": "own", "view": "messages"}),
+            json!({"run": "", "around": "", "cursor": ""}),
+        ),
+        (
+            "thread_grep",
+            json!({"thread": "own", "pattern": "hello"}),
+            json!({"cursor": ""}),
+        ),
+        ("thread_search", json!({}), json!({"cursor": ""})),
+    ];
+    for (tool, omitted, empty) in cases {
+        let mut with_empty = omitted.clone();
+        for (key, value) in empty.as_object().unwrap() {
+            with_empty[key] = value.clone();
+        }
+        let expected = f.call(own, tool, omitted.clone()).unwrap();
+        assert_eq!(
+            f.call(own, tool, with_empty).unwrap(),
+            expected,
+            "{tool}: empty strings must match omitted arguments"
+        );
+    }
+    // A non-empty invalid cursor is still rejected.
+    assert!(
+        f.call(
+            own,
+            "thread_grep",
+            json!({"thread": "own", "pattern": "hello", "cursor": "x"})
+        )
+        .unwrap_err()
+        .starts_with("thread_cursor_invalid")
+    );
+}
+
+#[test]
 fn search_matches_metadata_only_and_pages_by_cursor() {
     let f = Fixture::new();
     let own = f.own();
