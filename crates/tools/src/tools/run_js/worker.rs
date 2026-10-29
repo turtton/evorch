@@ -470,7 +470,8 @@ fn worker_beside(current: &Path) -> Result<PathBuf, String> {
     existing_file(&sibling).ok_or_else(|| {
         format!(
             "no evorch binary to serve the JS worker: {} is not evorch and {} does not exist; \
-             set {WORKER_ENV} to the evorch binary",
+             put the evorch CLI binary (or a symlink to it) at that path when packaging, \
+             or set {WORKER_ENV} to the evorch binary",
             current.display(),
             sibling.display()
         )
@@ -526,6 +527,41 @@ mod tests {
         let gui = touch(directory.path(), "evorch-gui");
 
         assert_eq!(worker_beside(&gui).unwrap(), evorch);
+    }
+
+    /// How the Nix GUI package lays out `libexec/<package>/`: the GUI
+    /// executable and a symlink to the `evorch` of another store path.
+    #[test]
+    fn gui_binary_uses_an_evorch_symlinked_beside_it() {
+        let store = tempfile::tempdir().unwrap();
+        let real = touch(store.path(), "evorch");
+        let libexec = tempfile::tempdir().unwrap();
+        let gui = touch(libexec.path(), "evorch-gui");
+        let link = libexec.path().join(real.file_name().unwrap());
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let found = worker_beside(&gui).unwrap();
+
+        assert_eq!(found, link);
+        assert_eq!(
+            resolve_worker(&found),
+            Some(real.canonicalize().unwrap()),
+            "the sandbox must mount and run the file the link points to"
+        );
+    }
+
+    #[test]
+    fn a_dangling_evorch_symlink_beside_the_gui_is_not_a_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let gui = touch(directory.path(), "evorch-gui");
+        let link = directory
+            .path()
+            .join(format!("evorch{}", std::env::consts::EXE_SUFFIX));
+        std::os::unix::fs::symlink(directory.path().join("gone"), link).unwrap();
+
+        let error = worker_beside(&gui).unwrap_err();
+
+        assert!(error.contains("no evorch binary"), "{error}");
     }
 
     #[test]
