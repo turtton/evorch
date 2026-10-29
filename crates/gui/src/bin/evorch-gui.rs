@@ -533,7 +533,8 @@ fn detected_provider_status(
 
 fn spawn_event_bridge(
     bus: Arc<EventBus>,
-    repaint: Option<Arc<dyn Fn() + Send + Sync>>,
+    arrival: Option<Arc<dyn Fn() + Send + Sync>>,
+    continuation: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> Result<(EventPump, tokio::runtime::Handle), GuiError> {
     let (pump_sender, pump_receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -551,7 +552,12 @@ fn spawn_event_bridge(
                     return;
                 }
             };
-            let pump = EventPump::spawn(&runtime.handle().clone(), bus.subscribe(), repaint);
+            let pump = EventPump::spawn_split(
+                &runtime.handle().clone(),
+                bus.subscribe(),
+                arrival,
+                continuation,
+            );
             if pump_sender.send((pump, runtime.handle().clone())).is_err() {
                 return;
             }
@@ -860,7 +866,17 @@ fn run() -> Result<(), GuiError> {
     };
 
     let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
-    let repaint_hook = {
+    // A new bus event may wait for the coalescing window; work the pump is
+    // already holding (backlog, retries) must not, so it gets an immediate hook.
+    let arrival_hook = {
+        let context_slot = Arc::clone(&repaint_ctx);
+        Arc::new(move || {
+            if let Some(context) = context_slot.get() {
+                gui::repaint::coalesced(context);
+            }
+        })
+    };
+    let continuation_hook = {
         let context_slot = Arc::clone(&repaint_ctx);
         Arc::new(move || {
             if let Some(context) = context_slot.get() {
@@ -868,7 +884,11 @@ fn run() -> Result<(), GuiError> {
             }
         })
     };
-    let (pump, handle) = spawn_event_bridge(Arc::clone(&bus), Some(repaint_hook))?;
+    let (pump, handle) = spawn_event_bridge(
+        Arc::clone(&bus),
+        Some(arrival_hook),
+        Some(continuation_hook),
+    )?;
 
     let self_improvement = &composition_config.self_improvement;
     // Keep the disabled path inert: no path creation, collector, or panic hook.

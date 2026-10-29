@@ -50,10 +50,28 @@ pub struct EventPump {
 
 impl EventPump {
     /// イベント購読タスクを起動し、フレーム側のポンプを生成する。
+    /// Every wake-up, arrival or continuation, uses the one `repaint` hook.
     pub fn spawn(
         handle: &tokio::runtime::Handle,
-        mut receiver: EventReceiver,
+        receiver: EventReceiver,
         repaint: Repaint,
+    ) -> Self {
+        Self::spawn_split(handle, receiver, repaint.clone(), repaint)
+    }
+
+    /// Like [`Self::spawn`], with two hooks for the two kinds of wake-up.
+    ///
+    /// `arrival` fires when a new bus event is queued; it may be deferred and
+    /// coalesced, because the next frame will drain whatever arrived meanwhile.
+    /// `continuation` fires when work the pump already holds is waiting for a
+    /// drain: a batch cut at the frame limit, a lock or validation retry, a
+    /// validated batch ready for hand-off, or an expired hand-off. It must wake
+    /// the UI at once, or each backlog step would wait out the coalescing window.
+    pub fn spawn_split(
+        handle: &tokio::runtime::Handle,
+        mut receiver: EventReceiver,
+        arrival: Repaint,
+        continuation: Repaint,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let validator = receiver.mutation_validator();
@@ -61,7 +79,7 @@ impl EventPump {
         let handoff = Arc::new(Handoff::default());
         let worker_handoff = Arc::clone(&handoff);
         let worker_validator = validator.clone();
-        let worker_repaint = repaint.clone();
+        let worker_repaint = continuation.clone();
         // A long-lived blocking task would make Runtime::drop wait for the GUI
         // to drop its pump first. A dedicated thread owns this independent queue.
         std::thread::Builder::new()
@@ -70,7 +88,6 @@ impl EventPump {
                 validate_batches(request_rx, worker_validator, worker_handoff, worker_repaint);
             })
             .expect("event validation worker");
-        let subscription_repaint = repaint.clone();
         let task = handle.spawn(async move {
             loop {
                 let event = match receiver.recv().await {
@@ -81,7 +98,7 @@ impl EventPump {
                 if tx.send(event).is_err() {
                     break;
                 }
-                request_repaint(&subscription_repaint);
+                request_repaint(&arrival);
             }
         });
         Self {
@@ -89,7 +106,7 @@ impl EventPump {
             requests,
             handoff,
             in_flight: false,
-            repaint,
+            repaint: continuation,
             task,
             validator,
         }
