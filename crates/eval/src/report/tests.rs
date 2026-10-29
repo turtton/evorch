@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use config::ProviderTypeConfig;
-use event_bus::{Event, ToolEvent};
+use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, ToolEvent};
 use providers::ContentBlock;
 
 use super::*;
@@ -71,6 +71,46 @@ fn judge_answers() -> Vec<Step> {
         verdicts(["B", "A", "tie", "A", "B"], true),
         verdicts(["A", "B", "tie", "A", "A"], true),
         analysis(),
+    ]
+}
+
+/// A root run that delegated to a worker, which finished with `result`, and to
+/// an explorer, which only answered in a message.
+fn delegation(label: &str, result: &str) -> Vec<Event> {
+    let started = |run: &str, parent: Option<&str>, role: &str| {
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: run.into(),
+            parent_run_id: parent.map(str::to_owned),
+            agent_name: role.into(),
+            role: role.into(),
+        })
+    };
+    vec![
+        started("root", None, "orchestrator"),
+        started(&format!("{label}-worker"), Some("root"), "worker"),
+        started(&format!("{label}-explorer"), Some("root"), "explorer"),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: "root".into(),
+            text: format!("{label} root text"),
+        }),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: format!("{label}-explorer"),
+            text: format!("{label} explorer found the module"),
+        }),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: format!("{label}-worker"),
+            text: "draft, superseded by finish".into(),
+        }),
+        Event::new(MessageEvent::FinalResultPublished {
+            run_id: format!("{label}-worker"),
+            text: result.into(),
+        }),
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: format!("{label}-worker"),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Done,
+            reason: None,
+        }),
     ]
 }
 
@@ -146,7 +186,7 @@ impl Fixture {
         };
         output::write_json(&dir.join(output::MANIFEST_FILE), &manifest).unwrap();
 
-        let dns = [
+        let mut dns = vec![
             Event::new(ToolEvent::ToolStarted {
                 tool_name: "shell".into(),
                 call_id: "1".into(),
@@ -164,6 +204,7 @@ impl Fixture {
                 parent_call_id: None,
             }),
         ];
+        dns.extend(delegation("baseline", "baseline worker report"));
         fixture.run(
             BASELINE,
             Status::Completed,
@@ -196,7 +237,7 @@ impl Fixture {
                 stderr_tail: "test failed".into(),
                 error: None,
             },
-            &[],
+            &delegation("candidate", "candidate worker report"),
             vec![
                 usage("c1", "claude", "claude-sonnet-9", "agent", 1_000_000),
                 usage("c2", "local", "mystery", "agent", 10),
@@ -395,6 +436,31 @@ async fn reports_reprice_judge_both_orders_and_write_json_and_markdown() {
     assert_eq!(requests[1]["A"]["status"], "incomplete");
     assert_eq!(requests[2]["swapped_roles"], serde_json::json!(["worker"]));
     assert!(requests[2]["baseline"]["timeline"].is_array());
+
+    // Then: each side carries the delegated runs' final outputs apart from the root's
+    // conversation; the swapped worker is marked as the focus and comes first, with
+    // its `finish` result rather than its last message.
+    let delegated = &requests[0]["A"]["delegated_outputs"];
+    assert_eq!(delegated[0]["role"], "worker");
+    assert_eq!(delegated[0]["focus"], true);
+    assert_eq!(delegated[0]["delegated_by"], "orchestrator");
+    assert_eq!(delegated[0]["phase"], "Done");
+    assert_eq!(delegated[0]["final_output"], "baseline worker report");
+    assert_eq!(delegated[1]["role"], "explorer");
+    assert_eq!(delegated[1]["focus"], false);
+    assert_eq!(
+        delegated[1]["final_output"],
+        "baseline explorer found the module"
+    );
+    assert_eq!(delegated.as_array().unwrap().len(), 2);
+    assert_eq!(
+        requests[1]["A"]["delegated_outputs"][0]["final_output"],
+        "candidate worker report"
+    );
+    assert_eq!(
+        requests[2]["candidate"]["delegated_outputs"][0]["final_output"],
+        "candidate worker report"
+    );
 
     // Then: both files are written, the JSON holds the same report, and judgments are cached.
     let written: Report = read_json(&fixture.dir().join(output::REPORT_JSON_FILE)).unwrap();
