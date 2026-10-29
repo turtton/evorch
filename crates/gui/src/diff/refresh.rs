@@ -166,19 +166,37 @@ impl DiffModel {
                     AUTO_REFRESH_INTERVAL
                 },
             );
-            match result {
-                Err(error)
-                    if matches!(
-                        slot.state,
-                        DiffState::Ready { .. } | DiffState::Truncated { .. } | DiffState::Empty
-                    ) =>
-                {
-                    slot.error = Some(error.to_string());
-                }
-                result => {
-                    slot.state = state_from_result(result);
-                    slot.error = None;
-                }
+            Self::apply(slot, result);
+        }
+        // The worker ended and every result it sent is drained: a request still in flight
+        // means it died (panicked) without answering, which would otherwise stay busy forever.
+        if self.worker.is_none()
+            && let Some(request) = self.in_flight.take()
+            && self.targets_current_repo(&request)
+        {
+            let slot = self.slot_mut(&request.mode);
+            slot.next_refresh = Some(now + ERROR_RETRY_INTERVAL);
+            Self::apply(slot, Err(DiffError::Io("diff worker stopped".into())));
+        }
+    }
+
+    fn targets_current_repo(&self, request: &DiffRequest) -> bool {
+        Some(&request.repo_root) == self.repo_root.as_ref()
+    }
+
+    fn apply(slot: &mut Slot, result: Result<String, DiffError>) {
+        match result {
+            Err(error)
+                if matches!(
+                    slot.state,
+                    DiffState::Ready { .. } | DiffState::Truncated { .. } | DiffState::Empty
+                ) =>
+            {
+                slot.error = Some(error.to_string());
+            }
+            result => {
+                slot.state = state_from_result(result);
+                slot.error = None;
             }
         }
     }

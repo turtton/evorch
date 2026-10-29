@@ -205,3 +205,29 @@ fn restored_snapshot_is_not_replaced_by_live_or_in_flight_diff() {
     assert!(!model.is_snapshot());
     assert!(matches!(model.state(&mode), DiffState::Ready { text } if text == "live"));
 }
+
+struct PanickingSource;
+
+impl DiffSource for PanickingSource {
+    fn fetch(&self, _: &DiffRequest) -> Result<String, DiffError> {
+        panic!("diff source panicked on purpose");
+    }
+}
+
+#[test]
+fn a_worker_that_panics_stops_being_busy_and_reports_an_error() {
+    let mut model = DiffModel::new();
+    let mode = DiffMode::WorkingTree;
+    let now = Instant::now();
+    model.request(Arc::new(PanickingSource), request("a", mode.clone()));
+    assert!(model.is_busy());
+
+    // The ended worker answered nothing: polling must still release the busy state.
+    while model.is_busy() {
+        model.poll_at(now);
+        std::thread::yield_now();
+    }
+    assert!(matches!(model.state(&mode), DiffState::Error { .. }));
+    let retry = model.slot(&mode).next_refresh.expect("retry is scheduled");
+    assert_eq!(retry, now + ERROR_RETRY_INTERVAL);
+}

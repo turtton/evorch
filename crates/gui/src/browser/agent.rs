@@ -78,8 +78,14 @@ impl AgentView for LiveAgentView {
         let key = key.to_owned();
         let repaint = ctx.clone();
         self.runtime.spawn(async move {
-            let on_frame = Arc::new(move || crate::repaint::coalesced(&repaint));
+            let on_frame = {
+                let repaint = repaint.clone();
+                Arc::new(move || crate::repaint::coalesced(&repaint))
+            };
             let _ = sender.send(browser.screencast(&key, on_frame).await);
+            // A start that fails never produces a frame, and one that succeeds may not produce
+            // one for a while, yet either result is only taken in by the next poll_frame.
+            crate::repaint::coalesced(&repaint);
         });
         self.pending = Some(receiver);
     }
@@ -353,5 +359,59 @@ impl AgentView for FakeAgentView {
 
     fn error(&self) -> Option<String> {
         self.failure.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use ::browser::agent::{LaunchOptions, RequestPolicy};
+
+    use super::*;
+
+    struct NoPolicy;
+
+    #[async_trait::async_trait]
+    impl RequestPolicy for NoPolicy {
+        async fn check(&self, _: &url::Url) -> Result<(), String> {
+            Err("unused".into())
+        }
+
+        async fn resolve(
+            &self,
+            _: &str,
+            _: u16,
+            _: bool,
+        ) -> Result<Vec<std::net::SocketAddr>, String> {
+            Err("unused".into())
+        }
+    }
+
+    #[test]
+    fn a_screencast_that_fails_to_start_wakes_the_ui_to_show_the_error() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let browser = Arc::new(AgentBrowser::new(LaunchOptions {
+            executable: None,
+            policy: Arc::new(NoPolicy),
+            max_pages: 1,
+            max_tabs: 1,
+        }));
+        let mut view = LiveAgentView::new(browser, runtime.handle().clone());
+        let ctx = egui::Context::default();
+        let (woken, wake) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = woken.send(());
+        });
+
+        // No tab is open for this run, so starting the screencast fails without a browser.
+        view.observe(Some("run-without-a-page"), &ctx);
+        wake.recv().expect("the failed start requests a repaint");
+
+        assert!(view.poll_frame().is_none());
+        assert!(
+            view.error()
+                .is_some_and(|error| error.contains("run-without-a-page"))
+        );
     }
 }

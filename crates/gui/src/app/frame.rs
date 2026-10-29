@@ -17,7 +17,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.dispatch_system_notifications(ctx);
         // Folded events add and bind threads while the window is hidden, too.
         self.sync_thread_mirror(Instant::now());
-        ctx.request_repaint_after(self.poll_repaint_delay());
+        ctx.request_repaint_after(self.logic_repaint_delay());
     }
 
     pub fn with_quota_backend(

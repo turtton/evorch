@@ -7,9 +7,10 @@
 //! interval, but only while such work exists. Everything else sits on a slow floor that is just
 //! a safety net for throttled timers (persistence syncs, refresh deadlines, receipt repair).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::WorkbenchState;
+use super::composer_draft::DRAFT_DEBOUNCE;
 use crate::model::tasks::AgentRunSource;
 
 /// Interval while a worker that cannot wake the UI is still running.
@@ -29,9 +30,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Whether some worker finishes without waking the UI, so only a poll in `ui` observes it.
     ///
     /// This is the audit of every poll `ui` makes. Sources that notify are deliberately absent:
-    /// the event pump, terminal PTYs, usage-stat loads, browser screencasts, HTML snapshots,
-    /// context previews, thread search, `@` mentions, file viewer and agent panes (these
-    /// schedule their own repaint), and the ownership probe (scheduled on its own).
+    /// the event pump, terminal PTYs, usage-stat loads, browser screencasts (frames, page
+    /// changes and a failed start), HTML snapshots, context previews, thread search, `@`
+    /// mentions, file viewer and agent panes (these schedule their own repaint), and the
+    /// ownership probe (scheduled on its own).
     pub(super) fn polled_work_pending(&self) -> bool {
         self.external_command_running()
             || !self.auto_title_jobs.is_empty()
@@ -48,17 +50,49 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.telemetry.subscription_quota.claude.is_busy()
             || self.telemetry.subscription_quota.cursor.is_busy()
             || self.has_unsettled_follow_ups()
-            // A draft waiting out its debounce is saved by a later frame, not by an event.
-            || self.draft_dirty_at.get().is_some()
     }
 
-    /// The delay to request at the end of a pass.
+    /// When the debounced composer draft is saved, if it is waiting to be. Without a sidebar
+    /// file nothing is ever saved and the draft stays dirty, so that is not a reason to wake.
+    /// A save that keeps failing is retried after the same debounce, never faster.
+    fn draft_save_due_in(&self, now: Instant) -> Option<Duration> {
+        self.sidebar_path.as_ref()?;
+        let changed = self.draft_dirty_at.get()?;
+        let due = (changed + DRAFT_DEBOUNCE).saturating_duration_since(now);
+        // A frame past the deadline has just saved it; do not ask for one in the same instant.
+        Some(due.max(BUSY_POLL))
+    }
+
+    /// The delay to request at the end of a `ui` pass.
     pub(super) fn poll_repaint_delay(&self) -> Duration {
-        if self.polled_work_pending() {
+        self.poll_repaint_delay_at(Instant::now())
+    }
+
+    fn poll_repaint_delay_at(&self, now: Instant) -> Duration {
+        let base = if self.polled_work_pending() {
             BUSY_POLL
         } else {
             IDLE_POLL
-        }
+        };
+        self.draft_save_due_in(now)
+            .map_or(base, |due| base.min(due))
+    }
+
+    /// The delay a hidden window requests. `logic` only folds events, saves the draft, mirrors
+    /// threads and reconciles receipts, so it must not stay awake for results it never collects
+    /// (titles, saves, logins and so on wait for the next `ui` pass).
+    pub(super) fn logic_repaint_delay(&self) -> Duration {
+        self.logic_repaint_delay_at(Instant::now())
+    }
+
+    fn logic_repaint_delay_at(&self, now: Instant) -> Duration {
+        let base = if self.has_unsettled_follow_ups() {
+            BUSY_POLL
+        } else {
+            IDLE_POLL
+        };
+        self.draft_save_due_in(now)
+            .map_or(base, |due| base.min(due))
     }
 }
 
@@ -93,14 +127,14 @@ mod tests {
             .with_sidebar(sidebar)
     }
 
-    /// egui reports a request minus the predicted frame time of the pass that made it.
-    const FRAME_SLACK: Duration = Duration::from_millis(50);
+    /// What egui reports for a request: it takes the frame time the pass predicted off the delay.
+    fn reported(requested: Duration) -> Duration {
+        let predicted = egui::RawInput::default().predicted_dt;
+        requested.saturating_sub(Duration::try_from_secs_f32(predicted).unwrap())
+    }
 
-    fn assert_requested(delay: Duration, expected: Duration) {
-        assert!(
-            delay <= expected && delay + FRAME_SLACK > expected,
-            "expected about {expected:?}, egui reports {delay:?}"
-        );
+    fn assert_requested(delay: Duration, requested: Duration) {
+        assert_eq!(delay, reported(requested));
     }
 
     /// One `ui` pass; the delay egui reports for the next frame.
@@ -173,13 +207,26 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_window_follows_the_same_rule() {
+    fn a_hidden_window_stays_awake_only_for_what_logic_collects() {
         let mut state = state();
         assert_requested(logic_delay(&mut state), IDLE_POLL);
 
+        // Results only `ui` collects do not keep a hidden window ticking.
         let (_hold, rx) = mpsc::channel();
-        state.routing_settings.save_rx = Some(rx);
+        state.project_profile_rx = Some(rx);
+        assert!(state.polled_work_pending());
+        assert_requested(logic_delay(&mut state), IDLE_POLL);
+        state.project_profile_rx = None;
+
+        // Receipts are reconciled by `logic`, so they do, and the hidden window rests once settled.
+        state
+            .follow_up_queues
+            .insert("t".into(), vec![queued_follow_up(false)]);
         assert_requested(logic_delay(&mut state), BUSY_POLL);
+        state
+            .follow_up_queues
+            .insert("t".into(), vec![queued_follow_up(true)]);
+        assert_requested(logic_delay(&mut state), IDLE_POLL);
     }
 
     #[test]
@@ -200,6 +247,16 @@ mod tests {
         assert!(state.polled_work_pending());
         state.auto_title_jobs.clear();
         assert!(!state.polled_work_pending());
+    }
+
+    fn queued_follow_up(undelivered: bool) -> QueuedFollowUp {
+        QueuedFollowUp {
+            submission_id: "one".into(),
+            text: "one".into(),
+            prompt: "one".into(),
+            undelivered,
+            rejection: None,
+        }
     }
 
     struct Background(bool);
@@ -282,25 +339,48 @@ mod tests {
     #[test]
     fn a_queued_follow_up_is_polled_until_it_settles() {
         let mut state = state();
-        let row = |undelivered| QueuedFollowUp {
-            submission_id: "one".into(),
-            text: "one".into(),
-            prompt: "one".into(),
-            undelivered,
-            rejection: None,
-        };
-        state.follow_up_queues.insert("t".into(), vec![row(true)]);
+        state
+            .follow_up_queues
+            .insert("t".into(), vec![queued_follow_up(true)]);
         assert!(!state.polled_work_pending(), "undelivered rows are settled");
-        state.follow_up_queues.insert("t".into(), vec![row(false)]);
+        state
+            .follow_up_queues
+            .insert("t".into(), vec![queued_follow_up(false)]);
         assert!(state.polled_work_pending());
     }
 
     #[test]
-    fn a_draft_waiting_for_its_debounce_is_polled() {
-        let state = state();
-        state.draft_dirty_at.set(Some(std::time::Instant::now()));
-        assert!(state.polled_work_pending());
+    fn a_draft_waiting_for_its_debounce_wakes_at_the_save_deadline() {
+        let state = state().with_sidebar_path("/nonexistent/sidebar.json".into());
+        let typed = Instant::now();
+        assert_eq!(state.poll_repaint_delay_at(typed), IDLE_POLL);
+
+        state.draft_dirty_at.set(Some(typed));
+        assert!(
+            !state.polled_work_pending(),
+            "a deadline is not polled work"
+        );
+        assert_eq!(state.poll_repaint_delay_at(typed), DRAFT_DEBOUNCE);
+        assert_eq!(state.logic_repaint_delay_at(typed), DRAFT_DEBOUNCE);
+        // Never closer than the busy interval, so a failing save cannot spin the loop.
+        assert_eq!(
+            state.poll_repaint_delay_at(typed + DRAFT_DEBOUNCE),
+            BUSY_POLL
+        );
+
         state.draft_dirty_at.set(None);
-        assert!(!state.polled_work_pending());
+        assert_eq!(state.poll_repaint_delay_at(typed), IDLE_POLL);
+    }
+
+    #[test]
+    fn a_draft_that_is_never_saved_does_not_keep_the_window_awake() {
+        let state = state();
+        assert!(state.sidebar_path.is_none());
+        let typed = Instant::now();
+        state.draft_dirty_at.set(Some(typed));
+        for elapsed in [Duration::ZERO, DRAFT_DEBOUNCE, DRAFT_DEBOUNCE * 10] {
+            assert_eq!(state.poll_repaint_delay_at(typed + elapsed), IDLE_POLL);
+            assert_eq!(state.logic_repaint_delay_at(typed + elapsed), IDLE_POLL);
+        }
     }
 }
