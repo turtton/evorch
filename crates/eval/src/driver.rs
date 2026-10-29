@@ -74,6 +74,8 @@ struct Observed {
     tool_calls: u32,
     denied: Vec<DeniedRequest>,
     tool_inputs: HashMap<String, (String, String)>,
+    /// Events the observer skipped because it fell behind the bus.
+    lagged_events: u64,
 }
 
 impl Observed {
@@ -104,6 +106,20 @@ impl Observed {
             }
             EventKind::Message(MessageEvent::MessageCompleted { run_id, text })
                 if self.is_root(run_id) && !text.trim().is_empty() =>
+            {
+                self.conversation
+                    .push(Entry::Assistant { text: text.clone() });
+            }
+            // The root's final report is published by `finish`, not as a model
+            // response, so it reaches the user only through this event. A report
+            // that repeats the response just shown is not shown twice.
+            EventKind::Message(MessageEvent::FinalResultPublished { run_id, text })
+                if self.is_root(run_id)
+                    && !text.trim().is_empty()
+                    && !matches!(
+                        self.conversation.last(),
+                        Some(Entry::Assistant { text: last }) if last == text
+                    ) =>
             {
                 self.conversation
                     .push(Entry::Assistant { text: text.clone() });
@@ -242,12 +258,16 @@ impl Observer {
                         }
                         Err(event_bus::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "evaluation replay observer lagged");
+                            let mut state = lock(&observed);
+                            state.lagged_events = state.lagged_events.saturating_add(skipped);
                         }
                         Err(event_bus::RecvError::Closed) => break,
                     },
                     _ = &mut stopped => {
+                        let (pending, skipped) = receiver.drain_pending_snapshot_counting_lag();
                         let mut state = lock(&observed);
-                        for event in receiver.drain_pending_snapshot() {
+                        state.lagged_events = state.lagged_events.saturating_add(skipped);
+                        for event in pending {
                             state.observe(&event, &bus);
                         }
                         break;
@@ -313,6 +333,13 @@ pub async fn drive(replay: Replay<'_>) -> ReplayOutcome {
         }
     };
     let observed = observer.finish().await;
+    let reason = match missing_report(status, &observed) {
+        Some(note) => {
+            tracing::warn!(%note, "evaluation replay conversation is incomplete");
+            format!("{reason}; {note}")
+        }
+        None => reason,
+    };
     ReplayOutcome {
         status,
         reason,
@@ -323,6 +350,28 @@ pub async fn drive(replay: Replay<'_>) -> ReplayOutcome {
         denied_requests: observed.denied,
         conversation: observed.conversation,
     }
+}
+
+/// A note for a completed replay whose conversation ends with the user's input,
+/// without the root's answer to it, so the lost final report is visible in the
+/// outcome instead of being mistaken for a replay that never produced one.
+fn missing_report(status: Status, observed: &Observed) -> Option<String> {
+    if status != Status::Completed
+        || !matches!(
+            observed.conversation.last(),
+            Some(Entry::User { .. } | Entry::Answer { .. })
+        )
+    {
+        return None;
+    }
+    let mut note = "the root run's final report is missing from the conversation".to_owned();
+    if observed.lagged_events > 0 {
+        note.push_str(&format!(
+            " (the observer skipped {} events after falling behind the event bus)",
+            observed.lagged_events
+        ));
+    }
+    Some(note)
 }
 
 async fn converse(

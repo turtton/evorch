@@ -81,6 +81,7 @@ fn fixture_with(
 fn enabled() -> config::RunJsConfig {
     config::RunJsConfig {
         enabled: true,
+        scopes: vec!["worker".into()],
         ..config::RunJsConfig::default()
     }
 }
@@ -162,7 +163,10 @@ read -r reply
     let fixture = fixture(
         worker(&script),
         None,
-        enabled(),
+        config::RunJsConfig {
+            scopes: vec!["explorer".into()],
+            ..enabled()
+        },
         vec![run_js_call("js-1"), finish()],
     );
 
@@ -318,6 +322,77 @@ async fn disabled_run_js_is_hidden_and_rejected() {
     );
     let text = result_text(&fixture.model, "js-1").await;
     assert!(text.contains("run_js is not enabled"), "{text}");
+}
+
+#[tokio::test]
+async fn run_js_outside_the_scopes_is_hidden_and_rejected() {
+    // Given: run_js switched on with the default scopes (worker:deep, worker:high-reasoning).
+    let fixture = fixture(
+        worker("exit 0"),
+        None,
+        config::RunJsConfig {
+            enabled: true,
+            ..config::RunJsConfig::default()
+        },
+        vec![run_js_call("js-1"), finish()],
+    );
+
+    // When: a Worker without a category calls it.
+    let events = run(&fixture, Role::Worker).await;
+
+    // Then: it is neither offered nor run, and the call is refused.
+    assert!(started(&events, "run_js").is_empty());
+    let offered = fixture.model.observed_tools().await;
+    assert!(
+        offered
+            .iter()
+            .flatten()
+            .all(|spec| spec.name != "run_js" && !spec.description.contains("run_js"))
+    );
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("run_js is not enabled"), "{text}");
+}
+
+#[tokio::test]
+async fn run_js_is_offered_and_runs_for_a_scoped_category() {
+    // Given: the default scopes and a Worker delegated with category `deep`.
+    let fixture = fixture(
+        worker("printf '%s\n' '{\"type\":\"done\",\"value\":\"ok\"}'"),
+        None,
+        config::RunJsConfig {
+            enabled: true,
+            ..config::RunJsConfig::default()
+        },
+        vec![run_js_call("js-1"), finish()],
+    );
+    let mut events = fixture.bus.subscribe();
+    let id = fixture.runtime.delegate_background(
+        Role::Worker,
+        "work".into(),
+        RunConfig {
+            category: Some("deep".into()),
+            ..RunConfig::default()
+        },
+    );
+    fixture.runtime.wait(id).await.unwrap();
+    let events = drain_events(&mut events).await;
+
+    // Then: run_js is offered to that run and its call runs.
+    let offered = fixture.model.observed_tools().await;
+    assert!(offered[0].iter().any(|spec| spec.name == "run_js"));
+    assert_eq!(started(&events, "run_js").len(), 1);
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        EventKind::Tool(ToolEvent::ToolCompleted {
+            tool_name,
+            call_id,
+            is_error: false,
+            ..
+        }) if tool_name == "run_js" && call_id == "js-1"
+    )));
+    let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("ok"), "{text}");
+    assert!(!text.contains("not enabled"), "{text}");
 }
 
 #[tokio::test]

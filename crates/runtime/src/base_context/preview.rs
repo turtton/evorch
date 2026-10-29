@@ -269,7 +269,11 @@ impl AgentRuntime {
             web_tools_enabled,
         );
         retain_backed_tools(&mut visible, self.artifact_pages().is_some());
-        apply_run_js_specs(&mut visible, self.run_js_enabled(), &self.run_js_settings());
+        apply_run_js_specs(
+            &mut visible,
+            self.run_js_offered_to(request.role, request.category.as_deref()),
+            &self.run_js_settings(),
+        );
         append_subagent_context_note(&mut visible, classify(selected_model));
         let choice = shared
             .model
@@ -332,7 +336,7 @@ fn tool_exclusion_reason(
     } else if spec.name == "escalate" {
         "Only root runs can escalate"
     } else if spec.name == tools::tools::run_js::NAME {
-        "run_js is disabled in the tools settings"
+        "run_js is off, or not scoped to this role and category, in the tools settings"
     } else if !web_tools_enabled {
         "Web tools are disabled in sandbox settings"
     } else {

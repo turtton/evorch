@@ -197,9 +197,13 @@ Example: const hits = (await tools.grep({pattern: "TODO", path: "crates"})).text
 
 ### 提供する範囲と既定値
 
-- 付与するロールは、Worker と、読み取りのロール（Explorer、Reviewer、Advisor、Planner、WebResearcher）とする。コードから呼べるツールは、そのロールに許可されたものに限られる（`crates/agents/src/role.rs`）。そのため、読み取りのロールでは読み取りだけになる。
-- Orchestrator には付与しない（ADR 0002）。Evaluator と MultimodalLooker にも付与しない。
+- 付与できるロールの上限は、`run_js` を capability に持つロールである。Worker と、読み取りのロール（Explorer、Reviewer、Advisor、Planner、WebResearcher）がこれにあたる。コードから呼べるツールは、そのロールに許可されたものに限られる（`crates/agents/src/role.rs`）。そのため、読み取りのロールでは読み取りだけになる。
+- Orchestrator には付与しない（ADR 0002）。Evaluator と MultimodalLooker にも付与しない。設定の `scopes` に書いても出ない。
 - 設定で有効にしたときだけ付与する。既定は無効とし、評価の結果で既定を見直す。
+- 有効にしても、出す先は `[tools.run_js] scopes` で絞る（user 層のみ）。要素は `"<role>"`（そのロールの全カテゴリとカテゴリ無し）か `"<role>:<category>"` で、表記は `agents.<role>` と `agents.<role>.categories.<name>` に合わせる。不正な要素は strict 検証でエラーにする。既定は `["worker:deep", "worker:high-reasoning"]` である。
+  - 理由: 評価で luna（Explorer / WebResearcher / quick の担当）は `run_js` ありで悪化した。読み取りのロールは `run_js` の中から shell を呼べず利点が小さく、評価もしていない。high-reasoning の sol も未評価である。使いこなせるのは賢いモデルだけと判断し、当面は Worker の deep と high-reasoning だけに出す。
+  - 判定は run の開始時に、ロールとカテゴリで行い、run の間は変わらない（プロンプトキャッシュ）。呼び出し時のゲートは、同じ判定を現在の設定で行い、さらにその run が開始時に `run_js` を持っていたことを要求する。無効化や scope からの除外は実行中の run の呼び出しも拒否し、追加した scope は次の run から効く。
+  - 評価の headless 実行（`evorch run --role worker`）はカテゴリ無しなので、評価の overlay で `scopes = ["worker"]` を指定する（`evals/run-js/README.md`）。GUI の Agent features からも scopes を編集できる。
 - 説明の内容は「エージェントへの説明」の節で決める。
 
 ### 評価

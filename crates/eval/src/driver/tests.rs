@@ -386,3 +386,110 @@ fn user_visible_questions_are_tracked_until_answered() {
     assert!(observed.pending.is_empty());
     assert_eq!(observed.conversation.len(), 1);
 }
+
+#[tokio::test]
+async fn final_report_published_by_finish_is_kept_in_the_conversation() {
+    // Given: a root that reports its result through `finish` after a progress message,
+    // and a user who has nothing to add.
+    let mut harness = Harness::new(
+        [
+            text("working on it"),
+            tool("finish", serde_json::json!({"result": "all fixed"})),
+        ],
+        10,
+        [decision("reply", "go on"), decision("finish", "")],
+    );
+    harness.thread.role = runtime::Role::Orchestrator;
+
+    // When: the replay runs.
+    let outcome = harness.drive(&EvalBudgetConfig::default()).await;
+
+    // Then: the final report is the last thing the user saw, and nothing is flagged.
+    assert_eq!(outcome.status, Status::Completed, "{}", outcome.reason);
+    assert_eq!(
+        outcome.conversation.last(),
+        Some(&assistant("all fixed")),
+        "{:?}",
+        outcome.conversation
+    );
+    assert!(
+        !outcome.reason.contains("missing"),
+        "a captured report is not flagged: {}",
+        outcome.reason
+    );
+}
+
+#[test]
+fn final_report_repeating_the_last_response_is_recorded_once() {
+    // Given: a root response that `finish` then publishes again verbatim, and a
+    // second report from a child run.
+    let bus = EventBus::new(8);
+    let mut observed = Observed {
+        root: Some("root".into()),
+        ..Observed::default()
+    };
+    let publish = |run_id: &str, text: &str| {
+        Event::new(MessageEvent::FinalResultPublished {
+            run_id: run_id.into(),
+            text: text.into(),
+        })
+    };
+
+    // When: the response, its repeat, a child's report and a blank report arrive.
+    observed.observe(
+        &Event::new(MessageEvent::MessageCompleted {
+            run_id: "root".into(),
+            text: "done".into(),
+        }),
+        &bus,
+    );
+    observed.observe(&publish("root", "done"), &bus);
+    observed.observe(&publish("child", "child report"), &bus);
+    observed.observe(&publish("root", "  "), &bus);
+
+    // Then: only the root's one distinct message is kept.
+    assert_eq!(observed.conversation, [assistant("done")]);
+}
+
+#[test]
+fn a_completed_replay_without_a_report_names_the_gap() {
+    // Given: observations whose last entry is still the user's input.
+    let missing = Observed {
+        conversation: vec![user("fix the bug")],
+        lagged_events: 3,
+        ..Observed::default()
+    };
+    let answered = Observed {
+        conversation: vec![user("fix the bug"), assistant("fixed")],
+        ..Observed::default()
+    };
+
+    // When / Then: only the completed replay lacking a report is described, with
+    // the lag that may explain it.
+    let note = missing_report(Status::Completed, &missing).unwrap();
+    assert!(note.contains("final report is missing"), "{note}");
+    assert!(note.contains("skipped 3 events"), "{note}");
+    assert_eq!(missing_report(Status::Completed, &answered), None);
+    assert_eq!(missing_report(Status::Incomplete, &missing), None);
+}
+
+#[tokio::test]
+async fn events_a_small_bus_overwrote_before_the_observer_stops_are_counted() {
+    // Given: an observer on a capacity-2 bus that has not run yet while four
+    // events arrive, so two are overwritten before it reads or stops.
+    let bus = Arc::new(EventBus::new(2));
+    let observer = Observer::start(&bus);
+    for index in 0..4 {
+        bus.emit(Event::new(MessageEvent::MessageCompleted {
+            run_id: "root".into(),
+            text: index.to_string(),
+        }));
+    }
+
+    // When: the observer stops, by its normal lag handling or its final drain.
+    let observed = observer.finish().await;
+
+    // Then: at least the two overwritten events are counted. Lag handling in
+    // `recv` emits its own fault event, which can overwrite one more slot.
+    assert!(observed.lagged_events >= 2, "{}", observed.lagged_events);
+}

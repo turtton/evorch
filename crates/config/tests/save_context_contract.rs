@@ -137,7 +137,7 @@ fn every_layered_save_and_preview_accepts_split_config_and_rejects_inactive_kind
                 }
                 "sandbox" => context.save_sandbox(&path, config.sandbox),
                 "agent_features" => {
-                    context.save_agent_features(&path, config::AgentFeatures::from_config(&config))
+                    context.save_agent_features(&path, &config::AgentFeatures::from_config(&config))
                 }
                 "self_improvement" => {
                     context.save_self_improvement(&path, &config.self_improvement)

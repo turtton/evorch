@@ -164,6 +164,7 @@ const RUN_JS_KEYS: &[&str] = &[
     "max_timeout_ms",
     "memory_limit_mib",
     "max_tool_calls",
+    "scopes",
 ];
 const EVAL_KEYS: &[&str] = &[
     "user_simulator",
@@ -260,6 +261,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         && let Some(run_js) = tools.get("run_js").and_then(toml::Value::as_table)
     {
         check_keys(run_js, "tools.run_js", RUN_JS_KEYS)?;
+        validate_run_js_scopes(run_js)?;
     }
     validate_eval(root)?;
     validate_section(root, "storage", STORAGE_KEYS)?;
@@ -269,6 +271,50 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
         check_keys(thread_index, "storage.thread_index", THREAD_INDEX_KEYS)?;
     }
     validate_section(root, "orchestration", ORCHESTRATION_KEYS)
+}
+
+fn validate_run_js_scopes(run_js: &toml::value::Table) -> Result<(), ConfigError> {
+    let Some(scopes) = run_js.get("scopes") else {
+        return Ok(());
+    };
+    let Some(scopes) = scopes.as_array() else {
+        return Err(ConfigError::InvalidField {
+            path: "tools.run_js.scopes".into(),
+            message: "must be an array of strings".into(),
+        });
+    };
+    for (index, scope) in scopes.iter().enumerate() {
+        let path = format!("tools.run_js.scopes[{index}]");
+        let Some(scope) = scope.as_str() else {
+            return Err(ConfigError::InvalidField {
+                path,
+                message: "must be a string".into(),
+            });
+        };
+        crate::validate_run_js_scope(scope)
+            .map_err(|message| ConfigError::InvalidField { path, message })?;
+    }
+    Ok(())
+}
+
+/// Lenient loading drops scopes that name a role or category this build does
+/// not know (as it drops unknown categories); other malformed values stay for
+/// the strict check to refuse.
+fn retain_known_run_js_scopes(run_js: &mut toml::value::Table, ignored: &mut Vec<String>) {
+    let Some(scopes) = run_js.get_mut("scopes").and_then(toml::Value::as_array_mut) else {
+        return;
+    };
+    let mut index = 0;
+    scopes.retain(|scope| {
+        let keep = scope
+            .as_str()
+            .is_none_or(|scope| crate::validate_run_js_scope(scope).is_ok() || scope.is_empty());
+        if !keep {
+            ignored.push(format!("tools.run_js.scopes[{index}]"));
+        }
+        index += 1;
+        keep
+    });
 }
 
 fn validate_eval(root: &toml::value::Table) -> Result<(), ConfigError> {
@@ -428,6 +474,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         .and_then(toml::Value::as_table_mut)
     {
         retain_known(run_js, "tools.run_js", RUN_JS_KEYS, &mut ignored);
+        retain_known_run_js_scopes(run_js, &mut ignored);
     }
     if let Some(thread_index) = root
         .get_mut("storage")
