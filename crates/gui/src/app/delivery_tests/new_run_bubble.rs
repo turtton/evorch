@@ -23,6 +23,22 @@ impl CommandSink for Sink {
     fn follow_up_status(&self, _: &str) -> Option<runtime::FollowUpStatus> {
         self.live.then(runtime::FollowUpStatus::default)
     }
+    fn withdraw_follow_up(
+        &mut self,
+        _: &str,
+        prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        let mut receipts = self.receipts.lock().unwrap();
+        let receipt = receipts
+            .iter_mut()
+            .find(|receipt| receipt.prompt_id == prompt_id)
+            .ok_or(runtime::FollowUpWithdrawalError::Unknown)?;
+        if receipt.status != storage::HostInputStatus::Accepted {
+            return Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into());
+        }
+        receipt.status = storage::HostInputStatus::Withdrawn;
+        Ok(())
+    }
     fn submit(&mut self, _: WorkbenchCommand) -> Vec<LoopEvent> {
         Vec::new()
     }
@@ -140,6 +156,64 @@ fn live_run_follow_up_still_waits_above_the_composer() {
     state.reconcile_follow_ups();
     assert_eq!(bubbles(&state), ["hello"]);
     assert!(state.composer.queued.is_empty());
+}
+
+#[test]
+fn editing_and_deleting_follow_ups_keeps_the_pending_new_run_bubble() {
+    let (mut state, receipts) = send(false);
+    let initial_id = state.history[0].id.clone();
+    receipts
+        .lock()
+        .unwrap()
+        .push(receipt_for(&state, storage::HostInputStatus::Accepted));
+    state.sink = Box::new(Sink {
+        receipts: receipts.clone(),
+        live: true,
+    });
+    for text in ["edit follow-up", "delete follow-up"] {
+        state.composer.input = text.into();
+        state.submit_composer();
+    }
+    receipts
+        .lock()
+        .unwrap()
+        .extend(
+            state
+                .history
+                .iter()
+                .skip(1)
+                .map(|message| storage::HostInputReceipt {
+                    prompt_id: message.id.clone(),
+                    text: message.prompt.clone(),
+                    ..super::review::receipt(storage::HostInputStatus::Accepted)
+                }),
+        );
+    state.reconcile_receipts();
+    state.reconcile_follow_ups();
+    assert_eq!(bubbles(&state), ["hello"]);
+    assert_eq!(state.composer.queued.len(), 2);
+    assert!(state.history[0].starts_run);
+    assert!(
+        state
+            .history
+            .iter()
+            .skip(1)
+            .all(|message| !message.starts_run)
+    );
+
+    state.withdraw_queued_follow_up(0, true);
+    assert_eq!(state.composer.input, "edit follow-up");
+    assert_eq!(state.composer.queued.len(), 1);
+    state.withdraw_queued_follow_up(0, false);
+    state.reconcile_receipts();
+    state.reconcile_follow_ups();
+    assert_eq!(state.composer.input, "edit follow-up");
+    assert!(state.composer.queued.is_empty());
+    assert_eq!(bubbles(&state), ["hello"]);
+    assert_eq!(state.history.len(), 1);
+    assert_eq!(state.history[0].id, initial_id);
+    assert!(state.history[0].starts_run);
+    assert_eq!(state.history[0].status, DeliveryStatus::Queued);
 }
 
 /// Reload the saved sidebar against a store holding `receipt`, as after a restart.

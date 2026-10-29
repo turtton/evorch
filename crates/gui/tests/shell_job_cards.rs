@@ -17,6 +17,7 @@ fn tool(
         call_id: call.into(),
         input: Some(input),
         run_id: None,
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "shell".into(),
@@ -25,6 +26,7 @@ fn tool(
         output: Some(output.into()),
         detail: Some(json!({"shell_job": {"job_id": JOB, "status": status}})),
         run_id: None,
+        parent_call_id: None,
     }));
 }
 
@@ -193,6 +195,7 @@ fn short_shell_job_handle_joins_result_and_live_output_in_one_card() {
             call_id: "short-start".into(),
             input: Some(json!({"command":"cargo test", "yield_ms":0})),
             run_id: None,
+            parent_call_id: None,
         }));
         if live_first {
             model.apply(&live);
@@ -204,6 +207,7 @@ fn short_shell_job_handle_joins_result_and_live_output_in_one_card() {
             output: Some("shell job: job-0\nstatus: running\ncursor: 0\n".into()),
             detail: Some(json!({"shell_job":{"job_id":"job-0", "status":"running"}})),
             run_id: None,
+            parent_call_id: None,
         }));
         if !live_first {
             model.apply(&live);
@@ -266,12 +270,14 @@ fn scoped_cards_keep_commands_logs_folding_and_open_requests_separate() {
                     call_id: "start".into(),
                     input: Some(json!({"command": command})),
                     run_id: Some(run.into()),
+                    parent_call_id: None,
                 }));
                 model.apply(&Event::new(ToolEvent::ToolCompleted {
                     tool_name: "shell".into(), call_id: "start".into(), is_error: false,
                     output: Some("poll fallback\n".into()),
                     detail: Some(json!({"shell_job": {"job_id": "job-0", "job_uid": uid, "status": "running"}})),
                     run_id: Some(run.into()),
+                    parent_call_id: None,
                 }));
                 if !live_first {
                     model.apply(&live);
@@ -329,6 +335,7 @@ fn scoped_job(model: &mut TranscriptModel, run: &str, uid: &str) {
         call_id: "start".into(),
         input: Some(json!({"command": format!("command-{run}")})),
         run_id: Some(run.into()),
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "shell".into(),
@@ -337,6 +344,7 @@ fn scoped_job(model: &mut TranscriptModel, run: &str, uid: &str) {
         output: None,
         detail: Some(json!({"shell_job": {"job_id": JOB, "job_uid": uid, "status": "running"}})),
         run_id: Some(run.into()),
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ShellJobOutput {
         job_uid: Some(uid.into()),
@@ -362,6 +370,7 @@ fn unfinished_controls_resolve_the_owned_job_for_headers_previews_and_open_reque
             call_id: "control".into(),
             input: Some(json!({"action": action, "job_id": JOB})),
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         }));
         let mut h = harness(model);
         assert!(
@@ -395,6 +404,7 @@ fn unfinished_poll_folds_with_the_previous_poll_before_and_after_completion() {
                 json!({"shell_job": {"job_id": JOB, "job_uid": "internal-a", "status": "running"}}),
             ),
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         })
     };
     for call in ["poll-1", "poll-2"] {
@@ -403,6 +413,7 @@ fn unfinished_poll_folds_with_the_previous_poll_before_and_after_completion() {
             call_id: call.into(),
             input: Some(json!({"action": "poll", "job_id": JOB})),
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         }));
         if call == "poll-1" {
             model.apply(&completed(call));
@@ -443,6 +454,7 @@ fn pending_controls_refuse_ambiguous_jobs_and_completed_legacy_calls_keep_exact_
         call_id: "legacy-poll".into(),
         input: Some(json!({"action": "poll", "job_id": JOB})),
         run_id: Some("run-a".into()),
+        parent_call_id: None,
     }));
     // A completed legacy call without a result UUID must never borrow the
     // modern job's UUID, even when there is only one matching job in store.
@@ -453,6 +465,7 @@ fn pending_controls_refuse_ambiguous_jobs_and_completed_legacy_calls_keep_exact_
         output: None,
         detail: None,
         run_id: Some("run-a".into()),
+        parent_call_id: None,
     }));
     let key = resolved_shell_job_key(model.entries().last().unwrap(), model.shell_jobs()).unwrap();
     assert!(key.uid.is_none());
@@ -463,6 +476,7 @@ fn pending_controls_refuse_ambiguous_jobs_and_completed_legacy_calls_keep_exact_
         call_id: "pending-poll".into(),
         input: Some(json!({"action": "poll", "job_id": JOB})),
         run_id: Some("run-a".into()),
+        parent_call_id: None,
     }));
     assert!(resolved_shell_job_key(model.entries().last().unwrap(), model.shell_jobs()).is_none());
     let h = harness(model);
@@ -479,6 +493,7 @@ fn expanded_card_keeps_its_state_when_job_identity_arrives() {
         call_id: "start".into(),
         input: Some(json!({"command": "cargo test"})),
         run_id: Some("run-a".into()),
+        parent_call_id: None,
     }));
     let completed = |detail| {
         Event::new(ToolEvent::ToolCompleted {
@@ -488,6 +503,7 @@ fn expanded_card_keeps_its_state_when_job_identity_arrives() {
             output: Some("returned output".into()),
             detail,
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         })
     };
     model.apply(&completed(None));
@@ -519,6 +535,7 @@ fn counter_handles_remain_distinct_in_control_cards_and_the_shell_jobs_pane() {
             call_id: handle.into(),
             input: Some(json!({"action": "poll", "job_id": handle})),
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
             tool_name: "shell".into(),
@@ -527,6 +544,7 @@ fn counter_handles_remain_distinct_in_control_cards_and_the_shell_jobs_pane() {
             output: None,
             detail: Some(json!({"shell_job": {"job_id": handle, "status": "running"}})),
             run_id: Some("run-a".into()),
+            parent_call_id: None,
         }));
     }
     let cards = harness(model.clone());

@@ -214,6 +214,15 @@ impl SandboxBoundary {
         self
     }
 
+    /// Mount no Cargo / rustup cache at all. For sandboxes that only run a
+    /// prebuilt program and must see nothing of the host's tool homes.
+    #[must_use]
+    pub fn without_tool_caches(mut self) -> Self {
+        self.cargo_home = None;
+        self.rustup_home = None;
+        self
+    }
+
     /// Host Cargo / rustup cache paths with their in-sandbox destinations.
     pub fn cache_mounts(&self) -> Vec<CacheMount> {
         let mut mounts = Vec::new();
@@ -317,6 +326,14 @@ fn tool_home(variable: &str, default: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_tool_caches_mounts_no_cargo_or_rustup_path() {
+        let boundary =
+            SandboxBoundary::new(PathBuf::from("/project")).cargo_cache("/home/u/.cargo");
+        assert!(!boundary.cache_mounts().is_empty());
+        assert!(boundary.without_tool_caches().cache_mounts().is_empty());
+    }
 
     #[test]
     fn regions_list_every_mount_by_host_path_in_mount_order() {

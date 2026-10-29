@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting, consuming its inbox or restoring terminal runs. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
+        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting or restoring terminal runs. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,7 +56,7 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives. Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are the agent messages that arrived, consumed as by inbox (automatic completion notices stay in the inbox); attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error on completion with nothing else to report, otherwise the object. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives. Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are explicit agent messages that arrived, consumed as by inbox; automatic completion notices are not included as messages. Returning terminal child output in runs acknowledges that completion and removes its still-queued automatic notice; unobserved and other-generation notices remain; attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error/Stopped on completion with nothing else to report, otherwise the object. A phase-only response does not acknowledge the output and leaves its automatic notice queued. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
@@ -107,7 +107,7 @@ pub(super) fn wait_reply(name: &str) -> ToolSpec {
 pub(super) fn inbox(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Consume this run's queued agent messages and return a JSON array with IDs, sender, kind, content and reply correlation. Returns an empty array if none are queued.",
+        "Consume this run's queued agent messages, including unobserved automatic child completion notices, and return a JSON array with IDs, sender, kind, content and reply correlation. Only automatic notices already acknowledged by output-bearing wait or terminal run_output are omitted; all other queued messages are consumed and returned. Returns an empty array if none are queued.",
         json!({}),
         &[],
         true,
@@ -349,7 +349,7 @@ pub(super) fn subagent_questions(name: &str) -> ToolSpec {
 pub(super) fn answer_subagent_question(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Answer one direct child's pending question. The answer reaches its next model turn, waking a Waiting child or continuing a completed child from saved history under your current run authority. Repeating the same answer does not start another continuation. If continuation is unavailable or the child was stopped, cancelled or failed, the answer remains saved and an error explains the recovery needed. Only the direct Orchestrator parent may answer; this never grants tool permissions. If user judgment is needed, ask_user on your own run first, then pass that answer here.",
+        "Answer one direct child's pending question. The answer reaches its next model turn, waking a Waiting child or continuing a completed child from saved history under your current run authority. Repeating the same answer does not start another continuation. If continuation is unavailable or the child was stopped, cancelled or failed, the answer remains saved and an error explains the recovery needed. Only the direct Orchestrator parent may answer; this never grants tool permissions. If user judgment is needed, ask_user on your own run first, then pass that answer here, quoting its question ID. The child receives your answer marked as a parent-agent answer, which is not user approval.",
         json!({"question_id":{"type":"string"},"answer":{"type":"string","minLength":1,"maxLength":4096}}),
         &["question_id", "answer"],
         true,

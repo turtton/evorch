@@ -15,10 +15,17 @@ mod host_inputs;
 mod identical_calls;
 mod messages;
 mod observability;
+#[cfg(test)]
+mod observed_completion_tests;
 mod questions;
 mod retracted_delegates;
 #[cfg(test)]
 mod review_evidence_tests;
+mod review_skills;
+#[cfg(test)]
+mod review_skills_tests;
+mod run_js_accounting;
+mod run_js_host;
 mod stop_context;
 mod team;
 mod tool_calls;
@@ -30,7 +37,7 @@ use agents::Role;
 use event_bus::event::diagnostic_codes;
 use event_bus::{AgentRunPhase, CompactionReason, Event, EventBus, LifecycleEvent, MessageEvent};
 use providers::{ContentBlock, FinishReason, ToolSpec, Usage};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tools::ToolExecutor;
 
 use crate::base_context::{self, InitialSystemPromptError};
@@ -38,6 +45,7 @@ use crate::compaction;
 use crate::compaction::policy::{CompactionLoopState, CompactionSettings, TriggerDecision};
 use crate::escalation::detector::EscalationDetector;
 use crate::escalation::{EscalationMemo, EscalationSettings};
+use crate::escalation_review::{LoadedBy, LoadedSkillRef};
 use crate::prompt::{SystemPromptCatalog, classify};
 use crate::rules::{RulesSession, RulesSource};
 use crate::runtime::{SandboxFactory, Shared, loop_shared};
@@ -46,6 +54,7 @@ use crate::{
     AgentContext, AgentInvocationContext, AgentModel, ExecutionPolicy, InterruptKind, RunConfig,
     RunId, RunInterrupt, RunMailbox, RunState, WorkspaceInspection,
 };
+pub(crate) use run_js_host::apply_run_js_specs;
 pub(crate) use tool_calls::{
     append_subagent_context_note, retain_backed_tools, standard_tool_specs, visible_tool_specs,
 };
@@ -84,7 +93,7 @@ pub(crate) struct RunHandoff {
 pub(crate) struct LoopChannels {
     pub(crate) phase_tx: watch::Sender<AgentRunPhase>,
     pub(crate) message_count_tx: watch::Sender<usize>,
-    pub(crate) inbox_rx: mpsc::Receiver<crate::runtime::user_inbox::UserInput>,
+    pub(crate) inbox_rx: crate::runtime::user_inbox::InboxReceiver,
     pub(crate) user_inbox: Arc<crate::runtime::user_inbox::UserInbox>,
     pub(crate) cancel_rx: watch::Receiver<RunInterrupt>,
     pub(crate) mailbox_version_rx: watch::Receiver<u64>,
@@ -116,6 +125,25 @@ pub(crate) struct LoopShared {
 const MAX_MODEL_SWITCHES: u32 = 16;
 /// A registry wait this long is reported as the run's owner-registry activity.
 const OWNERSHIP_WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How many times a run is reminded of shell jobs nobody has looked at before it is
+/// stopped for ignoring them.
+const MAX_UNOBSERVED_JOB_REMINDERS: u32 = 3;
+
+/// Reminders in all before a run is stopped, however the jobs came and went.
+const MAX_TOTAL_JOB_REMINDERS: u32 = 10;
+
+/// The reminder for a model that ended its turn with shell jobs unobserved.
+fn unobserved_jobs_reminder(jobs: &[String]) -> String {
+    let named = if jobs.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", jobs.join(", "))
+    };
+    format!(
+        "Shell jobs are still running or their results were not read{named}. Poll them with shell action:poll and their job_id, or stop them with action:stop, before finishing."
+    )
+}
 
 pub(crate) struct LoopState {
     pub(crate) thread_id: Option<String>,
@@ -158,6 +186,17 @@ pub(crate) struct LoopState {
     escalation_detector: EscalationDetector,
     pub(crate) budget: crate::budget_tracker::BudgetCounters,
     identical_calls: identical_calls::IdenticalCalls,
+    /// Set by the `run_js` host when something a program started may still be running
+    /// and could not be stopped. From then on no tool runs, and finalization retains
+    /// the workspace like it does for shell jobs it could not drain.
+    run_js_unconfirmed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Reminders in a row about unobserved shell jobs, restarted when one of the jobs
+    /// reminded of was dealt with.
+    unobserved_job_reminders: u32,
+    /// All reminders about unobserved shell jobs this run.
+    total_job_reminders: u32,
+    /// The jobs the last reminder named.
+    reminded_jobs: std::collections::BTreeSet<String>,
     /// Child questions a `wait` already reported to this run; a wait returns
     /// early only for questions not in this set.
     pub(crate) reported_questions: std::collections::HashSet<String>,
@@ -183,6 +222,79 @@ pub(crate) struct LoopState {
     /// Allowed directory each run-local skill came from, checked before every load.
     pub(crate) allowed_skill_origins: std::collections::BTreeMap<String, std::path::PathBuf>,
 }
+
+impl LoopState {
+    fn new(
+        task: RunTask,
+        shared: LoopShared,
+        channels: LoopChannels,
+        context: AgentContext,
+        image_model: Arc<dyn AgentModel>,
+        policy: ExecutionPolicy,
+    ) -> Self {
+        let compaction = CompactionLoopState {
+            checkpoint_seq: u32::try_from(context.checkpoints().len()).unwrap_or(u32::MAX),
+            ..Default::default()
+        };
+        Self {
+            thread_id: None,
+            turn: task.turn.clone(),
+            boundary_pending: false,
+            continuity: Default::default(),
+            benchmark: None,
+            benchmark_checked: false,
+            benchmark_replay: false,
+            task,
+            shared,
+            channels,
+            run_state: RunState::new(),
+            context,
+            image_model,
+            policy,
+            tool_specs: Vec::new(),
+            rules_session: None,
+            compaction,
+            last_usage: None,
+            answered_questions: Default::default(),
+            resumed: false,
+            completed_turn_end: None,
+            pending_user_messages: Vec::new(),
+            host_input_ledger: std::sync::Mutex::new(host_inputs::HostInputLedger::restored(
+                Vec::new(),
+            )),
+            initial_prompt_pending: None,
+            goal_wake_pending: false,
+            todo_context_pending: true,
+            todo_context_deferred: false,
+            model_switches: 0,
+            owner_turn_open: false,
+            current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
+            pending_escalation: None,
+            escalation_detector: EscalationDetector::default(),
+            budget: crate::budget_tracker::BudgetCounters::default(),
+            identical_calls: identical_calls::IdenticalCalls::default(),
+            run_js_unconfirmed: Arc::default(),
+            unobserved_job_reminders: 0,
+            total_job_reminders: 0,
+            reminded_jobs: std::collections::BTreeSet::new(),
+            reported_questions: std::collections::HashSet::new(),
+            last_tool: None,
+            retracted_delegates: retracted_delegates::RetractedDelegates::default(),
+            durable_task: None,
+            pending_terminal: None,
+            scratch: None,
+            allowed_directories: None,
+            thread_read_dirs: Vec::new(),
+            worker_base: None,
+            delegated_thread_dirs: Default::default(),
+            told_directories: Default::default(),
+            allowed_instructions: Default::default(),
+            allowed_skill_origins: Default::default(),
+        }
+    }
+}
+
+mod saved_compaction;
 
 pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels: LoopChannels) {
     let project = shared
@@ -241,6 +353,10 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
     let is_restored = restored.is_some();
+    let mut review_skill_refs = restored
+        .as_ref()
+        .map(|restored| restored.loaded_skills.clone())
+        .unwrap_or_default();
     let continuity = restored
         .as_ref()
         .map(|state| state.continuity.clone())
@@ -320,57 +436,20 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             None => AgentContext::new(task.run_id, task.role),
         }
     };
-    let mut state = LoopState {
-        thread_id,
-        turn: task.turn.clone(),
-        boundary_pending,
-        continuity,
-        benchmark,
-        benchmark_checked: benchmark_replay,
-        benchmark_replay,
-        task,
-        shared: loop_shared,
-        channels,
-        run_state: RunState::new(),
-        context,
-        image_model,
-        policy,
-        tool_specs: Vec::new(),
-        rules_session: None,
-        compaction: CompactionLoopState::default(),
-        last_usage: None,
-        answered_questions: Default::default(),
-        resumed: is_restored,
-        completed_turn_end,
-        pending_user_messages: Vec::new(),
-        host_input_ledger: std::sync::Mutex::new(host_inputs::HostInputLedger::restored(
-            restored_host_inputs,
-        )),
-        initial_prompt_pending: None,
-        goal_wake_pending: false,
-        todo_context_pending: true,
-        todo_context_deferred,
-        model_switches: 0,
-        owner_turn_open: false,
-        current_activity: std::sync::Mutex::new(event_bus::RunActivity::Idle),
-        pending_escalation: None,
-        escalation_detector: EscalationDetector::default(),
-        budget: crate::budget_tracker::BudgetCounters::default(),
-        identical_calls: identical_calls::IdenticalCalls::default(),
-        reported_questions: std::collections::HashSet::new(),
-        last_tool: None,
-        retracted_delegates: retracted_delegates::RetractedDelegates::default(),
-        durable_task: None,
-        pending_terminal: None,
-        scratch: None,
-        allowed_directories: None,
-        thread_read_dirs: Vec::new(),
-        worker_base: None,
-        delegated_thread_dirs: Default::default(),
-        told_directories,
-        allowed_instructions,
-        allowed_skill_origins: Default::default(),
-    };
+    let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
+    state.thread_id = thread_id;
+    state.boundary_pending = boundary_pending;
+    state.continuity = continuity;
+    state.benchmark = benchmark;
+    state.benchmark_checked = benchmark_replay;
+    state.benchmark_replay = benchmark_replay;
+    state.resumed = is_restored;
+    state.completed_turn_end = completed_turn_end;
+    state.host_input_ledger =
+        std::sync::Mutex::new(host_inputs::HostInputLedger::restored(restored_host_inputs));
+    state.todo_context_deferred = todo_context_deferred;
+    state.told_directories = told_directories;
+    state.allowed_instructions = allowed_instructions;
     // The run's own host prompt: already in a restored context (and committed
     // there when the same run resumed), or appended by setup below.
     if let Some(prompt_id) = state.task.initial_prompt_id.clone() {
@@ -543,6 +622,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .runtime()
             .is_some_and(|runtime| runtime.artifact_pages().is_some());
         retain_backed_tools(&mut state.tool_specs, artifact_pages);
+        state.apply_run_js();
         if !is_restored {
             state.add_team_tools();
         }
@@ -614,6 +694,18 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         let skill_roots = std::mem::take(&mut state.allowed_instructions.skill_roots);
         let inherited = state.task.config.allowed_skill_roots.clone();
         state.restore_allowed_skills(skill_roots.into_iter().chain(inherited));
+        review_skill_refs.extend(
+            state
+                .task
+                .config
+                .load_skills
+                .iter()
+                .map(|name| LoadedSkillRef {
+                    name: name.clone(),
+                    loaded_by: LoadedBy::DelegateLoadSkills,
+                }),
+        );
+        state.record_review_skills_again(review_skill_refs, is_restored);
         if !is_restored && !benchmark_replay {
             let allowed = state.directory_list();
             if let Err(error) = push_initial_system_message(
@@ -868,6 +960,7 @@ impl LoopState {
             // Resolve D3 and scope before manual/automatic/window compaction so
             // no preparation request can see the previous route's reasoning.
             let preparation_invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -982,6 +1075,7 @@ impl LoopState {
                 }
             }
             let invocation = AgentInvocationContext {
+                attempts: None,
                 turn: Some(self.turn.clone()),
                 category: self.task.config.category.clone(),
                 run_id: self.task.run_id.to_string(),
@@ -1274,7 +1368,41 @@ impl LoopState {
                         .executor
                         .has_unobserved_shell_jobs(&self.task.run_id.to_string())
                     {
-                        self.context.push_user("Shell jobs are still running. Poll their results or stop them before finishing.");
+                        // The model keeps answering without dealing with the jobs; asking
+                        // again with the same words would never end. Name them, and stop the
+                        // run when naming them did not help. Only a job being dealt with
+                        // (read, stopped, acknowledged) restarts the count: other tool calls,
+                        // failed ones included, do not, and the total is capped as well.
+                        let jobs = self
+                            .shared
+                            .executor
+                            .unobserved_shell_job_summaries(&self.task.run_id.to_string());
+                        let handles: std::collections::BTreeSet<String> = jobs
+                            .iter()
+                            .filter_map(|job| job.split(' ').next().map(str::to_owned))
+                            .collect();
+                        if self.reminded_jobs.difference(&handles).next().is_some() {
+                            self.unobserved_job_reminders = 0;
+                        }
+                        self.reminded_jobs = handles;
+                        self.unobserved_job_reminders += 1;
+                        self.total_job_reminders += 1;
+                        if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS
+                            || self.total_job_reminders > MAX_TOTAL_JOB_REMINDERS
+                        {
+                            let reminders =
+                                if self.unobserved_job_reminders > MAX_UNOBSERVED_JOB_REMINDERS {
+                                    format!("{MAX_UNOBSERVED_JOB_REMINDERS} reminders")
+                                } else {
+                                    format!("{MAX_TOTAL_JOB_REMINDERS} reminders in all")
+                                };
+                            self.finish_error(format!(
+                                "shell jobs stayed unobserved after {reminders}: {}",
+                                jobs.join(", ")
+                            ));
+                            return;
+                        }
+                        self.context.push_user(&unobserved_jobs_reminder(&jobs));
                         continue;
                     }
                     if self.flush_aside() {
@@ -1420,9 +1548,9 @@ impl LoopState {
                         }
                         continue;
                     }
-                    let seq = message.4;
-                    self.take_user_input(message);
-                    self.channels.user_inbox.consumed_through(seq);
+                    if !self.take_user_input(message) {
+                        continue;
+                    }
                     self.publish_message_count();
                     self.resumed = true;
                     return self.transition(AgentRunPhase::Running, None).is_ok();
@@ -1573,10 +1701,13 @@ impl LoopState {
 
     fn snapshot_diagnostic(&self, error: &impl std::fmt::Display) {
         self.shared.bus.emit(Event::new(event_bus::DiagnosticEvent {
-            source: "run_context".into(), severity: event_bus::DiagnosticSeverity::Warning,
+            source: "run_context".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::CONTEXT_SNAPSHOT_FAILED.into(),
-            detail: format!("復元用コンテキストを保存できませんでした。以前の有効なチェックポイントがあれば保持します: {error}"),
-            run_id: Some(self.task.run_id.to_string()), thread_id: None, call_id: None,
+            detail: format!("Could not save the conversation checkpoint: {error}"),
+            run_id: Some(self.task.run_id.to_string()),
+            thread_id: None,
+            call_id: None,
         }));
     }
 
@@ -1769,7 +1900,7 @@ impl LoopState {
             severity: event_bus::DiagnosticSeverity::Warning,
             code: diagnostic_codes::OWNERSHIP_REGISTRY_WAIT.into(),
             detail: format!(
-                "The owner registry stayed locked for over {} s; the run waits for it instead of failing.",
+                "Waiting for the owner registry (locked for over {} s)",
                 OWNERSHIP_WAIT_NOTICE.as_secs()
             ),
             run_id: Some(self.task.run_id.to_string()),

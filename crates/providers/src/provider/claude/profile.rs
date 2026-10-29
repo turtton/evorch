@@ -111,6 +111,35 @@ impl ClaudeWireProfile {
         Ok(headers)
     }
 
+    /// Reasoning controls for the plain Anthropic API (`x-api-key`) transport.
+    ///
+    /// It maps `effort` exactly like [`Self::reasoning`] (`thinking` and
+    /// `output_config.effort`) but never fails a request: an unspecified effort, a model
+    /// that is unknown or does not support the effort, or a `max_tokens` too small for
+    /// extended thinking all yield no controls, so nothing is sent and the model's own
+    /// defaults apply. `context_management` is omitted because it is a Claude Code beta
+    /// that needs its own `anthropic-beta` header, which this transport does not send.
+    pub fn api_key_reasoning(
+        &self,
+        model: &str,
+        max_tokens: u64,
+        effort: Option<&str>,
+    ) -> ClaudeReasoningControls {
+        let Some(effort) = effort else {
+            return ClaudeReasoningControls::default();
+        };
+        match self.reasoning(model, max_tokens, Some(effort)) {
+            Ok(controls) => ClaudeReasoningControls {
+                context_management: None,
+                ..controls
+            },
+            Err(error) => {
+                tracing::warn!(model, effort, %error, "reasoning effort is not sent to the Anthropic API");
+                ClaudeReasoningControls::default()
+            }
+        }
+    }
+
     /// `None` preserves an unspecified configuration; `Some("none")` disables thinking.
     /// Effort/budget changes are explicit cache boundaries and must stay stable per run.
     pub fn reasoning(

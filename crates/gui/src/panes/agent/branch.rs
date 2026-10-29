@@ -85,9 +85,9 @@ pub(super) fn turn_footer(
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
-        if action_button(ui, true, icons::GIT_FORK, "ここから fork")
+        if action_button(ui, true, icons::GIT_FORK, "Fork from here")
             .on_hover_text(
-                "ここから fork: このターンまでの会話を引き継いだ新しい thread を作ります",
+                "Fork from here: start a new thread that carries the conversation up to this turn",
             )
             .clicked()
         {
@@ -101,10 +101,10 @@ pub(super) fn turn_footer(
                 ui,
                 branch.rewind_block.is_none(),
                 icons::ARROW_COUNTER_CLOCKWISE,
-                "ここまで巻き戻す",
+                "Rewind to here",
             )
             .on_hover_text(
-                "ここまで巻き戻す: このターンの直後まで会話を戻します。今の会話は版として残ります",
+                "Rewind to here: return to just after this turn. The current conversation stays as a version",
             )
             .on_disabled_hover_text(branch.rewind_block.unwrap_or_default());
             if rewind.clicked() {
@@ -150,13 +150,13 @@ pub(super) fn edit_row(
         if let Some(current) = version_position(branch, &versions) {
             version_switcher(ui, &versions, current, action);
         }
-        let label = "ここから編集";
+        let label = "Edit from here";
         let edit = ui
             .add_enabled(
                 branch.rewind_block.is_none(),
-                frameless((action_icon(icons::PENCIL_SIMPLE), small("編集"))),
+                frameless((action_icon(icons::PENCIL_SIMPLE), small("Edit"))),
             )
-            .on_hover_text("ここから編集: このメッセージの直前まで戻し、内容を入力欄に戻します")
+            .on_hover_text("Edit from here: return to just before this message and put its content back in the input")
             .on_disabled_hover_text(branch.rewind_block.unwrap_or_default());
         accessible(&edit, label);
         if edit.clicked() {
@@ -189,7 +189,7 @@ pub(super) fn branch_divider(
     ui.add_space(SP_1);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
-        let text = "ここから分岐しました";
+        let text = "Branched from here";
         let label = ui.label(small(&with_icon(icons::GIT_FORK, text)));
         label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
         let Some(branch) = branch.filter(|_| own) else {
@@ -207,7 +207,7 @@ pub(super) fn branch_divider(
             ui,
             true,
             icons::ARROW_LEFT,
-            &format!("分岐元「{title}」を開く"),
+            &format!("Open source thread \"{title}\""),
         )
         .clicked()
         {
@@ -233,7 +233,7 @@ pub(super) fn start_versions(
         return;
     };
     ui.horizontal_wrapped(|ui| {
-        ui.label(small("最初のメッセージを編集した版があります"));
+        ui.label(small("The first message has edited versions"));
         version_switcher(ui, &versions, current, action);
     });
 }
@@ -267,15 +267,15 @@ fn version_switcher(
     for part in order {
         match part {
             Part::Previous => {
-                if action_button(ui, current > 0, icons::CARET_LEFT, "前の版")
-                    .on_hover_text("前の版")
+                if action_button(ui, current > 0, icons::CARET_LEFT, "Previous version")
+                    .on_hover_text("Previous version")
                     .clicked()
                 {
                     *action = Some(SidebarAction::SwitchVersion(versions[current - 1].clone()));
                 }
             }
             Part::Count => {
-                let name = format!("版 {} / {}", current + 1, versions.len());
+                let name = format!("Version {} / {}", current + 1, versions.len());
                 let label = ui.label(small(&format!("{}/{}", current + 1, versions.len())));
                 label.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name)
@@ -286,9 +286,9 @@ fn version_switcher(
                     ui,
                     current + 1 < versions.len(),
                     icons::CARET_RIGHT,
-                    "次の版",
+                    "Next version",
                 )
-                .on_hover_text("次の版")
+                .on_hover_text("Next version")
                 .clicked()
                 {
                     *action = Some(SidebarAction::SwitchVersion(versions[current + 1].clone()));
@@ -316,29 +316,24 @@ pub(super) fn confirm_modal(ui: &egui::Ui, action: &mut Option<SidebarAction>) {
     let modal = egui::Modal::new(egui::Id::new("conversation-rewind-modal")).show(&ctx, |ui| {
         ui.set_max_width(420.0);
         if pending.edit {
-            ui.heading("ここから編集");
-            ui.label("このメッセージの直前まで会話を戻し、内容を入力欄に戻します。");
+            ui.heading("Edit from here");
+            ui.label("Return to just before this message and put its content back in the input.");
         } else {
-            ui.heading("会話を巻き戻す");
-            ui.label(format!(
-                "ターン {} の直後まで会話を戻します。",
-                pending.turn
-            ));
+            ui.heading("Rewind the conversation");
+            ui.label(format!("Return to just after turn {}.", pending.turn));
         }
         ui.label(format!(
-            "巻き戻し前の会話は版として残り、{} {} でいつでも切り替えられます。",
+            "The conversation before the rewind stays as a version; switch any time with {} {}.",
             icons::CARET_LEFT,
             icons::CARET_RIGHT
         ));
-        ui.label(
-            egui::RichText::new("ファイルの変更は巻き戻りません。").color(palette().WARNING_FG),
-        );
+        ui.label(egui::RichText::new("File changes are not rewound.").color(palette().WARNING_FG));
         ui.add_space(SP_2);
         ui.horizontal(|ui| {
-            if ui.button("キャンセル").clicked() {
+            if ui.button("Cancel").clicked() {
                 close = true;
             }
-            if ui.button("巻き戻す").clicked() {
+            if ui.button("Rewind").clicked() {
                 *action = Some(if pending.edit {
                     SidebarAction::EditFromMessage {
                         thread: pending.thread.clone(),

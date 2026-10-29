@@ -119,6 +119,9 @@ struct Job {
     call_id: Option<String>,
     thread: Option<String>,
     synchronous: bool,
+    /// Publishes live output although no handle is exposed: a command started inside
+    /// `run_js` is waited for to its end, yet its card shows the output as it arrives.
+    stream_output: bool,
     timeout_ms: Option<u64>,
     state: Mutex<State>,
     changed: watch::Sender<u64>,
@@ -232,6 +235,7 @@ impl JobRegistry {
                 call_id: ctx.call_id.clone(),
                 thread: ctx.thread_id.clone(),
                 synchronous,
+                stream_output: ctx.parent_call_id.is_some(),
                 timeout_ms,
                 state: Mutex::new(State {
                     output: LiveOutput::new(synchronous),
@@ -506,12 +510,105 @@ impl JobRegistry {
         }
     }
     pub(super) async fn drain(&self, run_id: &str) -> Result<(), ToolError> {
+        self.drain_where(|job| job.owner == run_id).await
+    }
+
+    /// Stops the jobs a `run_js` call started (their call ids are
+    /// `<parent>/<n>`) and waits for their processes to be gone. The run's other
+    /// jobs are left alone.
+    pub(super) async fn drain_children(
+        &self,
+        run_id: &str,
+        parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        let prefix = format!("{parent_call_id}/");
+        self.drain_where(|job| {
+            job.owner == run_id
+                && job
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call_id| call_id.starts_with(&prefix))
+        })
+        .await
+    }
+
+    /// Acknowledges the outcome of the finished jobs of the `run_js` call `parent_call_id`
+    /// whose child call numbers are `seqs`: the call's result named exactly these as cut
+    /// off and possibly partly run, and it is in the history. A job that is still running,
+    /// or whose number was not named, stays unobserved.
+    pub(super) fn observe_children(&self, run_id: &str, parent_call_id: &str, seqs: &[u32]) {
+        let wanted: Vec<String> = seqs
+            .iter()
+            .map(|seq| format!("{parent_call_id}/{seq}"))
+            .collect();
+        for job in self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|job| {
+                job.owner == run_id
+                    && job
+                        .call_id
+                        .as_deref()
+                        .is_some_and(|call_id| wanted.iter().any(|wanted| wanted == call_id))
+            })
+        {
+            let mut state = job
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.completion.is_some() {
+                state.observed = true;
+            }
+        }
+    }
+
+    /// One line per job of the run that is running or whose result nobody has read,
+    /// naming it as the model can: its handle (a command started inside `run_js`
+    /// has none it can poll) and what state it is in.
+    pub(super) fn unobserved_summaries(&self, run_id: &str) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|job| job.owner == run_id && job.unobserved())
+            .map(|job| {
+                let state = job
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let status = state
+                    .completion
+                    .as_ref()
+                    .map_or("running", |completion| completion.status);
+                let status = if state.completion.is_some() {
+                    format!("{status}, result not read")
+                } else {
+                    status.to_owned()
+                };
+                if state.exposed {
+                    format!("{} ({status})", job.handle)
+                } else {
+                    format!(
+                        "{} ({status}; started by a program, not pollable)",
+                        job.handle
+                    )
+                }
+            })
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    async fn drain_where(&self, selected: impl Fn(&Job) -> bool) -> Result<(), ToolError> {
         let jobs: Vec<_> = self
             .jobs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .filter(|job| job.owner == run_id)
+            .filter(|job| selected(job))
             .cloned()
             .collect();
         for job in &jobs {
@@ -694,10 +791,11 @@ async fn forward_output(job: Arc<Job>, bus: Arc<EventBus>) {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !state.exposed && state.completion.is_some() {
+            let visible = state.exposed || job.stream_output;
+            if !visible && state.completion.is_some() {
                 return;
             }
-            state.exposed
+            visible
         };
         if !exposed {
             if changed.changed().await.is_err() {

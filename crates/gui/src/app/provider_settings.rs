@@ -34,6 +34,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.routing_settings.open = false;
         self.sandbox_settings.open = false;
+        self.agent_features.open = false;
         self.self_improvement_settings.open = false;
         self.close_theme_settings();
         self.role_settings.open = false;

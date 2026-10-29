@@ -7,16 +7,28 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.routing_settings.open
             || self.role_settings.open
             || self.sandbox_settings.open
+            || self.agent_features.open
             || self.self_improvement_settings.open
             || self.storage_settings.open
             || self.theme_settings.open
+    }
+
+    /// The model picker modal is up: every key belongs to it, not to the panes
+    /// and shortcuts behind its backdrop.
+    pub(super) fn picker_owns_input(&self) -> bool {
+        self.model_picker.open
+    }
+
+    /// The thread search modal is up: like the model picker, it takes every key.
+    pub(super) fn search_owns_input(&self) -> bool {
+        self.thread_search.is_open()
     }
 
     /// Captures Tab for composer completion before egui derives focus and key state.
     ///
     /// Only a focused composer claims it, so other panes keep Tab.
     pub fn raw_input_hook(&mut self, raw_input: &mut egui::RawInput) {
-        if self.settings_owns_input() {
+        if self.settings_owns_input() || self.picker_owns_input() || self.search_owns_input() {
             return;
         }
         if self.terminals.focused {

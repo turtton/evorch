@@ -1,6 +1,7 @@
 //! Delivery observation for the user inbox, separate from command acceptance.
-use std::sync::Mutex;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Text, images, and whether this input came from the host user (rather than an
 /// internal team notification). Only host input contributes to the GUI queue.
@@ -8,10 +9,88 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// enqueue sequence (zero for internal notices), never a durable identity.
 pub(crate) type UserInput = (String, Vec<crate::DelegateImage>, bool, Option<String>, u64);
 
+/// Receiving/draining is not adoption. Keep a removable staging buffer so a
+/// withdrawal releases its bounded channel slot even during an in-flight tool.
+/// The receiver owns the channel; UserInbox holds only a weak reference, so
+/// dropping the agent loop still closes the sender normally.
+#[derive(Debug)]
+pub(crate) struct InboxReceiver(Arc<Mutex<ReceiveState>>);
+
+#[derive(Debug)]
+struct ReceiveState {
+    channel: tokio::sync::mpsc::Receiver<UserInput>,
+    staged: VecDeque<UserInput>,
+}
+
+impl From<tokio::sync::mpsc::Receiver<UserInput>> for InboxReceiver {
+    fn from(channel: tokio::sync::mpsc::Receiver<UserInput>) -> Self {
+        Self(Arc::new(Mutex::new(ReceiveState {
+            channel,
+            staged: VecDeque::new(),
+        })))
+    }
+}
+
+impl InboxReceiver {
+    pub(crate) fn new(channel: tokio::sync::mpsc::Receiver<UserInput>, inbox: &UserInbox) -> Self {
+        let receiver = Self::from(channel);
+        *inbox
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&receiver.0);
+        receiver
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<UserInput> {
+        std::future::poll_fn(|cx| {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(input) = state.staged.pop_front() {
+                std::task::Poll::Ready(Some(input))
+            } else {
+                state.channel.poll_recv(cx)
+            }
+        })
+        .await
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<UserInput, tokio::sync::mpsc::error::TryRecvError> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.staged.pop_front() {
+            Some(input) => Ok(input),
+            None => state.channel.try_recv(),
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .channel
+            .close();
+    }
+}
+
 /// The prompt ID whose delivery receipt this input carries: host input with an
 /// ID. Internal notices, goal wakes and agent messages are never tracked.
 pub(crate) fn tracked_prompt_id(input: &UserInput) -> Option<&str> {
     input.3.as_deref().filter(|_| input.2)
+}
+
+/// Why a queued input cannot be withdrawn from this incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FollowUpWithdrawalError {
+    #[error("message already consumed or withdrawn")]
+    AlreadyConsumed,
+    #[error("unknown queued message")]
+    Unknown,
+    #[error("inbox closed")]
+    Closed,
 }
 
 /// Pending input has not yet been appended to the agent's context.
@@ -26,7 +105,8 @@ pub struct FollowUpStatus {
 struct InboxState {
     status: FollowUpStatus,
     accepted: u64,
-    consumed: u64,
+    pending: BTreeSet<u64>,
+    prompts: HashMap<String, u64>,
     requested_through: u64,
     handoff: bool,
 }
@@ -36,13 +116,19 @@ pub(crate) struct UserInbox {
     wake: tokio::sync::watch::Sender<bool>,
     // Separate from observation: host preparation can access the run map, whose
     // readers may inspect status. Never hold state while preparing a host send.
-    // Lock order: trusted_send before state. Never wait for storage or a
+    // Lock order: trusted_send -> consumption -> state. Never wait for storage or a
     // channel permit while holding state.
     trusted_send: Mutex<()>,
+    // Linearizes context adoption against durable withdrawal. Storage never
+    // runs under state; observation and run-map readers remain nonblocking.
+    consumption: Mutex<()>,
+    receiver: Mutex<Weak<Mutex<ReceiveState>>>,
     /// Set once under `trusted_send`: this incarnation accepts no more host input.
     sealed: AtomicBool,
     #[cfg(test)]
     pause: Mutex<Option<test_pause::SendPause>>,
+    #[cfg(test)]
+    claim_gate_contended: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl Default for UserInbox {
@@ -51,9 +137,13 @@ impl Default for UserInbox {
             state: Mutex::new(InboxState::default()),
             wake: tokio::sync::watch::channel(false).0,
             trusted_send: Mutex::new(()),
+            consumption: Mutex::new(()),
+            receiver: Mutex::new(Weak::new()),
             sealed: AtomicBool::new(false),
             #[cfg(test)]
             pause: Mutex::new(None),
+            #[cfg(test)]
+            claim_gate_contended: Mutex::new(None),
         }
     }
 }
@@ -151,7 +241,11 @@ impl UserInbox {
 
     // Hold the observation lock through enqueueing so consumption cannot race
     // ahead of registration. A rejected send must not increase the count.
-    pub(crate) fn enqueue<E>(&self, send: impl FnOnce(u64) -> Result<(), E>) -> Result<(), E> {
+    pub(crate) fn enqueue<E>(
+        &self,
+        prompt_id: Option<&str>,
+        send: impl FnOnce(u64) -> Result<(), E>,
+    ) -> Result<(), E> {
         let mut state = self
             .state
             .lock()
@@ -162,7 +256,10 @@ impl UserInbox {
             .expect("inbox sequence exhausted");
         send(seq)?;
         state.accepted = seq;
-        state.status.pending += 1;
+        state.pending.insert(seq);
+        if let Some(id) = prompt_id {
+            state.prompts.insert(id.into(), seq);
+        }
         if state.handoff {
             state.requested_through = seq;
         }
@@ -170,18 +267,97 @@ impl UserInbox {
         Ok(())
     }
 
-    /// Acknowledge the ordered prefix actually appended, not a notification or
-    /// durable Delivered receipt. A repeated/old cut cannot consume newer input.
-    pub(crate) fn consumed_through(&self, seq: u64) {
+    /// Claim immediately before context adoption, not when taking a request cut
+    /// or draining the mpsc channel. A withdrawn input can never be adopted.
+    pub(crate) fn claim(&self, seq: u64) -> bool {
+        if seq == 0 {
+            return true; // internal notification / initial input
+        }
+        #[cfg(test)]
+        if let Some(reached) = self.claim_gate_contended.lock().unwrap().take() {
+            // Signal an actual contended gate attempt, not just thread startup.
+            assert!(matches!(
+                self.consumption.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            reached.send(()).unwrap();
+        }
+        let _guard = self
+            .consumption
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let through = seq.min(state.accepted).max(state.consumed);
-        let count = through - state.consumed;
-        state.consumed = through;
-        state.status.pending = state.status.pending.saturating_sub(count as usize);
+        let claimed = state.pending.remove(&seq);
         self.refresh(&mut state);
+        claimed
+    }
+
+    pub(crate) fn is_pending(&self, seq: u64) -> bool {
+        seq == 0
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending
+                .contains(&seq)
+    }
+
+    /// Serialize with sends/sealing and context adoption. If persistence fails,
+    /// leave the input pending; callers must not remove its GUI row.
+    pub(crate) fn withdraw(
+        &self,
+        prompt_id: &str,
+        persist: impl FnOnce() -> Result<(), crate::RuntimeError>,
+    ) -> Result<(), crate::RuntimeError> {
+        self.serialize_trusted_send(|| {
+            let _guard = self
+                .consumption
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let seq = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let seq = *state
+                    .prompts
+                    .get(prompt_id)
+                    .ok_or(FollowUpWithdrawalError::Unknown)?;
+                if !state.pending.contains(&seq) {
+                    return Err(FollowUpWithdrawalError::AlreadyConsumed.into());
+                }
+                if self.sealed() {
+                    return Err(FollowUpWithdrawalError::Closed.into());
+                }
+                seq
+            };
+            persist()?;
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.pending.remove(&seq);
+            self.refresh(&mut state);
+            drop(state);
+            if let Some(receiver) = self
+                .receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .upgrade()
+            {
+                let mut receiver = receiver
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while let Ok(input) = receiver.channel.try_recv() {
+                    receiver.staged.push_back(input);
+                }
+                receiver.staged.retain(|input| input.4 != seq);
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn request_next_turn(&self) {
@@ -201,7 +377,11 @@ impl UserInbox {
     }
 
     fn refresh(&self, state: &mut InboxState) {
-        state.status.next_turn_requested = state.requested_through > state.consumed;
+        state.status.pending = state.pending.len();
+        state.status.next_turn_requested = state
+            .pending
+            .first()
+            .is_some_and(|seq| *seq <= state.requested_through);
         self.wake.send_replace(state.status.next_turn_requested);
     }
 
@@ -306,15 +486,15 @@ mod tests {
     #[test]
     fn rejected_sends_and_consumed_batches_do_not_leave_phantom_pending_input() {
         let inbox = UserInbox::default();
-        assert_eq!(inbox.enqueue(|_| Err("full")), Err("full"));
+        assert_eq!(inbox.enqueue(None, |_| Err("full")), Err("full"));
         assert_eq!(inbox.status(), FollowUpStatus::default());
-        inbox.enqueue(|_| Ok::<_, ()>(())).unwrap();
-        inbox.enqueue(|_| Ok::<_, ()>(())).unwrap();
+        inbox.enqueue(None, |_| Ok::<_, ()>(())).unwrap();
+        inbox.enqueue(None, |_| Ok::<_, ()>(())).unwrap();
         inbox.request_next_turn();
-        inbox.consumed_through(1);
+        inbox.claim(1);
         assert_eq!(inbox.status().pending, 1);
         assert!(inbox.status().next_turn_requested);
-        inbox.consumed_through(2);
+        inbox.claim(2);
         assert_eq!(inbox.status(), FollowUpStatus::default());
         inbox.request_next_turn();
         assert_eq!(inbox.status(), FollowUpStatus::default());
@@ -336,7 +516,7 @@ mod handoff_tests {
         drop(second);
         let mut accepted = 0;
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 accepted = seq;
                 Ok::<_, ()>(())
             })
@@ -346,20 +526,20 @@ mod handoff_tests {
         // The cut doesn't permanently seal host acceptance. A later input stays
         // pending, but is outside this next-request snapshot.
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 assert_eq!(seq, 2);
                 Ok::<_, ()>(())
             })
             .unwrap();
-        inbox.consumed_through(1);
+        inbox.claim(1);
         assert_eq!(inbox.status().pending, 1);
         assert!(!inbox.status().next_turn_requested);
         let next_batch = inbox.begin_wait();
         assert!(*next_batch.borrow());
         assert_eq!(inbox.seal_for_next_request(), (2, true));
-        inbox.consumed_through(1); // stale acknowledgement is idempotent
+        inbox.claim(1); // stale acknowledgement is idempotent
         assert!(inbox.status().next_turn_requested);
-        inbox.consumed_through(2);
+        inbox.claim(2);
         assert_eq!(inbox.status(), FollowUpStatus::default());
     }
 
@@ -367,10 +547,10 @@ mod handoff_tests {
     fn old_consumption_does_not_clear_a_new_reservation_and_failed_send_has_no_sequence() {
         let inbox = UserInbox::default();
         let wake = inbox.begin_wait();
-        assert_eq!(inbox.enqueue(|_| Err("full")), Err("full"));
+        assert_eq!(inbox.enqueue(None, |_| Err("full")), Err("full"));
         assert!(!*wake.borrow());
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 assert_eq!(seq, 1);
                 Ok::<_, ()>(())
             })
@@ -380,24 +560,24 @@ mod handoff_tests {
         assert_eq!(cut, (1, true));
         let next = inbox.begin_wait();
         inbox
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 assert_eq!(seq, 2);
                 Ok::<_, ()>(())
             })
             .unwrap();
-        inbox.consumed_through(1);
+        inbox.claim(1);
         assert!(*next.borrow());
         assert_eq!(inbox.status().pending, 1);
         assert_eq!(inbox.seal_for_next_request(), (2, true));
-        inbox.consumed_through(1); // stale acknowledgement is idempotent
+        inbox.claim(1); // stale acknowledgement is idempotent
         assert!(inbox.status().next_turn_requested);
-        inbox.consumed_through(2);
+        inbox.claim(2);
         assert!(!*next.borrow());
         // An old incarnation's wake cannot affect a restored inbox even when
         // their first sequence values coincide.
         let restored = UserInbox::default();
         restored
-            .enqueue(|seq| {
+            .enqueue(None, |seq| {
                 assert_eq!(seq, 1);
                 Ok::<_, ()>(())
             })
@@ -410,7 +590,7 @@ mod handoff_tests {
     #[test]
     fn send_sooner_is_a_reservation_but_cut_does_not_replace_permanent_seal() {
         let inbox = UserInbox::default();
-        inbox.enqueue(|_| Ok::<_, ()>(())).unwrap();
+        inbox.enqueue(None, |_| Ok::<_, ()>(())).unwrap();
         assert!(!inbox.status().next_turn_requested);
         inbox.request_next_turn();
         assert_eq!(inbox.seal_for_next_request(), (1, true));
@@ -419,5 +599,135 @@ mod handoff_tests {
         assert!(inbox.sealed());
         assert_eq!(inbox.seal_for_next_request(), (1, true));
         assert!(inbox.sealed());
+    }
+}
+
+#[cfg(test)]
+mod withdrawal_tests {
+    use super::*;
+
+    fn queued(inbox: &UserInbox, id: &str) -> u64 {
+        let mut accepted = 0;
+        inbox
+            .enqueue(Some(id), |seq| {
+                accepted = seq;
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        accepted
+    }
+
+    #[test]
+    fn cut_does_not_consume_and_withdrawal_preserves_newer_reservations() {
+        let inbox = UserInbox::default();
+        let first = queued(&inbox, "first");
+        let second = queued(&inbox, "second");
+        inbox.request_next_turn();
+        assert_eq!(inbox.seal_for_next_request(), (second, true));
+        let newer = queued(&inbox, "newer");
+        inbox.withdraw("first", || Ok(())).unwrap();
+        assert_eq!(inbox.status().pending, 2);
+        assert!(inbox.status().next_turn_requested);
+        assert!(!inbox.claim(first));
+        assert!(inbox.claim(second));
+        assert_eq!(inbox.status().pending, 1);
+        assert!(!inbox.status().next_turn_requested);
+        inbox.request_next_turn();
+        inbox.withdraw("newer", || Ok(())).unwrap();
+        assert!(!inbox.claim(newer));
+        assert_eq!(inbox.status(), FollowUpStatus::default());
+        assert_eq!(
+            inbox.withdraw("second", || Ok(())),
+            Err(FollowUpWithdrawalError::AlreadyConsumed.into())
+        );
+        assert_eq!(
+            inbox.withdraw("missing", || Ok(())),
+            Err(FollowUpWithdrawalError::Unknown.into())
+        );
+    }
+
+    #[test]
+    fn failed_persistence_and_closed_inbox_leave_input_pending() {
+        let inbox = UserInbox::default();
+        let seq = queued(&inbox, "one");
+        let error = crate::RuntimeError::FollowUpWithdrawal(FollowUpWithdrawalError::Unknown);
+        assert_eq!(inbox.withdraw("one", || Err(error.clone())), Err(error));
+        assert_eq!(inbox.status().pending, 1);
+        inbox.seal();
+        assert_eq!(
+            inbox.withdraw("one", || panic!("must not persist")),
+            Err(FollowUpWithdrawalError::Closed.into())
+        );
+        assert!(inbox.claim(seq));
+    }
+
+    #[test]
+    fn adoption_cannot_overtake_a_committing_withdrawal() {
+        let inbox = std::sync::Arc::new(UserInbox::default());
+        let seq = queued(&inbox, "one");
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        let withdrawal = {
+            let inbox = inbox.clone();
+            std::thread::spawn(move || {
+                inbox.withdraw("one", || {
+                    reached_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    Ok(())
+                })
+            })
+        };
+        reached.recv().unwrap();
+        // Observation does not take the consumption/storage gate.
+        assert_eq!(inbox.status().pending, 1);
+        let (claim_reached_tx, claim_reached) = std::sync::mpsc::channel();
+        *inbox.claim_gate_contended.lock().unwrap() = Some(claim_reached_tx);
+        let adoption = {
+            let inbox = inbox.clone();
+            std::thread::spawn(move || inbox.claim(seq))
+        };
+        claim_reached.recv().unwrap();
+        resume.send(()).unwrap();
+        assert_eq!(withdrawal.join().unwrap(), Ok(()));
+        assert!(!adoption.join().unwrap());
+        assert_eq!(inbox.status().pending, 0);
+    }
+}
+
+#[cfg(test)]
+mod channel_withdrawal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_queue_withdrawal_reclaims_capacity_and_keeps_fifo_until_receiver_drop() {
+        let inbox = UserInbox::default();
+        let (sender, channel) = tokio::sync::mpsc::channel(2);
+        let mut receiver = InboxReceiver::new(channel, &inbox);
+        for id in ["first", "withdraw"] {
+            inbox
+                .enqueue(Some(id), |seq| {
+                    sender.try_send((id.into(), vec![], true, Some(id.into()), seq))
+                })
+                .unwrap();
+        }
+        assert_eq!(sender.capacity(), 0);
+        inbox.request_next_turn();
+        let (cut, _) = inbox.seal_for_next_request();
+        inbox.withdraw("withdraw", || Ok(())).unwrap();
+        inbox
+            .enqueue(Some("new"), |seq| {
+                sender.try_send(("new".into(), vec![], true, Some("new".into()), seq))
+            })
+            .unwrap();
+        let first = receiver.recv().await.unwrap();
+        let newer = receiver.recv().await.unwrap();
+        assert_eq!((first.0.as_str(), newer.0.as_str()), ("first", "new"));
+        assert!(first.4 <= cut && newer.4 > cut);
+        assert!(inbox.claim(first.4));
+        assert!(inbox.claim(newer.4));
+        assert_eq!(inbox.status().pending, 0);
+        assert!(receiver.try_recv().is_err());
+        drop(receiver);
+        assert!(sender.is_closed());
     }
 }

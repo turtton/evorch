@@ -141,6 +141,57 @@ async fn every_network_review_outcome_preserves_streak_and_denial_guidance() {
     }
 }
 
+#[tokio::test]
+async fn a_web_review_records_what_it_sent_beside_the_call() {
+    let (runtime, mut state, _cancel) = fixture();
+    let mut events = runtime.shared.bus.subscribe();
+    let model = Arc::new(ScriptedModel::new([Ok(text_response(
+        r#"{"approve":true,"reason":"ok","risk_level":"low","authorization_level":"high"}"#,
+        FinishReason::Stop,
+    ))]));
+    state.shared.model = model.clone();
+    let input = serde_json::json!({"url":"https://example.com"});
+    let result = state.gate_network_tool("web_fetch", "fetch", &input).await;
+    assert!(matches!(result, NetworkGate::Proceed));
+
+    let sent = model.observed().await;
+    let [providers::ContentBlock::Text { text: payload }] = sent[0][1].content.as_slice() else {
+        panic!("one user text block");
+    };
+    let records: Vec<_> = events
+        .drain_pending_snapshot()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.code == diagnostic_codes::ESCALATION_REVIEW_MANIFEST =>
+            {
+                Some(diagnostic)
+            }
+            _ => None,
+        })
+        .collect();
+    let [record] = records.as_slice() else {
+        panic!("one record, got {records:?}");
+    };
+    assert_eq!(record.call_id.as_deref(), Some("fetch"));
+    assert_eq!(
+        record.run_id.as_deref(),
+        Some(state.task.run_id.to_string().as_str())
+    );
+    let manifest: crate::escalation_review::ReviewManifest =
+        serde_json::from_str(&record.detail).unwrap();
+    assert_eq!(manifest.scope, "web");
+    assert_eq!(manifest.tool.as_deref(), Some("web_fetch"));
+    let digest = manifest.payload.unwrap();
+    assert_eq!(
+        digest.sha256,
+        crate::escalation_review::sha256_hex(payload.as_bytes())
+    );
+    assert_eq!(digest.bytes, payload.len() as u64);
+    runtime.cancel(state.task.run_id).unwrap();
+    runtime.wait(state.task.run_id).await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn critical_network_approval_wait_can_timeout_or_cancel() {
     for cancel_wait in [false, true] {

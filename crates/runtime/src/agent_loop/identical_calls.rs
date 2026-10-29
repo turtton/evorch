@@ -40,6 +40,9 @@ impl Streak {
 pub(super) struct IdenticalCalls {
     calls: Streak,
     stalled: Streak,
+    /// Calls made inside `run_js` programs. Kept apart from `calls` so that the
+    /// children between two identical `run_js` calls do not hide the repeat.
+    children: Streak,
 }
 
 impl IdenticalCalls {
@@ -54,6 +57,9 @@ impl IdenticalCalls {
             self.stalled.reset();
         }
         for call @ (_, name, input) in calls {
+            if name != tools::tools::run_js::NAME {
+                self.children.reset();
+            }
             if reports_progress(name, input) {
                 self.calls.reset();
             } else if self.calls.push(name, input) >= limit {
@@ -61,6 +67,12 @@ impl IdenticalCalls {
             }
         }
         None
+    }
+
+    /// Records a call a `run_js` program made. Returns true when the program (or
+    /// consecutive `run_js` calls) made `limit` identical calls in a row.
+    pub(super) fn observe_child(&mut self, name: &str, input: &Value, limit: u32) -> bool {
+        self.children.push(name, input) >= limit
     }
 
     /// Ends the stalled streak at a call that does not report progress.

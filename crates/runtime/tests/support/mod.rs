@@ -31,6 +31,7 @@ pub struct ScriptedModel {
     keyed: Mutex<HashMap<String, VecDeque<Result<ChatResponse, RuntimeError>>>>,
     keyed_gates: Mutex<HashMap<String, Arc<Notify>>>,
     observed: Mutex<Vec<Vec<Message>>>,
+    observed_tools: Mutex<Vec<Vec<ToolSpec>>>,
     observed_count: watch::Sender<usize>,
     gate: Option<Arc<Notify>>,
     selected_model: Option<String>,
@@ -61,6 +62,7 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
             observed_count: watch::channel(0).0,
             gate: None,
             selected_model: None,
@@ -76,6 +78,7 @@ impl ScriptedModel {
             keyed: Mutex::new(HashMap::new()),
             keyed_gates: Mutex::new(HashMap::new()),
             observed: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
             observed_count: watch::channel(0).0,
             gate: Some(gate),
             selected_model: None,
@@ -109,6 +112,11 @@ impl ScriptedModel {
         self.observed.lock().await.clone()
     }
 
+    /// The tool definitions of every request, in request order.
+    pub async fn observed_tools(&self) -> Vec<Vec<ToolSpec>> {
+        self.observed_tools.lock().await.clone()
+    }
+
     pub async fn wait_for_request(&self, index: usize) -> Vec<Message> {
         let mut count = self.observed_count.subscribe();
         count
@@ -126,8 +134,9 @@ impl AgentModel for ScriptedModel {
         _invocation: &AgentInvocationContext,
         _role: Role,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
+        self.observed_tools.lock().await.push(tools.to_vec());
         {
             let mut observed = self.observed.lock().await;
             observed.push(messages.to_vec());

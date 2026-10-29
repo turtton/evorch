@@ -9,7 +9,11 @@ mod hosted_search_cache;
 mod image_generation_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
+#[path = "run_js_cache/mod.rs"]
+mod run_js_cache;
 mod support;
+#[path = "web_tools_cache/mod.rs"]
+mod web_tools_cache;
 use std::sync::Arc;
 
 use config::{Config, LoadOptions};
@@ -459,6 +463,19 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         .filter(|request| request.path == harness.wire.path())
         .map(|request| request.body)
         .collect::<Vec<_>>();
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    verify_trace_of(harness, run, events, compactions, &requests);
+}
+
+/// [`verify_trace`] for a run whose wire requests are exactly `requests`, so a
+/// later run of the same runtime can follow it on the same mock.
+fn verify_trace_of(
+    harness: &Harness,
+    run: RunId,
+    events: &[Event],
+    compactions: usize,
+    requests: &[Value],
+) {
     let protocol = harness.wire.protocol();
     let mut starts = Vec::new();
     let mut completed = std::collections::HashMap::new();
@@ -510,7 +527,6 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
     assert_eq!(requests.len(), starts.len());
     assert_eq!(requests.len(), completed.len());
     assert!(requests.len() >= 3);
-    assert_eq!(harness.mock.remaining_scripts(), 0);
     let mut total_input = 0;
     let mut total_cached = 0;
     for (index, (request_id, checkpoint)) in starts.iter().enumerate() {
@@ -912,7 +928,10 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
         assert!(usage[index + 1].1 >= usage[index].0);
     }
     assert_eq!(
-        requests[3].to_string().matches("[user-answer id=").count(),
+        requests[3]
+            .to_string()
+            .matches("[parent-answer id=")
+            .count(),
         1
     );
     assert!(requests[3].to_string().contains("Use scope A"));
@@ -921,6 +940,86 @@ async fn answering_a_completed_child_preserves_its_wire_prefix() {
         harness.runtime.wait(parent).await.unwrap(),
         AgentRunPhase::Error
     );
+}
+
+#[tokio::test]
+async fn observed_child_completion_preserves_the_wire_prefix_without_an_extra_turn() {
+    for tool in ["wait", "run_output"] {
+        let read = Arc::new(GatedRead {
+            started: Notify::new(),
+            release: Notify::new(),
+            child_started: Notify::new(),
+        });
+        let mut h = harness_with_read(
+            vec![
+                read_response(0),
+                text_response("child result"),
+                ScriptedResponse::tool_call(
+                    "observe",
+                    MODEL,
+                    0,
+                    "observe",
+                    tool,
+                    [if tool == "wait" {
+                        json!({"run_ids":["run-2"]}).to_string()
+                    } else {
+                        json!({"run_id":"run-2"}).to_string()
+                    }],
+                ),
+                text_response("The child result is already known"),
+            ],
+            1_000_000,
+            read.clone(),
+        );
+        h.runtime = h.runtime.with_sequential_run_ids();
+        let parent = h.runtime.delegate_background(
+            Role::Orchestrator,
+            "Coordinate child".into(),
+            RunConfig::default(),
+        );
+        read.started.notified().await;
+        let child = h
+            .runtime
+            .delegate_background_as_child(parent, Role::Worker, "Child work", RunConfig::default())
+            .unwrap();
+        assert_eq!(h.runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+        read.release.notify_one();
+        assert_eq!(h.runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
+        let events = through_phase(&mut h.receiver, parent, AgentRunPhase::Done).await;
+        let requests: Vec<_> = h
+            .mock
+            .recorded_requests()
+            .into_iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .map(|request| request.body)
+            .collect();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(h.mock.remaining_scripts(), 0);
+        for (previous, next) in [(0, 2), (2, 3)] {
+            assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next])
+                .unwrap();
+        }
+        assert!(requests[3].to_string().contains("child result"));
+        assert!(!requests[3].to_string().contains("[agent-message"));
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Provider(ProviderEvent::RequestCompleted {
+                    run_id: Some(run),
+                    input_tokens,
+                    cache_read_tokens,
+                    ..
+                }) if run == &parent.to_string() => Some((*input_tokens, *cache_read_tokens)),
+                EventKind::Diagnostic(d) if d.code == "CacheRegression" => panic!("{d:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 3);
+        for pair in usage.windows(2) {
+            assert!(pair[0].0 > 0);
+            assert!(pair[1].1 >= pair[0].0);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1648,6 +1747,161 @@ async fn manual_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Manual).await;
 }
 
+/// An explicit saved-context transaction is the one replacement boundary, even
+/// when either compaction or resume happens in a fresh runtime.
+#[tokio::test]
+async fn ended_run_offline_compaction_resume_reuses_the_new_wire_prefix() {
+    for wire in [Wire::ChatCompletions, Wire::Responses] {
+        for restart in [0, 1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage_config = storage::StorageConfig {
+                db_path: directory.path().join("saved-compaction.sqlite3"),
+                ..Default::default()
+            };
+            let storage = storage::Storage::open(storage_config.clone()).unwrap();
+            let mut harness = harness_with_wire(
+                wire,
+                vec![
+                    read_response(0),
+                    text_response(&"old analysis to summarize ".repeat(100)),
+                    text_response("latest completed turn"),
+                    read_response(1),
+                    read_response(2),
+                    text_response("done"),
+                ],
+                1_000_000,
+                Arc::new(BulkRead),
+                Vec::new(),
+                None,
+                0.5,
+                |_| {},
+            );
+            harness.runtime = harness.runtime.with_run_store(
+                runtime::RunStore::open(&storage_config, storage.handle()).unwrap(),
+            );
+            let run = harness.runtime.delegate_background(
+                Role::Worker,
+                "Preserve this original goal".into(),
+                RunConfig {
+                    interactive: true,
+                    keep_alive: true,
+                    ..Default::default()
+                },
+            );
+            let mut events =
+                through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+            harness
+                .runtime
+                .send_message(run, "Keep this last complete turn".into())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            harness
+                .runtime
+                .stop(run, runtime::StopScope::SelfOnly)
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+            harness.runtime.wait(run).await.unwrap();
+            if restart == 1 {
+                restart_saved_compaction_harness(&mut harness, &storage_config, &storage);
+            }
+            let before = harness
+                .mock
+                .recorded_requests()
+                .iter()
+                .filter(|request| request.path == wire.path())
+                .count();
+            harness
+                .runtime
+                .compact_saved_chat(run, RunConfig::default())
+                .await
+                .unwrap();
+            loop {
+                let event = harness.receiver.recv().await.unwrap();
+                let compacted = matches!(&event.kind, EventKind::Compaction(
+                    CompactionEvent::Compacted { run_id, .. }) if run_id == &run.to_string());
+                events.push(event);
+                if compacted {
+                    break;
+                }
+            }
+            assert_eq!(
+                harness
+                    .mock
+                    .recorded_requests()
+                    .iter()
+                    .filter(|request| request.path == wire.path())
+                    .count(),
+                before,
+                "offline structural compaction must not start an agent request"
+            );
+            if restart == 2 {
+                restart_saved_compaction_harness(&mut harness, &storage_config, &storage);
+            }
+            harness
+                .runtime
+                .resume_chat(run, RunConfig::default())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            assert_eq!(
+                harness
+                    .mock
+                    .recorded_requests()
+                    .iter()
+                    .filter(|request| request.path == wire.path())
+                    .count(),
+                before,
+                "a completed turn must resume to input waiting, not replay"
+            );
+            harness
+                .runtime
+                .send_message(run, "Continue after the saved boundary".into())
+                .unwrap();
+            events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+            harness.runtime.cancel(run).unwrap();
+            harness.runtime.wait(run).await.unwrap();
+            // Retains both the input-derived cache accounting and independent
+            // protocol assertions: replacement once, then append-only reuse.
+            verify_trace(&harness, run, &events, 1);
+        }
+    }
+}
+
+fn restart_saved_compaction_harness(
+    harness: &mut Harness,
+    storage_config: &storage::StorageConfig,
+    storage: &storage::Storage,
+) {
+    let root = harness._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    harness.runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_system_prompts(contract_prompts())
+    .with_compaction(current.compaction.clone())
+    .with_run_store(runtime::RunStore::open(storage_config, storage.handle()).unwrap());
+    assert!(harness.runtime.list_agents().is_empty());
+}
+
 #[tokio::test]
 async fn automatic_compaction_can_replace_history_then_warms_a_new_prefix() {
     compaction_restarts_cache(CompactionReason::Automatic).await;
@@ -2349,7 +2603,7 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     media_type: "image/png".into(),
                     data: "aW1hZ2U=".into(),
                 }],
-                None,
+                Some(format!("delivered-{expedite}")),
             )
             .unwrap();
         review_storage.attach(&harness.runtime);
@@ -2377,6 +2631,36 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
                     .next_turn_requested
             );
         }
+        let withdrawn_ids = [
+            format!("withdraw-middle-{expedite}"),
+            format!("withdraw-tail-{expedite}"),
+        ];
+        for id in &withdrawn_ids {
+            harness
+                .runtime
+                .send_message_with_images(
+                    run,
+                    format!("never deliver {id}"),
+                    vec![DelegateImage {
+                        media_type: "image/png".into(),
+                        data: "d2l0aGRyYXdu".into(),
+                    }],
+                    Some(id.clone()),
+                )
+                .unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 4);
+        for id in &withdrawn_ids {
+            harness.runtime.withdraw_follow_up(run, id).unwrap();
+        }
+        assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 2);
+        let receipts = harness.runtime.host_input_receipts(&withdrawn_ids).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.status == storage::HostInputStatus::Withdrawn)
+        );
         assert_eq!(
             harness
                 .mock
@@ -2389,6 +2673,12 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
         read.release.notify_one();
         let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
         harness.runtime.wait(run).await.unwrap();
+        assert_eq!(
+            harness
+                .runtime
+                .withdraw_follow_up(run, &format!("delivered-{expedite}")),
+            Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into())
+        );
         assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 0);
         assert!(
             !harness
@@ -2405,6 +2695,13 @@ async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() 
             .map(|r| &r.body)
             .collect::<Vec<_>>();
         assert_eq!(bodies.len(), if expedite { 3 } else { 4 });
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !body.to_string().contains("never deliver")
+                    && !body.to_string().contains("d2l0aGRyYXdu"))
+        );
+
         assert_eq!(
             bodies[1].to_string().contains("first queued follow-up"),
             expedite

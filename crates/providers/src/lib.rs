@@ -23,7 +23,7 @@ pub use auth::ProviderAuth;
 pub use client::ProviderClient;
 pub use codex_catalog_version::{
     CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
-    CodexClientVersion,
+    CodexClientVersion, CodexVersionResolution,
 };
 pub use compaction::{CompactionResult, Compactor};
 pub use error::ProviderError;
@@ -36,9 +36,9 @@ pub use image_generation::{
     ImageGenerationResponse, InlineImage,
 };
 pub use message::{
-    ChatRequest, ChatResponse, ContentBlock, FinishReason, JsonSchema, Message, ObservationContext,
-    ProviderCapabilities, RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec,
-    Usage,
+    AttemptLog, AttemptOutcome, AttemptRecord, ChatRequest, ChatResponse, ContentBlock,
+    FinishReason, JsonSchema, Message, ObservationContext, ProviderCapabilities,
+    RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
 pub use responses_replay::{

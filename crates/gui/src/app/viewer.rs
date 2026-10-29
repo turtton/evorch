@@ -105,6 +105,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ctx = ui.ctx().clone();
         self.observe_attention();
         self.observe_unread_threads();
+        self.capture_thread_search_keys(&ctx);
         let mut sidebar_action = None;
         let mut agents_action = None;
         let mut tasks_action = None;
@@ -301,6 +302,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_add_project();
                     Ok(())
                 }
+                SidebarAction::OpenThreadSearch => {
+                    self.open_thread_search();
+                    Ok(())
+                }
                 SidebarAction::OpenProjectSettings(project_id) => {
                     self.open_project_settings(project_id);
                     Ok(())
@@ -336,6 +341,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ComposerAction::Send => self.submit_composer(),
                 ComposerAction::Stop => self.stop_chat(),
                 ComposerAction::DeliverNextTurn => self.deliver_follow_ups_next_turn(),
+                ComposerAction::EditQueued(index) => self.withdraw_queued_follow_up(index, true),
+                ComposerAction::DeleteQueued(index) => self.withdraw_queued_follow_up(index, false),
                 ComposerAction::RestoreQueued(index) => self.restore_queued_follow_up(index),
                 ComposerAction::DismissQueued(index) => self.dismiss_queued_follow_up(index),
                 ComposerAction::ModelPreference(_) => {}
@@ -345,8 +352,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.render_project_dialog(ui.ctx());
+        self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());
+        self.render_agent_features(ui.ctx());
         self.render_self_improvement_settings(ui.ctx());
         self.render_storage_settings(ui.ctx());
         if self.routing_settings.open {

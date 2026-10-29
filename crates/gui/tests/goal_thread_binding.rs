@@ -123,6 +123,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
             call_id: format!("call-{run}"),
             tool_name: format!("tool-{run}"),
             input: None,
+            parent_call_id: None,
         }));
         bus.emit(Event::new(ProviderEvent::CacheReuseObserved {
             request_id: format!("request-{run}"),

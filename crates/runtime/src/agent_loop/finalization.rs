@@ -18,6 +18,14 @@ impl LoopState {
                 false
             }
         };
+        let drained = if let Some(detail) = self.run_js_unconfirmed_detail() {
+            self.finalization_error(format!(
+                "run_js could not confirm that what it started has stopped ({detail}); workspace retained"
+            ));
+            false
+        } else {
+            drained
+        };
         // No host input enters this incarnation from here: wait out a send in
         // progress, then take what never reached the context.
         crate::runtime::user_inbox::seal_off_thread(std::sync::Arc::clone(

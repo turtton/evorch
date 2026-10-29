@@ -169,9 +169,12 @@ impl ThreadRecord {
 
     /// Both lists run newest first by the latest activity in each thread's
     /// displayed subtree, so a reply in a child thread lifts its whole family.
+    /// The main list keeps pinned threads first, then families with a pending
+    /// or running run anywhere in the displayed subtree, then the rest.
     pub fn partition_for_project<'a>(
         threads: &'a [Self],
         project: &ProjectId,
+        phases: &BTreeMap<String, ThreadRunPhase>,
     ) -> (Vec<&'a Self>, Vec<&'a Self>) {
         let (mut archived, mut main): (Vec<_>, Vec<_>) = threads
             .iter()
@@ -184,10 +187,15 @@ impl ThreadRecord {
                 .then_with(|| left.id.cmp(&right.id))
         };
         let activity = subtree_activity(&main, threads);
+        let running = subtree_running(&main, threads, phases);
+        // Only a displayed root can be pinned; a child hangs under its parent
+        // whatever a stale pin says.
+        let pinned =
+            |thread: &Self| thread.pinned && crate::display_parent(threads, &thread.id).is_none();
         main.sort_by(|left, right| {
-            right
-                .pinned
-                .cmp(&left.pinned)
+            pinned(right)
+                .cmp(&pinned(left))
+                .then_with(|| running.contains(&right.id).cmp(&running.contains(&left.id)))
                 .then_with(|| newest_first(&activity, left, right))
         });
         let activity = subtree_activity(&archived, threads);
@@ -291,6 +299,44 @@ fn subtree_activity<'a>(
         }
     }
     activity
+}
+
+/// Threads of `section` that show a pending or running run of their own, of a
+/// hidden rewind version of theirs, or of a displayed descendant. Every thread
+/// of `all` counts, not only the visible ones, and raw run phases are used as
+/// for archive safety, so a Stopped or Error root cannot hide a running
+/// subagent and a hidden version's run still lifts the family it belongs to.
+fn subtree_running<'a>(
+    section: &[&'a ThreadRecord],
+    all: &[ThreadRecord],
+    phases: &BTreeMap<String, ThreadRunPhase>,
+) -> BTreeSet<&'a ThreadId> {
+    let shown: BTreeMap<&ThreadId, &'a ThreadRecord> =
+        section.iter().map(|thread| (&thread.id, *thread)).collect();
+    let mut running = BTreeSet::new();
+    for thread in all.iter().filter(|thread| {
+        thread.run_ids.iter().any(|run_id| {
+            matches!(
+                phases.get(run_id),
+                Some(ThreadRunPhase::Pending | ThreadRunPhase::Running)
+            )
+        })
+    }) {
+        // A hidden rewind version is displayed through its group's visible version.
+        let mut current = if thread.superseded {
+            crate::visible_version(all, &thread.id)
+        } else {
+            Some(thread.id.clone())
+        };
+        // Cyclic parent links stop at the first repeated ancestor.
+        while let Some(id) = current
+            && let Some(record) = shown.get(&id)
+            && running.insert(&record.id)
+        {
+            current = crate::display_parent(all, &id);
+        }
+    }
+    running
 }
 
 fn unix_seconds(at: std::time::SystemTime) -> i64 {

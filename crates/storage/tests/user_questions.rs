@@ -1,4 +1,4 @@
-use event_bus::UserQuestion;
+use event_bus::{AnswerOrigin, UserQuestion};
 use storage::{Database, Storage, StorageConfig};
 
 fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
@@ -23,6 +23,7 @@ fn question(id: u64) -> UserQuestion {
         options: vec!["A".into(), "B".into()],
         blocking: true,
         answer: None,
+        answer_origin: None,
     }
 }
 
@@ -33,16 +34,16 @@ fn first_answer_wins_and_same_answer_is_idempotent_across_reopen() {
     storage.handle().create_user_question(&question).unwrap();
     storage
         .handle()
-        .answer_user_question(&question.id, "自由回答")
+        .answer_user_question(&question.id, "自由回答", &AnswerOrigin::Host)
         .unwrap();
     storage
         .handle()
-        .answer_user_question(&question.id, "自由回答")
+        .answer_user_question(&question.id, "自由回答", &AnswerOrigin::Host)
         .unwrap();
     assert!(
         storage
             .handle()
-            .answer_user_question(&question.id, "different")
+            .answer_user_question(&question.id, "different", &AnswerOrigin::Host)
             .is_err()
     );
     assert!(database.pending_user_questions().unwrap().is_empty());
@@ -79,7 +80,7 @@ fn question_limits_prevent_invisible_pending_questions() {
     assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
     storage
         .handle()
-        .answer_user_question("question-0", "A")
+        .answer_user_question("question-0", "A", &AnswerOrigin::Host)
         .unwrap();
     storage
         .handle()
@@ -128,7 +129,7 @@ fn secret_rejection_leaves_no_question_or_answer_mutation() {
     assert!(
         storage
             .handle()
-            .answer_user_question(&q.id, secret)
+            .answer_user_question(&q.id, secret, &AnswerOrigin::Host)
             .is_err()
     );
     assert_eq!(database.user_question(&q.id).unwrap().unwrap().answer, None);
@@ -165,7 +166,7 @@ fn inheritance_is_explicit_preserves_provenance_and_cannot_read_unrelated_questi
     );
     storage
         .handle()
-        .answer_user_question(&original.id, "A")
+        .answer_user_question(&original.id, "A", &AnswerOrigin::Host)
         .unwrap();
     let inherited = database.user_questions_for_run("run-3").unwrap().remove(0);
     assert_eq!(inherited.run_id, "run-1");
@@ -275,7 +276,7 @@ fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
     );
     storage
         .handle()
-        .answer_user_question(&original.id, "A")
+        .answer_user_question(&original.id, "A", &AnswerOrigin::Host)
         .unwrap();
     // answer persists a projection, which a later link must supersede as well.
     storage
@@ -283,6 +284,7 @@ fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
         .bind_user_questions("run-3", "run-4", std::slice::from_ref(&original.id))
         .unwrap();
     original.answer = Some("A".into());
+    original.answer_origin = Some(AnswerOrigin::Host);
     original.recipient_run_ids.push("run-4".into());
     assert_eq!(
         reopened.user_question(&original.id).unwrap(),
@@ -293,4 +295,38 @@ fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
         vec![original]
     );
     assert!(reopened.pending_user_questions().unwrap().is_empty());
+}
+
+#[test]
+fn answer_origin_is_stored_with_the_first_answer_and_survives_reopen() {
+    let (_dir, storage, _database, config) = fixture();
+    let question = question(7);
+    storage.handle().create_user_question(&question).unwrap();
+    let parent = AnswerOrigin::ParentAgent {
+        answered_by_run_id: "run-parent".into(),
+    };
+    storage
+        .handle()
+        .answer_user_question(&question.id, "yes", &parent)
+        .unwrap();
+    // A later identical answer from another source must not rewrite who answered first.
+    storage
+        .handle()
+        .answer_user_question(&question.id, "yes", &AnswerOrigin::Host)
+        .unwrap();
+    drop(storage);
+    let stored = Database::open(&config)
+        .unwrap()
+        .user_question(&question.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.answer_origin, Some(parent));
+}
+
+#[test]
+fn a_question_cannot_be_created_already_attributed_to_an_answerer() {
+    let (_dir, storage, _database, _config) = fixture();
+    let mut question = question(8);
+    question.answer_origin = Some(AnswerOrigin::Host);
+    assert!(storage.handle().create_user_question(&question).is_err());
 }

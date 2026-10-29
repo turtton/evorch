@@ -24,6 +24,7 @@ fn harness_sized(is_error: bool, size: egui::Vec2) -> Harness<'static> {
         call_id: "patch-1".into(),
         input: Some(serde_json::json!({"input": PATCH})),
         run_id: None,
+        parent_call_id: None,
     }));
     model.apply(&Event::new(ToolEvent::ToolCompleted {
         tool_name: "apply_patch".into(),
@@ -32,6 +33,7 @@ fn harness_sized(is_error: bool, size: egui::Vec2) -> Harness<'static> {
         output: Some(if is_error { FAILURE } else { SUCCESS }.into()),
         detail: None,
         run_id: None,
+        parent_call_id: None,
     }));
     let mut harness = Harness::builder().with_size(size).build_ui(move |ui| {
         gui::theme::install(ui.ctx());

@@ -95,6 +95,7 @@ impl UserSimulator {
             },
         ];
         let invocation = AgentInvocationContext {
+            attempts: None,
             run_id: self.run_id.clone(),
             model_preference: None,
             category: None,

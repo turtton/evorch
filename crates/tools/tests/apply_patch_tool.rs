@@ -84,7 +84,8 @@ fn definition_is_the_codex_json_function_without_escalation() {
 }
 
 // Given: the standard executor / When: its specs are listed / Then: apply_patch
-// is the seventh standard tool with its contract unchanged.
+// is the seventh standard tool with its contract unchanged; run_js is registered too but
+// the runtime offers it only when `[tools.run_js]` is enabled.
 #[test]
 fn standard_executor_registers_apply_patch_as_seventh_tool() {
     let executor = ToolExecutor::with_standard_tools(
@@ -102,6 +103,7 @@ fn standard_executor_registers_apply_patch_as_seventh_tool() {
             "git_diff",
             "grep",
             "read",
+            "run_js",
             "shell",
             "write"
         ]

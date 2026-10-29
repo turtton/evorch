@@ -184,13 +184,11 @@ async fn parent_answer_during_natural_finalization_is_applied_once() {
         before + 1,
         "an answer accepted during finalization must reach a new model turn"
     );
-    assert_eq!(
-        serde_json::to_string(observed.last().unwrap())
-            .unwrap()
-            .matches("[user-answer id=")
-            .count(),
-        1
-    );
+    let injected = serde_json::to_string(observed.last().unwrap()).unwrap();
+    assert_eq!(injected.matches("[parent-answer id=").count(), 1);
+    // The origin is part of the tag: a parent's answer never reads as the user's.
+    assert!(injected.contains(&format!("{} from={}]", question.id, fixture.parent)));
+    assert!(!injected.contains("[user-answer"));
     fixture.runtime.cancel(fixture.parent).unwrap();
     fixture.runtime.wait(fixture.parent).await.unwrap();
 }
@@ -279,7 +277,7 @@ async fn caller_interruption_releases_finalization_wait_and_preserves_answer() {
                     .iter()
                     .map(|history| serde_json::to_string(history)
                         .unwrap()
-                        .matches("[user-answer id=")
+                        .matches("[parent-answer id=")
                         .count())
                     .sum::<usize>(),
                 1
@@ -379,7 +377,7 @@ async fn delayed_parent_answer_resumes_done_child_once_with_saved_history() {
         let history = serde_json::to_string(last).unwrap();
         assert!(history.contains("Independent work completed"));
         assert!(history.contains("Use A"));
-        assert_eq!(history.matches("[user-answer id=").count(), 1);
+        assert_eq!(history.matches("[parent-answer id=").count(), 1);
 
         runtime
             .answer_subagent_question(parent, &question.id, "Use A")
@@ -424,7 +422,7 @@ async fn live_waiting_child_reads_parent_answer_once() {
     );
     let observed = fixture.model.observed().await;
     let last = serde_json::to_string(observed.last().unwrap()).unwrap();
-    assert_eq!(last.matches("[user-answer id=").count(), 1);
+    assert_eq!(last.matches("[parent-answer id=").count(), 1);
     assert!(last.contains("Use A"));
     fixture.runtime.cancel(fixture.parent).unwrap();
     fixture.runtime.wait(fixture.parent).await.unwrap();
@@ -556,7 +554,7 @@ async fn failed_child_resumes_with_the_answer_under_the_parents_current_owner() 
     let last = serde_json::to_string(fixture.model.observed().await.last().unwrap()).unwrap();
     assert!(last.contains("Which implementation?"), "{last}");
     assert!(last.contains("continue independently"), "{last}");
-    assert_eq!(last.matches("[user-answer id=").count(), 1);
+    assert_eq!(last.matches("[parent-answer id=").count(), 1);
     fixture.runtime.cancel(fixture.parent).unwrap();
     fixture.runtime.wait(fixture.parent).await.unwrap();
 }

@@ -485,7 +485,10 @@ async fn stop_during_wake_admission_keeps_snapshot_and_held_message_for_operator
         &runtime.entry(root).unwrap().mailbox
     ));
     assert_eq!(
-        runtime.shared.held_messages.lock().unwrap()[&root],
+        runtime.shared.held_messages.lock().unwrap()[&root]
+            .iter()
+            .map(|queued| queued.message.clone())
+            .collect::<Vec<_>>(),
         vec![report]
     );
     assert!(matches!(

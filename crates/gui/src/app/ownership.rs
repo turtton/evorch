@@ -37,8 +37,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             Err(RegistryError::Ownership(
                 OwnershipError::OwnerResponsive | OwnershipError::Fenced,
-            )) => Err("このスレッドは別ウィンドウが write mode で保持中です".into()),
-            Err(error) => Err(format!("write mode を取得できません: {error}")),
+            )) => Err("Another window holds this thread in write mode".into()),
+            Err(error) => Err(format!("Could not get write mode: {error}")),
         }
     }
 
@@ -75,6 +75,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 if ui.button("Agent roles").clicked() {
                     self.open_role_settings();
+                    ui.close();
+                }
+                if ui
+                    .button("Agent features")
+                    .on_hover_text("Turn agent tools such as web tools and run_js on or off")
+                    .clicked()
+                {
+                    self.open_agent_features();
                     ui.close();
                 }
                 if ui
@@ -348,11 +356,11 @@ fn ownership_status_ui(ui: &mut egui::Ui, status: &OwnershipStatus, now: Instant
         None => "checking ownership".to_owned(),
     };
     if let Some(failure) = &status.failure {
-        tooltip.push_str("\n操作権限の確認を再試行中...\n");
+        tooltip.push_str("\nRechecking access…\n");
         tooltip.push_str(&failure.detail);
     }
     let access = if status.stale(now) {
-        tooltip.push_str("\n表示は前回の確認結果です。操作時に権限を再確認します。");
+        tooltip.push_str("\nShowing the last check; access is rechecked on action.");
         format!("{} (stale)", display.access)
     } else {
         display.access.to_owned()
@@ -381,10 +389,9 @@ fn ownership_status_ui(ui: &mut egui::Ui, status: &OwnershipStatus, now: Instant
 }
 
 fn ownership_action_error_ui(ui: &mut egui::Ui, error: &OwnershipActionError) {
-    ui.colored_label(
-        palette().ERROR_FG,
-        format!("{}: {}", error.operation, error.detail),
-    );
+    crate::theme::widgets::reason_label_with(ui, palette().ERROR_FG, &error.detail, |shown| {
+        format!("{}: {shown}", error.operation)
+    });
 }
 
 #[cfg(test)]

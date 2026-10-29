@@ -5,6 +5,7 @@ use super::scoped_call::parse_scoped_call_id;
 mod branch;
 mod compaction;
 mod diagnostics;
+mod drafts;
 mod lifecycle;
 mod reviews;
 pub mod shell_jobs;
@@ -12,6 +13,8 @@ mod thinking;
 
 pub use reviews::ToolReview;
 
+#[cfg(test)]
+mod draft_tests;
 #[cfg(test)]
 mod tool_tests;
 
@@ -30,12 +33,45 @@ pub enum ToolStatus {
     /// The run ended before the call reported a result, for example because
     /// the process exited mid-call. A late completion still replaces it.
     Interrupted,
+    /// The model is still composing the call; `arguments` is the raw text
+    /// streamed so far. `ToolStarted` turns the card into a running call.
+    Drafting {
+        /// Position of the call within the streamed response.
+        index: usize,
+        arguments: String,
+        /// The response finished, so the call is waiting for its start event.
+        sealed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageDirection {
     Incoming,
     Outgoing,
+}
+
+/// A transcript line `prefix` + `reason`. Runtime reasons are Japanese, so the
+/// line shows the English form and the original reason moves to the hover;
+/// a reason that needs no translation stays a plain notice or error.
+pub(crate) fn reason_entry(prefix: &str, reason: &str, error: bool) -> TranscriptEntry {
+    let shown = crate::model::failure_text::english(reason);
+    let text = format!("{prefix}{shown}");
+    if shown == reason {
+        return if error {
+            TranscriptEntry::Error { text }
+        } else {
+            TranscriptEntry::Notice { text }
+        };
+    }
+    TranscriptEntry::Diagnostic {
+        severity: if error {
+            event_bus::DiagnosticSeverity::Error
+        } else {
+            event_bus::DiagnosticSeverity::Warning
+        },
+        text,
+        hover: reason.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +84,13 @@ pub enum TranscriptEntry {
     },
     Notice {
         text: String,
+    },
+    /// A runtime diagnostic: `text` is the short user-facing line, `hover`
+    /// carries severity, source, code and the raw detail.
+    Diagnostic {
+        severity: event_bus::DiagnosticSeverity,
+        text: String,
+        hover: String,
     },
     SandboxReview {
         text: String,
@@ -83,6 +126,9 @@ pub enum TranscriptEntry {
         is_error: bool,
         status: ToolStatus,
         reviews: Vec<ToolReview>,
+        /// The `run_js` call that made this call from its code (ADR 0039).
+        /// Such a child renders inside its parent's card when that is shown.
+        parent_call_id: Option<String>,
     },
     AgentMessage {
         direction: MessageDirection,
@@ -122,6 +168,7 @@ pub struct TranscriptModel {
     pending_reviews: std::collections::BTreeMap<(Option<String>, String), Vec<ToolReview>>,
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
+    drafts: drafts::DraftIndex,
 }
 
 impl Default for TranscriptModel {
@@ -150,6 +197,7 @@ impl TranscriptModel {
             shell_jobs: shell_jobs::ShellJobs::default(),
             pending_reviews: std::collections::BTreeMap::new(),
             approvals_while_running: std::collections::BTreeSet::new(),
+            drafts: drafts::DraftIndex::default(),
         }
     }
 
@@ -211,11 +259,13 @@ impl TranscriptModel {
             is_error: false,
             status,
             reviews: Vec::new(),
+            parent_call_id: None,
         });
     }
 
     pub fn apply(&mut self, event: &Event) {
         self.finish_thinking(event);
+        self.finish_drafts(event);
         if let event_bus::EventKind::Diagnostic(diagnostic) = &event.kind
             && self.apply_review(diagnostic)
         {
@@ -228,7 +278,11 @@ impl TranscriptModel {
         match &event.kind {
             event_bus::EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) => {
                 self.push(TranscriptEntry::Notice {text:match &question.answer {
-                    Some(answer)=>format!("Answer: {answer}"),
+                    Some(answer)=>match &question.answer_origin {
+                        Some(event_bus::AnswerOrigin::Host)=>format!("Answer from you: {answer}"),
+                        Some(event_bus::AnswerOrigin::ParentAgent{..})=>format!("Answer from parent agent: {answer}"),
+                        None=>format!("Answer: {answer}"),
+                    },
                     None=>format!("Question: {}",question.title),
                 }});
             }
@@ -236,7 +290,10 @@ impl TranscriptModel {
                 run_id, parent_run_id: Some(_), agent_name, ..
             }) => {
                 self.agent_names.insert(run_id.clone(), agent_name.clone());
-                self.push_notice(format!("subagent {agent_name} started"));
+                // The delegate card that spawned it already announces the subagent.
+                if !self.delegate_in_flight() {
+                    self.push_notice(format!("subagent {agent_name} started"));
+                }
             }
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TaskPromptPublished {
                 agent_name, prompt, ..
@@ -268,9 +325,10 @@ impl TranscriptModel {
                 run_id: run_id.clone(),
                 context_len: *context_len,
             }),
+            // A stop is visible in the phase indicator and the Stop controls; no notice.
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 to: event_bus::AgentRunPhase::Stopped, ..
-            }) => self.push(TranscriptEntry::Notice { text: "Run stopped (resumable)".into() }),
+            }) => {}
             event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged {
                     to: event_bus::AgentRunPhase::Error,
@@ -286,9 +344,7 @@ impl TranscriptModel {
                     reason: Some(reason),
                     ..
                 } | event_bus::LifecycleEvent::Failed { reason, .. },
-            ) => self.push(TranscriptEntry::Error {
-                text: format!("Run failed: {reason}"),
-            }),
+            ) => self.push(reason_entry("Run failed: ", reason, true)),
             event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                 run_id, to: event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, ..
             }) if self.agent_names.contains_key(run_id) => {
@@ -298,18 +354,50 @@ impl TranscriptModel {
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
                 self.complete_message(run_id, text, &event.meta);
+                self.response_completed(run_id);
             }
-            event_bus::EventKind::Message(message) => self.append_text(message),
+            event_bus::EventKind::Message(event_bus::MessageEvent::ToolCallDelta {
+                run_id,
+                index,
+                call_id,
+                tool_name,
+                arguments_delta,
+            }) => self.apply_tool_call_delta(&drafts::ToolCallFragment {
+                run_id: run_id.as_deref(),
+                index: *index,
+                call_id: call_id.as_deref(),
+                tool_name: tool_name.as_deref(),
+                arguments_delta,
+            }),
+            event_bus::EventKind::Message(event_bus::MessageEvent::StreamRetried { run_id }) => {
+                self.discard_drafts(run_id.as_deref());
+            }
+            event_bus::EventKind::Message(message) => {
+                if let event_bus::MessageEvent::MessageDelta { run_id, .. }
+                | event_bus::MessageEvent::ReasoningDelta { run_id, .. } = message
+                {
+                    // A new response began, so earlier calls it did not start are stale.
+                    self.discard_sealed_drafts(run_id.as_deref());
+                }
+                self.append_text(message);
+            }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolStarted {
                 tool_name,
                 call_id,
                 input,
                 run_id,
+                parent_call_id,
             }) => {
                 // Older ledgers have no completion events. Tool execution still
                 // closes the preceding response before the next answer streams.
                 self.streaming_messages.remove(run_id);
-                self.start_tool(run_id.as_deref(), tool_name, call_id, input.as_ref());
+                self.start_tool(
+                    run_id.as_deref(),
+                    tool_name,
+                    call_id,
+                    input.as_ref(),
+                    parent_call_id.as_deref(),
+                );
             }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted {
                 tool_name,
@@ -318,6 +406,7 @@ impl TranscriptModel {
                 output,
                 detail,
                 run_id,
+                parent_call_id,
             }) => {
                 self.update_scoped_tool(
                 call_id,
@@ -336,12 +425,16 @@ impl TranscriptModel {
                     output: current_output,
                     detail: current_detail,
                     is_error: current_is_error,
+                    parent_call_id: current_parent,
                     ..
                 }) = self.find_scoped_tool_mut(call_id, run_id.as_deref()) {
                     current_run.clone_from(run_id);
                     current_output.clone_from(output);
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
+                    if parent_call_id.is_some() {
+                        current_parent.clone_from(parent_call_id);
+                    }
                     input = current_input.clone();
                 }
                 if matches!(tool_name.as_str(), "shell" | "bash") {
@@ -357,14 +450,15 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::ShellJobOutput {
                 job_id,
                 job_uid,
+                call_id,
                 run_id,
                 offset,
                 chunk,
                 status,
                 exit_code,
-                ..
             }) => self.shell_jobs.apply_live(
                 shell_jobs::ShellJobKey::new(run_id.as_deref(), job_id, job_uid.as_deref()),
+                call_id.as_deref(),
                 *offset,
                 chunk,
                 status,
@@ -421,7 +515,9 @@ impl TranscriptModel {
         let (delta, run_id) = match message {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
-            MessageEvent::MessageCompleted { .. } => return,
+            MessageEvent::MessageCompleted { .. }
+            | MessageEvent::ToolCallDelta { .. }
+            | MessageEvent::StreamRetried { .. } => return,
             MessageEvent::FinalResultPublished { text, run_id } => {
                 self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
@@ -468,6 +564,7 @@ impl TranscriptModel {
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
+                    | TranscriptEntry::Diagnostic { .. }
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
                     | TranscriptEntry::Tool { .. }
@@ -481,7 +578,9 @@ impl TranscriptModel {
             self.push(match message {
                 MessageEvent::MessageDelta { .. }
                 | MessageEvent::FinalResultPublished { .. }
-                | MessageEvent::MessageCompleted { .. } => TranscriptEntry::Message {
+                | MessageEvent::MessageCompleted { .. }
+                | MessageEvent::ToolCallDelta { .. }
+                | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {
                     text: delta.clone(),
                     run_id: run_id.clone(),
                 },
@@ -546,6 +645,7 @@ impl TranscriptModel {
                 *id -= 1;
             }
         }
+        self.drafts.entry_removed(removed_id);
         self.thinking.retain(|_, id| *id != removed_id);
         for id in self.thinking.values_mut() {
             if *id > removed_id {
@@ -572,7 +672,12 @@ impl TranscriptModel {
         tool_name: &str,
         call_id: &str,
         input: Option<&serde_json::Value>,
+        parent_call_id: Option<&str>,
     ) {
+        // A run_js child is never streamed by the model, so it has no draft.
+        if parent_call_id.is_none() && self.claim_draft(run_id, tool_name, call_id, input) {
+            return;
+        }
         let pending = self.take_pending_reviews(run_id, call_id);
         if let Some(TranscriptEntry::Tool {
             tool_name: name,
@@ -580,12 +685,16 @@ impl TranscriptModel {
             output: None,
             status: status @ (ToolStatus::AwaitingApproval | ToolStatus::Approved),
             reviews,
+            parent_call_id: current_parent,
             ..
         }) = self.find_scoped_tool_mut(call_id, run_id)
         {
             tool_name.clone_into(name);
             if input.is_some() {
                 *current_input = input.cloned();
+            }
+            if parent_call_id.is_some() {
+                *current_parent = parent_call_id.map(str::to_owned);
             }
             *status = ToolStatus::Running;
             reviews.extend(pending);
@@ -601,6 +710,7 @@ impl TranscriptModel {
             is_error: false,
             status: ToolStatus::Running,
             reviews: pending,
+            parent_call_id: parent_call_id.map(str::to_owned),
         });
     }
 
@@ -637,6 +747,7 @@ impl TranscriptModel {
                 is_error: false,
                 status,
                 reviews,
+                parent_call_id: None,
             });
             return;
         };
@@ -687,6 +798,7 @@ impl TranscriptModel {
                 is_error: false,
                 status,
                 reviews: Vec::new(),
+                parent_call_id: None,
             });
         }
     }
@@ -738,6 +850,7 @@ impl TranscriptModel {
             self.entries.remove(0);
             self.first_entry_id += 1;
             self.host_inputs.retain(|_, id| *id >= self.first_entry_id);
+            self.drafts.entries_evicted(self.first_entry_id);
             self.thinking.retain(|_, id| *id >= self.first_entry_id);
             self.streaming_messages.retain(|_, ids| {
                 ids.retain(|id| *id >= self.first_entry_id);
@@ -788,6 +901,26 @@ mod tests {
             model.entries(),
             &[TranscriptEntry::Error {
                 text: "Run failed: profile=x http error 401".into(),
+            }]
+        );
+    }
+
+    // Given: a run that fails with the Japanese runtime Display (the same text the model reads)
+    // When: the transcript shows it / Then: English line, original reason in the hover
+    #[test]
+    fn japanese_failure_reason_shows_in_english_with_the_original_in_the_hover() {
+        let reason = "モデル呼び出しに失敗しました: HTTP 500";
+        let mut model = TranscriptModel::new();
+        model.apply(&Event::new(LifecycleEvent::Failed {
+            session_id: "run-error".into(),
+            reason: reason.into(),
+        }));
+        assert_eq!(
+            model.entries(),
+            &[TranscriptEntry::Diagnostic {
+                severity: event_bus::DiagnosticSeverity::Error,
+                text: "Run failed: Model call failed: HTTP 500".into(),
+                hover: reason.into(),
             }]
         );
     }
@@ -898,6 +1031,7 @@ mod tests {
             tool_name: "read".into(),
             call_id: "c1".into(),
             run_id: None,
+            parent_call_id: None,
         }));
         model.apply(&Event::new(ToolEvent::ToolCompleted {
             output: None,
@@ -906,6 +1040,7 @@ mod tests {
             is_error: false,
             detail: None,
             run_id: None,
+            parent_call_id: None,
         }));
         assert_eq!(
             model.entries()[0],
@@ -919,6 +1054,7 @@ mod tests {
                 is_error: false,
                 status: ToolStatus::Succeeded,
                 reviews: Vec::new(),
+                parent_call_id: None,
             }
         );
     }

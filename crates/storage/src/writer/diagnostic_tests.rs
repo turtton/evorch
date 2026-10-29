@@ -178,3 +178,24 @@ fn retention_cursor_seeks_past_protected_rows_with_identical_timestamps() {
         Some((1, 9500 + diagnostic::SCAN_BATCH_SIZE as i64))
     );
 }
+
+#[test]
+fn review_manifest_audit_records_are_retained_like_review_decisions() {
+    let mut state = fixture();
+    let mut manifest = event(1, true);
+    if let event_bus::EventKind::Diagnostic(diagnostic) = &mut manifest.kind {
+        diagnostic.code = "escalation_review_manifest".into();
+    }
+    let decision = event(1, true);
+    let ordinary = event(1, false);
+    for event in [&manifest, &decision, &ordinary] {
+        append(&mut state, event).unwrap();
+    }
+    let now = UNIX_EPOCH + Duration::from_secs(31 * 86_400);
+    assert_eq!(retain_recent(&mut state, now).unwrap(), 1);
+    let remaining = event::list_all_ordered(&state.conn).unwrap();
+    assert_eq!(remaining.len(), 2);
+    for kept in [&manifest, &decision] {
+        assert!(remaining.iter().any(|row| &row.event == kept));
+    }
+}

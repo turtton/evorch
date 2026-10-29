@@ -546,7 +546,7 @@ async fn model_wait_has_no_deadline_and_ends_on_completion() {
     model.first.notify_one();
     let result = wait.await.unwrap();
     assert_eq!(began.elapsed(), Duration::from_secs(5 * 60 * 60));
-    assert!(result.get("timed_out").is_none(), "{result}");
+    assert!(result.get("timed_out").is_none(), "{result:?}");
     assert_eq!(result["completed_run_ids"], json!([first.to_string()]));
     cleanup(&runtime).await;
 }

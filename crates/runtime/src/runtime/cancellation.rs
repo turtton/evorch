@@ -231,6 +231,9 @@ pub(crate) enum HookPoint {
     HandoffBeforeReserve,
     AdmissionCompleted,
     AdmissionGoalCheckpoint,
+    HeldMessageTaken,
+    RestoreMessagePrepared,
+    LiveMessagePrepared,
 }
 #[cfg(test)]
 type ExecutionHook = (HookPoint, Weak<ExecutionControl>, Box<dyn FnOnce() + Send>);

@@ -80,7 +80,8 @@ fn assert_schema(format: &Value) {
     let required = schema["schema"]["required"]
         .as_array()
         .expect("required fields");
-    assert_eq!(required.len(), 4);
+    assert_eq!(required.len(), 5);
+    assert!(required.contains(&json!("procedure_step")));
     assert!(
         required.contains(&json!("risk_level")) && required.contains(&json!("authorization_level"))
     );
@@ -672,6 +673,7 @@ async fn independent_review_preserves_the_normal_turn_prefix_and_cached_input() 
     ]);
     let harness = harness(&mock.base_url(), false, Duration::from_secs(2));
     let invocation = AgentInvocationContext {
+        attempts: None,
         turn: None,
         run_id: "normal-run".into(),
         category: None,
@@ -764,4 +766,151 @@ async fn one_review_deadline_covers_structured_and_legacy_attempts() {
     assert_eq!(requests.len(), 2);
     assert!(requests[0].get("response_format").is_some());
     assert!(requests[1].get("response_format").is_none());
+}
+
+const CLEANUP_STEPS: &str = "After the merge, remove the task worktree.\n";
+const CRITICAL_VERIFIED: &str = r#"{"approve":true,"reason":"cleanup the procedure defines","risk_level":"critical","authorization_level":"high","procedure_step":"verified"}"#;
+
+/// One agent run that reads a skill, then has a shell command reviewed with it
+/// in context. Returns the chat requests the agent itself sent, in order, and
+/// the single review request.
+async fn run_skill_review(prompt: String) -> (Vec<Value>, Value) {
+    use event_bus::AgentRunPhase;
+    use runtime::skill::{SkillScope, discover_skills};
+    use runtime::{AgentRuntime, RunConfig};
+    use std::sync::Arc;
+
+    let skills = tempfile::tempdir().expect("skills");
+    std::fs::create_dir(skills.path().join("worktree-pr")).expect("skill dir");
+    std::fs::write(
+        skills.path().join("worktree-pr/SKILL.md"),
+        format!("---\nname: worktree-pr\ndescription: worktree steps\n---\n{CLEANUP_STEPS}"),
+    )
+    .expect("skill");
+    let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
+        vec![
+            ScriptedResponse::tool_call(
+                "load",
+                MODEL,
+                0,
+                "call-skill",
+                "skill_load",
+                [r#"{"name":"worktree-pr"}"#],
+            ),
+            ScriptedResponse::tool_call(
+                "shell",
+                MODEL,
+                0,
+                "call-shell",
+                "shell",
+                [
+                    r#"{"command":"printf cleaned","sandbox_access":"unsandboxed","justification":"post-merge cleanup"}"#,
+                ],
+            ),
+            ScriptedResponse::text_stream("review", MODEL, [CRITICAL_VERIFIED]),
+            ScriptedResponse::text_stream("finish", MODEL, ["cleaned up"]),
+        ],
+        vec![MODEL.to_owned(), REVIEW_MODEL.to_owned()],
+    );
+    let harness = harness(&mock.base_url(), false, Duration::from_secs(5));
+    let bus = Arc::new(EventBus::new(256));
+    let executor = Arc::new(tools::ToolExecutor::with_standard_tools(
+        bus.clone(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    ));
+    let runtime =
+        AgentRuntime::new(bus, executor.clone(), harness.model.clone()).with_skills(Arc::new(
+            discover_skills(&[(SkillScope::User, skills.path().to_path_buf())]),
+        ));
+    runtime.set_sandbox_escalation(config::EscalationApproval::Auto, false);
+    executor.set_shell_escalation(
+        runtime.shell_escalation_gate(),
+        Arc::new(sandbox::DirectSandbox::new_unchecked()),
+    );
+    let run = runtime
+        .delegate_chat("skill-review", Role::Worker, prompt, RunConfig::default())
+        .expect("start");
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
+    let bodies: Vec<_> = mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect();
+    assert_eq!(mock.remaining_scripts(), 0, "{bodies:#?}");
+    let (reviews, turns): (Vec<_>, Vec<_>) = bodies
+        .into_iter()
+        .partition(|body| body.get("response_format").is_some());
+    assert_eq!(reviews.len(), 1);
+    (turns, reviews.into_iter().next().expect("review"))
+}
+
+fn assert_skill_review_keeps_the_prefix(turns: &[Value]) {
+    assert_eq!(turns.len(), 3);
+    for pair in turns.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1])
+            .expect("a skill read and a review leave the sent prefix alone");
+        assert_eq!(pair[0]["tools"], pair[1]["tools"]);
+        assert_eq!(pair[0]["messages"][0], pair[1]["messages"][0]);
+    }
+    // The review's skill context is its own request, never part of the agent's.
+    assert!(
+        turns
+            .iter()
+            .all(|turn| !turn.to_string().contains("loaded_skills"))
+    );
+}
+
+fn review_context(review: &Value) -> Value {
+    let user = review["messages"][1]["content"]
+        .as_str()
+        .expect("review payload");
+    let payload: Value = serde_json::from_str(user).expect("payload JSON");
+    payload["context"].clone()
+}
+
+#[tokio::test]
+async fn a_loaded_skill_reaches_the_review_and_the_normal_turns_keep_their_prefix() {
+    let (turns, review) = run_skill_review("CI通ったらマージしていいよ".into()).await;
+    assert_skill_review_keeps_the_prefix(&turns);
+    let context = review_context(&review);
+    assert_eq!(
+        context["real_user_requests"][0]["text"],
+        "CI通ったらマージしていいよ"
+    );
+    assert_eq!(context["loaded_skills"][0]["name"], "worktree-pr");
+    assert_eq!(context["loaded_skills"][0]["loaded_by"], "skill_load");
+    assert_eq!(context["loaded_skills"][0]["text"], CLEANUP_STEPS);
+    // The verified critical step ran without asking the user.
+    assert!(
+        turns[2]["messages"]
+            .to_string()
+            .contains("exit_code: 0\\ncleaned")
+    );
+}
+
+#[tokio::test]
+async fn an_expanded_mention_reaches_the_review_apart_from_the_user_words() {
+    let typed = "CI通ったらマージしていいよ @extra";
+    let mut prompt = typed.to_owned();
+    runtime::skill::append_skill_attachment(&mut prompt, "extra", "Extra procedure steps.");
+    let (turns, review) = run_skill_review(prompt.clone()).await;
+    assert_skill_review_keeps_the_prefix(&turns);
+    // The agent still receives the whole message, block included.
+    assert!(
+        turns[0]["messages"]
+            .to_string()
+            .contains("Extra procedure steps.")
+    );
+    let context = review_context(&review);
+    assert_eq!(context["real_user_requests"][0]["text"], typed);
+    let skills = context["loaded_skills"].as_array().expect("skills");
+    let attached = skills
+        .iter()
+        .find(|skill| skill["name"] == "extra")
+        .expect("attached skill");
+    assert_eq!(attached["loaded_by"], "user_mention");
+    assert_eq!(attached["trust"], "user-attached");
+    assert_eq!(attached["text"], "Extra procedure steps.");
+    assert!(skills.iter().any(|skill| skill["name"] == "worktree-pr"));
 }

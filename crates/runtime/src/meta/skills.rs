@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use super::{DispatchResult, error, parse, success};
 use crate::agent_loop::LoopState;
+use crate::escalation_review::LoadedBy;
 use crate::skill::SkillRegistry;
 
 #[derive(Deserialize)]
@@ -23,7 +24,18 @@ pub(super) fn skill_load(state: &LoopState, input: serde_json::Value) -> Dispatc
     {
         return error(reason);
     }
-    skill_load_with_registry(state.skills(), input)
+    let body_name = input
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|_| input.get("resource").is_none_or(serde_json::Value::is_null))
+        .map(str::to_owned);
+    let dispatch = skill_load_with_registry(state.skills(), input);
+    if let Some(name) = body_name
+        && !dispatch.result.is_error
+    {
+        state.record_review_skill(&name, LoadedBy::SkillLoad, dispatch.result.content.clone());
+    }
+    dispatch
 }
 
 /// レジストリを引数に取る内部実装。LoopState は agent_loop モジュール外から

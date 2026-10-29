@@ -15,7 +15,9 @@ mod held_messages;
 mod output;
 mod project;
 mod questions;
+mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
+pub use questions::RunWait;
 mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;
@@ -56,8 +58,8 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 #[cfg(test)]
 mod host_input_tests;
 pub(crate) mod user_inbox;
-pub use user_inbox::FollowUpStatus;
 use user_inbox::UserInbox;
+pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
 
 const INBOX_CAPACITY: usize = 32;
 
@@ -99,11 +101,14 @@ pub(crate) struct Shared {
     execution_hooks: cancellation::TestHooks,
     /// Stop and chat renewal serialize per run, not behind other chats' storage work.
     stop_restore_gates: Mutex<HashMap<RunId, Weak<Mutex<()>>>>,
+    saved_compactions: Mutex<HashSet<RunId>>,
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
+    /// Monotonic incarnation IDs, including same-run-ID restores.
+    next_completion_generation: AtomicU64,
     /// Messages for finished or stopped runs, released when the run is registered again.
-    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<AgentMessage>>>,
+    pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
     /// Automatic wakes per conversation root since the last user input.
     pub(crate) auto_wakes: Mutex<HashMap<RunId, u32>>,
     pub(crate) learning: OnceLock<crate::memory_queue::LearningSettings>,
@@ -131,6 +136,8 @@ pub(crate) struct Shared {
     pub(crate) comment_checker: OnceLock<config::CommentCheckerConfig>,
     pub(crate) orchestration: OnceLock<config::OrchestrationConfig>,
     pub(crate) web_tools_enabled: AtomicBool,
+    /// `[tools.run_js]` (ADR 0039): whether `run_js` is offered and its limits.
+    pub(crate) run_js: Mutex<config::RunJsConfig>,
     pub(crate) sandbox_escalation: Arc<Mutex<(config::EscalationApproval, bool)>>,
     /// Variables added to every shell command, including run-built executors'.
     pub(crate) shell_environment: OnceLock<Vec<(String, String)>>,
@@ -270,6 +277,7 @@ pub(crate) struct RunEntry {
     pub(crate) parent: Option<RunId>,
     escalated_from: Option<RunId>,
     completion_relayed: bool,
+    completion_notice: Arc<crate::mailbox::CompletionNotice>,
     terminal_reason: Option<String>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
@@ -287,6 +295,8 @@ pub(crate) struct RunEntry {
     mailbox: Arc<RunMailbox>,
     _join: Option<JoinHandle<()>>,
 }
+
+type MessageDelivery = (String, AgentMessage, DeliveryDisposition);
 
 struct SentRecord {
     sender: RunId,
@@ -511,6 +521,10 @@ impl AgentRuntime {
                 }
                 Self::review_error(run_id, error)
             })?;
+        // Skills are not stored in the evidence graph; the replaced entry keeps them.
+        if let Some(previous) = runs.get(&run_id) {
+            review.loaded_skills = previous.loaded_skills.clone();
+        }
         if let Some(existing) = runs
             .values()
             .find(|run| run.root_run_id == review.root_run_id)
@@ -693,7 +707,9 @@ impl AgentRuntime {
                 #[cfg(test)]
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
+                saved_compactions: Mutex::new(HashSet::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
                 topology: OnceLock::new(),
@@ -719,6 +735,7 @@ impl AgentRuntime {
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
+                run_js: Mutex::new(config::RunJsConfig::default()),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),
@@ -810,6 +827,7 @@ impl AgentRuntime {
         let _ = self.shared.orchestration.set(config.orchestration.clone());
         let _ = self.shared.budget.set((&config.budget).into());
         self.set_web_tools_enabled(config.sandbox.web_tools_enabled);
+        self.set_run_js_settings(config.tools.run_js.clone());
         self.set_sandbox_escalation(
             config.sandbox.escalation_approval,
             config.sandbox.escalate_to_user_on_deny,
@@ -1011,7 +1029,9 @@ impl AgentRuntime {
                 #[cfg(test)]
                 execution_hooks: Default::default(),
                 stop_restore_gates: Mutex::new(HashMap::new()),
+                saved_compactions: Mutex::new(HashSet::new()),
                 operator_stops: Mutex::new(HashSet::new()),
+                next_completion_generation: AtomicU64::new(1),
                 held_messages: Mutex::new(HashMap::new()),
                 auto_wakes: Mutex::new(HashMap::new()),
                 bus,
@@ -1031,6 +1051,7 @@ impl AgentRuntime {
                 comment_checker: OnceLock::new(),
                 orchestration: OnceLock::new(),
                 web_tools_enabled: AtomicBool::new(true),
+                run_js: Mutex::new(config::RunJsConfig::default()),
                 sandbox_escalation: Arc::new(Mutex::new((config::EscalationApproval::Auto, false))),
                 shell_environment: OnceLock::new(),
                 sandbox_root: Mutex::new(None),
@@ -1506,6 +1527,7 @@ impl AgentRuntime {
         let (message_count_tx, message_count_rx) = watch::channel(0);
         let (inbox_tx, inbox_rx) = mpsc::channel(INBOX_CAPACITY);
         let user_inbox = Arc::new(UserInbox::default());
+        let inbox_rx = crate::runtime::user_inbox::InboxReceiver::new(inbox_rx, &user_inbox);
         let cancel_rx = execution.cancel_tx.subscribe();
         let (compact_tx, compact_rx) = watch::channel(0_u64);
         let (model_preference_tx, model_preference_rx) =
@@ -1578,6 +1600,13 @@ impl AgentRuntime {
                     parent,
                     escalated_from,
                     completion_relayed,
+                    completion_notice: crate::mailbox::CompletionNotice::new(
+                        parent,
+                        run_id,
+                        self.shared
+                            .next_completion_generation
+                            .fetch_add(1, Ordering::Relaxed),
+                    ),
                     phase_tx: phase_tx_entry,
                     phase_rx,
                     message_count_rx,
@@ -1976,7 +2005,7 @@ impl AgentRuntime {
         let send = || {
             // A sealed incarnation has drained its inbox for good: refuse before
             // reserving, persisting or creating a goal.
-            if trusted_user && inbox.sealed() {
+            if trusted_user && (inbox.sealed() || inbox.status().pending >= INBOX_CAPACITY) {
                 return Err(RuntimeError::RunTerminated {
                     run_id: run_id.to_string(),
                 });
@@ -2038,11 +2067,11 @@ impl AgentRuntime {
                 self.goal_user_input(run_id, &text);
             }
             let enqueue = |seq| {
-                permit.send((text.clone(), images, trusted_user, prompt_id, seq));
+                permit.send((text.clone(), images, trusted_user, prompt_id.clone(), seq));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {
-                inbox.enqueue(enqueue)?;
+                inbox.enqueue(prompt_id.as_deref(), enqueue)?;
             } else {
                 enqueue(0)?;
             }
@@ -2100,7 +2129,9 @@ impl AgentRuntime {
                     prompt_id,
                     reason,
                 },
-                storage::HostInputStatus::Accepted => continue,
+                storage::HostInputStatus::Accepted | storage::HostInputStatus::Withdrawn => {
+                    continue;
+                }
             };
             self.shared.bus.emit(Event::new(event));
         }
@@ -2111,7 +2142,7 @@ impl AgentRuntime {
             source: "agent_runtime".into(),
             severity: event_bus::DiagnosticSeverity::Warning,
             code: event_bus::event::diagnostic_codes::HOST_INPUT_RECEIPT_FAILED.into(),
-            detail: format!("host input receipts left unsettled: {detail}"),
+            detail: format!("Input delivery receipts could not be settled: {detail}"),
             run_id: Some(run_id.to_string()),
             thread_id: None,
             call_id: None,
@@ -2226,6 +2257,33 @@ impl AgentRuntime {
         Ok(status)
     }
 
+    /// Withdraw only input not yet adopted by the agent. The next-request cut
+    /// does not consume input. Successful withdrawal is durable before returning.
+    pub fn withdraw_follow_up(&self, run_id: RunId, prompt_id: &str) -> Result<(), RuntimeError> {
+        self.validate_run_mutation(run_id)?;
+        let inbox = Arc::clone(&self.entry(run_id)?.user_inbox);
+        inbox.withdraw(prompt_id, || {
+            let store = self
+                .shared
+                .run_store
+                .get()
+                .ok_or_else(|| Self::review_error(run_id, "storage is not configured"))?;
+            let transition = storage::HostInputTransition::new(
+                prompt_id,
+                storage::HostInputStatus::Withdrawn,
+                None,
+            );
+            let applied = store
+                .handle
+                .transition_host_inputs(&[transition])
+                .map_err(|error| Self::review_error(run_id, error))?;
+            if applied.is_empty() {
+                return Err(user_inbox::FollowUpWithdrawalError::AlreadyConsumed.into());
+            }
+            Ok(())
+        })
+    }
+
     /// Deliver queued follow-ups before the next model request, without cancelling
     /// an in-flight response or tool. This does not send a new message.
     pub fn deliver_follow_ups_next_turn(&self, run_id: RunId) -> Result<(), RuntimeError> {
@@ -2266,6 +2324,9 @@ impl AgentRuntime {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
             })
             .collect::<Vec<_>>();
+        for target in &targets {
+            self.ensure_no_saved_compaction(*target)?;
+        }
         self.goal_work_stopped(run_id);
         let mut admissions = self
             .shared
@@ -2502,6 +2563,7 @@ impl AgentRuntime {
 
     /// run の次のターン境界で手動コンテキスト圧縮を要求する。
     pub fn compact(&self, run_id: RunId) -> Result<(), RuntimeError> {
+        self.ensure_no_saved_compaction(run_id)?;
         self.validate_run_mutation(run_id)?;
         let entry = self.entry(run_id)?;
         if entry.compaction_busy.load(Ordering::Acquire) {
@@ -2709,8 +2771,37 @@ impl AgentRuntime {
         kind: AgentMessageKind,
         content: String,
         reply_to: Option<String>,
-    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+    ) -> Result<MessageDelivery, RuntimeError> {
+        let queued = crate::mailbox::QueuedMessage::explicit(AgentMessage {
+            message_id: String::new(),
+            sender_run_id: sender.to_string(),
+            recipient_run_id: recipient.to_string(),
+            kind,
+            content,
+            reply_to,
+        });
+        self.try_live_queued_delivery(sender, recipient, queued)
+            .map(|delivery| delivery.expect("explicit messages cannot be observed completions"))
+    }
+
+    /// Keep origin through the final runs-locked enqueue. Observation uses the
+    /// same lock, so it either prevents delivery or removes the typed queue item.
+    fn try_live_queued_delivery(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        mut queued: crate::mailbox::QueuedMessage,
+    ) -> Result<Option<MessageDelivery>, RuntimeError> {
+        #[cfg(test)]
+        if let Ok(execution) = self.execution_snapshot(recipient) {
+            self.execution_hook(HookPoint::LiveMessagePrepared, &execution);
+        }
         let runs = lock_runs(&self.shared.runs);
+        if queued.observed() {
+            return Ok(None);
+        }
+        let kind = queued.message.kind.clone();
+        let reply_to = &queued.message.reply_to;
         let sender_entry = runs.get(&sender).ok_or_else(|| unknown_run(sender))?;
         let recipient_entry = runs.get(&recipient).ok_or_else(|| unknown_run(recipient))?;
 
@@ -2784,17 +2875,11 @@ impl AgentRuntime {
             self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
         );
 
-        let message = AgentMessage {
-            message_id: message_id.clone(),
-            sender_run_id: sender.to_string(),
-            recipient_run_id: recipient.to_string(),
-            kind: kind.clone(),
-            content: content.clone(),
-            reply_to: reply_to.clone(),
-        };
-
+        queued.message.message_id.clone_from(&message_id);
+        let message = queued.message.clone();
+        let interrupts_wait = queued.interrupts_wait();
         let mailbox = Arc::clone(&recipient_entry.mailbox);
-        if let Err(push_error) = mailbox.try_push(message.clone()) {
+        if let Err(push_error) = mailbox.try_push_queued(queued) {
             return Err(match push_error {
                 PushError::Full => RuntimeError::MailboxFull {
                     run_id: recipient.to_string(),
@@ -2806,6 +2891,7 @@ impl AgentRuntime {
         }
 
         if reply_correlation.is_none() {
+            let sender = message.sender_run_id.parse().unwrap_or(sender);
             sent.insert(message_id.clone(), SentRecord { sender, recipient });
         }
         drop(sent);
@@ -2814,7 +2900,7 @@ impl AgentRuntime {
         let disposition = match phase {
             AgentRunPhase::Waiting => DeliveryDisposition::Wake,
             AgentRunPhase::Pending | AgentRunPhase::Running => {
-                if is_child_to_parent {
+                if interrupts_wait && is_child_to_parent {
                     DeliveryDisposition::Steering
                 } else {
                     DeliveryDisposition::Aside
@@ -2823,7 +2909,7 @@ impl AgentRuntime {
             AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => unreachable!(),
         };
 
-        Ok((message_id, message, disposition))
+        Ok(Some((message_id, message, disposition)))
     }
 
     /// run 自身の待機で mailbox を非消費のまま監視するための参照を返す。

@@ -16,6 +16,10 @@ pub enum MetadataOrigin {
     Manual,
     Preset,
     Catalog,
+    /// models.dev's entry for the API model a Cursor model ID is a variant of.
+    ApiEquivalent,
+    /// Cursor's own docs table.
+    ProviderDocs,
     Default,
 }
 
@@ -27,6 +31,91 @@ pub struct ResolvedModelMetadata {
     pub origin: MetadataOrigin,
 }
 
+/// How a catalog entry was matched to a configured model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogMatch {
+    /// The entry the profile itself names, or the same model ID.
+    Direct,
+    /// The public API model a Cursor model ID is a variant of, found by stripping its
+    /// effort, lane and thinking suffixes. Cursor bills a subscription, so the entry's
+    /// prices only approximate what the same usage costs through the API.
+    ApiEquivalent,
+}
+
+fn explicit_entry<'a>(
+    entry: &ModelEntryConfig,
+    catalog: &'a ModelCatalog,
+) -> Option<&'a ModelMetadata> {
+    let reference = match entry.metadata_source {
+        Some(MetadataSource::ModelsDev) | None => entry.metadata_ref.as_deref(),
+        Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
+    }?;
+    reference
+        .split_once('/')
+        .and_then(|(provider, model)| {
+            catalog
+                .find(provider, model)
+                .or_else(|| catalog.find(provider, reference))
+        })
+        .or_else(|| catalog.find_unique_model(reference))
+}
+
+/// Whether `entry` names a catalog model explicitly, which then outranks Cursor's own
+/// docs table.
+pub fn has_explicit_reference(entry: &ModelEntryConfig, catalog: Option<&ModelCatalog>) -> bool {
+    catalog.is_some_and(|catalog| explicit_entry(entry, catalog).is_some())
+}
+
+/// Cursor model IDs carry effort, lane and thinking suffixes that models.dev does not
+/// list; the base model's family names the provider whose API prices it.
+fn cursor_api_equivalent<'a>(
+    model_id: &str,
+    catalog: &'a ModelCatalog,
+) -> Option<&'a ModelMetadata> {
+    use config::types::cursor_model::{cursor_api_providers, cursor_id_aliases, cursor_lookup_ids};
+    let exact = cursor_lookup_ids(model_id);
+    // Spellings the catalog may use for the same models; they only rank after every
+    // exact ID, so a model whose own name carries a suffix still beats its base.
+    let aliases: Vec<String> = exact.iter().flat_map(|id| cursor_id_aliases(id)).collect();
+    exact
+        .into_iter()
+        .chain(aliases.iter().map(String::as_str))
+        .find_map(|id| {
+            cursor_api_providers(id)
+                .iter()
+                .find_map(|provider| catalog.find(provider, id))
+        })
+}
+
+/// Like [`resolve_catalog_entry`], also reporting whether the entry is only the
+/// API-equivalent of a Cursor model.
+pub fn resolve_catalog_match<'a>(
+    entry: &ModelEntryConfig,
+    catalog: &'a ModelCatalog,
+    provider_id: Option<&str>,
+    provider_type: Option<config::ProviderTypeConfig>,
+) -> Option<(&'a ModelMetadata, CatalogMatch)> {
+    let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
+    explicit_entry(entry, catalog)
+        .or_else(|| {
+            provider_type
+                .map(config::ProviderTypeConfig::models_dev_provider_candidates)
+                .unwrap_or(&[])
+                .iter()
+                .find_map(|slug| catalog.find(slug, model_id))
+                .or_else(|| provider_id.and_then(|provider| catalog.find(provider, model_id)))
+                .or_else(|| catalog.find_unique_model(model_id))
+                .or_else(|| catalog.find_agreeing_model(model_id))
+        })
+        .map(|metadata| (metadata, CatalogMatch::Direct))
+        .or_else(|| {
+            (provider_type == Some(config::ProviderTypeConfig::Cursor))
+                .then(|| cursor_api_equivalent(model_id, catalog))
+                .flatten()
+                .map(|metadata| (metadata, CatalogMatch::ApiEquivalent))
+        })
+}
+
 /// Shared catalog selection for runtime limits and GUI prices, without modifying configuration.
 pub fn resolve_catalog_entry<'a>(
     entry: &ModelEntryConfig,
@@ -34,31 +123,37 @@ pub fn resolve_catalog_entry<'a>(
     provider_id: Option<&str>,
     provider_type: Option<config::ProviderTypeConfig>,
 ) -> Option<&'a ModelMetadata> {
+    resolve_catalog_match(entry, catalog, provider_id, provider_type).map(|(metadata, _)| metadata)
+}
+
+/// Cursor's own docs prices for `entry`, unless the entry names a catalog model.
+pub fn cursor_docs_pricing(
+    entry: &ModelEntryConfig,
+    catalog: Option<&ModelCatalog>,
+    provider_type: Option<config::ProviderTypeConfig>,
+) -> Option<config::types::provider::PriceSchedule> {
+    if provider_type != Some(config::ProviderTypeConfig::Cursor)
+        || has_explicit_reference(entry, catalog)
+    {
+        return None;
+    }
     let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
-    let reference = match entry.metadata_source {
-        Some(MetadataSource::ModelsDev) | None => entry.metadata_ref.as_deref(),
-        Some(MetadataSource::Manual | MetadataSource::ProviderDefault) => None,
-    };
-    let explicit = reference.and_then(|reference| {
-        reference
-            .split_once('/')
-            .and_then(|(provider, model)| {
-                catalog
-                    .find(provider, model)
-                    .or_else(|| catalog.find(provider, reference))
-            })
-            .or_else(|| catalog.find_unique_model(reference))
-    });
-    explicit.or_else(|| {
-        provider_type
-            .map(config::ProviderTypeConfig::models_dev_provider_candidates)
-            .unwrap_or(&[])
-            .iter()
-            .find_map(|slug| catalog.find(slug, model_id))
-            .or_else(|| provider_id.and_then(|provider| catalog.find(provider, model_id)))
-            .or_else(|| catalog.find_unique_model(model_id))
-            .or_else(|| catalog.find_agreeing_model(model_id))
-    })
+    config::types::cursor_model::cursor_docs_pricing(model_id)
+}
+
+/// Cursor's own docs figure for `entry`, unless the entry names a catalog model.
+pub fn cursor_docs_context_window(
+    entry: &ModelEntryConfig,
+    catalog: Option<&ModelCatalog>,
+    provider_type: Option<config::ProviderTypeConfig>,
+) -> Option<u64> {
+    if provider_type != Some(config::ProviderTypeConfig::Cursor)
+        || has_explicit_reference(entry, catalog)
+    {
+        return None;
+    }
+    let (model_id, _) = config::types::provider::parse_model_speed(&entry.id);
+    config::types::cursor_model::cursor_docs_context_window(model_id)
 }
 
 /// Resolves each limit from manual overrides, presets, then the optional catalog.
@@ -70,14 +165,25 @@ pub fn resolve_model_metadata(
     provider_type: Option<config::ProviderTypeConfig>,
 ) -> ResolvedModelMetadata {
     let preset = entry.preset.as_ref().and_then(|name| presets.get(name));
-    let catalog_entry = catalog
-        .and_then(|catalog| resolve_catalog_entry(entry, catalog, provider_id, provider_type));
+    let matched = catalog
+        .and_then(|catalog| resolve_catalog_match(entry, catalog, provider_id, provider_type));
+    let catalog_entry = matched.map(|(metadata, _)| metadata);
     let (context_window, origin) = if let Some(window) = entry.context_window {
         (Some(window), MetadataOrigin::Manual)
     } else if let Some(window) = preset.and_then(|preset| preset.context_window) {
         (Some(window), MetadataOrigin::Preset)
-    } else if let Some(window) = catalog_entry.and_then(|model| model.context_window) {
-        (Some(window), MetadataOrigin::Catalog)
+    } else if let Some(window) = cursor_docs_context_window(entry, catalog, provider_type) {
+        (Some(window), MetadataOrigin::ProviderDocs)
+    } else if let Some((window, kind)) =
+        matched.and_then(|(model, kind)| Some((model.context_window?, kind)))
+    {
+        (
+            Some(window),
+            match kind {
+                CatalogMatch::Direct => MetadataOrigin::Catalog,
+                CatalogMatch::ApiEquivalent => MetadataOrigin::ApiEquivalent,
+            },
+        )
     } else {
         (None, MetadataOrigin::Default)
     };
@@ -121,14 +227,18 @@ pub(crate) fn apply_model_windows(
             // more specific than models.dev's general metadata.
             let window = match resolved.origin {
                 MetadataOrigin::Manual | MetadataOrigin::Preset => resolved.context_window,
-                MetadataOrigin::Catalog | MetadataOrigin::Default => {
-                    provider_window.or(resolved.context_window)
-                }
+                MetadataOrigin::Catalog
+                | MetadataOrigin::ApiEquivalent
+                | MetadataOrigin::ProviderDocs
+                | MetadataOrigin::Default => provider_window.or(resolved.context_window),
             };
             if let Some(window) = window.filter(|window| *window > 0) {
                 let target = match resolved.origin {
                     MetadataOrigin::Manual | MetadataOrigin::Preset => &mut configured,
-                    MetadataOrigin::Catalog | MetadataOrigin::Default => &mut discovered,
+                    MetadataOrigin::Catalog
+                    | MetadataOrigin::ApiEquivalent
+                    | MetadataOrigin::ProviderDocs
+                    | MetadataOrigin::Default => &mut discovered,
                 };
                 target.entry(entry.id.clone()).or_insert(window);
                 target.insert(key, window);

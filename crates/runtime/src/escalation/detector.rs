@@ -546,6 +546,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn light_calls_count_one_tool_call_per_ten_and_free_calls_none() {
+        use crate::escalation::detector::CallWeight;
+        let settings = EscalationSettings::default();
+        let mut detector = EscalationDetector::default();
+        for _ in 0..25 {
+            detector.observe_weighted(
+                &observation("read", None, false),
+                &settings,
+                CallWeight::Light,
+            );
+        }
+        assert_eq!(detector.tool_calls(), 2);
+        for _ in 0..50 {
+            detector.observe_weighted(
+                &observation("read", None, false),
+                &settings,
+                CallWeight::Free,
+            );
+        }
+        assert_eq!(detector.tool_calls(), 2);
+        detector.observe(&observation("shell", None, false), &settings);
+        assert_eq!(detector.tool_calls(), 3);
+        for _ in 0..5 {
+            detector.observe_weighted(
+                &observation("grep", None, false),
+                &settings,
+                CallWeight::Light,
+            );
+        }
+        assert_eq!(
+            detector.tool_calls(),
+            4,
+            "the 30th light call completes a tenth"
+        );
+    }
+
     // Given: 既定設定と空の検出器
     // When: メタ操作を除く成功したツール呼び出しを200回観測する
     // Then: 200回目にツール呼び出し数の提案を返し、メタ操作は数えない
@@ -860,8 +897,27 @@ pub(crate) struct EscalationDetector {
     consecutive_edit_failures: u32,
     edit_counts_by_path: BTreeMap<PathBuf, u32>,
     tool_calls: u32,
+    /// Light calls seen; every [`LIGHT_CALLS_PER_TOOL_CALL`]th adds one to `tool_calls`.
+    light_calls: u32,
     proposed: bool,
 }
+
+/// How much a call adds to the run's tool call count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallWeight {
+    /// One call.
+    Full,
+    /// A cheap read-only call a `run_js` program made: one call per
+    /// [`LIGHT_CALLS_PER_TOOL_CALL`]. Such a call spends no model request and
+    /// adds nothing to the context, so counting it like a model's call would end a
+    /// run that reads many files in one program long before it does any harm.
+    Light,
+    /// Not counted (a later page of a read already counted).
+    Free,
+}
+
+/// Light calls that count as one tool call.
+pub(crate) const LIGHT_CALLS_PER_TOOL_CALL: u32 = 10;
 
 impl EscalationDetector {
     pub(crate) const fn is_no_progress_trigger(trigger: &EscalationTrigger) -> bool {
@@ -878,8 +934,27 @@ impl EscalationDetector {
         obs: &ToolObservation,
         settings: &EscalationSettings,
     ) -> Option<EscalationTrigger> {
+        self.observe_weighted(obs, settings, CallWeight::Full)
+    }
+
+    /// [`Self::observe`] for a call that counts as `weight` toward the tool call count.
+    pub(crate) fn observe_weighted(
+        &mut self,
+        obs: &ToolObservation,
+        settings: &EscalationSettings,
+        weight: CallWeight,
+    ) -> Option<EscalationTrigger> {
         if !is_meta_op(obs.tool) {
-            self.tool_calls = self.tool_calls.saturating_add(1);
+            match weight {
+                CallWeight::Full => self.tool_calls = self.tool_calls.saturating_add(1),
+                CallWeight::Light => {
+                    self.light_calls = self.light_calls.saturating_add(1);
+                    if self.light_calls.is_multiple_of(LIGHT_CALLS_PER_TOOL_CALL) {
+                        self.tool_calls = self.tool_calls.saturating_add(1);
+                    }
+                }
+                CallWeight::Free => {}
+            }
         }
 
         if self.proposed {

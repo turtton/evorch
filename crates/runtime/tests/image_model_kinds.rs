@@ -69,6 +69,7 @@ models = [{{ route = "chat" }}, {{ route = "art" }}]
     let error = model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 run_id: "image-kind".into(),
                 ..Default::default()
             },

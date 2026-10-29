@@ -1,5 +1,6 @@
 //! egui-free view models shared by the panes.
 
+pub mod agent_features;
 pub mod artifact_opener;
 pub mod codex_auth;
 pub mod codex_auth_backend;
@@ -9,8 +10,11 @@ pub mod context_inspector;
 pub mod demo;
 pub mod durable_tasks;
 pub mod effort;
+pub mod failure_text;
 pub mod folder_picker;
+pub mod fuzzy;
 pub mod html_snapshots;
+pub mod latest_job;
 pub mod ledger;
 pub mod model_catalog;
 pub mod model_metadata;
@@ -30,6 +34,7 @@ pub mod self_improvement_settings;
 pub mod system_notifications;
 pub mod tasks;
 pub mod telemetry;
+pub mod thread_search;
 pub mod thread_todos;
 pub mod transcript;
 pub mod transcript_registry;

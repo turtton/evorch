@@ -1,5 +1,6 @@
 //! Follow-ups sent while a run is busy wait above the composer, oldest first,
 //! and join the transcript only once the runtime reports them delivered.
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use gui::app::WorkbenchState;
@@ -13,7 +14,10 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 /// Simulates one live run's inbox; `None` means the thread has no run.
 #[derive(Clone, Default)]
-struct InboxSink(Arc<Mutex<Option<FollowUpStatus>>>);
+struct InboxSink(
+    Arc<Mutex<Option<FollowUpStatus>>>,
+    Arc<Mutex<HashSet<String>>>,
+);
 
 impl InboxSink {
     fn update(&self, change: impl FnOnce(&mut FollowUpStatus)) {
@@ -26,12 +30,32 @@ impl CommandSink for InboxSink {
         *self.0.lock().unwrap()
     }
 
+    fn withdraw_follow_up(
+        &mut self,
+        _thread: &str,
+        prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        let mut status = self.0.lock().unwrap();
+        let inbox = status
+            .as_mut()
+            .ok_or(runtime::FollowUpWithdrawalError::Closed)?;
+        if inbox.pending == 0 || !self.1.lock().unwrap().remove(prompt_id) {
+            return Err(runtime::FollowUpWithdrawalError::AlreadyConsumed.into());
+        }
+        inbox.pending -= 1;
+        inbox.next_turn_requested &= inbox.pending > 0;
+        Ok(())
+    }
+
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
         let mut status = self.0.lock().unwrap();
         match command {
             WorkbenchCommand::SendChat(chat) => {
                 match status.as_mut() {
-                    Some(inbox) if !inbox.closed => inbox.pending += 1,
+                    Some(inbox) if !inbox.closed => {
+                        inbox.pending += 1;
+                        self.1.lock().unwrap().insert(chat.submission_id.clone());
+                    }
                     _ => *status = Some(FollowUpStatus::default()),
                 }
                 vec![LoopEvent::ChatAccepted {
@@ -181,4 +205,46 @@ fn follow_ups_dropped_by_a_finished_run_can_be_edited_or_dismissed() {
     gui.run();
     assert!(!gui.has_label("Not delivered: second follow-up"));
     assert_eq!(user_messages(&gui), ["start the task"]);
+}
+
+#[test]
+fn live_queue_edit_and_delete_are_distinct_and_preserve_the_other_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let sink = InboxSink::default();
+    let mut gui = workbench(temp.path(), sink.clone());
+    send(&mut gui, "start");
+    send(&mut gui, "keep queued");
+    let image = gui::model::composer::ImageAttachment {
+        media_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+    };
+    gui.state_mut()
+        .composer_mut()
+        .attachments
+        .push(image.clone());
+    gui.state_mut().composer_mut().image_input_supported = true;
+    send(&mut gui, "edit queued");
+    send(&mut gui, "delete queued");
+    assert!(gui.has_label("Edit: keep queued"));
+    assert!(gui.has_label("Delete: edit queued"));
+    gui.click_label("Send sooner");
+    gui.run();
+    gui.state_mut().composer_mut().input = "current draft".into();
+    gui.click_label("Edit: edit queued");
+    gui.run();
+    assert_eq!(gui.state().composer().input, "current draft\n\nedit queued");
+    assert_eq!(gui.state().composer().attachments, [image]);
+    assert_eq!(gui.state().composer().images_needed, 0);
+    assert!(!gui.has_label("Queued: edit queued"));
+    assert!(!gui.has_label("Not delivered: edit queued"));
+    assert!(gui.has_label("Queued: keep queued"));
+    assert_eq!(sink.0.lock().unwrap().unwrap().pending, 2);
+    gui.click_label("Delete: delete queued");
+    gui.run();
+    assert!(!gui.has_label("Queued: delete queued"));
+    assert!(!gui.has_label("Not delivered: delete queued"));
+    assert!(gui.has_label("Queued: keep queued"));
+    assert_eq!(gui.state().composer().input, "current draft\n\nedit queued");
+    assert_eq!(sink.0.lock().unwrap().unwrap().pending, 1);
+    assert_eq!(user_messages(&gui), ["start"]);
 }

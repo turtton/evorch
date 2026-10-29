@@ -96,10 +96,9 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
     });
     ui.separator();
     if let Some(error) = diff.refresh_error(&mode) {
-        ui.label(
-            RichText::new(format!("Refresh failed: {error}. Retrying automatically…"))
-                .color(palette().WARNING_FG),
-        );
+        crate::theme::widgets::reason_label_with(ui, palette().WARNING_FG, error, |shown| {
+            format!("Refresh failed: {shown}. Retrying automatically…")
+        });
     }
     match diff.state(&mode) {
         DiffState::Idle => {
@@ -140,7 +139,9 @@ pub fn diff_pane(ui: &mut egui::Ui, diff: &DiffModel) -> Option<DiffMode> {
             diff_body(ui, text, view);
         }
         DiffState::Error { message } => {
-            ui.label(RichText::new(format!("error: {message}")).color(palette().ERROR_FG));
+            crate::theme::widgets::reason_label_with(ui, palette().ERROR_FG, message, |shown| {
+                format!("error: {shown}")
+            });
         }
     }
     requested

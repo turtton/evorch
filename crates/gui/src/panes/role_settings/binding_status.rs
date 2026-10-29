@@ -9,13 +9,13 @@ pub(super) fn binding_status(
     ui.horizontal_wrapped(|ui| {
         badge(
             ui,
-            "未定義 (route なし)",
+            "Undefined (no route)",
             palette().WARNING_FG,
             palette().WARNING_SURFACE,
         );
         ui.add_enabled(
             !logical.trim().is_empty(),
-            egui::Button::new("route を作成"),
+            egui::Button::new("Create route"),
         )
         .clicked()
         .then(|| logical.to_owned())

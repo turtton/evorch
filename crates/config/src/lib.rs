@@ -14,6 +14,7 @@ mod migrate;
 pub mod presets;
 pub mod prompt_sources;
 pub mod save;
+mod save_agent_features;
 mod save_agents;
 mod save_codex;
 mod save_context;
@@ -37,6 +38,7 @@ pub use save::{
     OpenAiCompatibleProviderInput, ProviderCredentialInput, save_openai_compatible_provider,
     validate_openai_compatible_provider_input,
 };
+pub use save_agent_features::{AgentFeatures, save_agent_features};
 pub use save_agents::save_agent_bindings;
 pub use save_codex::{
     CodexModelIntent, CodexProviderInput, delete_provider, save_codex_provider,
@@ -69,7 +71,7 @@ pub use types::{
     ResolvedAgentBinding, RoleBindingConfig, RouteCandidateConfig, RoutingConfig, RulesConfig,
     SandboxConfig, SelfImprovementConfig, SummarizerKind, WorkerBindingConfig, gpt_generation,
 };
-pub use types::{BrowserToolsConfig, ToolsConfig};
+pub use types::{BrowserToolsConfig, RunJsConfig, ToolsConfig};
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
 pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
 pub use types::{

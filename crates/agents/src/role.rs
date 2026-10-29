@@ -46,11 +46,11 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// | Role | ツール | 委譲 |
 /// |---|---|---|
 /// | Orchestrator | 委譲・調査・skill_load・AgentRun 間メッセージ系 + web_fetch (mutation tool なし) | 可 |
-/// | Explorer | read / grep | 不可 |
-/// | Worker | read / write / edit / apply_patch / grep / shell / git_diff / skill_load + AgentRun 間メッセージ系 | 不可 |
-/// | Reviewer | read / grep / git_diff | 不可 |
-/// | Advisor | read / grep / git_diff | 不可 |
-/// | WebResearcher | read / grep / web_search / web_fetch / browser_* | 不可 |
+/// | Explorer | read / grep / run_js | 不可 |
+/// | Worker | read / write / edit / apply_patch / grep / shell / git_diff / skill_load / run_js + AgentRun 間メッセージ系 | 不可 |
+/// | Reviewer | read / grep / git_diff / run_js | 不可 |
+/// | Advisor | read / grep / git_diff / run_js | 不可 |
+/// | WebResearcher | read / grep / web_search / web_fetch / browser_* / run_js | 不可 |
 /// | Evaluator | read / grep / eval_* | 不可 |
 ///
 /// # 設計上の決定
@@ -58,6 +58,9 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
 /// - web_search は WebResearcher 専用であり、Orchestrator は web_fetch のみを持つ。
 /// - apply_patch はファイルを書き換えるため、edit / write と同じく Worker だけが持つ。
+/// - run_js (ADR 0039) は Orchestrator / Evaluator / MultimodalLooker 以外が持つ。
+///   コードから呼べるツールはそのロールが許可されたものに限られるため、読み取りの
+///   ロールでは読み取りだけになる。設定 `[tools.run_js]` が有効なときだけモデルに見せる。
 ///
 /// # ロール追加時の配線
 ///
@@ -163,7 +166,7 @@ impl Role {
                 ],
                 true,
             ),
-            Role::Explorer => RoleCapabilities::new(["read", "grep"], false),
+            Role::Explorer => RoleCapabilities::new(["read", "grep", "run_js"], false),
             Role::Worker => RoleCapabilities::new(
                 [
                     "read",
@@ -178,21 +181,29 @@ impl Role {
                     "wait_reply",
                     "inbox",
                     "escalate",
+                    "run_js",
                 ],
                 false,
             ),
-            Role::Reviewer => RoleCapabilities::new(["read", "grep", "git_diff"], false),
+            Role::Reviewer => RoleCapabilities::new(["read", "grep", "git_diff", "run_js"], false),
             Role::WebResearcher => RoleCapabilities::new(
-                ["read", "grep", "web_search", "web_fetch"]
+                ["read", "grep", "web_search", "web_fetch", "run_js"]
                     .into_iter()
                     .chain(BROWSER_TOOLS),
                 false,
             ),
             Role::Planner => RoleCapabilities::new(
-                ["read", "grep", "git_diff", "skill_load", "web_fetch"],
+                [
+                    "read",
+                    "grep",
+                    "git_diff",
+                    "skill_load",
+                    "web_fetch",
+                    "run_js",
+                ],
                 false,
             ),
-            Role::Advisor => RoleCapabilities::new(["read", "grep", "git_diff"], false),
+            Role::Advisor => RoleCapabilities::new(["read", "grep", "git_diff", "run_js"], false),
             Role::MultimodalLooker => RoleCapabilities::new(["read"], false),
             Role::Evaluator => {
                 RoleCapabilities::new(["read", "grep"].into_iter().chain(EVALUATOR_TOOLS), false)

@@ -19,6 +19,7 @@ fn job() -> (Arc<Job>, mpsc::Receiver<Input>, watch::Receiver<bool>) {
         call_id: None,
         thread: None,
         synchronous: false,
+        stream_output: false,
         timeout_ms: None,
         state: Mutex::new(State {
             output: LiveOutput::default(),

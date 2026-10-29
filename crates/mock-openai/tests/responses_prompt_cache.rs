@@ -160,6 +160,7 @@ fn chat_request(messages: Vec<Message>) -> ChatRequest {
         service_tier: None,
         output_schema: None,
         observation: Some(providers::ObservationContext {
+            attempts: None,
             turn: None,
             run_id: "run-1".into(),
             purpose: Default::default(),

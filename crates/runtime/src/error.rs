@@ -7,6 +7,8 @@ use crate::RunId;
 /// エージェント実行ランタイムのエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("cannot withdraw follow-up: {0}")]
+    FollowUpWithdrawal(#[from] crate::runtime::FollowUpWithdrawalError),
     #[error("review evidence for {run_id} is unavailable: {reason}")]
     ReviewEvidence { run_id: String, reason: String },
     #[error("実行 {run_id} の復元に失敗しました: {reason}")]
@@ -148,6 +150,8 @@ pub enum RuntimeError {
         /// compaction 実行中の run ID。
         run_id: String,
     },
+    #[error("Could not compact saved AgentRun {run_id}: {reason}")]
+    SavedCompactionFailed { run_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

@@ -89,8 +89,10 @@ impl UserMessage {
             prompt: self.prompt.clone(),
             undelivered: true,
             rejection: match &self.status {
-                DeliveryStatus::Rejected { reason } => Some(format!("送信されませんでした: {reason}")),
-                DeliveryStatus::Unknown => Some("配送状況不明 — 再送すると重複する可能性があります。内容を確認してから再送してください".into()),
+                DeliveryStatus::Rejected { reason } => Some(format!("Not sent: {reason}")),
+                DeliveryStatus::Unknown => Some(
+                    "Delivery unknown — resending may duplicate it. Check before resending".into(),
+                ),
                 _ => None,
             },
         }

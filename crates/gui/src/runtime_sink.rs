@@ -57,7 +57,18 @@ pub struct RuntimeCommandSink {
     /// Project each thread last submitted from, for host follow-ups that carry none.
     thread_roots: BTreeMap<String, PathBuf>,
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
+    search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
+    compaction_jobs: BTreeMap<String, saved_compaction::CompactionJob>,
 }
+
+/// Reply channel, project, query, result limit and continuation cursor of a thread search.
+type SearchJob = (
+    std::sync::mpsc::Sender<Result<runtime::HostThreadSearch, String>>,
+    PathBuf,
+    String,
+    usize,
+    Option<String>,
+);
 
 impl RuntimeCommandSink {
     fn rebind_conversation_root(&mut self, thread: &str, run: RunId) {
@@ -99,6 +110,8 @@ impl RuntimeCommandSink {
             chat_permits: BTreeMap::new(),
             thread_roots: BTreeMap::new(),
             ownership: None,
+            search_jobs: crate::model::latest_job::LatestJob::default(),
+            compaction_jobs: BTreeMap::new(),
         }
     }
 
@@ -156,7 +169,12 @@ impl RuntimeCommandSink {
     }
 }
 
+mod saved_compaction;
+
 impl CommandSink for RuntimeCommandSink {
+    fn poll(&mut self) -> Vec<LoopEvent> {
+        self.poll_compactions()
+    }
     fn has_host_input_receipts(&self) -> bool {
         true
     }
@@ -175,6 +193,19 @@ impl CommandSink for RuntimeCommandSink {
             return self.runtime.reconcile_orphaned_host_inputs(run);
         }
         Ok(Vec::new())
+    }
+
+    fn withdraw_follow_up(
+        &mut self,
+        thread: &str,
+        prompt_id: &str,
+    ) -> Result<(), runtime::RuntimeError> {
+        let run = self
+            .chat_runs
+            .get(thread)
+            .or_else(|| self.goal_runs.get(thread))
+            .ok_or(runtime::FollowUpWithdrawalError::Unknown)?;
+        self.runtime.withdraw_follow_up(*run, prompt_id)
     }
 
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
@@ -257,6 +288,34 @@ impl CommandSink for RuntimeCommandSink {
                 .map_err(|error| error.to_string());
             let _ = sender.send(report);
         });
+        Some(receiver)
+    }
+
+    fn search_threads(
+        &self,
+        project: PathBuf,
+        query: String,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let runtime = self.runtime.clone();
+        let handle = self.handle.clone();
+        // One storage read at a time, newest request first: a search left over
+        // from a closed modal is replaced, and its dropped sender tells the
+        // modal it was superseded.
+        self.search_jobs.submit(
+            (sender, project, query, limit, cursor),
+            move |(sender, project, query, limit, cursor)| {
+                let found =
+                    runtime.search_threads_for_host(&project, &query, limit, cursor.as_deref());
+                let _ = sender.send(found);
+            },
+            move |worker| {
+                // Storage reads block, so they stay off the UI and async worker threads.
+                handle.spawn_blocking(worker);
+            },
+        );
         Some(receiver)
     }
 
@@ -377,6 +436,29 @@ impl RuntimeCommandSink {
         command: WorkbenchCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<LoopEvent> {
+        let thread = match &command {
+            WorkbenchCommand::CompactChat { thread_id }
+            | WorkbenchCommand::StopChat { thread_id }
+            | WorkbenchCommand::StopRun { thread_id, .. } => Some(thread_id),
+            WorkbenchCommand::ContinueChat(chat) => Some(&chat.thread_id),
+            WorkbenchCommand::SendChat(chat) => Some(&chat.thread_id),
+            _ => None,
+        };
+        if let Some(thread) = thread
+            && self.compaction_jobs.contains_key(thread)
+        {
+            let reason = "Context compaction is in progress; try again after it completes".into();
+            if matches!(command, WorkbenchCommand::SendChat(_)) {
+                return vec![LoopEvent::ChatRejected {
+                    thread_id: thread.clone(),
+                    reason,
+                }];
+            }
+            return vec![LoopEvent::ChatNotice {
+                thread_id: thread.clone(),
+                text: reason,
+            }];
+        }
         match command {
             WorkbenchCommand::AnswerUserQuestion {
                 thread_id,
@@ -451,7 +533,7 @@ impl RuntimeCommandSink {
                             saved,
                             LoopEvent::CommandRejected {
                                 reason: format!(
-                                    "回答は保存済みですが受信先を確認できません: {reason}"
+                                    "Answer saved, but its recipient could not be confirmed: {reason}"
                                 ),
                             },
                         ];
@@ -460,10 +542,7 @@ impl RuntimeCommandSink {
                 if active {
                     return vec![saved];
                 }
-                let text = format!(
-                    "[user-answer id={}]\nQuestion: {}\nAnswer: {}",
-                    question.id, question.title, answer
-                );
+                let text = question.answer_message();
                 let mut events = self.submit_authorized(
                     WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
                         submission_id: String::new(),
@@ -485,7 +564,7 @@ impl RuntimeCommandSink {
                 for event in &mut events {
                     if let LoopEvent::ChatRejected { reason, .. } = event {
                         *reason = format!(
-                            "回答は保存済みですが会話の再開に失敗しました: {reason}。原因を解消して会話を再開してください。"
+                            "Answer saved, but the conversation could not resume: {reason}. Fix the cause and resume it."
                         );
                     }
                 }
@@ -504,37 +583,7 @@ impl RuntimeCommandSink {
                 }
                 Vec::new()
             }
-            WorkbenchCommand::CompactChat { thread_id } => {
-                let result =
-                    self.chat_runs
-                        .get(&thread_id)
-                        .or_else(|| self.goal_runs.get(&thread_id))
-                        .ok_or_else(|| "No active conversation run to compact".to_owned())
-                        .and_then(|run_id| {
-                            let run = self.runtime.inspect_agent(*run_id).map_err(|error| {
-                                format!("Could not request context compaction: {error}")
-                            })?;
-                            // compact() queues a generation even for a terminal run.
-                            if !matches!(
-                                run.phase,
-                                event_bus::AgentRunPhase::Pending
-                                    | event_bus::AgentRunPhase::Running
-                                    | event_bus::AgentRunPhase::Waiting
-                            ) {
-                                return Err("The conversation run has ended; resume with /continue before requesting compaction".into());
-                            }
-                            self.runtime.compact(*run_id).map_err(|error| {
-                                format!("Could not request context compaction: {error}")
-                            })
-                        });
-                vec![LoopEvent::ChatNotice {
-                    thread_id,
-                    text: match result {
-                        Ok(()) => "Context compaction requested for the next turn boundary".into(),
-                        Err(reason) => reason,
-                    },
-                }]
-            }
+            WorkbenchCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
             WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 let result = self
                     .chat_runs

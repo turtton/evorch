@@ -12,7 +12,8 @@ pub(super) struct SandboxSettings {
     pub config: config::SandboxConfig,
     draft: config::SandboxConfig,
     error: Option<String>,
-    runtime: Option<runtime::AgentRuntime>,
+    /// The live runtime that the sandbox and Agent features settings update.
+    pub(super) runtime: Option<runtime::AgentRuntime>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -57,6 +58,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.role_settings.open = false;
         self.close_theme_settings();
         self.self_improvement_settings.open = false;
+        self.agent_features.open = false;
         self.sandbox_settings.open = true;
     }
 
@@ -92,12 +94,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                     ui.checkbox(&mut self.sandbox_settings.draft.escalate_to_user_on_deny, "Ask me when auto review denies a request");
                     ui.separator();
-                    ui.checkbox(&mut self.sandbox_settings.draft.web_tools_enabled, "Enable web tools");
-                    ui.label(muted("Enabled tools follow each role's tool visibility. Search runs automatically; fetch requests are reviewed using their arguments."));
-                    ui.label(muted("Tool visibility is set when a run starts. Disabling blocks Web tool calls in existing runs too. Enabling exposes tools to new runs."));
+                    ui.label(muted("Web tools and other agent tools are switched in Settings (⚙) → Agent features."));
                 });
                 if let Some(error) = &self.sandbox_settings.error {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {
@@ -131,13 +131,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match result {
             Ok(()) => {
                 self.sandbox_settings.config = self.sandbox_settings.draft;
-                self.sink.submit(
-                    crate::model::commands::WorkbenchCommand::SetWebToolsEnabled {
-                        enabled: self.sandbox_settings.config.web_tools_enabled,
-                    },
-                );
                 if let Some(runtime) = &self.sandbox_settings.runtime {
-                    runtime.set_web_tools_enabled(self.sandbox_settings.config.web_tools_enabled);
                     runtime.set_sandbox_escalation(
                         self.sandbox_settings.config.escalation_approval,
                         self.sandbox_settings.config.escalate_to_user_on_deny,

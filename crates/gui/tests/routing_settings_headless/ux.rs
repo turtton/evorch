@@ -18,9 +18,9 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
     harness.run();
     harness.click_label("Explorer");
     harness.run();
-    assert!(harness.has_label("未定義 (route なし)"));
+    assert!(harness.has_label("Undefined (no route)"));
     // When: create the missing route through the role modal and save its candidate.
-    harness.click_label("route を作成");
+    harness.click_label("Create route");
     harness.run();
     harness.click_label("legacy candidate 1 model override");
     harness.run();
@@ -38,7 +38,7 @@ fn routing_prefill_save_returns_to_fresh_role_settings() {
         harness.state().role_settings().agents.explorer.head_route(),
         Some("legacy")
     );
-    assert!(!harness.has_label("未定義 (route なし)"));
+    assert!(!harness.has_label("Undefined (no route)"));
     assert!(harness.has_label("→ accelerated/fast"));
     assert_eq!(
         runtime::AgentModel::selected_model(runtime.as_ref(), runtime::Role::Explorer, None),

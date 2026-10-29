@@ -24,10 +24,10 @@ fn implicit_roles_without_routes_offer_creation_with_resolved_role_name() {
         harness.run();
         harness.click_label(label);
         harness.run();
-        assert!(harness.has_label("未定義 (route なし)"), "{role_key}");
-        assert!(harness.has_label("route を作成"), "{role_key}");
+        assert!(harness.has_label("Undefined (no route)"), "{role_key}");
+        assert!(harness.has_label("Create route"), "{role_key}");
         // When: clicking the missing implicit reference's action.
-        harness.click_label("route を作成");
+        harness.click_label("Create route");
         harness.run();
         // Then: routing is prefilled without materializing an agents binding or writing disk.
         assert!(!harness.state().role_settings().open);
@@ -87,14 +87,14 @@ fn category_status_uses_override_then_worker_binding_then_worker_name() {
         harness.click_label("quick");
         harness.run();
         assert_eq!(
-            harness.count_labels("未定義 (route なし)"),
+            harness.count_labels("Undefined (no route)"),
             expected_warnings,
             "worker={worker:?}, category={category:?}"
         );
-        assert_eq!(harness.count_labels("route を作成"), expected_warnings);
+        assert_eq!(harness.count_labels("Create route"), expected_warnings);
         assert_eq!(harness.state().role_settings().agents, before);
         if category == Some("missing-category") {
-            harness.click_label("route を作成");
+            harness.click_label("Create route");
             harness.run();
             assert_eq!(
                 harness
@@ -119,11 +119,11 @@ fn implicit_category_without_worker_route_warns_without_creating_an_override() {
     harness.run();
     harness.click_label("Worker");
     harness.run();
-    assert_eq!(harness.count_labels("未定義 (route なし)"), 1);
+    assert_eq!(harness.count_labels("Undefined (no route)"), 1);
     harness.click_label("quick");
     harness.run();
-    assert_eq!(harness.count_labels("未定義 (route なし)"), 2);
-    assert_eq!(harness.count_labels("route を作成"), 2);
+    assert_eq!(harness.count_labels("Undefined (no route)"), 2);
+    assert_eq!(harness.count_labels("Create route"), 2);
     assert_eq!(
         harness.state().role_settings().agents.worker.head_route(),
         None

@@ -8,9 +8,17 @@ impl TranscriptModel {
             && question.run_id != question.root_run_id
         {
             let name = self.agent_names.get(&question.run_id);
+            // Who answered is shown; an unknown origin keeps the plain wording.
+            let by = match &question.answer_origin {
+                Some(event_bus::AnswerOrigin::Host) => " from you",
+                Some(event_bus::AnswerOrigin::ParentAgent { .. }) => " from parent agent",
+                None => "",
+            };
             let text = match (&question.answer, name) {
-                (Some(answer), Some(name)) => format!("Answer sent to subagent {name}: {answer}"),
-                (Some(answer), None) => format!("Answer sent to a subagent: {answer}"),
+                (Some(answer), Some(name)) => {
+                    format!("Answer{by} sent to subagent {name}: {answer}")
+                }
+                (Some(answer), None) => format!("Answer{by} sent to a subagent: {answer}"),
                 (None, Some(name)) => format!(
                     "Subagent question from {name} reached orchestrator: {}",
                     question.title
@@ -28,6 +36,14 @@ impl TranscriptModel {
         } else {
             self.apply(event);
         }
+    }
+
+    /// Whether a `delegate` call is still spawning, so its card covers the start.
+    pub(super) fn delegate_in_flight(&self) -> bool {
+        self.entries.iter().rev().take(32).any(|entry| {
+            matches!(entry, TranscriptEntry::Tool { tool_name, status: super::ToolStatus::Running, .. }
+                if tool_name == "delegate")
+        })
     }
 
     pub(super) fn terminal_notice(&self, event: &Event) -> Option<TranscriptEntry> {
@@ -52,7 +68,7 @@ impl TranscriptModel {
                 run_id,
                 to: AgentRunPhase::Stopped,
                 ..
-            }) => (run_id, "stopped (resumable)"),
+            }) => (run_id, "stopped"),
             _ => return None,
         };
         let text = match self.agent_names.get(run_id) {

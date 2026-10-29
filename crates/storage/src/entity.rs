@@ -284,6 +284,9 @@ impl SecretGuard {
             EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => {
                 self.check_text("event", "ReasoningDelta.delta", delta)
             }
+            EventKind::Message(MessageEvent::ToolCallDelta {
+                arguments_delta, ..
+            }) => self.check_text("event", "ToolCallDelta.arguments_delta", arguments_delta),
             EventKind::Tool(ToolEvent::ShellJobOutput { chunk, .. }) => {
                 self.check_text("event", "ShellJobOutput.chunk", chunk)
             }
@@ -320,7 +323,8 @@ impl SecretGuard {
                 self.check_text("event", "Compacted.checkpoint_id", checkpoint_id)?;
                 self.check_text("event", "Compacted.run_id", run_id)
             }
-            EventKind::Lifecycle(_)
+            EventKind::Message(MessageEvent::StreamRetried { .. })
+            | EventKind::Lifecycle(_)
             | EventKind::Tool(_)
             | EventKind::Provider(_)
             | EventKind::Usage(_)

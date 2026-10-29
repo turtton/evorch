@@ -69,7 +69,7 @@ pub(super) fn render(
     action: &mut Option<SidebarAction>,
 ) {
     let (project_threads, archived) =
-        ThreadRecord::partition_for_project(&sidebar.threads, &project.id);
+        ThreadRecord::partition_for_project(&sidebar.threads, &project.id, indicators.phases);
 
     if project_threads.is_empty() {
         ui.horizontal(|ui| {
@@ -470,25 +470,34 @@ fn active_row(
         } else {
             ui.add_space(ACTION_SIZE);
         }
-        let (pin_icon, pin_label, pin_hint) = if thread.pinned {
-            (
-                icons::filled(ui, icons::PUSH_PIN)
-                    .size(FONT_ICON)
-                    .color(palette().TEXT),
-                "★",
-                "Unpin",
-            )
+        // A child hangs under its parent, so pinning it would do nothing: only
+        // the displayed root has a Pin button. Children keep the slot empty so
+        // the trailing columns stay aligned.
+        if display_root {
+            let (pin_icon, pin_label, pin_hint) = if thread.pinned {
+                (
+                    icons::filled(ui, icons::PUSH_PIN)
+                        .size(FONT_ICON)
+                        .color(palette().TEXT),
+                    "★",
+                    "Unpin",
+                )
+            } else {
+                (
+                    icon_text(icons::PUSH_PIN).color(palette().TEXT_MUTED),
+                    "☆",
+                    "Pin",
+                )
+            };
+            let pin = ui.add(ghost(pin_icon).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)));
+            pin.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pin_label)
+            });
+            if pin.on_hover_text(pin_hint).clicked() {
+                *action = Some(SidebarAction::TogglePin(thread.id.clone()));
+            }
         } else {
-            (
-                icon_text(icons::PUSH_PIN).color(palette().TEXT_MUTED),
-                "☆",
-                "Pin",
-            )
-        };
-        let pin = ui.add(ghost(pin_icon).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)));
-        pin.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pin_label));
-        if pin.on_hover_text(pin_hint).clicked() {
-            *action = Some(SidebarAction::TogglePin(thread.id.clone()));
+            ui.add_space(ACTION_SIZE);
         }
         ui.add_space(SP_1);
         hidden_count_badge(ui, hidden.count);

@@ -200,6 +200,7 @@ async fn preferences_keep_identical_model_ids_in_different_profiles_separate() {
         model
             .complete(
                 &AgentInvocationContext {
+                    attempts: None,
                     model_preference: Some(crate::ModelPreference {
                         profile: profile.into(),
                         model: Some("catalog-model".into()),
@@ -235,6 +236,7 @@ async fn category_explicit_output_limit_overrides_model_metadata() {
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 category: Some("quick".into()),
                 ..Default::default()
             },
@@ -288,6 +290,7 @@ async fn metadata_limit_reaches_streaming_structured_and_summary_requests() {
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 purpose: event_bus::RequestPurpose::Compaction,
                 ..Default::default()
             },

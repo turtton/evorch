@@ -32,7 +32,11 @@ pub(super) fn run_output(
             if serde_json::to_value(&output).is_ok_and(|value| waiting::terminal(&value)) {
                 state.budget.mark_child_completed(&run_id.to_string());
             }
-            serialize(&output)
+            let dispatch = serialize(&output);
+            if let Some(notice) = &output.completion_notice {
+                runtime.observe_completion(notice);
+            }
+            dispatch
         }
         Err(runtime_error) => {
             let code = match &runtime_error {

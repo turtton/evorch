@@ -289,7 +289,12 @@ fn responses_native_state_never_reaches_transcripts_panes_or_recorded_events() {
     assert_eq!(
         entries
             .iter()
-            .filter(|entry| !matches!(entry, TranscriptEntry::Notice { .. }))
+            .filter(|entry| {
+                !matches!(
+                    entry,
+                    TranscriptEntry::Notice { .. } | TranscriptEntry::Diagnostic { .. }
+                )
+            })
             .cloned()
             .collect::<Vec<_>>(),
         expected

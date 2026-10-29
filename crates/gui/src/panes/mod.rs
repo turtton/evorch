@@ -34,6 +34,7 @@ pub mod sidebar;
 pub mod tasks;
 pub mod team;
 pub mod terminal;
+pub mod thread_search;
 pub mod transcript_tool;
 pub mod usage;
 

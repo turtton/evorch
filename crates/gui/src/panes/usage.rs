@@ -326,7 +326,11 @@ impl UsagePane {
                 .start(config.clone(), self.range, Some(ui.ctx().clone()));
         }
         if let Some(error) = &self.error {
-            ui.colored_label(crate::theme::tokens::palette().ERROR_FG, error);
+            crate::theme::widgets::reason_label(
+                ui,
+                crate::theme::tokens::palette().ERROR_FG,
+                error,
+            );
         }
         ui.horizontal(|ui| {
             for view in UsageView::ALL {

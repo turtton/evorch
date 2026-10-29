@@ -64,6 +64,7 @@ fn harness() -> (
             call_id: "call-1".into(),
             run_id: Some("run-2".into()),
             input: Some(json!({"command": "pwd"})),
+            parent_call_id: None,
         }),
         requested(A, "shell"),
         requested(B, "write"),
@@ -243,6 +244,7 @@ fn preserves_full_unicode_arguments_and_wraps_in_a_narrow_conversation() {
             call_id: "call-1".into(),
             run_id: Some("run-2".into()),
             input: Some(json!("界".repeat(130))),
+            parent_call_id: None,
         }),
         requested(A, "shell"),
     ]);

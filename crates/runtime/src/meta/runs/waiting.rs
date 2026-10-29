@@ -4,6 +4,8 @@
 //! the caller is cancelled. Waiting never restores or cancels the observed work.
 
 use std::collections::HashSet;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::time::Duration;
 
 use event_bus::AgentRunPhase;
@@ -14,6 +16,7 @@ use tokio::sync::watch;
 
 use super::super::{DispatchResult, error, parse, parse_run_id, serialize, success};
 use crate::agent_loop::LoopState;
+use crate::mailbox::CompletionNotice;
 use crate::{AgentRuntime, RunId, RunInterrupt};
 
 pub(in crate::meta) const MAX_WAIT_RUNS: usize = 8;
@@ -44,6 +47,36 @@ pub(crate) fn drop_ignored_arguments(name: &str, input: &mut Value) {
         && let Some(object) = input.as_object_mut()
     {
         object.remove("timeout_ms");
+    }
+}
+
+struct Snapshots {
+    values: Vec<Value>,
+    notices: Vec<Arc<CompletionNotice>>,
+}
+
+impl Deref for Snapshots {
+    type Target = [Value];
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+#[derive(Debug)]
+struct WaitResult {
+    value: Value,
+    notices: Vec<Arc<CompletionNotice>>,
+}
+
+impl Deref for WaitResult {
+    type Target = Value;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl DerefMut for WaitResult {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
     }
 }
 
@@ -128,16 +161,21 @@ async fn wait_with(
         // Another wait in this same tool batch may already have received input.
         user_input_response(runtime, caller, &request)
     } else {
-        tokio::select! {
-            biased;
-            // Observe cancellation/terminal state first. If observation wins a
-            // race with UI delivery, the receiver retains the input for the next
-            // tool round boundary.
-            result = observe(runtime, caller, &request, state.channels.cancel_rx.clone()) => result,
-            Some(message) = state.channels.inbox_rx.recv() => {
-                // Inject after ToolResults, never between ToolUse and ToolResult.
-                state.queue_user_message(message);
-                user_input_response(runtime, caller, &request)
+        let observation = observe(runtime, caller, &request, state.channels.cancel_rx.clone());
+        tokio::pin!(observation);
+        loop {
+            tokio::select! {
+                biased;
+                // Keep observation alive when discarding a withdrawn input;
+                // receiving a tombstone must not interrupt the wait.
+                result = &mut observation => break result,
+                Some(message) = state.channels.inbox_rx.recv() => {
+                    // Inject after ToolResults, never between ToolUse and ToolResult.
+                    state.queue_user_message(message);
+                    if state.has_pending_user_messages() {
+                        break user_input_response(runtime, caller, &request);
+                    }
+                }
             }
         }
     };
@@ -162,7 +200,7 @@ async fn wait_with(
         Err(message) => return error(message),
     };
     let advanced = record_observations(state, runtime, &request, &result);
-    let mut dispatch = if request.legacy
+    let phase_only = request.legacy
         && result["inbox_ready"] != true
         && result["user_input_ready"] == false
         && result["messages"].as_array().is_none_or(Vec::is_empty)
@@ -171,12 +209,16 @@ async fn wait_with(
             .is_some_and(Vec::is_empty)
         && result["completed_run_ids"]
             .as_array()
-            .is_some_and(|runs| !runs.is_empty())
-    {
-        // Preserve the established single-run success result.
+            .is_some_and(|runs| !runs.is_empty());
+    let mut dispatch = if phase_only {
+        // A phase-only legacy response does not deliver the child's output.
         success(result["runs"][0]["phase"].as_str().unwrap_or("Error"))
     } else {
-        serialize(&result)
+        let dispatch = serialize(&result.value);
+        for notice in &result.notices {
+            runtime.observe_completion(notice);
+        }
+        dispatch
     };
     dispatch.result.progress = Some(if advanced {
         tools::Progress::Advanced
@@ -187,7 +229,7 @@ async fn wait_with(
 }
 
 /// Moves the caller's queued agent messages into the result. Automatic child
-/// completion notices stay queued: the run snapshots already carry them.
+/// completion notices are acknowledged only when output-bearing snapshots return.
 fn deliver(runtime: &AgentRuntime, caller: RunId, result: &mut Value) {
     let messages = match runtime.run_mailbox(caller) {
         Ok(mailbox) => mailbox.drain_interrupting(),
@@ -235,7 +277,7 @@ fn user_input_response(
     runtime: &AgentRuntime,
     caller: RunId,
     request: &WaitRequest,
-) -> Result<Value, String> {
+) -> Result<WaitResult, String> {
     let runs = snapshots(runtime, caller, &request.runs)?;
     let mailbox = runtime
         .run_mailbox(caller)
@@ -251,7 +293,7 @@ async fn observe(
     caller: RunId,
     request: &WaitRequest,
     mut cancel: watch::Receiver<RunInterrupt>,
-) -> Result<Value, String> {
+) -> Result<WaitResult, String> {
     if cancel.borrow().is_interrupted() {
         return Err("wait cancelled".into());
     }
@@ -382,11 +424,15 @@ fn new_question_runs(
 }
 
 fn response(
-    runs: Vec<Value>,
+    runs: Snapshots,
     attention: Vec<RunId>,
     inbox_ready: bool,
     timed_out: Option<bool>,
-) -> Value {
+) -> WaitResult {
+    let Snapshots {
+        values: runs,
+        notices,
+    } = runs;
     let mut result = json!({
         "inbox_ready": inbox_ready,
         "user_input_ready": false,
@@ -397,11 +443,15 @@ fn response(
     if let Some(timed_out) = timed_out {
         result["timed_out"] = Value::Bool(timed_out);
     }
-    result
+    WaitResult {
+        value: result,
+        notices,
+    }
 }
 
-fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Vec<Value>, String> {
-    runs.iter()
+fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Snapshots, String> {
+    let mut notices = Vec::new();
+    let values = runs.iter()
         .map(|run| {
             let output = runtime.run_output(caller, *run).map_err(|error| {
                 json!({
@@ -410,6 +460,9 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Ve
                     "message": error.to_string(),
                 }).to_string()
             })?;
+            if let Some(notice) = &output.completion_notice {
+                notices.push(notice.clone());
+            }
             let mut value = serde_json::to_value(output).map_err(|error| error.to_string())?;
             value["needs_user_input"] = Value::Bool(!terminal(&value) && runtime.has_pending_user_questions(*run));
             value["has_pending_question"] =
@@ -428,7 +481,8 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Ve
             }
             Ok(value)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Snapshots { values, notices })
 }
 
 #[cfg(test)]

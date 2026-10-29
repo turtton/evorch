@@ -142,6 +142,18 @@ pub struct DiagnosticEvent {
     pub call_id: Option<String>,
 }
 
+impl DiagnosticEvent {
+    /// Whether this is a sandbox escalation review audit record: a decision or
+    /// the manifest of what the review was given. Audit records are always
+    /// persisted and exempt from diagnostic retention.
+    #[must_use]
+    pub fn is_escalation_audit(&self) -> bool {
+        self.source == "sandbox"
+            && (self.code == diagnostic_codes::ESCALATION_REVIEW
+                || self.code == diagnostic_codes::ESCALATION_REVIEW_MANIFEST)
+    }
+}
+
 /// A `DiagnosticEvent::detail` line starting with this names the fault site (for
 /// example a panic location). Consumers that group occurrences keep sites apart.
 pub const DIAGNOSTIC_SITE_PREFIX: &str = "site=";
@@ -167,6 +179,9 @@ pub mod diagnostic_codes {
     /// reasoning effort was not applied, or the model's route was guessed because
     /// the account catalog did not provide it.
     pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
+    /// Catalog/version lookup evidence. Failures and degraded catalogs are warnings;
+    /// successful fetches are info (not persisted under the default warnings policy).
+    pub const PROVIDER_CATALOG_FETCH: &str = "ProviderCatalogFetch";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
@@ -198,6 +213,9 @@ pub mod diagnostic_codes {
     pub const STORAGE_WRITER_HALTED: &str = "StorageWriterHalted";
     /// Sandbox escalation review decisions.
     pub const ESCALATION_REVIEW: &str = "escalation_review";
+    /// What one sandbox escalation review was given: hashes and IDs of its inputs,
+    /// never their text. Retained like the decisions themselves.
+    pub const ESCALATION_REVIEW_MANIFEST: &str = "escalation_review_manifest";
     /// Tool call access decisions.
     pub const TOOL_CALL_ACCESS: &str = "tool_call_access";
     /// MCP scope policy denials.
@@ -226,6 +244,7 @@ pub mod diagnostic_codes {
         DELEGATION_RETRACTED,
         PROVIDER_UNAVAILABLE,
         PROVIDER_MODEL_ROUTE,
+        PROVIDER_CATALOG_FETCH,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,
@@ -240,6 +259,7 @@ pub mod diagnostic_codes {
         AGENT_RUN_PANICKED,
         STORAGE_WRITER_HALTED,
         ESCALATION_REVIEW,
+        ESCALATION_REVIEW_MANIFEST,
         TOOL_CALL_ACCESS,
         SCOPE_DENIED,
         PUBLISH_DIAGNOSTICS,
@@ -630,6 +650,31 @@ pub enum MessageEvent {
         #[serde(default)]
         run_id: Option<String>,
     },
+    /// Live display of a tool call the model is still composing.
+    ///
+    /// Observational only and never persisted: the accepted response
+    /// (`MessageCompleted` / `ToolStarted`) stays the single source of truth and
+    /// these fragments are neither replayed to the model nor part of any prompt.
+    ToolCallDelta {
+        /// Agent run that is streaming the call. Deltas without a run cannot be
+        /// attributed to a transcript and are dropped by display consumers.
+        run_id: Option<String>,
+        /// Position of the call within the streamed response.
+        index: usize,
+        /// Provider call ID; only the first fragment of a call carries it.
+        call_id: Option<String>,
+        /// Tool name; only the first fragment of a call carries it.
+        tool_name: Option<String>,
+        /// Raw argument text appended by this fragment.
+        arguments_delta: String,
+    },
+    /// The provider is retrying a response whose stream failed. The retry replays
+    /// the response from its start, so display consumers discard what the failed
+    /// attempt left behind, whether or not the retry carries any tool call.
+    StreamRetried {
+        /// Agent run that is streaming, when attributable.
+        run_id: Option<String>,
+    },
 }
 
 /// A persisted clarification, independent of tool approval and run phase.
@@ -648,9 +693,44 @@ pub struct UserQuestion {
     pub options: Vec<String>,
     pub blocking: bool,
     pub answer: Option<String>,
+    /// Who supplied `answer`. `None` while pending, and for answers stored before
+    /// the origin was recorded (their source is unknown, not assumed to be a user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_origin: Option<AnswerOrigin>,
+}
+
+/// The source of a question's answer. Only `Host` is a person's answer; a
+/// parent agent's answer must never be mistaken for the user's approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnswerOrigin {
+    /// Submitted through the host-facing (user) answer API.
+    Host,
+    /// Given by the requester's Orchestrator parent via `answer_subagent_question`.
+    ParentAgent { answered_by_run_id: String },
 }
 
 impl UserQuestion {
+    /// The user-role message that delivers the stored answer to a recipient run.
+    ///
+    /// Injection and the history check that stops re-injection after a restore
+    /// both use this, so they cannot drift apart. Only a parent agent's answer
+    /// gets a distinct tag; host and legacy (unknown-origin) answers keep the
+    /// original `user-answer` form so histories saved earlier still match.
+    pub fn answer_message(&self) -> String {
+        let tag = match &self.answer_origin {
+            Some(AnswerOrigin::ParentAgent { answered_by_run_id }) => {
+                format!("parent-answer id={} from={answered_by_run_id}", self.id)
+            }
+            Some(AnswerOrigin::Host) | None => format!("user-answer id={}", self.id),
+        };
+        format!(
+            "[{tag}]\nQuestion: {}\nAnswer: {}",
+            self.title,
+            self.answer.as_deref().unwrap_or_default()
+        )
+    }
+
     /// Child-to-parent questions must never become user-facing prompts.
     pub fn is_user_visible(&self) -> bool {
         self.run_id == self.root_run_id
@@ -699,6 +779,11 @@ pub enum ToolEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// このツール呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+        ///
+        /// 親を持たない通常の呼び出しと旧形式ペイロードでは欠落し、`None` として読む。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// ツール呼び出しが完了した。
     ToolCompleted {
@@ -723,6 +808,11 @@ pub enum ToolEvent {
         /// はこのフィールドを持たないため、欠落時は `None` として読む。
         #[serde(default)]
         run_id: Option<String>,
+        /// このツール呼び出しを起こした親ツール呼び出し (例: `run_js`) の ID。
+        ///
+        /// 親を持たない通常の呼び出しと旧形式ペイロードでは欠落し、`None` として読む。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
     },
     /// Redacted live output of an asynchronous shell job, batched for display.
     /// Live progress only: the output artifact remains the durable record.
@@ -1376,6 +1466,54 @@ mod tests {
     use super::*;
     use crate::{OwnershipAction, OwnershipEvent};
 
+    fn answered_question(origin: Option<AnswerOrigin>) -> UserQuestion {
+        UserQuestion {
+            id: "question-1".into(),
+            run_id: "run-child".into(),
+            root_run_id: "run-root".into(),
+            root_name: "orchestrator".into(),
+            recipient_run_ids: Vec::new(),
+            title: "Which API?".into(),
+            options: Vec::new(),
+            blocking: true,
+            answer: Some("Use A".into()),
+            answer_origin: origin,
+        }
+    }
+
+    #[test]
+    fn answer_message_tells_a_parent_agent_answer_from_a_host_answer() {
+        let host = answered_question(Some(AnswerOrigin::Host)).answer_message();
+        let parent = answered_question(Some(AnswerOrigin::ParentAgent {
+            answered_by_run_id: "run-parent".into(),
+        }))
+        .answer_message();
+        assert_eq!(
+            host,
+            "[user-answer id=question-1]\nQuestion: Which API?\nAnswer: Use A"
+        );
+        assert_eq!(
+            parent,
+            "[parent-answer id=question-1 from=run-parent]\nQuestion: Which API?\nAnswer: Use A"
+        );
+    }
+
+    #[test]
+    fn answers_stored_before_origin_existed_keep_the_legacy_message_form() {
+        // Saved histories hold `[user-answer ...]`; matching them avoids re-injection on restore.
+        let legacy: UserQuestion = serde_json::from_value(serde_json::json!({
+            "id":"question-1", "run_id":"run-child", "root_run_id":"run-root",
+            "root_name":"orchestrator", "title":"Which API?", "options":[],
+            "blocking":true, "answer":"Use A"
+        }))
+        .unwrap();
+        assert_eq!(legacy.answer_origin, None);
+        assert_eq!(
+            legacy.answer_message(),
+            answered_question(Some(AnswerOrigin::Host)).answer_message()
+        );
+    }
+
     #[test]
     fn serde_round_trip_preserves_every_variant() {
         let cases: Vec<(&'static str, EventKind)> = vec![
@@ -1553,6 +1691,7 @@ mod tests {
                     tool_name: "read".into(),
                     call_id: "call-1".into(),
                     run_id: None,
+                    parent_call_id: None,
                 }
                 .into(),
             ),
@@ -1565,6 +1704,7 @@ mod tests {
                     is_error: true,
                     detail: None,
                     run_id: None,
+                    parent_call_id: None,
                 }
                 .into(),
             ),
@@ -1862,6 +2002,7 @@ mod tests {
                 is_error: false,
                 detail: Some(serde_json::json!({ "request_id": "req-1" })),
                 run_id: None,
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
                 output: None,
@@ -1870,6 +2011,7 @@ mod tests {
                 is_error: true,
                 detail: None,
                 run_id: None,
+                parent_call_id: None,
             }),
         ];
 
@@ -1927,6 +2069,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parent_call_id_is_optional_in_tool_payloads() {
+        // Given: parent_call_id を持たない旧形式のペイロードと、持つペイロード。
+        let legacy = [
+            serde_json::json!({"kind": "ToolStarted", "payload": {
+                "tool_name": "read", "call_id": "c1/0", "run_id": "r1"
+            }}),
+            serde_json::json!({"kind": "ToolCompleted", "payload": {
+                "tool_name": "read", "call_id": "c1/0", "run_id": "r1", "is_error": false
+            }}),
+        ];
+        // When/Then: 旧形式は None として読め、書き戻しでも項目を出さない。
+        for payload in legacy {
+            let event: ToolEvent = serde_json::from_value(payload).unwrap();
+            match &event {
+                ToolEvent::ToolStarted { parent_call_id, .. }
+                | ToolEvent::ToolCompleted { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, &None)
+                }
+                other => panic!("unexpected tool event: {other:?}"),
+            }
+            assert!(
+                serde_json::to_value(event).unwrap()["payload"]
+                    .get("parent_call_id")
+                    .is_none()
+            );
+        }
+        // When/Then: 値を持つペイロードは往復で保持される。
+        let child = serde_json::json!({"kind": "ToolStarted", "payload": {
+            "tool_name": "read", "call_id": "c1/0", "run_id": "r1", "parent_call_id": "c1"
+        }});
+        let event: ToolEvent = serde_json::from_value(child.clone()).unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap(), child);
+    }
+
     // Given: detail フィールドを含まない旧形式の ToolCompleted ペイロード (v0.1 で保存された JSON)。
     // When: 旧形式 JSON をデシリアライズする。
     // Then: detail が None として復元され、SCHEMA_VERSION 1 のまま読み続けられる。
@@ -1962,6 +2139,7 @@ mod tests {
                 is_error: false,
                 detail: None,
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }
@@ -2739,6 +2917,7 @@ mod tests {
                 tool_name: "read".into(),
                 call_id: "call-1".into(),
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }
@@ -2782,6 +2961,7 @@ mod tests {
                 is_error: false,
                 detail: Some(serde_json::json!({ "request_id": "req-1" })),
                 run_id: None,
+                parent_call_id: None,
             })
         );
     }

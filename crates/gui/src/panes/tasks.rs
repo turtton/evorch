@@ -52,7 +52,12 @@ pub fn tasks_pane(
                         }
                     }
                     Err(error) => {
-                        ui.colored_label(palette().ERROR_FG, format!("Cannot load tasks: {error}"));
+                        crate::theme::widgets::reason_label_with(
+                            ui,
+                            palette().ERROR_FG,
+                            error.to_string(),
+                            |shown| format!("Cannot load tasks: {shown}"),
+                        );
                     }
                     Ok(None) => {}
                 }
@@ -76,10 +81,7 @@ pub fn tasks_pane(
                                 ui.horizontal_wrapped(|ui| {
                                     task_label(ui, &row.id, &row.title, &row.id, selected_task);
                                     if row.status == storage::entity::TaskStatus::Stopped {
-                                        ui.colored_label(
-                                            palette().WARNING_FG,
-                                            "Stopped (resumable)",
-                                        );
+                                        ui.colored_label(palette().WARNING_FG, "Stopped");
                                     } else {
                                         ui.label(row.status.as_str());
                                     }

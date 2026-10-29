@@ -48,6 +48,9 @@ pub struct AgentInvocationContext {
     pub purpose: event_bus::RequestPurpose,
     /// Logical input identity; model retries must retain this context unchanged.
     pub turn: Option<providers::RequestTurnContext>,
+    /// Where the provider attempts made for this call are noted. Observation
+    /// only: it reaches no wire request.
+    pub attempts: Option<providers::AttemptLog>,
 }
 
 /// ロール実行のためのモデル呼び出し境界。
@@ -531,6 +534,7 @@ mod tests {
         ];
 
         let invocation = AgentInvocationContext {
+            attempts: None,
             turn: None,
             category: None,
             run_id: "run-1".to_string(),

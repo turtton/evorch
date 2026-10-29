@@ -309,6 +309,7 @@ async fn approval_requests_are_denied_and_escalation_denials_recorded() {
             call_id: "call-1".into(),
             input: Some(serde_json::json!({"command": "git push"})),
             run_id: Some("root".into()),
+            parent_call_id: None,
         }),
         EventKind::Diagnostic(DiagnosticEvent {
             source: "sandbox".into(),
@@ -365,6 +366,7 @@ fn user_visible_questions_are_tracked_until_answered() {
         options: vec!["a".into()],
         blocking: true,
         answer: None,
+        answer_origin: None,
     };
     let answered = UserQuestion {
         answer: Some("a".into()),

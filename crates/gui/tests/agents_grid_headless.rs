@@ -205,5 +205,6 @@ fn tool_started(run_id: &str, tool_name: &str) -> Event {
         tool_name: tool_name.into(),
         call_id: "call-1".into(),
         run_id: Some(run_id.into()),
+        parent_call_id: None,
     })
 }

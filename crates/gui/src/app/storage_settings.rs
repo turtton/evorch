@@ -150,6 +150,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.open = false;
         self.role_settings.open = false;
         self.sandbox_settings.open = false;
+        self.agent_features.open = false;
         self.self_improvement_settings.open = false;
         self.close_theme_settings();
         self.storage_settings.open();
@@ -223,11 +224,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         ui.colored_label(palette().ERROR_FG, "Storage writes are still suspended.");
                     }
                     if let Some(error) = &cleanup.maintenance_error {
-                        ui.colored_label(palette().ERROR_FG, error);
+                        crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                     }
                 }
                 if let Some(error) = &model.error {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
                 if model.job.is_some() {
                     ui.label(muted("Checking or cleaning storage…"));

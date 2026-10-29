@@ -59,6 +59,7 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
                 is_error: false,
                 status,
                 reviews: Vec::new(),
+                parent_call_id: None,
             },
         )
     })
@@ -87,6 +88,7 @@ fn started(run: &str) -> Event {
         call_id: "call-x".into(),
         run_id: Some(run.into()),
         input: Some(serde_json::json!({"path": "a.rs"})),
+        parent_call_id: None,
     })
 }
 

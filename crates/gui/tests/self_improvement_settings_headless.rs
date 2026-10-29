@@ -102,7 +102,7 @@ fn cancel_discards_toggle_and_other_settings_close_the_modal() {
     harness.state_mut().open_sandbox_settings();
     harness.run();
     assert!(!harness.has_label("Enable self-improvement drafts (default off)"));
-    assert!(harness.has_label("Enable web tools"));
+    assert!(harness.has_label("Save sandbox"));
 }
 
 #[test]

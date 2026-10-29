@@ -45,6 +45,7 @@ impl ToolExecutor {
             call_id: id.to_owned(),
             input: Some(args),
             run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
         }));
         if let ToolError::ExecutionDenied { reason, .. } = error {
             self.event_bus.emit(Event::new(ToolEvent::ExecutionDenied {
@@ -54,6 +55,27 @@ impl ToolExecutor {
             }));
         }
         self.emit_completed(ctx, name, id, Err(error));
+    }
+
+    /// Closes a call whose future was dropped before it finished (its caller was
+    /// cancelled or ended), with the terminal event a cancelled model call gets.
+    /// The call may have changed state before it was cut off.
+    pub fn report_cancelled_call(
+        &self,
+        ctx: &ToolExecutionContext,
+        name: &str,
+        id: &str,
+        reason: &str,
+    ) {
+        self.event_bus.emit(Event::new(ToolEvent::ToolCompleted {
+            tool_name: name.to_owned(),
+            call_id: id.to_owned(),
+            is_error: true,
+            output: Some(reason.to_owned()),
+            detail: None,
+            run_id: Some(ctx.run_id.clone()),
+            parent_call_id: ctx.parent_call_id.clone(),
+        }));
     }
 
     /// Validate without executing or requesting approval. No ToolStarted is emitted.
@@ -97,6 +119,12 @@ impl ToolExecutor {
 }
 
 impl ValidatedToolCall {
+    /// What the executor's own policy decides for this call before any approval.
+    /// `Deny` and `AskFirst` need a user decision the caller may not want to request.
+    pub const fn action(&self) -> Action {
+        self.action
+    }
+
     /// Consume a call after the runtime has resolved all scope and approval layers.
     pub fn scope_approved(mut self) -> PreparedToolCall {
         self.action = Action::Proceed;

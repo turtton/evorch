@@ -139,6 +139,41 @@ fn live_shell_output_is_not_persisted() {
 }
 
 #[test]
+fn composing_tool_call_drafts_and_retry_markers_are_not_persisted() {
+    // Given: a tool call still being streamed, next to a durable text delta.
+    let (_dir, storage, db) = fixture();
+    let mut bridge = StorageBridge::new(storage.handle(), "session");
+    // When: both reach the bridge.
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::ToolCallDelta {
+            run_id: Some("run".into()),
+            index: 0,
+            call_id: Some("call".into()),
+            tool_name: Some("write".into()),
+            arguments_delta: "{\"path\":".into(),
+        }))
+        .unwrap();
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::StreamRetried {
+            run_id: Some("run".into()),
+        }))
+        .unwrap();
+    bridge
+        .handle_event(&Event::new(event_bus::MessageEvent::MessageCompleted {
+            run_id: "run".into(),
+            text: "done".into(),
+        }))
+        .unwrap();
+    // Then: only the accepted response is stored.
+    let stored = db.events_all_ordered().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert!(matches!(
+        stored[0].event.kind,
+        event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { .. })
+    ));
+}
+
+#[test]
 fn heartbeat_is_observational_but_ownership_transitions_are_durable() {
     let (_dir, storage, db) = fixture();
     let mut bridge = StorageBridge::new(storage.handle(), "session");
@@ -185,9 +220,9 @@ fn heartbeat_is_observational_but_ownership_transitions_are_durable() {
 fn diagnostics_policy_preserves_warnings_errors_and_sandbox_audit() {
     use event_bus::{DiagnosticEvent, DiagnosticSeverity};
     for (policy, expected) in [
-        (DiagnosticPersistence::Off, 1),
-        (DiagnosticPersistence::Warnings, 3),
-        (DiagnosticPersistence::All, 4),
+        (DiagnosticPersistence::Off, 2),
+        (DiagnosticPersistence::Warnings, 4),
+        (DiagnosticPersistence::All, 5),
     ] {
         let (_dir, storage, db) = fixture();
         let mut bridge =
@@ -209,21 +244,23 @@ fn diagnostics_policy_preserves_warnings_errors_and_sandbox_audit() {
                 }))
                 .unwrap();
         }
-        bridge
-            .handle_event(&Event::new(DiagnosticEvent {
-                source: "sandbox".into(),
-                severity: DiagnosticSeverity::Info,
-                code: "escalation_review".into(),
-                detail: "audit".into(),
-                run_id: Some("run".into()),
-                thread_id: None,
-                call_id: None,
-            }))
-            .unwrap();
+        for code in ["escalation_review", "escalation_review_manifest"] {
+            bridge
+                .handle_event(&Event::new(DiagnosticEvent {
+                    source: "sandbox".into(),
+                    severity: DiagnosticSeverity::Info,
+                    code: code.into(),
+                    detail: "audit".into(),
+                    run_id: Some("run".into()),
+                    thread_id: None,
+                    call_id: None,
+                }))
+                .unwrap();
+        }
         assert_eq!(db.events_all_ordered().unwrap().len(), expected);
         assert_eq!(
             bridge.monitor().snapshot().skipped_diagnostics,
-            (4 - expected) as u64
+            (5 - expected) as u64
         );
     }
 }

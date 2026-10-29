@@ -53,6 +53,22 @@ impl ProviderClient for StubClient {
         _auth: &ProviderAuth,
         request: &ChatRequest,
     ) -> Result<ChatResponse, ProviderError> {
+        // What a provider adapter's observer does with the context it is given.
+        if let Some(log) = request
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.attempts.as_ref())
+        {
+            log.started(providers::AttemptRecord {
+                request_id: "req-stub".into(),
+                provider: "stub".into(),
+                profile: None,
+                protocol: "stub-protocol".into(),
+                model: request.model.clone(),
+                streaming: false,
+                outcome: providers::AttemptOutcome::Pending,
+            });
+        }
         self.requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -181,6 +197,7 @@ async fn complete(model: &RoutedModel, run_id: &str) -> Result<ChatResponse, Run
     model
         .complete(
             &AgentInvocationContext {
+                attempts: None,
                 turn: None,
                 category: None,
                 run_id: run_id.to_string(),
@@ -335,4 +352,25 @@ async fn complete_keeps_affinity_per_run_id() {
         .map(|request| request.model.clone())
         .collect::<Vec<_>>();
     assert_eq!(models, ["route-model", "route-model", "route-model"]);
+}
+
+#[tokio::test]
+async fn preflight_chain_preserves_live_affinity_without_inference() {
+    let (model, requests) = routed_model(Ok(response()), "default-model", Some("route-model"));
+    assert_eq!(complete(&model, "live-run").await, Ok(response()));
+    let before = model.affinity.lock().unwrap().clone();
+
+    let routes = model
+        .preflight_chain("worker", &[config::ChainEntryConfig::route("worker")])
+        .unwrap();
+
+    assert_eq!(
+        routes,
+        [routing::ResolvedRoute {
+            profile: "local".into(),
+            model_id: "route-model".into(),
+        }]
+    );
+    assert_eq!(*model.affinity.lock().unwrap(), before);
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }

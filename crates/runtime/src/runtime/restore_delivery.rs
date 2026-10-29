@@ -13,8 +13,24 @@ impl AgentRuntime {
         &self,
         sender: RunId,
         recipient: RunId,
-        mut message: AgentMessage,
-    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        message: AgentMessage,
+    ) -> Result<MessageDelivery, RuntimeError> {
+        self.restore_queued_and_deliver(
+            sender,
+            recipient,
+            crate::mailbox::QueuedMessage::explicit(message),
+        )
+        .map(|delivery| delivery.expect("explicit messages cannot be observed completions"))
+    }
+
+    /// None means an in-flight automatic notice was acknowledged before commit.
+    /// Keep its receipt even while waiting for restore_gate or reading storage.
+    pub(super) fn restore_queued_and_deliver(
+        &self,
+        sender: RunId,
+        recipient: RunId,
+        mut queued: crate::mailbox::QueuedMessage,
+    ) -> Result<Option<MessageDelivery>, RuntimeError> {
         let fail = |reason| RuntimeError::RunRestoreFailed {
             run_id: recipient.to_string(),
             reason,
@@ -26,21 +42,20 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         });
+        self.ensure_no_saved_compaction(recipient)?;
         let mut live_retry_available = true;
         loop {
             let previous = {
                 let runs = lock_runs(&self.shared.runs);
+                if queued.observed() {
+                    return Ok(None);
+                }
                 if let Some(entry) = runs.get(&recipient) {
                     if is_live(entry) {
                         drop(runs);
                         self.validate_run_mutation(recipient)?;
-                        let result = self.try_live_delivery(
-                            sender,
-                            recipient,
-                            message.kind.clone(),
-                            message.content.clone(),
-                            message.reply_to.clone(),
-                        );
+                        let result =
+                            self.try_live_queued_delivery(sender, recipient, queued.clone());
                         match result {
                             Err(RuntimeError::RunTerminated { .. }) if live_retry_available => {
                                 live_retry_available = false;
@@ -49,7 +64,12 @@ impl AgentRuntime {
                             result => return result,
                         }
                     }
-                    self.authorize_restore(&runs, sender, (recipient, entry.parent), &message)?;
+                    self.authorize_restore(
+                        &runs,
+                        sender,
+                        (recipient, entry.parent),
+                        &queued.message,
+                    )?;
                     // A subagent's report to its finished parent is never lost:
                     // it is held until the parent continues, and while the
                     // operator's stop holds the parent is not woken for it.
@@ -58,7 +78,7 @@ impl AgentRuntime {
                     match self.continuation_refusal(recipient, Some(entry)) {
                         Some(RunRestoreFailure::StoppedByOperator) if from_child => {
                             drop(runs);
-                            return self.hold_for_parent(sender, recipient, message);
+                            return self.hold_queued_for_parent(sender, recipient, queued);
                         }
                         Some(reason) => return Err(fail(reason)),
                         None => {}
@@ -71,7 +91,9 @@ impl AgentRuntime {
             let (previous, from_child) = previous;
             let store = match self.shared.run_store.get() {
                 Some(store) => store,
-                None if from_child => return self.hold_for_parent(sender, recipient, message),
+                None if from_child => {
+                    return self.hold_queued_for_parent(sender, recipient, queued);
+                }
                 None if previous.is_some() => {
                     return Err(fail(RunRestoreFailure::StorageNotConfigured));
                 }
@@ -107,7 +129,7 @@ impl AgentRuntime {
                     &lock_runs(&self.shared.runs),
                     sender,
                     (recipient, parent),
-                    &message,
+                    &queued.message,
                 )?;
             }
             // Optional ancestry is read before runs is held; bind it to the exact parent ID.
@@ -173,7 +195,7 @@ impl AgentRuntime {
                         // Disk alone cannot continue the parent: keep the report
                         // and let the parent be woken under current authority.
                         Err(_) if from_child => {
-                            return self.hold_for_parent(sender, recipient, message);
+                            return self.hold_queued_for_parent(sender, recipient, queued);
                         }
                         Err(error) => return Err(error),
                     }
@@ -192,9 +214,6 @@ impl AgentRuntime {
             record.restorable = false;
             record.config_json = serde_json::to_string(&descriptor)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
-            self.shared
-                .model
-                .restore_route_pins(&recipient.to_string(), &descriptor.route_pins);
             let config = RunConfig {
                 name: descriptor.name,
                 interactive: descriptor.interactive,
@@ -206,6 +225,10 @@ impl AgentRuntime {
                 ownership,
                 ..RunConfig::default()
             };
+            #[cfg(test)]
+            if let Ok(execution) = self.execution_snapshot(recipient) {
+                self.execution_hook(HookPoint::RestoreMessagePrepared, &execution);
+            }
             let mut intents = self
                 .shared
                 .spawn_intents
@@ -217,6 +240,10 @@ impl AgentRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut runs = lock_runs(&self.shared.runs);
+            // Linearize observation against snapshot consumption and registration.
+            if queued.observed() {
+                return Ok(None);
+            }
             // A complete intervening restore may already be terminal: phase alone is not a generation check.
             match (previous.as_ref(), runs.get(&recipient)) {
                 (_, Some(entry)) if is_live(entry) => {
@@ -224,13 +251,7 @@ impl AgentRuntime {
                     drop(admissions);
                     drop(intents);
                     self.validate_run_mutation(recipient)?;
-                    let result = self.try_live_delivery(
-                        sender,
-                        recipient,
-                        message.kind.clone(),
-                        message.content.clone(),
-                        message.reply_to.clone(),
-                    );
+                    let result = self.try_live_queued_delivery(sender, recipient, queued.clone());
                     match result {
                         Err(RuntimeError::RunTerminated { .. }) if live_retry_available => {
                             live_retry_available = false;
@@ -244,10 +265,13 @@ impl AgentRuntime {
                 _ => continue,
             }
             let parent = runs.get(&recipient).map_or(parent, |entry| entry.parent);
-            self.authorize_restore(&runs, sender, (recipient, parent), &message)?;
+            self.authorize_restore(&runs, sender, (recipient, parent), &queued.message)?;
             if let Some(reason) = self.continuation_refusal(recipient, runs.get(&recipient)) {
                 return Err(fail(reason));
             }
+            self.shared
+                .model
+                .restore_route_pins(&recipient.to_string(), &descriptor.route_pins);
             let execution = Self::prepare_restored_execution(recipient, parent, &intents)?;
             // The writer only upserts the already-read record; no storage read holds runs.
             let write = restored.provenance.write(record.clone()).map_err(|error| {
@@ -266,58 +290,55 @@ impl AgentRuntime {
                 &execution,
             );
             self.shared.run_ids.observe(recipient);
-            message.message_id = format!(
+            queued.message.message_id = format!(
                 "msg-{}",
                 self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
             );
-            restored.trigger = Some(message.clone());
+            restored.trigger = Some(queued.message.clone());
             self.register_restored(
                 &mut runs,
                 &intents,
                 execution,
                 (recipient, parent, role, config, sender),
                 restored,
-                &message,
+                &queued.message,
                 durable_parent,
             )?;
-            return Ok((
-                message.message_id.clone(),
-                message,
+            return Ok(Some((
+                queued.message.message_id.clone(),
+                queued.message,
                 DeliveryDisposition::Restored,
-            ));
+            )));
         }
     }
     /// Keep a subagent's message for its finished parent and wake the parent.
     /// A parent that came back meanwhile receives it directly.
-    fn hold_for_parent(
+    fn hold_queued_for_parent(
         &self,
         sender: RunId,
         recipient: RunId,
-        mut message: AgentMessage,
-    ) -> Result<(String, AgentMessage, DeliveryDisposition), RuntimeError> {
+        mut queued: crate::mailbox::QueuedMessage,
+    ) -> Result<Option<MessageDelivery>, RuntimeError> {
         let runs = lock_runs(&self.shared.runs);
+        if queued.observed() {
+            return Ok(None);
+        }
         if runs.get(&recipient).is_some_and(is_live) {
             drop(runs);
-            return self.try_live_delivery(
-                sender,
-                recipient,
-                message.kind.clone(),
-                message.content.clone(),
-                message.reply_to.clone(),
-            );
+            return self.try_live_queued_delivery(sender, recipient, queued);
         }
-        message.message_id = format!(
+        queued.message.message_id = format!(
             "msg-{}",
             self.shared.next_message_id.fetch_add(1, Ordering::Relaxed)
         );
-        self.hold_message(recipient, message.clone());
+        self.hold_queued_message(recipient, queued.clone());
         drop(runs);
         self.schedule_wake(recipient);
-        Ok((
-            message.message_id.clone(),
-            message,
+        Ok(Some((
+            queued.message.message_id.clone(),
+            queued.message,
             DeliveryDisposition::Held,
-        ))
+        )))
     }
 }
 

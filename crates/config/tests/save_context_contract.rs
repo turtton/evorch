@@ -35,6 +35,7 @@ fn every_layered_save_and_preview_accepts_split_config_and_rejects_inactive_kind
         "agents",
         "routing_agents",
         "sandbox",
+        "agent_features",
         "self_improvement",
         "project",
     ] {
@@ -135,6 +136,9 @@ fn every_layered_save_and_preview_accepts_split_config_and_rejects_inactive_kind
                     context.save_routing_and_agents(&path, &config.routing, Some(&config.agents))
                 }
                 "sandbox" => context.save_sandbox(&path, config.sandbox),
+                "agent_features" => {
+                    context.save_agent_features(&path, config::AgentFeatures::from_config(&config))
+                }
                 "self_improvement" => {
                     context.save_self_improvement(&path, &config.self_improvement)
                 }

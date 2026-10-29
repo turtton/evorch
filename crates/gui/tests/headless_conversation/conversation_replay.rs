@@ -94,6 +94,7 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
                     call_id: "call".into(),
                     run_id: Some("root".into()),
                     input: Some(serde_json::json!({"path":"src/main.rs"})),
+                    parent_call_id: None,
                 }),
                 Event::new(ToolEvent::ToolCompleted {
                     tool_name: "read".into(),
@@ -102,6 +103,7 @@ fn role_qualified_chat_restores_user_assistant_and_tool_entries() {
                     output: Some("file contents".into()),
                     is_error: false,
                     detail: None,
+                    parent_call_id: None,
                 }),
                 delta("root", "found the cause"),
                 final_result("root", "found the cause"),
@@ -523,6 +525,7 @@ fn access_reviews_replay_inside_their_tool_cards_after_restart() {
                 call_id: "call-shell".into(),
                 input: Some(serde_json::json!({"command": "curl example.com"})),
                 run_id: Some("root".into()),
+                parent_call_id: None,
             }),
             diagnostic(
                 "sandbox",
@@ -537,6 +540,7 @@ fn access_reviews_replay_inside_their_tool_cards_after_restart() {
                 output: Some("denied".into()),
                 detail: None,
                 run_id: Some("root".into()),
+                parent_call_id: None,
             }),
             diagnostic(
                 "network_access",

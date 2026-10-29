@@ -111,6 +111,7 @@ fn legacy_tool_and_user_boundaries_preserve_earlier_messages() {
         tool_name: "read".into(),
         call_id: "call".into(),
         input: None,
+        parent_call_id: None,
     }));
     model.apply(&delta("run", "partial"));
     model.apply(&completed("run", "complete answer"));

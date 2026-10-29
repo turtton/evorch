@@ -130,7 +130,7 @@ provider is used or required.
 Non-demo mode starts a real AgentRuntime. Messages and `/goal <objective>`
 both continue the thread's persistent conversation; `/goal` also records a
 thread goal that the runtime checks before the work is reported as done.
-既知の制限: エージェント応答の描画は demo スクリプトモデルのままであり、provider composition root 導入まで実 provider の応答は表示されない。
+Known limitation: agent responses are still rendered by the demo script model; real provider responses are not shown until the provider composition root lands.
 
 Sidebar state is loaded from and saved to --state PATH. Without --state, the
 default is <user-config-dir>/sidebar.json; if no user config dir is derivable,
@@ -1261,6 +1261,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Given: the fail-closed credential store of the Fixed model source
+    // When: its error reaches a provider / run failure reason
+    // Then: the wording the model reads is unchanged; only the GUI translates it
+    #[test]
+    fn unwired_credential_store_error_keeps_its_model_facing_wording() {
+        use sandbox::credential::CredentialStore as _;
+        let error = super::UnwiredCredentialStore.get("key").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "資格情報サービスを利用できません: GUI runtime は credential store を接続していない"
+        );
+    }
+
     #[test]
     fn thread_index_initial_settings_and_reload_reach_writer_in_order() {
         let dir = tempfile::tempdir().unwrap();

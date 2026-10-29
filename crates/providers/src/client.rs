@@ -31,6 +31,11 @@ pub trait ProviderClient: Send + Sync {
         Ok(None)
     }
 
+    /// Missing models in a degraded catalog are not authoritative unavailability.
+    fn catalog_degradation(&self) -> Option<String> {
+        None
+    }
+
     /// Session-backed hosted web search, when the provider offers it.
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {
         None
@@ -145,7 +150,23 @@ pub trait ProviderClient: Send + Sync {
                                 }));
                             }
                         }
-                        StreamEvent::ToolCallDelta { .. } => {}
+                        // Display only: Completed stays the sole source of the tool calls.
+                        // A retry replays tool calls from the start, so StreamRetried tells
+                        // consumers to drop the failed attempt's drafts.
+                        StreamEvent::ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_delta,
+                        } => {
+                            bus.emit(Event::new(MessageEvent::ToolCallDelta {
+                                run_id,
+                                index,
+                                call_id: id,
+                                tool_name: name,
+                                arguments_delta,
+                            }));
+                        }
                         StreamEvent::Completed { response } => return Ok(response),
                     }
                 },
@@ -160,6 +181,12 @@ pub trait ProviderClient: Send + Sync {
                 });
             }
             dedup.on_new_attempt();
+            bus.emit(Event::new(MessageEvent::StreamRetried {
+                run_id: request
+                    .observation
+                    .as_ref()
+                    .map(|context| context.run_id.clone()),
+            }));
             tokio::time::sleep(policy.backoff_for(attempts_used - 1)).await;
         }
     }
@@ -265,6 +292,7 @@ mod tests {
                     assert_eq!(run_id, None);
                     deltas.push(delta);
                 }
+                EventKind::Message(MessageEvent::StreamRetried { .. }) => {}
                 other => panic!("想定外のイベント: {other:?}"),
             }
         }
@@ -309,6 +337,63 @@ mod tests {
         assert_eq!(deltas.concat(), "Hello world");
         assert_eq!(deltas, ["Hello", " world"]);
         assert_eq!(client.attempts.load(Ordering::SeqCst), 2);
+    }
+
+    fn tool_delta(
+        index: usize,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: &str,
+    ) -> Result<StreamEvent, ProviderError> {
+        Ok(StreamEvent::ToolCallDelta {
+            index,
+            id: id.map(Into::into),
+            name: name.map(Into::into),
+            arguments_delta: arguments.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn streaming_publishes_tool_call_drafts_and_announces_each_retry() {
+        // Given: 最初の試行は引数の途中で EOF になり、二回目はテキストだけを返す。
+        let client = ScriptedClient::new(vec![
+            Ok(vec![tool_delta(0, Some("call-1"), Some("write"), "{\"pa")]),
+            Ok(vec![text("retried"), completed()]),
+        ]);
+        let bus = EventBus::new(16);
+        let mut receiver = bus.subscribe();
+        // When: 共通のストリーミング経路で送信する。
+        let result = client
+            .send_streaming(&ProviderAuth::new("key"), &sample_request(), &bus)
+            .await;
+        // Then: 確定応答は Completed のまま、再試行の境界が tool 断片の有無に依らず通知される。
+        assert_eq!(result, Ok(sample_response()));
+        let mut kinds = Vec::new();
+        while let Some(event) = receiver.recv().now_or_never() {
+            kinds.push(match event.expect("イベントを受信できる").kind {
+                EventKind::Message(MessageEvent::ToolCallDelta {
+                    call_id,
+                    tool_name,
+                    arguments_delta,
+                    ..
+                }) => format!("tool {call_id:?} {tool_name:?} {arguments_delta}"),
+                EventKind::Message(MessageEvent::StreamRetried { run_id }) => {
+                    format!("retried {run_id:?}")
+                }
+                EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
+                    format!("text {delta}")
+                }
+                other => panic!("想定外のイベント: {other:?}"),
+            });
+        }
+        assert_eq!(
+            kinds,
+            [
+                "tool Some(\"call-1\") Some(\"write\") {\"pa",
+                "retried None",
+                "text retried",
+            ]
+        );
     }
 
     #[tokio::test]

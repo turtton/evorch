@@ -217,12 +217,19 @@ impl RunMetrics {
         };
         for event in &record.events {
             match &event.kind {
-                EventKind::Tool(ToolEvent::ToolStarted { tool_name, .. }) => {
+                // `run_js` などの親ツール呼び出しの中で行われた子の呼び出しは、
+                // モデルが発行したターンの呼び出しではないため集計しない。
+                EventKind::Tool(ToolEvent::ToolStarted {
+                    tool_name,
+                    parent_call_id: None,
+                    ..
+                }) => {
                     *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
                 }
                 EventKind::Tool(ToolEvent::ToolCompleted {
                     tool_name,
                     is_error: true,
+                    parent_call_id: None,
                     ..
                 }) => {
                     *metrics.tool_errors.entry(tool_name.clone()).or_default() += 1;

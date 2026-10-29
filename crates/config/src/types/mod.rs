@@ -4,6 +4,7 @@ pub mod agents;
 pub mod budget;
 pub mod comment_checker;
 pub mod compaction;
+pub mod cursor_model;
 pub mod edit_tool;
 pub mod eval;
 pub mod misc;
@@ -60,7 +61,7 @@ pub use storage::{
     StorageConfig, ThreadIndexConfig,
 };
 pub use team::TeamConfig;
-pub use tools::{BrowserToolsConfig, ToolsConfig};
+pub use tools::{BrowserToolsConfig, RunJsConfig, ToolsConfig};
 
 /// 現在の設定スキーマバージョン (ADR 0014)。
 pub const CURRENT_VERSION: u32 = 3;

@@ -18,6 +18,9 @@ pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PREVIEW_LINES: usize = 300;
 pub const CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESULT_IMAGES: usize = 4;
+/// Largest text a `run_js` program gets whole when the model's copy was cut to a
+/// preview. It is held in memory only, for the duration of the call.
+pub const FULL_CONTENT_BYTES: usize = 1024 * 1024;
 const SLOTS: usize = 64;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const MARKER: &str = "\n[Output artifact: ";
@@ -68,12 +71,38 @@ impl Capture {
         if !large {
             return ToolResult::success(safe.text);
         }
-        artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count)
+        let full = (!truncated && safe.text.len() <= FULL_CONTENT_BYTES).then(|| safe.text.clone());
+        let mut result =
+            artifact_result(&safe.text, &safe.text, self.bytes, !truncated, safe.count);
+        if let Some(full) = full {
+            result.set_whole_text(full);
+        }
+        result
     }
 }
 
 /// Apply the same ceiling before any event, GUI, or model receives a tool result.
 pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
+    // Two small facts outlive any replacement of the detail below: run_js's own
+    // summary (the interface reads it), and whether a post-edit checker warned
+    // (never its text), so a caller such as run_js can still report the warning.
+    let run_js = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("run_js"))
+        .cloned();
+    let mut shell_status = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("shell"))
+        .cloned();
+    let checker_outcome = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("comment_checker"))
+        .and_then(|checker| checker.get("outcome"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     if result.images.len() > MAX_RESULT_IMAGES {
         let omitted = result.images.len() - MAX_RESULT_IMAGES;
         result.images.truncate(MAX_RESULT_IMAGES);
@@ -81,14 +110,46 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
             .content
             .push_str(&format!("\n[{omitted} more images omitted]"));
     }
+    let mut replaced = false;
+    // A result that was cut to a preview and an artifact reference before (shell) is
+    // not cut again: the preview is not the output, so it must not become a new
+    // artifact or a whole text, and its reference must keep pointing at the output.
+    let already_cut = result
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail.get("output_artifact").is_some());
     if result.content.len() > PREVIEW_BYTES + 2048
         || result.content.lines().count() > PREVIEW_LINES + 8
     {
-        let mut capture = Capture::default();
-        capture.push(result.content.as_bytes());
-        let limited = capture.finish();
-        result.content = limited.content;
-        result.detail = limited.detail;
+        if already_cut {
+            // Only a long reference can push it over the ceiling. Drop the head of the
+            // preview, so the reference at its end survives.
+            let kept = tail_preview(&result.content);
+            if kept.len() < result.content.len() {
+                // The status header was at the start: say it is gone, in the detail that
+                // stays and in the copy a rebuilt detail gets.
+                for status in result
+                    .detail
+                    .as_mut()
+                    .and_then(|detail| detail.get_mut("shell"))
+                    .into_iter()
+                    .chain(shell_status.as_mut())
+                {
+                    status["header"] = serde_json::json!(false);
+                }
+            }
+            result.content = kept.to_owned();
+        } else {
+            let mut capture = Capture::default();
+            capture.push(result.content.as_bytes());
+            let limited = capture.finish();
+            if let Some(whole) = limited.whole_text() {
+                result.set_whole_text(whole.to_owned());
+            }
+            result.content = limited.content;
+            result.detail = limited.detail;
+            replaced = true;
+        }
     }
     // Structured output from external tools must not bypass the text ceiling.
     if result
@@ -98,6 +159,19 @@ pub(crate) fn limit_result(mut result: ToolResult) -> ToolResult {
     {
         result.detail =
             Some(serde_json::json!({"detail_omitted": "structured output exceeded 16 KiB"}));
+        replaced = true;
+    }
+    if replaced {
+        if let Some(run_js) = run_js {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["run_js"] = run_js;
+        }
+        if let Some(shell_status) = shell_status {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["shell"] = shell_status;
+        }
+        if let Some(outcome) = checker_outcome {
+            result.detail.get_or_insert_with(|| serde_json::json!({}))["comment_checker"] =
+                serde_json::json!({"outcome": outcome});
+        }
     }
     result
 }
@@ -339,6 +413,68 @@ fn start_cleanup(root: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_the_start_of_a_cut_shell_result_records_that_its_header_is_gone() {
+        let status =
+            |header| serde_json::json!({"exit_code": 1, "timed_out_ms": null, "header": header});
+        let long_note = format!(
+            "\n[Output artifact: /var/tmp/o/{}.txt; captured 9 of 9 bytes]",
+            "p".repeat(30_000)
+        );
+        let result = |content: String| {
+            ToolResult::error(content).with_detail(serde_json::json!({
+                "output_artifact": {"path": "/var/tmp/o/4.txt", "original_bytes": 9},
+                "shell": status(true),
+            }))
+        };
+
+        let trimmed = limit_result(result(format!("exit_code: 1\ntail{long_note}")));
+        assert!(
+            !trimmed.content.starts_with("exit_code: 1"),
+            "the header went with the head"
+        );
+        assert_eq!(trimmed.detail.as_ref().unwrap()["shell"]["header"], false);
+
+        let kept = limit_result(result(
+            "exit_code: 1\ntail\n[Output artifact: /var/tmp/o/4.txt]".into(),
+        ));
+        assert!(kept.content.starts_with("exit_code: 1"));
+        assert_eq!(kept.detail.as_ref().unwrap()["shell"]["header"], true);
+    }
+
+    #[test]
+    fn a_checker_warning_outlives_the_artifact_but_its_text_does_not() {
+        let detail = serde_json::json!({"comment_checker": {"outcome": "warning", "message": "UNTRUSTED TEXT"}});
+        for result in [
+            ToolResult::success("line\n".repeat(20_000)).with_detail(detail.clone()),
+            ToolResult::success("short").with_detail(serde_json::json!({
+                "comment_checker": {"outcome": "warning", "message": "UNTRUSTED TEXT"},
+                "diff": "x".repeat(20_000),
+            })),
+        ] {
+            let limited = limit_result(result);
+            let detail = limited.detail.unwrap();
+            assert_eq!(
+                detail["comment_checker"],
+                serde_json::json!({"outcome": "warning"})
+            );
+            assert!(!detail.to_string().contains("UNTRUSTED"));
+        }
+    }
+
+    #[test]
+    fn a_large_run_js_result_keeps_its_summary_next_to_the_artifact() {
+        let content = "line\n".repeat(20_000);
+        let result = ToolResult::success(content)
+            .with_detail(serde_json::json!({"run_js": {"calls": [{"seq": 1, "name": "read"}]}}));
+
+        let limited = limit_result(result);
+
+        let detail = limited.detail.unwrap();
+        assert!(detail["output_artifact"]["path"].is_string());
+        assert_eq!(detail["run_js"]["calls"][0]["name"], "read");
+    }
 
     #[test]
     fn root_defaults_to_var_tmp() {

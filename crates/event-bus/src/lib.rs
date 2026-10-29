@@ -22,7 +22,7 @@ pub use thread_goal::{ThreadGoalCheck, ThreadGoalPhase, ThreadGoalSnapshot, Thre
 
 pub use bus::{EventBus, EventReceiver, RecvError};
 pub use event::{
-    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase,
+    AgentMessage, AgentMessageEvent, AgentMessageKind, AgentRunPhase, AnswerOrigin,
     CACHE_RETENTION_WARNING_THRESHOLD, CANCELLED_REASON, CacheBaselineMissing, CacheComparison,
     CompactionEvent, CompactionReason, ContextComposition, DeliveryDisposition, DiagnosticEvent,
     DiagnosticSeverity, EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta,

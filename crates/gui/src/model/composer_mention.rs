@@ -35,8 +35,6 @@ const GIT_LOCAL_ENV: &[&str] = &[
     "GIT_SHALLOW_FILE",
     "GIT_COMMON_DIR",
 ];
-const SKILL_BLOCK_START: &str = "\n\n<skill name=\"";
-const SKILL_BLOCK_END: &str = "\n</skill>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionKind {
@@ -354,17 +352,12 @@ fn score(entry: &MentionEntry, query: &str) -> Option<(u8, usize, usize)> {
             1
         } else if search.contains(query) {
             2
-        } else if is_subsequence(search, query) {
+        } else if crate::model::fuzzy::is_subsequence(search, query) {
             3
         } else {
             return None;
         };
     Some((tier, depth, search.len()))
-}
-
-fn is_subsequence(haystack: &str, needle: &str) -> bool {
-    let mut chars = haystack.chars();
-    needle.chars().all(|wanted| chars.any(|c| c == wanted))
 }
 
 /// Finds an `@token` that starts at a word boundary and contains `cursor` (a byte offset).
@@ -433,10 +426,7 @@ pub fn expand_skill_mentions(
             continue;
         }
         let body = skills.load_body(name).map_err(|_| name.to_owned())?;
-        expanded.push_str(&format!(
-            "{SKILL_BLOCK_START}{name}\">\n{}{SKILL_BLOCK_END}",
-            body.trim_end()
-        ));
+        runtime::skill::append_skill_attachment(&mut expanded, name, &body);
     }
     Ok(expanded)
 }
@@ -459,33 +449,14 @@ pub fn withheld_skill_mentions<'a>(
 
 /// Splits trailing skill blocks added by [`expand_skill_mentions`] from the typed text.
 pub fn split_skill_attachments(text: &str) -> (&str, Vec<&str>) {
-    for (start, _) in text.match_indices(SKILL_BLOCK_START) {
-        if let Some(names) = parse_skill_blocks(&text[start..]) {
-            return (&text[..start], names);
-        }
-    }
-    (text, Vec::new())
-}
-
-fn parse_skill_blocks(rest: &str) -> Option<Vec<&str>> {
-    if rest.is_empty() {
-        return Some(Vec::new());
-    }
-    let (name, body) = rest.strip_prefix(SKILL_BLOCK_START)?.split_once("\">\n")?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    for (end, _) in body.match_indices(SKILL_BLOCK_END) {
-        if let Some(mut names) = parse_skill_blocks(&body[end + SKILL_BLOCK_END.len()..]) {
-            names.insert(0, name);
-            return Some(names);
-        }
-    }
-    None
+    let (typed, attachments) = runtime::skill::split_skill_attachments(text);
+    (
+        typed,
+        attachments
+            .into_iter()
+            .map(|attachment| attachment.name)
+            .collect(),
+    )
 }
 
 /// `/`-separated form of a native path string.

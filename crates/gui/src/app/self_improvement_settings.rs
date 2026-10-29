@@ -24,6 +24,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.routing_settings.open = false;
         self.role_settings.open = false;
         self.sandbox_settings.open = false;
+        self.agent_features.open = false;
         self.close_theme_settings();
         self.self_improvement_settings.open = true;
     }
@@ -61,7 +62,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                 });
                 if let Some(error) = &self.self_improvement_settings.error {
-                    ui.colored_label(palette().ERROR_FG, error);
+                    crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 }
                 if busy {
                     ui.label(muted("Saving settings…"));

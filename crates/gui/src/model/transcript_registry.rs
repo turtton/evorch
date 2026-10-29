@@ -143,6 +143,12 @@ impl TranscriptRegistry {
                     | event_bus::AgentRunPhase::Error,
                 ..
             }) => vec![TranscriptKey::Thread, TranscriptKey::Run(run_id.clone())],
+            // An idle run discards drafts of calls its finished response never started.
+            EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: event_bus::AgentRunPhase::Waiting,
+                ..
+            }) => self.route_run(run_id),
             EventKind::Lifecycle(event_bus::LifecycleEvent::Failed { .. })
             | EventKind::Fault(_) => {
                 vec![TranscriptKey::Thread]
@@ -162,7 +168,9 @@ impl TranscriptRegistry {
                 | MessageEvent::MessageCompleted { run_id, .. },
             ) => self.route_run(run_id),
             EventKind::Message(MessageEvent::MessageDelta { run_id, .. })
-            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. }) => match run_id {
+            | EventKind::Message(MessageEvent::ReasoningDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::ToolCallDelta { run_id, .. })
+            | EventKind::Message(MessageEvent::StreamRetried { run_id }) => match run_id {
                 Some(run_id) => self.route_run(run_id),
                 None => Vec::new(),
             },
@@ -209,7 +217,9 @@ impl TranscriptRegistry {
         match &event.kind {
             EventKind::Message(
                 MessageEvent::MessageDelta { run_id: None, .. }
-                | MessageEvent::ReasoningDelta { run_id: None, .. },
+                | MessageEvent::ReasoningDelta { run_id: None, .. }
+                | MessageEvent::ToolCallDelta { run_id: None, .. }
+                | MessageEvent::StreamRetried { run_id: None },
             ) => {
                 tracing::warn!("dropped run-less stream delta");
                 return;
@@ -221,6 +231,10 @@ impl TranscriptRegistry {
                 | MessageEvent::ReasoningDelta {
                     run_id: Some(_), ..
                 }
+                | MessageEvent::ToolCallDelta {
+                    run_id: Some(_), ..
+                }
+                | MessageEvent::StreamRetried { run_id: Some(_) }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. },
             )
@@ -555,6 +569,7 @@ mod tests {
             tool_name: "read".into(),
             call_id: "call-1".into(),
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         });
         registry.apply(&started);
         let completed = Event::new(ToolEvent::ToolCompleted {
@@ -564,6 +579,7 @@ mod tests {
             is_error: false,
             detail: None,
             run_id: Some("run-1".into()),
+            parent_call_id: None,
         });
 
         assert_eq!(
@@ -583,6 +599,7 @@ mod tests {
                 is_error: false,
                 status: ToolStatus::Succeeded,
                 reviews: Vec::new(),
+                parent_call_id: None,
             }]
         );
     }
@@ -597,6 +614,7 @@ mod tests {
                 tool_name: "write".into(),
                 call_id: call_id.into(),
                 run_id: run_id.map(str::to_owned),
+                parent_call_id: None,
             }));
         }
         // When: looking up known, unknown, and runless calls.
@@ -614,6 +632,7 @@ mod tests {
             tool_name: "write".into(),
             call_id: "known".into(),
             run_id: Some("run-2".into()),
+            parent_call_id: None,
         }));
         let known = Event::new(ToolEvent::ApprovalRequested {
             input: None,
@@ -667,6 +686,7 @@ mod tests {
                 tool_name: format!("tool-{run_id}"),
                 call_id: format!("call-{run_id}"),
                 run_id: Some(run_id.into()),
+                parent_call_id: None,
             }));
         }
         registry.apply(&Event::new(MessageEvent::MessageDelta {
@@ -687,6 +707,7 @@ mod tests {
                     is_error: false,
                     status: ToolStatus::Running,
                     reviews: Vec::new(),
+                    parent_call_id: None,
                 }]
             );
         }

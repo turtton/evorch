@@ -176,7 +176,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         ui.label("No saved checkpoint");
                     }
                     Some(Err(error)) => {
-                        ui.label(error);
+                        crate::theme::widgets::reason_label(ui, ui.visuals().text_color(), error);
                     }
                     None => {
                         ui.label("Select a run");
@@ -231,6 +231,7 @@ mod tests {
                 call_id: "call-1".into(),
                 tool_name: "shell".into(),
                 input: None,
+                parent_call_id: None,
             })
         };
         state.apply_events([tool("run-2")]);

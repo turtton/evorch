@@ -1,102 +1,5 @@
 use gui::{app::WorkbenchState, fixture::DemoSource, headless::HeadlessWorkbench};
 
-#[test]
-fn sandbox_settings_web_tools_toggle_persists_and_applies_live_when_saved() {
-    // Given: an existing project configuration and the chatbox sandbox button.
-    let dir = tempfile::tempdir().expect("temp");
-    let path = config::project_main_config_path(dir.path());
-    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
-    std::fs::write(&path, "version = 2\n[metrics]\nenabled = false\n").expect("fixture");
-    let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
-    let runtime = runtime::AgentRuntime::new(
-        bus.clone(),
-        std::sync::Arc::new(tools::ToolExecutor::with_standard_tools(
-            bus,
-            std::sync::Arc::new(sandbox::DirectSandbox::new_unchecked()),
-        )),
-        std::sync::Arc::new(runtime::compose::UnconfiguredModel),
-    );
-    runtime.set_web_tools_enabled(true);
-    let state = WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-        .expect("state")
-        .with_settings_load_options(config::LoadOptions {
-            project_dir: Some(dir.path().to_path_buf()),
-            user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
-            read_env: false,
-            ..Default::default()
-        })
-        .with_provider_settings_path(path.clone())
-        .with_sandbox_runtime(runtime.clone());
-    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
-    harness.run();
-    // When: disabling Web tools through the real checkbox and saving.
-    harness.click_label("Sandbox: auto review");
-    harness.run();
-    harness.click_label("Enable web tools");
-    harness.run();
-    harness.click_label("Save sandbox");
-    harness.run();
-    assert!(!harness.has_label("Save sandbox"));
-    // Then: the typed setting is persisted without changing other sections.
-    let saved = config::Config::load(&config::LoadOptions {
-        project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("load");
-    assert!(!saved.sandbox.web_tools_enabled);
-    assert!(!saved.metrics.enabled);
-    assert!(!runtime.web_tools_enabled());
-}
-
-#[test]
-fn sandbox_settings_cancel_keeps_web_tools_unchanged_when_reopened() {
-    // Given: an enabled persisted setting.
-    let dir = tempfile::tempdir().expect("temp");
-    let path = config::project_main_config_path(dir.path());
-    std::fs::create_dir_all(path.parent().expect("config parent")).expect("config directory");
-    config::save_sandbox(
-        &path,
-        config::SandboxConfig {
-            web_tools_enabled: true,
-            ..Default::default()
-        },
-    )
-    .expect("save");
-    let mut state =
-        WorkbenchState::new(DemoSource(Vec::new()), &workspace_ui::UiSettings::default())
-            .expect("state")
-            .with_settings_load_options(config::LoadOptions {
-                project_dir: Some(dir.path().to_path_buf()),
-                user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
-                read_env: false,
-                ..Default::default()
-            })
-            .with_provider_settings_path(path.clone());
-    state.open_sandbox_settings();
-    let mut harness = HeadlessWorkbench::new(state, [960.0, 600.0]);
-    harness.run();
-    // When: editing and cancelling instead of saving.
-    harness.click_label("Enable web tools");
-    harness.run();
-    harness.click_label("Cancel");
-    harness.run();
-    // Then: reopening reloads the persisted enabled setting; saving preserves it.
-    harness.state_mut().open_sandbox_settings();
-    harness.run();
-    harness.click_label("Save sandbox");
-    harness.run();
-    let saved = config::Config::load(&config::LoadOptions {
-        project_dir: Some(dir.path().into()),
-        user_config_dir: Some(dir.path().join(config::PROJECT_CONFIG_DIR)),
-        read_env: false,
-        ..Default::default()
-    })
-    .expect("load");
-    assert!(saved.sandbox.web_tools_enabled);
-}
-
 fn escalation_fixture(
     dir: &std::path::Path,
     initial: config::SandboxConfig,
@@ -153,13 +56,13 @@ fn chatbox_sandbox_button_opens_restored_modal() {
     let (mut harness, _) = escalation_fixture(dir.path(), config::SandboxConfig::default());
     harness.click_label("Cancel");
     harness.run();
-    assert!(!harness.has_label("Enable web tools"));
     // When: opening settings from the chatbox.
     harness.click_label("Sandbox: auto review");
     harness.run();
-    // Then: the modal exposes all sandbox settings.
+    // Then: the modal exposes the sandbox settings, and Web tools live only in
+    // Agent features so the two modals never disagree about them.
+    assert!(!harness.has_label("Web tools"));
     for label in [
-        "Enable web tools",
         "Ask me when auto review denies a request",
         "auto review",
         "ask me",
@@ -181,7 +84,14 @@ fn settings_menu_no_longer_offers_sandbox() {
     harness.run();
     // Then: sandbox settings have moved, while other settings remain available.
     assert!(!harness.has_label("Sandbox"));
-    for label in ["Theme", "Providers", "Agent roles", "Routing", "Storage"] {
+    for label in [
+        "Theme",
+        "Providers",
+        "Agent roles",
+        "Agent features",
+        "Routing",
+        "Storage",
+    ] {
         assert!(harness.has_label(label), "missing settings entry: {label}");
     }
 }
@@ -226,31 +136,28 @@ fn modal_escalation_change_applies_live_when_saved() {
 }
 
 #[test]
-fn sandbox_settings_save_preserves_persisted_escalation_fields() {
-    // Given: non-default persisted settings, also installed in the runtime.
+fn sandbox_save_keeps_the_web_tools_setting_and_live_state() {
+    // Given: Web tools disabled on disk and in the live runtime.
     let dir = tempfile::tempdir().expect("temp");
     let initial = config::SandboxConfig {
-        escalation_approval: config::EscalationApproval::User,
-        escalate_to_user_on_deny: true,
+        web_tools_enabled: false,
         ..Default::default()
     };
     let (mut harness, runtime) = escalation_fixture(dir.path(), initial);
-    // When: changing only Web tool availability and saving the loaded configuration.
-    harness.click_label("Enable web tools");
+    // When: changing only the approval mode and saving the sandbox.
+    harness.click_label("ask me");
     harness.run();
     harness.click_label("Save sandbox");
     harness.run();
-    // Then: disk and the same live runtime retain both non-default approval fields.
+    // Then: Web tools stay disabled on disk and in the same runtime.
     assert_eq!(
         reload_sandbox(dir.path()),
         config::SandboxConfig {
-            web_tools_enabled: false,
+            escalation_approval: config::EscalationApproval::User,
             ..initial
         }
     );
-    let policy = runtime.execution_policy(runtime::Role::Worker);
-    assert_eq!(policy.escalation_approval, initial.escalation_approval);
-    assert!(policy.escalate_to_user_on_deny);
+    assert!(!runtime.web_tools_enabled());
 }
 
 #[test]
@@ -277,7 +184,11 @@ fn capture_sandbox_settings() {
         .save_png(std::path::Path::new("/tmp/opencode/sandbox-settings.png"))
         .expect("PNG");
     // Then: controls fit within the viewport.
-    for label in ["Enable web tools", "Save sandbox", "Cancel"] {
+    for label in [
+        "Ask me when auto review denies a request",
+        "Save sandbox",
+        "Cancel",
+    ] {
         assert!(
             harness
                 .label_rects(label)

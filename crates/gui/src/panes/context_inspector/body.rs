@@ -25,7 +25,7 @@ impl ContextInspectorPane {
         let report = match result {
             Ok(report) => report.clone(),
             Err(error) => {
-                ui.colored_label(palette().ERROR_FG, error);
+                crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 return;
             }
         };
@@ -132,7 +132,7 @@ impl ContextInspectorPane {
                 return;
             }
             Some((_, Err(error))) => {
-                ui.colored_label(palette().ERROR_FG, error);
+                crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 return;
             }
             None if self.run.is_empty() => return,
@@ -216,7 +216,7 @@ impl ContextInspectorPane {
         let (left, right) = match (left, right) {
             (Ok(left), Ok(right)) => (left, right),
             (Err(error), _) | (_, Err(error)) => {
-                ui.colored_label(palette().ERROR_FG, error);
+                crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
                 return;
             }
         };

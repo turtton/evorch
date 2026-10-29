@@ -104,7 +104,7 @@ fn owner_responsive_shows_notice_without_sending() {
     assert!(observed.lock().unwrap().commands.is_empty());
     assert!(state.issued().is_empty());
     assert!(state.transcript().entries().iter().any(|entry| matches!(entry,
-        TranscriptEntry::Notice { text } if text == "このスレッドは別ウィンドウが write mode で保持中です")));
+        TranscriptEntry::Notice { text } if text == "Another window holds this thread in write mode")));
     assert_eq!(state.composer_mut().input, "hello");
 }
 

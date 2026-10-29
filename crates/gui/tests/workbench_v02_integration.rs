@@ -170,6 +170,7 @@ fn tool_started(run_id: &str, tool_name: &str, call_id: &str) -> Event {
         tool_name: tool_name.into(),
         call_id: call_id.into(),
         run_id: Some(run_id.into()),
+        parent_call_id: None,
     })
 }
 
@@ -283,6 +284,7 @@ fn assert_run_transcript(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::Diagnostic { .. }
             | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::AgentMessage { .. }
@@ -300,6 +302,7 @@ fn assert_run_transcript(
             TranscriptEntry::Message { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
+            | TranscriptEntry::Diagnostic { .. }
             | TranscriptEntry::SandboxReview { .. }
             | TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::Tool { .. }

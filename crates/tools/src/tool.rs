@@ -178,6 +178,27 @@ pub trait Tool: Send + Sync + std::any::Any {
         Ok(())
     }
 
+    /// Stop the shell jobs that the `run_js` call `parent_call_id` started and
+    /// await their process teardown, leaving the run's other jobs running. An
+    /// error means a process may still be alive.
+    async fn drain_child_shell_jobs(
+        &self,
+        _run_id: &str,
+        _parent_call_id: &str,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Acknowledge the finished jobs of the `run_js` call `parent_call_id` whose child call
+    /// numbers are `seqs`, once its result, which names them, has reached the model. Jobs
+    /// still running, or not named, stay unobserved.
+    fn observe_child_shell_jobs(&self, _run_id: &str, _parent_call_id: &str, _seqs: &[u32]) {}
+
+    /// One line per running or unread job of the run, for a reminder that names them.
+    fn unobserved_shell_job_summaries(&self, _run_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Reserve historical shell handles before restoring model-visible history.
     /// The default also covers custom shells which may later be replaced.
     fn reserve_shell_job_handles(&self, next: u64) -> Result<(), ToolError> {

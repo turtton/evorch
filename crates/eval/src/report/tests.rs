@@ -152,6 +152,7 @@ impl Fixture {
                 call_id: "1".into(),
                 input: Some(serde_json::json!({"command": "cargo update"})),
                 run_id: Some("root".into()),
+                parent_call_id: None,
             }),
             Event::new(ToolEvent::ToolCompleted {
                 tool_name: "shell".into(),
@@ -160,6 +161,7 @@ impl Fixture {
                 output: Some("error: Could not resolve host: index.crates.io".into()),
                 detail: None,
                 run_id: Some("root".into()),
+                parent_call_id: None,
             }),
         ];
         fixture.run(

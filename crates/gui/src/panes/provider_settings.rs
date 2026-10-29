@@ -151,7 +151,7 @@ pub fn provider_settings_modal(
                 }
             }
             if let Some(error) = &model.error {
-                ui.label(egui::RichText::new(error).color(palette().ERROR_FG));
+                crate::theme::widgets::reason_label(ui, palette().ERROR_FG, error);
             }
             ui.horizontal(|ui| {
                 if model.editor.is_some() {
