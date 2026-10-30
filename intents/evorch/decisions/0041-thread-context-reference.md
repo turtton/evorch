@@ -514,7 +514,7 @@ v25 は origin/main（`870a969b`）の時点で空いている（最新は v24�
 - 起動時の discovery: `run_contexts` などのヘッダを keyset で走査し、本文は読まない。状態変更は R2 に従い、R / B の試行数・E / D を保存する。新しい run から処理する。
 - アイドル時を優先する。ただし、通常コマンドが 32 件、または 100 ms 経過したら、必ず 1 step を実行する（`writer/state.rs:390–396` の `run_due_work` に組み込む）。
 - 抽出は writer の外で 1 並列で行う。同じ read transaction の SnapshotBundle を入力にし、commit 時は上記の epoch / revision / state / generation / request の全条件を再確認する。
-- pending がない、無効、容量不足、retry 待ちのときは、10 ms ごとに writer を起こさない。
+- pending がない、無効、容量不足、retry 待ちのときは、10 ms ごとに writer を起こさない。WAL 待機中は backoff（最短 100 ms、上限 1 s）の probe 時刻と容量通知だけで起こす。
 - retry: 1 秒から始め、最大 5 分の指数 backoff とする。同じ revision で 5 回失敗したら blocked にし、後続の run は進める。
 - 巨大な run が前景の書き込みを待たせる時間を計測する。
 
@@ -530,7 +530,7 @@ v25 は origin/main（`870a969b`）の時点で空いている（最新は v24�
 - `H=hard_limits.max_db_bytes`、`P=file_sizes().total()`（現状 `storage/src/db.rs:114–124` では DB+WAL+SHM）、`F=計測で得る前景正本 transaction の増加量の保守的上界` とする。snapshot / note / event のうち最大を F とし、`R=max(R_floor, ceil(safety_factor × F))` を正本用物理 reserve とする。`R_floor>0`、`safety_factor>=1`、再開用ヒステリシス `J>0`、書き込み 1 step の上限は順序 2 の計測で数値案を得て、**順序 5 の開始前**に W1/W2/W6 が ADR に値・根拠を記録する。実測最大は普遍的上界と断定せず、上界外入力は索引を止めて再評価する。
 - 各索引 commit の直前、writer 内で他書き込みと直列化し、SQLite の write transaction を確保して P を再計測する（別プロセスの writer とも競合させない）。予定差分の text / 属性 / FTS / page 丸めと WAL frame の増加（旧 page の書き換えも含む）から `G_db` / `G_wal` / `G_shm` を保守的に見積もり、`G=G_db+G_wal+G_shm` とする。削除予定の論理バイトを物理空きとして先取りしない。安全な増加上界を算出できなければ `growth_unbounded` として admission を拒否する。論理会計係数を物理増加量そのものと見なさない。
 - `P+G+R >= H` または `WAL+G_wal >= hard_limits.max_wal_bytes` で索引の書き込みを停止する。境界の等号も停止側とする。再計測で `P+G+R+J < H` かつ `WAL+G_wal+J < hard_limits.max_wal_bytes`、正本書き込み停止が解除されたときだけ再開する。H が reserve を満たせなければ索引無効相当とし正本を優先する。上限変更は writer の設定取り込み時から判定に使う。
-- admission が **WAL だけ**を理由に拒否された場合、pause / request gap の終端化前に、拒否した IMMEDIATE transaction を終了し、reader を待たない `wal_checkpoint(TRUNCATE)`（busy timeout 0、呼出後は通常値へ復元）を最大 1 回試す。新しい IMMEDIATE transaction で WAL / DB / SHM を再計測し、lease epoch・source revision・work generation・request guard と対象操作の G を再検証してから admission をやり直す。PASSIVE checkpoint 後に high-water だけが残る場合は安全に進めるが、reader の pin 等で条件を満たせなければ従来どおり pause する。H / max_wal / G / R / J は緩めない。pause 後の容量通知による再判定にも両方の厳密な +J 条件を適用し、既に終端化した request の gap は後の成功に書き換えない。
+- admission が **WAL だけ**を理由に拒否された場合、拒否した IMMEDIATE transaction を終了し、reader を待たない `wal_checkpoint(TRUNCATE)`（busy timeout 0、呼出後は通常値へ復元）を試す。結果 `(busy, log, checkpointed)` が busy=0 かつ log=checkpointed でない（reader が frame を保持、または checkpoint lock が busy）場合に限り、pause せず**期限付き WAL 待機**に入る。待機開始時刻 `wal_wait_since_ns` を `thread_index_state` に永続化し、再起動・owner 交代でも延長しない。待機中は IMMEDIATE を持たず writer を占有しない（期限前の失敗 probe も書き込み tx を取らない）。再試行は reader を待たない TRUNCATE probe（100 ms から 2 倍、上限 1 s、容量変化通知で前倒し）で行い、probe が完全成功したときだけ新しい IMMEDIATE transaction で WAL / DB / SHM を再計測し、lease epoch・source revision・work generation・request guard と対象操作の G を再検証してから admission をやり直す。WAL admission / probe の checkpoint は 1 step 最大 1 回とする（DbSize reclaim の checkpoint は別枠）。失敗 probe 後は容量・reserve・source suspension を再評価し、WAL 以外の拒否に変わったら通常の pause / gap に移る。checkpoint が完全成功してもなお WAL だけで拒否される場合（G_wal ≥ max_wal）と WAL 以外の理由は従来どおり即 pause する。期限判定は失敗 probe 時に行い、期限後でも probe が完全成功した場合は admission を試す。H / max_wal / G / R / J は緩めない。pause 後の容量通知による再判定にも両方の厳密な +J 条件を適用し、既に終端化した request の gap は後の成功に書き換えない。
 - Paused の診断は返却時点の reason / adjustment、DB / WAL / SHM、R / J、対象操作と G_db / G_wal / G_shm、適用中の物理上限を保存する。計測ハーネスは失敗時も最後の反復番号、完了検索数、backfill 成功数とそれまでの観測を残す。後からの `thread_index_capacity()` をこの診断の代わりに使わず、本文・SQL パラメータは記録しない。
 - reserve / J は索引への admission 制限であって正本の停止閾値ではない。`IndexPaused` 中も snapshot / note / event は残る物理余裕を利用でき、正本の停止は共通判定の hard limit 側で決める。索引停止をそのまま writes_suspended に伝播しない。
 - 共通 `capacity_status(planned_growth)` API（W2 所有）は `Normal` / `IndexPaused(reason)` / `SourceSuspended(reason)` と DB/WAL 実測・reserve を返す。snapshot / note / event と索引 job はこの容量圧迫判定に接続する。現状 `writer/state.rs:190–207` は容量停止中の snapshot / note に `StorageError::Serialization` を返すため、エラー型のパターン一致や文字列解析を回収開始条件にしない。共通判定と容量変化通知で接続し、正本 API のエラー型変更は本設計の前提にしない。
@@ -582,10 +582,10 @@ request 契約（R5、順序 1 で固定）:
 |---|---|
 | accepted | request が永続化され、別 owner に処理を委ねた非待機応答だけ。完了を意味しない |
 | completed | 固定 target がすべて同 revision / version で成功（または対象 0 件） |
-| completed_with_gaps | 全 target が成功または理由付き終端に到達し、gap が 1 件以上。blocked（provenance_unknown / 5 回失敗等）、capacity_paused、oversized、evicted_by_budget、固定後の deleted、superseded を gap として件数・理由を返す。全件 gap でも failed とはしない |
+| completed_with_gaps | 全 target が成功または理由付き終端に到達し、gap が 1 件以上。blocked（provenance_unknown / 5 回失敗等）、capacity_paused、capacity_wait_expired（WAL 待機の期限切れ）、oversized、evicted_by_budget、固定後の deleted、superseded を gap として件数・理由を返す。全件 gap でも failed とはしない |
 | failed | 不正引数、DB 利用不能、request/lease 永続化不能、回復不能な制御処理障害。target の通常の処理不能とは分ける。受付前なら request_id なし、受付後は failed を記録する |
 
-- request は容量不足の解消を無期限には待たず、物理 admission が拒否した target を `capacity_paused` gap にする。通常の P は残し、容量通知で job が再開しても terminal request の結果は変更しない。oversized は E、blocked は B、削除済みは D を維持する。別 target の論理 eviction が起きた場合は request 終了時にも保持 revision を再確認し、未保持を evicted_by_budget gap にする。
+- request は容量不足の解消を無期限には待たず、WAL 以外の理由で物理 admission が拒否した target は従来どおり `capacity_paused` gap にする。WAL だけを理由とし checkpoint 競合を観測した拒否では、request ごとに max(wal_wait_since_ns, created_at_ns)+5 分まで待機し、その間 target は pending（accepted / --wait は継続）とする。期限までに回復しなければその request の pending target を `capacity_wait_expired` gap にして終端化する（期限判定・最新 pending 集合確認・gap 化・since クリアは同一 IMMEDIATE で原子的に行う）。全 request の期限を過ぎた job は従来の pause に移り、以後は容量通知による +J 厳密再判定で再開する。例外: WAL 待機中・WAL pause 中に受け付けた新規 request は即 gap にせず pending とし、既存の WalLimit pause を解除して新しい待機 episode に入る（+J 再開契約の例外。別プロセスで受け付けた場合も、現 owner が lease 更新時に pending request を検知して同様に扱う）。index 無効・DbSize 側の pause は従来どおり受付時 gap とする。無効化を適用したときは待機中の request を `IndexDisabled` gap で即終端化する。終端化した request の結果は後の回復で変更しない。通常の P は残し、容量通知で job が再開しても terminal request の結果は変更しない。oversized は E、blocked は B、削除済みは D を維持する。別 target の論理 eviction が起きた場合は request 終了時にも保持 revision を再確認し、未保持を evicted_by_budget gap にする。
 - 待機中に owner が異常終了した場合、request / target / 試行数は DB に残す。待機 CLI は lease 期限到達後に CAS で引き継ぎ候補となり、勝者（新 GUI または CLI）が新 epoch で未完了 target から再開する。旧 epoch の commit は拒否し、結果を二重計上しない。待機 CLI が停止しても request は取消さず、次の GUI/CLI owner が継続する。
 - accepted-only 応答後に唯一の owner が落ち、待機 CLI もいなければ、隠れた daemon は起動しない。request は永続的に待機し、次回 owner 起動時に再開する。CLI は request_id と owner 不在状態を診断で確認できる共通 status API を持つ。待機の中断は request の failed / completed と混同しない。
 
@@ -633,7 +633,7 @@ request 契約（R5、順序 1 で固定）:
 - R2: evict → 上限引き上げ → snapshot/note 更新 → 再起動でも E のまま。blocked 後の再起動・同 revision discovery で attempt_count がリセットされない。version 変更 / 明示 reindex の例外、削除と遅延 commit の競合、request 取消・世代変更の commit 拒否を表の各セルに対応させる。
 - R3: 論理予算に空きがあるが物理 reserve 不足なら索引 commit を止める。停止後にも reserve 内の snapshot/note 正本書き込み余裕を維持できる。P+G+R の手前・ちょうど・超え、2 サイクル不成功、reader の WAL 保持、auto_vacuum=NONE、再開ヒステリシスを検証する。
 - R4: 画像+text の tool_result、2048 B 超の error、明示 tool_result 検索で成功/エラーの両方が出て既定 conversation には出ないこと。note 更新・clear 前後の guarded ref が snapshot の同 ordinal の発言へ誤解決されず stale になること。
-- R5: GUI owner あり/なし × wait あり/なしの 4 ケース、受付後の source 更新/削除、blocked / 容量不足 / oversized / 全件 gap / 0 件の結果、待機中の owner 異常終了→lease 引き継ぎ、accepted 後の owner 不在→次回起動で継続を検証する。
+- R5: GUI owner あり/なし × wait あり/なしの 4 ケース、受付後の source 更新/削除、blocked / 容量不足 / oversized / 全件 gap / 0 件の結果、待機中の owner 異常終了→lease 引き継ぎ、accepted 後の owner 不在→次回起動で継続を検証する。WAL 待機（#373）については、statement snapshot pin → 待機 → 解放後の自動再開（gap なし）、期限切れの `capacity_wait_expired`、再起動・owner 交代での期限引き継ぎ、取消、無効化、別プロセス受付、受付と期限判定の競合、WAL 以外への遷移、G_wal ≥ max_wal の即 pause、step あたり checkpoint 1 回、待機中に IMMEDIATE を持たないことを検証する。
 
 ### 計測計画
 
@@ -686,7 +686,7 @@ tool warm / cold はハーネスの 1 drain あたり 120 秒 watchdog に達し
 
 この判断により、既知の制約の範囲を「遅い検索（phrase・tool）＋background backfill」に広げ、WAL の一時停止と検索遅延（`runtime_deadline`）の両方を含める。それ以外の正確性・カバレッジ・資源エラーのゲートは変更しない。過去の FAIL はすべて保持し、PASS に書き換えない。
 
-今後の対応は別 PR とする。期限付きの非同期待機と自動再開を実装し、容量の上限と `G` を維持したまま request を待機・継続できるようにする。また、backfill と並行したときの遅い検索を改善する。今回はこれらを実装しない。
+今後の対応は別 PR とする。期限付きの非同期待機と自動再開を実装し、容量の上限と `G` を維持したまま request を待機・継続できるようにする。また、backfill と並行したときの遅い検索を改善する。今回はこれらを実装しない。WAL 一時停止側は #373 / PR #433 で期限付き待機と自動再開を実装した。承認済みバックアップがホストに無いため S8 の 14 セル再計測は行えず、回帰テストで受け入れた。
 
 #### #374 マージ後の更新（2026-10-30）
 
@@ -829,6 +829,7 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 ### マージ後の追跡
 
 - [x] #374 bounded scan — PR #432（merge `8b39b3a1`）。走査予算と chunk 単位の snapshot 解放を反映した。
+- [x] #373 WAL 待機 — PR #433（merge `29474dd3`）。WAL 上限の pause を期限付き待機と自動再開にした。
 - [ ] S8 再計測（新バックアップ承認後）
 
 ### 計画と契約

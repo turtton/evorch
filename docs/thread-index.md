@@ -9,6 +9,10 @@ matching happens in the runtime after redaction
 ([#374](https://github.com/turtton/evorch/issues/374),
 [PR #432](https://github.com/turtton/evorch/pull/432)).
 
+If index writes are refused only because the WAL is at its limit while a reader pins it, the request is not settled immediately: the owner probes a non-blocking TRUNCATE checkpoint with bounded backoff for up to 5 minutes per request and resumes automatically; after that the pending targets settle as `capacity_wait_expired` gaps. Other capacity refusals settle as `capacity_paused` as before
+([#373](https://github.com/turtton/evorch/issues/373),
+[PR #433](https://github.com/turtton/evorch/pull/433)).
+
 ## Configuration
 
 In the user `config.toml`:
