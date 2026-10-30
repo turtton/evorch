@@ -377,66 +377,6 @@ fn empty_restore_matches_legacy() {
     assert_same(&old, &new);
 }
 
-/// Manual measurement only: G1_RESTORE_COPY is a directory containing a SQLite
-/// backup (`events.db`) and sidebar.json. No writer/runtime/provider is started.
-/// Run old/new in separate processes so VmHWM is comparable; elapsed time is
-/// reported, never used as a correctness condition.
-#[test]
-#[ignore = "requires an explicitly supplied read-only backup, not the live database"]
-fn measure_restore_copy() {
-    let root =
-        std::path::PathBuf::from(std::env::var_os("G1_RESTORE_COPY").expect("backup directory"));
-    let legacy = std::env::var("G1_RESTORE_MODE").as_deref() == Ok("legacy");
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter("warn,gui::restore=info")
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let db = Database::open_read_only(&root.join("events.db")).unwrap();
-    let saved: super::history::HistorySidebar =
-        serde_json::from_slice(&std::fs::read(root.join("sidebar.json")).unwrap()).unwrap();
-    let mut state = state(saved.sidebar);
-    state.history = saved.user_messages;
-    state.composer_drafts = saved.composer_drafts;
-    let stage = crate::restore_metrics::RestoreTimer::new("runtime_orchestrator_read");
-    if legacy {
-        // Match the old two independent queries and materialized vectors.
-        let goals = db.orchestrator_events_ordered().unwrap();
-        let mut snapshots = crate::startup_restore::ThreadSnapshots::default();
-        for stored in goals {
-            if matches!(
-                stored.event.kind,
-                event_bus::EventKind::Orchestrator(
-                    event_bus::OrchestratorEvent::ThreadGoalUpdated { .. }
-                )
-            ) {
-                snapshots.apply(stored.event);
-            }
-        }
-        let todos = db.orchestrator_events_ordered().unwrap();
-        for stored in todos {
-            if matches!(
-                stored.event.kind,
-                event_bus::EventKind::Orchestrator(
-                    event_bus::OrchestratorEvent::ThreadTodoUpdated { .. }
-                )
-            ) {
-                snapshots.apply(stored.event);
-            }
-        }
-        std::hint::black_box(snapshots);
-    } else {
-        std::hint::black_box(crate::startup_restore::ThreadSnapshots::read(&db).unwrap());
-    }
-    stage.finish();
-    if legacy {
-        state.restore_history_legacy(&db, None).unwrap();
-    } else {
-        state.restore_history(&db).unwrap();
-    }
-    std::hint::black_box(state);
-}
-
 #[test]
 fn non_repair_candidates_never_decode_their_conversation_payloads() {
     let dir = tempfile::tempdir().unwrap();
