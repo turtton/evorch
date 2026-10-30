@@ -109,6 +109,7 @@ impl EventKind {
             },
             Self::Message(event) => match event {
                 MessageEvent::MessageCompleted { .. } => "MessageCompleted",
+                MessageEvent::MessagePart { .. } => "MessagePart",
                 MessageEvent::FinalResultPublished { .. } => "FinalResultPublished",
                 MessageEvent::MessageDelta { .. } => "MessageDelta",
                 MessageEvent::ReasoningDelta { .. } => "ReasoningDelta",
@@ -191,6 +192,7 @@ impl EventKind {
             },
             Self::Message(event) => match event {
                 MessageEvent::MessageCompleted { run_id, .. }
+                | MessageEvent::MessagePart { run_id, .. }
                 | MessageEvent::FinalResultPublished { run_id, .. } => Some(run_id),
                 MessageEvent::MessageDelta { run_id, .. }
                 | MessageEvent::ReasoningDelta { run_id, .. }
@@ -801,6 +803,20 @@ pub enum MessageEvent {
     /// Canonical text of one accepted model response, replacing its streamed deltas.
     /// This is observational only and does not mark the run as finished.
     MessageCompleted { run_id: String, text: String },
+    /// One slice of an accepted response, written only by the storage bridge
+    /// when the response is too large for a single `MessageCompleted` row.
+    ///
+    /// Never emitted on the bus. Readers require every indexed slice of one
+    /// response before rebuilding it with [`crate::MessagePartAssembler`].
+    MessagePart {
+        run_id: String,
+        /// Unique for this response, including when another response has gaps.
+        response_id: String,
+        text: String,
+        /// Zero-based position. Readers reject missing or out-of-order slices.
+        index: usize,
+        total: usize,
+    },
     /// 受理された finish 操作の最終結果を観測用に公開した。
     FinalResultPublished {
         /// 結果を返した run の ID。

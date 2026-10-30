@@ -5420,6 +5420,7 @@ dependencies = [
  "config",
  "event-bus",
  "runtime",
+ "secret-guard",
  "serde",
  "serde_json",
  "storage",
@@ -5427,6 +5428,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
