@@ -127,15 +127,6 @@ fn discards_result_when_account_changes_during_fetch() {
 
 #[test]
 fn loads_catalog_when_profile_account_has_valid_access_token() {
-    fetch_catalog(false);
-}
-
-#[test]
-fn loads_catalog_with_visible_fallback_when_github_fails() {
-    fetch_catalog(true);
-}
-
-fn fetch_catalog(github_fails: bool) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sandbox::CredentialStore;
     use std::io::{Read, Write};
@@ -144,20 +135,10 @@ fn fetch_catalog(github_fails: bool) {
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for (status, body) in [
-            if github_fails {
-                ("503 Service Unavailable", "unavailable")
-            } else {
-                (
-                    "200 OK",
-                    r#"[{"tag_name":"rust-v0.157.2","name":"0.157.2","draft":false,"prerelease":false}]"#,
-                )
-            },
-            (
-                "200 OK",
-                r#"{"models":[{"slug":"gpt-6-sol","context_window":272000},{"slug":"gpt-6-luna"},{"slug":"gpt-6-sol","context_window":272000}]}"#,
-            ),
-        ] {
+        for (status, body) in [(
+            "200 OK",
+            r#"{"models":[{"slug":"gpt-6-sol","context_window":272000},{"slug":"gpt-6-luna"},{"slug":"gpt-6-sol","context_window":272000}]}"#,
+        )] {
             let (mut stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -197,9 +178,6 @@ fn fetch_catalog(github_fails: bool) {
     let mut settings = settings();
     let editor = settings.codex_mut().unwrap();
     editor.account = "oauth-account".into();
-    editor.fetch.version_resolver = Arc::new(providers::CodexCatalogVersionResolver::new(format!(
-        "{base_url}/releases"
-    )));
     editor.fetch.base_url = base_url;
     // When
     settings.start_models_fetch_with_store(Some(store));
@@ -216,17 +194,10 @@ fn fetch_catalog(github_fails: bool) {
         Some(&272_000)
     );
     assert!(!editor.fetch.context_windows.contains_key("gpt-6-luna"));
-    let version = if github_fails { "0.156.1" } else { "0.157.2" };
-    let resolved = editor.fetch.catalog_version.as_ref().unwrap();
-    assert_eq!(resolved.version, version);
-    assert_eq!(resolved.warning.is_some(), github_fails);
+    let version = providers::CODEX_CLIENT_VERSION;
     let requests = server.join().unwrap();
-    let release_request = &requests[0];
-    assert!(release_request.starts_with("GET /releases?per_page=10&page=1 HTTP/1.1"));
-    assert!(!release_request.contains(&token));
-    assert!(!release_request.contains("authorization:"));
-    assert!(!release_request.contains("chatgpt-account-id:"));
-    let request = &requests[1];
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
     assert!(request.starts_with(&format!("GET /models?client_version={version} HTTP/1.1")));
     assert!(request.contains("chatgpt-account-id: jwt-account\r\n"));
     assert!(request.contains("originator: codex_cli_rs\r\n"));

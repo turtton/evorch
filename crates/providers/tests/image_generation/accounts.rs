@@ -36,10 +36,6 @@ async fn ac2_codex_images_share_refresh_account_and_session_headers() {
         CodexConfig {
             base_url: server.uri(),
             auth_base_url: server.uri(),
-            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-                version: "0.200.0".into(),
-                warning: None,
-            }),
             ..Default::default()
         },
         store.clone(),

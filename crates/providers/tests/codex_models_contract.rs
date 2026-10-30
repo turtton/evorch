@@ -1,4 +1,4 @@
-use providers::{CODEX_MODELS_FALLBACK_VERSION, ProviderAuth, ProviderError};
+use providers::{CODEX_CLIENT_VERSION, ProviderAuth, ProviderError};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -9,10 +9,13 @@ async fn lists_new_slugs_using_resolved_catalog_version() {
     Mock::given(method("GET"))
         .and(path("/backend-api/codex/models"))
         .and(header("authorization", "Bearer oauth-access"))
-        .and(query_param("client_version", "0.156.1"))
+        .and(query_param("client_version", CODEX_CLIENT_VERSION))
         .and(header("chatgpt-account-id", "catalog-account"))
         .and(header("originator", "codex_cli_rs"))
-        .and(header("user-agent", "codex_cli_rs/0.156.1"))
+        .and(header(
+            "user-agent",
+            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "models": [{"slug": "gpt-6-sol", "display_name": "GPT-6-Sol"}, {"slug": "gpt-6-luna"}]
         })))
@@ -24,7 +27,6 @@ async fn lists_new_slugs_using_resolved_catalog_version() {
         &format!("{}/backend-api/codex/", server.uri()),
         &ProviderAuth::new("oauth-access"),
         "catalog-account",
-        "0.156.1",
     )
     .await
     .unwrap();
@@ -53,14 +55,10 @@ async fn catalog_advertises_fast_support_leniently() {
         .expect(1)
         .mount(&server).await;
     // When: カタログを取得する。
-    let models = providers::list_codex_models(
-        &server.uri(),
-        &ProviderAuth::new("token"),
-        "account",
-        CODEX_MODELS_FALLBACK_VERSION,
-    )
-    .await
-    .expect("catalog");
+    let models =
+        providers::list_codex_models(&server.uri(), &ProviderAuth::new("token"), "account")
+            .await
+            .expect("catalog");
     // Then: 広告されたpriorityまたはfastだけが対応扱いになる。
     let actual: Vec<_> = models
         .iter()
@@ -101,7 +99,6 @@ async fn rejects_invalid_codex_response_when_schema_is_wrong() {
             &server.uri(),
             &ProviderAuth::new("token"),
             "catalog-account",
-            CODEX_MODELS_FALLBACK_VERSION,
         )
         .await;
         // Then
@@ -122,7 +119,6 @@ async fn returns_empty_when_codex_catalog_is_empty() {
         &server.uri(),
         &ProviderAuth::new("token"),
         "catalog-account",
-        CODEX_MODELS_FALLBACK_VERSION,
     )
     .await;
     // Then
@@ -142,7 +138,6 @@ async fn returns_http_error_when_oauth_is_rejected() {
         &server.uri(),
         &ProviderAuth::new("token"),
         "catalog-account",
-        CODEX_MODELS_FALLBACK_VERSION,
     )
     .await;
     // Then
@@ -159,10 +154,13 @@ async fn returns_http_error_when_strict_catalog_rejects_client_headers() {
     Mock::given(method("GET"))
         .and(path("/models"))
         .and(header("authorization", "Bearer oauth-access"))
-        .and(query_param("client_version", CODEX_MODELS_FALLBACK_VERSION))
+        .and(query_param("client_version", CODEX_CLIENT_VERSION))
         .and(header("chatgpt-account-id", "catalog-account"))
         .and(header("originator", "codex_cli_rs"))
-        .and(header("user-agent", "codex_cli_rs/0.156.1"))
+        .and(header(
+            "user-agent",
+            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
+        ))
         .respond_with(ResponseTemplate::new(403).set_body_string("client headers rejected"))
         .with_priority(1)
         .expect(1)
@@ -179,7 +177,6 @@ async fn returns_http_error_when_strict_catalog_rejects_client_headers() {
         &server.uri(),
         &ProviderAuth::new("oauth-access"),
         "catalog-account",
-        CODEX_MODELS_FALLBACK_VERSION,
     )
     .await;
     // Then

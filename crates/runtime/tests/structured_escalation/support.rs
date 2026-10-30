@@ -166,12 +166,6 @@ fn harness_with_model(
             factory: FactoryOptions {
                 auth_base_url_override: Some(base_url.into()),
                 request_timeout: Some(timeout),
-                codex_client_version: Some(providers::CodexClientVersion::Fixed(
-                    providers::CodexCatalogVersion {
-                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                        warning: None,
-                    },
-                )),
                 ..Default::default()
             },
         },

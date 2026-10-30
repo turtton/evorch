@@ -33,7 +33,7 @@ async fn mount(server: &MockServer, response: ResponseTemplate) {
         .and(header("originator", "codex_cli_rs"))
         .and(header(
             "user-agent",
-            format!("codex_cli_rs/{}", providers::CODEX_MODELS_FALLBACK_VERSION),
+            format!("codex_cli_rs/{}", providers::CODEX_CLIENT_VERSION),
         ))
         .and(header("accept", "text/event-stream"))
         .and(CodexIdMatcher)
@@ -87,22 +87,13 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
 }
 
 #[tokio::test]
-async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
-    // Given: release discovery and inference both use offline mock endpoints.
+async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup() {
+    // Given: only the Codex backend is mocked; any other endpoint would be unmatched.
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
-            "tag_name": "rust-v0.156.1",
-            "draft": false,
-            "prerelease": false,
-        }])))
-        .expect(1)
-        .mount(&server)
-        .await;
+    let version = providers::CODEX_CLIENT_VERSION;
     Mock::given(method("GET"))
         .and(path("/models"))
-        .and(wiremock::matchers::query_param("client_version", "0.156.1"))
+        .and(wiremock::matchers::query_param("client_version", version))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"models": [{"slug": "gpt-4o"}]})),
         )
@@ -111,8 +102,8 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
         .await;
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
-        .and(header("version", "0.156.1"))
-        .and(header("user-agent", "codex_cli_rs/0.156.1"))
+        .and(header("version", version))
+        .and(header("user-agent", format!("codex_cli_rs/{version}")))
         .respond_with(sse_response(&fixture("codex", "responses_success.sse")))
         .expect(2)
         .mount(&server)
@@ -121,16 +112,13 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
         CodexConfig {
             base_url: server.uri(),
             auth_base_url: server.uri(),
-            client_version: providers::CodexClientVersion::Resolve(Arc::new(
-                providers::CodexCatalogVersionResolver::new(format!("{}/releases", server.uri())),
-            )),
             ..CodexConfig::default()
         },
         seeded_store(),
     )
     .expect("Codex client can be built");
 
-    // Catalog preflight pins the same version later used by both inference turns.
+    // When: the catalog is fetched and two inference turns are sent.
     assert_eq!(
         client.list_models(&ProviderAuth::new("")).await.unwrap(),
         Some(vec!["gpt-4o".into()])
@@ -139,21 +127,14 @@ async fn resolved_latest_version_reaches_headers_and_stays_stable_per_client() {
         let response = client
             .send(&ProviderAuth::new(""), &request())
             .await
-            .expect("send succeeds with the resolved version");
+            .expect("send succeeds with the built-in version");
         assert_eq!(response.finish_reason, FinishReason::Stop);
     }
 
-    // Then: both inference requests carry the resolved headers, and discovery
-    // happens once without receiving any Codex credentials.
+    // Then: every request carried the same built-in version, and nothing else
+    // (such as a release lookup) was contacted.
     server.verify().await;
-    let requests = server.received_requests().await.expect("requests recorded");
-    assert_eq!(requests.len(), 4);
-    let discovery = requests
-        .iter()
-        .find(|request| request.url.path() == "/releases")
-        .expect("release lookup was recorded");
-    assert!(!discovery.headers.contains_key("authorization"));
-    assert!(!discovery.headers.contains_key("chatgpt-account-id"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -173,10 +154,6 @@ async fn send_sets_codex_headers_and_aggregates_stream() {
             auth_base_url: server.uri(),
             timeout: Duration::from_secs(1),
             event_bus: Some(bus),
-            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                warning: None,
-            }),
         },
         seeded_store(),
     )
@@ -306,10 +283,6 @@ async fn stream_parallel_tool_calls_recover_final_arguments() {
             base_url: server.uri(),
             auth_base_url: server.uri(),
             event_bus: Some(Arc::clone(&bus)),
-            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                warning: None,
-            }),
             ..CodexConfig::default()
         },
         seeded_store(),

@@ -227,7 +227,7 @@ async fn mount_codex_catalog(server: &wiremock::MockServer, access_token: &str) 
         .and(wiremock::matchers::header("chatgpt-account-id", "account"))
         .and(wiremock::matchers::query_param(
             "client_version",
-            providers::CODEX_MODELS_FALLBACK_VERSION,
+            providers::CODEX_CLIENT_VERSION,
         ))
         .respond_with(
             wiremock::ResponseTemplate::new(200)
@@ -243,23 +243,13 @@ fn codex_model(
     store: Arc<FileCredentialStore>,
     id_token: &str,
 ) -> Arc<RoutedModel> {
-    codex_model_with_version(
-        server,
-        store,
-        id_token,
-        providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-            version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-            warning: None,
-        }),
-        None,
-    )
+    codex_model_with_bus(server, store, id_token, None)
 }
 
-fn codex_model_with_version(
+fn codex_model_with_bus(
     server: &wiremock::MockServer,
     store: Arc<FileCredentialStore>,
     id_token: &str,
-    version: providers::CodexClientVersion,
     bus: Option<Arc<EventBus>>,
 ) -> Arc<RoutedModel> {
     use sandbox::credential::CredentialStore;
@@ -302,125 +292,12 @@ fn codex_model_with_version(
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
                 auth_base_url_override: Some(server.uri()),
-                codex_client_version: Some(version),
                 ..Default::default()
             },
         },
         Some(test_support::model_catalog_dir()),
     )
     .unwrap()
-}
-
-#[tokio::test]
-async fn codex_release_failure_missing_model_is_degraded_not_unadvertised() {
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-    // The old-version catalog succeeds but omits the configured model. A release
-    // lookup failure cannot turn that incomplete catalog into authoritative absence.
-    for status in [503, 429] {
-        let server = MockServer::start().await;
-        Mock::given(path("/releases"))
-            .respond_with(ResponseTemplate::new(status))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/models"))
-            .and(query_param(
-                "client_version",
-                providers::CODEX_MODELS_FALLBACK_VERSION,
-            ))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(path("/models"))
-            .and(query_param("client_version", "0.999.0"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"models": [{"slug": "gpt-4o"}]})),
-            )
-            .expect(0)
-            .mount(&server)
-            .await;
-        let directory = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
-        let bus = Arc::new(EventBus::new(32));
-        let mut receiver = bus.subscribe();
-        let model = codex_model_with_version(
-            &server,
-            store,
-            FRESH_ID_TOKEN,
-            providers::CodexClientVersion::Resolve(Arc::new(
-                providers::CodexCatalogVersionResolver::new(format!("{}/releases", server.uri())),
-            )),
-            Some(Arc::clone(&bus)),
-        );
-        let invocation = AgentInvocationContext {
-            model_preference: Some(ModelPreference {
-                profile: "codex".into(),
-                model: None,
-                reasoning_effort: None,
-            }),
-            ..Default::default()
-        };
-        let error = model
-            .admit(&invocation, Role::Reviewer)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("degraded"), "{error}");
-        assert!(!error.contains("not advertised"), "{error}");
-        let preflight_error = model
-            .preflight_routes(&[routing::ResolvedRoute {
-                profile: "codex".into(),
-                model_id: "gpt-4o".into(),
-            }])
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(preflight_error.contains("degraded"), "{preflight_error}");
-        assert!(
-            !preflight_error.contains("not advertised"),
-            "{preflight_error}"
-        );
-        assert!(
-            server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|r| r.method == "GET")
-        );
-        let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
-        let catalog = diagnostics
-            .iter()
-            .find(|event| event.code == event_bus::event::diagnostic_codes::PROVIDER_CATALOG_FETCH)
-            .unwrap();
-        assert_eq!(catalog.severity, event_bus::DiagnosticSeverity::Warning);
-        for field in [
-            "profile=codex",
-            "version_source=bundled",
-            "model_count=0",
-            "catalog_result=ok",
-            "version_cache_hit=false",
-            "catalog_cache_hit=false",
-            "elapsed_ms=",
-            &format!("version_lookup_failure=http_{status}"),
-            providers::CODEX_MODELS_FALLBACK_VERSION,
-            "New models may be missing",
-        ] {
-            assert!(catalog.detail.contains(field), "{field}: {catalog:?}");
-        }
-        for diagnostic in &diagnostics {
-            for secret in ["access-token", "refresh-token", FRESH_ID_TOKEN, "account"] {
-                assert!(!diagnostic.detail.contains(secret), "{diagnostic:?}");
-            }
-        }
-    }
 }
 
 async fn catalog_diagnostics(
@@ -448,99 +325,43 @@ async fn catalog_diagnostics(
 }
 
 #[tokio::test]
-async fn codex_preflight_warns_for_advertised_model_when_version_lookup_degrades() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-    let server = MockServer::start().await;
-    // GitHub's unauthenticated rate limit answers 403.
-    Mock::given(path("/releases"))
-        .respond_with(ResponseTemplate::new(403))
-        .expect(1)
-        .mount(&server)
-        .await;
+async fn codex_catalog_success_reports_hardcoded_client_version() {
+    // Given: a Codex catalog that advertises the configured model. No other
+    // endpoint is mocked: the client version needs no network lookup.
+    let server = wiremock::MockServer::start().await;
     mount_codex_catalog(&server, "access-token").await;
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
-    let resolver = || {
-        providers::CodexClientVersion::Resolve(Arc::new(
-            providers::CodexCatalogVersionResolver::new(format!("{}/releases", server.uri())),
-        ))
-    };
     let bus = Arc::new(EventBus::new(32));
     let mut receiver = bus.subscribe();
-    let model = codex_model_with_version(
-        &server,
-        Arc::clone(&store),
-        FRESH_ID_TOKEN,
-        resolver(),
-        Some(Arc::clone(&bus)),
-    );
-    let routes = [routing::ResolvedRoute {
-        profile: "codex".into(),
-        model_id: "gpt-4o".into(),
-    }];
-    model.preflight_routes(&routes).await.unwrap();
-    let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
-    let warning = diagnostics
-        .iter()
-        .find(|event| event.code == event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE)
-        .expect("degradation is reported as a warning");
-    assert_eq!(warning.severity, event_bus::DiagnosticSeverity::Warning);
-    for field in ["profile=codex", "model=gpt-4o", "degraded", "http_403"] {
-        assert!(warning.detail.contains(field), "{field}: {warning:?}");
-    }
-    for diagnostic in &diagnostics {
-        for secret in ["access-token", "refresh-token", FRESH_ID_TOKEN] {
-            assert!(!diagnostic.detail.contains(secret), "{diagnostic:?}");
-        }
-    }
-    server.verify().await;
-    server.reset().await;
-    Mock::given(path("/releases"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"tag_name": "rust-v0.999.0", "draft": false, "prerelease": false},
-        ])))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .and(wiremock::matchers::query_param("client_version", "0.999.0"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"models": [{"slug": "gpt-4o"}]})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    // A new resolver models recovery after the shared resolver's tested backoff.
-    let bus = Arc::new(EventBus::new(32));
-    let mut receiver = bus.subscribe();
-    let recovered = codex_model_with_version(
-        &server,
-        store,
-        FRESH_ID_TOKEN,
-        resolver(),
-        Some(Arc::clone(&bus)),
-    );
-    recovered.preflight_routes(&routes).await.unwrap();
+    let model = codex_model_with_bus(&server, store, FRESH_ID_TOKEN, Some(Arc::clone(&bus)));
+    // When: preflighting an advertised route.
+    model
+        .preflight_routes(&[routing::ResolvedRoute {
+            profile: "codex".into(),
+            model_id: "gpt-4o".into(),
+        }])
+        .await
+        .unwrap();
+    // Then: the only request is the catalog fetch, reported at info severity
+    // with the built-in client version and without version lookup fields.
     let diagnostics = catalog_diagnostics(&bus, &mut receiver).await;
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let catalog = &diagnostics[0];
     assert_eq!(catalog.severity, event_bus::DiagnosticSeverity::Info);
-    assert!(
-        catalog.detail.contains("version_source=resolved"),
-        "{catalog:?}"
-    );
-    assert!(catalog.detail.contains("model_count=1"), "{catalog:?}");
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| r.method == "GET")
-    );
+    for field in [
+        "profile=codex",
+        &format!("client_version={}", providers::CODEX_CLIENT_VERSION),
+        "catalog_result=ok",
+        "model_count=1",
+    ] {
+        assert!(catalog.detail.contains(field), "{field}: {catalog:?}");
+    }
+    assert!(!catalog.detail.contains("version_source"), "{catalog:?}");
+    assert!(!catalog.detail.contains("version_lookup"), "{catalog:?}");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/models");
 }
 
 #[tokio::test]
@@ -562,16 +383,7 @@ async fn codex_catalog_api_errors_are_not_unadvertised_or_secret_bearing() {
             Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
         let bus = Arc::new(EventBus::new(32));
         let mut receiver = bus.subscribe();
-        let model = codex_model_with_version(
-            &server,
-            store,
-            FRESH_ID_TOKEN,
-            providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                warning: None,
-            }),
-            Some(Arc::clone(&bus)),
-        );
+        let model = codex_model_with_bus(&server, store, FRESH_ID_TOKEN, Some(Arc::clone(&bus)));
         let error = model
             .preflight_routes(&[routing::ResolvedRoute {
                 profile: "codex".into(),

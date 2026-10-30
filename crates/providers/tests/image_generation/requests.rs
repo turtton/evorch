@@ -85,8 +85,11 @@ async fn requests(codex: bool) {
             mock = mock
                 .and(header("chatgpt-account-id", "selected-account"))
                 .and(header("originator", "codex_cli_rs"))
-                .and(header("version", "0.200.0"))
-                .and(header("user-agent", "codex_cli_rs/0.200.0"))
+                .and(header("version", providers::CODEX_CLIENT_VERSION))
+                .and(header(
+                    "user-agent",
+                    format!("codex_cli_rs/{}", providers::CODEX_CLIENT_VERSION),
+                ))
                 .and(header("OpenAI-Beta", "responses=experimental"));
         }
         mock.respond_with(

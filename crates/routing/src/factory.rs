@@ -184,8 +184,6 @@ pub struct FactoryOptions {
     pub auth_base_url_override: Option<String>,
     /// provider request timeout の上書き。`None` なら60秒。
     pub request_timeout: Option<Duration>,
-    /// Codex client version の上書き。`None` なら共有 resolver で一度だけ解決する。
-    pub codex_client_version: Option<providers::CodexClientVersion>,
     /// Claude subscription installation seed. API-key clients never access this path.
     /// Library callers without a path share a process-local seed.
     pub claude_installation_id_path: Option<PathBuf>,
@@ -351,7 +349,6 @@ fn build_codex(
             .auth_base_url_override
             .clone()
             .unwrap_or_else(|| DEFAULT_AUTH_BASE_URL.to_string()),
-        client_version: options.codex_client_version.clone().unwrap_or_default(),
         event_bus,
         ..CodexConfig::default()
     };

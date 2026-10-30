@@ -298,7 +298,6 @@ pub(crate) async fn load_catalog(cache_dir: &Path) -> Option<ModelCatalog> {
 async fn load_codex_windows(
     config: &Config,
     store: &Arc<dyn CredentialStore>,
-    client_version: &str,
 ) -> BTreeMap<String, u64> {
     let mut windows = BTreeMap::new();
     let codex_profiles: Vec<_> = config
@@ -334,7 +333,6 @@ async fn load_codex_windows(
             &profile.base_url,
             &providers::ProviderAuth::new(tokens.access_token),
             &claims.chatgpt_account_id,
-            client_version,
         )
         .await
         {
@@ -412,10 +410,7 @@ impl ModelResolution {
                             profile.provider_type == config::ProviderTypeConfig::OpenAiCodex
                         }) =>
                     {
-                        let version = providers::CodexCatalogVersionResolver::shared()
-                            .resolve()
-                            .await;
-                        load_codex_windows(&self.config, store, &version.version).await
+                        load_codex_windows(&self.config, store).await
                     }
                     Some(_) | None => BTreeMap::new(),
                 }

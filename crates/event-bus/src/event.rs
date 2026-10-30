@@ -355,8 +355,7 @@ pub mod diagnostic_codes {
     /// reasoning effort was not applied, or the model's route was guessed because
     /// the account catalog did not provide it.
     pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
-    /// Catalog/version lookup evidence. Failures and degraded catalogs are warnings;
-    /// successful fetches are info (not persisted under the default warnings policy).
+    /// Catalog lookup evidence. Failures are warnings; successful fetches are info (not persisted under the default warnings policy).
     pub const PROVIDER_CATALOG_FETCH: &str = "ProviderCatalogFetch";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";

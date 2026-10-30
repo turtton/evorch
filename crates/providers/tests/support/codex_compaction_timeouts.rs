@@ -103,12 +103,6 @@ impl Exchange {
                 base_url: base_url.clone(),
                 auth_base_url: base_url,
                 timeout: normal_timeout,
-                client_version: providers::CodexClientVersion::Fixed(
-                    providers::CodexCatalogVersion {
-                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                        warning: None,
-                    },
-                ),
                 ..CodexConfig::default()
             },
             seeded_store(),

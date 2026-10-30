@@ -333,12 +333,6 @@ async fn ac5_codex_404_falls_back_to_openai_http_endpoint() {
         CodexClient::with_config(
             CodexConfig {
                 base_url: format!("{}/backend-api/codex", server.uri()),
-                client_version: providers::CodexClientVersion::Fixed(
-                    providers::CodexCatalogVersion {
-                        version: "0.200.0".into(),
-                        warning: None,
-                    },
-                ),
                 ..Default::default()
             },
             tokens,

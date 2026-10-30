@@ -63,9 +63,13 @@ pub struct CodexModelInfo {
     pub supports_fast: bool,
 }
 
+/// Codex backend へ名乗る Codex CLI のバージョン。
+/// 推論リクエストのヘッダーとモデルカタログ取得の双方で使う。実行時に最新版を
+/// 問い合わせず、リリースごとに更新する（Sol/Luna は 0.155.0 以上が必要）。
+pub const CODEX_CLIENT_VERSION: &str = "0.166.0";
+
 /// OAuth の Bearer トークンとアカウント ID で Codex のモデルカタログを取得する。
-/// `client_version` は [`crate::CodexCatalogVersionResolver`] で解決した値を渡す。
-/// バージョン解決を分離し、GitHub へ Codex 認証情報を送らない。
+/// [`CODEX_CLIENT_VERSION`] を `client_version` として送る。
 ///
 /// # Errors
 /// HTTP・通信エラー、または応答形式が不正な場合の JSON エラーを返す。
@@ -73,16 +77,15 @@ pub async fn list_codex_models(
     base_url: &str,
     auth: &ProviderAuth,
     account_id: &str,
-    client_version: &str,
 ) -> Result<Vec<CodexModelInfo>, ProviderError> {
     let request = build_http_client(Some(std::time::Duration::from_secs(10)))?
         .get(format!("{}/models", base_url.trim_end_matches('/')))
-        .query(&[("client_version", client_version)])
+        .query(&[("client_version", CODEX_CLIENT_VERSION)])
         .header("chatgpt-account-id", account_id)
         .header("originator", "codex_cli_rs")
         .header(
             reqwest::header::USER_AGENT,
-            format!("codex_cli_rs/{client_version}"),
+            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
         )
         .bearer_auth(&auth.api_key);
     let models: CodexModelList = fetch_list(request).await?;

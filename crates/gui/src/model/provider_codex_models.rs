@@ -13,7 +13,6 @@ mod tests;
 pub struct CodexFetchedModels {
     pub models: Vec<String>,
     pub context_windows: BTreeMap<String, u64>,
-    pub version: providers::CodexCatalogVersion,
 }
 
 #[derive(Debug)]
@@ -24,8 +23,6 @@ pub struct CodexModelsFetch {
     pub context_windows: BTreeMap<String, u64>,
     pub fetch_selected: BTreeSet<String>,
     pub models_rx: Option<mpsc::Receiver<Result<CodexFetchedModels, String>>>,
-    pub version_resolver: Arc<providers::CodexCatalogVersionResolver>,
-    pub catalog_version: Option<providers::CodexCatalogVersion>,
     pub(super) source: Option<(String, String)>,
 }
 
@@ -38,8 +35,6 @@ impl Default for CodexModelsFetch {
             context_windows: BTreeMap::new(),
             fetch_selected: BTreeSet::new(),
             models_rx: None,
-            version_resolver: providers::CodexCatalogVersionResolver::shared(),
-            catalog_version: None,
             source: None,
         }
     }
@@ -56,9 +51,7 @@ impl CodexEditorModel {
         self.fetch.models_fetch_state = ModelsFetchState::Loading;
         self.fetch.available_models = None;
         self.fetch.context_windows.clear();
-        self.fetch.catalog_version = None;
         self.fetch.fetch_selected.clear();
-        let resolver = self.fetch.version_resolver.clone();
         let account = self.account.clone();
         let base_url = self.fetch.base_url.clone();
         self.fetch.source = Some((account.clone(), base_url.clone()));
@@ -71,12 +64,10 @@ impl CodexEditorModel {
                     .build()
                     .map_err(|error| error.to_string())?;
                 runtime.block_on(async {
-                    let version = resolver.resolve().await;
                     let models = providers::list_codex_models(
                         &base_url,
                         &providers::ProviderAuth::new(credentials.access_token),
                         &credentials.account_id,
-                        &version.version,
                     )
                     .await
                     .map_err(|error| map_fetch_error(&error))?;
@@ -84,7 +75,6 @@ impl CodexEditorModel {
                     Ok(CodexFetchedModels {
                         models,
                         context_windows,
-                        version,
                     })
                 })
             });
@@ -119,7 +109,6 @@ impl CodexEditorModel {
         };
         self.fetch.source = None;
         let result = result.map(|fetched| {
-            self.fetch.catalog_version = Some(fetched.version);
             self.fetch.context_windows = fetched.context_windows;
             fetched.models
         });
@@ -128,10 +117,7 @@ impl CodexEditorModel {
                 self.fetch.available_models = None;
                 self.fetch.models_fetch_state = ModelsFetchState::Failed(format!(
                     "Codex backend returned 0 models with client version {}; check catalog compatibility and account access",
-                    self.fetch
-                        .catalog_version
-                        .as_ref()
-                        .map_or("unknown", |version| version.version.as_str()),
+                    providers::CODEX_CLIENT_VERSION,
                 ));
             }
             Ok(models) => {

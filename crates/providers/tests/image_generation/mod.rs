@@ -40,12 +40,6 @@ fn client(
                     base_url: format!("{}{suffix}", server.uri()),
                     auth_base_url: server.uri(),
                     event_bus: bus,
-                    client_version: providers::CodexClientVersion::Fixed(
-                        providers::CodexCatalogVersion {
-                            version: "0.200.0".into(),
-                            warning: None,
-                        },
-                    ),
                     ..Default::default()
                 },
                 store,
