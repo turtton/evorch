@@ -94,7 +94,7 @@ pub use migrations::backfill::{
     DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
 };
 pub use projection::{ReconcileSummary, SessionSnapshot};
-pub use read::{RunContextHeader, StoredAgentMessage};
+pub use read::{RunContextHeader, RunContextMeta, StoredAgentMessage};
 pub use repo::event::{EventPage, StoredEvent};
 pub use repo::user_questions::AnswerMode;
 pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewEvidenceRow};

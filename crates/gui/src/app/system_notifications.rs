@@ -20,6 +20,14 @@ pub(super) struct SystemNotifications {
 }
 
 impl SystemNotifications {
+    #[cfg(test)]
+    pub(super) fn assert_same_seed(&self, other: &Self) {
+        assert_eq!(self.questions, other.questions);
+        assert_eq!(self.boundaries, other.boundaries);
+        assert_eq!(self.completed, other.completed);
+        assert_eq!(self.pending, other.pending);
+    }
+
     /// Record identity even when delivery is suppressed by focus or history replay.
     fn observe(&mut self, event: &Event) -> bool {
         match &event.kind {

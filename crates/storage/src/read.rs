@@ -27,6 +27,16 @@ pub struct RunContextHeader {
     pub updated_at_ns: i64,
 }
 
+/// Snapshot identity and phase, without selecting any JSON payload columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContextMeta {
+    pub name: String,
+    pub role: String,
+    pub parent_run_id: Option<String>,
+    pub terminal_phase: String,
+    pub updated_at_ns: i64,
+}
+
 impl Database {
     pub fn user_question(&self, id: &str) -> Result<Option<event_bus::UserQuestion>, StorageError> {
         crate::repo::user_questions::get(&self.conn, id)
@@ -225,6 +235,17 @@ impl Database {
     /// Returns an error if SQLite access or row decoding fails.
     pub fn run_context(&self, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
         run_context::get(&self.conn, run_id)
+    }
+
+    /// Read only snapshot metadata; compressed conversation/checkpoints are not read.
+    pub fn run_context_meta(&self, run_id: &str) -> Result<Option<RunContextMeta>, StorageError> {
+        run_context::meta(&self.conn, run_id)
+    }
+
+    /// Read conversation JSON only for a checkpoint. Phase and payload come
+    /// from the same SQLite snapshot, even if another connection saves a run.
+    pub fn checkpoint_run_messages(&self, run_id: &str) -> Result<Option<String>, StorageError> {
+        run_context::checkpoint_messages(&self.conn, run_id)
     }
 
     /// Saved headers in requested order, once per ID, skipping unsaved runs.

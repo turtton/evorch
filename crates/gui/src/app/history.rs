@@ -172,6 +172,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db: &storage::Database,
         registry_path: Option<&std::path::Path>,
     ) -> Result<(), storage::StorageError> {
+        let total = crate::restore_metrics::RestoreTimer::new("history_total");
+        let stage = crate::restore_metrics::RestoreTimer::new("history_first_pass");
         // Two streamed passes keep a long history out of memory: the first
         // finds where each run last waited, the second replays.
         let mut restored_tasks = crate::model::tasks::TaskRestore::default();
@@ -224,6 +226,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         })?;
         self.tasks.finish_restore(restored_tasks);
+        stage.finish();
+        let stage = crate::restore_metrics::RestoreTimer::new("history_sidebar_receipts");
         self.user_questions = db
             .pending_user_questions()?
             .into_iter()
@@ -250,6 +254,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Err(error) => return Err(storage::StorageError::Serialization(error.to_string())),
             }
         }
+        stage.finish();
+        let stage = crate::restore_metrics::RestoreTimer::new("history_role_inference");
         // The first root chat run owns a thread's role. Repair both missing
         // roles and values overwritten by role cycling in older sidebar files.
         let mut inferred_role = false;
@@ -258,7 +264,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 continue;
             }
             for run_id in &thread.run_ids {
-                let Some(record) = db.run_context(run_id)? else {
+                let Some(record) = db.run_context_meta(run_id)? else {
                     continue;
                 };
                 if record.parent_run_id.is_some()
@@ -297,20 +303,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.transcripts.bind_run(run, &thread.id.to_string());
             }
         }
+        stage.finish();
+        let stage = crate::restore_metrics::RestoreTimer::new("history_completed_snapshots");
         let mut completed_snapshots = std::collections::BTreeMap::new();
         for thread in &self.sidebar.threads {
             for run_id in &thread.run_ids {
-                if !last_waiting.contains_key(run_id) {
+                if !last_waiting.contains_key(run_id)
+                    || completed_at_waiting.get(run_id).copied().unwrap_or(false)
+                {
                     continue;
                 }
-                let Some(record) = db.run_context(run_id)? else {
+                let Some(messages_json) = db.checkpoint_run_messages(run_id)? else {
                     continue;
                 };
-                if record.terminal_phase != "Checkpoint" {
-                    continue;
-                }
-                let Ok(messages) =
-                    serde_json::from_str::<Vec<providers::Message>>(&record.messages_json)
+                let Ok(messages) = serde_json::from_str::<Vec<providers::Message>>(&messages_json)
                 else {
                     continue;
                 };
@@ -340,6 +346,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        stage.finish();
+        let stage = crate::restore_metrics::RestoreTimer::new("history_second_pass");
         self.seed_branches(None);
         self.adopt_recorded_origins(db);
         let mut messages = self.history.clone();
@@ -404,6 +412,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ));
             }
         })?;
+        stage.finish();
+        let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");
         // A response can finish after the replay cursor, in a later feed batch.
         self.shared_feed.parts = parts;
         self.note_replayed_event(replayed_to);
@@ -427,6 +437,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
         self.refresh_active_thread_workspace();
         self.refresh_draft_banner();
+        stage.finish();
+        total.finish();
+        self.transcripts.log_restore_census();
         Ok(())
     }
 
@@ -521,7 +534,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             {
                 continue;
             }
-            let record = match db.run_context(run_id) {
+            let record = match db.run_context_meta(run_id) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     tracing::warn!(%run_id, "history phase reconciliation skipped: snapshot missing");
@@ -793,3 +806,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 }
+
+#[cfg(test)]
+include!("history_legacy.rs");

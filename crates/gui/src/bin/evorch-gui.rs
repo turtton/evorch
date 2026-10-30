@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use event_bus::{Event, EventBus, EventKind, LifecycleEvent};
+#[cfg(test)]
+use event_bus::EventKind;
+use event_bus::{Event, EventBus, LifecycleEvent};
 use gui::app::{WorkbenchApp, WorkbenchState};
 use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
@@ -377,25 +379,15 @@ fn spawn_storage_bridge(
     )?)
 }
 
-/// Restore each thread's latest objective without restarting work or old authority.
+#[cfg(test)]
 fn latest_thread_goals(
     events: impl IntoIterator<Item = event_bus::Event>,
 ) -> std::collections::BTreeMap<String, event_bus::ThreadGoalSnapshot> {
-    let mut latest = std::collections::BTreeMap::new();
+    let mut snapshots = gui::startup_restore::ThreadSnapshots::default();
     for event in events {
-        if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated {
-            snapshot,
-        }) = event.kind
-        {
-            // One goal can move between threads, and a thread can later
-            // receive a different goal. Preserve both uniqueness rules.
-            latest.retain(|thread, goal: &mut event_bus::ThreadGoalSnapshot| {
-                thread == &snapshot.thread_id || goal.goal_id != snapshot.goal_id
-            });
-            latest.insert(snapshot.thread_id.clone(), snapshot);
-        }
+        snapshots.apply(event);
     }
-    latest
+    snapshots.goals
 }
 
 type Reload = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
@@ -465,55 +457,34 @@ impl eval::evaluator::EvaluatorHost for EvaluatorHost {
     }
 }
 
-fn restore_thread_goals(storage_config: &StorageConfig, runtime: &runtime::AgentRuntime) {
-    let result =
-        Database::open(storage_config).and_then(|database| database.orchestrator_events_ordered());
-    match result {
-        Ok(events) => {
-            let latest = latest_thread_goals(events.into_iter().map(|stored| stored.event));
-            for snapshot in latest.into_values() {
-                if let Err(error) = runtime.restore_thread_goal(snapshot) {
-                    tracing::warn!(%error, "failed to restore thread goal");
-                }
-            }
+fn restore_thread_goals(
+    goals: std::collections::BTreeMap<String, event_bus::ThreadGoalSnapshot>,
+    runtime: &runtime::AgentRuntime,
+) {
+    for snapshot in goals.into_values() {
+        if let Err(error) = runtime.restore_thread_goal(snapshot) {
+            tracing::warn!(%error, "failed to restore thread goal");
         }
-        Err(error) => tracing::warn!(%error, "failed to read thread goals"),
     }
 }
 
 /// Restore procedures for current sidebar conversations without binding old run authority.
 fn restore_thread_todos(
-    storage_config: &StorageConfig,
+    todos: std::collections::BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     runtime: &runtime::AgentRuntime,
     sidebar: &workspace_ui::SidebarState,
 ) {
-    let result =
-        Database::open(storage_config).and_then(|database| database.orchestrator_events_ordered());
-    match result {
-        Ok(events) => {
-            let mut latest = std::collections::BTreeMap::new();
-            for stored in events {
-                if let EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadTodoUpdated {
-                    snapshot,
-                }) = stored.event.kind
-                {
-                    gui::model::thread_todos::apply_snapshot(&mut latest, &snapshot);
-                }
-            }
-            for snapshot in latest.into_values() {
-                if sidebar.threads.iter().any(|thread| {
-                    thread.id.to_string() == snapshot.thread_id
-                        && sidebar
-                            .projects
-                            .iter()
-                            .any(|project| project.id == thread.project_id)
-                }) && let Err(error) = runtime.restore_thread_todo(snapshot)
-                {
-                    tracing::warn!(%error, "failed to restore thread procedures");
-                }
-            }
+    for snapshot in todos.into_values() {
+        if sidebar.threads.iter().any(|thread| {
+            thread.id.to_string() == snapshot.thread_id
+                && sidebar
+                    .projects
+                    .iter()
+                    .any(|project| project.id == thread.project_id)
+        }) && let Err(error) = runtime.restore_thread_todo(snapshot)
+        {
+            tracing::warn!(%error, "failed to restore thread procedures");
         }
-        Err(error) => tracing::warn!(%error, "failed to read thread procedures"),
     }
 }
 
@@ -1012,7 +983,19 @@ fn run() -> Result<(), GuiError> {
             .as_ref()
             .map(|drafts| drafts.join("crash-spool")),
     )?;
-    restore_thread_goals(&storage_config, &runtime);
+    let restore = gui::restore_metrics::RestoreTimer::new("runtime_goals_todos_total");
+    let stage = gui::restore_metrics::RestoreTimer::new("runtime_orchestrator_read");
+    let snapshots = Database::open(&storage_config)
+        .and_then(|db| gui::startup_restore::ThreadSnapshots::read(&db))
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to read thread goals and procedures");
+            gui::startup_restore::ThreadSnapshots::default()
+        });
+    stage.finish();
+    let stage = gui::restore_metrics::RestoreTimer::new("runtime_goals");
+    restore_thread_goals(snapshots.goals, &runtime);
+    stage.finish();
+    let stage = gui::restore_metrics::RestoreTimer::new("runtime_evaluator_host");
     let _ = evaluator_host.runtime.set(runtime.downgrade());
     let _ = evaluator_host.reload.set({
         let production = production_model.clone();
@@ -1028,7 +1011,11 @@ fn run() -> Result<(), GuiError> {
             reload_index_settings(&handle, &options)
         })
     });
-    restore_thread_todos(&storage_config, &runtime, &sidebar);
+    stage.finish();
+    let stage = gui::restore_metrics::RestoreTimer::new("runtime_todos");
+    restore_thread_todos(snapshots.todos, &runtime, &sidebar);
+    stage.finish();
+    restore.finish();
 
     let ownership_root = match demo_directory.as_ref() {
         Some(directory) => directory.path().join("threads"),
@@ -1151,10 +1138,12 @@ fn run() -> Result<(), GuiError> {
         )
         .with_usage_ledger(storage.handle(), usage_pricing)
         .with_thread_mirror(storage.handle());
+    let stage = gui::restore_metrics::RestoreTimer::new("startup_history");
     state.restore_history_with_ownership(
         &storage::Database::open(&storage_config)?,
         &ownership_root.join("owners.db"),
     )?;
+    stage.finish();
     if !arguments.demo {
         // Show what other windows sharing this database do; after the restore,
         // which fixes where following starts.
