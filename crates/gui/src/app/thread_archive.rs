@@ -1,4 +1,4 @@
-use workspace_ui::{ThreadError, ThreadId, ThreadRecord};
+use workspace_ui::{LineageIndex, ThreadError, ThreadId, ThreadRecord};
 
 use super::{WorkbenchError, WorkbenchState};
 use crate::model::tasks::AgentRunSource;
@@ -14,17 +14,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .ok_or(ThreadError::UnknownThread)?;
         // A family is archived as a unit. Ignore stale child actions as well as
         // clicks on a pinned root, even when they arrive outside the sidebar UI.
-        if workspace_ui::display_parent(&self.sidebar.threads, &thread_id).is_some()
-            || (!thread.archived && thread.pinned)
-        {
+        let lineage = LineageIndex::new(&self.sidebar.threads);
+        if lineage.display_parent(&thread_id).is_some() || (!thread.archived && thread.pinned) {
             return Ok(());
         }
         let archived = !thread.archived;
-        let family = thread_family(&self.sidebar.threads, &thread_id);
+        let family = thread_family(&lineage, &thread_id);
         // Match the pinned/child no-op contract for stale UI or direct actions.
         // Check the whole family before mutating it: an idle root must not hide
         // a running descendant. Restoring a family is always safe.
-        if archived && family_has_running_runs(&self.sidebar.threads, &family, &self.phases) {
+        if archived && family_has_running_runs(&lineage, &family, &self.phases) {
             return Ok(());
         }
         for thread in &mut self.sidebar.threads {

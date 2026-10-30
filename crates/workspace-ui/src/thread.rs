@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -222,29 +222,39 @@ impl ThreadRecord {
         project: &ProjectId,
         phases: &BTreeMap<String, ThreadRunPhase>,
     ) -> (Vec<&'a Self>, Vec<&'a Self>) {
+        Self::partition_with_lineage(&crate::LineageIndex::new(threads), project, phases)
+    }
+
+    /// [`Self::partition_for_project`] over a lineage index the caller already
+    /// built for the same thread list, so one frame resolves version groups once.
+    pub fn partition_with_lineage<'a>(
+        lineage: &crate::LineageIndex<'a>,
+        project: &ProjectId,
+        phases: &BTreeMap<String, ThreadRunPhase>,
+    ) -> (Vec<&'a Self>, Vec<&'a Self>) {
+        let threads = lineage.threads();
         let (mut archived, mut main): (Vec<_>, Vec<_>) = threads
             .iter()
             .filter(|thread| &thread.project_id == project && !thread.superseded)
             .partition(|thread| thread.archived);
-        let newest_first = |activity: &BTreeMap<&ThreadId, i64>, left: &Self, right: &Self| {
+        let newest_first = |activity: &HashMap<&ThreadId, i64>, left: &Self, right: &Self| {
             activity[&right.id]
                 .cmp(&activity[&left.id])
                 .then_with(|| left.title.cmp(&right.title))
                 .then_with(|| left.id.cmp(&right.id))
         };
-        let activity = subtree_activity(&main, threads);
-        let running = subtree_running(&main, threads, phases);
+        let activity = subtree_activity(&main, lineage);
+        let running = subtree_running(&main, lineage, phases);
         // Only a displayed root can be pinned; a child hangs under its parent
         // whatever a stale pin says.
-        let pinned =
-            |thread: &Self| thread.pinned && crate::display_parent(threads, &thread.id).is_none();
+        let pinned = |thread: &Self| thread.pinned && lineage.display_parent(&thread.id).is_none();
         main.sort_by(|left, right| {
             pinned(right)
                 .cmp(&pinned(left))
                 .then_with(|| running.contains(&right.id).cmp(&running.contains(&left.id)))
                 .then_with(|| newest_first(&activity, left, right))
         });
-        let activity = subtree_activity(&archived, threads);
+        let activity = subtree_activity(&archived, lineage);
         archived.sort_by(|left, right| newest_first(&activity, left, right));
         (main, archived)
     }
@@ -321,22 +331,22 @@ impl ThreadRecord {
 
 fn subtree_activity<'a>(
     section: &[&'a ThreadRecord],
-    all: &[ThreadRecord],
-) -> BTreeMap<&'a ThreadId, i64> {
-    let mut activity: BTreeMap<&ThreadId, i64> = section
+    lineage: &crate::LineageIndex<'_>,
+) -> HashMap<&'a ThreadId, i64> {
+    let mut activity: HashMap<&ThreadId, i64> = section
         .iter()
         .map(|thread| (&thread.id, thread.last_activity()))
         .collect();
-    let parents: BTreeMap<&ThreadId, ThreadId> = section
+    let parents: HashMap<&ThreadId, &ThreadId> = section
         .iter()
-        .filter_map(|thread| Some((&thread.id, crate::display_parent(all, &thread.id)?)))
+        .filter_map(|thread| Some((&thread.id, lineage.display_parent(&thread.id)?)))
         .collect();
     for thread in section {
         let at = thread.last_activity();
         // Cyclic parent links stop at the first repeated ancestor.
-        let mut seen = BTreeSet::from([&thread.id]);
+        let mut seen = HashSet::from([&thread.id]);
         let mut current = &thread.id;
-        while let Some(parent) = parents.get(current)
+        while let Some(&parent) = parents.get(current)
             && let Some((&ancestor, &latest)) = activity.get_key_value(parent)
             && seen.insert(ancestor)
         {
@@ -349,18 +359,18 @@ fn subtree_activity<'a>(
 
 /// Threads of `section` that show a pending or running run of their own, of a
 /// hidden rewind version of theirs, or of a displayed descendant. Every thread
-/// of `all` counts, not only the visible ones, and raw run phases are used as
+/// of the lineage counts, not only the visible ones, and raw run phases are used as
 /// for archive safety, so a Stopped or Error root cannot hide a running
 /// subagent and a hidden version's run still lifts the family it belongs to.
 fn subtree_running<'a>(
     section: &[&'a ThreadRecord],
-    all: &[ThreadRecord],
+    lineage: &crate::LineageIndex<'_>,
     phases: &BTreeMap<String, ThreadRunPhase>,
-) -> BTreeSet<&'a ThreadId> {
-    let shown: BTreeMap<&ThreadId, &'a ThreadRecord> =
+) -> HashSet<&'a ThreadId> {
+    let shown: HashMap<&ThreadId, &'a ThreadRecord> =
         section.iter().map(|thread| (&thread.id, *thread)).collect();
-    let mut running = BTreeSet::new();
-    for thread in all.iter().filter(|thread| {
+    let mut running = HashSet::new();
+    for thread in lineage.threads().iter().filter(|thread| {
         thread.run_ids.iter().any(|run_id| {
             matches!(
                 phases.get(run_id),
@@ -370,16 +380,16 @@ fn subtree_running<'a>(
     }) {
         // A hidden rewind version is displayed through its group's visible version.
         let mut current = if thread.superseded {
-            crate::visible_version(all, &thread.id)
+            lineage.visible_version(&thread.id)
         } else {
-            Some(thread.id.clone())
+            Some(&thread.id)
         };
         // Cyclic parent links stop at the first repeated ancestor.
         while let Some(id) = current
-            && let Some(record) = shown.get(&id)
+            && let Some(record) = shown.get(id)
             && running.insert(&record.id)
         {
-            current = crate::display_parent(all, &id);
+            current = lineage.display_parent(id);
         }
     }
     running

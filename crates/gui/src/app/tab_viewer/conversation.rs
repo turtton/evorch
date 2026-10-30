@@ -86,6 +86,8 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             })
             .cloned()
             .collect();
+        // Version groups are resolved once for this frame's parent/child lookups.
+        let lineage = active_thread.map(|_| workspace_ui::LineageIndex::new(&self.sidebar.threads));
         let ctx = ConversationContext {
             todo: thread_id
                 .as_deref()
@@ -104,21 +106,25 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             active_thread_title: active_thread.map(|thread| thread.title.as_str()),
             extra_read_dirs: &extra_read_dirs,
             // Rewound versions are not parents or children: they share one row.
-            parent_thread: active_thread
-                .and_then(|thread| workspace_ui::display_parent(&self.sidebar.threads, &thread.id))
-                .and_then(|id| self.sidebar.threads.iter().find(|thread| thread.id == id)),
-            child_threads: self
-                .sidebar
-                .threads
-                .iter()
-                .filter(|thread| {
-                    !thread.superseded
-                        && active_thread.is_some_and(|parent| {
-                            workspace_ui::display_parent(&self.sidebar.threads, &thread.id).as_ref()
-                                == Some(&parent.id)
+            parent_thread: lineage
+                .as_ref()
+                .zip(active_thread)
+                .and_then(|(lineage, thread)| lineage.display_parent(&thread.id))
+                .and_then(|id| lineage.as_ref()?.get(id)),
+            child_threads: lineage
+                .as_ref()
+                .zip(active_thread)
+                .map(|(lineage, parent)| {
+                    self.sidebar
+                        .threads
+                        .iter()
+                        .filter(|thread| {
+                            !thread.superseded
+                                && lineage.display_parent(&thread.id) == Some(&parent.id)
                         })
+                        .collect()
                 })
-                .collect(),
+                .unwrap_or_default(),
             branch: match (self.focus, active_thread) {
                 (ConversationFocus::Thread, Some(thread)) => {
                     Some(crate::panes::agent::BranchContext {

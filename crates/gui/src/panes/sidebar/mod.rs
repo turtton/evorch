@@ -64,6 +64,8 @@ pub fn sidebar_pane(
         .data(|data| data.get_temp::<SidebarUiState>(egui::Id::new(UI_STATE_ID)))
         .unwrap_or_default();
     let mut action = None;
+    // Version groups are resolved once per frame and shared by every project.
+    let lineage = workspace_ui::LineageIndex::new(&sidebar.threads);
 
     pane_root(ui, "Projects", |ui| {
         egui::ScrollArea::vertical()
@@ -79,7 +81,7 @@ pub fn sidebar_pane(
                     &pane_state,
                     &mut action,
                     |ui, project, action| {
-                        threads::render(ui, sidebar, project, &indicators, action);
+                        threads::render(ui, sidebar, project, &lineage, &indicators, action);
                     },
                 );
             });

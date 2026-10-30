@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use egui::{Align, Layout, Rect, Sense, Stroke, Ui};
 use workspace_ui::{
-    LineageKind, ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord, ThreadRunPhase,
-    ThreadState,
+    LineageIndex, LineageKind, ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord,
+    ThreadRunPhase, ThreadState,
 };
 
 use crate::theme::icons;
@@ -26,17 +26,14 @@ const INDENT: f32 = 16.0;
 const FAMILY_GAP: f32 = SP_1;
 
 /// A root's family, including every rewound version and their forks.
-pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeSet<ThreadId> {
-    let root = workspace_ui::version_root(threads, root);
+pub(crate) fn thread_family(lineage: &LineageIndex<'_>, root: &ThreadId) -> BTreeSet<ThreadId> {
+    let root = lineage.version_root(root);
     let mut family = BTreeSet::from([root.clone()]);
     let mut pending = vec![root];
     while let Some(parent) = pending.pop() {
-        for child in threads
-            .iter()
-            .filter(|thread| thread.parent_thread_id.as_ref() == Some(&parent))
-        {
+        for child in lineage.children(parent) {
             if family.insert(child.id.clone()) {
-                pending.push(child.id.clone());
+                pending.push(&child.id);
             }
         }
     }
@@ -44,32 +41,35 @@ pub(crate) fn thread_family(threads: &[ThreadRecord], root: &ThreadId) -> BTreeS
 }
 
 pub(crate) fn family_has_running_runs(
-    threads: &[ThreadRecord],
+    lineage: &LineageIndex<'_>,
     family: &BTreeSet<ThreadId>,
     phases: &BTreeMap<String, ThreadRunPhase>,
 ) -> bool {
     // Display aggregation prioritizes Stopped/Error over Running. Archive
     // safety instead depends on every raw run phase, including descendants.
-    threads.iter().any(|thread| {
-        family.contains(&thread.id)
-            && thread.run_ids.iter().any(|run_id| {
+    family
+        .iter()
+        .filter_map(|id| lineage.get(id))
+        .any(|thread| {
+            thread.run_ids.iter().any(|run_id| {
                 matches!(
                     phases.get(run_id),
                     Some(ThreadRunPhase::Running | ThreadRunPhase::Pending)
                 )
             })
-    })
+        })
 }
 
 pub(super) fn render(
     ui: &mut Ui,
     sidebar: &SidebarState,
     project: &ProjectRecord,
+    lineage: &LineageIndex<'_>,
     indicators: &ThreadIndicators<'_>,
     action: &mut Option<SidebarAction>,
 ) {
     let (project_threads, archived) =
-        ThreadRecord::partition_for_project(&sidebar.threads, &project.id, indicators.phases);
+        ThreadRecord::partition_with_lineage(lineage, &project.id, indicators.phases);
 
     if project_threads.is_empty() {
         ui.horizontal(|ui| {
@@ -83,7 +83,7 @@ pub(super) fn render(
         .ctx()
         .data(|data| data.get_temp::<usize>(limit_id))
         .unwrap_or(FAMILY_PAGE);
-    let rows = nested_threads(&project_threads, &sidebar.threads);
+    let rows = nested_threads(&project_threads, lineage);
     let (rows, hidden) = limit_families(&rows, limit, |thread| {
         thread.pinned
             || sidebar.active_thread.as_ref() == Some(&thread.id)
@@ -91,7 +91,7 @@ pub(super) fn render(
             || indicators.approval_threads.contains(&thread.id)
             || indicators.unread_threads.contains(&thread.id)
     });
-    render_tree(ui, sidebar, &rows, indicators, false, action);
+    render_tree(ui, sidebar, lineage, &rows, indicators, false, action);
     if hidden > 0 {
         ui.indent(("more-threads-indent", &project.id), |ui| {
             if ui
@@ -111,8 +111,8 @@ pub(super) fn render(
             egui::CollapsingHeader::new(format!("Archived ({})", archived.len()))
                 .id_salt(("archived-threads", &project.id))
                 .show(ui, |ui| {
-                    let rows = nested_threads(&archived, &sidebar.threads);
-                    render_tree(ui, sidebar, &rows, indicators, true, action);
+                    let rows = nested_threads(&archived, lineage);
+                    render_tree(ui, sidebar, lineage, &rows, indicators, true, action);
                 });
         });
     }
@@ -170,6 +170,7 @@ fn hidden_descendants(
 fn render_tree(
     ui: &mut Ui,
     sidebar: &SidebarState,
+    lineage: &LineageIndex<'_>,
     rows: &[(&ThreadRecord, usize)],
     indicators: &ThreadIndicators<'_>,
     archived: bool,
@@ -194,8 +195,8 @@ fn render_tree(
         let mut expansion =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
-        let display_root = workspace_ui::display_parent(&sidebar.threads, &thread.id).is_none();
-        let kind = branch_kind(&sidebar.threads, thread).filter(|_| !display_root);
+        let display_root = lineage.display_parent(&thread.id).is_none();
+        let kind = branch_kind(lineage, thread).filter(|_| !display_root);
         ui.push_id(&thread.id, |ui| {
             compact_row(ui, active, |ui| {
                 ui.spacing_mut().item_spacing.x = SP_1;
@@ -272,8 +273,8 @@ fn render_tree(
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
                         && family_has_running_runs(
-                            &sidebar.threads,
-                            &thread_family(&sidebar.threads, &thread.id),
+                            lineage,
+                            &thread_family(lineage, &thread.id),
                             indicators.phases,
                         );
                     active_row(
@@ -323,11 +324,9 @@ enum BranchKind {
 
 /// A rewind replaces its source in place, so the kind comes from the original
 /// conversation of the thread's version group.
-fn branch_kind(threads: &[ThreadRecord], thread: &ThreadRecord) -> Option<BranchKind> {
-    let original_id = workspace_ui::version_root(threads, &thread.id);
-    let original = threads
-        .iter()
-        .find(|candidate| candidate.id == original_id)
+fn branch_kind(lineage: &LineageIndex<'_>, thread: &ThreadRecord) -> Option<BranchKind> {
+    let original = lineage
+        .get(lineage.version_root(&thread.id))
         .unwrap_or(thread);
     if original.escalation_source_run_id.is_some() {
         Some(BranchKind::Escalation)
@@ -621,45 +620,46 @@ pub(super) fn family_limit_id(project: &ProjectId) -> egui::Id {
 
 fn nested_threads<'a>(
     threads: &[&'a ThreadRecord],
-    all: &[ThreadRecord],
+    lineage: &LineageIndex<'_>,
 ) -> Vec<(&'a ThreadRecord, usize)> {
-    fn append<'a>(
-        thread: &'a ThreadRecord,
-        depth: usize,
-        rows: &[(&'a ThreadRecord, Option<ThreadId>)],
-        seen: &mut BTreeSet<workspace_ui::ThreadId>,
-        output: &mut Vec<(&'a ThreadRecord, usize)>,
-    ) {
-        if !seen.insert(thread.id.clone()) {
-            return;
-        }
-        output.push((thread, depth));
-        for (child, _) in rows
-            .iter()
-            .filter(|(_, parent)| parent.as_ref() == Some(&thread.id))
-        {
-            append(child, depth + 1, rows, seen, output);
+    // Rewound versions are hidden; children hang under their parent's visible version.
+    let parents: Vec<Option<&ThreadId>> = threads
+        .iter()
+        .map(|thread| lineage.display_parent(&thread.id))
+        .collect();
+    let shown: HashSet<&ThreadId> = threads.iter().map(|thread| &thread.id).collect();
+    let mut children: HashMap<&ThreadId, Vec<usize>> = HashMap::new();
+    for (row, parent) in parents.iter().enumerate() {
+        if let Some(parent) = parent {
+            children.entry(parent).or_default().push(row);
         }
     }
 
-    // Rewound versions are hidden; children hang under their parent's visible version.
-    let rows: Vec<_> = threads
-        .iter()
-        .map(|thread| (*thread, workspace_ui::display_parent(all, &thread.id)))
-        .collect();
-    let mut seen = BTreeSet::new();
+    let mut seen = HashSet::new();
     let mut output = Vec::with_capacity(threads.len());
-    for (thread, parent) in &rows {
-        if parent
-            .as_ref()
-            .is_none_or(|parent| !threads.iter().any(|candidate| &candidate.id == parent))
-        {
-            append(thread, 0, &rows, &mut seen, &mut output);
+    // Depth-first in row order; a thread already placed is skipped, which also
+    // keeps cyclic parent links from looping.
+    let mut place = |start: usize| {
+        let mut pending = vec![(start, 0)];
+        while let Some((row, depth)) = pending.pop() {
+            let thread = threads[row];
+            if !seen.insert(&thread.id) {
+                continue;
+            }
+            output.push((thread, depth));
+            if let Some(rows) = children.get(&thread.id) {
+                pending.extend(rows.iter().rev().map(|&child| (child, depth + 1)));
+            }
+        }
+    };
+    for (row, parent) in parents.iter().enumerate() {
+        if parent.is_none_or(|parent| !shown.contains(parent)) {
+            place(row);
         }
     }
     // Corrupt or cyclic parent links still leave every thread reachable.
-    for thread in threads.iter().copied() {
-        append(thread, 0, &rows, &mut seen, &mut output);
+    for row in 0..threads.len() {
+        place(row);
     }
     output
 }
@@ -770,7 +770,8 @@ mod tests {
 
     use egui_kittest::{Harness, kittest::Queryable};
     use workspace_ui::{
-        LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord, ThreadRunPhase, ThreadState,
+        LineageIndex, LineageKind, ProjectId, ThreadId, ThreadLineage, ThreadRecord,
+        ThreadRunPhase, ThreadState,
     };
 
     use super::{
@@ -921,7 +922,8 @@ mod tests {
             fork.clone(),
             legacy.clone(),
         ];
-        let kind = |thread: &ThreadRecord| branch_kind(&threads, thread);
+        let lineage = LineageIndex::new(&threads);
+        let kind = |thread: &ThreadRecord| branch_kind(&lineage, thread);
         assert_eq!(kind(&root), None);
         assert_eq!(kind(&escalated), Some(BranchKind::Escalation));
         // A rewind does not copy the escalation source, but replaces it in place.
@@ -978,6 +980,8 @@ mod tests {
         let mut thread = ThreadRecord::new(ThreadId::new("thread"), ProjectId::new("p"), "Thread");
         thread.run_ids = vec!["terminal".into(), "active".into()];
         let family = BTreeSet::from([thread.id.clone()]);
+        let threads = [thread.clone()];
+        let lineage = LineageIndex::new(&threads);
         for (terminal, display) in [
             (ThreadRunPhase::Stopped, ThreadState::Stopped),
             (ThreadRunPhase::Error, ThreadState::Error),
@@ -986,11 +990,7 @@ mod tests {
                 let phases =
                     BTreeMap::from([("terminal".into(), terminal), ("active".into(), active)]);
                 assert_eq!(thread.state(&phases), display);
-                assert!(family_has_running_runs(
-                    std::slice::from_ref(&thread),
-                    &family,
-                    &phases
-                ));
+                assert!(family_has_running_runs(&lineage, &family, &phases));
             }
         }
         // Missing phases and runs not owned by this family cannot block it.
@@ -1004,11 +1004,7 @@ mod tests {
                 ("terminal".into(), phase),
                 ("unrelated".into(), ThreadRunPhase::Running),
             ]);
-            assert!(!family_has_running_runs(
-                std::slice::from_ref(&thread),
-                &family,
-                &phases
-            ));
+            assert!(!family_has_running_runs(&lineage, &family, &phases));
         }
     }
 
@@ -1027,12 +1023,13 @@ mod tests {
         let root_id = root.id.clone();
         let expected = BTreeSet::from([root.id.clone(), child.id.clone(), grandchild.id.clone()]);
         let threads = [unrelated, grandchild, child, root];
-        let family = thread_family(&threads, &root_id);
+        let lineage = LineageIndex::new(&threads);
+        let family = thread_family(&lineage, &root_id);
         assert_eq!(family, expected);
         let phases = BTreeMap::from([("active".into(), ThreadRunPhase::Pending)]);
-        assert!(family_has_running_runs(&threads, &family, &phases));
-        let other_family = thread_family(&threads, &threads[0].id);
-        assert!(!family_has_running_runs(&threads, &other_family, &phases));
+        assert!(family_has_running_runs(&lineage, &family, &phases));
+        let other_family = thread_family(&lineage, &threads[0].id);
+        assert!(!family_has_running_runs(&lineage, &other_family, &phases));
     }
 
     #[test]
@@ -1045,7 +1042,7 @@ mod tests {
         let mut grandchild = ThreadRecord::new(ThreadId::new("grandchild"), project, "Grandchild");
         grandchild.parent_thread_id = Some(child.id.clone());
         let all = [grandchild.clone(), child.clone(), parent.clone()];
-        let rows = nested_threads(&[&grandchild, &child, &parent], &all);
+        let rows = nested_threads(&[&grandchild, &child, &parent], &LineageIndex::new(&all));
         assert_eq!(
             rows.iter()
                 .map(|(thread, depth)| (thread.id.to_string(), *depth))
