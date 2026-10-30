@@ -352,7 +352,6 @@ pub(crate) fn gap_pending(
 /// `reason`. The wait of one request started at `max(since_ns, created_at_ns)`
 /// (a request submitted during the wait waits from its own submission), so a
 /// request is expired when that instant plus `limit_ns` is `<= now_ns`.
-#[allow(dead_code, reason = "used by the bounded WAL wait in a later stage")]
 pub(crate) fn gap_expired(
     conn: &Connection,
     since_ns: i64,
@@ -374,7 +373,6 @@ pub(crate) fn gap_expired(
 /// The earliest wait deadline among live requests that still have a pending
 /// target; `None` when nothing waits. Cancelled and finished requests are not
 /// considered.
-#[allow(dead_code, reason = "used by the bounded WAL wait in a later stage")]
 pub(crate) fn earliest_wait_deadline(
     conn: &Connection,
     since_ns: i64,
@@ -392,7 +390,6 @@ pub(crate) fn earliest_wait_deadline(
 
 /// The newest `created_at_ns` among live requests that still have a pending
 /// target. Cancelled and finished requests are not considered.
-#[allow(dead_code, reason = "used by the bounded WAL wait in a later stage")]
 pub(crate) fn latest_pending_created_at(conn: &Connection) -> Result<Option<i64>, StorageError> {
     Ok(conn.query_row(
         "SELECT MAX(q.created_at_ns) FROM thread_index_requests q \

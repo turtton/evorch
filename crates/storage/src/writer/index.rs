@@ -32,10 +32,6 @@ mod lease;
 mod requests;
 #[cfg(test)]
 mod tests;
-#[allow(
-    dead_code,
-    reason = "the bounded WAL wait is wired into the step in a later stage"
-)]
 mod wait;
 mod work;
 
