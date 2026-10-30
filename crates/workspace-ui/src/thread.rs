@@ -114,6 +114,10 @@ pub struct ThreadRecord {
     pub id: ThreadId,
     pub project_id: ProjectId,
     pub title: String,
+    /// `title` is a placeholder the app generated, not one the user chose, so the
+    /// first message may replace it. Cleared by any rename or applied auto-title.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_is_placeholder: bool,
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
@@ -182,6 +186,7 @@ impl ThreadRecord {
             id,
             project_id,
             title: title.into(),
+            title_is_placeholder: false,
             pinned: false,
             archived: false,
             created_at: unix_seconds(std::time::SystemTime::now()),

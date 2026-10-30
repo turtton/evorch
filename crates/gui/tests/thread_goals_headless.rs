@@ -440,7 +440,6 @@ fn band_harness(
                         child_threads: Vec::new(),
                         thread_metrics: None,
                         phase: None,
-                        next_thread_title: String::new(),
                         model_picker: gui::panes::model_picker::ModelPickerContext {
                             profiles: &[],
                             preference: None,

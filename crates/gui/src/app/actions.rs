@@ -226,6 +226,23 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
+    /// Opens a thread the user has not named. It gets a placeholder title that
+    /// the first message replaces with a generated one.
+    pub fn create_untitled_thread(&mut self) -> Result<ThreadId, WorkbenchError> {
+        let title = self.sidebar.next_placeholder_title();
+        let id = self.insert_thread(title)?;
+        if let Some(thread) = self
+            .sidebar
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == id)
+        {
+            thread.title_is_placeholder = true;
+        }
+        self.switch_thread(id.clone())?;
+        Ok(id)
+    }
+
     /// Opens a thread whose runs may read `dirs`, never write them (ADR 0037),
     /// with `draft_input` waiting in the composer. Nothing is sent. Rejected
     /// directories leave no thread behind.

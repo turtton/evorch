@@ -143,7 +143,6 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .iter()
                 .find(|((id, _), _)| id == tab)
                 .map(|(_, ack)| ack.phase()),
-            next_thread_title: format!("thread-{}", self.sidebar.threads.len() + 1),
             model_picker: crate::panes::model_picker::ModelPickerContext {
                 profiles: self.profiles,
                 preference: active_thread.and_then(|thread| thread.model_preference.as_ref()),

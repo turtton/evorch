@@ -160,6 +160,11 @@ fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) 
         id: local.id.clone(),
         project_id: pick(&base.project_id, &local.project_id, &disk.project_id),
         title: pick(&base.title, &local.title, &disk.title),
+        title_is_placeholder: pick(
+            &base.title_is_placeholder,
+            &local.title_is_placeholder,
+            &disk.title_is_placeholder,
+        ),
         pinned: pick(&base.pinned, &local.pinned, &disk.pinned),
         archived: pick(&base.archived, &local.archived, &disk.archived),
         created_at: pick(&base.created_at, &local.created_at, &disk.created_at),

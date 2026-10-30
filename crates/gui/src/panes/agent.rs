@@ -54,7 +54,6 @@ pub struct ConversationContext<'a> {
     pub child_threads: Vec<&'a workspace_ui::ThreadRecord>,
     pub thread_metrics: Option<crate::model::telemetry::ThreadMetrics>,
     pub phase: Option<ThreadRunPhase>,
-    pub next_thread_title: String,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
     pub sandbox_picker: crate::panes::composer::SandboxPickerContext,
     /// Present only while showing a thread conversation.
@@ -160,9 +159,7 @@ fn empty_state_body(
             "Start a thread to open a conversation.",
             Some("Start a thread"),
         ) {
-            *action = Some(AgentPaneAction::Sidebar(SidebarAction::CreateThread(
-                ctx.next_thread_title.clone(),
-            )));
+            *action = Some(AgentPaneAction::Sidebar(SidebarAction::CreateThread));
         }
     } else {
         empty_state(
@@ -812,7 +809,6 @@ mod tests {
                         child_threads: Vec::new(),
                         thread_metrics: None,
                         phase: Some(phase),
-                        next_thread_title: String::new(),
                         sandbox_picker: Default::default(),
                         model_picker: crate::panes::model_picker::ModelPickerContext {
                             profiles: &[],
