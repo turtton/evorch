@@ -12,6 +12,11 @@
 //! case-insensitive substring match would accept is filtered out. Blocks are
 //! returned only while their run is `indexed` at its current `source_revision`,
 //! so a stale index never contributes a hit.
+//!
+//! [`Database::conversation_scan_chunk`] is the filter-free alternative: it
+//! reads the same ordered stream lazily, stops at a block or byte bound and
+//! finalizes its statement before returning, so a caller can verify blocks
+//! with its own matcher without FTS work or a long-lived read snapshot.
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Row, params_from_iter};
@@ -134,6 +139,43 @@ pub struct ConversationQuery<'a> {
     pub limit: usize,
 }
 
+/// One unfiltered, keyset-paged scan of the blocks of `runs`.
+///
+/// Unlike [`ConversationQuery`] there is no text filter: the caller verifies
+/// every returned block with its own matcher, so the work of one call is
+/// bounded by [`ScanLimits`] and never by how rare a match is.
+#[derive(Debug, Clone, Copy)]
+pub struct ConversationScan<'a> {
+    /// Authorized runs in the caller's scan order; `seq` is the index here.
+    pub runs: &'a [String],
+    pub kinds: &'a [IndexBlockKind],
+    /// Resume strictly after this position.
+    pub after: Option<CandidatePosition>,
+}
+
+/// Work bounds of one [`Database::conversation_scan_chunk`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanLimits {
+    /// 1..=[`MAX_SEARCH_PAGE_ROWS`] blocks.
+    pub max_blocks: usize,
+    /// At least 1. Scanning stops after the first block that brings the
+    /// accumulated text bytes to this value, so one chunk may exceed it by
+    /// at most one block.
+    pub max_bytes: usize,
+}
+
+/// A bounded run of blocks in `(seq, block id)` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanChunk {
+    pub blocks: Vec<ConversationCandidate>,
+    /// Sum of `text.len()` over `blocks`.
+    pub scanned_bytes: usize,
+    /// The statement had no further row. Stopping at a limit leaves this
+    /// `false`, even if nothing remains; the next call then returns no block
+    /// and `true`.
+    pub exhausted: bool,
+}
+
 /// A block of an indexed run at its current revision. `text` is the
 /// extracted, redacted and truncated index text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +281,70 @@ impl Database {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The next bounded chunk of blocks of `scan.runs`, ordered by
+    /// `(seq, block id)` and strictly after `scan.after`.
+    ///
+    /// Only blocks of runs that are `indexed` at their current revision are
+    /// returned. The statement is prepared, stepped just far enough to reach
+    /// a limit, and finalized before returning, so no read snapshot outlives
+    /// the call (a live one would block WAL checkpoints).
+    ///
+    /// # Errors
+    /// Returns an error for an empty or oversized batch, no kinds, invalid
+    /// limits, or SQLite failure.
+    pub fn conversation_scan_chunk(
+        &self,
+        scan: &ConversationScan<'_>,
+        limits: ScanLimits,
+    ) -> Result<ScanChunk, StorageError> {
+        self.scan_chunk_observed(scan, limits, &mut |_| {})
+    }
+
+    /// [`Self::conversation_scan_chunk`] that lets the work-counter tests read
+    /// the statement just before it is finalized.
+    fn scan_chunk_observed(
+        &self,
+        scan: &ConversationScan<'_>,
+        limits: ScanLimits,
+        observe: &mut dyn FnMut(&rusqlite::Statement<'_>),
+    ) -> Result<ScanChunk, StorageError> {
+        check_batch(scan.runs)?;
+        if !(1..=MAX_SEARCH_PAGE_ROWS).contains(&limits.max_blocks)
+            || limits.max_bytes == 0
+            || scan.kinds.is_empty()
+        {
+            return Err(StorageError::Serialization(
+                "conversation scan needs 1-500 blocks, 1+ bytes and at least one kind".into(),
+            ));
+        }
+        // SQL LIMIT = max_blocks only stops the statement where the loop
+        // below stops anyway; it never hides a row the loop would read.
+        let (sql, params) = conversation_scan_sql(scan, limits.max_blocks);
+        let mut chunk = ScanChunk {
+            blocks: Vec::new(),
+            scanned_bytes: 0,
+            exhausted: false,
+        };
+        let mut statement = self.conn.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(params))?;
+        loop {
+            let Some(row) = rows.next()? else {
+                chunk.exhausted = true;
+                break;
+            };
+            let block = candidate(row)?;
+            chunk.scanned_bytes = chunk.scanned_bytes.saturating_add(block.text.len());
+            chunk.blocks.push(block);
+            if chunk.blocks.len() >= limits.max_blocks || chunk.scanned_bytes >= limits.max_bytes {
+                break;
+            }
+        }
+        drop(rows);
+        observe(&statement);
+        drop(statement);
+        Ok(chunk)
+    }
+
     /// Coverage of each given run, in input order.
     ///
     /// # Errors
@@ -296,12 +402,7 @@ fn conversation_candidate_sql(
     //
     // Keep one statement, hence one SQLite read snapshot. Duplicate run IDs
     // deliberately produce separate arms/seqs; duplicate kinds do not.
-    let mut kinds = Vec::new();
-    for kind in query.kinds {
-        if !kinds.contains(kind) {
-            kinds.push(*kind);
-        }
-    }
+    let kinds = unique_kinds(query.kinds);
     let mut params = Vec::new();
     let exact = tokenizer_prefilter::install(conn);
     let filter = filter_sql(query.filter, &mut params, exact);
@@ -320,25 +421,46 @@ fn conversation_candidate_sql(
             }
         })
         .collect::<String>();
-    let after_id = query.after.map(|after| {
+    keyset_sql(
+        query.runs,
+        &kinds,
+        query.after,
+        query.limit,
+        &filter,
+        params,
+    )
+}
+
+/// Scope-first keyset statement shared by the filtered candidate query and
+/// the unfiltered bounded scan. `kinds` is already de-duplicated and `params`
+/// already holds the numbered bindings used by `filter`.
+fn keyset_sql(
+    runs: &[String],
+    kinds: &[IndexBlockKind],
+    after: Option<CandidatePosition>,
+    limit: usize,
+    filter: &str,
+    mut params: Vec<SqlValue>,
+) -> (String, Vec<SqlValue>) {
+    let after_id = after.map(|after| {
         params.push(SqlValue::Integer(after.block_id));
         params.len()
     });
-    params.push(SqlValue::Integer(to_i64(query.limit)));
+    params.push(SqlValue::Integer(to_i64(limit)));
     let limit = params.len();
     let mut arms = Vec::new();
-    for (seq, run) in query.runs.iter().enumerate() {
-        if query.after.is_some_and(|after| seq < after.seq) {
+    for (seq, run) in runs.iter().enumerate() {
+        if after.is_some_and(|after| seq < after.seq) {
             continue;
         }
         params.push(SqlValue::Text(run.clone()));
         let run_parameter = params.len();
-        let after = if query.after.is_some_and(|after| seq == after.seq) {
+        let after = if after.is_some_and(|after| seq == after.seq) {
             format!(" AND b.id > ?{}", after_id.unwrap())
         } else {
             String::new()
         };
-        for kind in &kinds {
+        for kind in kinds {
             arms.push(format!(
                 "SELECT b.id, {seq} AS seq, b.run_id, r.source_revision, r.snapshot_revision, \
                         b.source_kind, b.ordinal, b.block_index, b.note_seq, b.role, b.kind, \
@@ -372,6 +494,29 @@ fn conversation_candidate_sql(
         arms.join(" UNION ALL ")
     );
     (sql, params)
+}
+
+/// Statement for [`Database::conversation_scan_chunk`]: the raw keyset stream
+/// with no text predicate, so no FTS table is consulted.
+fn conversation_scan_sql(scan: &ConversationScan<'_>, limit: usize) -> (String, Vec<SqlValue>) {
+    keyset_sql(
+        scan.runs,
+        &unique_kinds(scan.kinds),
+        scan.after,
+        limit,
+        "1",
+        Vec::new(),
+    )
+}
+
+fn unique_kinds(kinds: &[IndexBlockKind]) -> Vec<IndexBlockKind> {
+    let mut unique = Vec::new();
+    for kind in kinds {
+        if !unique.contains(kind) {
+            unique.push(*kind);
+        }
+    }
+    unique
 }
 
 fn check_batch(runs: &[String]) -> Result<(), StorageError> {
