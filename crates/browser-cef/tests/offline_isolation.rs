@@ -42,6 +42,7 @@ fn open(bundle: ArtifactBundle) -> (OsrBrowser, Arc<NetLog>) {
         [800, 600],
         2.0,
         Dialogs::Suppress,
+        30,
     )
     .expect("browser");
     (browser, log)
