@@ -1,9 +1,11 @@
 //! Phase B conversation search over the persisted index (ADR 0041 M5).
 //!
 //! Only runs of threads that already passed visibility enter a [`Stream`].
-//! Storage narrows each scoped batch with a superset prefilter; every
-//! candidate is then verified by the caller's matcher on re-redacted text, so
-//! SQL routing never changes what counts as a match.
+//! Storage returns the blocks of each scoped batch in keyset order in bounded
+//! chunks, without any text filter; the caller's matcher then verifies every
+//! block on re-redacted text. Routing therefore never changes what counts as a
+//! match, and the work of one call is bounded by the blocks and bytes it
+//! scans, not by how rare a match is.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -12,15 +14,17 @@ use storage::thread_index::{
     BlockLocator, GUARDED_REFERENCE_VERSION, GuardedReference, GuardedSource, IndexBlockKind,
 };
 use storage::thread_search::{
-    CandidatePosition, ConversationCandidate, ConversationFilter, ConversationQuery,
-    MAX_SEARCH_BATCH_RUNS,
+    CandidatePosition, ConversationCandidate, ConversationScan, MAX_SEARCH_BATCH_RUNS, ScanLimits,
 };
 
 use super::normalize::Ref;
 use super::{Members, STORE_ERROR, Scope};
 
-/// Candidate rows fetched per statement.
-const PAGE_ROWS: usize = 200;
+/// Blocks fetched per statement at most.
+pub(super) const CHUNK_BLOCKS: usize = 200;
+/// Index text bytes fetched per statement at most (a chunk may exceed it by
+/// one block).
+pub(super) const CHUNK_BYTES: usize = 1024 * 1024;
 
 /// All saved roots own their native positions. Continued roots contain copies,
 /// which extraction excludes; selecting only the latest root would lose the
@@ -39,17 +43,26 @@ pub(super) fn scan_runs(members: &Members, include_children: bool) -> Vec<String
     runs
 }
 
-/// Keyset-paged candidates over runs in scan order, at most
-/// [`MAX_SEARCH_BATCH_RUNS`] runs per statement. A candidate's slot is the
-/// index of its run in `runs`.
+/// Work done by one call's [`Stream`]: what storage handed back, whether or
+/// not the budget later charged it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ScanStats {
+    pub(super) fetched_blocks: usize,
+    pub(super) fetched_bytes: usize,
+    pub(super) statements: usize,
+}
+
+/// Keyset-chunked blocks over runs in scan order, at most
+/// [`MAX_SEARCH_BATCH_RUNS`] runs per statement. A block's slot is the index
+/// of its run in `runs`.
 pub(super) struct Stream<'s> {
     scope: &'s Scope<'s>,
     runs: Vec<String>,
     kinds: Vec<IndexBlockKind>,
-    filter: ConversationFilter,
     batch: usize,
     after: Option<CandidatePosition>,
     buffer: VecDeque<(usize, ConversationCandidate)>,
+    stats: ScanStats,
 }
 
 impl<'s> Stream<'s> {
@@ -58,27 +71,37 @@ impl<'s> Stream<'s> {
         scope: &'s Scope<'s>,
         runs: Vec<String>,
         kinds: Vec<IndexBlockKind>,
-        filter: ConversationFilter,
         first_block: Option<i64>,
     ) -> Self {
         Self {
             scope,
             runs,
             kinds,
-            filter,
             batch: 0,
             after: first_block.map(|block| CandidatePosition {
                 seq: 0,
                 block_id: block.saturating_sub(1),
             }),
             buffer: VecDeque::new(),
+            stats: ScanStats::default(),
         }
     }
 
-    /// The next candidate without consuming it.
-    pub(super) fn peek(&mut self) -> Result<Option<&(usize, ConversationCandidate)>, String> {
+    pub(super) const fn stats(&self) -> ScanStats {
+        self.stats
+    }
+
+    /// The next block without consuming it. Only when nothing is buffered a
+    /// chunk is fetched, at most `min(CHUNK_*, remaining_*)` and at least one
+    /// block: the caller needs the next position even with nothing left to
+    /// spend, to record where a cut resumes.
+    pub(super) fn peek(
+        &mut self,
+        remaining_blocks: usize,
+        remaining_bytes: usize,
+    ) -> Result<Option<&(usize, ConversationCandidate)>, String> {
         while self.buffer.is_empty() && self.batch < self.runs.len() {
-            self.fetch()?;
+            self.fetch(remaining_blocks, remaining_bytes)?;
         }
         Ok(self.buffer.front())
     }
@@ -87,30 +110,50 @@ impl<'s> Stream<'s> {
         self.buffer.pop_front()
     }
 
-    fn fetch(&mut self) -> Result<(), String> {
+    fn fetch(&mut self, remaining_blocks: usize, remaining_bytes: usize) -> Result<(), String> {
         let end = (self.batch + MAX_SEARCH_BATCH_RUNS).min(self.runs.len());
         let runs = &self.runs[self.batch..end];
-        let rows = self
+        let limits = ScanLimits {
+            max_blocks: CHUNK_BLOCKS.min(remaining_blocks).max(1),
+            max_bytes: CHUNK_BYTES.min(remaining_bytes).max(1),
+        };
+        let chunk = self
             .scope
             .store
             .with_database(|db| {
-                db.conversation_candidates(&ConversationQuery {
-                    runs,
-                    kinds: &self.kinds,
-                    filter: &self.filter,
-                    after: self.after,
-                    limit: PAGE_ROWS,
-                })
+                db.conversation_scan_chunk(
+                    &ConversationScan {
+                        runs,
+                        kinds: &self.kinds,
+                        after: self.after,
+                    },
+                    limits,
+                )
             })
             .map_err(|_| STORE_ERROR.to_owned())?;
+        self.stats.statements += 1;
+        self.stats.fetched_blocks += chunk.blocks.len();
+        self.stats.fetched_bytes += chunk.scanned_bytes;
         let batch = self.batch;
-        let full = rows.len() == PAGE_ROWS;
-        self.after = rows.last().map(|row| row.position).filter(|_| full);
-        if !full {
+        // A chunk that stopped at a limit always holds a block; the guard only
+        // keeps a misbehaving store from looping forever.
+        let last = chunk
+            .blocks
+            .last()
+            .map(|block| block.position)
+            .filter(|_| !chunk.exhausted);
+        if let Some(last) = last {
+            self.after = Some(last);
+        } else {
+            self.after = None;
             self.batch = end;
         }
-        self.buffer
-            .extend(rows.into_iter().map(|row| (batch + row.position.seq, row)));
+        self.buffer.extend(
+            chunk
+                .blocks
+                .into_iter()
+                .map(|block| (batch + block.position.seq, block)),
+        );
         Ok(())
     }
 }

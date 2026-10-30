@@ -309,12 +309,12 @@ async fn same_thread_continuation_searches_original_native_positions_after_resta
 fn final_report_after_candidate_budget_is_counted_once_across_cursor_drain() {
     let f = Fixture::new();
     let own = f.own();
-    let mut messages: Vec<_> = (0..search::MAX_CANDIDATES)
+    let mut messages: Vec<_> = (0..search::MAX_SCANNED_BLOCKS)
         .map(|ordinal| user(vec![text(&format!("boundaryneedle {ordinal}"))]))
         .collect();
     messages.push(assistant(vec![text(&format!(
         "boundaryneedle {}",
-        search::MAX_CANDIDATES
+        search::MAX_SCANNED_BLOCKS
     ))]));
     f.native_run("run-100", Some("own"), None, messages);
     f.index("run-100");
@@ -333,11 +333,10 @@ fn final_report_after_candidate_budget_is_counted_once_across_cursor_drain() {
         &scope,
         vec!["run-100".into()],
         vec![storage::thread_index::IndexBlockKind::Text],
-        storage::thread_search::ConversationFilter::All,
         None,
     );
     let mut positions = std::collections::BTreeSet::new();
-    while stream.peek().unwrap().is_some() {
+    while stream.peek(usize::MAX, usize::MAX).unwrap().is_some() {
         let (_, candidate) = stream.pop().unwrap();
         assert!(positions.insert(match candidate.locator {
             BlockLocator::Message {
@@ -349,7 +348,7 @@ fn final_report_after_candidate_budget_is_counted_once_across_cursor_drain() {
     }
     assert_eq!(
         positions,
-        (0..=search::MAX_CANDIDATES)
+        (0..=search::MAX_SCANNED_BLOCKS)
             .map(|ordinal| (ordinal, 0))
             .collect()
     );
@@ -379,12 +378,12 @@ fn final_report_after_candidate_budget_is_counted_once_across_cursor_drain() {
             assert!(pages < 4, "{page}");
             args["cursor"] = json!(cursor);
         }
-        assert_eq!(total, search::MAX_CANDIDATES as u64 + 1);
+        assert_eq!(total, search::MAX_SCANNED_BLOCKS as u64 + 1);
         assert_eq!(pages, 2);
         assert!(
             last_ref
                 .unwrap()
-                .starts_with(&format!("run-100#{}.0@", search::MAX_CANDIDATES))
+                .starts_with(&format!("run-100#{}.0@", search::MAX_SCANNED_BLOCKS))
         );
     }
     // Regex visits every candidate but matches only three on the first page,
@@ -509,7 +508,7 @@ fn report_on_a_later_run_invalidates_cursor_when_its_revision_changes() {
         "run-100",
         Some("own"),
         None,
-        vec![user(vec![text("laterreport")]); search::MAX_CANDIDATES + 1],
+        vec![user(vec![text("laterreport")]); search::MAX_SCANNED_BLOCKS + 1],
     );
     f.native_run(
         "run-101",
@@ -528,7 +527,7 @@ fn report_on_a_later_run_invalidates_cursor_when_its_revision_changes() {
             }),
         )
         .unwrap();
-    assert_eq!(count(&first), search::MAX_CANDIDATES as u64);
+    assert_eq!(count(&first), search::MAX_SCANNED_BLOCKS as u64);
     let conn = Connection::open(&f.store().db_path).unwrap();
     conn.execute("UPDATE thread_index_runs SET source_revision = source_revision + 1 WHERE run_id = 'run-101'", []).unwrap();
     let error = f.call(own, "thread_search", json!({
@@ -955,14 +954,14 @@ fn more_than_one_hundred_runs_and_include_children_are_not_truncated() {
 fn regex_scan_budget_continues_and_invisible_runs_do_not_change_any_output() {
     let f = Fixture::new();
     let own = f.own();
-    let messages = (0..search::MAX_CANDIDATES + 3)
+    let messages = (0..search::MAX_SCANNED_BLOCKS + 3)
         .map(|i| user(vec![text(&format!("scan-{i}"))]))
         .collect();
     f.native_run("run-100", Some("own"), None, messages);
     f.index("run-100");
     let args = json!({"query": "^scan-", "match": "regex", "kinds": ["conversation"]});
     let first = f.call(own, "thread_search", args.clone()).unwrap();
-    assert_eq!(count(&first), search::MAX_CANDIDATES as u64);
+    assert_eq!(count(&first), search::MAX_SCANNED_BLOCKS as u64);
     assert_eq!(first["partial"], true);
     let no_hit = f
         .call(
