@@ -3023,3 +3023,175 @@ fn wal_retry_expiration_stops_merge_adjustment_and_self_eviction() {
         }
     }
 }
+
+#[test]
+fn wal_pause_left_by_an_expiry_admits_new_requests_that_wait_for_their_own_deadline() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "request deadlines", 1));
+    let first = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = first.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    let expired_at = 2 * S + WAL_WAIT_LIMIT_NS;
+    assert!(matches!(
+        fx.drive(&lease, expired_at),
+        IndexStepResult::Paused(_)
+    ));
+    assert!(matches!(
+        fx.rt.pause,
+        Some(status) if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    ));
+    assert!(matches!(
+        terminal(&mut fx, &first.request_id, expired_at),
+        ReindexResult::CompletedWithGaps { .. }
+    ));
+
+    // The expired WAL pause does not turn the next request into a gap.
+    let second_at = expired_at + S;
+    let second = fx
+        .control(second_at)
+        .submit_request(&all(), &gui(), second_at, HOUR)
+        .unwrap();
+    assert!(matches!(second.progress, RequestProgress::Pending(_)));
+    assert_eq!(fx.rt.pause, None);
+    waiting(fx.drive(&lease, second_at));
+    assert_eq!(fx.rt.wal_wait.unwrap().since_ns, second_at);
+    assert_eq!(fx.rt.counters.wal_waits, 2);
+
+    // A later request keeps waiting after the earlier one has expired.
+    let third_at = second_at + 100 * S;
+    let third = fx
+        .control(third_at)
+        .submit_request(&all(), &gui(), third_at, HOUR)
+        .unwrap();
+    assert!(matches!(third.progress, RequestProgress::Pending(_)));
+    let next = waiting(fx.drive(&lease, second_at + WAL_WAIT_LIMIT_NS));
+    assert!(matches!(
+        terminal(&mut fx, &second.request_id, second_at + WAL_WAIT_LIMIT_NS),
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    assert!(matches!(
+        fx.control(next)
+            .request_status(&third.request_id, next)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    assert!(next < third_at + WAL_WAIT_LIMIT_NS);
+
+    drop(pin);
+    assert_eq!(fx.drive(&lease, next), idle());
+    assert!(matches!(
+        terminal(&mut fx, &third.request_id, next),
+        ReindexResult::Completed { summary, .. } if summary.succeeded == 1
+    ));
+    assert_eq!(fx.rt.counters.pauses, 1);
+}
+
+#[test]
+fn db_size_pause_still_closes_new_requests_at_acceptance() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "fits the logical budget easily", 10 * S));
+    let lease = fx.lease(&gui(), S);
+    fx.config.hard_limits = tight_limits(fx.sizes(), 64 * 1024);
+    assert!(matches!(
+        fx.drive(&lease, 2 * S),
+        IndexStepResult::Paused(_)
+    ));
+    let submitted = fx
+        .control(3 * S)
+        .submit_request(&all(), &gui(), 3 * S, HOUR)
+        .unwrap();
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { ref summary, .. })
+            if summary.gaps[0].reason == RequestGapReason::CapacityPaused
+    ));
+}
+
+#[test]
+fn background_owner_waits_for_a_pinned_wal_and_probes_when_capacity_changes() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("writer.db");
+    drop(
+        storage(&dir, HardLimits::default())
+            .handle()
+            .save_snapshot_bundle(&verified("run-a", "pinned wal background", 10 * S))
+            .unwrap(),
+    );
+    // A real, uncheckpointed WAL high-water kept by another connection.
+    let pressure = Connection::open(&db_path).unwrap();
+    pressure
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
+    pressure
+        .execute_batch(
+            "CREATE TABLE wal_pressure(payload BLOB); \
+             INSERT INTO wal_pressure VALUES(zeroblob(12582912));",
+        )
+        .unwrap();
+    let high_water = file_sizes(&db_path).unwrap().wal;
+    assert!(high_water > 12 * MIB);
+    let storage = storage(
+        &dir,
+        HardLimits {
+            max_wal_bytes: high_water + 1,
+            ..HardLimits::default()
+        },
+    );
+    let handle = storage.handle();
+    let reader = Connection::open(&db_path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM run_contexts;")
+        .unwrap();
+    let (observe, observer) = mpsc::channel();
+    handle
+        .0
+        .send(Command::Index(super::IndexCommand::Observe(observe)))
+        .unwrap();
+    assert!(matches!(
+        handle.start_thread_index_owner(gui()),
+        Ok(LeaseResult::Acquired(_))
+    ));
+    wait_for(&observer, |counters| counters.wal_waits >= 1);
+
+    // Waiting: no wake-up without a timer, no pause, no index write.
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.wal_wait.is_some(), "{status:?}");
+    assert!(!status.wake_scheduled, "{status:?}");
+    assert!(
+        status
+            .retry_wake_in
+            .is_some_and(|in_| in_ <= Duration::from_secs(1)),
+        "{status:?}"
+    );
+    assert_eq!(status.paused, None);
+    assert_eq!(status.counters.pauses, 0);
+    assert_eq!(status.counters.commits, 0);
+
+    // A maintenance checkpoint is a capacity notification: the probe runs in
+    // the same writer iteration, before the next command is handled.
+    let probes = status.counters.wal_wait_probes;
+    handle.checkpoint_now().unwrap();
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.counters.wal_wait_probes > probes, "{status:?}");
+    assert!(status.wal_wait.is_some(), "{status:?}");
+    assert_eq!(status.counters.pauses, 0);
+
+    reader.execute_batch("COMMIT").unwrap();
+    wait_for(&observer, |counters| counters.commits >= 1);
+    let status = handle.thread_index_job_status().unwrap();
+    assert_eq!(status.paused, None);
+    assert_eq!(status.counters.pauses, 0);
+    assert_eq!(status.counters.wal_wait_expiries, 0);
+    handle.stop_thread_index_owner().unwrap();
+    drop(pressure);
+}

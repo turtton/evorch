@@ -485,3 +485,130 @@ fn external_cancel_is_not_reported_as_failed() {
         RequestProgress::Cancelled
     ));
 }
+
+/// A store whose WAL high-water is held by another connection and whose only
+/// WAL headroom is one byte, with a reader pinning that WAL: the index cannot
+/// admit any step until the reader leaves.
+struct PinnedWal {
+    _dir: tempfile::TempDir,
+    storage: Storage,
+    reader: Option<rusqlite::Connection>,
+    _pressure: rusqlite::Connection,
+}
+
+impl PinnedWal {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pinned.db");
+        let config = StorageConfig {
+            db_path: db_path.clone(),
+            ..StorageConfig::default()
+        };
+        {
+            let storage = Storage::open(config.clone()).unwrap();
+            source(&storage.handle(), "native", "/project", 20, true);
+        }
+        // Above the merge bound (8,437,792 B) plus one commit, so a truncated
+        // WAL admits every step; the high-water alone does not.
+        let pressure = rusqlite::Connection::open(&db_path).unwrap();
+        pressure
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        pressure
+            .execute_batch(
+                "CREATE TABLE wal_pressure(payload BLOB); \
+                 INSERT INTO wal_pressure VALUES(zeroblob(12582912));",
+            )
+            .unwrap();
+        let high_water = std::fs::metadata(dir.path().join("pinned.db-wal"))
+            .unwrap()
+            .len();
+        assert!(high_water > 12 << 20);
+        let storage = Storage::open(StorageConfig {
+            hard_limits: storage::HardLimits {
+                max_wal_bytes: high_water + 1,
+                ..storage::HardLimits::default()
+            },
+            ..config
+        })
+        .unwrap();
+        let reader = rusqlite::Connection::open(&db_path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM run_contexts;")
+            .unwrap();
+        Self {
+            _dir: dir,
+            storage,
+            reader: Some(reader),
+            _pressure: pressure,
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            reader.execute_batch("COMMIT").unwrap();
+        }
+    }
+}
+
+/// Runs a foreground request; `on_pause` may change the world and returns how
+/// far the injected clock moves. Every requested pause stays within one second.
+fn pinned_foreground(
+    pinned: &mut PinnedWal,
+    mut on_pause: impl FnMut(&mut PinnedWal, usize) -> i64,
+) -> ReindexResult {
+    let handle = pinned.storage.handle();
+    let offset = Cell::new(0_i64);
+    let pauses = Cell::new(0_usize);
+    let pinned = std::cell::RefCell::new(pinned);
+    unwrap_outcome(execute(
+        &handle,
+        &all(),
+        &owner("cli", IndexOwnerKind::Cli),
+        true,
+        || now_ns() + offset.get(),
+        |duration| {
+            assert!(duration <= Duration::from_secs(1), "{duration:?}");
+            let index = pauses.get();
+            pauses.set(index + 1);
+            assert!(index < 100_000, "request must reach terminal");
+            let jump = on_pause(&mut pinned.borrow_mut(), index);
+            offset.set(offset.get() + jump + i64::try_from(duration.as_nanos()).unwrap());
+        },
+    ))
+}
+
+#[test]
+fn foreground_waits_for_a_pinned_wal_and_completes_without_gaps_when_the_reader_leaves() {
+    let mut pinned = PinnedWal::new();
+    let result = pinned_foreground(&mut pinned, |pinned, index| {
+        if index == 0 {
+            pinned.release();
+        }
+        0
+    });
+    let ReindexResult::Completed { summary, .. } = result else {
+        panic!("expected completion, got {result:?}");
+    };
+    assert_eq!((summary.target_count, summary.succeeded), (1, 1));
+    assert!(summary.gaps.is_empty());
+}
+
+#[test]
+fn foreground_closes_with_capacity_wait_expired_when_the_reader_never_leaves() {
+    let mut pinned = PinnedWal::new();
+    let limit_ns = 301_000_000_000;
+    let result = pinned_foreground(
+        &mut pinned,
+        |_, index| if index == 0 { limit_ns } else { 0 },
+    );
+    let ReindexResult::CompletedWithGaps { summary, .. } = result else {
+        panic!("a wait expiry is a gap, not a failure: {result:?}");
+    };
+    assert_eq!(summary.gaps.len(), 1);
+    assert_eq!(
+        summary.gaps[0].reason,
+        RequestGapReason::CapacityWaitExpired
+    );
+    pinned.release();
+}

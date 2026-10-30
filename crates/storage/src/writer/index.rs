@@ -78,6 +78,7 @@ impl ThreadIndexControl for Control<'_> {
         requests::validate(request)?;
         let conn = self.env.conn;
         let rt = &mut *self.rt;
+        let mut wal_pending = false;
         let (request_id, lease) = (|| {
             let transaction = rusqlite::Transaction::new_unchecked(
                 conn,
@@ -97,7 +98,14 @@ impl ThreadIndexControl for Control<'_> {
                     shm: 0,
                 },
             )?;
-            if status.state != CapacityState::Normal
+            // A WAL-only refusal is the bounded wait, not a policy gap: the
+            // request stays pending and expires on its own deadline. A WAL
+            // pause left by an earlier expiry is released so the next step
+            // admits (or waits) again from this request's own start.
+            wal_pending = status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+                && rt.pause.is_none_or(|pause| pause.state == status.state);
+            if !wal_pending
+                && status.state != CapacityState::Normal
                 && status.state != CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
             {
                 let gap = if !rt.settings.enabled {
@@ -112,6 +120,15 @@ impl ThreadIndexControl for Control<'_> {
             Ok::<_, StorageError>((request_id, lease))
         })()
         .map_err(persistence)?;
+        if wal_pending {
+            let rt = &mut *self.rt;
+            rt.pause = None;
+            rt.paused_growth = None;
+            rt.paused_work = None;
+            if let Some(wait) = rt.wal_wait.as_mut() {
+                wait.advance_to(self.now_ns);
+            }
+        }
         let status = self.request_status(&request_id, now_ns)?;
         Ok(RequestSubmission {
             request_id,
@@ -375,6 +392,7 @@ impl IndexJob {
             && self.rt.settings.enabled
             && self.rt.pause.is_none()
             && !self.in_flight
+            && !(self.rt.wal_wait.is_some() && self.retry_wake.is_some())
             && (self.rt.ready.is_some()
                 || self.rt.merge_pending
                 || !self.rt.discovery_complete
@@ -393,6 +411,15 @@ impl IndexJob {
         Some(deadline)
     }
 
+    /// A due WAL wait must not sit behind its backoff timer: the next step
+    /// runs the probe.
+    fn wake_due_wait(&mut self, now_ns: i64) {
+        if self.rt.wal_wait.is_some_and(|wait| wait.probe_due(now_ns)) {
+            self.retry_wake = None;
+            self.maybe_work = true;
+        }
+    }
+
     /// Called once per handled ordinary command.
     pub(super) fn note_command(&mut self) {
         self.commands_since_step = self.commands_since_step.saturating_add(1);
@@ -405,7 +432,12 @@ impl IndexJob {
             settings_generation: self.rt.settings_generation,
             owner_lease: self.lease().cloned(),
             paused: self.rt.pause,
-            wal_wait: None,
+            wal_wait: self.rt.wal_wait.map(|wait| WalWaitStatus {
+                since_ns: wait.since_ns,
+                refused: wait.refused,
+                next_retry_at_ns: wait.next_retry_at_ns,
+                probes: wait.probes,
+            }),
             in_flight: self.in_flight,
             wake_scheduled: self.wants_step(),
             retry_wake_in: self
@@ -615,6 +647,15 @@ pub(super) fn on_capacity_change(
     config: &StorageConfig,
     source_suspended: bool,
 ) {
+    if let Some(wait) = job.rt.wal_wait.as_mut() {
+        // A reader may have left: probe now instead of after the backoff.
+        wait.advance_to(now_ns());
+        job.retry_wake = None;
+        job.maybe_work = true;
+        // The notification itself is the retry event: step in this iteration
+        // instead of waiting for the idle timer.
+        job.commands_since_step = STEP_EVERY_COMMANDS;
+    }
     if job.rt.pause.is_none() {
         return;
     }
@@ -663,6 +704,7 @@ pub(super) fn handle(
         IndexCommand::Submit(request, owner, now_ns, duration, reply) => {
             let _ = reply.send(control.submit_request(&request, &owner, now_ns, duration));
             job.maybe_work = true;
+            job.wake_due_wait(now);
         }
         IndexCommand::Status(request_id, now_ns, reply) => {
             let _ = reply.send(control.request_status(&request_id, now_ns));
@@ -725,6 +767,7 @@ pub(super) fn handle(
         IndexCommand::ApplySettings(settings, reply) => {
             let _ = reply.send(control.apply_index_settings(settings));
             job.maybe_work = true;
+            job.wake_due_wait(now);
         }
         IndexCommand::JobStatus(reply) => {
             let _ = reply.send(Ok(job.status(Instant::now())));
@@ -745,6 +788,8 @@ pub(super) fn handle(
 
 fn stop_owner(job: &mut IndexJob, conn: &Connection) -> Result<(), StorageError> {
     job.rt.ready = None;
+    // Only the start of the wait is durable; the next owner rebuilds the rest.
+    job.rt.wal_wait = None;
     // Keep the single worker across owner restarts. Joining here can deadlock:
     // its completion sender may be waiting on this writer's full queue.
     match job.owner.take().and_then(|owner| owner.lease) {
