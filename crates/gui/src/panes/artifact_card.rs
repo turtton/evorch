@@ -101,16 +101,9 @@ fn is_available(ctx: &egui::Context, path: &Path) -> bool {
     is_available_at(ctx, path, ctx.input(|input| input.time), Path::is_file)
 }
 
-/// Recheck due resources without requiring their transcript card to be drawn.
+/// Keep recovery scheduled even when the transcript card is not drawn.
 pub(crate) fn poll_availability(ctx: &egui::Context, path: &Path) {
-    let id = egui::Id::new(("artifact-available", path));
-    let now = ctx.input(|input| input.time);
-    if ctx.data(|data| {
-        data.get_temp::<Availability>(id)
-            .is_none_or(|cached| !cached.available && now >= cached.retry_at)
-    }) {
-        is_available(ctx, path);
-    }
+    is_available(ctx, path);
 }
 
 /// Stored files are immutable, but an unavailable store can recover. Limit
