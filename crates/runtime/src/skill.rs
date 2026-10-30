@@ -15,7 +15,8 @@ mod resource;
 pub use attachments::append_skill_attachment;
 pub(crate) use discovery::repo_skill_dirs;
 pub use discovery::{
-    build_standard_registry, default_skill_dirs, discover_skills, discover_with_builtin,
+    build_standard_registry, default_skill_dirs, default_skill_dirs_with_user_config,
+    discover_skills, discover_with_builtin,
 };
 pub use frontmatter::{
     SkillFrontmatter, SkillValidationError, parse_and_validate, read_frontmatter_prefix,

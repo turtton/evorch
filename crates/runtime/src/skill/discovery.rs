@@ -60,9 +60,21 @@ pub fn build_standard_registry(repo_root: Option<&Path>) -> SkillRegistry {
 /// repo-agents エントリなし、`config::user_config_dir` が `None` なら user エントリなし。
 /// `$HOME` が未設定または空なら user-agents エントリなし。XDG から HOME は推測しない。
 pub fn default_skill_dirs(repo_root: Option<&Path>) -> Vec<(SkillScope, PathBuf)> {
-    let user_config = config::user_config_dir();
+    default_skill_dirs_with_user_config(repo_root, config::user_config_dir().as_deref())
+}
+
+/// [`default_skill_dirs`] と同じ優先順位で、user スコープの設定ディレクトリを
+/// 呼び出し側が明示して返す。
+///
+/// `--user-config` のように起動引数で user config dir が確定している場合に使う。
+/// `user_config` が `None` なら user エントリなし (グローバル既定へはフォールバック
+/// しない)。user-agents (`$HOME/.agents/skills`) は `user_config` と独立に解決する。
+pub fn default_skill_dirs_with_user_config(
+    repo_root: Option<&Path>,
+    user_config: Option<&Path>,
+) -> Vec<(SkillScope, PathBuf)> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    default_skill_dirs_from(repo_root, user_config.as_deref(), home.as_deref())
+    default_skill_dirs_from(repo_root, user_config, home.as_deref())
 }
 
 /// リポジトリスコープの skill ディレクトリを、リポジトリルートからのパス要素で優先度順に並べる。
@@ -708,6 +720,24 @@ mod tests {
                 (SkillScope::User, config.join("skills")),
                 (SkillScope::UserAgents, home.join(".agents/skills")),
             ]
+        );
+    }
+
+    #[test]
+    fn default_skill_dirs_with_user_config_uses_the_explicit_directory() {
+        let selected = Path::new("/selected/evorch");
+        let dirs = default_skill_dirs_with_user_config(None, Some(selected));
+        assert!(dirs.contains(&(SkillScope::User, selected.join("skills"))));
+        assert_eq!(
+            dirs.iter()
+                .filter(|(scope, _)| *scope == SkillScope::User)
+                .count(),
+            1
+        );
+        assert!(
+            default_skill_dirs_with_user_config(None, None)
+                .iter()
+                .all(|(scope, _)| *scope != SkillScope::User)
         );
     }
 
