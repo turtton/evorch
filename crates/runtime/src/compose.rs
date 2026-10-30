@@ -16,7 +16,7 @@ use sandbox::credential::CredentialStore;
 use tools::ToolExecutor;
 
 use crate::rules::{ProjectTrust, RulesSettings, RulesSource};
-use crate::skill::default_skill_dirs;
+use crate::skill::default_skill_dirs_with_user_config;
 use crate::skill_source::SkillCatalogSource;
 use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RuntimeError};
 mod benchmark;
@@ -186,13 +186,15 @@ pub fn compose_runtime(input: RuntimeComposition<'_>) -> Result<ComposedRuntime,
         RulesSettings::from(&input.config.rules),
         None,
         repo_root.clone(),
-        user_dir.map(|directory| directory.join("AGENTS.md")),
+        user_dir
+            .as_ref()
+            .map(|directory| directory.join("AGENTS.md")),
     )));
     let source = SkillCatalogSource::new(
         input.config.clone(),
-        config::user_config_dir(),
+        user_dir.clone(),
         Vec::new(),
-        default_skill_dirs(repo_root.as_deref()),
+        default_skill_dirs_with_user_config(repo_root.as_deref(), user_dir.as_deref()),
         bus,
     );
     let runtime = runtime.with_skill_source(Arc::new(source));
