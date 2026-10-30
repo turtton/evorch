@@ -40,24 +40,34 @@ pub(crate) fn thread_family(lineage: &LineageIndex<'_>, root: &ThreadId) -> BTre
     family
 }
 
-pub(crate) fn family_has_running_runs(
-    lineage: &LineageIndex<'_>,
-    family: &BTreeSet<ThreadId>,
+/// Threads with a pending or running run of their own. A repeated ID is
+/// listed when any of its records has one, so a family lookup by ID sees every
+/// record. Built once per frame or action and shared by every family check.
+pub(crate) fn threads_with_active_runs<'a>(
+    threads: &'a [ThreadRecord],
     phases: &BTreeMap<String, ThreadRunPhase>,
-) -> bool {
-    // Display aggregation prioritizes Stopped/Error over Running. Archive
-    // safety instead depends on every raw run phase, including descendants.
-    // Every record of a family ID counts, not only the one `lineage.get` answers
-    // for it, so a repeated ID cannot hide a running run.
-    lineage.threads().iter().any(|thread| {
-        family.contains(&thread.id)
-            && thread.run_ids.iter().any(|run_id| {
+) -> HashSet<&'a ThreadId> {
+    threads
+        .iter()
+        .filter(|thread| {
+            thread.run_ids.iter().any(|run_id| {
                 matches!(
                     phases.get(run_id),
                     Some(ThreadRunPhase::Running | ThreadRunPhase::Pending)
                 )
             })
-    })
+        })
+        .map(|thread| &thread.id)
+        .collect()
+}
+
+pub(crate) fn family_has_running_runs(
+    family: &BTreeSet<ThreadId>,
+    active: &HashSet<&ThreadId>,
+) -> bool {
+    // Display aggregation prioritizes Stopped/Error over Running. Archive
+    // safety instead depends on every raw run phase, including descendants.
+    family.iter().any(|id| active.contains(id))
 }
 
 pub(super) fn render(
@@ -125,6 +135,8 @@ pub(super) struct ThreadIndicators<'a> {
     pub approval_threads: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads whose finished work has not been opened since it finished.
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+    /// Threads with a pending or running run of their own.
+    pub active_runs: &'a HashSet<&'a workspace_ui::ThreadId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,6 +189,7 @@ fn render_tree(
     action: &mut Option<SidebarAction>,
 ) {
     let rails = TreeRails::new(rows);
+    let clip = ui.clip_rect();
     // Rails bridge the vertical gap between rows so a branch reads as one line.
     let row_gap = ui.spacing().item_spacing.y;
     let mut collapsed_depth = None;
@@ -210,7 +223,10 @@ fn render_tree(
                         Sense::hover()
                     },
                 );
-                paint_rails(ui, rect, &rails.rails(index), row_gap);
+                // Rows scrolled out of view need no guides.
+                if rect.bottom() + row_gap >= clip.top() && rect.top() - row_gap <= clip.bottom() {
+                    paint_rails(ui, rect, depth, &rails, index, row_gap);
+                }
                 if has_children {
                     if toggle.clicked() {
                         expansion.toggle(ui);
@@ -273,9 +289,8 @@ fn render_tree(
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
                         && family_has_running_runs(
-                            lineage,
                             &thread_family(lineage, &thread.id),
-                            indicators.phases,
+                            indicators.active_runs,
                         );
                     active_row(
                         ui,
@@ -377,12 +392,13 @@ fn family_gap_before(rows: &[(&ThreadRecord, usize)], index: usize) -> bool {
     starts_family && index > 0 && (has_children || follows_children)
 }
 
-/// Tree guides per row: entry `level - 1` tells whether the branch at `level`
-/// (1..=depth) continues below the row, i.e. a later row at that level follows
-/// before the tree climbs above it.
+/// Tree guides per row. At `level` (1..=depth) the branch continues below a row
+/// when a later row at that level follows before the tree climbs above it.
 ///
-/// Built in O(rows); each row's guides are produced on demand in O(depth), so
-/// rows a collapsed ancestor hides cost nothing.
+/// Built in O(rows). A row's guides are read sparsely: whether its own branch
+/// continues in O(1), and the ancestor levels that continue by walking only
+/// those levels, so the work follows the lines drawn rather than the depth,
+/// and rows that are not drawn cost nothing.
 struct TreeRails {
     depths: Vec<usize>,
     /// Next later row at the same depth or shallower.
@@ -417,23 +433,21 @@ impl TreeRails {
         }
     }
 
-    fn rails(&self, index: usize) -> Vec<bool> {
+    /// Whether the row's own branch (its deepest level) continues below it.
+    fn own_continues(&self, index: usize) -> bool {
         let depth = self.depths[index];
-        let mut rails = vec![false; depth];
-        if depth == 0 {
-            return rails;
-        }
-        rails[depth - 1] = self.next_at_most[index].is_some_and(|next| self.depths[next] == depth);
-        // For a shallower level, the first later row at or above it is on the
-        // chain of strictly shallower rows.
-        let mut next = self.next_shallower[index];
-        for level in (1..depth).rev() {
-            while let Some(row) = next.filter(|&row| self.depths[row] > level) {
-                next = self.next_shallower[row];
-            }
-            rails[level - 1] = next.is_some_and(|row| self.depths[row] == level);
-        }
-        rails
+        depth > 0 && self.next_at_most[index].is_some_and(|next| self.depths[next] == depth)
+    }
+
+    /// The ancestor levels (shallower than the row, at least 1) whose branch
+    /// continues below the row, deepest first. For a level, the first later row
+    /// at or above it lies on the chain of strictly shallower rows, and the
+    /// level continues exactly when that row sits on it, so the levels are the
+    /// depths on the chain.
+    fn continuing_ancestors(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(self.next_shallower[index], |&row| self.next_shallower[row])
+            .map(|row| self.depths[row])
+            .take_while(|&level| level >= 1)
     }
 }
 
@@ -446,26 +460,31 @@ fn rail_stroke() -> Stroke {
 /// Paints the rails left of `slot` (the row's caret slot): pass-through lines
 /// for ancestor branches that continue, and an elbow joining this row to its
 /// parent's rail.
-fn paint_rails(ui: &Ui, slot: Rect, continues: &[bool], row_gap: f32) {
-    let Some((own, ancestors)) = continues.split_last() else {
+fn paint_rails(ui: &Ui, slot: Rect, depth: usize, rails: &TreeRails, index: usize, row_gap: f32) {
+    if depth == 0 {
         return;
-    };
+    }
     let painter = ui.painter();
     let stroke = rail_stroke();
-    let depth = continues.len();
     let top = slot.top() - row_gap / 2.0;
     let bottom = slot.bottom() + row_gap / 2.0;
     let middle = painter.round_to_pixel_center(slot.center().y);
     let rail_x = |level: usize| {
         painter.round_to_pixel_center(slot.left() - (depth - level) as f32 * INDENT - INDENT / 2.0)
     };
-    for (index, continues) in ancestors.iter().enumerate() {
-        if *continues {
-            painter.vline(rail_x(index + 1), top..=bottom, stroke);
-        }
+    for level in rails.continuing_ancestors(index) {
+        painter.vline(rail_x(level), top..=bottom, stroke);
     }
     let x = rail_x(depth);
-    painter.vline(x, top..=if *own { bottom } else { middle }, stroke);
+    painter.vline(
+        x,
+        top..=if rails.own_continues(index) {
+            bottom
+        } else {
+            middle
+        },
+        stroke,
+    );
     painter.hline(x..=slot.left(), middle, stroke);
 }
 
@@ -810,7 +829,7 @@ fn attention_dot(ui: &mut Ui, label: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     use egui_kittest::{Harness, kittest::Queryable};
     use workspace_ui::{
@@ -844,6 +863,7 @@ mod tests {
             question_threads: &question_threads,
             approval_threads: &approval_threads,
             unread_threads: &unread_threads,
+            active_runs: &HashSet::new(),
         };
         // a hides a1, a1x and a2, but neither itself nor b's subtree.
         assert_eq!(
@@ -912,6 +932,20 @@ mod tests {
             .collect()
     }
 
+    /// The sparse reads as one flag per level, shallowest first.
+    fn dense_rails(rails: &TreeRails, depth: usize, index: usize) -> Vec<bool> {
+        let ancestors: Vec<usize> = rails.continuing_ancestors(index).collect();
+        (1..=depth)
+            .map(|level| {
+                if level == depth {
+                    rails.own_continues(index)
+                } else {
+                    ancestors.contains(&level)
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn rails_match_the_definition_on_deep_wide_and_irregular_trees() {
         let mut shapes: Vec<Vec<usize>> = vec![
@@ -940,7 +974,7 @@ mod tests {
             let rails = TreeRails::new(&rows);
             for index in 0..rows.len() {
                 assert_eq!(
-                    rails.rails(index),
+                    dense_rails(&rails, depths[index], index),
                     brute_force_rails(&depths, index),
                     "row {index} of {depths:?}"
                 );
@@ -956,7 +990,7 @@ mod tests {
         let rails = TreeRails::new(&rows);
         assert_eq!(
             (0..rows.len())
-                .map(|index| rails.rails(index))
+                .map(|index| dense_rails(&rails, rows[index].1, index))
                 .collect::<Vec<_>>(),
             [
                 vec![],
@@ -1077,7 +1111,6 @@ mod tests {
         thread.run_ids = vec!["terminal".into(), "active".into()];
         let family = BTreeSet::from([thread.id.clone()]);
         let threads = [thread.clone()];
-        let lineage = LineageIndex::new(&threads);
         for (terminal, display) in [
             (ThreadRunPhase::Stopped, ThreadState::Stopped),
             (ThreadRunPhase::Error, ThreadState::Error),
@@ -1086,7 +1119,10 @@ mod tests {
                 let phases =
                     BTreeMap::from([("terminal".into(), terminal), ("active".into(), active)]);
                 assert_eq!(thread.state(&phases), display);
-                assert!(family_has_running_runs(&lineage, &family, &phases));
+                assert!(family_has_running_runs(
+                    &family,
+                    &super::threads_with_active_runs(&threads, &phases)
+                ));
             }
         }
         // Missing phases and runs not owned by this family cannot block it.
@@ -1100,7 +1136,10 @@ mod tests {
                 ("terminal".into(), phase),
                 ("unrelated".into(), ThreadRunPhase::Running),
             ]);
-            assert!(!family_has_running_runs(&lineage, &family, &phases));
+            assert!(!family_has_running_runs(
+                &family,
+                &super::threads_with_active_runs(&threads, &phases)
+            ));
         }
     }
 
@@ -1117,9 +1156,10 @@ mod tests {
         let running = BTreeMap::from([("active".into(), ThreadRunPhase::Running)]);
         // Given `lineage.get` answers with the first record only, the second
         // record's run must still block archiving its family.
-        assert!(family_has_running_runs(&lineage, &family, &running));
+        let active = super::threads_with_active_runs(&threads, &running);
+        assert!(family_has_running_runs(&family, &active));
         let other_family = thread_family(&lineage, &ThreadId::new("other"));
-        assert!(!family_has_running_runs(&lineage, &other_family, &running));
+        assert!(!family_has_running_runs(&other_family, &active));
     }
 
     #[test]
@@ -1141,9 +1181,10 @@ mod tests {
         let family = thread_family(&lineage, &root_id);
         assert_eq!(family, expected);
         let phases = BTreeMap::from([("active".into(), ThreadRunPhase::Pending)]);
-        assert!(family_has_running_runs(&lineage, &family, &phases));
+        let active = super::threads_with_active_runs(&threads, &phases);
+        assert!(family_has_running_runs(&family, &active));
         let other_family = thread_family(&lineage, &threads[0].id);
-        assert!(!family_has_running_runs(&lineage, &other_family, &phases));
+        assert!(!family_has_running_runs(&other_family, &active));
     }
 
     #[test]
@@ -1198,11 +1239,126 @@ mod tests {
                 .all(|(index, (thread, depth))| *depth == index
                     && thread.id.to_string() == format!("t{index}"))
         );
-        // Only the rows that get drawn pay for their guides: a collapsed
-        // ancestor's descendants are never asked.
         let rails = TreeRails::new(&rows);
-        assert_eq!(rails.rails(0), Vec::<bool>::new());
-        assert_eq!(rails.rails(2999), vec![false; 2999]);
+        assert!(!rails.own_continues(0));
+        assert!(!rails.own_continues(2999));
+        assert_eq!(rails.continuing_ancestors(2999).count(), 0);
+    }
+
+    #[test]
+    fn rail_work_follows_the_lines_drawn_not_the_depth() {
+        // A fully expanded single chain 20000 deep has nothing to continue at
+        // any level. Reading every row's guides yields no ancestor level at
+        // all, where dense per-row vectors would hold 200 million flags.
+        let depths: Vec<usize> = (0..20_000).collect();
+        let threads = records(depths.len());
+        let rows = rows_at(&threads, &depths);
+        let rails = TreeRails::new(&rows);
+        let drawn: usize = (0..rows.len())
+            .map(|index| {
+                usize::from(rails.own_continues(index)) + rails.continuing_ancestors(index).count()
+            })
+            .sum();
+        assert_eq!(drawn, 0);
+
+        // With a later sibling at each of the first 2000 levels, the lines of
+        // the deepest row are exactly those levels and nothing more is walked.
+        let mut depths: Vec<usize> = (0..2_000).collect();
+        depths.extend((0..2_000).rev());
+        let threads = records(depths.len());
+        let rows = rows_at(&threads, &depths);
+        let rails = TreeRails::new(&rows);
+        let levels: Vec<usize> = rails.continuing_ancestors(1_999).collect();
+        assert_eq!(levels, (1..1_999).rev().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn independent_roots_get_their_family_state_from_one_shared_active_set() {
+        const ROOTS: usize = 3_000;
+        let project = ProjectId::new("demo");
+        let mut threads: Vec<ThreadRecord> = (0..ROOTS)
+            .map(|index| {
+                ThreadRecord::new(
+                    ThreadId::new(format!("r{index}")),
+                    project.clone(),
+                    format!("r{index}"),
+                )
+            })
+            .collect();
+        let lineage = LineageIndex::new(&threads);
+        let idle = BTreeMap::new();
+        let none = super::threads_with_active_runs(&threads, &idle);
+        assert!(none.is_empty());
+        // No root's family check looks past its own family, whatever the count.
+        assert!(threads.iter().all(|thread| {
+            !family_has_running_runs(&thread_family(&lineage, &thread.id), &none)
+        }));
+
+        threads[1_234].run_ids.push("active".into());
+        let running = BTreeMap::from([("active".into(), ThreadRunPhase::Running)]);
+        let lineage = LineageIndex::new(&threads);
+        let active = super::threads_with_active_runs(&threads, &running);
+        let flagged: Vec<_> = threads
+            .iter()
+            .filter(|thread| family_has_running_runs(&thread_family(&lineage, &thread.id), &active))
+            .map(|thread| thread.id.to_string())
+            .collect();
+        assert_eq!(flagged, ["r1234"]);
+    }
+
+    #[test]
+    fn many_independent_roots_and_a_deep_chain_render_in_a_small_viewport() {
+        let project = ProjectId::new("demo");
+        let mut threads: Vec<ThreadRecord> = (0..120)
+            .map(|index| {
+                ThreadRecord::new(
+                    ThreadId::new(format!("r{index}")),
+                    project.clone(),
+                    format!("r{index}"),
+                )
+            })
+            .collect();
+        for index in 0..200 {
+            let mut thread = ThreadRecord::new(
+                ThreadId::new(format!("c{index}")),
+                project.clone(),
+                format!("c{index}"),
+            );
+            thread.parent_thread_id = Some(ThreadId::new(if index == 0 {
+                "r0".to_string()
+            } else {
+                format!("c{}", index - 1)
+            }));
+            threads.push(thread);
+        }
+        let sidebar = workspace_ui::SidebarState {
+            threads,
+            ..Default::default()
+        };
+        let phases = BTreeMap::new();
+        let none = BTreeSet::new();
+        let active = HashSet::new();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(400.0, 120.0))
+            .build_ui_state(
+                |ui, action: &mut Option<SidebarAction>| {
+                    crate::theme::install(ui.ctx());
+                    let lineage = LineageIndex::new(&sidebar.threads);
+                    let section: Vec<&ThreadRecord> = sidebar.threads.iter().collect();
+                    let rows = nested_threads(&section, &lineage);
+                    let indicators = ThreadIndicators {
+                        phases: &phases,
+                        question_threads: &none,
+                        approval_threads: &none,
+                        unread_threads: &none,
+                        active_runs: &active,
+                    };
+                    super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
+                },
+                None,
+            );
+        harness.run_steps(2);
+        assert!(harness.query_by_label("r0").is_some());
     }
 
     #[test]
@@ -1221,6 +1377,7 @@ mod tests {
         sidebar.threads[2].parent_thread_id = Some(ThreadId::new("child"));
         let phases = BTreeMap::new();
         let none = BTreeSet::new();
+        let active = HashSet::new();
         let mut harness = Harness::builder()
             .with_size(egui::vec2(400.0, 300.0))
             .build_ui_state(
@@ -1248,6 +1405,7 @@ mod tests {
                         question_threads: &none,
                         approval_threads: &none,
                         unread_threads: &none,
+                        active_runs: &active,
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },

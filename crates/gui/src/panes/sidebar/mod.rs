@@ -53,11 +53,13 @@ pub fn sidebar_pane(
     approval_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
+    let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
     let indicators = threads::ThreadIndicators {
         phases,
         question_threads,
         approval_threads,
         unread_threads,
+        active_runs: &active_runs,
     };
     let pane_state = ui
         .ctx()

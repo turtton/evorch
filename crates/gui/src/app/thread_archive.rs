@@ -2,7 +2,9 @@ use workspace_ui::{LineageIndex, ThreadError, ThreadId, ThreadRecord};
 
 use super::{WorkbenchError, WorkbenchState};
 use crate::model::tasks::AgentRunSource;
-use crate::panes::sidebar::threads::{family_has_running_runs, thread_family};
+use crate::panes::sidebar::threads::{
+    family_has_running_runs, thread_family, threads_with_active_runs,
+};
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub fn toggle_archive(&mut self, thread_id: ThreadId) -> Result<(), WorkbenchError> {
@@ -23,7 +25,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // Match the pinned/child no-op contract for stale UI or direct actions.
         // Check the whole family before mutating it: an idle root must not hide
         // a running descendant. Restoring a family is always safe.
-        if archived && family_has_running_runs(&lineage, &family, &self.phases) {
+        if archived
+            && family_has_running_runs(
+                &family,
+                &threads_with_active_runs(&self.sidebar.threads, &self.phases),
+            )
+        {
             return Ok(());
         }
         for thread in &mut self.sidebar.threads {
