@@ -273,6 +273,126 @@ fn a_restart_replays_history_once_and_following_starts_after_it() {
     assert_eq!(texts(&c.state), replayed);
 }
 
+/// Actual recorder output, delivered incrementally to another window's feed.
+fn stored_response_parts(text: &str) -> Vec<Event> {
+    let dir = TempDir::new().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("parts.db"),
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 512,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    StorageBridge::new(storage.handle(), "parts-source")
+        .handle_event(&reply("run-a", text))
+        .unwrap();
+    let parts: Vec<_> = Database::open(&config)
+        .unwrap()
+        .events_all_ordered()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.event)
+        .collect();
+    assert!(parts.len() > 2);
+    assert!(parts.iter().all(|part| {
+        matches!(
+            part.kind,
+            event_bus::EventKind::Message(MessageEvent::MessagePart { .. })
+        ) && serde_json::to_vec(&part.kind).unwrap().len() <= 512
+    }));
+    parts
+}
+
+#[test]
+fn response_parts_survive_feed_batches_and_every_restart_boundary_without_duplication() {
+    let text = "あ\"\\\n".repeat(200);
+    let parts = stored_response_parts(&text);
+    for restored in 0..=parts.len() {
+        let shared = Shared::new();
+        let mut a = open_window(&shared, "evorch-gui:a");
+        let thread = a.open_thread(&shared, "Alpha");
+        a.host.start(&thread.to_string()).unwrap();
+        a.emit(run_started("run-a", &thread));
+        a.emit(phase(
+            "run-a",
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+        ));
+        let persist = |part: &Event| {
+            a.storage
+                .handle()
+                .append_stream_event(&a.stream, part, None)
+                .unwrap();
+        };
+        for part in &parts[..restored] {
+            persist(part);
+        }
+        let mut b = open_window(&shared, "evorch-gui:b");
+        b.state.switch_thread(thread).unwrap();
+        if restored < parts.len() {
+            assert!(texts(&b.state).is_empty());
+        }
+        for (index, part) in parts.iter().enumerate().skip(restored) {
+            persist(part);
+            let before = event_count(&shared);
+            assert_eq!(b.state.poll_shared_feed(), 1);
+            assert_eq!(event_count(&shared), before, "following must not write");
+            if index + 1 < parts.len() {
+                assert!(texts(&b.state).is_empty());
+            }
+        }
+        assert_eq!(texts(&b.state), [text.as_str()]);
+        assert_eq!(b.state.poll_shared_feed(), 0);
+        assert_eq!(texts(&b.state), [text.as_str()]);
+    }
+}
+
+#[test]
+fn late_sidebar_rehydrates_response_parts_across_pages_and_then_follows_the_remaining_parts() {
+    let text = "あ\"\\\n".repeat(200);
+    let parts = stored_response_parts(&text);
+    for restored in [1, parts.len()] {
+        let shared = Shared::new();
+        let private = shared.dir.path().join("private.json");
+        let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
+        let thread = a.open_thread(&shared, "Alpha");
+        a.emit(run_started("run-a", &thread));
+        a.emit(phase(
+            "run-a",
+            AgentRunPhase::Pending,
+            AgentRunPhase::Running,
+        ));
+        let persist = |part: &Event| {
+            a.storage
+                .handle()
+                .append_stream_event(&a.stream, part, None)
+                .unwrap();
+        };
+        for part in &parts[..restored] {
+            persist(part);
+        }
+        let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
+            state.with_rehydrate_page_size(1)
+        });
+        assert!(b.state.sidebar().threads.is_empty());
+        std::fs::copy(&private, shared.sidebar()).unwrap();
+        assert_eq!(b.state.poll_shared_feed(), 0);
+        b.state.switch_thread(thread).unwrap();
+        if restored < parts.len() {
+            assert!(texts(&b.state).is_empty());
+        }
+        for part in &parts[restored..] {
+            persist(part);
+            b.state.poll_shared_feed();
+        }
+        assert_eq!(texts(&b.state), [text.as_str()]);
+        assert_eq!(b.state.poll_shared_feed(), 0);
+        assert_eq!(texts(&b.state), [text.as_str()]);
+    }
+}
+
 #[test]
 fn a_released_thread_stops_showing_its_runs_as_active() {
     // Given: B shows A's run as running

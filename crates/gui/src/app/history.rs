@@ -398,6 +398,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ));
             }
         })?;
+        // A response can finish after the replay cursor, in a later feed batch.
+        self.shared_feed.parts = parts;
         self.note_replayed_event(replayed_to);
         self.note_restored_active_runs();
         self.reconcile_restored_phases(db, registry_path);
