@@ -19,6 +19,8 @@ mod follow_ups;
 mod frame;
 mod frame_trace;
 mod history;
+#[cfg(test)]
+mod history_restore_tests;
 mod input;
 mod mentions;
 mod ownership;

@@ -43,6 +43,57 @@ impl Default for TranscriptRegistry {
 }
 
 impl TranscriptRegistry {
+    pub(crate) fn log_restore_census(&self) {
+        if !tracing::enabled!(target: "gui::restore", tracing::Level::INFO) {
+            return;
+        }
+        let mut entries = 0usize;
+        let mut tool_input_bytes = 0usize;
+        let mut tool_detail_bytes = 0usize;
+        let mut tool_output_bytes = 0usize;
+        let mut message_bytes = 0usize;
+        let mut reasoning_bytes = 0usize;
+        for model in std::iter::once(&self.thread)
+            .chain(self.threads.values())
+            .chain(self.runs.values())
+        {
+            for entry in model.entries() {
+                entries += 1;
+                match entry {
+                    TranscriptEntry::Tool {
+                        input,
+                        detail,
+                        output,
+                        ..
+                    } => {
+                        tool_input_bytes += input.as_ref().map_or(0, json_bytes);
+                        tool_detail_bytes += detail.as_ref().map_or(0, json_bytes);
+                        tool_output_bytes += output.as_ref().map_or(0, String::len);
+                    }
+                    TranscriptEntry::Message { text, .. } => message_bytes += text.len(),
+                    TranscriptEntry::Reasoning { text, .. } => reasoning_bytes += text.len(),
+                    _ => {}
+                }
+            }
+        }
+        let (vm_rss_kib, vm_hwm_kib) = crate::restore_metrics::process_memory();
+        tracing::info!(
+            target: "gui::restore",
+            thread_models = self.threads.len(),
+            fallback_models = 1,
+            run_models = self.runs.len(),
+            entries,
+            tool_input_bytes,
+            tool_detail_bytes,
+            tool_output_bytes,
+            message_bytes,
+            reasoning_bytes,
+            vm_rss_kib,
+            vm_hwm_kib,
+            "restore census (logical payload bytes, including duplicate deliveries)"
+        );
+    }
+
     pub(crate) fn finish_history(&mut self) {
         self.thread.finish_history();
         for model in self.threads.values_mut().chain(self.runs.values_mut()) {
@@ -482,6 +533,21 @@ impl TranscriptRegistry {
 
     pub fn run_ids(&self) -> impl Iterator<Item = &String> {
         self.runs.keys()
+    }
+}
+
+// Estimate retained JSON payload without allocating a second serialized copy.
+fn json_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 5,
+        serde_json::Value::Number(_) => 8,
+        serde_json::Value::String(text) => text.len(),
+        serde_json::Value::Array(values) => values.iter().map(json_bytes).sum(),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + json_bytes(value))
+            .sum(),
     }
 }
 

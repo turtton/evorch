@@ -252,6 +252,42 @@ pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, 
         .optional()?)
 }
 
+pub(crate) fn meta(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<crate::RunContextMeta>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT name, role, parent_run_id, terminal_phase, updated_at_ns \
+             FROM run_contexts WHERE run_id = ?1",
+            [run_id],
+            |row| {
+                Ok(crate::RunContextMeta {
+                    name: row.get(0)?,
+                    role: row.get(1)?,
+                    parent_run_id: row.get(2)?,
+                    terminal_phase: row.get(3)?,
+                    updated_at_ns: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub(crate) fn checkpoint_messages(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT messages_json FROM run_contexts \
+             WHERE run_id = ?1 AND terminal_phase = 'Checkpoint'",
+            [run_id],
+            |row| crate::codec::text_column(row, 0),
+        )
+        .optional()?)
+}
+
 pub(crate) fn headers(
     conn: &Connection,
     run_ids: &[String],
@@ -397,6 +433,90 @@ mod tests {
             updated_at_ns: 1,
             host_inputs_json: "[]".into(),
         }
+    }
+
+    #[test]
+    fn metadata_never_decodes_payload_and_messages_never_decodes_checkpoints() {
+        let database = crate::Database::open_in_memory().unwrap();
+        let record = record(&SUMMARY.repeat(300));
+        super::upsert(&database.conn, &record).unwrap();
+        let full = database.run_context(&record.run_id).unwrap().unwrap();
+        assert_eq!(
+            database.checkpoint_run_messages(&record.run_id).unwrap(),
+            Some(full.messages_json)
+        );
+        let expected = crate::RunContextMeta {
+            name: record.name,
+            role: record.role,
+            parent_run_id: record.parent_run_id,
+            terminal_phase: record.terminal_phase,
+            updated_at_ns: record.updated_at_ns,
+        };
+        assert_eq!(
+            database.run_context_meta(&record.run_id).unwrap(),
+            Some(expected.clone())
+        );
+        // A non-codec BLOB is invalid to the full reader. Metadata must not
+        // touch it, and reading messages alone must not touch checkpoints.
+        database
+            .conn
+            .execute(
+                "UPDATE run_contexts SET checkpoints_json = x'00' WHERE run_id = ?1",
+                [&record.run_id],
+            )
+            .unwrap();
+        assert!(database.run_context(&record.run_id).is_err());
+        assert!(
+            database
+                .checkpoint_run_messages(&record.run_id)
+                .unwrap()
+                .is_some()
+        );
+        database
+            .conn
+            .execute(
+                "UPDATE run_contexts SET messages_json = x'00' WHERE run_id = ?1",
+                [&record.run_id],
+            )
+            .unwrap();
+        assert!(database.checkpoint_run_messages(&record.run_id).is_err());
+        assert_eq!(
+            database.run_context_meta(&record.run_id).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(database.run_context_meta("absent").unwrap(), None);
+        assert_eq!(database.checkpoint_run_messages("absent").unwrap(), None);
+    }
+
+    #[test]
+    fn checkpoint_phase_and_body_cannot_mix_generations_between_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::StorageConfig {
+            db_path: dir.path().join("snapshots.db"),
+            ..Default::default()
+        };
+        let reader = crate::Database::open(&config).unwrap();
+        let writer = crate::Database::open(&config).unwrap();
+        let mut saved = record("generation A");
+        super::upsert(&writer.conn, &saved).unwrap();
+        let stale = reader.run_context_meta(&saved.run_id).unwrap().unwrap();
+        assert_eq!(stale.terminal_phase, "Checkpoint");
+        // Explicitly interleave a committed save; no sleep or scheduler race.
+        // Keep the timestamp unchanged to avoid relying on clock uniqueness.
+        saved.terminal_phase = "Error".into();
+        saved.messages_json = serde_json::json!([{
+            "role": "assistant",
+            "content": [{"type": "text", "text": "generation B"}]
+        }])
+        .to_string();
+        super::upsert(&writer.conn, &saved).unwrap();
+        assert_eq!(reader.checkpoint_run_messages(&saved.run_id).unwrap(), None);
+        saved.terminal_phase = "Checkpoint".into();
+        super::upsert(&writer.conn, &saved).unwrap();
+        assert_eq!(
+            reader.checkpoint_run_messages(&saved.run_id).unwrap(),
+            Some(saved.messages_json)
+        );
     }
 
     #[test]
