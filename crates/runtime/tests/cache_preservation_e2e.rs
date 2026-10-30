@@ -1494,6 +1494,450 @@ async fn mention_follow_ups_keep_the_wire_prefix_and_the_users_words_apart() {
     }
 }
 
+/// A mention test's bundled skill and the block the runtime appends for it.
+struct BundledSkill {
+    name: &'static str,
+    scope: &'static str,
+    body: String,
+}
+
+impl BundledSkill {
+    fn load() -> Self {
+        const NAME: &str = "git-best-practices";
+        let registry = runtime::skill::build_standard_registry(None);
+        Self {
+            name: NAME,
+            scope: registry.get(NAME).unwrap().scope.as_str(),
+            body: registry.load_body(NAME).unwrap(),
+        }
+    }
+
+    fn mention(&self, prompt_id: &str) -> RunConfig {
+        RunConfig {
+            skill_mentions: vec![self.name.into()],
+            initial_prompt_id: Some(prompt_id.into()),
+            interactive: true,
+            keep_alive: true,
+            ..Default::default()
+        }
+    }
+
+    /// What the agent is sent for `typed` with this skill attached.
+    fn expanded(&self, typed: &str) -> String {
+        let mut text = typed.to_owned();
+        runtime::skill::append_skill_attachment(&mut text, self.name, &self.body);
+        text
+    }
+}
+
+fn user_contents(request: &Value) -> Vec<String> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// `(input_tokens, cache_read_tokens)` of each completed request of `run`.
+fn completed_requests(events: &[Event], run: RunId) -> Vec<(u64, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                input_tokens,
+                cache_read_tokens,
+                run_id: Some(id),
+                ..
+            }) if id == &run.to_string() => Some((*input_tokens, *cache_read_tokens)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A new runtime over the same storage and mock, as after a process restart.
+fn restart_runtime(harness: &mut Harness, config: &storage::StorageConfig, db: &storage::Storage) {
+    let root = harness._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    harness.runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_compaction(current.compaction.clone())
+    .with_run_store(runtime::RunStore::open(config, db.handle()).unwrap());
+}
+
+#[tokio::test]
+async fn an_attached_skill_in_saved_history_is_reused_by_a_restarted_runtime_without_cache_loss() {
+    let skill = BundledSkill::load();
+    let mut harness = harness(
+        vec![
+            text_response("first answer"),
+            text_response("second answer"),
+            text_response("third answer"),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    let first = "Start with @git-best-practices";
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "restart",
+            Role::Worker,
+            first.into(),
+            skill.mention("first"),
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .stop(run, runtime::StopScope::SelfOnly)
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Stopped).await);
+    harness.runtime.wait(run).await.unwrap();
+
+    restart_runtime(&mut harness, &config, &db);
+    // A plain follow-up replays the saved expansion; a new mention expands once more.
+    harness
+        .runtime
+        .continue_goal(run, "plain follow-up".into(), RunConfig::default())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    let again = "And again @git-best-practices";
+    harness
+        .runtime
+        .continue_goal(run, again.into(), skill.mention("again"))
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1])
+            .expect("a restart and a mention leave the sent prefix alone");
+        assert_eq!(pair[0]["tools"], pair[1]["tools"]);
+        assert_eq!(pair[0]["messages"][0], pair[1]["messages"][0]);
+    }
+    assert_eq!(
+        user_contents(&requests[2]),
+        [
+            skill.expanded(first),
+            "plain follow-up".to_owned(),
+            skill.expanded(again)
+        ]
+    );
+    // The replayed message is the saved bytes, not a second expansion.
+    assert_eq!(user_contents(&requests[1])[0], skill.expanded(first));
+    assert_eq!(
+        requests[2].to_string().matches("<skill name=").count(),
+        2,
+        "one block per mention, none added by the restart"
+    );
+}
+
+#[tokio::test]
+async fn follow_ups_queued_behind_a_running_request_expand_at_send_and_keep_the_wire_prefix() {
+    let skill = BundledSkill::load();
+    let (gate, arrived) = mock_openai::ResponseGate::new();
+    struct ReleaseOnDrop(mock_openai::ResponseGate);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release_on_drop = ReleaseOnDrop(gate.clone());
+    let mut harness = harness(
+        vec![
+            text_response("first answer").with_gate(gate.clone()),
+            text_response("answer after the edit"),
+            text_response("last answer"),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    let run = harness
+        .runtime
+        .delegate_chat(
+            "queue",
+            Role::Worker,
+            "Original task".into(),
+            skill.mention("start"),
+        )
+        .unwrap();
+    tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+        .await
+        .unwrap();
+    // The first request is still running: queue a follow-up, withdraw it, send an edit.
+    harness
+        .runtime
+        .continue_goal(
+            run,
+            "queued @git-best-practices".into(),
+            skill.mention("queued"),
+        )
+        .unwrap();
+    harness.runtime.withdraw_follow_up(run, "queued").unwrap();
+    let edited = "edited @git-best-practices";
+    harness
+        .runtime
+        .continue_goal(run, edited.into(), skill.mention("edited"))
+        .unwrap();
+    assert_eq!(harness.runtime.follow_up_status(run).unwrap().pending, 1);
+    gate.release();
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 2 {
+        let event = harness.receiver.recv().await.unwrap();
+        if matches!(&event.kind, EventKind::Provider(ProviderEvent::RequestCompleted {
+            run_id: Some(id), ..
+        }) if id == &run.to_string())
+        {
+            completed += 1;
+        }
+        events.push(event);
+    }
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness
+        .runtime
+        .send_message(run, "plain last".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await);
+    harness.runtime.cancel(run).unwrap();
+    harness.runtime.wait(run).await.unwrap();
+
+    verify_trace(&harness, run, &events, 0);
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 3);
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1])
+            .expect("queueing and editing leave the sent prefix alone");
+    }
+    // The agent saw only the edit, expanded when it was sent; the withdrawn
+    // message never reached the wire.
+    assert_eq!(
+        user_contents(&requests[2]),
+        [
+            skill.expanded("Original task"),
+            skill.expanded(edited),
+            "plain last".to_owned()
+        ]
+    );
+    assert!(requests.iter().all(|r| !r.to_string().contains("queued @")));
+    // Each submission keeps its own record, the withdrawn one included.
+    let origins = harness
+        .runtime
+        .host_input_origins(&["queued".into(), "edited".into()])
+        .unwrap();
+    assert_eq!(
+        origins
+            .iter()
+            .map(|origin| (origin.text.as_str(), origin.skills.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("queued @git-best-practices", vec![skill.name.to_owned()]),
+            (edited, vec![skill.name.to_owned()])
+        ]
+    );
+    let evidence = storage::Database::open(&config)
+        .unwrap()
+        .review_evidence_for_target(&run.to_string())
+        .unwrap();
+    assert!(evidence.iter().any(|row| row.text == edited
+        && row.attachments.len() == 1
+        && row.attachments[0].scope == skill.scope));
+}
+
+#[tokio::test]
+async fn forks_inherit_expanded_text_unchanged_and_each_branch_keeps_its_own_wire_prefix() {
+    let skill = BundledSkill::load();
+    let mut harness = harness(
+        vec![
+            text_response("source one"),
+            text_response("source two"),
+            text_response("fork one"),
+            text_response("fork one more"),
+            text_response("plain fork one"),
+            text_response("plain fork more"),
+        ],
+        1_000_000,
+    );
+    let config = storage::StorageConfig {
+        db_path: harness._directory.path().join("history.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    harness.runtime = harness
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    let start = "Start with @git-best-practices";
+    let source = harness
+        .runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            start.into(),
+            skill.mention("source"),
+        )
+        .unwrap();
+    let mut events = through_phase(&mut harness.receiver, source, AgentRunPhase::Waiting).await;
+    // The boundary is published right before or after the run reports Waiting.
+    let mut boundary = events.iter().find_map(|event| match &event.kind {
+        EventKind::Lifecycle(LifecycleEvent::TurnCompleted {
+            run_id,
+            context_len,
+        }) if run_id == &source.to_string() => Some(*context_len),
+        _ => None,
+    });
+    while boundary.is_none() {
+        let event = harness.receiver.recv().await.unwrap();
+        if let EventKind::Lifecycle(LifecycleEvent::TurnCompleted {
+            run_id,
+            context_len,
+        }) = &event.kind
+            && run_id == &source.to_string()
+        {
+            boundary = Some(*context_len);
+        }
+        events.push(event);
+    }
+    let boundary = boundary.unwrap();
+    harness
+        .runtime
+        .send_message(source, "second source turn".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, source, AgentRunPhase::Waiting).await);
+    let seed = || {
+        Some(runtime::ChatForkSeed {
+            source_run_id: source.to_string(),
+            context_len: boundary,
+        })
+    };
+
+    // A branch that mentions the skill again, and a rewind that sends plain words.
+    let branch = "Branch with @git-best-practices";
+    let fork = harness
+        .runtime
+        .delegate_chat_seeded(
+            "fork",
+            Role::Worker,
+            branch.into(),
+            skill.mention("fork"),
+            seed(),
+        )
+        .unwrap();
+    let fork_events = through_phase(&mut harness.receiver, fork, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .send_message(fork, "fork follow-up".into())
+        .unwrap();
+    let fork_events = [
+        fork_events,
+        through_phase(&mut harness.receiver, fork, AgentRunPhase::Waiting).await,
+    ]
+    .concat();
+    let plain = harness
+        .runtime
+        .delegate_chat_seeded(
+            "rewind",
+            Role::Worker,
+            "Rewind words".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+            seed(),
+        )
+        .unwrap();
+    let mut plain_events =
+        through_phase(&mut harness.receiver, plain, AgentRunPhase::Waiting).await;
+    harness
+        .runtime
+        .send_message(plain, "rewind follow-up".into())
+        .unwrap();
+    plain_events.extend(through_phase(&mut harness.receiver, plain, AgentRunPhase::Waiting).await);
+    for run in [fork, plain, source] {
+        harness.runtime.cancel(run).unwrap();
+        harness.runtime.wait(run).await.unwrap();
+    }
+
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 6);
+    let expanded_start = skill.expanded(start);
+    // Source branch: its own prefix is stable.
+    assert_append_only(CacheProtocol::OpenAi, &requests[0], &requests[1]).unwrap();
+    // The fork starts from the inherited bytes and adds only the new input, expanded once.
+    assert_eq!(
+        user_contents(&requests[2]),
+        [expanded_start.clone(), skill.expanded(branch)]
+    );
+    assert_eq!(
+        user_contents(&requests[3]),
+        [
+            expanded_start.clone(),
+            skill.expanded(branch),
+            "fork follow-up".to_owned()
+        ]
+    );
+    assert_append_only(CacheProtocol::OpenAi, &requests[2], &requests[3])
+        .expect("a branch keeps its own prefix");
+    // A rewind with plain words adds no block: the inherited one is not expanded again.
+    assert_eq!(
+        user_contents(&requests[4]),
+        [expanded_start.clone(), "Rewind words".to_owned()]
+    );
+    assert_eq!(requests[4].to_string().matches("<skill name=").count(), 1);
+    assert_append_only(CacheProtocol::OpenAi, &requests[4], &requests[5])
+        .expect("a rewound branch keeps its own prefix");
+    // The inherited message is byte-identical in the source and in both branches.
+    assert_eq!(user_contents(&requests[0])[0], expanded_start);
+    // Later requests of a branch reuse its cached input (the mock's cache follows the input).
+    let fork_completed = completed_requests(&fork_events, fork);
+    assert_eq!(fork_completed.len(), 2);
+    assert!(fork_completed[1].1 >= fork_completed[0].0);
+    let plain_completed = completed_requests(&plain_events, plain);
+    assert_eq!(plain_completed.len(), 2);
+    assert!(plain_completed[1].1 >= plain_completed[0].0);
+}
+
 #[tokio::test]
 async fn workspace_without_initial_system_survives_compaction_and_reuses_wire_prefix() {
     let mut harness = harness(
