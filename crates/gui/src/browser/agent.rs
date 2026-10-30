@@ -78,8 +78,14 @@ impl AgentView for LiveAgentView {
         let key = key.to_owned();
         let repaint = ctx.clone();
         self.runtime.spawn(async move {
-            let on_frame = Arc::new(move || crate::repaint::coalesced(&repaint));
+            let on_frame = {
+                let repaint = repaint.clone();
+                Arc::new(move || crate::repaint::coalesced(&repaint))
+            };
             let _ = sender.send(browser.screencast(&key, on_frame).await);
+            // A start that fails never produces a frame, and one that succeeds may not produce
+            // one for a while, yet either result is only taken in by the next poll_frame.
+            crate::repaint::coalesced(&repaint);
         });
         self.pending = Some(receiver);
     }
@@ -241,6 +247,11 @@ impl<V: AgentView> AgentBrowserSurface for AgentBrowserPane<V> {
                     });
             }
             let watched = self.observing.as_deref() == Some(selected);
+            // Before anything below reads the view: this takes in a screencast that just started
+            // or failed to, so the pass a wake-up triggered already shows it.
+            if watched && let Some(image) = self.view.poll_frame() {
+                self.keep_frame(selected, image, &ctx);
+            }
             if open {
                 if let Some(tab) = self.view.tab() {
                     ui.label(muted(format!("Showing the active tab {tab}")));
@@ -250,9 +261,6 @@ impl<V: AgentView> AgentBrowserSurface for AgentBrowserPane<V> {
                 }
             } else {
                 ui.label(muted("The page was closed."));
-            }
-            if watched && let Some(image) = self.view.poll_frame() {
-                self.keep_frame(selected, image, &ctx);
             }
             let activity = if watched {
                 self.view.activity()
@@ -353,5 +361,138 @@ impl AgentView for FakeAgentView {
 
     fn error(&self) -> Option<String> {
         self.failure.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use ::browser::agent::{LaunchOptions, RequestPolicy};
+    use egui_kittest::kittest::Queryable as _;
+
+    use super::*;
+
+    struct NoPolicy;
+
+    #[async_trait::async_trait]
+    impl RequestPolicy for NoPolicy {
+        async fn check(&self, _: &url::Url) -> Result<(), String> {
+            Err("unused".into())
+        }
+
+        async fn resolve(
+            &self,
+            _: &str,
+            _: u16,
+            _: bool,
+        ) -> Result<Vec<std::net::SocketAddr>, String> {
+            Err("unused".into())
+        }
+    }
+
+    #[test]
+    fn a_screencast_that_fails_to_start_wakes_the_ui_to_show_the_error() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let browser = Arc::new(AgentBrowser::new(LaunchOptions {
+            executable: None,
+            policy: Arc::new(NoPolicy),
+            max_pages: 1,
+            max_tabs: 1,
+        }));
+        let mut view = LiveAgentView::new(browser, runtime.handle().clone());
+        let ctx = egui::Context::default();
+        let (woken, wake) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = woken.send(());
+        });
+
+        // No tab is open for this run, so starting the screencast fails without a browser.
+        view.observe(Some("run-without-a-page"), &ctx);
+        wake.recv().expect("the failed start requests a repaint");
+
+        assert!(view.poll_frame().is_none());
+        assert!(
+            view.error()
+                .is_some_and(|error| error.contains("run-without-a-page"))
+        );
+    }
+
+    struct Deferred {
+        failure: mpsc::Receiver<String>,
+        error: Option<String>,
+    }
+
+    impl AgentView for Deferred {
+        fn pages(&mut self, _: &egui::Context) -> Vec<String> {
+            vec!["run-1".into()]
+        }
+
+        fn observe(&mut self, _: Option<&str>, _: &egui::Context) {}
+
+        fn poll_frame(&mut self) -> Option<egui::ColorImage> {
+            if let Ok(error) = self.failure.try_recv() {
+                self.error = Some(error);
+            }
+            None
+        }
+
+        fn tab(&self) -> Option<String> {
+            None
+        }
+
+        fn activity(&self) -> Vec<Activity> {
+            Vec::new()
+        }
+
+        fn error(&self) -> Option<String> {
+            self.error.clone()
+        }
+    }
+
+    #[test]
+    fn the_pass_a_failed_start_wakes_already_shows_the_error() {
+        let (fail, failure) = mpsc::channel();
+        let pane = AgentBrowserPane::new(Deferred {
+            failure,
+            error: None,
+        });
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, pane: &mut AgentBrowserPane<Deferred>| {
+                let runs = [];
+                AgentBrowserSurface::render(
+                    pane,
+                    ui,
+                    BrowserTabView {
+                        runs: &runs,
+                        selected: Some("run-1"),
+                    },
+                );
+            },
+            pane,
+        );
+        harness.run();
+        assert!(
+            harness
+                .query_by_label_contains("screencast could not start")
+                .is_none()
+        );
+
+        // The window is at rest; only the start failing wakes it.
+        let (woken, wake) = mpsc::channel();
+        harness.ctx.set_request_repaint_callback(move |_| {
+            let _ = woken.send(());
+        });
+        fail.send("screencast could not start".into()).unwrap();
+        crate::repaint::coalesced(&harness.ctx);
+        wake.recv().expect("the failure requests a repaint");
+
+        // That one pass, with nothing else in between, must draw it.
+        harness.step();
+        assert!(
+            harness
+                .query_by_label_contains("screencast could not start")
+                .is_some()
+        );
     }
 }

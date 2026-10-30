@@ -127,6 +127,8 @@ fn latest_columns_match_the_credential_free_schema() {
                 column("wall_clock_ns", "INTEGER", 1, None, 0),
                 column("kind", "TEXT", 1, None, 0),
                 column("payload", "TEXT", 1, None, 0),
+                column("subkind", "TEXT", 0, None, 0),
+                column("run_id", "TEXT", 0, None, 0),
             ],
         ),
         (

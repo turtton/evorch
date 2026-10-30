@@ -504,6 +504,41 @@ impl Database {
         event::list_orchestrator_ordered(&self.conn)
     }
 
+    /// Hands the events of the given `(kind, subkind)` pairs to `visit` in ID
+    /// order, one at a time. `kind` is the stored category name (`Orchestrator`,
+    /// `Message`, `compaction`, ...); a `None` subkind matches every subkind of
+    /// the kind. Rows are found through an index, so a selective filter does not
+    /// read the rest of the history. Rows written before the event columns existed
+    /// are still matched until the backfill converts them, at the cost of
+    /// decoding every such row of the kind. Events that no longer decode are
+    /// skipped, as in [`Self::events_all_ordered`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn for_each_event_matching(
+        &self,
+        filters: &[(&str, Option<&str>)],
+        visit: impl FnMut(StoredEvent),
+    ) -> Result<(), StorageError> {
+        event::select::for_each_matching(&self.conn, filters, visit)
+    }
+
+    /// Hands every event that concerns `run_ids` to `visit` in ID order: the
+    /// events attributed to a run by `Event::primary_run_id`, agent messages
+    /// sent by one, and approvals and denials whose call ID (`<run>:<call>`)
+    /// belongs to one. Approvals with an unscoped call ID are not attributed.
+    /// Unconverted rows are attributed from their payload.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn for_each_event_for_runs(
+        &self,
+        run_ids: &[String],
+        visit: impl FnMut(StoredEvent),
+    ) -> Result<(), StorageError> {
+        event::select::for_each_for_runs(&self.conn, run_ids, visit)
+    }
+
     /// `run_ids` and every run delegated from them, sorted.
     ///
     /// # Errors
@@ -525,8 +560,8 @@ impl Database {
     }
 
     /// Up to `limit` events at or after `from_ns` concerning `run_ids`, oldest
-    /// first, and whether more matched. An event concerns a run when a `run_id`
-    /// field names it or its approval call ID belongs to it.
+    /// first, and whether more matched. Which events concern a run is defined
+    /// by [`Self::for_each_event_for_runs`].
     ///
     /// # Errors
     /// Returns an error if SQLite access fails.
@@ -536,7 +571,7 @@ impl Database {
         from_ns: i64,
         limit: usize,
     ) -> Result<(Vec<StoredEvent>, bool), StorageError> {
-        event::list_for_runs(&self.conn, run_ids, from_ns, limit)
+        event::select::list_for_runs(&self.conn, run_ids, from_ns, limit)
     }
 
     /// [`Self::events_for_runs`] over events with `after_id < id <= through_id`.
@@ -552,7 +587,7 @@ impl Database {
         through_id: i64,
         limit: usize,
     ) -> Result<(Vec<StoredEvent>, bool), StorageError> {
-        event::list_for_runs_between(&self.conn, run_ids, 0, after_id, through_id, limit)
+        event::select::list_for_runs_between(&self.conn, run_ids, after_id, through_id, limit)
     }
 
     /// Hands every event to `visit` in ID order, one at a time, so that a

@@ -87,6 +87,9 @@ pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, Diagnost
 pub use entity::CatalogUpdateRecord;
 pub use error::StorageError;
 pub use host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
+pub use migrations::backfill::{
+    DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
+};
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, StoredAgentMessage};
 pub use repo::event::{EventPage, StoredEvent};

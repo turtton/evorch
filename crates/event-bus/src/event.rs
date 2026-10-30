@@ -60,6 +60,175 @@ impl Event {
     }
 }
 
+impl Event {
+    /// The run this event belongs to, for indexing and per-run replay.
+    ///
+    /// Follows how the transcript attributes an event to a run: the `run_id`
+    /// of lifecycle, message, tool, provider, ledger, compaction and
+    /// diagnostic events, the requesting run of a user question, the session
+    /// of a fallback (which names the run), and the recipient of an agent
+    /// message. Events with no single owning run — approvals and denials
+    /// (attributed through their call ID), faults, ownership, orchestrator
+    /// and usage events — have none.
+    #[must_use]
+    pub fn primary_run_id(&self) -> Option<&str> {
+        self.kind.primary_run_id()
+    }
+}
+
+impl EventKind {
+    /// The inner `kind` tag of the category's own tagged enum, as written in the
+    /// serialized payload, or `""` for categories without one (diagnostic and
+    /// ownership events). Complements the category name stored as the event's
+    /// `kind` column.
+    #[must_use]
+    pub const fn subkind_name(&self) -> &'static str {
+        match self {
+            Self::Lifecycle(event) => match event {
+                LifecycleEvent::RunProgress { .. } => "RunProgress",
+                LifecycleEvent::Started { .. } => "Started",
+                LifecycleEvent::Delegated { .. } => "Delegated",
+                LifecycleEvent::BackgroundTaskStarted { .. } => "BackgroundTaskStarted",
+                LifecycleEvent::BackgroundTaskCompleted { .. } => "BackgroundTaskCompleted",
+                LifecycleEvent::BackgroundTaskCancelled { .. } => "BackgroundTaskCancelled",
+                LifecycleEvent::AgentRunStarted { .. } => "AgentRunStarted",
+                LifecycleEvent::TaskPromptPublished { .. } => "TaskPromptPublished",
+                LifecycleEvent::AgentRunStateChanged { .. } => "AgentRunStateChanged",
+                LifecycleEvent::TurnCompleted { .. } => "TurnCompleted",
+                LifecycleEvent::Completed { .. } => "Completed",
+                LifecycleEvent::Failed { .. } => "Failed",
+                LifecycleEvent::RoutingDecision { .. } => "RoutingDecision",
+                LifecycleEvent::EscalationRequested { .. } => "EscalationRequested",
+                LifecycleEvent::EscalationProposed { .. } => "EscalationProposed",
+                LifecycleEvent::AgentRunRestored { .. } => "AgentRunRestored",
+                LifecycleEvent::RootWakeRequested { .. } => "RootWakeRequested",
+                LifecycleEvent::AutoContinuationPaused { .. } => "AutoContinuationPaused",
+                LifecycleEvent::HostInputDelivered { .. } => "HostInputDelivered",
+                LifecycleEvent::HostInputDropped { .. } => "HostInputDropped",
+                LifecycleEvent::HostInputUnknown { .. } => "HostInputUnknown",
+            },
+            Self::Message(event) => match event {
+                MessageEvent::MessageCompleted { .. } => "MessageCompleted",
+                MessageEvent::FinalResultPublished { .. } => "FinalResultPublished",
+                MessageEvent::MessageDelta { .. } => "MessageDelta",
+                MessageEvent::ReasoningDelta { .. } => "ReasoningDelta",
+                MessageEvent::ToolCallDelta { .. } => "ToolCallDelta",
+                MessageEvent::StreamRetried { .. } => "StreamRetried",
+            },
+            Self::Tool(event) => match event {
+                ToolEvent::UserQuestionUpdated { .. } => "UserQuestionUpdated",
+                ToolEvent::ArtifactsPresented { .. } => "ArtifactsPresented",
+                ToolEvent::ToolStarted { .. } => "ToolStarted",
+                ToolEvent::ToolCompleted { .. } => "ToolCompleted",
+                ToolEvent::ShellJobOutput { .. } => "ShellJobOutput",
+                ToolEvent::ApprovalRequested { .. } => "ApprovalRequested",
+                ToolEvent::ApprovalResolved { .. } => "ApprovalResolved",
+                ToolEvent::ExecutionDenied { .. } => "ExecutionDenied",
+            },
+            Self::Usage(event) => match event {
+                UsageEvent::Usage { .. } => "Usage",
+                UsageEvent::CacheStats { .. } => "CacheStats",
+            },
+            Self::Provider(event) => match event {
+                ProviderEvent::ProviderFallback { .. } => "ProviderFallback",
+                ProviderEvent::RequestStarted { .. } => "RequestStarted",
+                ProviderEvent::FirstTokenObserved { .. } => "FirstTokenObserved",
+                ProviderEvent::RequestCompleted { .. } => "RequestCompleted",
+                ProviderEvent::CacheReuseObserved { .. } => "CacheReuseObserved",
+                ProviderEvent::RequestFailed { .. } => "RequestFailed",
+                ProviderEvent::CooldownStarted { .. } => "CooldownStarted",
+                ProviderEvent::FallbackTriggered { .. } => "FallbackTriggered",
+            },
+            Self::Fault(event) => match event {
+                FaultEvent::SubscriberLagged { .. } => "SubscriberLagged",
+                FaultEvent::SkillDiagnostic { .. } => "SkillDiagnostic",
+            },
+            Self::AgentMessage(event) => match event {
+                AgentMessageEvent::Delivered { .. } => "Delivered",
+            },
+            Self::Compaction(event) => match event {
+                CompactionEvent::Compacted { .. } => "Compacted",
+            },
+            Self::Orchestrator(event) => match event {
+                OrchestratorEvent::ThreadGoalUpdated { .. } => "ThreadGoalUpdated",
+                OrchestratorEvent::ThreadTodoUpdated { .. } => "ThreadTodoUpdated",
+                OrchestratorEvent::TaskProgressed { .. } => "TaskProgressed",
+                OrchestratorEvent::TaskCheckpoint { .. } => "TaskCheckpoint",
+            },
+            Self::Ledger(event) => match event {
+                LedgerEvent::RunLedgerAppended { .. } => "RunLedgerAppended",
+            },
+            Self::Diagnostic(_) | Self::Ownership(_) => "",
+        }
+    }
+
+    /// See [`Event::primary_run_id`].
+    #[must_use]
+    pub fn primary_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Lifecycle(event) => match event {
+                LifecycleEvent::RunProgress { run_id, .. }
+                | LifecycleEvent::AgentRunStarted { run_id, .. }
+                | LifecycleEvent::TaskPromptPublished { run_id, .. }
+                | LifecycleEvent::AgentRunStateChanged { run_id, .. }
+                | LifecycleEvent::TurnCompleted { run_id, .. }
+                | LifecycleEvent::EscalationProposed { run_id, .. }
+                | LifecycleEvent::AgentRunRestored { run_id, .. }
+                | LifecycleEvent::RootWakeRequested { run_id }
+                | LifecycleEvent::AutoContinuationPaused { run_id, .. }
+                | LifecycleEvent::HostInputDelivered { run_id, .. }
+                | LifecycleEvent::HostInputDropped { run_id, .. }
+                | LifecycleEvent::HostInputUnknown { run_id, .. } => Some(run_id),
+                LifecycleEvent::Started { .. }
+                | LifecycleEvent::Delegated { .. }
+                | LifecycleEvent::BackgroundTaskStarted { .. }
+                | LifecycleEvent::BackgroundTaskCompleted { .. }
+                | LifecycleEvent::BackgroundTaskCancelled { .. }
+                | LifecycleEvent::Completed { .. }
+                | LifecycleEvent::Failed { .. }
+                | LifecycleEvent::RoutingDecision { .. }
+                | LifecycleEvent::EscalationRequested { .. } => None,
+            },
+            Self::Message(event) => match event {
+                MessageEvent::MessageCompleted { run_id, .. }
+                | MessageEvent::FinalResultPublished { run_id, .. } => Some(run_id),
+                MessageEvent::MessageDelta { run_id, .. }
+                | MessageEvent::ReasoningDelta { run_id, .. }
+                | MessageEvent::ToolCallDelta { run_id, .. }
+                | MessageEvent::StreamRetried { run_id } => run_id.as_deref(),
+            },
+            Self::Tool(event) => match event {
+                ToolEvent::UserQuestionUpdated { question } => Some(&question.run_id),
+                ToolEvent::ArtifactsPresented { run_id, .. } => Some(run_id),
+                ToolEvent::ToolStarted { run_id, .. }
+                | ToolEvent::ToolCompleted { run_id, .. }
+                | ToolEvent::ShellJobOutput { run_id, .. } => run_id.as_deref(),
+                ToolEvent::ApprovalRequested { .. }
+                | ToolEvent::ApprovalResolved { .. }
+                | ToolEvent::ExecutionDenied { .. } => None,
+            },
+            Self::Provider(event) => match event {
+                ProviderEvent::RequestStarted { run_id, .. }
+                | ProviderEvent::FirstTokenObserved { run_id, .. }
+                | ProviderEvent::RequestCompleted { run_id, .. }
+                | ProviderEvent::CacheReuseObserved { run_id, .. }
+                | ProviderEvent::RequestFailed { run_id, .. }
+                | ProviderEvent::CooldownStarted { run_id, .. } => run_id.as_deref(),
+                // The fallback is recorded under the run that was routed.
+                ProviderEvent::FallbackTriggered { session_id, .. } => Some(session_id),
+                ProviderEvent::ProviderFallback { .. } => None,
+            },
+            Self::Compaction(CompactionEvent::Compacted { run_id, .. })
+            | Self::Ledger(LedgerEvent::RunLedgerAppended { run_id, .. }) => Some(run_id),
+            Self::Diagnostic(event) => event.run_id.as_deref(),
+            Self::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
+                Some(&message.recipient_run_id)
+            }
+            Self::Usage(_) | Self::Fault(_) | Self::Orchestrator(_) | Self::Ownership(_) => None,
+        }
+    }
+}
+
 /// イベントの大分類。隣接タグ形式（`kind` / `payload` キー）でシリアライズされる。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
@@ -1787,6 +1956,11 @@ mod tests {
             assert_eq!(
                 value["kind"]["kind"], category,
                 "outer tag mismatch: category={category}"
+            );
+            assert_eq!(
+                event.kind.subkind_name(),
+                value["kind"]["payload"]["kind"].as_str().unwrap_or(""),
+                "subkind must be the serialized inner tag: category={category}"
             );
             // 内側 enum レベルの隣接タグ（{"kind", "payload"}）
             if category != "Ownership" {

@@ -278,6 +278,11 @@ pub trait CommandSink: Send {
     fn poll(&mut self) -> Vec<LoopEvent> {
         Vec::new()
     }
+    /// Whether a background job exists whose result only [`Self::poll`] collects, without
+    /// waking the UI.
+    fn has_background_work(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

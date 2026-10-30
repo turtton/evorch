@@ -86,6 +86,11 @@ impl StorageSettings {
         });
     }
 
+    /// Whether a preview or cleanup worker is running.
+    pub(super) const fn is_busy(&self) -> bool {
+        self.job.is_some()
+    }
+
     fn poll(&mut self) -> bool {
         let Some(rx) = self.job.take() else {
             return false;
@@ -270,5 +275,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             model.open = false;
             model.confirm_delete = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_job_is_busy_until_it_is_collected() {
+        let mut settings = StorageSettings::default();
+        assert!(!settings.is_busy());
+        let (tx, rx) = mpsc::channel();
+        settings.job = Some(rx);
+        assert!(settings.is_busy());
+        tx.send(JobResult::Preview(Err("failed".into()))).unwrap();
+        assert!(settings.poll());
+        assert!(!settings.is_busy());
     }
 }

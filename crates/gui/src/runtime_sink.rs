@@ -184,6 +184,9 @@ impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
         self.poll_compactions()
     }
+    fn has_background_work(&self) -> bool {
+        !self.compaction_jobs.is_empty()
+    }
     fn has_host_input_receipts(&self) -> bool {
         true
     }

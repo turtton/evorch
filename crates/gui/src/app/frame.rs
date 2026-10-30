@@ -17,7 +17,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.dispatch_system_notifications(ctx);
         // Folded events add and bind threads while the window is hidden, too.
         self.sync_thread_mirror(Instant::now());
-        ctx.request_repaint_after(Duration::from_millis(200));
+        ctx.request_repaint_after(self.logic_repaint_delay());
     }
 
     pub fn with_quota_backend(
@@ -50,7 +50,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.apply_loop_event(event);
         }
         let sink_time = sink_started.elapsed();
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.diff.poll();
         self.drain_pty(&ctx);
         self.poll_provider_save();
@@ -141,18 +140,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.persist_composer_draft();
         let draft_time = draft_started.elapsed();
         self.render_restore_diagnostics(&ctx);
-        if self.provider_settings.openai_mut().is_some_and(|editor| {
-            matches!(
-                editor.models_fetch_state,
-                crate::model::provider_settings::ModelsFetchState::Loading
-            )
-        }) || self.codex_auth().is_authenticating()
-            || self.provider_save_rx.is_some()
-            || self.folder_picker.is_busy()
-            || self.provider_settings.catalog.is_busy()
-        {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        }
+        // After every poll above and the render, so work started or finished this pass counts.
+        ctx.request_repaint_after(self.poll_repaint_delay());
         let frame_time = frame_started.elapsed();
         if super::frame_trace::enabled() {
             self.frame_trace
@@ -235,11 +224,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         // A queued input may be consumed without a pump (headless fixtures or
         // lagged notifications). Poll only unsettled work at this frame boundary.
-        if self
-            .follow_up_queues
-            .values()
-            .any(|rows| rows.iter().any(|row| !row.undelivered))
-        {
+        if self.has_unsettled_follow_ups() {
             self.receipt_reconciliation.dirty = true;
         }
         let mut receipts = self.read_receipts_if_due(Instant::now());
