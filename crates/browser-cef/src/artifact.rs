@@ -10,6 +10,7 @@ use crate::runtime::{SendCell, on_ui};
 
 #[derive(Default)]
 pub struct NetLog {
+    /// Requests served from files present in the bundle (never a synthetic 404).
     pub served: Mutex<Vec<String>>,
     pub blocked: Mutex<Vec<String>>,
 }
@@ -27,7 +28,8 @@ impl ArtifactContext {
         let handler_log = Arc::clone(&log);
         let bundle = Arc::new(bundle);
         let context = on_ui(move || {
-            let mut handler = ArtifactContextHandler::new(Arc::clone(&handler_log));
+            let mut handler =
+                ArtifactContextHandler::new(Arc::clone(&bundle), Arc::clone(&handler_log));
             let context = request_context_create_context(
                 Some(&RequestContextSettings::default()),
                 Some(&mut handler),
@@ -58,6 +60,7 @@ fn request_url(request: Option<&mut Request>) -> String {
 
 wrap_request_context_handler! {
     struct ArtifactContextHandler {
+        bundle: Arc<ArtifactBundle>,
         log: Arc<NetLog>,
     }
 
@@ -72,13 +75,14 @@ wrap_request_context_handler! {
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut i32>,
         ) -> Option<ResourceRequestHandler> {
-            Some(BlockingResourceHandler::new(Arc::clone(&self.log)))
+            Some(BlockingResourceHandler::new(Arc::clone(&self.bundle), Arc::clone(&self.log)))
         }
     }
 }
 
 wrap_resource_request_handler! {
     struct BlockingResourceHandler {
+        bundle: Arc<ArtifactBundle>,
         log: Arc<NetLog>,
     }
 
@@ -91,7 +95,12 @@ wrap_resource_request_handler! {
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
             let url = request_url(request);
-            if is_allowed_url(&url) {
+            // Chromium may ask for /favicon.ico after loading, even when the
+            // document never names it. Only bundle entries may be served from
+            // this origin: reject misses explicitly, before the scheme handler,
+            // rather than logging a timing-dependent synthetic 404 as served.
+            let in_bundle = artifact_path(&url).is_none_or(|path| self.bundle.get(path).is_some());
+            if is_allowed_url(&url) && in_bundle {
                 ReturnValue::CONTINUE
             } else {
                 self.log.blocked.lock().unwrap_or_else(|e| e.into_inner()).push(url);
@@ -129,10 +138,16 @@ wrap_scheme_handler_factory! {
         ) -> Option<ResourceHandler> {
             let url = request_url(request);
             let file = artifact_path(&url).and_then(|path| self.bundle.get(path));
-            self.log.served.lock().unwrap_or_else(|e| e.into_inner()).push(url);
             let (status, mime, body) = match file {
-                Some((mime, body)) => (200, mime.to_owned(), body),
-                None => (404, "text/plain".to_owned(), Arc::new(b"not found".to_vec())),
+                Some((mime, body)) => {
+                    self.log.served.lock().unwrap_or_else(|e| e.into_inner()).push(url);
+                    (200, mime.to_owned(), body)
+                },
+                None => {
+                    // Fail closed even if CEF bypasses on_before_resource_load.
+                    self.log.blocked.lock().unwrap_or_else(|e| e.into_inner()).push(url);
+                    (404, "text/plain".to_owned(), Arc::new(b"not found".to_vec()))
+                },
             };
             Some(StaticResource::new(
                 Arc::new(Head { status, mime }),

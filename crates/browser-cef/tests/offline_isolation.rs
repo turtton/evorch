@@ -132,21 +132,92 @@ fn leak_probes_stay_offline() {
 }
 
 fn snapshot_captures_the_page_after_its_scripts_ran() {
-    let image = render_snapshot(
-        b"<!doctype html><body style=\"background:#f00\"><script>document.body.style.background = '#00f';</script>".to_vec(),
-        // nextest's slow-timeout bounds the wait; the snapshot has no other deadline.
-        Duration::MAX,
-    )
-    .expect("snapshot");
+    for (html, expected) in [
+        (
+            "<!doctype html><body style=\"background:#f00\"><script>document.body.style.background = '#00f';</script>",
+            egui::Color32::BLUE,
+        ),
+        (
+            "<!doctype html><body style=\"background:#f00\" onload=\"document.body.style.background = '#0f0'\">",
+            egui::Color32::GREEN,
+        ),
+        // White is valid content, not a reason to discard or retry a frame.
+        (
+            "<!doctype html><body style=\"background:#fff\">",
+            egui::Color32::WHITE,
+        ),
+    ] {
+        let image = render_snapshot(
+            html.as_bytes().to_vec(),
+            // nextest bounds the wait; the snapshot has no other deadline.
+            Duration::MAX,
+        )
+        .expect("snapshot");
 
-    assert_eq!(image.size, SNAPSHOT_SIZE.map(|side| side as usize));
-    let center = image.pixels[image.size[0] * image.size[1] / 2 + image.size[0] / 2];
-    assert_eq!(center, egui::Color32::from_rgb(0, 0, 255));
+        assert_eq!(image.size, SNAPSHOT_SIZE.map(|side| side as usize));
+        let center = image.pixels[image.size[0] * image.size[1] / 2 + image.size[0] / 2];
+        assert_eq!(center, expected, "{html}");
+    }
+}
+
+fn only_bundle_resources_are_served() {
+    // Request the favicon explicitly, so this regression does not depend on
+    // when Chromium decides to request its implicit favicon. A bundled icon
+    // must remain usable; neither it nor other missing files may hit the network.
+    for bundled_favicon in [false, true] {
+        let mut bundle = ArtifactBundle::html(
+            r#"<!doctype html>
+            <head>
+            <link rel="icon" href="data:,">
+            <script>
+            const results = {};
+            function done(name, loaded) {
+                results[name] = loaded;
+                if (Object.keys(results).length === 3)
+                    document.title = JSON.stringify(results);
+            }
+            </script>
+            </head><body>
+            <img src="/favicon.ico" onload="done('icon', true)" onerror="done('icon', false)">
+            <img src="/missing.svg" onload="done('missing', true)" onerror="done('missing', false)">
+            <img src="/ok.svg" onload="done('ok', true)" onerror="done('ok', false)">
+            "#,
+        );
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#;
+        bundle.insert("ok.svg", "image/svg+xml", svg);
+        if bundled_favicon {
+            bundle.insert("favicon.ico", "image/svg+xml", svg);
+        }
+        let (browser, log) = open(bundle);
+        browser.wait_for(|status| status.title.starts_with('{') && status.load_end_count > 0);
+        let report: Value = serde_json::from_str(&browser.status().title).expect("resource report");
+        assert_eq!(
+            report,
+            json!({ "icon": bundled_favicon, "missing": false, "ok": true })
+        );
+        let mut expected = vec![
+            ArtifactContext::url("index.html"),
+            ArtifactContext::url("ok.svg"),
+        ];
+        if bundled_favicon {
+            expected.push(ArtifactContext::url("favicon.ico"));
+        }
+        let mut served = log.served.lock().unwrap().clone();
+        served.sort();
+        expected.sort();
+        assert_eq!(served, expected);
+        let blocked = log.blocked.lock().unwrap();
+        assert!(blocked.contains(&ArtifactContext::url("missing.svg")));
+        assert_eq!(
+            blocked.contains(&ArtifactContext::url("favicon.ico")),
+            !bundled_favicon
+        );
+    }
 }
 
 fn renderer_crash_reloads_the_artifact() {
     let (browser, _log) = open(ArtifactBundle::html(
-        "<!doctype html><title>alive</title><p>crash me</p>",
+        "<!doctype html><title>alive</title><body style=\"background:#f00\"><script>document.body.style.background = '#00f';</script>",
     ));
     browser.wait_for(|status| status.title == "alive" && status.load_end_count > 0);
     let loads = browser.status().load_end_count;
@@ -163,6 +234,12 @@ fn renderer_crash_reloads_the_artifact() {
 
     browser.wait_for(|status| status.renderer_crashes == 1 && status.load_end_count > loads);
     assert_eq!(browser.status().title, "alive");
+    let image = browser
+        .capture_settled(Duration::MAX)
+        .expect("reloaded snapshot");
+    assert_eq!(image.size, [1600, 1200], "snapshot at 2x scale");
+    let center = image.pixels[image.size[0] * image.size[1] / 2 + image.size[0] / 2];
+    assert_eq!(center, egui::Color32::BLUE);
 }
 
 /// CEF initializes once per process, so the scenarios share one runtime.
@@ -176,6 +253,7 @@ fn cef_preview_is_offline_and_recovers() {
     .expect("CEF runtime");
 
     leak_probes_stay_offline();
+    only_bundle_resources_are_served();
     renderer_crash_reloads_the_artifact();
     snapshot_captures_the_page_after_its_scripts_ran();
 
