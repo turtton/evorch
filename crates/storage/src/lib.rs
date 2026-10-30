@@ -92,7 +92,7 @@ pub use migrations::backfill::{
 };
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, StoredAgentMessage};
-pub use repo::event::StoredEvent;
+pub use repo::event::{EventPage, StoredEvent};
 pub use repo::user_questions::AnswerMode;
 pub use review::{AssistantReferenceRow, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};

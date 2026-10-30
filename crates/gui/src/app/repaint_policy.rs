@@ -50,6 +50,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             || self.telemetry.subscription_quota.claude.is_busy()
             || self.telemetry.subscription_quota.cursor.is_busy()
             || self.has_unsettled_follow_ups()
+            || self.shared_state_retry_pending()
+    }
+
+    /// A sidebar save waiting for another process to release the file, or events of
+    /// another process held until the sidebar names their conversation. Neither wakes the
+    /// UI; the frame boundary retries them.
+    fn shared_state_retry_pending(&self) -> bool {
+        self.sidebar_save_deferred() || self.shared_events_held()
     }
 
     /// When the debounced composer draft is saved, if it is waiting to be. Without a sidebar
@@ -86,7 +94,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn logic_repaint_delay_at(&self, now: Instant) -> Duration {
-        let base = if self.has_unsettled_follow_ups() {
+        let base = if self.has_unsettled_follow_ups() || self.shared_state_retry_pending() {
             BUSY_POLL
         } else {
             IDLE_POLL
@@ -382,5 +390,48 @@ mod tests {
             assert_eq!(state.poll_repaint_delay_at(typed + elapsed), IDLE_POLL);
             assert_eq!(state.logic_repaint_delay_at(typed + elapsed), IDLE_POLL);
         }
+    }
+
+    #[test]
+    fn a_deferred_sidebar_save_and_held_shared_events_keep_the_window_polling() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sidebar.json");
+        let mut state = crate::app::delivery_tests::state(&path);
+        state.save_sidebar();
+        assert!(!state.sidebar_save_deferred());
+        assert!(!state.polled_work_pending());
+        assert_eq!(state.logic_repaint_delay_at(Instant::now()), IDLE_POLL);
+
+        // Another process holds the lock: the save waits and is retried by polling.
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.path().join("sidebar.json.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        state.save_sidebar();
+        assert!(state.sidebar_save_deferred());
+        assert!(state.polled_work_pending());
+        assert_eq!(state.logic_repaint_delay_at(Instant::now()), BUSY_POLL);
+
+        // The lock is released and the retry succeeds: back to the floor.
+        drop(held);
+        state.flush_deferred_sidebar_save();
+        assert!(!state.polled_work_pending());
+        assert_eq!(state.logic_repaint_delay_at(Instant::now()), IDLE_POLL);
+
+        // Events held for a sidebar that does not name their conversation yet.
+        state
+            .shared_feed
+            .pending
+            .push_back(crate::shared_state::FedEvent {
+                id: 1,
+                event: event_bus::Event::new(event_bus::LifecycleEvent::Started {
+                    session_id: "held".into(),
+                }),
+            });
+        assert!(state.polled_work_pending());
+        assert_eq!(state.logic_repaint_delay_at(Instant::now()), BUSY_POLL);
     }
 }

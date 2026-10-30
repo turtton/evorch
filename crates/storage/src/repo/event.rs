@@ -194,6 +194,66 @@ pub fn list_all_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageEr
     )
 }
 
+/// One page of events read after a cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventPage {
+    /// Decodable events of other sessions in ID order.
+    pub events: Vec<StoredEvent>,
+    /// Largest event ID scanned, including excluded rows and rows that no
+    /// longer decode, or the requested cursor when no row followed it. The next
+    /// page starts after it.
+    pub last_id: i64,
+    /// Rows scanned; a page shorter than the limit reached the end of the log.
+    pub scanned: usize,
+}
+
+/// Up to `limit` events with `id > after_id` in ID order. Rows of
+/// `exclude_session` are passed over without reading their payload.
+pub fn list_after(
+    conn: &Connection,
+    after_id: i64,
+    limit: usize,
+    exclude_session: Option<&str>,
+) -> Result<EventPage, StorageError> {
+    let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+    let mut statement = conn.prepare_cached(
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+         CASE WHEN session_id = ?3 THEN NULL ELSE payload END \
+         FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+    )?;
+    let mut rows = statement.query(params![after_id, limit, exclude_session])?;
+    let mut events = Vec::new();
+    let mut last_id = after_id;
+    let mut scanned = 0;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        last_id = row.get(0)?;
+        if row.get_ref(6)? == rusqlite::types::ValueRef::Null {
+            continue;
+        }
+        match row_to_event(row) {
+            Ok(event) => events.push(event),
+            // 現行の型で復元できない行は読み飛ばし、カーソルだけ進めます。
+            Err(StorageError::Serialization(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(EventPage {
+        events,
+        last_id,
+        scanned,
+    })
+}
+
+/// Largest event ID, or 0 for an empty log.
+pub fn last_id(conn: &Connection) -> Result<i64, StorageError> {
+    Ok(
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
 /// Orchestrator events in ID order. Only these rows' payloads are decoded,
 /// a small share of a long history.
 pub fn list_orchestrator_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageError> {

@@ -21,6 +21,7 @@ pub mod panes;
 pub mod pty;
 pub mod repaint;
 pub mod runtime_sink;
+pub mod shared_state;
 pub mod terminal;
 pub mod theme;
 pub mod window;

@@ -201,6 +201,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // consecutive logic-only tick is still a new opportunity for repair.
         self.last_pump_logic_only = logic;
         self.last_pump_frame = Some(frame);
+        self.flush_deferred_sidebar_save();
+        self.drain_shared_feed();
         let drain_started = Instant::now();
         let events = self
             .pump

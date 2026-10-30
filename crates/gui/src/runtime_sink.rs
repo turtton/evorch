@@ -16,11 +16,20 @@ use crate::model::commands::{
     CommandSink, GoalSubmission, LoopEvent, ReferenceKind, WorkbenchCommand,
 };
 
-/// storage bridge が使う永続化セッション ID。
-///
-/// 固定値にすることで、再起動後の `Database::agent_messages_by_session` が
-/// 前セッションの transcript を引き続き復元できる。
+/// Prefix of the stream ids GUI processes persist their events under.
 pub const STORAGE_SESSION_ID: &str = "evorch-gui";
+
+/// A stream id for this process: [`STORAGE_SESSION_ID`], the process id and a
+/// random part. Processes sharing one database persist under distinct streams,
+/// so each recognises and skips its own rows when following the others.
+pub fn new_stream_id() -> String {
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    format!(
+        "{STORAGE_SESSION_ID}:{}-{}",
+        std::process::id(),
+        &random[..8]
+    )
+}
 
 pub fn finish_chat_start(
     host: &runtime::ownership::OwnerHost,
