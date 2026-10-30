@@ -868,10 +868,12 @@ name = "browser-cef"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "browser",
  "cef",
  "egui",
  "egui_kittest",
+ "image",
  "serde_json",
  "tokio",
  "tracing",

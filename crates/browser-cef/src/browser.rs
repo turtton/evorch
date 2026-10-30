@@ -1,10 +1,13 @@
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use cef::*;
+use serde_json::{Value, json};
 
 use crate::artifact::ArtifactContext;
 use crate::clipboard::{COPY_MESSAGE, MAX_COPY_BYTES, MAX_PENDING_COPIES};
+use crate::devtools::DevTools;
 use crate::frame::{PaintBuffer, PixelRect};
 use crate::offline::is_allowed_url;
 use crate::popup::Popup;
@@ -262,34 +265,67 @@ impl OsrBrowser {
         self.shared.wait(None, |shared| predicate(&shared.status()));
     }
 
-    /// The first frame painted after the page finished loading. A repaint is
-    /// forced once loading ends, so the frame reflects the loaded document.
+    /// Captures the loaded document through Chromium's renderer snapshot
+    /// callback, not an unrelated (possibly initial, blank) OSR paint.
     pub fn capture_settled(&self, timeout: Duration) -> Result<egui::ColorImage, String> {
-        self.wait_settled(timeout)?;
-        lock(&self.shared.frame)
-            .frame()
-            .ok_or_else(|| "no frame was painted".into())
+        let shot = self.capture_loaded(timeout)?;
+        let data = shot["data"].as_str().ok_or("the snapshot has no image")?;
+        let png = STANDARD.decode(data).map_err(|error| error.to_string())?;
+        let view = *lock(&self.shared.view);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some((view.width as f32 * view.scale).ceil() as u32);
+        limits.max_image_height = Some((view.height as f32 * view.scale).ceil() as u32);
+        let mut reader =
+            image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+        reader.limits(limits);
+        let image = reader
+            .decode()
+            .map_err(|error| error.to_string())?
+            .into_rgba8();
+        Ok(egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        ))
     }
 
     /// Waits for the page to load and then paint. Chromium routes input by the
     /// hit-test data a painted frame carries, so input sent earlier can be lost.
     pub fn wait_settled(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now().checked_add(timeout);
-        let remaining =
-            || deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        if !self.wait_loaded(remaining()) {
-            return Err("the page did not finish loading".into());
-        }
+        self.capture_loaded(timeout)?;
+        // The renderer snapshot above is the visual-state barrier. Invalidate
+        // alone only repaints the current OSR surface, which can still be the
+        // initial white surface even after loading has ended.
         let painted = self.frame_seq();
         let host = SendCell(self.host().ok_or("the browser is closed")?);
         on_ui(move || host.0.invalidate(PaintElementType::VIEW));
-        if !self
-            .shared
-            .wait(remaining(), |shared| lock(&shared.frame).seq() > painted)
-        {
+        if !self.shared.wait(remaining(deadline), |shared| {
+            lock(&shared.frame).seq() > painted
+        }) {
             return Err("the page did not paint after loading".into());
         }
         Ok(())
+    }
+
+    fn capture_loaded(&self, timeout: Duration) -> Result<Value, String> {
+        let deadline = Instant::now().checked_add(timeout);
+        if !self.wait_loaded(remaining(deadline)) {
+            return Err("the page did not finish loading".into());
+        }
+        // Page.captureScreenshot asks the renderer for a snapshot and completes
+        // when that frame is available. OnPaint has no request/frame identifier,
+        // so merely waiting for its sequence to advance cannot provide this
+        // guarantee. Use the returned pixels, not the independently updated OSR
+        // buffer. This stays in-process; no debugging port or network is opened.
+        DevTools::attach(self)?.call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "png",
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+            }),
+            remaining(deadline).unwrap_or(Duration::MAX),
+        )
     }
 
     /// Waits until the document has loaded and nothing is loading; false if
@@ -342,6 +378,10 @@ impl OsrBrowser {
         }
         lock(&self.artifact).take();
     }
+}
+
+fn remaining(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
 }
 
 impl Drop for OsrBrowser {

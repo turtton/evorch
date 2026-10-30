@@ -16,6 +16,8 @@ pub type Reply = Result<Value, String>;
 
 type Callback = Box<dyn FnOnce(Reply) + Send>;
 
+const AGENT_DETACHED: &str = "the DevTools agent detached";
+
 #[derive(Default)]
 struct Pending {
     next_id: AtomicI32,
@@ -23,8 +25,24 @@ struct Pending {
 }
 
 impl Pending {
+    fn insert(&self, callback: Callback) -> i32 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        lock(&self.waiting).insert(id, callback);
+        id
+    }
+
     fn take(&self, id: i32) -> Option<Callback> {
         lock(&self.waiting).remove(&id)
+    }
+
+    fn fail_all(&self, reason: &str) {
+        let waiting: Vec<Callback> = lock(&self.waiting)
+            .drain()
+            .map(|(_, callback)| callback)
+            .collect();
+        for callback in waiting {
+            callback(Err(reason.to_owned()));
+        }
     }
 }
 
@@ -101,27 +119,30 @@ impl DevTools {
 
     /// Releases the browser and fails every pending command; later calls fail.
     pub fn detach(&self) {
-        drop(lock(&self.session).take());
-        let waiting: Vec<Callback> = lock(&self.pending.waiting)
-            .drain()
-            .map(|(_, callback)| callback)
-            .collect();
-        for callback in waiting {
-            callback(Err("the page closed".into()));
-        }
+        let session = lock(&self.session).take();
+        self.pending.fail_all("the page closed");
+        drop(session);
     }
 
     fn send(&self, method: &str, params: Value, reply: Callback) -> Result<i32, String> {
-        let host = lock(&self.session)
+        let session = lock(&self.session);
+        let host = session
             .as_ref()
             .map(|session| session.host.clone())
             .ok_or_else(|| format!("{method}: the page closed"))?;
-        let id = self.pending.next_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.pending.waiting).insert(id, reply);
+        // Explicit detach cannot drain the queue between finding the session
+        // and registering this callback, leaving its receiver stranded.
+        let id = self.pending.insert(reply);
+        drop(session);
         let message = json!({ "id": id, "method": method, "params": params }).to_string();
         let pending = Arc::clone(&self.pending);
         let rejected = format!("{method}: CEF rejected the DevTools message");
         let posted = post_ui(move || {
+            // A detach (or caller deadline) may have canceled a queued command
+            // before its UI task runs. Do not send it to a newly attached agent.
+            if !lock(&pending.waiting).contains_key(&id) {
+                return;
+            }
             if host.0.send_dev_tools_message(Some(message.as_bytes())) != 1
                 && let Some(callback) = pending.take(id)
             {
@@ -153,6 +174,12 @@ wrap_dev_tools_message_observer! {
     }
 
     impl DevToolsMessageObserver {
+        fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
+            // CEF discards every pending result at this boundary, including
+            // screenshot results. Later commands may attach a fresh agent.
+            self.pending.fail_all(AGENT_DETACHED);
+        }
+
         fn on_dev_tools_message(&self, _browser: Option<&mut Browser>, message: Option<&[u8]>) -> i32 {
             let Some(message) = message.and_then(|message| serde_json::from_slice::<Value>(message).ok()) else {
                 return 0;
@@ -169,5 +196,144 @@ wrap_dev_tools_message_observer! {
             }
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_detach_settles_pending_results_in_either_callback_order() {
+        for reply_first in [false, true] {
+            let pending = Arc::new(Pending::default());
+            let observer = Observer::new(Arc::clone(&pending));
+            let (sender, receiver) = channel();
+            let id = pending.insert(Box::new(move |reply| {
+                let _ = sender.send(reply);
+            }));
+            let (async_sender, async_receiver) = tokio::sync::oneshot::channel();
+            pending.insert(Box::new(move |reply| {
+                let _ = async_sender.send(reply);
+            }));
+            let response = json!({ "id": id, "result": { "data": "snapshot" } }).to_string();
+
+            if reply_first {
+                observer.on_dev_tools_message(None, Some(response.as_bytes()));
+            }
+            observer.on_dev_tools_agent_detached(None);
+            // A late result cannot replace the terminal error or complete twice.
+            observer.on_dev_tools_message(None, Some(response.as_bytes()));
+
+            let reply = receiver.recv().expect("request completion");
+            if reply_first {
+                assert_eq!(reply.unwrap(), json!({ "data": "snapshot" }));
+            } else {
+                assert_eq!(reply, Err(AGENT_DETACHED.to_owned()));
+            }
+            assert_eq!(
+                async_receiver.blocking_recv().expect("async completion"),
+                Err(AGENT_DETACHED.to_owned())
+            );
+            assert!(lock(&pending.waiting).is_empty());
+
+            // CEF permits a later command to attach a fresh agent.
+            let (sender, receiver) = channel();
+            let next = pending.insert(Box::new(move |reply| {
+                let _ = sender.send(reply);
+            }));
+            let response = json!({ "id": next, "result": {} }).to_string();
+            observer.on_dev_tools_message(None, Some(response.as_bytes()));
+            assert_eq!(receiver.recv().expect("reattached result"), Ok(json!({})));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the CEF runtime and helper; see docs/browser.md"]
+    fn terminating_after_sending_a_screenshot_completes_its_waiter() {
+        use crate::offline::ArtifactBundle;
+        use crate::{ArtifactContext, CefRuntime, Dialogs, RuntimeConfig};
+
+        let helper = std::env::current_exe()
+            .expect("test executable")
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("target profile directory")
+            .join(crate::runtime::HELPER_NAME);
+        let runtime = CefRuntime::initialize(RuntimeConfig {
+            helper_path: helper,
+            ..RuntimeConfig::offline()
+        })
+        .expect("CEF runtime");
+
+        for close_browser in [true, false] {
+            let context = ArtifactContext::create(ArtifactBundle::html(
+                "<!doctype html><body style=\"background:blue\">",
+            ))
+            .expect("artifact context");
+            let browser = OsrBrowser::create(
+                context,
+                &ArtifactContext::url("index.html"),
+                [320, 240],
+                1.0,
+                Dialogs::Suppress,
+                30,
+            )
+            .expect("browser");
+            assert!(browser.wait_loaded(None));
+            let devtools = Arc::new(DevTools::attach(&browser).expect("DevTools"));
+            devtools
+                .call(
+                    "Runtime.evaluate",
+                    json!({ "expression": "1" }),
+                    Duration::MAX,
+                )
+                .expect("agent attached");
+
+            let (sender, receiver) = channel();
+            let ui_devtools = Arc::clone(&devtools);
+            let host = SendCell(browser.host().expect("browser host"));
+            // Sending and terminating in one UI task prevents an asynchronous
+            // renderer snapshot reply from arriving between these operations.
+            on_ui(move || {
+                ui_devtools
+                    .send(
+                        "Page.captureScreenshot",
+                        json!({ "format": "png", "fromSurface": true }),
+                        Box::new(move |reply| {
+                            let _ = sender.send(reply);
+                        }),
+                    )
+                    .expect("screenshot sent");
+                if close_browser {
+                    host.0.close_browser(1);
+                } else {
+                    ui_devtools.detach();
+                }
+            })
+            .expect("UI task");
+
+            assert_eq!(
+                receiver.recv().expect("screenshot completion"),
+                Err(if close_browser {
+                    AGENT_DETACHED
+                } else {
+                    "the page closed"
+                }
+                .to_owned())
+            );
+            if close_browser {
+                browser.wait_for(|status| status.closed);
+            } else {
+                assert!(
+                    devtools
+                        .call("Runtime.evaluate", json!({}), Duration::MAX)
+                        .is_err()
+                );
+            }
+            drop(devtools);
+            drop(browser);
+        }
+        drop(runtime);
     }
 }
