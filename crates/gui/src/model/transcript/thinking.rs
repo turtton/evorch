@@ -4,7 +4,9 @@ use super::TranscriptModel;
 
 impl TranscriptModel {
     pub fn visible_entry_id(&self, index: usize) -> usize {
-        self.first_entry_id + self.view_start.min(self.entries.len()) + index
+        self.entry_meta
+            .get(self.view_start.min(self.entries.len()) + index)
+            .map_or(self.next_entry_id, |meta| meta.id)
     }
 
     pub fn thinking_is_streaming(&self, entry_id: usize) -> bool {
@@ -32,7 +34,7 @@ impl TranscriptModel {
     /// Marks `run_id`'s calls that are still running as interrupted. The run
     /// has ended, so no result will arrive and a spinner would never stop.
     pub(crate) fn interrupt_running_tools(&mut self, run_id: &str) {
-        for entry in &mut self.entries {
+        for (entry, meta) in self.entries.iter_mut().zip(&mut self.entry_meta) {
             if let super::TranscriptEntry::Tool {
                 run_id: Some(run),
                 status: status @ super::ToolStatus::Running,
@@ -41,6 +43,7 @@ impl TranscriptModel {
                 && run == run_id
             {
                 *status = super::ToolStatus::Interrupted;
+                meta.revision += 1;
             }
         }
     }

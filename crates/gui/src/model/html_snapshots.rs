@@ -6,6 +6,7 @@
 //! installed [`HtmlSnapshots`], cards keep their text-only HTML entry.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -29,6 +30,7 @@ pub struct HtmlSnapshots {
     dir: PathBuf,
     states: Mutex<HashMap<String, SnapshotState>>,
     requests: Mutex<Vec<SnapshotRequest>>,
+    generation: AtomicU64,
 }
 
 impl HtmlSnapshots {
@@ -37,6 +39,7 @@ impl HtmlSnapshots {
             dir,
             states: Mutex::default(),
             requests: Mutex::default(),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -88,6 +91,11 @@ impl HtmlSnapshots {
             }
         };
         lock(&self.states).insert(sha256.to_owned(), state);
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     fn cache_path(&self, sha256: &str) -> PathBuf {

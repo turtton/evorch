@@ -29,6 +29,7 @@ struct Prepared {
     markdown: String,
     blocks: Vec<(String, Block)>,
     images: Vec<ImageLink>,
+    image_uris: Vec<String>,
 }
 
 /// An image destination from the source and the path it resolved to.
@@ -89,6 +90,8 @@ impl Prepared {
             + self.blocks.iter().map(block).sum::<usize>()
             + self.images.capacity() * size_of::<ImageLink>()
             + self.images.iter().map(image).sum::<usize>()
+            + self.image_uris.capacity() * size_of::<String>()
+            + self.image_uris.iter().map(String::capacity).sum::<usize>()
     }
 }
 
@@ -193,6 +196,9 @@ pub fn render_markdown_with_base(
                 }
             }))
             .show(ui, &mut cache, markdown);
+        for uri in &prepared.image_uris {
+            super::agent::async_layout::observe_image(ui.ctx(), uri);
+        }
     });
 }
 
@@ -214,6 +220,7 @@ fn prepare(source: &str, base: Option<&Path>) -> Prepared {
     let mut start = 0;
     let mut block_start = None;
     let mut blocks = Vec::new();
+    let mut image_uris = Vec::new();
     let mut markdown = String::new();
     let mut block = String::new();
     let mut table = table::Table::default();
@@ -228,6 +235,16 @@ fn prepare(source: &str, base: Option<&Path>) -> Prepared {
     }
     for (event, range) in Parser::new_ext(source, Options::ENABLE_TABLES).into_offset_iter() {
         match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                let uri = dest_url.into_string();
+                // Match the viewer's implicit file scheme: observing a bare
+                // path would miss the loader actually used by markdown.
+                image_uris.push(if uri.contains("://") || uri.starts_with("data:") {
+                    uri
+                } else {
+                    format!("file://{uri}")
+                });
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 block_start = Some((range.start, TagEnd::CodeBlock));
                 block.push_str(&fence);
@@ -283,6 +300,7 @@ fn prepare(source: &str, base: Option<&Path>) -> Prepared {
         markdown,
         blocks,
         images,
+        image_uris,
     }
 }
 

@@ -73,6 +73,7 @@ pub fn summary(presentation: &ArtifactPresentation) -> String {
 }
 
 pub fn show(ui: &mut Ui, id: egui::Id, presentation: &ArtifactPresentation) {
+    crate::panes::agent::mark_async_layout(ui.ctx());
     soft_frame(palette().SURFACE).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if let Some(title) = &presentation.title {
@@ -100,6 +101,11 @@ fn is_available(ctx: &egui::Context, path: &Path) -> bool {
     is_available_at(ctx, path, ctx.input(|input| input.time), Path::is_file)
 }
 
+/// Keep recovery scheduled even when the transcript card is not drawn.
+pub(crate) fn poll_availability(ctx: &egui::Context, path: &Path) {
+    is_available(ctx, path);
+}
+
 /// Stored files are immutable, but an unavailable store can recover. Limit
 /// metadata I/O during repeated frames while scheduling a repaint for recovery.
 fn is_available_at(
@@ -117,6 +123,9 @@ fn is_available_at(
                 available: check_file(path),
                 retry_at: now + AVAILABILITY_RECHECK_INTERVAL.as_secs_f64(),
             };
+            if cached.is_some_and(|previous| previous.available != checked.available) {
+                crate::panes::agent::async_layout::invalidate(ctx);
+            }
             ctx.data_mut(|data| data.insert_temp(id, checked));
             checked
         }
@@ -225,6 +234,7 @@ fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response
         return None;
     };
     crate::panes::file_viewer::install_image_loader(ui.ctx());
+    crate::panes::agent::async_layout::observe_image(ui.ctx(), &uri);
     let image = egui::Image::new(uri)
         .alt_text(format!("{title} preview"))
         // Remaining height can be zero below a transcript's scroll viewport.
