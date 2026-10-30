@@ -509,10 +509,12 @@ pub(super) fn run_with_limits(
             "backfill_in_progress": summary.backfill_in_progress(),
         })
     });
-    let stats = stream
+    let mut stats = stream
         .as_ref()
         .map(|(_, stream)| stream.stats())
         .unwrap_or_default();
+    stats.charged_blocks = budget.blocks;
+    stats.charged_bytes = budget.bytes;
     let output = fit(MAX_OUTPUT_BYTES, total, |count| {
         // A trimmed page resumes after the last thread it still shows.
         let next_cursor = if count < total {

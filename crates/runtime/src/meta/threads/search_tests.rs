@@ -168,20 +168,45 @@ const fn limits(max_blocks: usize, max_bytes: usize) -> SearchLimits {
     }
 }
 
-/// The deterministic work bounds of one call (#374).
+/// The deterministic work bounds of one call (#374), derived from how the
+/// stream asks storage for chunks; `max_block_bytes` is the largest stored block.
+///
+/// - Charged work: a block is charged only while the budget is not exhausted,
+///   so blocks never exceed `max_blocks`, and bytes stay below `max_bytes`
+///   before the last block, which adds at most one block.
+/// - Fetched work: a chunk is requested only with nothing buffered, so before
+///   it everything fetched was charged. What is left over is the unprocessed
+///   tail of the last chunk (below `CHUNK_*` plus the block that crossed it),
+///   or, once the budget is spent, the single block read ahead for the cut,
+///   whose text is fetched too. Text blocks have no size limit, so that
+///   read-ahead is up to `max_block_bytes` on top of the charged bytes.
+/// - Statements: all but the last chunk of each kind were charged in full, so
+///   block-limited chunks number at most `max_blocks / CHUNK_BLOCKS + 1`,
+///   byte-limited ones at most `max_bytes / CHUNK_BYTES + 1`; each batch ends
+///   with at most one chunk that finds no further row, and the cut reads one
+///   block ahead.
 fn assert_scan_bounds(stats: ScanStats, limits: SearchLimits, max_block_bytes: usize, runs: usize) {
     let batches = runs.div_ceil(MAX_SEARCH_BATCH_RUNS);
+    let context = format!("{stats:?} {limits:?} max_block_bytes={max_block_bytes}");
+    assert!(stats.charged_blocks <= limits.max_blocks, "{context}");
     assert!(
-        stats.fetched_blocks <= limits.max_blocks + CHUNK_BLOCKS,
-        "{stats:?} {limits:?}"
+        stats.charged_bytes < limits.max_bytes + max_block_bytes,
+        "{context}"
+    );
+    assert!(stats.fetched_blocks >= stats.charged_blocks, "{context}");
+    assert!(stats.fetched_bytes >= stats.charged_bytes, "{context}");
+    assert!(
+        stats.fetched_blocks <= stats.charged_blocks + CHUNK_BLOCKS,
+        "{context}"
     );
     assert!(
-        stats.fetched_bytes <= limits.max_bytes + CHUNK_BYTES + max_block_bytes,
-        "{stats:?} {limits:?}"
+        stats.fetched_bytes <= stats.charged_bytes + CHUNK_BYTES + max_block_bytes,
+        "{context}"
     );
     assert!(
-        stats.statements <= limits.max_blocks.div_ceil(CHUNK_BLOCKS) + batches + 1,
-        "{stats:?} {limits:?}"
+        stats.statements
+            <= limits.max_blocks / CHUNK_BLOCKS + limits.max_bytes / CHUNK_BYTES + batches + 3,
+        "{context}"
     );
 }
 
@@ -2335,4 +2360,87 @@ fn one_call_fetches_a_bounded_amount_even_when_nothing_or_everything_matches() {
     assert_eq!(page["partial"], true);
     assert!(page["next_cursor"].is_string());
     assert_eq!(stats.fetched_blocks, 450 + 1);
+}
+
+#[test]
+fn byte_heavy_blocks_stay_within_derived_bounds_and_drain_completely() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("big", Some(f.project.path()), "run-1401", |row| {
+        row.updated_at_ns = 100;
+    });
+    let padded =
+        |marker: &str, bytes: usize| format!("{marker}{}", "y".repeat(bytes - marker.len()));
+    let marker = |hit: bool| if hit { "needle " } else { "plain " };
+    // Many one-byte blocks (count splits), blocks of a quarter MiB (byte
+    // splits) and two Text blocks of 2 MiB (the read-ahead past a spent
+    // budget is as large as the block).
+    let mut messages = Vec::new();
+    for i in 0..1800 {
+        messages.push(user(vec![text(if [5, 900, 1799].contains(&i) {
+            "needle"
+        } else {
+            "x"
+        })]));
+    }
+    for i in 0..16 {
+        messages.push(user(vec![text(&padded(
+            marker(i == 3 || i == 15),
+            256 * 1024,
+        ))]));
+    }
+    for i in 0..2 {
+        messages.push(user(vec![text(&padded(marker(i == 1), 2 * 1024 * 1024))]));
+    }
+    for i in 0..20 {
+        messages.push(user(vec![text(if i == 10 { "needle" } else { "x" })]));
+    }
+    f.native_run("run-1401", Some("big"), None, messages);
+    f.index("run-1401");
+    let max_block = f.max_block_bytes();
+    assert!(max_block >= 2 * 1024 * 1024, "{max_block}");
+    let corpus = Corpus {
+        threads: vec![("big".to_owned(), vec!["run-1401".to_owned()])],
+    };
+    let query = json!("needle");
+    let expected = oracle(
+        &f,
+        own,
+        &corpus,
+        &matcher_of(&query, "words"),
+        &["conversation"],
+    );
+    assert_eq!(expected.len(), 7);
+    let args = json!({"query": query, "kinds": ["conversation"], "limit": 20});
+    for sweep in [
+        limits(search::MAX_SCANNED_BLOCKS, search::MAX_SCANNED_BYTES),
+        limits(300, 1 << 20),
+        limits(500, 512 * 1024),
+        limits(50, 300_000),
+    ] {
+        let pages = f.drain(own, args.clone(), sweep);
+        assert!(pages.len() > 1, "{sweep:?}");
+        for (_, stats) in &pages {
+            assert_scan_bounds(*stats, sweep, max_block, 2);
+        }
+        let (counts, _) = collected(&pages);
+        assert_eq!(counts, BTreeMap::from([("big".to_owned(), 7)]), "{sweep:?}");
+        assert_eq!(pages.last().unwrap().0["next_cursor"], Value::Null);
+    }
+    // Nothing matches: the same blocks are examined and the drain still ends.
+    let pages = f.drain(
+        own,
+        json!({"query": "zzz-absent", "match": "phrase", "kinds": ["conversation"]}),
+        limits(search::MAX_SCANNED_BLOCKS, search::MAX_SCANNED_BYTES),
+    );
+    assert!(pages.len() > 1);
+    for (page, stats) in &pages {
+        assert_scan_bounds(
+            *stats,
+            limits(search::MAX_SCANNED_BLOCKS, search::MAX_SCANNED_BYTES),
+            max_block,
+            2,
+        );
+        assert_eq!(page["threads"], json!([]));
+    }
 }

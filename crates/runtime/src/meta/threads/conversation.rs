@@ -43,13 +43,19 @@ pub(super) fn scan_runs(members: &Members, include_children: bool) -> Vec<String
     runs
 }
 
-/// Work done by one call's [`Stream`]: what storage handed back, whether or
-/// not the budget later charged it.
+/// Work done by one call: what storage handed back to the [`Stream`], and what
+/// the budget charged for it. Fetched work exceeds charged work by the blocks
+/// still buffered when the call ends and by the one block read ahead to record
+/// where a cut resumes; that block's text is fetched with it, so a very large
+/// block costs its size once more.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ScanStats {
     pub(super) fetched_blocks: usize,
     pub(super) fetched_bytes: usize,
     pub(super) statements: usize,
+    /// Blocks and bytes examined and charged to the budget (set by `search`).
+    pub(super) charged_blocks: usize,
+    pub(super) charged_bytes: usize,
 }
 
 /// Keyset-chunked blocks over runs in scan order, at most
