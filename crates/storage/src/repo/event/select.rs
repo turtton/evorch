@@ -34,6 +34,10 @@ pub(crate) const IDS_BY_SUBKIND_SQL: &str =
 pub(crate) const IDS_UNCONVERTED_BY_KIND_SQL: &str =
     "SELECT id FROM events WHERE kind = ?1 AND subkind IS NULL";
 pub(crate) const IDS_BY_RUN_SQL: &str = "SELECT id FROM events WHERE run_id = ?1";
+pub(crate) const IDS_UNCONVERTED_MENTIONING_SQL: &str =
+    "SELECT id FROM events WHERE subkind IS NULL AND instr(payload, ?1) > 0";
+pub(crate) const IDS_BLANK_MENTIONING_SQL: &str =
+    "SELECT id FROM events WHERE subkind = '' AND instr(payload, ?1) > 0";
 
 /// Whether any row still lacks `subkind` and `run_id`.
 pub(crate) fn has_unbackfilled(conn: &Connection) -> Result<bool, StorageError> {

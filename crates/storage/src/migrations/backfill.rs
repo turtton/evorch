@@ -57,9 +57,8 @@ pub struct EventBackfillSummary {
     /// Rows converted by this call.
     pub converted: u64,
     /// Converted rows whose payload no longer decodes. They get an empty
-    /// `subkind`, and as `run_id` the first `run_id` string found in the raw
-    /// payload (keys in sorted order, depth first), so that raw inspection
-    /// still finds them by run.
+    /// `subkind` and no `run_id`; raw inspection of a run finds them through
+    /// `idx_events_blank_subkind` and their payload instead.
     pub undecodable: u64,
     /// Transactions committed by this call.
     pub batches: u64,
@@ -216,8 +215,7 @@ struct Columns {
     decoded: bool,
 }
 
-/// The stored columns of an event payload. A payload the current types reject
-/// still names its run in raw JSON, which inspection of old events relies on.
+/// The stored columns of an event payload.
 fn derive_columns(payload: &str) -> Columns {
     match serde_json::from_str::<EventKind>(payload) {
         Ok(kind) => Columns {
@@ -227,26 +225,9 @@ fn derive_columns(payload: &str) -> Columns {
         },
         Err(_) => Columns {
             subkind: "",
-            run_id: serde_json::from_str::<serde_json::Value>(payload)
-                .ok()
-                .and_then(|value| first_run_id(&value)),
+            run_id: None,
             decoded: false,
         },
-    }
-}
-
-fn first_run_id(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Object(object) => {
-            object
-                .iter()
-                .find_map(|(key, value)| match (key.as_str(), value.as_str()) {
-                    ("run_id", Some(run_id)) => Some(run_id.to_owned()),
-                    _ => first_run_id(value),
-                })
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(first_run_id),
-        _ => None,
     }
 }
 

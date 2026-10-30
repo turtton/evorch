@@ -7,8 +7,8 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 use super::select::{
-    IDS_BY_KIND_SQL, IDS_BY_RUN_SQL, IDS_BY_SUBKIND_SQL, IDS_UNCONVERTED_BY_KIND_SQL,
-    UNCONVERTED_EXISTS_SQL,
+    IDS_BLANK_MENTIONING_SQL, IDS_BY_KIND_SQL, IDS_BY_RUN_SQL, IDS_BY_SUBKIND_SQL,
+    IDS_UNCONVERTED_BY_KIND_SQL, IDS_UNCONVERTED_MENTIONING_SQL, UNCONVERTED_EXISTS_SQL,
 };
 use super::*;
 use crate::inspect::EventScope;
@@ -579,8 +579,7 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
         })
         .unwrap();
 
-    // Then: everything is converted exactly once; a removed variant is blank and
-    // keeps the run its raw payload names.
+    // Then: everything is converted exactly once; a removed variant is blank.
     assert_eq!(
         (rest.converted, rest.remaining, rest.undecodable),
         (total - 10, 0, 2)
@@ -616,7 +615,7 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
         panic!("rows");
     };
     assert_eq!((blank.as_str(), no_run.as_deref()), ("", None));
-    assert_eq!((named.as_str(), run.as_deref()), ("", Some("run-gone")));
+    assert_eq!((named.as_str(), run.as_deref()), ("", None));
 }
 
 fn plan(conn: &Connection, sql: &str, bound: usize) -> String {
@@ -641,6 +640,8 @@ fn lookups_use_the_new_indexes() {
         (IDS_BY_RUN_SQL, 1, "idx_events_run_id"),
         (UNCONVERTED_EXISTS_SQL, 0, "idx_events_unbackfilled"),
         (BATCH_SELECT_SQL, 2, "idx_events_unbackfilled"),
+        (IDS_UNCONVERTED_MENTIONING_SQL, 1, "idx_events_unbackfilled"),
+        (IDS_BLANK_MENTIONING_SQL, 1, "idx_events_blank_subkind"),
     ] {
         let plan = plan(conn, sql, bound);
         assert!(plan.contains(index), "{sql}: {plan}");
@@ -903,54 +904,84 @@ fn reads_agree_before_during_and_after_the_backfill() {
 }
 
 #[test]
-fn undecodable_rows_are_skipped_by_typed_reads_but_inspectable_by_run_throughout() {
-    // Given: a row written by an older build whose variant is gone.
+fn undecodable_rows_are_skipped_by_typed_reads_but_inspectable_by_every_named_run() {
+    // Given: unconverted rows in which removed-variant payloads name several runs.
     let database = open();
-    let kept = append(
-        &database.conn,
-        &kind_from(adjacent(
-            "Message",
-            "MessageCompleted",
-            json!({"run_id": "run-1", "text": "t"}),
-        )),
-    );
-    database
-        .conn
-        .execute(
-            "INSERT INTO events (schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
-             VALUES (1, 1, 1, 'Message', '{\"kind\":\"Message\",\"payload\":{\"kind\":\"Gone\",\"payload\":{\"run_id\":\"run-1\"}}}')",
-            [],
-        )
-        .unwrap();
-    let gone = database.conn.last_insert_rowid();
+    let gone = |payload: &str| {
+        database
+            .conn
+            .execute(
+                "INSERT INTO events (schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+                 VALUES (1, 1, 1, 'Message', ?1)",
+                [format!(
+                    "{{\"kind\":\"Message\",\"payload\":{{\"kind\":\"Gone\",\"payload\":{payload}}}}}"
+                )],
+            )
+            .unwrap();
+        database.conn.last_insert_rowid()
+    };
+    let first = insert_unconverted(&database.conn, &run_message("run-a", "1"));
+    let both = gone(r#"{"a":{"run_id":"run-a"},"b":{"run_id":"run-b"}}"#);
+    let second = insert_unconverted(&database.conn, &run_message("run-b", "2"));
+    let others = gone(r#"{"x":[{"run_id":"run-b"}],"y":{"run_id":"run-c"}}"#);
+    let third = insert_unconverted(&database.conn, &run_message("run-a", "3"));
 
-    // When/Then: typed reads return only the decodable event, and raw inspection
-    // still returns both with the same order and truncation, before and after.
-    for _ in 0..2 {
-        let mut ids = Vec::new();
+    let check = |stage: &str| {
+        for (run, expected, newest) in [
+            ("run-a", vec![first, both, third], vec![both, third]),
+            ("run-b", vec![both, second, others], vec![second, others]),
+            ("run-c", vec![others], vec![others]),
+        ] {
+            // Raw inspection finds each row under every run its payload names.
+            let (all, truncated) = database.inspect_events(EventScope::Run(run), 10).unwrap();
+            assert_eq!(
+                all.iter().map(|e| e.id).collect::<Vec<_>>(),
+                expected,
+                "{stage} {run}"
+            );
+            assert!(!truncated, "{stage} {run}");
+            let (limited, truncated) = database.inspect_events(EventScope::Run(run), 2).unwrap();
+            assert_eq!(
+                limited.iter().map(|e| e.id).collect::<Vec<_>>(),
+                newest,
+                "{stage} {run}"
+            );
+            assert_eq!(truncated, expected.len() > 2, "{stage} {run}");
+        }
+        // Typed readers never see the removed variant.
+        let mut seen = Vec::new();
         database
-            .for_each_event_matching(&[("Message", None)], |stored| ids.push(stored.id))
+            .for_each_event_for_runs(&["run-b".to_owned()], |stored| seen.push(stored.id))
             .unwrap();
-        assert_eq!(ids, [kept]);
-        let mut ids = Vec::new();
+        assert_eq!(seen, [second], "{stage}");
+        let mut seen = Vec::new();
         database
-            .for_each_event_for_runs(&["run-1".to_owned()], |stored| ids.push(stored.id))
+            .for_each_event_matching(&[("Message", None)], |stored| seen.push(stored.id))
             .unwrap();
-        assert_eq!(ids, [kept]);
-        let (all, truncated) = database
-            .inspect_events(EventScope::Run("run-1"), 10)
-            .unwrap();
-        assert_eq!(all.iter().map(|e| e.id).collect::<Vec<_>>(), [kept, gone]);
-        assert!(!truncated);
-        let (newest, truncated) = database
-            .inspect_events(EventScope::Run("run-1"), 1)
-            .unwrap();
-        assert_eq!(newest.iter().map(|e| e.id).collect::<Vec<_>>(), [gone]);
-        assert!(truncated);
-        database
-            .backfill_event_columns(&EventBackfillOptions::default())
-            .unwrap();
-    }
+        assert_eq!(seen, [first, second, third], "{stage}");
+    };
+
+    // When/Then: the answers do not change as the backfill converts the rows.
+    check("before");
+    database
+        .backfill_event_columns(&EventBackfillOptions {
+            batch_rows: 2,
+            max_rows: Some(2),
+        })
+        .unwrap();
+    check("during");
+    database
+        .backfill_event_columns(&EventBackfillOptions {
+            batch_rows: 2,
+            max_rows: Some(2),
+        })
+        .unwrap();
+    check("during, past the first removed rows");
+    database
+        .backfill_event_columns(&EventBackfillOptions::default())
+        .unwrap();
+    assert_eq!(database.unbackfilled_event_count().unwrap(), 0);
+    check("after");
 }
 
 fn file_config(dir: &tempfile::TempDir) -> StorageConfig {

@@ -12,7 +12,10 @@ use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Map, Value, json};
 
 use crate::improvement::{ImprovementCandidate, ImprovementStatus};
-use crate::repo::event::select::{IDS_BY_RUN_SQL, has_unbackfilled, normalize, push_ids};
+use crate::repo::event::select::{
+    IDS_BLANK_MENTIONING_SQL, IDS_BY_RUN_SQL, IDS_UNCONVERTED_MENTIONING_SQL, has_unbackfilled,
+    normalize, push_ids,
+};
 use crate::{Database, StorageError};
 
 /// Columns holding JSON text that are expanded in inspection output.
@@ -103,14 +106,22 @@ impl Database {
                     true,
                     &mut candidates,
                 )?;
+                // Any string value equal to the run narrows the payload scan of rows
+                // the columns cannot attribute; the checks below decide. Rows whose
+                // payload no longer decodes are blank, and are always scanned.
+                let needle = Value::String(run_id.into()).to_string();
+                push_ids(
+                    &transaction,
+                    IDS_BLANK_MENTIONING_SQL,
+                    [&needle],
+                    true,
+                    &mut candidates,
+                )?;
                 if has_unbackfilled(&transaction)? {
-                    // Any string value equal to the run narrows the scan; the checks
-                    // below decide.
-                    let needle = Value::String(run_id.into()).to_string();
                     push_ids(
                         &transaction,
-                        "SELECT id FROM events WHERE subkind IS NULL AND instr(payload, ?1) > 0",
-                        [needle],
+                        IDS_UNCONVERTED_MENTIONING_SQL,
+                        [&needle],
                         true,
                         &mut candidates,
                     )?;
