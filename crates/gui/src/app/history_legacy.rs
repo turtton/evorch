@@ -1,4 +1,4 @@
-// Test oracle: restore_history_inner from 0dbe2b5d, before G1-B1.
+// Test oracle: restore_history_inner from 4c899c0e, before G1-B1.
 // Only stage metrics were added; keep snapshot selection and replay independent.
 impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn restore_history_legacy(
@@ -185,6 +185,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_second_pass");
         self.seed_branches(None);
+        self.adopt_recorded_origins(db);
         let mut messages = self.history.clone();
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
