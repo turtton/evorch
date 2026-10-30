@@ -1,25 +1,40 @@
-//! Offline event repair and read-only retention preview. No runtime is started.
+//! Offline repair, read-only preview and lightweight online backfill. No runtime is started.
 
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use storage::EventBackfillOptions;
 use storage::maintenance::{
-    StripOptions, preview_task_progress_retention, strip_task_progress_cursor,
+    CompactOptions, DeltaMode, StripOptions, backfill_events, compact_events,
+    preview_task_progress_retention, strip_task_progress_cursor,
 };
 
-pub const USAGE: &str = "usage: evorch maintenance <strip-task-progress-cursor|preview-task-progress-retention> [--db <path>]
+pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
+  compact-events [--apply] [--backup <new-path>] [--batch-rows <1..100000>]
+                 [--provider-retention-days <N>] [--delta-mode <preserve|delete>] [--sidebar <path>]
+  backfill-events [--batch-rows <1..100000>] [--max-rows <N>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
-Default: read-only dry-run. Stop ALL evorch GUI/runtime processes before either preview or --apply.
+  preview-task-progress-retention
+backfill-events: safe next to live writers; converts legacy subkind/run_id columns only.
+Use --max-rows for bounded work. Long-lived readers can pin the WAL and let it grow.
+Other commands: default read-only preview. Stop ALL evorch GUI/runtime processes for preview AND apply.
 Preview requires an existing maintenance lease and a checkpointed DB (no nonempty WAL).
+compact-events --apply: mandatory verified backup, restartable batches, accounting repair, VACUUM.
+Default preserves message/reasoning display anchors; existing single oversized rows are reported, not split.
+--sidebar defaults to the GUI's <user-config-dir>/sidebar.json. Unreadable/missing/invalid sidebar disables delta aggregation with a warning.
+--delta-mode delete opts into deleting ALL message/reasoning deltas, including incomplete text.
+--provider-retention-days defaults to 90; 0 disables it. RequestStarted is always retained.
 Apply creates a backup, commits bounded batches, then full VACUUM and WAL TRUNCATE.
 Full VACUUM can take minutes or longer; time depends on disk throughput and DB size.
 Allow up to four times the database size as free space (backup plus scratch).
-Keep the backup secure: it includes the old cursor payloads. Never run on a live store.";
+Keep backups secure: they include the original payloads. Never run offline commands on a live store.";
 
 #[derive(Debug, Clone)]
 pub struct MaintenanceArgs {
     pub db: Option<PathBuf>,
     pub retention_preview: bool,
     pub strip: StripOptions,
+    pub compact: Option<CompactOptions>,
+    pub backfill: Option<EventBackfillOptions>,
 }
 
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs, String> {
@@ -27,15 +42,18 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     if argv.next().as_deref() != Some("maintenance") {
         return Err(USAGE.into());
     }
-    let retention_preview = match argv.next().as_deref() {
-        Some("strip-task-progress-cursor") => false,
-        Some("preview-task-progress-retention") => true,
+    let command = argv.next().ok_or(USAGE)?;
+    let retention_preview = match command.as_str() {
+        "strip-task-progress-cursor" | "compact-events" | "backfill-events" => false,
+        "preview-task-progress-retention" => true,
         _ => return Err(USAGE.into()),
     };
     let mut args = MaintenanceArgs {
         db: None,
         retention_preview,
         strip: StripOptions::default(),
+        compact: (command == "compact-events").then(CompactOptions::default),
+        backfill: (command == "backfill-events").then(EventBackfillOptions::default),
     };
     let mut seen = std::collections::BTreeSet::new();
     while let Some(arg) = argv.next() {
@@ -44,13 +62,51 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         }
         match arg.as_str() {
             "--db" => args.db = Some(argv.next().ok_or(USAGE)?.into()),
-            "--apply" if !retention_preview => args.strip.apply = true,
-            "--backup" if !retention_preview => {
+            "--apply" if args.compact.is_some() => args.compact.as_mut().unwrap().apply = true,
+            "--backup" if args.compact.is_some() => {
+                args.compact.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--sidebar" if args.compact.is_some() => {
+                args.compact.as_mut().unwrap().sidebar = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--batch-rows" if args.compact.is_some() || args.backfill.is_some() => {
+                let n: usize = argv
+                    .next()
+                    .ok_or(USAGE)?
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=100_000).contains(n))
+                    .ok_or(USAGE)?;
+                if let Some(options) = &mut args.compact {
+                    options.batch_rows = n;
+                }
+                if let Some(options) = &mut args.backfill {
+                    options.batch_rows = n;
+                }
+            }
+            "--max-rows" if args.backfill.is_some() => {
+                args.backfill.as_mut().unwrap().max_rows =
+                    Some(argv.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?);
+            }
+            "--provider-retention-days" if args.compact.is_some() => {
+                let days: u64 = argv.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+                days.checked_mul(86_400).ok_or(USAGE)?;
+                args.compact.as_mut().unwrap().provider_retention_days = days;
+            }
+            "--delta-mode" if args.compact.is_some() => {
+                args.compact.as_mut().unwrap().delta_mode = match argv.next().as_deref() {
+                    Some("preserve") => DeltaMode::Preserve,
+                    Some("delete") => DeltaMode::Delete,
+                    _ => return Err(USAGE.into()),
+                };
+            }
+            "--apply" if command == "strip-task-progress-cursor" => args.strip.apply = true,
+            "--backup" if command == "strip-task-progress-cursor" => {
                 args.strip.backup = Some(argv.next().ok_or(USAGE)?.into())
             }
-            "--no-backup" if !retention_preview => args.strip.no_backup = true,
-            "--no-vacuum" if !retention_preview => args.strip.no_vacuum = true,
-            "--batch-size" if !retention_preview => {
+            "--no-backup" if command == "strip-task-progress-cursor" => args.strip.no_backup = true,
+            "--no-vacuum" if command == "strip-task-progress-cursor" => args.strip.no_vacuum = true,
+            "--batch-size" if command == "strip-task-progress-cursor" => {
                 args.strip.batch_size = argv
                     .next()
                     .ok_or(USAGE)?
@@ -75,6 +131,29 @@ pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
             .ok_or("cannot resolve config directory; pass --db")?
             .join("evorch-events.db"),
     };
+    if let Some(options) = args.backfill {
+        return backfill_events(&path, &options)
+            .map(|summary| json!(summary))
+            .map_err(|error| error.to_string());
+    }
+    if let Some(mut options) = args.compact {
+        if options.sidebar.is_none() {
+            options.sidebar = config::user_config_dir().map(|dir| dir.join("sidebar.json"));
+        }
+        if options.delta_mode == DeltaMode::Delete {
+            eprintln!(
+                "WARNING: --delta-mode delete removes reasoning display and incomplete message text. Completed messages remain. This is irreversible without restoring the backup."
+            );
+        }
+        if options.apply {
+            eprintln!(
+                "Offline compaction: stop ALL evorch processes. Mandatory verified backup; reserve four times the database size. Committed groups survive interruption; rerun to finish. Full VACUUM may take minutes or longer."
+            );
+        }
+        return compact_events(&path, &options)
+            .map(|summary| json!(summary))
+            .map_err(|error| error.to_string());
+    }
     if args.retention_preview {
         return preview_task_progress_retention(&path)
             .map(|summary| json!(summary))

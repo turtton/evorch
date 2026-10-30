@@ -110,7 +110,7 @@ fn init_auto_vacuum(conn: &Connection) -> Result<(), StorageError> {
 }
 
 /// SQLite データベースファイル群（本体 / WAL / SHM）のサイズです。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct FileSizes {
     pub db: u64,
     pub wal: u64,
