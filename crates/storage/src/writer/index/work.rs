@@ -293,8 +293,16 @@ pub(crate) fn apply_settings(
     env: Env<'_>,
     rt: &mut IndexRuntime,
     settings: ThreadIndexSettings,
+    now_ns: i64,
 ) -> Result<IndexSettingsReceipt, StorageError> {
     immediate(env.conn, |conn| {
+        if !settings.enabled {
+            // Disabled owners do not get scheduled. Finish control work here,
+            // atomically with clearing the durable episode, not in prepare.
+            requests::gap_pending(conn, RequestGapReason::IndexDisabled)?;
+            requests::finalize(conn, now_ns)?;
+            wait::clear_since(conn)?;
+        }
         if applied_versions(conn)? == (EXTRACTOR_VERSION, rt.accounting.version) {
             return Ok(());
         }
@@ -331,6 +339,10 @@ pub(crate) fn apply_settings(
     rt.pause = None;
     rt.paused_growth = None;
     rt.paused_work = None;
+    if !settings.enabled {
+        rt.wal_wait = None;
+        rt.ready = None;
+    }
     if let Some(wait) = rt.wal_wait.as_mut() {
         // Settings affect admission immediately, but never extend the episode.
         wait.advance_to(i64::MIN);
@@ -339,6 +351,26 @@ pub(crate) fn apply_settings(
         applied_generation: rt.settings_generation,
         settings,
     })
+}
+
+/// A request accepted by another writer is also an explicit new WAL episode.
+/// Only WalLimit pauses are released; ordinary capacity pauses retain +J.
+pub(crate) fn resume_pending_wal_request(
+    conn: &Connection,
+    rt: &mut IndexRuntime,
+) -> Result<bool, StorageError> {
+    if rt.settings.enabled
+        && rt.pause.is_some_and(|status| {
+            status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+        })
+        && requests::latest_pending_created_at(conn)?.is_some()
+    {
+        rt.pause = None;
+        rt.paused_growth = None;
+        rt.paused_work = None;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn adjustment_pending(conn: &Connection, rt: &IndexRuntime) -> Result<bool, StorageError> {
@@ -814,40 +846,67 @@ fn wal_wait_step(
         );
         return Ok(None);
     }
-    let deadline = wait_deadline(env.conn, waiting.since_ns)?;
-    if requests::earliest_wait_deadline(env.conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
-        .is_some_and(|deadline| now_ns >= deadline)
-    {
-        let expired = immediate(env.conn, |conn| {
-            let expired = requests::gap_expired(
-                conn,
-                waiting.since_ns,
-                WAL_WAIT_LIMIT_NS,
-                now_ns,
-                RequestGapReason::CapacityWaitExpired,
-            )?;
-            requests::finalize(conn, now_ns)?;
-            Ok(expired)
-        })?;
-        rt.counters.wal_wait_expiries += expired as u64;
+    // A failed probe permits waiting only while WAL is still the sole refusal.
+    // In particular a restart must not restore an old WAL reason over current
+    // source suspension or total/reserve pressure.
+    let mut status =
+        physical_capacity_status(env, rt, rt.paused_growth.unwrap_or(waiting.refused.growth))?;
+    status.operation = waiting.refused.operation;
+    if !matches!(
+        status.state,
+        CapacityState::Normal | CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    ) {
+        return refuse(env, rt, status, now_ns).map(|refusal| Some(refusal.action()));
+    }
+    // The deadline, current pending set, individual gaps and episode end share
+    // one IMMEDIATE. A concurrent submission either participates in this
+    // decision (and keeps the job alive) or starts after the completed episode.
+    let (deadline, expired, ended) = immediate(env.conn, |conn| {
+        let deadline = wait_deadline(conn, waiting.since_ns)?;
+        let expired =
+            if requests::earliest_wait_deadline(conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
+                .is_some_and(|deadline| now_ns >= deadline)
+            {
+                let expired = requests::gap_expired(
+                    conn,
+                    waiting.since_ns,
+                    WAL_WAIT_LIMIT_NS,
+                    now_ns,
+                    RequestGapReason::CapacityWaitExpired,
+                )?;
+                requests::finalize(conn, now_ns)?;
+                expired
+            } else {
+                0
+            };
+        let ended = now_ns >= deadline;
+        if ended {
+            wait::clear_since(conn)?;
+        }
+        Ok((deadline, expired, ended))
+    })?;
+    rt.counters.wal_wait_expiries += expired as u64;
+    if expired > 0 {
         tracing::warn!(expired, "thread index WAL request wait expired");
     }
-    if now_ns >= deadline {
+    if ended {
         tracing::warn!(
             since_ns = waiting.since_ns,
             deadline_ns = deadline,
             "thread index WAL job wait expired"
         );
-        let status = pause_with(
-            env,
-            rt,
-            waiting.refused,
-            now_ns,
-            RequestGapReason::CapacityWaitExpired,
-        )?;
+        // All expired targets were settled in the transaction above. Never
+        // gap_pending here: a different writer may already have submitted.
+        status.state = CapacityState::IndexPaused(IndexPauseReason::WalLimit);
+        rt.pause = Some(status);
+        rt.counters.pauses += 1;
+        rt.wal_wait = None;
         return Ok(Some(Action::Paused(status)));
     }
     let waiting = rt.wal_wait.as_mut().expect("waiting");
+    if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit) {
+        waiting.refused = status;
+    }
     waiting.probed(outcome, now_ns, Some(deadline));
     Ok(Some(Action::Idle {
         next_wake_at_ns: Some(waiting.next_retry_at_ns),
