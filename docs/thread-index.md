@@ -4,6 +4,11 @@ The GUI explicitly starts the shared storage index owner. Merely opening a
 `Storage` does not start indexing. GUI and CLI use the same durable request,
 lease, and step APIs; there is no separate CLI indexing engine.
 
+Search keyset-scans the indexed body within visible runs and does not read FTS;
+matching happens in the runtime after redaction
+([#374](https://github.com/turtton/evorch/issues/374),
+[PR #432](https://github.com/turtton/evorch/pull/432)).
+
 ## Configuration
 
 In the user `config.toml`:

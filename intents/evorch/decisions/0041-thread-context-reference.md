@@ -76,7 +76,8 @@ escalation 先は元スレッドの子として扱い、元と先を双方向に
 
 #### 決定 d: 検索方式
 
-- 本文検索（Phase B）は FTS5 の trigram を使う。2 文字以下の語は trigram で引けないため、`LIKE` で代用する（Phase B の設計では「3 scalar 未満の語」と定義する）。
+- 2026-10-30 改訂（[#374](https://github.com/turtton/evorch/issues/374)、[PR #432](https://github.com/turtton/evorch/pull/432)、merge `8b39b3a1`）: 本文検索（Phase B）は可視 run を scope-first の keyset 走査で読む。1 chunk は最大 200 block / 1 MiB とし、redaction 後に runtime の matcher で判定する。FTS5 trigram 索引は読み取り経路で使わない。
+- 行ごとの相関 `MATCH` は、返却件数ではなく scoped block 数に比例して仕事量が増え、走査予算で上限を付けられなかった。FTS5 索引の維持（書き込み）は当面継続する。索引の廃止は別決定とする。
 - Phase A では FTS を使わない。Phase B の詳細は「Phase B の設計」を参照。
 - `thread_grep` はスレッド内の正規化したテキストを線形に走査する。
 - `thread_search` はメタデータ（title、人間の発話、working note、最終報告）だけを対象にする。
@@ -541,9 +542,11 @@ v25 は origin/main（`870a969b`）の時点で空いている（最新は v24�
 
 - kinds は、既存の title / user / working_note / final_report に、`conversation` / `tool_use` / `tool_result` を加える。既定は決定 B-1 のとおり。同じ位置の複数の一致は 1 つにまとめる。
 - 既存の意味を保つ: query 配列は OR、`words` / `phrase` / `regex`、`include_children`、`updated_after`。
-- visibility を先に確定し、scoped relation か keyset batch で storage の API に問い合わせる。100 はバッチの上限であり、総数の上限ではない。「FTS を先に引いてから可視性で絞る」方式（S2）は使わない。
-- 3 scalar 未満の語や、Unicode で一致が保証されない場合は、`LIKE`（エスケープしてバインド）か scan を使う。regex は可視範囲を走査する。予算を超えたら `partial` と続きの情報を返す。
-- cursor は version 付きで、caller、scope、正規化した条件、keyset の位置、regex の位置、revision、改ざん検出を含む。毎回、再認可する。run が 101 件以上あるスレッドでも続きを取れる。
+- visibility を先に確定し、可視 run の索引本文を scope-first の keyset で走査する（#374、PR #432）。「FTS を先に引いてから可視性で絞る」方式（S2）も、行ごとの相関 `MATCH` も使わない。
+- storage は最大 200 block / 1 MiB の chunk ごとに読み、runtime が redaction 後の本文を matcher で判定する。`words` / `phrase` / `regex` の違いは matcher のみとし、短い語も同じ走査経路を使う。
+- 走査予算は調べた block 数と bytes（2,000 block / 4 MiB）で数える。SQL が返した一致候補数では数えない。予算到達時は `partial: true` と `next_cursor` を返す。`threads` が空でも続きがあれば取得を続ける。
+- cut の判定用に次の block を 1 つ先読みするため、fetched bytes は最大 1 block 分だけ予算を超え得る。1 statement は 1 chunk で finalize し、read snapshot を chunk を超えて保持しない。
+- cursor は version 付きで、caller、scope、正規化した条件、改ざん検出を含む。resume 位置は `(run, 次の未走査 block id)` とし、run の `source_revision`、thread の run 集合と coverage digest に結び付ける。毎回再認可する。run が 101 件以上あるスレッドでも続きを取れる。
 - `source_revision` が一致しない古い索引は、hit にも件数にも出さない。
 - hit に `truncated` と source_revision を付ける。guarded reference は version と source_kind を持つ tagged locator とし、毎回再認可する。従来の unguarded ref は従来どおり使える。
 - 会話の locator は `(run_id, snapshot_revision, source_revision, ordinal, block_index)` とする。`thread_read view=messages` は現状も正本 snapshot を normalize する経路（`read.rs:466–477`）なので、FTS の text を返す経路に変えない。同一 read transaction で revision と位置を検証し、異なれば `stale_reference`、一致すれば元 snapshot の該当 block を従来の表示・応答上限で返す。
@@ -685,6 +688,18 @@ tool warm / cold はハーネスの 1 drain あたり 120 秒 watchdog に達し
 
 今後の対応は別 PR とする。期限付きの非同期待機と自動再開を実装し、容量の上限と `G` を維持したまま request を待機・継続できるようにする。また、backfill と並行したときの遅い検索を改善する。今回はこれらを実装しない。
 
+#### #374 マージ後の更新（2026-10-30）
+
+[#374](https://github.com/turtton/evorch/issues/374) は [PR #432](https://github.com/turtton/evorch/pull/432)（merge `8b39b3a1`）で走査仕事量を上限付きにし、上記の検索側要因を除去した。WAL 一時停止（#373）は別対応である。以下の補助計測は合成 corpus・release build の結果であり、S8 gate の合格を示すものではない（出所: #374 / PR #432）。
+
+- phrase 64 候補: 約 62 s → 約 40 ms。
+- 複合 phrase no-hit: 約 123 s → 約 40 ms。
+- 頻出 tool 語、2,048 block: 約 1.33 s → 約 19 ms。
+
+S8 再計測用の承認済みバックアップはホストに存在しない。新たなバックアップの承認後に corpus / oracle / classification / manifest を再固定して計測する。live DB を暗黙に代用しない。以下の過去の FAIL と未確認事項は、再計測で確認するまで維持する。
+
+S8 ハーネスの backfill cadence は毎 step heartbeat・Idle 1 ms である。本番 CLI の lease 半分で heartbeat・Idle 25 ms → 1 s とは異なる（`crates/runtime/examples/thread_search_measure/job.rs`、`crates/evorch/src/reindex_threads.rs`）。この条件差を踏まえて再計測する。120 秒 watchdog と容量制約は緩めない。
+
 **S8 の最終セル結果:**
 
 - backfill off の 14 セル（ascii_trigram / short / unicode / phrase / regex / tool / nohit の warm / cold）は binary `3ca7f672`（SHA `122acfaa…`）ですべて PASS。利用者の判断により、この結果を引き継ぐ。`3ca7f672` から計測した binary `8bffe9d0`（SHA `da7f2b13…`）まで、検索経路の差分は空である。
@@ -810,6 +825,11 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 - 作業場所: worktree `/home/turtton/.ghr/github.com/turtton/evorch/.worktrees/thread-conversation-search`、ブランチ `feat/thread-conversation-search`（起点は origin/main の `870a969b`）。メインのチェックアウトと他の worktree の `target` には触らない。
 - コミットは署名つきで、`type(scope): subject` 形式にする。force push はしない。区切りごとに commit と push を行う。
 - ユーザー許可（原文）:「推奨で、マージまでOK」。worktree で作業 → 計画の独立レビュー → 実装 → 別の Reviewer による受け入れ → push と PR → CI 成功で squash マージ（`--match-head-commit`）。
+
+### マージ後の追跡
+
+- [x] #374 bounded scan — PR #432（merge `8b39b3a1`）。走査予算と chunk 単位の snapshot 解放を反映した。
+- [ ] S8 再計測（新バックアップ承認後）
 
 ### 計画と契約
 

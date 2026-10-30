@@ -6,6 +6,17 @@ benchmark, **not** a storage search microbenchmark. It uses a zero-wait scripted
 The normal authorization, metadata reads, candidate verification, redaction,
 JSON/output bounds and runtime snapshot persistence remain enabled.
 
+## Backfill cadence caveat
+
+The S8 harness heartbeats after every step and waits 1 ms on Idle. Production
+CLI backfill heartbeats at half the lease interval and backs off on Idle from
+25 ms to 1 s. These are different scheduling conditions; account for this
+when interpreting or rerunning S8 results. Sources:
+`crates/runtime/examples/thread_search_measure/job.rs` and
+`crates/evorch/src/reindex_threads.rs`; see also
+[ADR 0041, S8 known limitations](../intents/evorch/decisions/0041-thread-context-reference.md).
+Keep the 120-second watchdog and capacity constraints unchanged.
+
 ## Safety and prerequisites
 
 - Coordinate an exclusive quiet/build/measurement interval with the parent.
