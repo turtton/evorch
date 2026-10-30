@@ -277,21 +277,32 @@ pub(crate) fn terminal_summaries(
     conn: &Connection,
     run_ids: &[String],
 ) -> Result<Vec<RunTerminalSummary>, StorageError> {
-    // JSON is decoded inside SQLite so only the last message leaves it.
+    // JSON is decoded inside SQLite so only the last message leaves it. A
+    // compressed snapshot cannot be, so its bytes are returned and decoded here.
     let mut statement = conn.prepare(
         "SELECT c.run_id, c.role, c.name, c.parent_run_id, c.terminal_phase, c.restorable, \
          c.updated_at_ns, \
          CASE WHEN json_valid(c.config_json) THEN \
              CASE WHEN json_type(c.config_json, '$.non_restorable_reason') = 'text' \
              THEN json_extract(c.config_json, '$.non_restorable_reason') END END, \
-         CASE WHEN json_valid(c.messages_json) THEN json_array_length(c.messages_json) END, \
-         CASE WHEN json_valid(c.messages_json) THEN json_extract(c.messages_json, '$[#-1]') END \
+         CASE WHEN typeof(c.messages_json) = 'text' AND json_valid(c.messages_json) \
+             THEN json_array_length(c.messages_json) END, \
+         CASE WHEN typeof(c.messages_json) = 'text' AND json_valid(c.messages_json) \
+             THEN json_extract(c.messages_json, '$[#-1]') END, \
+         CASE WHEN typeof(c.messages_json) = 'blob' THEN c.messages_json END \
          FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
          ORDER BY requested.key",
     )?;
     let rows = statement.query_map([distinct_json(run_ids)?], |row| {
-        let message_count: Option<i64> = row.get(8)?;
-        let last_message: Option<String> = row.get(9)?;
+        let mut message_count: Option<i64> = row.get(8)?;
+        let mut last_message: Option<String> = row.get(9)?;
+        if let rusqlite::types::ValueRef::Blob(_) = row.get_ref(10)? {
+            let messages = crate::codec::text_column(row, 10)?;
+            if let Ok(serde_json::Value::Array(messages)) = serde_json::from_str(&messages) {
+                message_count = i64::try_from(messages.len()).ok();
+                last_message = messages.last().map(serde_json::Value::to_string);
+            }
+        }
         Ok(RunTerminalSummary {
             run_id: row.get(0)?,
             role: row.get(1)?,

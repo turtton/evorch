@@ -53,6 +53,7 @@
 //! }
 //! ```
 
+mod codec;
 pub mod config;
 mod db;
 mod diagnostic;

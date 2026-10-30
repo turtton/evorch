@@ -174,7 +174,12 @@ impl Database {
     /// Returns an error if SQLite access fails.
     pub fn inspect_run(&self, run_id: &str, full: bool) -> Result<Value, StorageError> {
         let mut context = self
-            .json_rows("SELECT * FROM run_contexts WHERE run_id = ?1", &[run_id])?
+            .json_rows(
+                "SELECT run_id, role, name, parent_run_id, config_json, messages_json, \
+                 checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, \
+                 host_inputs_json FROM run_contexts WHERE run_id = ?1",
+                &[run_id],
+            )?
             .into_iter()
             .next();
         if let Some(Value::Object(object)) = context.as_mut()
@@ -415,13 +420,12 @@ fn is_review_manifest(payload: &Value) -> bool {
 }
 
 fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {
-    let payload: String = row.get(4)?;
     Ok(InspectEvent {
         id: row.get(0)?,
         session_id: row.get(1)?,
         wall_clock_ns: row.get(2)?,
         kind: row.get(3)?,
-        payload: serde_json::from_str(&payload).unwrap_or(Value::String(payload)),
+        payload: column_json("payload", row.get_ref(4)?),
     })
 }
 
@@ -456,6 +460,17 @@ fn column_json(name: &str, value: ValueRef<'_>) -> Value {
                 .flatten()
                 .unwrap_or_else(|| Value::String(text.into_owned()))
         }
-        ValueRef::Blob(bytes) => json!({ "blob_bytes": bytes.len() }),
+        ValueRef::Blob(bytes) => match JSON_COLUMNS
+            .contains(&name)
+            .then(|| crate::codec::decode(value))
+        {
+            Some(Ok(text)) => {
+                serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.into_owned()))
+            }
+            Some(Err(error)) => {
+                json!({ "blob_bytes": bytes.len(), "undecodable": error.to_string() })
+            }
+            None => json!({ "blob_bytes": bytes.len() }),
+        },
     }
 }

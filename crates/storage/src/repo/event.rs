@@ -59,9 +59,17 @@ pub fn append_event(
     SecretGuard::from_env().check_event_kind(&event.kind)?;
     let payload = serde_json::to_string(&event.kind)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
-    let event_len = u64::try_from(payload.len())
+    let plain_len = u64::try_from(payload.len())
         .map_err(|_| StorageError::OutOfRange("event payload length"))?;
-    enforce_limit(LimitKind::EventSize, event_len, limits.max_event_bytes)?;
+    // One event's size limit bounds what a consumer must hold in memory, so it
+    // is checked on the plaintext. Session and daily limits bound the database
+    // file and are charged what is actually stored, as the accounting triggers do.
+    enforce_limit(LimitKind::EventSize, plain_len, limits.max_event_bytes)?;
+    let kind = kind_name(&event.kind);
+    let subkind = event.kind.subkind_name();
+    let encoded = encode_payload(kind, subkind, &payload);
+    let event_len = u64::try_from(encoded.stored_len())
+        .map_err(|_| StorageError::OutOfRange("event payload length"))?;
 
     // 他ウィンドウの writer がシードと INSERT の間に割り込まないよう、
     // 容量検査から commit まで同じ write transaction で保護します。
@@ -117,8 +125,6 @@ pub fn append_event(
         .map_err(|_| StorageError::OutOfRange("monotonic nanoseconds"))?;
     let wall_clock_ns = system_time_to_ns(event.meta.wall_clock)?;
     let schema_version = i64::from(event.meta.schema_version);
-    let kind = kind_name(&event.kind);
-    let subkind = event.kind.subkind_name();
     let run_id = event.kind.primary_run_id();
     let event_len_i64 =
         i64::try_from(event_len).map_err(|_| StorageError::OutOfRange("event payload length"))?;
@@ -132,7 +138,7 @@ pub fn append_event(
             monotonic_ns,
             wall_clock_ns,
             kind,
-            payload,
+            encoded,
             subkind,
             run_id
         ],
@@ -331,7 +337,7 @@ pub(crate) fn row_to_event(row: &Row<'_>) -> Result<StoredEvent, StorageError> {
     let schema_version: i64 = row.get(2)?;
     let monotonic_ns: i64 = row.get(3)?;
     let wall_clock_ns: i64 = row.get(4)?;
-    let payload: String = row.get(6)?;
+    let payload = crate::codec::decode(row.get_ref(6)?)?;
     let event = Event {
         meta: event_bus::EventMeta {
             schema_version: u32::try_from(schema_version)
@@ -350,6 +356,29 @@ pub(crate) fn row_to_event(row: &Row<'_>) -> Result<StoredEvent, StorageError> {
         session_id: row.get(1)?,
         event,
     })
+}
+
+/// Whether a payload of this `events.kind` / subkind is compressed. Only kinds
+/// that are bulky and are located by `kind`, `subkind` or the `run_id` column
+/// qualify. Every other kind stays TEXT because SQL reads inside its payload,
+/// and so do agent messages and approvals: they are attributed to a run by
+/// text in the payload (sender/recipient, call ID), so compressing them would
+/// make every run lookup decode every such row.
+pub(crate) fn encode_payload<'a>(
+    kind: &str,
+    subkind: &str,
+    payload: &'a str,
+) -> crate::codec::Encoded<'a> {
+    let compressible = match kind {
+        "Tool" => !select::PAYLOAD_ATTRIBUTED_SUBKINDS.contains(&subkind),
+        "Message" | "compaction" => true,
+        _ => false,
+    };
+    if compressible {
+        crate::codec::encode(payload)
+    } else {
+        crate::codec::Encoded::Plain(payload)
+    }
 }
 
 const fn kind_name(kind: &EventKind) -> &'static str {
@@ -372,6 +401,8 @@ const fn kind_name(kind: &EventKind) -> &'static str {
 
 #[cfg(test)]
 mod columns_tests;
+#[cfg(test)]
+mod compression_tests;
 #[cfg(test)]
 mod limits_tests;
 #[cfg(test)]

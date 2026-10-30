@@ -196,3 +196,119 @@ fn events_of_runs_can_be_read_in_pages_bounded_by_ids() {
     // Then: every matching event up to the bound arrives once, in order
     assert_eq!(ids, [1, 3, 5, 7]);
 }
+
+fn big_tool_output(label: &str, run_id: &str) -> Event {
+    Event::new(event_bus::ToolEvent::ToolCompleted {
+        tool_name: "shell".into(),
+        call_id: format!("call-{label}"),
+        is_error: false,
+        output: Some(format!("{label} output line\n").repeat(500)),
+        detail: None,
+        run_id: Some(run_id.into()),
+        parent_call_id: None,
+    })
+}
+
+fn payload_classes(path: &std::path::Path) -> Vec<String> {
+    let conn = Connection::open(path).expect("raw connection");
+    let mut statement = conn
+        .prepare("SELECT typeof(payload) FROM events ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn compressed_payloads_are_followed_excluded_and_paged_like_plain_ones() {
+    // Given: large tool outputs (stored as zstd BLOBs) from this and another session
+    let dir = TempDir::new().expect("temp dir");
+    let config = StorageConfig {
+        db_path: dir.path().join("compressed.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    let events = [
+        ("other", big_tool_output("a", "r1")),
+        ("me", big_tool_output("b", "r1")),
+        ("other", big_tool_output("c", "r2")),
+        ("other", big_tool_output("d", "r1")),
+    ];
+    for (session, event) in &events {
+        storage
+            .handle()
+            .append_stream_event(session, event, None)
+            .expect("append");
+    }
+    assert_eq!(payload_classes(&config.db_path), ["blob"; 4]);
+    let reader = Database::open_read_only(&config.db_path).expect("read-only open");
+
+    // When/Then: the follower decodes every row and skips its own without reading it
+    let all = reader.events_after(0, 10).unwrap();
+    assert_eq!(
+        all.events
+            .iter()
+            .map(|stored| &stored.event)
+            .collect::<Vec<_>>(),
+        events.iter().map(|(_, event)| event).collect::<Vec<_>>()
+    );
+    let others = reader.events_after_excluding(0, 2, "me").unwrap();
+    assert_eq!(
+        others
+            .events
+            .iter()
+            .map(|stored| stored.id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    assert_eq!((others.scanned, others.last_id), (2, 2));
+
+    // And: the paged run read finds compressed rows through the run_id column
+    let runs = ["r1".to_owned()];
+    let (page, more) = reader.events_for_runs_between(&runs, 0, 4, 2).unwrap();
+    assert_eq!(
+        page.iter().map(|stored| stored.id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(more);
+    let (rest, more) = reader.events_for_runs_between(&runs, 2, 4, 2).unwrap();
+    assert_eq!(rest.iter().map(|stored| stored.id).collect::<Vec<_>>(), [4]);
+    assert!(!more);
+}
+
+#[test]
+fn a_corrupt_compressed_row_is_skipped_by_the_follower_and_never_read_when_excluded() {
+    // Given: damaged BLOBs (zstd magic, then garbage) in another session's row and in our own
+    let dir = TempDir::new().expect("temp dir");
+    let config = StorageConfig {
+        db_path: dir.path().join("corrupt.db"),
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).expect("storage must open");
+    storage
+        .handle()
+        .append_stream_event("other", &big_tool_output("ok", "r1"), None)
+        .expect("append");
+    let damaged: Vec<u8> = [0x28, 0xB5, 0x2F, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF].to_vec();
+    let conn = Connection::open(&config.db_path).expect("raw connection");
+    for session in ["other", "me"] {
+        conn.execute(
+            "INSERT INTO events \
+             (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
+             VALUES (?1, ?2, 0, 0, 'Tool', ?3)",
+            params![session, event_bus::SCHEMA_VERSION, damaged],
+        )
+        .expect("raw insert");
+    }
+    let reader = Database::open_read_only(&config.db_path).expect("read-only open");
+
+    // When: following with our own session excluded
+    let page = reader.events_after_excluding(0, 10, "me").unwrap();
+
+    // Then: the intact row arrives, the damaged foreign row is skipped like an undecodable one,
+    // and the cursor passes both damaged rows
+    assert_eq!(page.events.len(), 1);
+    assert_eq!((page.scanned, page.last_id), (3, 3));
+}
