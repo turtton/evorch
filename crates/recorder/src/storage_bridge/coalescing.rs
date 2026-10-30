@@ -396,13 +396,15 @@ pub(super) fn split_oversize(
     if json_len(&event.kind) <= limit || redactor.detect(text).is_some() {
         return None;
     }
-    let row = |text: &str, index: usize, last: bool| {
+    let response_id = uuid::Uuid::new_v4().to_string();
+    let row = |text: &str, index: usize, total: usize| {
         EventKind::Message(if complete {
             MessageEvent::MessagePart {
                 run_id: run_id.expect("completed response has a run").to_owned(),
+                response_id: response_id.clone(),
                 text: text.to_owned(),
                 index,
-                last,
+                total,
             }
         } else {
             MessageEvent::ReasoningDelta {
@@ -411,9 +413,8 @@ pub(super) fn split_oversize(
             }
         })
     };
-    // `false` is the longer spelling. No index can exceed the original
-    // byte length, so reserve enough digits for every slice up front.
-    let room = limit.checked_sub(json_len(&row("", text.len(), false)))?;
+    // Neither index nor total can exceed the original byte length.
+    let room = limit.checked_sub(json_len(&row("", text.len(), text.len())))?;
     let pieces = split_json_bounded(text, room)?;
     let count = pieces.len();
     Some(
@@ -422,7 +423,7 @@ pub(super) fn split_oversize(
             .enumerate()
             .map(|(index, piece)| Event {
                 meta: event.meta.clone(),
-                kind: row(piece, index, index + 1 == count),
+                kind: row(piece, index, count),
             })
             .collect(),
     )

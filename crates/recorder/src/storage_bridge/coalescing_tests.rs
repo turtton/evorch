@@ -219,6 +219,39 @@ async fn unattributed_approval_and_fault_keep_their_position_between_reasoning()
 }
 
 #[test]
+fn separately_split_responses_have_distinct_identities_even_when_opposite_ends_are_lost() {
+    let guard = secret_guard::SecretRedactor::with_known_values([]);
+    let response = |text: &str| {
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: "run".into(),
+            text: text.repeat(1000),
+        })
+    };
+    let a = split_oversize(&response("A"), 512, &guard).unwrap();
+    let b = split_oversize(&response("B"), 512, &guard).unwrap();
+    let identity = |event: &Event| {
+        let EventKind::Message(MessageEvent::MessagePart { response_id, .. }) = &event.kind else {
+            panic!("expected a part")
+        };
+        response_id.clone()
+    };
+    assert_ne!(identity(&a[0]), identity(&b[0]));
+    let mut assembler = event_bus::MessagePartAssembler::new();
+    assert!(assembler.accept(&a[0]).is_none());
+    for part in &b[1..] {
+        assert!(assembler.accept(part).is_none());
+    }
+    let c = response("C");
+    let mut recovered = Vec::new();
+    for part in split_oversize(&c, 512, &guard).unwrap() {
+        if let Some(event) = assembler.accept(&part) {
+            recovered.push(event.into_owned());
+        }
+    }
+    assert_eq!(recovered, [c]);
+}
+
+#[test]
 fn impossible_row_limits_remain_rejectable_and_do_not_loop() {
     let guard = secret_guard::SecretRedactor::with_known_values([]);
     for limit in [0, 1, 80] {

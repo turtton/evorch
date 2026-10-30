@@ -62,11 +62,7 @@ impl RunRecord {
             .iter()
             .map(|row| RequestUsage::from_record(&row.record))
             .collect();
-        let events = database
-            .events_all_ordered()?
-            .into_iter()
-            .map(|stored| stored.event)
-            .collect();
+        let events = assemble(database.events_all_ordered()?);
         Ok(Self { requests, events })
     }
 
@@ -88,7 +84,7 @@ impl RunRecord {
             .map(|row| RequestUsage::from_record(&row.record))
             .collect();
         let (events, truncated) = database.events_for_runs(run_ids, from_ns, max_events)?;
-        let events = events.into_iter().map(|stored| stored.event).collect();
+        let events = assemble(events);
         Ok((Self { requests, events }, truncated))
     }
 
@@ -114,6 +110,16 @@ impl RunRecord {
     pub fn overhead_requests(&self) -> impl Iterator<Item = &RequestUsage> {
         self.requests.iter().filter(|request| request.is_overhead())
     }
+}
+
+// All persisted-record consumers (conversation, child outputs, inspection and
+// timelines) see the same complete responses, never storage-only slices.
+fn assemble(events: Vec<storage::StoredEvent>) -> Vec<Event> {
+    let mut parts = event_bus::MessagePartAssembler::new();
+    events
+        .into_iter()
+        .filter_map(|stored| parts.accept(&stored.event).map(|event| event.into_owned()))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

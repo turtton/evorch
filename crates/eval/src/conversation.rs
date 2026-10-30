@@ -55,7 +55,11 @@ pub fn recorded(
         })
         .collect();
     let mut asked = std::collections::HashSet::new();
+    let mut parts = event_bus::MessagePartAssembler::new();
     for event in events {
+        let Some(event) = parts.accept(event) else {
+            continue;
+        };
         let entry = match &event.kind {
             EventKind::Message(MessageEvent::MessageCompleted { run_id, text })
                 if chat_runs.contains(run_id) && !text.trim().is_empty() =>
