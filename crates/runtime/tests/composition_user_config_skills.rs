@@ -29,9 +29,18 @@ fn write_skill(user_config: &Path, name: &str) {
     .expect("SKILL.md");
 }
 
+const PRESET: &str = "user-config-probe";
+
+fn write_preset(user_config: &Path, body: &str) {
+    let directory = user_config.join("presets");
+    std::fs::create_dir_all(&directory).expect("presets directory");
+    std::fs::write(directory.join(format!("{PRESET}.md")), body).expect("preset");
+}
+
 /// compose_runtime した runtime が実際にモデルへ渡した system prompt 全文を返す。
 async fn system_prompt_for(user_config_dir: Option<&Path>) -> String {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.agents.orchestrator.preset = Some(PRESET.to_owned());
     let bus = Arc::new(EventBus::new(32));
     let credentials = tempfile::tempdir().expect("credential directory");
     let model = Arc::new(ScriptedModel::new([Ok(text_response(
@@ -76,7 +85,7 @@ async fn system_prompt_for(user_config_dir: Option<&Path>) -> String {
 
 // Given: グローバル user config (XDG_CONFIG_HOME) と明示指定の user config dir に別々の skill がある
 // When: 明示指定ありと指定なしで compose_runtime する
-// Then: 指定ありは指定側の skill だけを発見し、グローバル側の skill は見えない。
+// Then: 指定ありは指定側の skill と user presets だけを使い、グローバル側は見えない。
 //       指定なしは従来どおりグローバル側を使う
 #[tokio::test]
 async fn explicit_user_config_dir_selects_user_scope_skills() {
@@ -86,6 +95,8 @@ async fn explicit_user_config_dir_selects_user_scope_skills() {
     let selected = sandbox.path().join("selected");
     write_skill(&global, "global-only-skill");
     write_skill(&selected, "selected-only-skill");
+    write_preset(&global, "GLOBAL-PRESET-BODY");
+    write_preset(&selected, "SELECTED-PRESET-BODY");
     // SAFETY: このバイナリの唯一の test で、他スレッドは env を読み書きしない。
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
@@ -95,8 +106,12 @@ async fn explicit_user_config_dir_selects_user_scope_skills() {
     let explicit = system_prompt_for(Some(&selected)).await;
     assert!(explicit.contains("- selected-only-skill: "), "{explicit}");
     assert!(!explicit.contains("- global-only-skill: "), "{explicit}");
+    assert!(explicit.contains("SELECTED-PRESET-BODY"), "{explicit}");
+    assert!(!explicit.contains("GLOBAL-PRESET-BODY"), "{explicit}");
 
     let fallback = system_prompt_for(None).await;
     assert!(fallback.contains("- global-only-skill: "), "{fallback}");
     assert!(!fallback.contains("- selected-only-skill: "), "{fallback}");
+    assert!(fallback.contains("GLOBAL-PRESET-BODY"), "{fallback}");
+    assert!(!fallback.contains("SELECTED-PRESET-BODY"), "{fallback}");
 }
