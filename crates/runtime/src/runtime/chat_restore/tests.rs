@@ -1,6 +1,7 @@
 use super::*;
 
 mod admission_retry;
+mod compressed_snapshot;
 mod escalation;
 mod fork_seed;
 mod host_receipts;

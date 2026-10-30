@@ -499,7 +499,7 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
     let expected = preview_task_progress_retention(&path).unwrap();
     {
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision; DROP INDEX idx_events_durable_retention; DROP INDEX idx_events_task_lifecycle; PRAGMA user_version=25;").unwrap();
+        conn.execute_batch("ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN snapshot_revision; DROP INDEX idx_events_durable_retention; DROP INDEX idx_events_task_lifecycle; PRAGMA user_version=25;").unwrap();
     }
     let before = fs::read(&path).unwrap();
     let actual = preview_task_progress_retention(&path).unwrap();
@@ -643,4 +643,65 @@ fn preview_requires_a_lease_and_detects_database_or_sidecar_changes() {
     );
     assert!(preview_task_progress_retention(&path).is_err());
     assert_eq!(directory_contents(dir.path()), before);
+}
+
+#[test]
+fn retention_and_stripping_ignore_compressed_payloads_of_other_kinds() {
+    // Given: task history next to a large tool output stored as a zstd BLOB.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let events = [
+        event(Some("Title"), "running", None),
+        event(None, "running", Some("result")),
+        event(None, "completed", Some("result")),
+    ];
+    let config = seed(&path, &events);
+    let expected = preview_task_progress_retention(&path).unwrap();
+    {
+        let storage = Storage::open(config.clone()).unwrap();
+        storage
+            .handle()
+            .append_event(
+                Some("session"),
+                &Event::new(event_bus::ToolEvent::ToolCompleted {
+                    tool_name: "shell".into(),
+                    call_id: "call".into(),
+                    is_error: false,
+                    output: Some("large tool output\n".repeat(1000)),
+                    detail: None,
+                    run_id: Some("run".into()),
+                    parent_call_id: None,
+                }),
+            )
+            .unwrap();
+        storage.close();
+    }
+    let db = Database::open(&config).unwrap();
+    let tool_class: String = db
+        .conn
+        .query_row(
+            "SELECT typeof(payload) FROM events WHERE kind = 'Tool'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tool_class, "blob");
+
+    // When: retention previews and ticks over the mixed history.
+    let actual = preview_task_progress_retention(&path).unwrap();
+    let result = retention::tick(&db.conn, &mut Default::default()).unwrap();
+
+    // Then: only the task rows are selected, exactly as without the BLOB row.
+    assert_eq!(actual.event_count, expected.event_count);
+    assert_eq!(actual.payload_bytes, expected.payload_bytes);
+    assert_eq!(result.event_count, expected.event_count);
+    let remaining: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'Tool'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 1);
 }

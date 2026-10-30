@@ -986,8 +986,8 @@ fn main() -> Result<()> {
                     name: row.get(2)?,
                     parent_run_id: row.get(3)?,
                     config_json: row.get(4)?,
-                    messages_json: row.get(5)?,
-                    checkpoints_json: row.get(6)?,
+                    messages_json: stored_text(row, 5)?,
+                    checkpoints_json: stored_text(row, 6)?,
                     terminal_phase: row.get(7)?,
                     restorable: row.get(8)?,
                     updated_at_ns: row.get(9)?,
@@ -1086,4 +1086,14 @@ fn main() -> Result<()> {
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+/// A snapshot column that may be plain TEXT or a zstd BLOB (large snapshots are compressed).
+fn stored_text(row: &rusqlite::Row<'_>, index: usize) -> Result<String> {
+    Ok(match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Blob(bytes) => {
+            String::from_utf8(zstd::stream::decode_all(bytes)?)?
+        }
+        value => String::from_utf8(value.as_str()?.as_bytes().to_vec())?,
+    })
 }

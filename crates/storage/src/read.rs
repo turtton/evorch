@@ -302,7 +302,7 @@ impl Database {
             let mut statement = transaction.prepare(
                 "WITH RECURSIVE tree(run_id) AS (SELECT run_id FROM run_contexts WHERE run_id IN (SELECT value FROM json_each(?1)) \
                  UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id) \
-                 SELECT context.run_id, (length(CAST(context.messages_json AS BLOB)) + length(CAST(context.checkpoints_json AS BLOB)) + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
+                 SELECT context.run_id, (context.messages_len + context.checkpoints_len + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
                  ORDER BY CAST(substr(context.run_id, 5) AS INTEGER) LIMIT ?2",
             )?;
             statement
@@ -429,7 +429,7 @@ impl Database {
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             let kind: String = row.get(1)?;
-            let payload: String = row.get(2)?;
+            let payload = crate::codec::decode(row.get_ref(2)?)?;
             let event_kind = serde_json::from_str::<EventKind>(&payload).map_err(|error| {
                 StorageError::Serialization(format!("event id {id} kind {kind}: {error}"))
             })?;

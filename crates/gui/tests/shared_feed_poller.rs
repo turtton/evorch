@@ -221,3 +221,46 @@ fn dropping_a_worker_whose_queue_is_full_returns() {
     // Then: dropping the worker still stops it (a deadlock is caught by the runner's watchdog)
     drop(worker);
 }
+
+#[test]
+fn compressed_event_payloads_are_followed_like_plain_ones() {
+    // Given: a large tool output from another process, stored as a zstd BLOB, and one of our own
+    let (_dir, config, storage) = setup("compressed.db");
+    let handle = storage.handle();
+    let output = |label: &str| {
+        Event::new(event_bus::ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: format!("call-{label}"),
+            is_error: false,
+            output: Some(format!("{label} output line\n").repeat(500)),
+            detail: None,
+            run_id: Some("run-other".into()),
+            parent_call_id: None,
+        })
+    };
+    let foreign = output("foreign");
+    handle
+        .append_stream_event("other", &foreign, None)
+        .expect("append");
+    handle
+        .append_stream_event("me", &output("own"), None)
+        .expect("append");
+    let class: String = rusqlite::Connection::open(&config.db_path)
+        .expect("raw connection")
+        .query_row(
+            "SELECT typeof(payload) FROM events WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("payload type");
+    assert_eq!(class, "blob");
+    let mut follower = poller(&config, "me", 0);
+
+    // When: it polls
+    let batch = follower.poll_once().expect("poll");
+
+    // Then: the foreign event arrives decoded and the cursor passes our own row
+    assert_eq!(batch.events.len(), 1);
+    assert_eq!(batch.events[0].event, foreign);
+    assert_eq!(follower.cursor(), 2);
+}
