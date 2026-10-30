@@ -8,12 +8,15 @@
 use serde::{Deserialize, Serialize};
 
 use super::{ReviewRunContext, UserRequest, bounded};
-use crate::skill::{SkillScope, split_skill_attachments};
+use crate::skill::SkillScope;
 
 /// Longest skill body sent to the reviewer, in bytes.
 pub(crate) const MAX_SKILL_BYTES: usize = 16 * 1024;
 /// Most skills sent to the reviewer; the oldest are dropped first.
 pub(crate) const MAX_LOADED_SKILLS: usize = 6;
+/// Most skills a user attached that are sent to the reviewer; the oldest are
+/// dropped first. Separate from [`MAX_LOADED_SKILLS`].
+pub(crate) const MAX_ATTACHED_SKILLS: usize = 6;
 
 /// Who chose to bring a skill into the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,47 +141,59 @@ impl ReviewRunContext {
     }
 }
 
-/// Moves the skill bodies a host expanded from `@skill` mentions out of the
-/// user's words: each request keeps its typed text, and the bodies come back
-/// as views the user attached.
-pub(super) fn detach_attached_skills(requests: &mut [UserRequest]) -> Vec<LoadedSkillView> {
-    let mut attached = Vec::new();
+/// The skills users attached to their messages with `@skill` mentions, read
+/// from the evidence's own provenance: the host sent them beside the typed
+/// words, so no text is parsed and nothing the agent or the user writes can pass
+/// for one. A later attachment of a name replaces an earlier one, and the newest
+/// [`MAX_ATTACHED_SKILLS`] are kept.
+pub(super) fn attached_skill_views(requests: &[UserRequest]) -> Vec<LoadedSkillView> {
+    let mut attached: Vec<LoadedSkillView> = Vec::new();
     for request in requests {
-        // An answer to a question is typed by the user; no host expands mentions in it.
-        if request.in_reply_to.is_some() {
-            continue;
+        for attachment in &request.attachments {
+            attached.retain(|known| known.name != attachment.name);
+            attached.push(LoadedSkillView {
+                name: attachment.name.clone(),
+                scope: scope_label(&attachment.scope),
+                trust: "user-attached",
+                loaded_by: "user_mention",
+                text: bounded(&attachment.body, MAX_SKILL_BYTES),
+                truncated: attachment.body.len() > MAX_SKILL_BYTES,
+                attached_to: request.evidence.id.clone(),
+            });
         }
-        let (typed, attachments) = split_skill_attachments(&request.text);
-        if attachments.is_empty() {
-            continue;
-        }
-        let attached_to = request.evidence.id.clone();
-        attached.extend(attachments.into_iter().map(|attachment| LoadedSkillView {
-            name: attachment.name.to_owned(),
-            scope: "user_message",
-            trust: "user-attached",
-            loaded_by: "user_mention",
-            text: bounded(&attachment.body, MAX_SKILL_BYTES),
-            truncated: attachment.body.len() > MAX_SKILL_BYTES,
-            attached_to: attached_to.clone(),
-        }));
-        request.text = typed.to_owned();
     }
+    let excess = attached.len().saturating_sub(MAX_ATTACHED_SKILLS);
+    attached.drain(..excess);
     attached
 }
 
-/// `recorded` followed by `attached`, a later load replacing an earlier one of
-/// the same name, newest [`MAX_LOADED_SKILLS`] kept.
+/// The fixed label for a stored scope name, so an unknown value cannot put its
+/// own text into the reviewer's payload.
+fn scope_label(scope: &str) -> &'static str {
+    [
+        SkillScope::Repo,
+        SkillScope::RepoAgents,
+        SkillScope::User,
+        SkillScope::UserAgents,
+        SkillScope::Builtin,
+    ]
+    .into_iter()
+    .map(|known| known.as_str())
+    .find(|known| *known == scope)
+    .unwrap_or("unknown")
+}
+
+/// `recorded` followed by `attached`. A skill the user attached replaces a
+/// recorded one of the same name. The two kinds keep separate limits, so a
+/// user's attachments never push out what the agent loaded, nor the reverse.
 pub(super) fn merge_views(
     mut recorded: Vec<LoadedSkillView>,
     attached: Vec<LoadedSkillView>,
 ) -> Vec<LoadedSkillView> {
-    for view in attached {
-        recorded.retain(|known| known.name != view.name);
-        recorded.push(view);
-    }
+    recorded.retain(|known| attached.iter().all(|view| view.name != known.name));
     let excess = recorded.len().saturating_sub(MAX_LOADED_SKILLS);
     recorded.drain(..excess);
+    recorded.extend(attached);
     recorded
 }
 

@@ -10,6 +10,7 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 mod new_run_bubble;
 mod performance;
 mod review;
+mod skills;
 
 #[derive(Default)]
 struct Receipts(Arc<Mutex<Vec<storage::HostInputReceipt>>>);
@@ -49,7 +50,8 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         id: "old".into(),
         thread_id: "thread".into(),
         text: "retry this".into(),
-        prompt: "retry this".into(),
+        skills: Vec::new(),
+        origin_unverified: false,
         at: std::time::SystemTime::now(),
         image_count: 2,
         resent_from: None,
@@ -152,6 +154,7 @@ fn receipts_override_counts_and_resolved_originals_ignore_late_delivery() {
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     };
     let receipts = Arc::new(Mutex::new(vec![receipt]));
     state.sink = Box::new(Receipts(receipts.clone()));
@@ -206,6 +209,7 @@ fn startup_missing_receipt_is_rejected_and_terminal_accepted_is_unknown() {
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     };
     state.apply_receipts(&[receipt], false);
     assert_eq!(state.history[0].status, DeliveryStatus::Unknown);
@@ -261,6 +265,7 @@ fn withdrawn_receipt_removes_history_on_recovery_without_a_tombstone() {
         reason: None,
         accepted_at_ns: 0,
         status_at_ns: 0,
+        evidence_id: None,
     };
     state.history[0].status = DeliveryStatus::Queued;
     assert!(state.apply_receipts(std::slice::from_ref(&receipt), true));
@@ -331,6 +336,7 @@ fn already_consumed_input_cannot_be_deleted_or_duplicated_into_composer() {
             reason: None,
             accepted_at_ns: 0,
             status_at_ns: 0,
+            evidence_id: None,
         };
         assert!(!state.apply_receipts(&[receipt], false));
         assert_eq!(state.history[0].status, DeliveryStatus::Delivered);

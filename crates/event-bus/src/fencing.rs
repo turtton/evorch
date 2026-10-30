@@ -469,6 +469,8 @@ mod question_tests {
                     agent_name: "Worker".into(),
                     role: "worker".into(),
                     prompt: "task".into(),
+                    user_text: None,
+                    skills: Vec::new(),
                 }),
                 Event::new(MessageEvent::MessageCompleted {
                     run_id: run.into(),

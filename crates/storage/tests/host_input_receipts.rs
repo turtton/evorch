@@ -27,6 +27,7 @@ fn receipt(id: &str, run: &str, status: HostInputStatus) -> HostInputReceipt {
         reason: None,
         accepted_at_ns: 10,
         status_at_ns: 10,
+        evidence_id: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn evidence(id: &str, run: &str, text: &str) -> ReviewEvidenceRow {
         in_reply_to_title: None,
         reference_kind: None,
         reference_context: None,
+        attachments: Vec::new(),
         created_at_ns: 1,
     }
 }
@@ -632,4 +634,235 @@ fn withdrawn_is_terminal_and_survives_reopen_and_reconciliation() {
         status(&reopened, "withdraw"),
         Some(HostInputStatus::Withdrawn)
     );
+}
+
+#[test]
+fn origins_report_the_words_and_skill_names_each_submission_recorded() {
+    let (_dir, storage, database, _config) = fixture();
+    let handle = storage.handle();
+    let mut with_skills = evidence("evidence-skills", "run-origin", "use @a and @b");
+    with_skills.attachments = ["a", "b"]
+        .into_iter()
+        .map(|name| storage::EvidenceAttachment {
+            name: name.into(),
+            scope: "user".into(),
+            body: format!("{name} steps"),
+        })
+        .collect();
+    let mut first = receipt("prompt-skills", "run-origin", HostInputStatus::Accepted);
+    first.text = "use @a and @b".into();
+    first.evidence_id = Some(with_skills.id.clone());
+    handle
+        .append_host_input_accepted(&[with_skills], &[], None, &first)
+        .unwrap();
+    let plain = evidence("evidence-plain", "run-origin", "plain words");
+    let mut second = receipt("prompt-plain", "run-origin", HostInputStatus::Accepted);
+    second.text = "plain words".into();
+    second.evidence_id = Some(plain.id.clone());
+    handle
+        .append_host_input_accepted(&[plain], &[], None, &second)
+        .unwrap();
+    // A receipt that names no evidence has no skills.
+    let bare = receipt("prompt-bare", "run-origin", HostInputStatus::Accepted);
+    handle
+        .append_host_input_accepted(&[], &[], None, &bare)
+        .unwrap();
+
+    let ids = [
+        "prompt-bare".to_owned(),
+        "missing".to_owned(),
+        "prompt-skills".to_owned(),
+        "prompt-plain".to_owned(),
+    ];
+    let origins = database.host_input_origins(&ids).unwrap();
+    let summary: Vec<_> = origins
+        .iter()
+        .map(|origin| {
+            (
+                origin.prompt_id.as_str(),
+                origin.text.as_str(),
+                origin.skills.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("prompt-bare", "message prompt-bare", Vec::<String>::new()),
+            (
+                "prompt-skills",
+                "use @a and @b",
+                vec!["a".to_owned(), "b".to_owned()]
+            ),
+            ("prompt-plain", "plain words", Vec::new()),
+        ]
+    );
+}
+
+#[test]
+fn one_unreadable_record_does_not_hide_the_others() {
+    let (dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let good = {
+        let mut row = evidence("evidence-good", "run-bad", "good words");
+        row.attachments = vec![storage::EvidenceAttachment {
+            name: "kept".into(),
+            scope: "user".into(),
+            body: "x".repeat(64 * 1024),
+        }];
+        row
+    };
+    let broken = evidence("evidence-broken", "run-bad", "broken words");
+    for (row, id) in [(good, "prompt-good"), (broken, "prompt-broken")] {
+        let mut receipt = receipt(id, "run-bad", HostInputStatus::Accepted);
+        receipt.evidence_id = Some(row.id.clone());
+        handle
+            .append_host_input_accepted(&[row], &[], None, &receipt)
+            .unwrap();
+    }
+    // A receipt whose evidence row never arrived.
+    let mut orphan = receipt("prompt-orphan", "run-bad", HostInputStatus::Accepted);
+    orphan.evidence_id = Some("no-such-evidence".into());
+    handle
+        .append_host_input_accepted(&[], &[], None, &orphan)
+        .unwrap();
+    storage.close();
+    let connection = rusqlite::Connection::open(dir.path().join("receipts.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE review_evidence SET attachments_json = '{not json' WHERE id = 'evidence-broken'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let database = Database::open(&config).unwrap();
+    let ids = [
+        "prompt-good".to_owned(),
+        "prompt-broken".to_owned(),
+        "prompt-orphan".to_owned(),
+    ];
+    let origins = database.host_input_origins(&ids).unwrap();
+    assert_eq!(origins.len(), 3);
+    assert_eq!(origins[0].skills, ["kept"]);
+    assert_eq!(origins[0].unreadable, None);
+    for broken in &origins[1..] {
+        assert!(broken.skills.is_empty());
+        assert!(broken.unreadable.is_some(), "{broken:?}");
+    }
+    assert_eq!(origins[1].text, "message prompt-broken");
+}
+
+#[test]
+fn attachment_acceptances_keep_their_sequence_across_a_reopen() {
+    let (_dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let skills = |body: &str| {
+        let mut row = evidence(&format!("evidence-{body}"), "run-seq", "use @demo");
+        row.attachments = vec![storage::EvidenceAttachment {
+            name: "demo".into(),
+            scope: "user".into(),
+            body: body.into(),
+        }];
+        row
+    };
+    // The same evidence twice around another, with the clock running backwards.
+    for (index, body) in ["first", "second", "first"].into_iter().enumerate() {
+        let row = skills(body);
+        let mut receipt = receipt(
+            &format!("prompt-{index}"),
+            "run-seq",
+            HostInputStatus::Accepted,
+        );
+        receipt.evidence_id = Some(row.id.clone());
+        receipt.accepted_at_ns = 100 - i64::try_from(index).unwrap();
+        handle
+            .append_host_input_accepted(&[row], &[], None, &receipt)
+            .unwrap();
+    }
+    storage.close();
+    let reopened = Database::open(&config).unwrap();
+    let bodies: Vec<_> = reopened
+        .review_attachment_acceptances_for_lineage(&["run-seq".to_owned()])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.attachments[0].body.clone())
+        .collect();
+    assert_eq!(bodies, ["first", "second", "first"]);
+    // A later acceptance after the reopen continues the sequence.
+    let storage = Storage::open(config.clone()).unwrap();
+    let row = skills("third");
+    let mut later = receipt("prompt-3", "run-seq", HostInputStatus::Accepted);
+    later.evidence_id = Some(row.id.clone());
+    later.accepted_at_ns = 1;
+    storage
+        .handle()
+        .append_host_input_accepted(&[row], &[], None, &later)
+        .unwrap();
+    let bodies: Vec<_> = Database::open(&config)
+        .unwrap()
+        .review_attachment_acceptances_for_lineage(&["run-seq".to_owned()])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.attachments[0].body.clone())
+        .collect();
+    assert_eq!(bodies, ["first", "second", "first", "third"]);
+}
+
+#[test]
+fn attachments_of_the_wrong_shape_are_unreadable_one_by_one() {
+    let (dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let mut good = evidence("evidence-shape-good", "run-shape", "good words");
+    good.attachments = vec![storage::EvidenceAttachment {
+        name: "kept".into(),
+        scope: "user".into(),
+        body: "steps".into(),
+    }];
+    let shapes = [
+        ("not-an-object", r#"["not-an-object"]"#),
+        ("root-object", r#"{"name":"demo"}"#),
+        ("name-number", r#"[{"name":3}]"#),
+        ("no-name", r#"[{"body":"x"}]"#),
+        ("null-root", "null"),
+        ("mixed", r#"[{"name":"fine"},7]"#),
+    ];
+    let mut rows = vec![("prompt-good".to_owned(), good)];
+    rows.extend(shapes.iter().map(|(label, _)| {
+        (
+            format!("prompt-{label}"),
+            evidence(&format!("evidence-{label}"), "run-shape", label),
+        )
+    }));
+    for (prompt, row) in &rows {
+        let mut receipt = receipt(prompt, "run-shape", HostInputStatus::Accepted);
+        receipt.evidence_id = Some(row.id.clone());
+        handle
+            .append_host_input_accepted(std::slice::from_ref(row), &[], None, &receipt)
+            .unwrap();
+    }
+    storage.close();
+    let connection = rusqlite::Connection::open(dir.path().join("receipts.sqlite3")).unwrap();
+    for (label, json) in shapes {
+        connection
+            .execute(
+                "UPDATE review_evidence SET attachments_json = ?1 WHERE id = ?2",
+                rusqlite::params![json, format!("evidence-{label}")],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let ids: Vec<_> = rows.iter().map(|(prompt, _)| prompt.clone()).collect();
+    let origins = Database::open(&config)
+        .unwrap()
+        .host_input_origins(&ids)
+        .unwrap();
+    assert_eq!(origins.len(), rows.len());
+    assert_eq!(origins[0].skills, ["kept"]);
+    assert_eq!(origins[0].unreadable, None);
+    for origin in &origins[1..] {
+        assert!(origin.skills.is_empty(), "{origin:?}");
+        assert!(origin.unreadable.is_some(), "{origin:?}");
+    }
 }

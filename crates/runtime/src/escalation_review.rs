@@ -21,7 +21,7 @@ pub(crate) use denial_streak::{CONSECUTIVE_DENIAL_LIMIT, DENIAL_GUIDANCE, Denial
 pub use gate::{EvidenceStamp, SandboxEscalationGate};
 pub use loaded_skills::LoadedSkillRef;
 pub(crate) use loaded_skills::{LoadedBy, LoadedSkill, LoadedSkillView};
-use loaded_skills::{detach_attached_skills, merge_views};
+use loaded_skills::{attached_skill_views, merge_views};
 pub(crate) use manifest::ManifestSink;
 use manifest::{Audit, ContextAudit, ReviewKind};
 pub use manifest::{
@@ -138,6 +138,11 @@ pub(crate) struct UserRequest {
     /// Which stored evidence this input is. Not sent to the reviewer.
     #[serde(skip)]
     pub(crate) evidence: EvidenceRef,
+    /// Skill bodies the host expanded from the user's `@name` mentions in
+    /// `text`. They travel beside the words, never inside them, and reach the
+    /// reviewer as loaded skills rather than as user input.
+    #[serde(skip)]
+    pub(crate) attachments: Vec<storage::EvidenceAttachment>,
 }
 
 /// The stored evidence row behind a user input; unset for an input that only
@@ -165,6 +170,12 @@ pub struct ReferenceContext {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SharedUserRequests {
     pub(crate) requests: Vec<UserRequest>,
+    /// One entry per accepted message that attached skills, in the order the
+    /// messages were accepted. Evidence is keyed by content, so the same
+    /// words and skills sent again are one evidence row; they are still two
+    /// acceptances here, and a restore rebuilds this list from the receipts.
+    #[serde(skip)]
+    pub(crate) attached: Vec<UserRequest>,
     pub(crate) evidence_revision: u64,
     pub(crate) synced: bool,
 }
@@ -173,6 +184,7 @@ impl Default for SharedUserRequests {
     fn default() -> Self {
         Self {
             requests: Vec::new(),
+            attached: Vec::new(),
             evidence_revision: 0,
             synced: true,
         }
@@ -182,18 +194,33 @@ impl Default for SharedUserRequests {
 impl SharedUserRequests {
     pub(crate) fn add_request(&mut self, request: UserRequest) {
         if !request.text.trim().is_empty() {
+            if !request.attachments.is_empty() {
+                self.attached.push(request.clone());
+            }
             self.requests.push(request);
             self.evidence_revision += 1;
+        }
+    }
+
+    /// Requests read back from storage: `attached` is the acceptance order the
+    /// receipts kept, repeats included.
+    pub(crate) fn restored(requests: Vec<UserRequest>, attached: Vec<UserRequest>) -> Self {
+        Self {
+            requests,
+            attached,
+            ..Self::default()
         }
     }
 }
 
 impl From<Vec<UserRequest>> for SharedUserRequests {
     fn from(requests: Vec<UserRequest>) -> Self {
-        Self {
-            requests,
-            ..Self::default()
-        }
+        let attached = requests
+            .iter()
+            .filter(|request| !request.attachments.is_empty())
+            .cloned()
+            .collect();
+        Self::restored(requests, attached)
     }
 }
 
@@ -219,13 +246,27 @@ impl ReviewRunContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn add_user_request(&self, target_run_id: &str, text: &str) {
+        self.add_user_request_with_skills(target_run_id, text, Vec::new());
+    }
+
+    /// Like [`Self::add_user_request`] for a message the host expanded
+    /// `@skill` mentions of: `text` is the user's words alone and `attachments`
+    /// the skills read for them.
+    pub(crate) fn add_user_request_with_skills(
+        &self,
+        target_run_id: &str,
+        text: &str,
+        attachments: Vec<storage::EvidenceAttachment>,
+    ) {
         self.add_request(UserRequest {
             target_run_id: target_run_id.into(),
             text: text.into(),
             in_reply_to: None,
             reference_context: None,
             evidence: EvidenceRef::default(),
+            attachments,
         });
     }
 
@@ -263,6 +304,7 @@ impl ReviewRunContext {
                 )),
                 kind: Some("user_answer".into()),
             },
+            attachments: Vec::new(),
         });
     }
 
@@ -296,6 +338,21 @@ impl ReviewRunContext {
             .iter()
             .filter(|request| self.lineage_run_ids.contains(&request.target_run_id))
             .count()
+    }
+
+    /// The accepted messages of this run's lineage that attached skills, in the
+    /// order they were accepted.
+    pub(crate) fn attached_requests(&self) -> Vec<UserRequest> {
+        let shared = self
+            .user_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared
+            .attached
+            .iter()
+            .filter(|request| self.lineage_run_ids.contains(&request.target_run_id))
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn requests(&self) -> (Vec<UserRequest>, u64, bool) {
@@ -371,11 +428,11 @@ pub(crate) fn review_context(
     run: ReviewRunContext,
     rules: Option<&crate::rules::RulesSource>,
 ) -> Result<(ReviewContext, EvidenceStamp), ReviewError> {
-    let (mut real_user_requests, revision, synced) = run.requests();
+    let (real_user_requests, revision, synced) = run.requests();
     if !synced {
         return Err(ReviewError::Unsynced);
     }
-    let attached = detach_attached_skills(&mut real_user_requests);
+    let attached = attached_skill_views(&run.attached_requests());
     let project_rules = rules.and_then(|rules| {
         if rules.trust() != crate::rules::ProjectTrust::Approved {
             return None;
@@ -1060,6 +1117,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1133,6 +1191,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1294,6 +1353,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1382,6 +1442,7 @@ mod tests {
                 in_reply_to: None,
                 reference_context: None,
                 evidence: EvidenceRef::default(),
+                attachments: Vec::new(),
             }]
             .into(),
         ));
@@ -1414,6 +1475,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),
@@ -1593,6 +1655,7 @@ mod tests {
                     in_reply_to: None,
                     reference_context: None,
                     evidence: EvidenceRef::default(),
+                    attachments: Vec::new(),
                 }]
                 .into(),
             )),

@@ -9,9 +9,14 @@ pub(super) struct UserMessage {
     pub id: String,
     pub thread_id: String,
     pub text: String,
-    /// The expanded prompt the agent receives; empty in older files.
+    /// Skills the user attached with `@name`; the runtime adds their bodies to
+    /// what the agent receives, and the bubble shows them as chips.
     #[serde(default)]
-    pub prompt: String,
+    pub skills: Vec<String>,
+    /// The runtime's record of this message could not be read (yet), so `text`
+    /// and `skills` are still the composer's copy. Checked again until read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub origin_unverified: bool,
     #[serde(default)]
     pub image_count: usize,
     #[serde(default)]
@@ -86,7 +91,7 @@ impl UserMessage {
         crate::model::composer::QueuedFollowUp {
             submission_id: self.id.clone(),
             text: self.text.clone(),
-            prompt: self.prompt.clone(),
+            skills: self.skills.clone(),
             undelivered: true,
             rejection: match &self.status {
                 DeliveryStatus::Rejected { reason } => Some(format!("Not sent: {reason}")),
@@ -336,6 +341,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.seed_branches(None);
+        self.adopt_recorded_origins(db);
         let mut messages = self.history.clone();
         messages.sort_by_key(|message| message.at);
         let mut messages = messages.into_iter().peekable();
@@ -686,6 +692,75 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         candidates
     }
 
+    /// Replaces each saved message's words and skill names with what the
+    /// runtime recorded when it accepted the submission, so a bubble never
+    /// shows a copy the runtime did not receive. Messages the runtime has no
+    /// record of (never accepted) keep the saved copy.
+    fn adopt_recorded_origins(&mut self, db: &storage::Database) {
+        let ids: Vec<String> = self
+            .history
+            .iter()
+            .filter(|message| !message.id.is_empty())
+            .map(|message| message.id.clone())
+            .collect();
+        self.apply_recorded_origins(db.host_input_origins(&ids));
+    }
+
+    /// Applies a lookup of the runtime's records to the saved history. A failed
+    /// lookup, or a record that cannot be read, leaves the saved copy but marks
+    /// the message unverified so it is looked up again; it is never taken for
+    /// "the runtime recorded nothing".
+    pub(super) fn apply_recorded_origins(
+        &mut self,
+        result: Result<Vec<storage::HostInputOrigin>, storage::StorageError>,
+    ) {
+        let index: std::collections::HashMap<String, usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.id.is_empty())
+            .map(|(position, message)| (message.id.clone(), position))
+            .collect();
+        match result {
+            Ok(origins) => {
+                for origin in origins {
+                    if let Some(&position) = index.get(&origin.prompt_id) {
+                        self.apply_origin_at(position, origin);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not read what the runtime recorded for saved messages");
+                for &position in index.values() {
+                    self.history[position].origin_unverified = true;
+                }
+            }
+        }
+    }
+
+    /// Takes one record as the message's own, or marks the message unverified
+    /// when the record could not be read. Returns whether the message changed.
+    pub(super) fn apply_origin_at(
+        &mut self,
+        position: usize,
+        origin: storage::HostInputOrigin,
+    ) -> bool {
+        let message = &mut self.history[position];
+        if let Some(reason) = &origin.unreadable {
+            tracing::warn!(prompt_id = %origin.prompt_id, %reason, "recorded skills are unreadable");
+            let changed = !message.origin_unverified;
+            message.origin_unverified = true;
+            return changed;
+        }
+        let changed = message.text != origin.text
+            || message.skills != origin.skills
+            || message.origin_unverified;
+        message.text = origin.text;
+        message.skills = origin.skills;
+        message.origin_unverified = false;
+        changed
+    }
+
     pub(super) fn restore_user_message(&mut self, message: UserMessage) {
         let message = self
             .history
@@ -696,8 +771,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if !message.shown_as_sent() {
             return;
         }
-        self.transcripts
-            .push_host_input(&message.thread_id, &message.id, message.text);
+        self.transcripts.push_host_input(
+            &message.thread_id,
+            &message.id,
+            message.text,
+            message.skills,
+        );
     }
 
     /// Messages that never reached the agent come back above the composer,

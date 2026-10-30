@@ -52,7 +52,7 @@ fn bubbles(state: &WorkbenchState<DemoSource>) -> Vec<String> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage { text } => Some(text),
+            TranscriptEntry::UserMessage { text, .. } => Some(text),
             _ => None,
         })
         .collect()
@@ -184,7 +184,7 @@ fn editing_and_deleting_follow_ups_keeps_the_pending_new_run_bubble() {
                 .skip(1)
                 .map(|message| storage::HostInputReceipt {
                     prompt_id: message.id.clone(),
-                    text: message.prompt.clone(),
+                    text: message.text.clone(),
                     ..super::review::receipt(storage::HostInputStatus::Accepted)
                 }),
         );

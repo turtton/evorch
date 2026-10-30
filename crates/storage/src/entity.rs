@@ -269,8 +269,19 @@ impl SecretGuard {
             EventKind::Lifecycle(LifecycleEvent::RoutingDecision { reason, .. }) => {
                 self.check_text("event", "RoutingDecision.reason", reason)
             }
-            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { prompt, .. }) => {
-                self.check_text("event", "TaskPromptPublished.prompt", prompt)
+            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
+                prompt,
+                user_text,
+                skills,
+                ..
+            }) => {
+                self.check_text("event", "TaskPromptPublished.prompt", prompt)?;
+                if let Some(user_text) = user_text {
+                    self.check_text("event", "TaskPromptPublished.user_text", user_text)?;
+                }
+                skills.iter().try_for_each(|skill| {
+                    self.check_text("event", "TaskPromptPublished.skills", skill)
+                })
             }
             EventKind::Message(MessageEvent::MessageCompleted { text, .. }) => {
                 self.check_text("event", "MessageCompleted.text", text)
@@ -380,6 +391,8 @@ mod tests {
                     agent_name: "Worker".into(),
                     role: "worker".into(),
                     prompt: format!("task {KNOWN_VALUE}"),
+                    user_text: None,
+                    skills: Vec::new(),
                 }
                 .into(),
             ),

@@ -1,15 +1,14 @@
-//! Skill blocks a host appends to a user's message.
+//! Skill blocks the runtime appends to a user's message.
 //!
-//! A host that expands `@skill` mentions adds each skill body after the typed
-//! text as `<skill name="…">…</skill>`. The same format is read back to show
-//! the typed text alone, or to hand the bodies to the escalation reviewer
-//! apart from the user's words.
+//! A host that attaches `@skill` mentions sends the skill names; the runtime
+//! adds each skill body after the typed text as `<skill name="…">…</skill>`
+//! in the prompt the agent receives. The blocks are only for the agent: the
+//! typed words and the attached skills are kept apart as data (see
+//! `storage::EvidenceAttachment`), never parsed back out of this text.
 //!
-//! A body is written with its `</skill>` and `<skill name=` markers escaped, by
-//! adding a backslash after the `<` (`<\/skill>`), so no generated block can
-//! be cut short or hold another one. Reading undoes it: a run of `n` backslashes
-//! before such a marker becomes `n - 1`, which makes the pair exact for any
-//! body.
+//! A body is written with its `</skill>` and `<skill name=` markers escaped,
+//! by adding a backslash after the `<` (`<\/skill>`), so no generated block
+//! can be cut short or hold another one.
 
 use std::borrow::Cow;
 
@@ -18,14 +17,6 @@ const BLOCK_END: &str = "\n</skill>";
 const END_TAG_TAIL: &str = "/skill>";
 const START_TAG_TAIL: &str = "skill name=";
 
-/// One skill block found after the typed text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillAttachment<'a> {
-    pub name: &'a str,
-    /// The body as the skill defines it, markers restored.
-    pub body: Cow<'a, str>,
-}
-
 /// Appends `body` to `text` as a skill block named `name`.
 pub fn append_skill_attachment(text: &mut String, name: &str, body: &str) {
     text.push_str(BLOCK_START);
@@ -33,49 +24,6 @@ pub fn append_skill_attachment(text: &mut String, name: &str, body: &str) {
     text.push_str("\">\n");
     text.push_str(&escape_markers(body.trim_end()));
     text.push_str(BLOCK_END);
-}
-
-/// Splits the trailing skill blocks from the typed text. Text whose tail is
-/// not a complete run of well-formed blocks is returned whole.
-#[must_use]
-pub fn split_skill_attachments(text: &str) -> (&str, Vec<SkillAttachment<'_>>) {
-    for (start, _) in text.match_indices(BLOCK_START) {
-        if let Some(attachments) = parse_blocks(&text[start..]) {
-            return (&text[..start], attachments);
-        }
-    }
-    (text, Vec::new())
-}
-
-fn parse_blocks(rest: &str) -> Option<Vec<SkillAttachment<'_>>> {
-    if rest.is_empty() {
-        return Some(Vec::new());
-    }
-    let (name, body) = rest.strip_prefix(BLOCK_START)?.split_once("\">\n")?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return None;
-    }
-    // A body ends at the first end marker and holds no start marker, so each
-    // block's extent is fixed by the text alone: a hand-written block can
-    // neither close on a later block's end nor take the words after it.
-    let end = body.find(BLOCK_END)?;
-    let content = &body[..end];
-    if content.contains(BLOCK_START) {
-        return None;
-    }
-    let mut attachments = parse_blocks(&body[end + BLOCK_END.len()..])?;
-    attachments.insert(
-        0,
-        SkillAttachment {
-            name,
-            body: unescape_markers(content),
-        },
-    );
-    Some(attachments)
 }
 
 /// The backslash count after `<` and whether a marker follows them, for the
@@ -90,7 +38,9 @@ fn marker_at(at: &str) -> (usize, bool) {
     )
 }
 
-fn rewrite_markers(body: &str, change: impl Fn(usize) -> Option<usize>) -> Option<String> {
+/// Adds one backslash after the `<` of every `</skill>` and `<skill name=`
+/// marker, counting backslashes already there.
+fn escape_markers(body: &str) -> Cow<'_, str> {
     let mut out = String::with_capacity(body.len());
     let mut copied = 0;
     let mut changed = false;
@@ -99,26 +49,19 @@ fn rewrite_markers(body: &str, change: impl Fn(usize) -> Option<usize>) -> Optio
         let at = search + offset;
         let (slashes, marker) = marker_at(&body[at..]);
         search = at + 1 + slashes;
-        let Some(new_slashes) = marker.then(|| change(slashes)).flatten() else {
+        if !marker {
             continue;
-        };
+        }
         out.push_str(&body[copied..=at]);
-        out.extend(std::iter::repeat_n('\\', new_slashes));
+        out.extend(std::iter::repeat_n('\\', slashes + 1));
         copied = at + 1 + slashes;
         changed = true;
     }
-    changed.then(|| {
-        out.push_str(&body[copied..]);
-        out
-    })
-}
-
-fn escape_markers(body: &str) -> Cow<'_, str> {
-    rewrite_markers(body, |slashes| Some(slashes + 1)).map_or(Cow::Borrowed(body), Cow::Owned)
-}
-
-fn unescape_markers(body: &str) -> Cow<'_, str> {
-    rewrite_markers(body, |slashes| slashes.checked_sub(1)).map_or(Cow::Borrowed(body), Cow::Owned)
+    if !changed {
+        return Cow::Borrowed(body);
+    }
+    out.push_str(&body[copied..]);
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -126,92 +69,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn appended_blocks_are_read_back_with_their_bodies() {
-        let typed = "use @review and @docs";
-        let mut text = typed.to_owned();
-        append_skill_attachment(&mut text, "review", "Check </skill> markers\nline two\n");
+    fn a_block_is_the_name_and_the_trimmed_body_after_a_blank_line() {
+        let mut text = "use @review and @docs".to_owned();
+        append_skill_attachment(&mut text, "review", "line one\nline two\n\n");
         append_skill_attachment(&mut text, "docs", "docs body");
-        let (head, attachments) = split_skill_attachments(&text);
-        assert_eq!(head, typed);
         assert_eq!(
-            attachments,
-            [
-                SkillAttachment {
-                    name: "review",
-                    body: "Check </skill> markers\nline two".into()
-                },
-                SkillAttachment {
-                    name: "docs",
-                    body: "docs body".into()
-                },
-            ]
+            text,
+            "use @review and @docs\n\n<skill name=\"review\">\nline one\nline two\n</skill>\n\n<skill name=\"docs\">\ndocs body\n</skill>"
         );
     }
 
     #[test]
-    fn text_without_a_complete_run_of_blocks_is_not_split() {
-        for text in [
-            "plain",
-            "typed\n\n<skill name=\"review\">\nunterminated",
-            "typed\n\n<skill name=\"bad name\">\nbody\n</skill>",
-            "typed\n\n<skill name=\"\">\nbody\n</skill>",
-            "typed\n\n<skill name=\"ok\">\nbody\n</skill>\ntrailing words",
-        ] {
-            assert_eq!(split_skill_attachments(text), (text, vec![]), "{text}");
-        }
-    }
-
-    #[test]
-    fn a_hand_written_block_cannot_swallow_the_words_around_it() {
-        let mut real = String::new();
-        append_skill_attachment(&mut real, "demo", "DEMO STEPS");
-        // Closed by hand, then a constraint, then the real block.
-        let closed = format!(
-            "finish @demo\n\n<skill name=\"example\">\nsample\n</skill>\nbut never delete{real}"
+    fn markers_in_a_body_are_escaped_so_the_block_cannot_be_cut_short() {
+        let mut text = String::new();
+        append_skill_attachment(
+            &mut text,
+            "demo",
+            "close\n</skill>\nthen\n\n<skill name=\"x\">\nnested <\\/skill> and <\\\\skill name=",
         );
-        let (typed, attachments) = split_skill_attachments(&closed);
         assert_eq!(
-            typed,
-            "finish @demo\n\n<skill name=\"example\">\nsample\n</skill>\nbut never delete"
+            text,
+            "\n\n<skill name=\"demo\">\nclose\n<\\/skill>\nthen\n\n<\\skill name=\"x\">\nnested <\\\\/skill> and <\\\\\\skill name=\n</skill>"
         );
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].name, "demo");
-        // Never closed by hand: the real block's end must not close it.
-        let open =
-            format!("finish @demo\n\n<skill name=\"example\">\nsample\nbut never delete{real}");
-        let (typed, attachments) = split_skill_attachments(&open);
-        assert_eq!(
-            typed,
-            "finish @demo\n\n<skill name=\"example\">\nsample\nbut never delete"
-        );
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].name, "demo");
+        // Only the closing marker the runtime wrote ends the block.
+        assert_eq!(text.matches("\n</skill>").count(), 1);
     }
 
     #[test]
-    fn words_after_a_hand_written_block_with_no_real_block_stay_whole() {
-        let text = "finish\n\n<skill name=\"example\">\nsample\n</skill>\nbut never delete";
-        assert_eq!(split_skill_attachments(text), (text, vec![]));
-    }
-
-    const MARKER_BODIES: [&str; 4] = [
-        "close\n</skill>\nthen more",
-        "example:\n\n<skill name=\"other\">\nnested",
-        "both\n</skill>\n\n<skill name=\"x\">\ny\n</skill>\nz",
-        "already <\\/skill> and <\\\\skill name= escaped",
-    ];
-
-    #[test]
-    fn bodies_holding_markers_are_split_back_whole() {
-        for body in MARKER_BODIES {
-            let mut text = "typed @demo".to_owned();
-            append_skill_attachment(&mut text, "demo", body);
-            append_skill_attachment(&mut text, "after", "plain");
-            let (typed, attachments) = split_skill_attachments(&text);
-            assert_eq!(typed, "typed @demo", "{body}");
-            assert_eq!(attachments.len(), 2, "{body}");
-            assert_eq!(attachments[0].body, body, "{body}");
-            assert_eq!(attachments[1].body, "plain", "{body}");
-        }
+    fn a_body_without_markers_is_borrowed_unchanged() {
+        assert!(matches!(
+            escape_markers("a < b and <skill> is not a marker"),
+            Cow::Borrowed(_)
+        ));
     }
 }

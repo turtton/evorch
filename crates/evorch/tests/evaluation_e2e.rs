@@ -90,6 +90,7 @@ fn preflight_failure(report_flag: Option<&str>, reports: bool) {
             in_reply_to_title: None,
             reference_kind: None,
             reference_context: None,
+            attachments: Vec::new(),
             created_at_ns: 1,
         }])
         .unwrap();

@@ -40,7 +40,12 @@ pub struct ChatSubmission {
     #[serde(default)]
     pub images: Vec<runtime::DelegateImage>,
     pub thread_id: String,
+    /// What the user typed. The runtime expands `skills` into the prompt the
+    /// agent sees; the words stay as typed everywhere else.
     pub text: String,
+    /// Names of the skills the user attached with `@name` mentions in `text`.
+    #[serde(default)]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub model_preference: Option<runtime::ModelPreference>,
     /// Completed-turn boundary a forked thread starts from until it saves its own history.
@@ -155,6 +160,14 @@ pub trait CommandSink: Send {
         &self,
         _ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
+        None
+    }
+    /// What the runtime recorded for each submission it accepted: the words and
+    /// the attached skill names. `None` only for non-runtime sinks/fixtures.
+    fn host_input_origins(
+        &self,
+        _ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
         None
     }
     /// Return only IDs that the generation-guarded storage operation changed.
@@ -388,6 +401,7 @@ mod tests {
                 thread_id: thread_id.into(),
                 text: "hi".into(),
                 model_preference: None,
+                skills: Vec::new(),
             }))
         });
         // Then: each acceptance retains its thread and receives a sequential ID.

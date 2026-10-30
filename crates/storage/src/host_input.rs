@@ -59,6 +59,20 @@ pub struct HostInputReceipt {
     pub reason: Option<String>,
     pub accepted_at_ns: i64,
     pub status_at_ns: i64,
+    /// The review evidence row this submission recorded, when it recorded one.
+    pub evidence_id: Option<String>,
+}
+
+/// What the runtime recorded for a submission: the host's own words and the
+/// skills it attached to them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostInputOrigin {
+    pub prompt_id: String,
+    pub text: String,
+    pub skills: Vec<String>,
+    /// Why the skill names could not be read for this submission alone (the
+    /// text is still the receipt's); `skills` is empty then.
+    pub unreadable: Option<String>,
 }
 
 impl HostInputReceipt {

@@ -266,6 +266,7 @@ fn save_valid_settings_writes_project_config_and_flips_status() {
             thread_id: "thread-1".into(),
             text: "hello".into(),
             model_preference: None,
+            skills: Vec::new(),
         })]
     );
 }

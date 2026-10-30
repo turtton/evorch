@@ -111,6 +111,7 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     let expected = [
         TranscriptEntry::UserMessage {
             text: "answer".into(),
+            skills: Vec::new(),
         },
         TranscriptEntry::Reasoning {
             text: "weighing options".into(),
@@ -262,6 +263,7 @@ fn responses_native_state_never_reaches_transcripts_panes_or_recorded_events() {
     let expected = [
         TranscriptEntry::UserMessage {
             text: "answer".into(),
+            skills: Vec::new(),
         },
         TranscriptEntry::Message {
             text: "final answer".into(),

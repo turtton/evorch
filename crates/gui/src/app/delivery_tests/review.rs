@@ -37,6 +37,7 @@ pub(super) fn receipt(status: storage::HostInputStatus) -> storage::HostInputRec
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     }
 }
 
@@ -229,7 +230,7 @@ fn delivered_to_unknown_with_or_without_notification_retracts_only_matching_bubb
         // Identical text is not identity: preserve this unrelated message.
         state
             .transcripts
-            .push_host_input("thread", "other", "retry this".into());
+            .push_host_input("thread", "other", "retry this".into(), Vec::new());
         assert_eq!(
             state
                 .transcripts

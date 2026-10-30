@@ -681,6 +681,12 @@ pub enum LifecycleEvent {
         role: String,
         /// メモリやチームタスク情報を付加し、実際に run へ渡した最終プロンプト。
         prompt: String,
+        /// `@skill` の展開を含むとき、ユーザーが入力した本文だけ。無ければ `prompt` が入力そのもの。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_text: Option<String>,
+        /// ユーザーが添付した skill 名。本文は `prompt` にだけ含まれる。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
     },
     /// エージェント実行の位相が遷移した。
     AgentRunStateChanged {
@@ -2426,6 +2432,8 @@ mod tests {
                 agent_name: "worker-alpha".into(),
                 role: "worker".into(),
                 prompt: prompt.into(),
+                user_text: None,
+                skills: Vec::new(),
             });
 
             let json = serde_json::to_string(&event).expect("JSONへ変換できる");
@@ -2449,6 +2457,39 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn task_prompt_published_keeps_the_typed_words_and_skill_names_apart_from_the_prompt() {
+        let event = Event::new(LifecycleEvent::TaskPromptPublished {
+            run_id: "run-1".into(),
+            parent_run_id: None,
+            agent_name: "worker".into(),
+            role: "worker".into(),
+            prompt: "go @review\n\n<skill name=\"review\">\nbody\n</skill>".into(),
+            user_text: Some("go @review".into()),
+            skills: vec!["review".into()],
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = &value["kind"]["payload"]["payload"];
+        assert_eq!(payload["user_text"], "go @review");
+        assert_eq!(payload["skills"], serde_json::json!(["review"]));
+        // Events saved before the fields existed still load.
+        let mut old = value.clone();
+        let fields = old["kind"]["payload"]["payload"].as_object_mut().unwrap();
+        fields.remove("user_text");
+        fields.remove("skills");
+        let restored: Event = serde_json::from_value(old).unwrap();
+        assert!(matches!(
+            restored.kind,
+            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished {
+                user_text: None,
+                skills,
+                ..
+            }) if skills.is_empty()
+        ));
     }
 
     #[test]

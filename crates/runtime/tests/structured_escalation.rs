@@ -774,7 +774,7 @@ const CRITICAL_VERIFIED: &str = r#"{"approve":true,"reason":"cleanup the procedu
 /// One agent run that reads a skill, then has a shell command reviewed with it
 /// in context. Returns the chat requests the agent itself sent, in order, and
 /// the single review request.
-async fn run_skill_review(prompt: String) -> (Vec<Value>, Value) {
+async fn run_skill_review(typed: String, mentions: &[&str]) -> (Vec<Value>, Value) {
     use event_bus::AgentRunPhase;
     use runtime::skill::{SkillScope, discover_skills};
     use runtime::{AgentRuntime, RunConfig};
@@ -785,6 +785,12 @@ async fn run_skill_review(prompt: String) -> (Vec<Value>, Value) {
     std::fs::write(
         skills.path().join("worktree-pr/SKILL.md"),
         format!("---\nname: worktree-pr\ndescription: worktree steps\n---\n{CLEANUP_STEPS}"),
+    )
+    .expect("skill");
+    std::fs::create_dir(skills.path().join("extra")).expect("skill dir");
+    std::fs::write(
+        skills.path().join("extra/SKILL.md"),
+        "---\nname: extra\ndescription: extra steps\n---\nExtra procedure steps.\n",
     )
     .expect("skill");
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(
@@ -828,7 +834,15 @@ async fn run_skill_review(prompt: String) -> (Vec<Value>, Value) {
         Arc::new(sandbox::DirectSandbox::new_unchecked()),
     );
     let run = runtime
-        .delegate_chat("skill-review", Role::Worker, prompt, RunConfig::default())
+        .delegate_chat(
+            "skill-review",
+            Role::Worker,
+            typed,
+            RunConfig {
+                skill_mentions: mentions.iter().map(|name| (*name).to_owned()).collect(),
+                ..RunConfig::default()
+            },
+        )
         .expect("start");
     assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
     let bodies: Vec<_> = mock
@@ -861,6 +875,25 @@ fn assert_skill_review_keeps_the_prefix(turns: &[Value]) {
     );
 }
 
+/// The text of the first user message a chat request carries.
+fn first_user_text(turn: &Value) -> String {
+    let message = turn["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "user")
+        .expect("user message");
+    match &message["content"] {
+        Value::String(text) => text.clone(),
+        parts => parts
+            .as_array()
+            .expect("content parts")
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+    }
+}
+
 fn review_context(review: &Value) -> Value {
     let user = review["messages"][1]["content"]
         .as_str()
@@ -871,7 +904,7 @@ fn review_context(review: &Value) -> Value {
 
 #[tokio::test]
 async fn a_loaded_skill_reaches_the_review_and_the_normal_turns_keep_their_prefix() {
-    let (turns, review) = run_skill_review("CI通ったらマージしていいよ".into()).await;
+    let (turns, review) = run_skill_review("CI通ったらマージしていいよ".into(), &[]).await;
     assert_skill_review_keeps_the_prefix(&turns);
     let context = review_context(&review);
     assert_eq!(
@@ -890,18 +923,16 @@ async fn a_loaded_skill_reaches_the_review_and_the_normal_turns_keep_their_prefi
 }
 
 #[tokio::test]
-async fn an_expanded_mention_reaches_the_review_apart_from_the_user_words() {
+async fn a_mention_reaches_the_review_apart_from_the_user_words_and_the_agent_sees_the_same_bytes()
+{
     let typed = "CI通ったらマージしていいよ @extra";
-    let mut prompt = typed.to_owned();
-    runtime::skill::append_skill_attachment(&mut prompt, "extra", "Extra procedure steps.");
-    let (turns, review) = run_skill_review(prompt.clone()).await;
+    let (turns, review) = run_skill_review(typed.into(), &["extra"]).await;
     assert_skill_review_keeps_the_prefix(&turns);
-    // The agent still receives the whole message, block included.
-    assert!(
-        turns[0]["messages"]
-            .to_string()
-            .contains("Extra procedure steps.")
-    );
+    // The agent is sent the typed words and the block, exactly as a host that
+    // expanded the mention itself would have sent them.
+    let mut expected = typed.to_owned();
+    runtime::skill::append_skill_attachment(&mut expected, "extra", "Extra procedure steps.\n");
+    assert_eq!(first_user_text(&turns[0]), expected);
     let context = review_context(&review);
     assert_eq!(context["real_user_requests"][0]["text"], typed);
     let skills = context["loaded_skills"].as_array().expect("skills");
@@ -911,6 +942,7 @@ async fn an_expanded_mention_reaches_the_review_apart_from_the_user_words() {
         .expect("attached skill");
     assert_eq!(attached["loaded_by"], "user_mention");
     assert_eq!(attached["trust"], "user-attached");
+    assert_eq!(attached["scope"], "user");
     assert_eq!(attached["text"], "Extra procedure steps.");
     assert!(skills.iter().any(|skill| skill["name"] == "worktree-pr"));
 }

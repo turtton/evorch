@@ -148,6 +148,8 @@ fn task_prompt_reordering_invalidates_both_slots_without_unsorting_ids() {
         agent_name: "worker".into(),
         role: "worker".into(),
         prompt: "delegated instruction".into(),
+        user_text: None,
+        skills: Vec::new(),
     });
     model.apply(&event);
     let ids: Vec<_> = model.visible_entry_ids().collect();

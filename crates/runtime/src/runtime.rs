@@ -12,6 +12,8 @@ mod chat_restore;
 mod child_renewal;
 mod completion_relay;
 mod held_messages;
+mod host_prompt;
+pub(crate) use host_prompt::HostPrompt;
 mod output;
 mod project;
 mod questions;
@@ -548,7 +550,7 @@ impl AgentRuntime {
     fn record_host_input(
         &self,
         run_id: RunId,
-        text: &str,
+        host: &HostPrompt,
         reference: Option<&PendingReference>,
         prompt_id: &str,
         image_count: u32,
@@ -571,11 +573,12 @@ impl AgentRuntime {
                 review
             }
         };
-        let mut row = crate::run_store::evidence_row(
+        let mut row = crate::run_store::evidence_row_with_attachments(
             &review.root_run_id,
             &run_id.to_string(),
             "host_chat",
-            text,
+            &host.typed,
+            host.attachments.clone(),
         );
         if let Some(reference) = reference {
             row.reference_kind = Some("assistant_turn".into());
@@ -607,12 +610,13 @@ impl AgentRuntime {
                     prompt_id: prompt_id.into(),
                     run_id: run_id.to_string(),
                     root_run_id: review.root_run_id.clone(),
-                    text: text.into(),
+                    text: host.typed.clone(),
                     image_count,
                     status: storage::HostInputStatus::Accepted,
                     reason: None,
                     accepted_at_ns: now,
                     status_at_ns: now,
+                    evidence_id: Some(row.id.clone()),
                 },
             )
             .map_err(|error| Self::review_error(run_id, error))?;
@@ -1398,6 +1402,7 @@ impl AgentRuntime {
             .initial_prompt_id
             .take()
             .filter(|id| !id.is_empty() && !history_only);
+        let prompt_origin = config.prompt_origin.take();
         if let Some(id) = &initial_prompt_id
             && turn.origin.as_deref() == Some("human")
         {
@@ -1666,6 +1671,10 @@ impl AgentRuntime {
                     agent_name: name,
                     role: role.name().to_lowercase(),
                     prompt: task.prompt.clone(),
+                    user_text: prompt_origin.as_ref().map(|origin| origin.typed.clone()),
+                    skills: prompt_origin
+                        .map(|origin| origin.skills)
+                        .unwrap_or_default(),
                 }));
         }
         self.shared
@@ -1902,7 +1911,14 @@ impl AgentRuntime {
         images: Vec<crate::DelegateImage>,
         submission_id: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, images, true, None, submission_id)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            images,
+            true,
+            None,
+            submission_id,
+        )
     }
 
     pub(crate) fn send_internal_message(
@@ -1910,7 +1926,14 @@ impl AgentRuntime {
         run_id: RunId,
         text: String,
     ) -> Result<(), RuntimeError> {
-        self.send_inbox_message(run_id, text, Vec::new(), false, None, None)
+        self.send_inbox_message(
+            run_id,
+            HostPrompt::plain(text),
+            Vec::new(),
+            false,
+            None,
+            None,
+        )
     }
 
     /// Deliver a host notice, such as a finished evaluation (ADR 0036), to the
@@ -1978,7 +2001,7 @@ impl AgentRuntime {
     fn send_inbox_message(
         &self,
         run_id: RunId,
-        text: String,
+        host: HostPrompt,
         images: Vec<crate::DelegateImage>,
         trusted_user: bool,
         initial_goal: Option<(String, Vec<String>)>,
@@ -2024,7 +2047,7 @@ impl AgentRuntime {
             if let Some(prompt_id) = &prompt_id {
                 let pending = self.persist_pending_reference(run_id)?;
                 let image_count = u32::try_from(images.len()).unwrap_or(u32::MAX);
-                self.record_host_input(run_id, &text, pending.as_ref(), prompt_id, image_count)?;
+                self.record_host_input(run_id, &host, pending.as_ref(), prompt_id, image_count)?;
                 if let Some(pending) = pending {
                     match self.take_pending_reference(run_id, pending.token) {
                         Ok(Some(_)) => {}
@@ -2064,10 +2087,16 @@ impl AgentRuntime {
             }
             // Invalidate the old check before the model can consume new host input.
             if trusted_user {
-                self.goal_user_input(run_id, &text);
+                self.goal_user_input(run_id, &host.typed);
             }
             let enqueue = |seq| {
-                permit.send((text.clone(), images, trusted_user, prompt_id.clone(), seq));
+                permit.send((
+                    host.prompt.clone(),
+                    images,
+                    trusted_user,
+                    prompt_id.clone(),
+                    seq,
+                ));
                 Ok::<_, RuntimeError>(())
             };
             if trusted_user {
@@ -2160,6 +2189,27 @@ impl AgentRuntime {
     ) -> Result<Vec<storage::HostInputReceipt>, storage::StorageError> {
         match self.shared.run_store.get() {
             Some(store) => store.handle.host_input_receipts(prompt_ids),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// What the runtime recorded for each given submission: the host's own
+    /// words and the names of the skills it attached, as fixed when it accepted
+    /// the message. Hosts show this rather than their own copy. Submissions
+    /// without a receipt are skipped; without storage there are none.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn host_input_origins(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<storage::HostInputOrigin>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => {
+                // Order this read after every acceptance already queued.
+                store.handle.host_input_receipts(prompt_ids)?;
+                store.host_input_origins(prompt_ids)
+            }
             None => Ok(Vec::new()),
         }
     }

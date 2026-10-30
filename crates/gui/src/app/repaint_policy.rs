@@ -261,7 +261,7 @@ mod tests {
         QueuedFollowUp {
             submission_id: "one".into(),
             text: "one".into(),
-            prompt: "one".into(),
+            skills: Vec::new(),
             undelivered,
             rejection: None,
         }

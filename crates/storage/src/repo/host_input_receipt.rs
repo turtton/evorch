@@ -4,7 +4,7 @@ use crate::StorageError;
 use crate::host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
 
 const COLUMNS: &str = "prompt_id, run_id, root_run_id, text, image_count, status, reason, \
-                       accepted_at_ns, status_at_ns";
+                       accepted_at_ns, status_at_ns, evidence_id";
 
 /// Canonical JSON array of distinct, non-empty prompt IDs in first-seen order.
 pub(crate) fn normalized_ids(json: &str) -> Result<String, StorageError> {
@@ -26,7 +26,11 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
     receipt.validate()?;
     let image_count = i64::from(receipt.image_count);
     conn.execute(
-        &format!("INSERT INTO host_input_receipts ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"),
+        &format!(
+            "INSERT INTO host_input_receipts ({COLUMNS}, acceptance_seq) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
+              (SELECT COALESCE(MAX(acceptance_seq), 0) + 1 FROM host_input_receipts))"
+        ),
         params![
             receipt.prompt_id,
             receipt.run_id,
@@ -37,6 +41,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
             receipt.reason,
             receipt.accepted_at_ns,
             receipt.status_at_ns,
+            receipt.evidence_id,
         ],
     )?;
     Ok(())
@@ -195,5 +200,72 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostInputReceipt> {
         reason: row.get(6)?,
         accepted_at_ns: row.get(7)?,
         status_at_ns: row.get(8)?,
+        evidence_id: row.get(9)?,
     })
+}
+
+/// What each given submission recorded, in request order; IDs without a
+/// receipt are skipped. A submission without evidence has no skills.
+///
+/// Only the skill names are projected out of the stored attachments, in SQL, so
+/// no skill body is read into memory. A row whose evidence cannot be read
+/// reports that on its own entry (`unreadable`) and never fails the others.
+pub(crate) fn origins(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<Vec<crate::HostInputOrigin>, StorageError> {
+    let ids = serde_json::to_string(ids)
+        .map_err(|error| StorageError::Serialization(error.to_string()))?;
+    let mut statement = conn.prepare(
+        "SELECT receipt.prompt_id, receipt.text, receipt.evidence_id, evidence.id, \
+                CASE WHEN evidence.id IS NULL THEN NULL \
+                     WHEN NOT json_valid(evidence.attachments_json) THEN NULL \
+                     WHEN json_type(evidence.attachments_json) <> 'array' THEN NULL \
+                     WHEN EXISTS (SELECT 1 FROM json_each(evidence.attachments_json) AS item \
+                                  WHERE CASE WHEN item.type <> 'object' THEN 1 \
+                                             WHEN json_type(item.value, '$.name') IS NOT 'text' \
+                                             THEN 1 ELSE 0 END = 1) THEN NULL \
+                     ELSE (SELECT json_group_array(json_extract(attachment.value, '$.name') \
+                                                   ORDER BY attachment.key) \
+                           FROM json_each(evidence.attachments_json) AS attachment) END \
+         FROM json_each(?1) AS requested \
+         JOIN host_input_receipts AS receipt ON receipt.prompt_id = requested.value \
+         LEFT JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
+         ORDER BY requested.key",
+    )?;
+    let rows = statement.query_map([ids], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut origins = Vec::new();
+    for row in rows {
+        let (prompt_id, text, evidence_id, evidence_found, names) = row?;
+        let (skills, unreadable) = match (evidence_id, evidence_found, names) {
+            (None, ..) => (Vec::new(), None),
+            (Some(_), None, _) => (Vec::new(), Some("its evidence row is missing".to_owned())),
+            (Some(_), Some(_), None) => (
+                Vec::new(),
+                Some("its attachments are not a list of named skills".to_owned()),
+            ),
+            (Some(_), Some(_), Some(names)) => match serde_json::from_str::<Vec<String>>(&names) {
+                Ok(names) => (names, None),
+                Err(error) => (
+                    Vec::new(),
+                    Some(format!("its attachments have no readable names: {error}")),
+                ),
+            },
+        };
+        origins.push(crate::HostInputOrigin {
+            prompt_id,
+            text,
+            skills,
+            unreadable,
+        });
+    }
+    Ok(origins)
 }

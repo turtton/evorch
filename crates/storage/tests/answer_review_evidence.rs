@@ -28,6 +28,7 @@ fn evidence() -> ReviewEvidenceRow {
         in_reply_to_title: Some(question().title),
         reference_kind: None,
         reference_context: None,
+        attachments: Vec::new(),
         created_at_ns: 1,
     }
 }

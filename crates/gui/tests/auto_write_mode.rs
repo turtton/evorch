@@ -198,6 +198,7 @@ fn sink_rejects_old_permit_even_after_same_host_reclaims() {
             thread_id: "thread".into(),
             text: "hello".into(),
             model_preference: None,
+            skills: Vec::new(),
         },
         stale,
     );
@@ -238,6 +239,7 @@ fn renewed_generation_does_not_reuse_previous_chat_run() {
         thread_id: "thread".into(),
         text: "hello".into(),
         model_preference: None,
+        skills: Vec::new(),
     };
     let original = sink.submit_chat_with_permit(chat.clone(), first.clone());
     let mut registry = runtime::ownership::Registry::open(&first.registry_path).unwrap();

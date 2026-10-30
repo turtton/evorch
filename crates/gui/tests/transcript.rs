@@ -167,7 +167,33 @@ fn task_prompt(run: &str, parent: Option<&str>, prompt: &str) -> Event {
         agent_name: "agent".into(),
         role: "worker".into(),
         prompt: prompt.into(),
+        user_text: None,
+        skills: Vec::new(),
     })
+}
+
+#[test]
+fn a_task_prompt_with_attached_skills_shows_the_typed_words_and_chips_once() {
+    let mut registry = TranscriptRegistry::new();
+    let event = Event::new(LifecycleEvent::TaskPromptPublished {
+        run_id: "root".into(),
+        parent_run_id: None,
+        agent_name: "agent".into(),
+        role: "worker".into(),
+        prompt: "go @review\n\n<skill name=\"review\">\nbody\n</skill>".into(),
+        user_text: Some("go @review".into()),
+        skills: vec!["review".into()],
+    });
+    registry.apply(&event);
+    // The run already shows the same instruction, so a repeat adds nothing.
+    registry.apply(&event);
+    assert_eq!(
+        registry.run("root").unwrap().entries(),
+        &[TranscriptEntry::UserMessage {
+            text: "go @review".into(),
+            skills: vec!["review".into()]
+        }]
+    );
 }
 
 #[test]
@@ -194,7 +220,8 @@ fn task_prompt_stays_in_its_run_transcript() {
     assert_eq!(
         registry.run("child").unwrap().entries(),
         &[TranscriptEntry::UserMessage {
-            text: "child instruction".into()
+            text: "child instruction".into(),
+            skills: Vec::new()
         }]
     );
 }

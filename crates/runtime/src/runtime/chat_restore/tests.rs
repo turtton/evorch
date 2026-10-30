@@ -11,6 +11,8 @@ mod resume;
 mod review_authority;
 mod saved_compaction;
 mod shell_handles;
+mod skill_mention_paths;
+mod skill_mentions;
 mod thread_lineage;
 mod thread_start;
 

@@ -5,8 +5,8 @@ mod mention;
 #[path = "composer_role.rs"]
 mod role;
 pub use mention::{
-    CompletionItem, CompletionKind, MentionIndex, MentionQuery, expand_skill_mentions, mention_at,
-    mention_skills, split_skill_attachments, withheld_skill_mentions,
+    CompletionItem, CompletionKind, MentionIndex, MentionQuery, mention_at, mention_skills,
+    mentioned_skills, withheld_skill_mentions,
 };
 pub use role::ComposerRole;
 
@@ -220,10 +220,10 @@ impl Default for ProviderStatus {
 pub struct QueuedFollowUp {
     /// The submission this row stands for in the thread's saved history.
     pub submission_id: String,
-    /// What the user typed; restoring it re-expands `@skill` mentions.
+    /// What the user typed; restoring it attaches its `@skill` mentions again.
     pub text: String,
-    /// The expanded prompt the agent receives and the transcript shows.
-    pub prompt: String,
+    /// The skills attached to it, shown as chips beside the words.
+    pub skills: Vec<String>,
     /// It never reached the agent: the run ended first or the runtime refused it.
     pub undelivered: bool,
     /// The runtime's reason for refusing it; `None` when the run ended first.

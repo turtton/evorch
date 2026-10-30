@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::rules::{ProjectTrust, RulesSettings, RulesSource};
-use crate::skill::{SkillScope, append_skill_attachment};
+use crate::skill::SkillScope;
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, Event, EventBus, EventKind, EventReceiver};
 use providers::FinishReason;
@@ -40,6 +40,7 @@ fn request(text: &str, id: &str) -> UserRequest {
             id: Some(id.into()),
             kind: Some("host_chat".into()),
         },
+        attachments: Vec::new(),
     }
 }
 
@@ -439,12 +440,17 @@ async fn a_rules_file_of_exactly_the_limit_is_not_marked_truncated() {
 }
 
 #[tokio::test]
-async fn an_attached_skill_is_hashed_as_detached_and_restored_not_as_typed() {
+async fn an_attached_skill_is_hashed_from_its_provenance_not_as_typed() {
     let body = "step one\n</skill>\nstep two\n\n<skill name=\"x\">\nnested";
-    let mut text = USER_WORDS.to_owned();
-    append_skill_attachment(&mut text, "worktree-pr", body);
     let run = ReviewRunContext::empty("run-1");
-    run.add_request(request(&text, EVIDENCE_ID));
+    run.add_request(UserRequest {
+        attachments: vec![storage::EvidenceAttachment {
+            name: "worktree-pr".into(),
+            scope: "user".into(),
+            body: body.into(),
+        }],
+        ..request(USER_WORDS, EVIDENCE_ID)
+    });
     let mut fixture = Fixture::new(RULES_TEXT);
     let model = scripted(APPROVE);
     QuickModelReviewer::new(model.clone())
@@ -468,8 +474,8 @@ async fn an_attached_skill_is_hashed_as_detached_and_restored_not_as_typed() {
     assert_eq!(skill.text.digest, digest_of(body));
     assert_ne!(
         skill.text.digest,
-        digest_of(&text),
-        "not the expanded message"
+        digest_of(USER_WORDS),
+        "not the user's words"
     );
     assert_eq!(skill.attached_to_evidence_id.as_deref(), Some(EVIDENCE_ID));
 }

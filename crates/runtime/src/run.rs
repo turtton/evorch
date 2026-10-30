@@ -154,6 +154,14 @@ pub enum RunPurpose {
     },
 }
 
+/// What a user typed, when the prompt a run received also holds the bodies of
+/// the skills they attached with `@name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptOrigin {
+    pub typed: String,
+    pub skills: Vec<String>,
+}
+
 /// AgentRun の実行設定。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunConfig {
@@ -163,6 +171,16 @@ pub struct RunConfig {
     /// runtime records the prompt's delivery receipt under this ID. Consumed
     /// when the run starts, so delegated children never inherit it.
     pub initial_prompt_id: Option<String>,
+    /// Names of the skills the user attached to this run's new prompt with
+    /// `@name`. The runtime reads their bodies and appends them to the prompt
+    /// the agent sees, keeping the user's own words and the skill bodies apart
+    /// in review evidence. Consumed when the prompt is accepted, so delegated
+    /// children never inherit it.
+    pub skill_mentions: Vec<String>,
+    /// Set by the runtime when it expanded `skill_mentions` into a new chat's
+    /// first prompt, so the run's published instruction can name what the
+    /// user typed. Hosts leave it empty; consumed when the run starts.
+    pub prompt_origin: Option<PromptOrigin>,
     pub budget: crate::budget_tracker::BudgetSettings,
     /// Durable task identity when this run is attached to a task.
     pub task_id: Option<String>,

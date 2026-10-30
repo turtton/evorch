@@ -126,6 +126,8 @@ fn published_prompt_and_result_with_run_id_round_trip_through_sqlite() {
             agent_name: "worker-alpha".into(),
             role: "worker".into(),
             prompt: "最終指示\nMemory lesson and team task".into(),
+            user_text: None,
+            skills: Vec::new(),
         }
         .into(),
         MessageEvent::FinalResultPublished {

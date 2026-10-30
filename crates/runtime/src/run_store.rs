@@ -330,6 +330,26 @@ impl RunStore {
 }
 
 impl RunStore {
+    pub(crate) fn host_input_origins(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<storage::HostInputOrigin>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .host_input_origins(prompt_ids)
+    }
+
+    pub(crate) fn review_attachment_acceptances_for_lineage(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<storage::ReviewEvidenceRow>, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .review_attachment_acceptances_for_lineage(run_ids)
+    }
+
     pub(crate) fn review_evidence_for_lineage(
         &self,
         run_ids: &[String],
@@ -371,6 +391,7 @@ pub(crate) fn materialize_review_context(
     let mut lineage = store.review_lineage_ancestors(&id)?;
     lineage.push(id.clone());
     let rows = store.review_evidence_for_lineage(&lineage)?;
+    let acceptances = store.review_attachment_acceptances_for_lineage(&lineage)?;
     if lineage.len() == 1 && rows.is_empty() {
         return Err(StorageError::Serialization(
             "review lineage is unavailable for legacy run".into(),
@@ -390,10 +411,9 @@ pub(crate) fn materialize_review_context(
     Ok(ReviewRunContext {
         root_run_id: roots.remove(0),
         lineage_run_ids: lineage,
-        user_requests: std::sync::Arc::new(Mutex::new(SharedUserRequests::from(
-            rows.into_iter()
-                .map(request_from_evidence)
-                .collect::<Vec<_>>(),
+        user_requests: std::sync::Arc::new(Mutex::new(SharedUserRequests::restored(
+            rows.into_iter().map(request_from_evidence).collect(),
+            acceptances.into_iter().map(request_from_evidence).collect(),
         ))),
         delegation_chain: Vec::new(),
         loaded_skills: Vec::new(),
@@ -419,6 +439,7 @@ pub(crate) fn request_from_evidence(
             id: Some(row.id),
             kind: Some(row.kind),
         },
+        attachments: row.attachments,
     }
 }
 
@@ -441,12 +462,15 @@ pub(crate) fn resync_review_context(
         }
         lineage.sort();
         lineage.dedup();
-        store.review_evidence_for_lineage(&lineage)
+        let rows = store.review_evidence_for_lineage(&lineage)?;
+        let acceptances = store.review_attachment_acceptances_for_lineage(&lineage)?;
+        Ok((rows, acceptances))
     })();
     shared.evidence_revision += 1;
     match result {
-        Ok(rows) => {
+        Ok((rows, acceptances)) => {
             shared.requests = rows.into_iter().map(request_from_evidence).collect();
+            shared.attached = acceptances.into_iter().map(request_from_evidence).collect();
             shared.synced = true;
             Ok(())
         }
@@ -480,12 +504,30 @@ pub(crate) fn evidence_row(
     kind: &str,
     text: &str,
 ) -> storage::ReviewEvidenceRow {
+    evidence_row_with_attachments(root, target, kind, text, Vec::new())
+}
+
+/// Evidence for a user message with the skill bodies expanded from its `@name`
+/// mentions. Without attachments the row is the one [`evidence_row`] gives, so
+/// existing keys do not move; with them the key also covers the canonical JSON
+/// of the attachments, so the same words with different skills are different
+/// evidence.
+pub(crate) fn evidence_row_with_attachments(
+    root: &str,
+    target: &str,
+    kind: &str,
+    text: &str,
+    attachments: Vec<storage::EvidenceAttachment>,
+) -> storage::ReviewEvidenceRow {
     use sha2::{Digest, Sha256};
+    let mut key = format!("{root}|{target}|{kind}|{text}|");
+    if !attachments.is_empty() {
+        // Serializing plain strings cannot fail.
+        let canonical = serde_json::to_string(&attachments).unwrap_or_default();
+        key.push_str(&format!("{:x}", Sha256::digest(canonical)));
+    }
     storage::ReviewEvidenceRow {
-        id: format!(
-            "{:x}",
-            Sha256::digest(format!("{root}|{target}|{kind}|{text}|"))
-        ),
+        id: format!("{:x}", Sha256::digest(key)),
         root_run_id: root.into(),
         target_run_id: target.into(),
         kind: kind.into(),
@@ -494,6 +536,7 @@ pub(crate) fn evidence_row(
         in_reply_to_title: None,
         reference_kind: None,
         reference_context: None,
+        attachments,
         created_at_ns: review_time_ns(),
     }
 }
@@ -592,5 +635,112 @@ mod review_tests {
         assert!(
             materialize_review_context(&store, crate::run_ids::RunIds::default().next()).is_err()
         );
+    }
+
+    fn attachment(name: &str, body: &str) -> storage::EvidenceAttachment {
+        storage::EvidenceAttachment {
+            name: name.into(),
+            scope: "user".into(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn evidence_without_attachments_keeps_its_key_and_attachments_change_it() {
+        let plain = evidence_row("root", "run", "host_chat", "use @review");
+        assert_eq!(
+            plain.id,
+            evidence_row_with_attachments("root", "run", "host_chat", "use @review", Vec::new()).id
+        );
+        let review = evidence_row_with_attachments(
+            "root",
+            "run",
+            "host_chat",
+            "use @review",
+            vec![attachment("review", "steps")],
+        );
+        let again = evidence_row_with_attachments(
+            "root",
+            "run",
+            "host_chat",
+            "use @review",
+            vec![attachment("review", "steps")],
+        );
+        let other_body = evidence_row_with_attachments(
+            "root",
+            "run",
+            "host_chat",
+            "use @review",
+            vec![attachment("review", "other steps")],
+        );
+        assert_ne!(plain.id, review.id);
+        assert_eq!(review.id, again.id);
+        assert_ne!(review.id, other_body.id);
+        assert_eq!(review.attachments, vec![attachment("review", "steps")]);
+    }
+
+    #[test]
+    fn a_request_restored_from_evidence_carries_its_attachments() {
+        let row = evidence_row_with_attachments(
+            "root",
+            "run",
+            "host_chat",
+            "use @review",
+            vec![attachment("review", "steps")],
+        );
+        let request = request_from_evidence(row);
+        assert_eq!(request.text, "use @review");
+        assert_eq!(request.attachments, vec![attachment("review", "steps")]);
+    }
+
+    #[test]
+    fn acceptances_keep_order_and_repeats_of_one_immutable_evidence_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("acceptances.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let store = RunStore::open(&config, storage.handle()).unwrap();
+        let root = crate::run_ids::RunIds::default().next();
+        let target = root.to_string();
+        let row = |body: &str| {
+            evidence_row_with_attachments(
+                &target,
+                &target,
+                "host_chat",
+                "use @demo",
+                vec![attachment("demo", body)],
+            )
+        };
+        // The same words and skill, then the skill changed, then the first again.
+        for (index, body) in ["first", "second", "first"].into_iter().enumerate() {
+            let row = row(body);
+            let receipt = storage::HostInputReceipt {
+                prompt_id: format!("prompt-{index}"),
+                run_id: target.clone(),
+                root_run_id: target.clone(),
+                text: "use @demo".into(),
+                image_count: 0,
+                status: storage::HostInputStatus::Accepted,
+                reason: None,
+                accepted_at_ns: 1,
+                status_at_ns: 1,
+                evidence_id: Some(row.id.clone()),
+            };
+            store
+                .handle
+                .append_host_input_accepted(&[row], &[], None, &receipt)
+                .unwrap();
+        }
+        let review = materialize_review_context(&store, root).unwrap();
+        // Evidence is immutable and keyed by content: the repeat is not a new row.
+        assert_eq!(review.requests().0.len(), 2);
+        let bodies: Vec<_> = review
+            .attached_requests()
+            .iter()
+            .map(|request| request.attachments[0].body.clone())
+            .collect();
+        assert_eq!(bodies, ["first", "second", "first"]);
     }
 }

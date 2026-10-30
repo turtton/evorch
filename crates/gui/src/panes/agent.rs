@@ -431,8 +431,8 @@ fn run_detail_body(
                         );
                         return;
                     }
-                    if let TranscriptEntry::UserMessage { text } = entry {
-                        user_bubble(ui, text);
+                    if let TranscriptEntry::UserMessage { text, skills } = entry {
+                        user_bubble(ui, text, skills);
                         if let Some(branch) = branch {
                             branch::edit_row(ui, model, entry_id, branch, branch_action);
                         }
@@ -578,8 +578,7 @@ fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
     soft_frame(fill)
 }
 
-fn user_bubble(ui: &mut egui::Ui, text: &str) {
-    let (text, skills) = crate::model::composer::split_skill_attachments(text);
+fn user_bubble(ui: &mut egui::Ui, text: &str, skills: &[String]) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
         let max_width = (ui.available_width() * 0.8).max(120.0);
         soft_frame(palette().SURFACE_RAISED)
@@ -650,10 +649,7 @@ fn role_label(ui: &mut egui::Ui, role: &str) {
 
 fn entry_label(entry: &TranscriptEntry) -> String {
     match entry {
-        TranscriptEntry::UserMessage { text } => format!(
-            "You: {}",
-            crate::model::composer::split_skill_attachments(text).0
-        ),
+        TranscriptEntry::UserMessage { text, .. } => format!("You: {text}"),
         TranscriptEntry::Notice { text }
         | TranscriptEntry::Diagnostic { text, .. }
         | TranscriptEntry::SandboxReview { text, .. }

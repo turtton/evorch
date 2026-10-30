@@ -117,7 +117,7 @@ async fn held(model: &RetryModel) {
     model.entered.notified().await;
 }
 
-async fn waiting(runtime: &AgentRuntime, run: RunId) {
+pub(super) async fn waiting(runtime: &AgentRuntime, run: RunId) {
     let mut phase = runtime.entry(run).unwrap().phase_rx.clone();
     while *phase.borrow_and_update() != AgentRunPhase::Waiting {
         phase.changed().await.unwrap();

@@ -175,6 +175,7 @@ fn send(world: &mut World, text: &str) -> Vec<LoopEvent> {
             composer_role: Default::default(),
             images: Vec::new(),
             model_preference: None,
+            skills: Vec::new(),
         }))
 }
 fn accepted(events: &[LoopEvent], root: RunId) {
@@ -349,6 +350,7 @@ fn continue_restores_chat_after_runtime_restart_without_new_run_or_role_switch()
             composer_role: gui::model::composer::ComposerRole::Orchestrator,
             images: Vec::new(),
             model_preference: None,
+            skills: Vec::new(),
         }));
     let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
         panic!("{events:?}")

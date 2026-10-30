@@ -248,6 +248,31 @@ impl Database {
         crate::repo::host_input_receipt::for_ids(&self.conn, prompt_ids)
     }
 
+    /// What each submission recorded (the host's words and the skill names
+    /// attached to them), in request order; IDs without a receipt are skipped.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn host_input_origins(
+        &self,
+        prompt_ids: &[String],
+    ) -> Result<Vec<crate::HostInputOrigin>, StorageError> {
+        crate::repo::host_input_receipt::origins(&self.conn, prompt_ids)
+    }
+
+    /// Evidence that attached skills, one entry per accepted submission in the
+    /// order the submissions were accepted, for the exact target set. The same
+    /// evidence appears again for each repeat submission.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn review_attachment_acceptances_for_lineage(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<crate::ReviewEvidenceRow>, StorageError> {
+        crate::repo::review_evidence::attachment_acceptances(&self.conn, run_ids)
+    }
+
     /// One run's delivery receipts, oldest first.
     pub fn host_input_receipts_for_run(
         &self,

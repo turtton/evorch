@@ -460,6 +460,7 @@ fn chat_send_issues_send_chat_and_shows_user_line() {
             thread_id: "thread-1".into(),
             text: "hello agent".into(),
             model_preference: None,
+            skills: Vec::new(),
         })]
     );
     assert!(harness.has_label("You: hello agent"));

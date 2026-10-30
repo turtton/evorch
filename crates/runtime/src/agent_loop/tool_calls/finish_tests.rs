@@ -179,6 +179,7 @@ async fn shell_then_finish_preserves_simultaneous_and_post_receiver_input_once()
                     reason: None,
                     accepted_at_ns: 1,
                     status_at_ns: 1,
+                    evidence_id: None,
                 },
             )
             .unwrap();

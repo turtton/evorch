@@ -69,6 +69,47 @@ impl CommandSink for RefusingRuntime {
     }
 }
 
+/// A runtime that accepts every chat and records the skills it attached itself.
+struct RecordingRuntime;
+
+impl CommandSink for RecordingRuntime {
+    fn has_host_input_receipts(&self) -> bool {
+        true
+    }
+
+    fn host_input_receipts(
+        &self,
+        _: &[String],
+    ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
+        Some(Ok(Vec::new()))
+    }
+
+    fn host_input_origins(
+        &self,
+        ids: &[String],
+    ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
+        Some(Ok(ids
+            .iter()
+            .map(|id| storage::HostInputOrigin {
+                prompt_id: id.clone(),
+                text: "use @git-best-practices please".into(),
+                skills: vec!["git-best-practices".into()],
+                unreadable: None,
+            })
+            .collect()))
+    }
+
+    fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        match command {
+            WorkbenchCommand::SendChat(chat) => vec![LoopEvent::ChatAccepted {
+                thread_id: chat.thread_id,
+                run_id: "run-1".into(),
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
 fn type_text(harness: &mut HeadlessWorkbench<DemoSource>, text: &str) {
     harness.input_mut().events.push(Event::Text(text.into()));
     harness.run();
@@ -191,13 +232,41 @@ fn at_mentions_complete_files_and_skills_and_send_skill_bodies() {
     harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
 
-    // Then: the agent receives the skill body while the transcript shows the typed text.
+    // Then: the runtime is handed the typed text and the skill's name to read, and the
+    // transcript shows the typed text with a chip.
     let typed = "@src/lib.rs with @review please";
     assert!(matches!(harness.state().issued(),
         [WorkbenchCommand::SendChat(chat)]
-            if chat.text == format!("{typed}\n\n<skill name=\"review\">\nRead every hunk.\n</skill>")));
+            if chat.text == typed && chat.skills == ["review"]));
     assert!(harness.has_label(&format!("You: {typed}")));
     assert!(harness.has_label(&format!("{} skill: review", gui::theme::icons::SPARKLE)));
+}
+
+#[test]
+fn the_bubble_shows_the_skills_the_runtime_recorded_for_the_accepted_message() {
+    // Given: a runtime that records the message with a skill the composer did not name.
+    let temp = tempfile::tempdir().expect("root");
+    let state = workbench_state(temp.path(), &[], TrustState::Approved)
+        .with_command_sink(Box::new(RecordingRuntime));
+    let mut harness = HeadlessWorkbench::new(state, [1200.0, 900.0]);
+    harness.run();
+    harness.click_label("Message or /command");
+    harness.run();
+
+    // When: a message with no mention is sent and accepted.
+    type_text(&mut harness, "use @git-best-practices please");
+    harness.key_press(Modifiers::NONE, Key::Enter);
+    harness.run();
+
+    // Then: the chip comes from the runtime's record, which also fills the saved history.
+    assert!(harness.has_label(&format!(
+        "{} skill: git-best-practices",
+        gui::theme::icons::SPARKLE
+    )));
+    assert!(harness.state().transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::UserMessage { skills, .. } if skills == &["git-best-practices".to_owned()]
+    )));
 }
 
 #[test]
@@ -247,16 +316,13 @@ fn untrusted_projects_send_repo_skill_mentions_as_plain_text_with_a_notice() {
     harness.key_press(Modifiers::NONE, Key::Enter);
     harness.run();
 
-    // Then: it is sent with only the builtin skill inlined; the repository
+    // Then: it is sent with only the builtin skill attached; the repository
     // skills stay plain text.
     let [WorkbenchCommand::SendChat(chat)] = harness.state().issued() else {
         panic!("one chat is sent: {:?}", harness.state().issued());
     };
-    assert!(chat.text.starts_with(typed), "{}", chat.text);
-    assert!(chat.text.contains("<skill name=\"git-best-practices\">"));
-    for leaked in ["fixture-skill\">", "FIXTURE BODY"] {
-        assert!(!chat.text.contains(leaked), "{leaked}: {}", chat.text);
-    }
+    assert_eq!(chat.text, typed);
+    assert_eq!(chat.skills, ["git-best-practices"]);
     // Then: a notice below the message names them, says why and how to enable them.
     assert_notice_below_message(
         &harness,
@@ -302,7 +368,7 @@ fn revoking_trust_right_before_a_send_keeps_repo_skills_out_of_it() {
         panic!("one chat is sent: {:?}", harness.state().issued());
     };
     assert_eq!(chat.text, typed);
-    assert!(!chat.text.contains("EVORCH FIXTURE BODY"));
+    assert!(chat.skills.is_empty());
     assert!(harness.state().composer().input.is_empty());
     // Then: the notice explains why it was not expanded.
     harness.run();

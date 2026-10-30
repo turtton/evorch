@@ -390,11 +390,29 @@ impl TranscriptRegistry {
         self.threads.entry(thread.into()).or_default().push(entry);
     }
 
-    pub(crate) fn push_host_input(&mut self, thread: &str, id: &str, text: String) {
+    pub(crate) fn push_host_input(
+        &mut self,
+        thread: &str,
+        id: &str,
+        text: String,
+        skills: Vec<String>,
+    ) {
         self.threads
             .entry(thread.into())
             .or_default()
-            .push_host_input(id, text);
+            .push_host_input(id, text, skills);
+    }
+
+    pub(crate) fn update_host_input(
+        &mut self,
+        thread: &str,
+        id: &str,
+        text: &str,
+        skills: &[String],
+    ) {
+        if let Some(model) = self.threads.get_mut(thread) {
+            model.update_host_input(id, text, skills);
+        }
     }
 
     pub(crate) fn remove_host_input(&mut self, thread: &str, id: &str) {

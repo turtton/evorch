@@ -84,6 +84,8 @@ fn assert_prompt(
             agent_name: name.into(),
             role: role.into(),
             prompt: prompt.into(),
+            user_text: None,
+            skills: Vec::new(),
         })
     );
     assert!(index > 0);

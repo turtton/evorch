@@ -61,6 +61,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         reason: None,
         accepted_at_ns: 1,
         status_at_ns: 1,
+        evidence_id: None,
     }]));
     let mut state = WorkbenchState::new(runtime, &UiSettings::default())
         .unwrap()
@@ -131,6 +132,6 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
     std::thread::sleep(Duration::from_millis(2250));
     tick(&mut app);
     assert!(app.workbench.0.transcripts().thread().entries().iter().any(|entry| {
-        matches!(entry, gui::model::transcript::TranscriptEntry::UserMessage { text } if text == "repair me")
+        matches!(entry, gui::model::transcript::TranscriptEntry::UserMessage { text, .. } if text == "repair me")
     }));
 }

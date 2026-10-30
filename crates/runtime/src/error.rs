@@ -16,6 +16,10 @@ pub enum RuntimeError {
         run_id: String,
         reason: RunRestoreFailure,
     },
+    /// A skill the user attached with `@name` could not be read. Nothing was
+    /// recorded or sent for the message.
+    #[error("skill @{name} could not be attached: {reason}")]
+    SkillAttachment { name: String, reason: String },
     #[error("run ownership generation is stale: {run_id}")]
     StaleOwnership { run_id: String },
     /// 存在しない AgentRun が参照された。

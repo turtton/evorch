@@ -21,7 +21,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         thread: &str,
         submission_id: String,
         text: String,
-        prompt: String,
+        skills: Vec<String>,
     ) {
         self.follow_up_queues
             .entry(thread.into())
@@ -29,7 +29,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .push(QueuedFollowUp {
                 submission_id,
                 text,
-                prompt,
+                skills,
                 undelivered: false,
                 rejection: None,
             });
@@ -60,8 +60,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             for mut item in std::mem::take(queue) {
                 if delivered > 0 && !item.undelivered {
                     delivered -= 1;
-                    self.transcripts
-                        .push_host_input(&thread, &item.submission_id, item.prompt);
+                    self.transcripts.push_host_input(
+                        &thread,
+                        &item.submission_id,
+                        item.text,
+                        item.skills,
+                    );
                     delivered_ids.push(item.submission_id);
                 } else {
                     item.undelivered |= dropped;
@@ -135,8 +139,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 runtime::FollowUpWithdrawalError::AlreadyConsumed,
             )) => {
                 if let Some(message) = self.history.iter().find(|message| message.id == id) {
-                    self.transcripts
-                        .push_host_input(&thread, &id, message.prompt.clone());
+                    self.transcripts.push_host_input(
+                        &thread,
+                        &id,
+                        message.text.clone(),
+                        message.skills.clone(),
+                    );
                 }
                 if self.mark_delivered(&[id]) {
                     self.save_sidebar();

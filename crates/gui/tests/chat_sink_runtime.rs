@@ -127,7 +127,8 @@ impl Fixture {
             model.clone(),
         );
         let runtime = runtime
-            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
+            .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap())
+            .with_skills(Arc::new(runtime::skill::build_standard_registry(None)));
         let sink = RuntimeCommandSink::new(runtime.clone(), rt.handle().clone());
         Self {
             invocations,
@@ -171,6 +172,24 @@ impl Fixture {
         self.send_preference(thread, text, None)
     }
 
+    fn send_with_skills(&mut self, thread: &str, text: &str, skills: &[&str]) -> String {
+        let events = self.sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id: String::new(),
+            project_root: None,
+            fork_seed: None,
+            composer_role: gui::model::composer::ComposerRole::Worker,
+            images: Vec::new(),
+            thread_id: thread.into(),
+            text: text.into(),
+            model_preference: None,
+            skills: skills.iter().map(|skill| (*skill).to_owned()).collect(),
+        }));
+        match events.as_slice() {
+            [LoopEvent::ChatAccepted { run_id, .. }] => run_id.clone(),
+            other => panic!("expected ChatAccepted, got {other:?}"),
+        }
+    }
+
     fn send_preference(
         &mut self,
         thread: &str,
@@ -186,6 +205,7 @@ impl Fixture {
             thread_id: thread.into(),
             text: text.into(),
             model_preference,
+            skills: Vec::new(),
         }));
         match events.as_slice() {
             [LoopEvent::ChatAccepted { thread_id, run_id }] => {
@@ -279,6 +299,7 @@ fn composer_chats_offer_procedures_with_worker_only_conversation_category() {
                     thread_id: "conversation".into(),
                     text: text.into(),
                     model_preference: None,
+                    skills: Vec::new(),
                 }));
             let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
                 panic!("expected accepted chat: {events:?}");
@@ -366,6 +387,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     thread_id: "conversation".into(),
                     text: "turn-1".into(),
                     model_preference: None,
+                    skills: Vec::new(),
                 }));
             let [LoopEvent::ChatAccepted { run_id, .. }] = events.as_slice() else {
                 panic!("expected accepted chat: {events:?}");
@@ -413,6 +435,7 @@ fn terminal_chat_continuation_uses_saved_role_after_composer_changes() {
                     thread_id: "conversation".into(),
                     text: "turn-2".into(),
                     model_preference: None,
+                    skills: Vec::new(),
                 })
             };
             let events = fixture.sink.submit(command);
@@ -699,4 +722,84 @@ fn stop_retains_chat_history_and_resumes_same_run_with_current_model_preference(
             .iter()
             .any(|block| matches!(block, ContentBlock::Text { text } if text == "reply-1"))
     }));
+}
+
+#[test]
+fn mentions_reach_the_model_as_skill_blocks_while_the_evidence_keeps_the_typed_words() {
+    // Given: the real runtime with the bundled skills.
+    let mut fixture = Fixture::new();
+    let registry = runtime::skill::build_standard_registry(None);
+    let body = registry.load_body("git-best-practices").unwrap();
+    let expected = |typed: &str| {
+        let mut text = typed.to_owned();
+        runtime::skill::append_skill_attachment(&mut text, "git-best-practices", &body);
+        text
+    };
+    // When: a first message and then a follow-up each mention the skill.
+    let first = "start with @git-best-practices";
+    let run = fixture.send_with_skills("mentions", first, &["git-best-practices"]);
+    fixture.wait_for_reply(&run, "reply-1");
+    let follow_up = "again @git-best-practices";
+    assert_eq!(
+        fixture.send_with_skills("mentions", follow_up, &["git-best-practices"]),
+        run
+    );
+    fixture.wait_for_reply(&run, "reply-2");
+    // Then: the model got the typed words followed by the skill block, each time.
+    let user_texts = |request: &Vec<Message>| -> Vec<String> {
+        request
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let requests = fixture.messages.lock().expect("messages").clone();
+    assert_eq!(user_texts(&requests[0]), [expected(first)]);
+    assert_eq!(
+        user_texts(&requests[1]),
+        [expected(first), expected(follow_up)]
+    );
+    // Then: review evidence holds the words, with the skill beside them.
+    let config = storage::StorageConfig {
+        db_path: fixture._directory.path().join("chat.sqlite3"),
+        ..storage::StorageConfig::default()
+    };
+    let rows = storage::Database::open(&config)
+        .unwrap()
+        .review_evidence_for_target(&run)
+        .unwrap();
+    for typed in [first, follow_up] {
+        let row = rows.iter().find(|row| row.text == typed).expect(typed);
+        assert_eq!(row.attachments.len(), 1);
+        assert_eq!(row.attachments[0].name, "git-best-practices");
+        assert_eq!(row.attachments[0].scope, "builtin");
+    }
+}
+
+#[test]
+fn an_unavailable_mention_is_rejected_and_nothing_reaches_the_model() {
+    let mut fixture = Fixture::new();
+    let events = fixture
+        .sink
+        .submit(WorkbenchCommand::SendChat(ChatSubmission {
+            submission_id: String::new(),
+            project_root: None,
+            fork_seed: None,
+            composer_role: gui::model::composer::ComposerRole::Worker,
+            images: Vec::new(),
+            thread_id: "mentions".into(),
+            text: "use @missing-skill".into(),
+            model_preference: None,
+            skills: vec!["missing-skill".into()],
+        }));
+    assert!(
+        matches!(events.as_slice(), [LoopEvent::ChatRejected { reason, .. }] if reason.contains("missing-skill")),
+        "{events:?}"
+    );
+    assert!(fixture.messages.lock().expect("messages").is_empty());
+    assert!(fixture.runtime.list_agents().is_empty());
 }

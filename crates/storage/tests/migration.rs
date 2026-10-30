@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 
-const LATEST_SCHEMA: u32 = 31;
+const LATEST_SCHEMA: u32 = 32;
 
 const EXPECTED_TABLES: [&str; 50] = [
     "learning_claims",
@@ -62,7 +62,7 @@ const EXPECTED_TABLES: [&str; 50] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 48] = [
+const EXPECTED_INDICES: [&str; 49] = [
     "learning_claims_day",
     "learning_claim_roots_run",
     "idx_thread_index_runs_work",
@@ -74,6 +74,7 @@ const EXPECTED_INDICES: [&str; 48] = [
     "idx_events_durable_retention_scan",
     "idx_events_task_lifecycle",
     "host_input_receipts_run",
+    "host_input_receipts_seq",
     "idx_threads_project_updated",
     "idx_threads_parent",
     "idx_thread_runs_thread",
@@ -397,7 +398,7 @@ fn v16_backfills_candidate_occurrence_tracking() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -456,7 +457,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -507,7 +508,7 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -548,7 +549,7 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -596,7 +597,7 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -640,7 +641,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -683,7 +684,7 @@ fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection.execute_batch(
-        "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -745,7 +746,7 @@ fn v24_adds_threads_backfilled_from_v23_runs_and_read_only_needs_the_upgrade() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              DROP TABLE threads; DROP TABLE thread_runs;
              DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -812,7 +813,7 @@ fn v25_adds_host_input_receipts_and_keeps_v24_run_contexts() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
              DROP TABLE host_input_receipts;
              ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
              INSERT INTO run_contexts VALUES ('run-1', 'worker', 'chat:Worker:t-1', NULL,
@@ -894,7 +895,11 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE run_contexts DROP COLUMN messages_len;
+            "ALTER TABLE review_evidence DROP COLUMN attachments_json;
+             DROP INDEX host_input_receipts_seq;
+             ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq;
+             ALTER TABLE host_input_receipts DROP COLUMN evidence_id;
+             ALTER TABLE run_contexts DROP COLUMN messages_len;
              ALTER TABLE run_contexts DROP COLUMN checkpoints_len;
              INSERT INTO run_contexts(run_id, role, name, config_json, messages_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns)
