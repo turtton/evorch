@@ -2,7 +2,7 @@ use super::WorkbenchState;
 use crate::model::tasks::AgentRunSource;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct UserMessage {
     /// The submission ID; empty in files saved before submissions had one.
     #[serde(default)]
@@ -68,7 +68,7 @@ pub(super) enum Resolution {
 impl UserMessage {
     /// A committed context snapshot makes a sent transcript bubble, and so does
     /// starting a run.
-    fn shown_as_sent(&self) -> bool {
+    pub(super) fn shown_as_sent(&self) -> bool {
         self.status == DeliveryStatus::Delivered || self.sent_while_queued()
     }
 
@@ -104,7 +104,7 @@ impl UserMessage {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct ComposerDraft {
     pub draft_id: String,
     pub thread_id: String,
@@ -113,25 +113,29 @@ pub(super) struct ComposerDraft {
     pub images_needed: usize,
 }
 
-#[derive(Serialize, Deserialize)]
-struct HistorySidebar {
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(super) struct HistorySidebar {
     #[serde(flatten)]
-    sidebar: workspace_ui::SidebarState,
+    pub sidebar: workspace_ui::SidebarState,
     #[serde(default)]
-    user_messages: Vec<UserMessage>,
+    pub user_messages: Vec<UserMessage>,
     #[serde(default)]
-    composer_drafts: Vec<ComposerDraft>,
+    pub composer_drafts: Vec<ComposerDraft>,
 }
 
 #[derive(Serialize)]
-struct HistorySidebarRef<'a> {
+pub(super) struct HistorySidebarRef<'a> {
     #[serde(flatten)]
-    sidebar: &'a workspace_ui::SidebarState,
-    user_messages: &'a [UserMessage],
-    composer_drafts: &'a [ComposerDraft],
+    pub sidebar: &'a workspace_ui::SidebarState,
+    pub user_messages: &'a [UserMessage],
+    pub composer_drafts: &'a [ComposerDraft],
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// Saves the sidebar, its messages and drafts to the file other GUI
+    /// processes share. When another process saved since this one last read or
+    /// wrote it, its changes are merged in so neither side's edits are lost;
+    /// they reach this process's state at the next import.
     pub(super) fn write_history_sidebar(
         &self,
         path: &std::path::Path,
@@ -142,24 +146,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             user_messages: &self.history,
             composer_drafts: &self.composer_drafts,
         };
-        // One atomic file holds the original, its resolution, and its draft.
-        // Never expose half a resend transition after a crash.
-        use std::io::Write;
-        let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            file.write_all(&serde_json::to_vec_pretty(&saved)?)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result?;
+        let local = serde_json::to_vec_pretty(&saved)?;
+        self.shared_sidebar_write(path, local)?;
         #[cfg(test)]
         self.sidebar_write_count
             .set(self.sidebar_write_count.get() + 1);
@@ -242,6 +230,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
                     self.history = saved.user_messages;
                     self.composer_drafts = saved.composer_drafts;
+                    self.shared_sidebar_restored();
                     let ids: Vec<_> = self
                         .history
                         .iter()
@@ -352,7 +341,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut messages = messages.into_iter().peekable();
         self.telemetry = crate::model::telemetry::TelemetryOverlay::new();
         let replay_now = std::time::Instant::now();
+        let mut replayed_to = 0;
         db.for_each_event_ordered(|stored| {
+            replayed_to = replayed_to.max(stored.id);
             while messages
                 .peek()
                 .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
@@ -402,6 +393,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ));
             }
         })?;
+        self.note_replayed_event(replayed_to);
+        self.note_restored_active_runs();
         self.reconcile_restored_phases(db, registry_path);
         let ids: Vec<_> = self
             .history
@@ -755,7 +748,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         changed
     }
 
-    fn restore_user_message(&mut self, message: UserMessage) {
+    pub(super) fn restore_user_message(&mut self, message: UserMessage) {
         let message = self
             .history
             .iter()

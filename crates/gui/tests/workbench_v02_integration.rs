@@ -553,7 +553,17 @@ fn v02_end_to_end_chained_scenario() {
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");
     assert_eq!(submissions[0].project_id, "demo");
-    assert_eq!(submissions[0].thread_id, "thread-1");
+    assert_eq!(
+        Some(submissions[0].thread_id.as_str()),
+        fixture
+            .workbench
+            .state()
+            .sidebar()
+            .active_thread
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref()
+    );
     assert_eq!(submissions[0].goal, "consolidate the v0.2 workbench");
     assert_eq!(
         fixture
@@ -648,7 +658,13 @@ fn v02_end_to_end_chained_scenario() {
             .active_thread
             .as_ref()
             .map(ToString::to_string),
-        Some("thread-1".to_string())
+        fixture
+            .workbench
+            .state()
+            .sidebar()
+            .active_thread
+            .as_ref()
+            .map(ToString::to_string)
     );
     assert_eq!(
         fresh_bench

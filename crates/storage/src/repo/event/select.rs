@@ -299,3 +299,38 @@ pub(crate) fn list_for_runs(
     })?;
     Ok((events, truncated))
 }
+
+/// Up to `limit` events concerning `run_ids` with `after_id < id <= through_id`,
+/// oldest first, and whether more matched. The last ID of a page is the next
+/// `after_id`, so a long history can be read page by page.
+pub(crate) fn list_for_runs_between(
+    conn: &Connection,
+    run_ids: &[String],
+    after_id: i64,
+    through_id: i64,
+    limit: usize,
+) -> Result<(Vec<StoredEvent>, bool), StorageError> {
+    let runs: HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+    let transaction = conn.unchecked_transaction()?;
+    let candidates: Vec<Candidate> = run_candidates(&transaction, run_ids)?
+        .into_iter()
+        .filter(|candidate| candidate.id > after_id && candidate.id <= through_id)
+        .collect();
+    let mut events = Vec::new();
+    let mut truncated = false;
+    visit_candidates(
+        &transaction,
+        &candidates,
+        i64::MIN,
+        |stored| concerns_runs(&stored.event, &runs),
+        |stored| {
+            if events.len() == limit {
+                truncated = true;
+                return ControlFlow::Break(());
+            }
+            events.push(stored);
+            ControlFlow::Continue(())
+        },
+    )?;
+    Ok((events, truncated))
+}

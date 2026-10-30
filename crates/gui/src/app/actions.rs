@@ -285,7 +285,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .selected_project
             .clone()
             .ok_or(ProjectError::UnknownProject)?;
-        let id = ThreadId::new(format!("thread-{}", self.sidebar.threads.len() + 1));
+        let id =
+            ThreadId::generate(|id| self.sidebar.threads.iter().any(|thread| &thread.id == id));
         self.sidebar.create_thread(id.clone(), project_id, title)?;
         Ok(id)
     }
@@ -562,7 +563,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         if let Err(error) = self.persist_history() {
-            tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
+            if error.is::<super::shared_sidebar::SaveDeferred>() {
+                tracing::debug!(path = %path.display(), "sidebar save deferred: file locked");
+            } else {
+                tracing::warn!(path = %path.display(), %error, "failed to save sidebar");
+            }
         }
     }
 

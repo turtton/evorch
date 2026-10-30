@@ -16,7 +16,7 @@ use gui::model::composer::{PROVIDER_MISSING_GUIDANCE, ProviderStatus};
 use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::pty::ShellSpawner;
-use gui::runtime_sink::{RuntimeCommandSink, STORAGE_SESSION_ID, derive_repo_slug};
+use gui::runtime_sink::{RuntimeCommandSink, derive_repo_slug, new_stream_id};
 use recorder::pricing::SharedUsagePricing;
 use recorder::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
 use routing::ProcessEnv;
@@ -349,7 +349,7 @@ fn storage_db_path(
 fn spawn_storage_bridge(
     bus: Arc<EventBus>,
     storage: Storage,
-    session_id: &'static str,
+    session_id: impl Into<String>,
     diagnostics: config::DiagnosticPersistence,
     metrics_enabled: bool,
     usage_pricing: SharedUsagePricing,
@@ -364,7 +364,7 @@ fn spawn_storage_bridge(
         bus,
         storage,
         |handle| {
-            let bridge = StorageBridge::new(handle, session_id)
+            let bridge = StorageBridge::new(handle, session_id.into())
                 .with_diagnostic_persistence(persistence)
                 .with_metrics_enabled(metrics_enabled)
                 .with_usage_ledger(usage_pricing);
@@ -886,7 +886,7 @@ fn run() -> Result<(), GuiError> {
     };
     let (pump, handle) = spawn_event_bridge(
         Arc::clone(&bus),
-        Some(arrival_hook),
+        Some(arrival_hook.clone()),
         Some(continuation_hook),
     )?;
 
@@ -999,10 +999,11 @@ fn run() -> Result<(), GuiError> {
     let usage_pricing: SharedUsagePricing = Arc::new(std::sync::RwLock::new(
         recorder::pricing::UsagePricing::new(composition_config.providers.clone(), None),
     ));
+    let stream_id = new_stream_id();
     let storage = spawn_storage_bridge(
         Arc::clone(&bus),
         storage,
-        STORAGE_SESSION_ID,
+        stream_id.clone(),
         composition_config.diagnostics.persistence,
         composition_config.metrics.enabled,
         Arc::clone(&usage_pricing),
@@ -1154,6 +1155,12 @@ fn run() -> Result<(), GuiError> {
         &storage::Database::open(&storage_config)?,
         &ownership_root.join("owners.db"),
     )?;
+    if !arguments.demo {
+        // Show what other windows sharing this database do; after the restore,
+        // which fixes where following starts.
+        let repaint: Arc<dyn Fn() + Send + Sync> = arrival_hook;
+        state = state.with_shared_feed(storage_config.db_path.clone(), stream_id, Some(repaint));
+    }
 
     if arguments.demo {
         state = state.with_diff_source(Arc::new(demo_diff_source()));

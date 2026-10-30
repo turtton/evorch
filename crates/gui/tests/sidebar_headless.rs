@@ -195,11 +195,8 @@ fn create_switch_pin_thread_via_ui_clicks() {
 
     // Then: the sidebar records the active pinned thread
     let sidebar = harness.state().sidebar();
-    assert_eq!(
-        sidebar.active_thread.as_ref().map(ToString::to_string),
-        Some("thread-1".into())
-    );
     assert_eq!(sidebar.threads.len(), 1);
+    assert_eq!(sidebar.active_thread.as_ref(), Some(&sidebar.threads[0].id));
     assert!(sidebar.threads[0].pinned);
 }
 

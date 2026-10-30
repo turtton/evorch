@@ -239,16 +239,51 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn branch_id(&self, source: &ThreadId, kind: LineageKind) -> ThreadId {
-        let (base, label) = match kind {
-            LineageKind::Fork => (source.clone(), "fork-"),
+        let (base, tag) = match kind {
+            LineageKind::Fork => (source.clone(), "fork"),
             LineageKind::Rewind => (
                 workspace_ui::version_root(&self.sidebar.threads, source),
                 "v",
             ),
         };
-        (self.sidebar.threads.len() + 1..)
-            .map(|n| ThreadId::new(format!("{base}-{label}{n}")))
-            .find(|id| !self.sidebar.threads.iter().any(|thread| &thread.id == id))
-            .expect("unbounded id search")
+        ThreadId::derived(&base, tag, |id| {
+            self.sidebar.threads.iter().any(|thread| &thread.id == id)
+        })
+    }
+
+    /// A conversation another process branched: install the history it
+    /// inherits from this process's copy of the parent, when that has reached
+    /// the branch point.
+    pub(super) fn seed_imported_branch(&mut self, thread: &str) {
+        let Some(record) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|record| record.id.to_string() == thread)
+        else {
+            return;
+        };
+        let Some(lineage) = &record.lineage else {
+            return;
+        };
+        let (point, kind) = (lineage.point.clone(), lineage.kind);
+        let parent = record.parent_thread_id.as_ref().map(ToString::to_string);
+        let owner = match &point {
+            Some(point) => match self.thread_for_run(&point.run_id) {
+                Some(owner) => Some(owner),
+                None => return,
+            },
+            None => None,
+        };
+        let empty = TranscriptModel::new();
+        let source = owner
+            .as_deref()
+            .and_then(|owner| self.transcripts.thread_model(owner))
+            .unwrap_or(&empty);
+        if let Some(model) =
+            source.branch_at(point.as_ref(), kind, parent.as_deref().unwrap_or_default())
+        {
+            self.transcripts.insert_thread(thread, model);
+        }
     }
 }
