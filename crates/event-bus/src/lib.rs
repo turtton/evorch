@@ -3,10 +3,12 @@
 pub mod artifact;
 pub use artifact::{ArtifactPresentation, PresentedArtifact};
 pub mod bus;
+mod message_parts;
+pub use message_parts::MessagePartAssembler;
 mod fencing;
 pub use fencing::{
     MutationBatchError, MutationBatchGuard, MutationCheck, MutationGuard, MutationGuardAttempt,
-    MutationGuardCheck, MutationGuardTryCheck, MutationValidator, event_run_ids,
+    MutationGuardCheck, MutationGuardTryCheck, MutationValidator,
 };
 pub mod event;
 pub mod orchestrator;

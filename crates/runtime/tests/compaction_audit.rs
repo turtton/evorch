@@ -591,6 +591,7 @@ async fn raw_transcript_reconstructs_in_order() {
             | EventKind::Message(MessageEvent::ToolCallDelta { .. })
             | EventKind::Message(MessageEvent::StreamRetried { .. })
             | EventKind::Message(MessageEvent::MessageCompleted { .. })
+            | EventKind::Message(MessageEvent::MessagePart { .. })
             | EventKind::Tool(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)

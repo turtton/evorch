@@ -20,9 +20,9 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     pub failure_reason: Option<String>,
     pub delegated_to: Option<String>,
-    /// セッションに蓄積されたメッセージ差分です。
-    /// イベント語彙に finalize イベントがないため、完了後も全文を保持します。
-    /// 「保留」は中断されたセッションを復元する場合に限り末尾の未完了分として解釈してください。
+    /// 旧 MessageDelta 記録の投影です。recorder は新規の MessageDelta を
+    /// 保存しないため、新しい記録では空です。受理済み本文はイベントログの
+    /// MessageCompleted / MessagePart から復元してください。
     pub pending_message: String,
     /// セッションに蓄積された推論差分です。
     /// イベント語彙に finalize イベントがないため、完了後も全文を保持します。
@@ -150,6 +150,7 @@ pub(crate) fn apply_event(state: &mut ProjectionState, stored: &StoredEvent) {
         EventKind::Message(
             MessageEvent::FinalResultPublished { .. }
             | MessageEvent::MessageCompleted { .. }
+            | MessageEvent::MessagePart { .. }
             | MessageEvent::ToolCallDelta { .. }
             | MessageEvent::StreamRetried { .. },
         ) => {}

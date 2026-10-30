@@ -516,6 +516,7 @@ impl TranscriptModel {
             MessageEvent::MessageDelta { delta, run_id }
             | MessageEvent::ReasoningDelta { delta, run_id } => (delta, run_id),
             MessageEvent::MessageCompleted { .. }
+            | MessageEvent::MessagePart { .. }
             | MessageEvent::ToolCallDelta { .. }
             | MessageEvent::StreamRetried { .. } => return,
             MessageEvent::FinalResultPublished { text, run_id } => {
@@ -579,6 +580,7 @@ impl TranscriptModel {
                 MessageEvent::MessageDelta { .. }
                 | MessageEvent::FinalResultPublished { .. }
                 | MessageEvent::MessageCompleted { .. }
+                | MessageEvent::MessagePart { .. }
                 | MessageEvent::ToolCallDelta { .. }
                 | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {
                     text: delta.clone(),

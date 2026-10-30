@@ -8,7 +8,10 @@ use tokio::{
     time::Instant,
 };
 
-use super::{PersistencePolicy, StorageBridgeMonitor, WriteRequest, monitor::PendingRegistration};
+use super::{
+    PersistencePolicy, StorageBridgeMonitor, WriteRequest, monitor::PendingRegistration,
+    run_order::event_runs,
+};
 
 pub(super) const WRITE_QUEUE_CAPACITY: usize = 16_384;
 const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
@@ -92,6 +95,35 @@ fn reasoning_delta(event: &Event) -> Option<(&str, &str)> {
     }
 }
 
+// Width of one character inside a JSON string literal.
+fn json_char_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Splits `text` on character boundaries so each piece's JSON-escaped length is
+/// at most `room`. `None` when a single character does not fit.
+fn split_json_bounded(text: &str, room: usize) -> Option<Vec<&str>> {
+    let mut pieces = Vec::new();
+    let (mut start, mut used) = (0, 0);
+    for (index, c) in text.char_indices() {
+        let width = json_char_len(c);
+        if width > room {
+            return None;
+        }
+        if used + width > room {
+            pieces.push(&text[start..index]);
+            (start, used) = (index, 0);
+        }
+        used += width;
+    }
+    pieces.push(&text[start..]);
+    Some(pieces)
+}
+
 // Count JSON escapes without allocating another full serialized payload or
 // repeatedly serializing the growing combined delta (which would be quadratic).
 fn json_len(value: &(impl serde::Serialize + ?Sized)) -> usize {
@@ -124,6 +156,8 @@ pub(super) struct EventQueue {
     monitor: StorageBridgeMonitor,
     policy: PersistencePolicy,
     max_coalesced_bytes: usize,
+    max_event_bytes: usize,
+    redactor: secret_guard::SecretRedactor,
 }
 
 impl EventQueue {
@@ -142,6 +176,8 @@ impl EventQueue {
             monitor,
             policy,
             max_coalesced_bytes: max_event_bytes.min(MAX_COALESCED_BYTES as u64) as usize,
+            max_event_bytes: usize::try_from(max_event_bytes).unwrap_or(usize::MAX),
+            redactor: secret_guard::SecretRedactor::from_env(),
         }
     }
 
@@ -154,6 +190,20 @@ impl EventQueue {
         if self.policy.skip(&event, &self.monitor) {
             return Ok(());
         }
+        match split_oversize(&event, self.max_event_bytes, &self.redactor) {
+            Some(pieces) => {
+                for piece in pieces {
+                    self.push_stored(piece).await?;
+                }
+                Ok(())
+            }
+            None => self.push_stored(event).await,
+        }
+    }
+
+    /// An event the policy keeps is either queued for the writer or merged into
+    /// its run's accumulating reasoning row.
+    async fn push_stored(&mut self, event: Event) -> Result<(), ()> {
         let delta_run = reasoning_delta(&event).map(|(run, _)| run.to_owned());
         match &delta_run {
             Some(run) => {
@@ -260,10 +310,32 @@ impl EventQueue {
         if self.pending.is_empty() {
             return Ok(());
         }
-        for run in event_bus::event_run_ids(std::slice::from_ref(event)) {
-            self.flush_run(&run).await?;
+        let runs = event_runs(event);
+        // An unattributed event can still be visible (for example an approval
+        // or fault). Preserve its position relative to all pending reasoning.
+        if runs.is_empty() {
+            return self.flush().await;
+        }
+        for run in runs {
+            self.flush_run(run).await?;
         }
         Ok(())
+    }
+
+    pub(super) async fn barrier(&mut self, reply: super::FlushReply) -> Result<(), ()> {
+        self.flush().await?;
+        self.requests
+            .send(WriteRequest::Barrier(reply))
+            .await
+            .map_err(|_| ())
+    }
+
+    pub(super) async fn flush_usage(&mut self) -> Result<(), ()> {
+        self.flush().await?;
+        self.requests
+            .send(WriteRequest::FlushUsage)
+            .await
+            .map_err(|_| ())
     }
 
     async fn flush_run(&mut self, run: &str) -> Result<(), ()> {
@@ -299,22 +371,61 @@ impl EventQueue {
         }
         Ok(())
     }
+}
 
-    pub(super) async fn barrier(&mut self, reply: super::FlushReply) -> Result<(), ()> {
-        self.flush().await?;
-        self.requests
-            .send(WriteRequest::Barrier(reply))
-            .await
-            .map_err(|_| ())
+/// Keeps the storage hard limit without dropping oversized accepted responses.
+/// The whole text is scanned first: splitting must not hide a secret across
+/// row boundaries. A hit stays whole for storage's ordinary fail-closed check.
+pub(super) fn split_oversize(
+    event: &Event,
+    max_event_bytes: usize,
+    redactor: &secret_guard::SecretRedactor,
+) -> Option<Vec<Event>> {
+    let (run_id, text, limit, complete) = match &event.kind {
+        EventKind::Message(MessageEvent::ReasoningDelta { run_id, delta }) => (
+            run_id.as_deref(),
+            delta,
+            max_event_bytes.min(MAX_COALESCED_BYTES),
+            false,
+        ),
+        EventKind::Message(MessageEvent::MessageCompleted { run_id, text }) => {
+            (Some(run_id.as_str()), text, max_event_bytes, true)
+        }
+        _ => return None,
+    };
+    if json_len(&event.kind) <= limit || redactor.detect(text).is_some() {
+        return None;
     }
-
-    pub(super) async fn flush_usage(&mut self) -> Result<(), ()> {
-        self.flush().await?;
-        self.requests
-            .send(WriteRequest::FlushUsage)
-            .await
-            .map_err(|_| ())
-    }
+    let row = |text: &str, index: usize, last: bool| {
+        EventKind::Message(if complete {
+            MessageEvent::MessagePart {
+                run_id: run_id.expect("completed response has a run").to_owned(),
+                text: text.to_owned(),
+                index,
+                last,
+            }
+        } else {
+            MessageEvent::ReasoningDelta {
+                run_id: run_id.map(str::to_owned),
+                delta: text.to_owned(),
+            }
+        })
+    };
+    // `false` is the longer spelling. No index can exceed the original
+    // byte length, so reserve enough digits for every slice up front.
+    let room = limit.checked_sub(json_len(&row("", text.len(), false)))?;
+    let pieces = split_json_bounded(text, room)?;
+    let count = pieces.len();
+    Some(
+        pieces
+            .into_iter()
+            .enumerate()
+            .map(|(index, piece)| Event {
+                meta: event.meta.clone(),
+                kind: row(piece, index, index + 1 == count),
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

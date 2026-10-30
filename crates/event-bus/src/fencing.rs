@@ -231,11 +231,7 @@ impl MutationFences {
     }
 }
 
-/// Run (or session/task) IDs an event is attributed to, in first-seen order and
-/// without duplicates. This is the same attribution the mutation fences use, so
-/// consumers that must order work per run (such as the storage bridge) agree
-/// with the authority checks on which runs an event belongs to.
-pub fn event_run_ids(events: &[Event]) -> Vec<String> {
+pub(crate) fn event_run_ids(events: &[Event]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut run_ids = Vec::new();
     for event in events {
@@ -371,7 +367,8 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
         ) => run_id.as_deref().is_none_or(accepts),
         EventKind::Message(
             MessageEvent::FinalResultPublished { run_id, .. }
-            | MessageEvent::MessageCompleted { run_id, .. },
+            | MessageEvent::MessageCompleted { run_id, .. }
+            | MessageEvent::MessagePart { run_id, .. },
         ) => accepts(run_id),
         EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => accepts(&question.run_id),
         EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => accepts(run_id),

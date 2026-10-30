@@ -155,6 +155,120 @@ async fn unattributed_reasoning_is_written_as_it_arrives_and_never_merged() {
 }
 
 #[tokio::test]
+async fn orchestrator_boundaries_flush_only_their_runs_reasoning_first() {
+    use event_bus::OrchestratorEvent;
+    let boundaries = [
+        Event::new(OrchestratorEvent::TaskProgressed {
+            task_id: "task".into(),
+            run_id: "a".into(),
+            progress: serde_json::json!({"done": 1}),
+            reason: "progress".into(),
+        }),
+        Event::new(OrchestratorEvent::TaskCheckpoint {
+            task_id: "task".into(),
+            run_id: "a".into(),
+            tool_call_count: 2,
+            cumulative_input_tokens: 3,
+            cumulative_output_tokens: 4,
+            elapsed_ms: 5,
+        }),
+    ];
+    let (mut queue, mut rx, _) = queue();
+    queue.push(reasoning(Some("b"), "other")).await.unwrap();
+    for boundary in boundaries {
+        queue.push(reasoning(Some("a"), "before")).await.unwrap();
+        queue.push(boundary.clone()).await.unwrap();
+        let written = collect(&mut rx);
+        assert_eq!(written.len(), 2);
+        assert_eq!(text(&written[0]), "before");
+        assert_eq!(written[1], boundary);
+    }
+    queue.flush().await.unwrap();
+    assert_eq!(
+        collect(&mut rx).iter().map(text).collect::<Vec<_>>(),
+        ["other"]
+    );
+}
+
+#[tokio::test]
+async fn unattributed_approval_and_fault_keep_their_position_between_reasoning() {
+    let boundaries = [
+        Event::new(ToolEvent::ApprovalRequested {
+            tool_name: "shell".into(),
+            call_id: "unattributed".into(),
+            input: None,
+        }),
+        Event::new(event_bus::FaultEvent::SkillDiagnostic {
+            kind: event_bus::SkillDiagnosticKind::DiscoveryError,
+            skill: "example".into(),
+            scope: "project".into(),
+            detail: "unavailable".into(),
+        }),
+    ];
+    let (mut queue, mut rx, _) = queue();
+    for boundary in boundaries {
+        queue.push(reasoning(Some("a"), "first")).await.unwrap();
+        queue.push(reasoning(Some("b"), "second")).await.unwrap();
+        queue.push(boundary.clone()).await.unwrap();
+        let written = collect(&mut rx);
+        assert_eq!(written.len(), 3);
+        assert_eq!(text(&written[0]), "first");
+        assert_eq!(text(&written[1]), "second");
+        assert_eq!(written[2], boundary);
+    }
+}
+
+#[test]
+fn impossible_row_limits_remain_rejectable_and_do_not_loop() {
+    let guard = secret_guard::SecretRedactor::with_known_values([]);
+    for limit in [0, 1, 80] {
+        assert!(split_oversize(&reasoning(Some("run"), "🦀"), limit, &guard).is_none());
+    }
+}
+
+#[test]
+fn a_known_secret_crossing_a_split_boundary_is_scanned_before_splitting() {
+    let credential = ["fixture", "-private", "-credential"].concat();
+    let guard = secret_guard::SecretRedactor::with_known_values([credential.clone()]);
+    let no_credentials = secret_guard::SecretRedactor::with_known_values([]);
+    for completed in [false, true] {
+        let event_with = |text: String| {
+            if completed {
+                Event::new(MessageEvent::MessageCompleted {
+                    run_id: "r".into(),
+                    text,
+                })
+            } else {
+                reasoning(Some("r"), &text)
+            }
+        };
+        let probe = split_oversize(&event_with(" ".repeat(300)), 200, &no_credentials).unwrap();
+        let text_of = |event: &Event| match &event.kind {
+            EventKind::Message(MessageEvent::MessagePart { text, .. }) => text.len(),
+            EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) => delta.len(),
+            _ => unreachable!(),
+        };
+        let prefix = text_of(&probe[0]) - credential.len() / 2;
+        let event = event_with(format!(
+            "{}{}{}",
+            " ".repeat(prefix),
+            credential,
+            " ".repeat(200)
+        ));
+        assert!(json_len(&event.kind) > 200);
+        let unguarded = split_oversize(&event, 200, &no_credentials).unwrap();
+        assert!(unguarded.iter().all(|row| match &row.kind {
+            EventKind::Message(MessageEvent::MessagePart { text, .. }) =>
+                guard.detect(text).is_none(),
+            EventKind::Message(MessageEvent::ReasoningDelta { delta, .. }) =>
+                guard.detect(delta).is_none(),
+            _ => false,
+        }));
+        assert!(split_oversize(&event, 200, &guard).is_none());
+    }
+}
+
+#[tokio::test]
 async fn message_deltas_are_dropped_and_do_not_end_a_reasoning_row() {
     let (mut queue, mut rx, monitor) = queue();
     queue.push(reasoning(Some("run"), "think ")).await.unwrap();

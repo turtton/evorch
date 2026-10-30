@@ -177,10 +177,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut completed_at_waiting = std::collections::BTreeMap::new();
         let mut completed_since_request = std::collections::BTreeMap::new();
         let mut replay_end = None;
+        // A response too large for one row is stored as parts; rebuild it.
+        let mut parts = event_bus::MessagePartAssembler::new();
         db.for_each_event_ordered(|stored| {
-            self.tasks.restore_event(&mut restored_tasks, &stored.event);
-            replay_end = Some(stored.event.meta.wall_clock);
-            match &stored.event.kind {
+            let Some(assembled) = parts.accept(&stored.event) else {
+                return;
+            };
+            let event: &event_bus::Event = &assembled;
+            self.tasks.restore_event(&mut restored_tasks, event);
+            replay_end = Some(event.meta.wall_clock);
+            match &event.kind {
                 event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
                     run_id: Some(run_id),
                     ..
@@ -336,45 +342,50 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.telemetry = crate::model::telemetry::TelemetryOverlay::new();
         let replay_now = std::time::Instant::now();
         let mut replayed_to = 0;
+        let mut parts = event_bus::MessagePartAssembler::new();
         db.for_each_event_ordered(|stored| {
             replayed_to = replayed_to.max(stored.id);
+            let Some(assembled) = parts.accept(&stored.event) else {
+                return;
+            };
+            let event: &event_bus::Event = &assembled;
             while messages
                 .peek()
-                .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
+                .is_some_and(|message| message.at <= event.meta.wall_clock)
             {
                 if let Some(message) = messages.next() {
                     self.restore_user_message(message);
                 }
             }
             let at = replay_end
-                .and_then(|end| end.duration_since(stored.event.meta.wall_clock).ok())
+                .and_then(|end| end.duration_since(event.meta.wall_clock).ok())
                 .and_then(|age| replay_now.checked_sub(age))
                 .unwrap_or(replay_now);
-            self.telemetry.apply_event_at(&stored.event, at);
+            self.telemetry.apply_event_at(event, at);
             self.transcripts.select_thread(None);
-            self.apply_conversation_event(&stored.event);
-            self.seed_system_notification(&stored.event);
+            self.apply_conversation_event(event);
+            self.seed_system_notification(event);
             if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                 run_id,
                 context_len,
-            }) = &stored.event.kind
+            }) = &event.kind
             {
                 self.seed_branches(Some(&workspace_ui::ForkPoint {
                     run_id: run_id.clone(),
                     context_len: *context_len,
                 }));
             }
-            self.bind_goal_event(&stored.event);
+            self.bind_goal_event(event);
             if let event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
-            ) = &stored.event.kind
+            ) = &event.kind
             {
                 // In particular, Stopped survives replay as resumable, not failed/idle.
                 self.phases.insert(run_id.clone(), super::frame::phase(*to));
             }
             if let event_bus::EventKind::Lifecycle(
                 event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
-            ) = &stored.event.kind
+            ) = &event.kind
                 && last_waiting.get(run_id) == Some(&stored.id)
                 && !completed_at_waiting.get(run_id).copied().unwrap_or(false)
                 && let Some(text) = completed_snapshots.get(run_id)

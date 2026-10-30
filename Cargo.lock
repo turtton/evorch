@@ -5420,6 +5420,7 @@ dependencies = [
  "config",
  "event-bus",
  "runtime",
+ "secret-guard",
  "serde",
  "serde_json",
  "storage",

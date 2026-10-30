@@ -12,6 +12,7 @@ mod coalescing;
 mod halt;
 mod lifecycle;
 mod monitor;
+mod run_order;
 mod usage_ledger;
 use coalescing::{COALESCE_INTERVAL, EventQueue, QueuedEvent, WRITE_QUEUE_CAPACITY};
 pub use lifecycle::OwnedStorageBridge;
@@ -100,6 +101,7 @@ pub struct StorageBridge {
     validator: Option<event_bus::MutationValidator>,
     policy: PersistencePolicy,
     monitor: StorageBridgeMonitor,
+    redactor: secret_guard::SecretRedactor,
     ledger: Option<usage_ledger::UsageRecorder>,
     halt: halt::HaltRecorder,
     #[cfg(test)]
@@ -119,6 +121,7 @@ impl StorageBridge {
             validator: None,
             policy: PersistencePolicy::default(),
             monitor: StorageBridgeMonitor::default(),
+            redactor: secret_guard::SecretRedactor::from_env(),
             ledger: None,
             halt: halt::HaltRecorder::default(),
             #[cfg(test)]
@@ -167,6 +170,17 @@ impl StorageBridge {
         if self.policy.skip(event, &self.monitor) {
             return Ok(());
         }
+        let max_bytes = usize::try_from(self.storage.max_event_bytes()).unwrap_or(usize::MAX);
+        if let Some(parts) = coalescing::split_oversize(event, max_bytes, &self.redactor) {
+            for part in parts {
+                self.persist_event(&part)?;
+            }
+            return Ok(());
+        }
+        self.persist_event(event)
+    }
+
+    fn persist_event(&mut self, event: &Event) -> Result<(), StorageError> {
         if let EventKind::Usage(usage) = &event.kind {
             self.usage.record(usage, &event.meta);
             self.usage_dirty = true;

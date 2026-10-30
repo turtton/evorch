@@ -795,6 +795,19 @@ pub enum MessageEvent {
     /// Canonical text of one accepted model response, replacing its streamed deltas.
     /// This is observational only and does not mark the run as finished.
     MessageCompleted { run_id: String, text: String },
+    /// One slice of an accepted response, written only by the storage bridge
+    /// when the response is too large for a single `MessageCompleted` row.
+    ///
+    /// Never emitted on the bus. A run's slices are stored in order and the one
+    /// with `last` set ends the response; readers rebuild a `MessageCompleted`
+    /// from them with [`crate::MessagePartAssembler`].
+    MessagePart {
+        run_id: String,
+        text: String,
+        /// Zero-based position. Readers reject missing or out-of-order slices.
+        index: usize,
+        last: bool,
+    },
     /// 受理された finish 操作の最終結果を観測用に公開した。
     FinalResultPublished {
         /// 結果を返した run の ID。
