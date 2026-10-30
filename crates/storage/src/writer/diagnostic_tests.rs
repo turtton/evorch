@@ -23,6 +23,7 @@ fn fixture() -> WriterState {
         reclaim_wal_pending: false,
         index: crate::writer::index::IndexJob::inert(),
         task_progress_cursor: Default::default(),
+        event_retention_cursor: Default::default(),
     }
 }
 
@@ -198,4 +199,47 @@ fn review_manifest_audit_records_are_retained_like_review_decisions() {
     for kept in [&manifest, &decision] {
         assert!(remaining.iter().any(|row| &row.event == kept));
     }
+}
+
+#[test]
+fn observation_retention_follows_the_configured_provider_window() {
+    let mut state = fixture();
+    for (kind, tag) in [
+        ("Fault", "SubscriberLagged"),
+        ("Provider", "RequestCompleted"),
+    ] {
+        state
+            .conn
+            .execute(
+                "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind) \
+                 VALUES (NULL, 1, 1, 1000, ?1, ?2, ?3)",
+                rusqlite::params![
+                    kind,
+                    format!(r#"{{"kind":"{kind}","payload":{{"kind":"{tag}","payload":{{}}}}}}"#),
+                    tag
+                ],
+            )
+            .unwrap();
+    }
+    let count = |state: &WriterState| -> i64 {
+        state
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap()
+    };
+    let now = std::time::SystemTime::now();
+
+    state.config.provider_event_retention_days = 0;
+    assert_eq!(
+        super::super::retain_observation_events(&mut state, now).unwrap(),
+        1
+    );
+    assert_eq!(count(&state), 1);
+
+    state.config.provider_event_retention_days = 90;
+    assert_eq!(
+        super::super::retain_observation_events(&mut state, now).unwrap(),
+        1
+    );
+    assert_eq!(count(&state), 0);
 }
