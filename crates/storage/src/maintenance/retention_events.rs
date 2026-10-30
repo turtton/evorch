@@ -20,8 +20,8 @@
 //! has to filter (everything except the unconditional `(kind, subkind)`
 //! deletes). Targets remember how far they have looked in a [`Cursor`], so a
 //! long history is covered over several ticks instead of one long write lock.
-//! When a tick stops early with work left, [`Cursor::has_backlog`] tells the
-//! writer to run the next maintenance sooner than the usual interval.
+//! The time budget bounds the deleting only: fetching candidates, the commit
+//! and the vacuum that follows in the writer's maintenance are outside it.
 //!
 //! Rows the event backfill has not converted yet (`subkind IS NULL`) are found
 //! through the same `(kind, subkind, id)` index, which stores NULL subkinds
@@ -118,21 +118,12 @@ const TARGETS: [Target; 8] = [
 #[derive(Debug)]
 pub(crate) struct Cursor {
     after: [i64; TARGETS.len()],
-    backlog: bool,
-}
-
-impl Cursor {
-    /// Whether the last tick stopped at a budget with rows still to remove.
-    pub(crate) fn has_backlog(&self) -> bool {
-        self.backlog
-    }
 }
 
 impl Default for Cursor {
     fn default() -> Self {
         Self {
             after: [i64::MIN; TARGETS.len()],
-            backlog: false,
         }
     }
 }
@@ -175,11 +166,9 @@ pub(crate) fn tick(
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let mut summary = Summary::default();
     let mut sessions: HashMap<String, i64> = HashMap::new();
-    let mut backlog = false;
     for (index, target) in TARGETS.iter().enumerate() {
         let budget = MAX_DELETIONS_PER_TICK.saturating_sub(summary.event_count as usize);
         if budget == 0 || out_of_time(summary.event_count, deadline) {
-            backlog = true;
             break;
         }
         let cutoff = match target.expiry {
@@ -189,7 +178,7 @@ pub(crate) fn tick(
                 None => continue,
             },
         };
-        backlog |= run_target(
+        run_target(
             &tx,
             target,
             &mut cursor.after[index],
@@ -200,7 +189,6 @@ pub(crate) fn tick(
             &mut sessions,
         )?;
     }
-    cursor.backlog = backlog;
     for (session, bytes) in sessions {
         tx.execute(
             "UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) WHERE id = ?2",
@@ -217,7 +205,6 @@ fn out_of_time(deleted: u64, deadline: Option<Instant>) -> bool {
         && deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
-/// Returns whether the target stopped at a budget with rows possibly left.
 #[allow(clippy::too_many_arguments)]
 fn run_target(
     tx: &Transaction<'_>,
@@ -228,7 +215,7 @@ fn run_target(
     deadline: Option<Instant>,
     summary: &mut Summary,
     sessions: &mut HashMap<String, i64>,
-) -> Result<bool, StorageError> {
+) -> Result<(), StorageError> {
     // Unconditional indexed rows are all deleted, so what is examined is
     // bounded by the deletion budget; filtering targets by their scan cap.
     let filtering = target.unconverted || cutoff.is_some();
@@ -273,7 +260,7 @@ fn run_target(
         Some(id) => id,
         None => *after,
     };
-    Ok(cut_by_budget)
+    Ok(())
 }
 
 /// The inner query reads index entries only and carries the LIMIT, so the

@@ -388,7 +388,7 @@ fn candidate_lookup_seeks_the_kind_subkind_index() {
 }
 
 #[test]
-fn a_spent_time_budget_still_makes_progress_and_flags_a_backlog() {
+fn a_spent_time_budget_still_makes_progress() {
     let conn = open();
     let total = TIME_CHECK_ROWS as usize * 3 + 5;
     for _ in 0..total {
@@ -400,7 +400,6 @@ fn a_spent_time_budget_still_makes_progress_and_flags_a_backlog() {
 
     // The clock is only read after TIME_CHECK_ROWS deletions.
     assert_eq!(first.event_count, TIME_CHECK_ROWS);
-    assert!(cursor.has_backlog());
     let mut removed = first.event_count;
     while count(&conn) > 0 {
         removed += tick(&conn, &mut cursor, NOW, RETENTION_DAYS, Duration::ZERO)
@@ -408,19 +407,4 @@ fn a_spent_time_budget_still_makes_progress_and_flags_a_backlog() {
             .event_count;
     }
     assert_eq!(removed, total as u64);
-    assert!(!cursor.has_backlog());
-}
-
-#[test]
-fn reaching_the_deletion_cap_flags_a_backlog_and_finishing_clears_it() {
-    let conn = open();
-    for _ in 0..MAX_DELETIONS_PER_TICK + 1 {
-        insert(&conn, "Fault", "SubscriberLagged", true, recent());
-    }
-    let mut cursor = Cursor::default();
-
-    run(&conn, &mut cursor, RETENTION_DAYS);
-    assert!(cursor.has_backlog());
-    run(&conn, &mut cursor, RETENTION_DAYS);
-    assert!(!cursor.has_backlog());
 }
