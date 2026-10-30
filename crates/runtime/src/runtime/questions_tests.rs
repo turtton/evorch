@@ -437,3 +437,110 @@ async fn failed_post_commit_reflection_is_unsynced_and_retry_repairs_it() {
     assert!(!review.stamp().synced);
     runtime.cancel(run).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_call_that_stores_the_answer_is_told_it_recorded() {
+    // Given: a pending question of a live run, and a second question to compare with.
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("first-only.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime = runtime(&config, storage.handle());
+    let run = runtime
+        .delegate_chat(
+            "root",
+            Role::Orchestrator,
+            "Task".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let question = runtime
+        .request_user_question(run, "Which?".into(), vec![], true)
+        .unwrap();
+
+    // When: the answer is submitted first-only, again with the same text, with another
+    // text, and for a question that does not exist.
+    let first = runtime.answer_user_question_if_pending(&question.id, "A");
+    let same = runtime.answer_user_question_if_pending(&question.id, "A");
+    let other = runtime.answer_user_question_if_pending(&question.id, "B");
+    let unknown = runtime.answer_user_question_if_pending("no-such-question", "A");
+
+    // Then: only the first is recorded; an earlier answer is reported as such even when
+    // identical, and an unrelated failure is an error, not `AlreadyAnswered`.
+    assert!(
+        matches!(first, Ok(AnswerOutcome::Recorded(ref q)) if q.answer.as_deref() == Some("A"))
+    );
+    assert_eq!(same, Ok(AnswerOutcome::AlreadyAnswered));
+    assert_eq!(other, Ok(AnswerOutcome::AlreadyAnswered));
+    assert!(unknown.is_err());
+    assert_eq!(
+        runtime
+            .user_question(&question.id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("A")
+    );
+    // The idempotent host API keeps its contract for every other caller.
+    assert!(runtime.answer_user_question(&question.id, "A").is_ok());
+    assert!(runtime.answer_user_question(&question.id, "B").is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn simultaneous_first_only_answers_record_exactly_one() {
+    // Given: a pending question and several answerers released at the same moment.
+    const ANSWERERS: usize = 6;
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("race.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let runtime = runtime(&config, storage.handle());
+    let run = runtime
+        .delegate_chat(
+            "root",
+            Role::Orchestrator,
+            "Task".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    let question = runtime
+        .request_user_question(run, "Which?".into(), vec![], true)
+        .unwrap();
+    let barrier = std::sync::Barrier::new(ANSWERERS);
+
+    // When: each answerer submits its own text.
+    let outcomes: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..ANSWERERS)
+            .map(|index| {
+                let (runtime, barrier, id) = (&runtime, &barrier, &question.id);
+                scope.spawn(move || {
+                    barrier.wait();
+                    runtime
+                        .answer_user_question_if_pending(id, &format!("answer {index}"))
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Then: one answerer recorded its answer, it is the stored one, and the rest were told
+    // the question was already answered.
+    let recorded: Vec<_> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            AnswerOutcome::Recorded(question) => question.answer.clone(),
+            AnswerOutcome::AlreadyAnswered => None,
+        })
+        .collect();
+    assert_eq!(recorded.len(), 1, "{outcomes:?}");
+    assert_eq!(
+        runtime.user_question(&question.id).unwrap().unwrap().answer,
+        recorded.first().cloned()
+    );
+}

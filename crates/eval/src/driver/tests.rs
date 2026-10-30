@@ -73,23 +73,30 @@ impl Harness {
     }
 
     async fn drive(&self, budget: &EvalBudgetConfig) -> ReplayOutcome {
+        self.drive_via(budget, &self.runtime).await
+    }
+
+    async fn drive_via(&self, budget: &EvalBudgetConfig, desk: &dyn Desk) -> ReplayOutcome {
         let simulator = UserSimulator::new(
             Arc::clone(&self.user) as Arc<dyn runtime::AgentModel>,
             &self.thread.thread_id,
         );
-        drive(Replay {
-            runtime: &self.runtime,
-            bus: &self.bus,
-            thread: &self.thread,
-            simulator: &simulator,
-            budget,
-            chat: RunConfig {
-                conversation: true,
-                interactive: true,
-                keep_alive: true,
-                ..RunConfig::default()
+        drive_with(
+            Replay {
+                runtime: &self.runtime,
+                bus: &self.bus,
+                thread: &self.thread,
+                simulator: &simulator,
+                budget,
+                chat: RunConfig {
+                    conversation: true,
+                    interactive: true,
+                    keep_alive: true,
+                    ..RunConfig::default()
+                },
             },
-        })
+            desk,
+        )
         .await
     }
 
@@ -112,6 +119,33 @@ impl Harness {
                 serde_json::from_str(text).unwrap()
             })
             .collect()
+    }
+}
+
+/// A question store that lets someone else answer at the one moment the driver cannot
+/// see coming: after its last check that the question still waits, as it sends its own
+/// answer.
+struct AnsweredJustBefore<'a> {
+    runtime: &'a AgentRuntime,
+    other_answer: &'a str,
+    interrupted: std::sync::atomic::AtomicBool,
+}
+
+impl Desk for AnsweredJustBefore<'_> {
+    fn is_answered(&self, id: &str) -> bool {
+        self.runtime.is_answered(id)
+    }
+
+    fn answer(&self, id: &str, text: &str) -> Result<AnswerOutcome, String> {
+        if !self
+            .interrupted
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.runtime
+                .answer_user_question(id, self.other_answer)
+                .unwrap();
+        }
+        self.runtime.answer(id, text)
     }
 }
 
@@ -219,6 +253,7 @@ async fn questions_from_the_root_are_answered_by_the_simulated_user() {
         Entry::Answer { title, text, .. } if title == "Which file?" && text == "lib.rs"
     )));
     assert_eq!(outcome.user_turns, 2);
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
     assert!(
         harness
             .runtime
@@ -226,6 +261,60 @@ async fn questions_from_the_root_are_answered_by_the_simulated_user() {
             .iter()
             .all(|agent| agent.phase == AgentRunPhase::Stopped)
     );
+}
+
+#[tokio::test]
+async fn a_question_answered_while_the_user_decides_is_not_answered_again() {
+    // Given: an agent that asks a question, and a simulated user whose answer is still
+    // being decided when the question is answered by someone else.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let harness = Harness::new(
+        [
+            tool("ask_user", serde_json::json!({"title": "Which file?"})),
+            text("asked"),
+        ],
+        10,
+        [
+            Step::Gated {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                then: Box::new(decision("answer", "lib.rs")),
+            },
+            decision("finish", ""),
+        ],
+    );
+    let interloper = async {
+        entered.notified().await;
+        let requests = harness.user.requests();
+        let Some(ContentBlock::Text { text }) = requests[0][1].content.first() else {
+            panic!("simulator payload");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        let id = payload["pending_question"]["id"].as_str().unwrap();
+        harness.runtime.answer_user_question(id, "main.rs").unwrap();
+        release.notify_one();
+    };
+
+    // When: the replay runs and the other answer lands before the decision is returned.
+    let budget = EvalBudgetConfig::default();
+    let (outcome, ()) = tokio::join!(harness.drive(&budget), interloper);
+
+    // Then: the stale decision is dropped instead of failing the replay with
+    // `question already answered`, and the question is not shown to the user again.
+    assert_eq!(outcome.status, Status::Completed, "{}", outcome.reason);
+    assert!(
+        !outcome
+            .conversation
+            .iter()
+            .any(|entry| matches!(entry, Entry::Answer { .. })),
+        "{:?}",
+        outcome.conversation
+    );
+    assert_eq!(outcome.user_turns, 1);
+    let payloads = harness.simulator_payloads();
+    assert_eq!(payloads.len(), 2);
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
 }
 
 #[tokio::test]
@@ -492,4 +581,171 @@ async fn events_a_small_bus_overwrote_before_the_observer_stops_are_counted() {
     // Then: at least the two overwritten events are counted. Lag handling in
     // `recv` emits its own fault event, which can overwrite one more slot.
     assert!(observed.lagged_events >= 2, "{}", observed.lagged_events);
+}
+
+fn root_question(id: &str, answer: Option<&str>) -> UserQuestion {
+    UserQuestion {
+        id: id.into(),
+        run_id: "root".into(),
+        root_run_id: "root".into(),
+        root_name: "chat:Worker:thread-1".into(),
+        recipient_run_ids: Vec::new(),
+        title: "Which file?".into(),
+        options: Vec::new(),
+        blocking: true,
+        answer: answer.map(Into::into),
+        answer_origin: None,
+    }
+}
+
+#[test]
+fn an_answered_question_never_becomes_pending_again() {
+    // Given: an observer and a question the driver answered itself.
+    let bus = EventBus::new(8);
+    let mut observed = Observed {
+        root: Some("root".into()),
+        ..Observed::default()
+    };
+    let update = |question| Event::new(ToolEvent::UserQuestionUpdated { question });
+    observed.observe(&update(root_question("q-1", None)), &bus);
+    observed.mark_answered("q-1");
+    assert!(observed.pending.is_empty());
+
+    // When: the question is announced unanswered again, then reported answered late.
+    observed.observe(&update(root_question("q-1", None)), &bus);
+    observed.observe(&update(root_question("q-1", Some("a"))), &bus);
+
+    // Then: it stays out of the pending list and is shown in the conversation once.
+    assert!(observed.pending.is_empty());
+    assert_eq!(observed.conversation.len(), 1);
+}
+
+#[test]
+fn a_missed_answer_event_is_made_up_from_the_question_store() {
+    // Given: two pending questions, one of which the store already holds an answer for
+    // (its answer event was skipped by an observer that fell behind the bus).
+    let bus = EventBus::new(8);
+    let state = Mutex::new(Observed {
+        root: Some("root".into()),
+        ..Observed::default()
+    });
+    for id in ["q-1", "q-2"] {
+        lock(&state).observe(
+            &Event::new(ToolEvent::UserQuestionUpdated {
+                question: root_question(id, None),
+            }),
+            &bus,
+        );
+    }
+
+    // When: pending questions are reconciled with the store.
+    reconcile_answered(&state, |id| id == "q-1");
+
+    // Then: only the unanswered question is left to ask the simulated user about.
+    let state = lock(&state);
+    assert_eq!(
+        state
+            .pending
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q-2"]
+    );
+    assert!(state.answered.contains("q-1"));
+}
+
+#[tokio::test]
+async fn a_question_answered_after_the_last_check_is_dropped_not_failed() {
+    // Given: for each other answer (different from, and identical to, the simulated
+    // user's), a question that is answered by someone else after the driver's last
+    // check and before its own answer is stored.
+    for other_answer in ["main.rs", "lib.rs"] {
+        let harness = Harness::new(
+            [
+                tool("ask_user", serde_json::json!({"title": "Which file?"})),
+                text("asked"),
+            ],
+            10,
+            [decision("answer", "lib.rs"), decision("finish", "")],
+        );
+        let desk = AnsweredJustBefore {
+            runtime: &harness.runtime,
+            other_answer,
+            interrupted: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        // When: the replay runs.
+        let outcome = harness.drive_via(&EvalBudgetConfig::default(), &desk).await;
+
+        // Then: the simulated user's answer is dropped without failing the replay, and
+        // it is neither recorded as the user's answer nor counted as a user turn.
+        assert_eq!(
+            outcome.status,
+            Status::Completed,
+            "{other_answer}: {}",
+            outcome.reason
+        );
+        assert!(
+            !outcome
+                .conversation
+                .iter()
+                .any(|entry| matches!(entry, Entry::Answer { .. })),
+            "{other_answer}: {:?}",
+            outcome.conversation
+        );
+        assert_eq!(outcome.user_turns, 1, "{other_answer}");
+        let payloads = harness.simulator_payloads();
+        assert_eq!(payloads.len(), 2, "{other_answer}");
+        assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_answer_in_the_original_conversation_is_replayed_by_one_simulated_answer() {
+    // Given: an original conversation in which the user answered a question, replayed
+    // against an agent that asks it again.
+    let mut harness = Harness::new(
+        [
+            tool("ask_user", serde_json::json!({"title": "Which file?"})),
+            text("asked"),
+        ],
+        10,
+        [decision("answer", "lib.rs"), decision("finish", "")],
+    );
+    harness.thread.turns = vec![
+        turn(UserTurnKind::InitialPrompt, "fix the bug"),
+        UserTurn {
+            kind: UserTurnKind::Answer,
+            text: "lib.rs".into(),
+            question: Some("Which file?".into()),
+            reference: None,
+        },
+    ];
+
+    // When: the replay runs.
+    let outcome = harness.drive(&EvalBudgetConfig::default()).await;
+
+    // Then: the simulated user saw the recorded answer as context and the pending
+    // question, and answered it exactly once: one stored answer, one answer entry, one
+    // user turn, one answer delivered to the agent.
+    assert_eq!(outcome.status, Status::Completed, "{}", outcome.reason);
+    let payloads = harness.simulator_payloads();
+    assert_eq!(
+        payloads[0]["original_user_messages"][1],
+        serde_json::json!({"kind": "answer", "text": "lib.rs", "question": "Which file?"})
+    );
+    assert_eq!(payloads[0]["pending_question"]["title"], "Which file?");
+    assert!(payloads[1]["pending_question"].is_null(), "{payloads:?}");
+    let answers: Vec<_> = outcome
+        .conversation
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Answer { .. }))
+        .collect();
+    assert_eq!(answers.len(), 1, "{:?}", outcome.conversation);
+    assert_eq!(outcome.user_turns, 2);
+    let delivered = sent_texts(&harness.agent)
+        .iter()
+        .filter(|text| text.contains("[user-answer id="))
+        .count();
+    assert_eq!(delivered, 1);
 }

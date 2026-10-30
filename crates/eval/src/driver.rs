@@ -11,7 +11,7 @@ use event_bus::{
     AgentRunPhase, DiagnosticSeverity, Event, EventBus, EventKind, LifecycleEvent, MessageEvent,
     ProviderEvent, RequestPurpose, ToolEvent, event::diagnostic_codes,
 };
-use runtime::{AgentRuntime, RunConfig, StopScope};
+use runtime::{AgentRuntime, AnswerOutcome, RunConfig, StopScope};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 
@@ -70,6 +70,10 @@ struct Observed {
     turns_completed: u64,
     conversation: Vec<Entry>,
     pending: Vec<PendingQuestion>,
+    /// Questions known to be answered. A question never becomes pending again, so the
+    /// simulated user is not asked to answer one a second time, whether the answer was
+    /// its own or the event reporting it was missed or arrives late.
+    answered: HashSet<String>,
     tokens: u64,
     tool_calls: u32,
     denied: Vec<DeniedRequest>,
@@ -81,6 +85,11 @@ struct Observed {
 impl Observed {
     fn is_root(&self, run_id: &str) -> bool {
         self.root.as_deref() == Some(run_id)
+    }
+
+    fn mark_answered(&mut self, id: &str) {
+        self.pending.retain(|pending| pending.id != id);
+        self.answered.insert(id.to_owned());
     }
 
     fn observe(&mut self, event: &Event, bus: &EventBus) {
@@ -127,27 +136,21 @@ impl Observed {
             EventKind::Tool(ToolEvent::UserQuestionUpdated { question })
                 if question.is_user_visible() && self.is_root(&question.root_run_id) =>
             {
-                let known = self
-                    .pending
-                    .iter()
-                    .position(|pending| pending.id == question.id);
-                match (&question.answer, known) {
-                    (None, None) => {
-                        self.conversation.push(Entry::Question {
-                            id: question.id.clone(),
-                            title: question.title.clone(),
-                            options: question.options.clone(),
-                        });
-                        self.pending.push(PendingQuestion {
-                            id: question.id.clone(),
-                            title: question.title.clone(),
-                            options: question.options.clone(),
-                        });
-                    }
-                    (Some(_), Some(index)) => {
-                        self.pending.remove(index);
-                    }
-                    _ => {}
+                if question.answer.is_some() {
+                    self.mark_answered(&question.id);
+                } else if !self.answered.contains(&question.id)
+                    && !self.pending.iter().any(|pending| pending.id == question.id)
+                {
+                    self.conversation.push(Entry::Question {
+                        id: question.id.clone(),
+                        title: question.title.clone(),
+                        options: question.options.clone(),
+                    });
+                    self.pending.push(PendingQuestion {
+                        id: question.id.clone(),
+                        title: question.title.clone(),
+                        options: question.options.clone(),
+                    });
                 }
             }
             EventKind::Tool(ToolEvent::ToolStarted {
@@ -296,9 +299,35 @@ fn lock(state: &Mutex<Observed>) -> std::sync::MutexGuard<'_, Observed> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What the driver asks of the question store. The runtime is the only implementation
+/// outside tests, which use the seam to answer a question at the exact moment between
+/// the driver's last check and its answer.
+trait Desk: Sync {
+    fn is_answered(&self, id: &str) -> bool;
+    fn answer(&self, id: &str, text: &str) -> Result<AnswerOutcome, String>;
+}
+
+impl Desk for AgentRuntime {
+    fn is_answered(&self, id: &str) -> bool {
+        self.user_question(id)
+            .ok()
+            .flatten()
+            .is_some_and(|question| question.answer.is_some())
+    }
+
+    fn answer(&self, id: &str, text: &str) -> Result<AnswerOutcome, String> {
+        self.answer_user_question_if_pending(id, text)
+    }
+}
+
 /// Run the replay to its end and report what happened. Never fails: every
 /// problem becomes a `failed` outcome with its reason.
 pub async fn drive(replay: Replay<'_>) -> ReplayOutcome {
+    let desk = replay.runtime;
+    drive_with(replay, desk).await
+}
+
+async fn drive_with(replay: Replay<'_>, desk: &dyn Desk) -> ReplayOutcome {
     let started = Instant::now();
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(replay.budget.max_elapsed_secs);
@@ -320,7 +349,15 @@ pub async fn drive(replay: Replay<'_>) -> ReplayOutcome {
             format!("the replay could not start: {error}"),
         ),
         Ok(root) => {
-            let ended = converse(&replay, root, &mut observer, &mut user_turns, deadline).await;
+            let ended = converse(
+                &replay,
+                desk,
+                root,
+                &mut observer,
+                &mut user_turns,
+                deadline,
+            )
+            .await;
             let stopped = match ended.0 {
                 Status::Incomplete => replay.runtime.cancel_subtree(root),
                 _ => replay.runtime.stop(root, StopScope::Subtree),
@@ -374,8 +411,26 @@ fn missing_report(status: Status, observed: &Observed) -> Option<String> {
     Some(note)
 }
 
+/// Drop pending questions that are already answered. The observer's view of a
+/// question depends on the bus event that reports its answer, which a lagging
+/// observer can miss, so the question store is consulted before the simulated
+/// user is asked about one.
+fn reconcile_answered(state: &Mutex<Observed>, is_answered: impl Fn(&str) -> bool) {
+    let ids: Vec<String> = lock(state)
+        .pending
+        .iter()
+        .map(|question| question.id.clone())
+        .collect();
+    for id in ids {
+        if is_answered(&id) {
+            lock(state).mark_answered(&id);
+        }
+    }
+}
+
 async fn converse(
     replay: &Replay<'_>,
+    desk: &dyn Desk,
     root: runtime::RunId,
     observer: &mut Observer,
     user_turns: &mut u32,
@@ -392,7 +447,9 @@ async fn converse(
     };
     let mut handled_turns = 0;
     let mut shown = HashSet::new();
+    let is_answered = |id: &str| desk.is_answered(id);
     loop {
+        reconcile_answered(&observer.state, is_answered);
         let (conversation, pending) = {
             let state = lock(&observer.state);
             if let Some(breach) = state.budget_breach(replay.budget) {
@@ -461,6 +518,14 @@ async fn converse(
             Ok(decision) => decision,
             Err(error) => return (Status::Failed, error.to_string()),
         };
+        // The decision took a while; a question answered meanwhile must not be
+        // answered again, and the decision about it is dropped.
+        if let (Action::Answer, Some(question)) = (decision.action, &pending) {
+            reconcile_answered(&observer.state, is_answered);
+            if lock(&observer.state).answered.contains(&question.id) {
+                continue;
+            }
+        }
         if decision.action == Action::Finish {
             return (
                 Status::Completed,
@@ -477,14 +542,23 @@ async fn converse(
             );
         }
         let sent = match (decision.action, pending) {
-            (Action::Answer, Some(question)) => replay
-                .runtime
-                .answer_user_question(&question.id, &decision.text)
-                .map(|_| Entry::Answer {
-                    question_id: question.id,
-                    title: question.title,
-                    text: decision.text,
-                }),
+            (Action::Answer, Some(question)) => {
+                match desk.answer(&question.id, &decision.text) {
+                    Ok(AnswerOutcome::Recorded(_)) => Ok(Entry::Answer {
+                        question_id: question.id,
+                        title: question.title,
+                        text: decision.text,
+                    }),
+                    // Answered by someone else after the last check: the decision was
+                    // made for a question that no longer waits. It is dropped, not
+                    // counted as a user turn nor recorded as the user's answer.
+                    Ok(AnswerOutcome::AlreadyAnswered) => {
+                        lock(&observer.state).mark_answered(&question.id);
+                        continue;
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             _ => replay
                 .runtime
                 .continue_goal(root, decision.text.clone(), replay.chat.clone())
@@ -496,7 +570,11 @@ async fn converse(
         match sent {
             Ok(entry) => {
                 *user_turns += 1;
-                lock(&observer.state).conversation.push(entry);
+                let mut state = lock(&observer.state);
+                if let Entry::Answer { question_id, .. } = &entry {
+                    state.mark_answered(question_id);
+                }
+                state.conversation.push(entry);
             }
             Err(error) => {
                 return (

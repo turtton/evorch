@@ -65,6 +65,9 @@ pub enum StorageError {
     AssistantReferenceConflict,
     /// The reference does not exist or its approval was already consumed.
     AssistantReferenceUnavailable,
+    /// The question was already answered by someone else. Only reported to a caller that
+    /// asked to be the first to answer ([`crate::AnswerMode::FirstOnly`]).
+    QuestionAlreadyAnswered,
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -120,6 +123,7 @@ impl fmt::Display for StorageError {
                 formatter,
                 "assistant reference is missing or already consumed"
             ),
+            Self::QuestionAlreadyAnswered => write!(formatter, "question already answered"),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -150,6 +154,7 @@ impl std::error::Error for StorageError {
             | Self::InvalidRunLedgerBody { .. }
             | Self::AssistantReferenceConflict
             | Self::AssistantReferenceUnavailable
+            | Self::QuestionAlreadyAnswered
             | Self::SecretDetected { .. } => None,
         }
     }

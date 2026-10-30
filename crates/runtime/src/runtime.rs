@@ -17,7 +17,7 @@ mod project;
 mod questions;
 mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
-pub use questions::RunWait;
+pub use questions::{AnswerOutcome, RunWait};
 mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;

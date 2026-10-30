@@ -14,6 +14,13 @@ pub(crate) enum Step {
     },
     /// Never answers, as a provider that hangs would.
     Hang,
+    /// Holds the request until `release` is notified, after telling `entered` that it
+    /// arrived, and then answers with `then`. Lets a test act while a request is in flight.
+    Gated {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        then: Box<Step>,
+    },
 }
 
 pub(crate) fn text(text: &str) -> Step {
@@ -92,9 +99,19 @@ impl AgentModel for ScriptedModel {
         _: &[ToolSpec],
     ) -> Result<ChatResponse, RuntimeError> {
         self.requests.lock().unwrap().push(messages.to_vec());
-        let step = self.steps.lock().unwrap().pop_front();
+        let mut step = self.steps.lock().unwrap().pop_front();
+        if let Some(Step::Gated {
+            entered,
+            release,
+            then,
+        }) = step
+        {
+            entered.notify_one();
+            release.notified().await;
+            step = Some(*then);
+        }
         let (content, finish_reason) = match step {
-            Some(Step::Hang) => std::future::pending().await,
+            Some(Step::Hang | Step::Gated { .. }) => std::future::pending().await,
             Some(Step::Tool { name, input }) => (
                 vec![ContentBlock::ToolUse {
                     id: format!("call-{}", self.requests.lock().unwrap().len()),
@@ -124,6 +141,23 @@ impl AgentModel for ScriptedModel {
 
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "scripted".into()
+    }
+}
+
+/// Every request must send the previous one unchanged and then more: by message, and as the
+/// canonical serde representation of the messages. The bytes a provider receives are checked
+/// at the HTTP boundary in `tests/structured_retry_cache.rs`.
+pub(crate) fn assert_prefix_kept(requests: &[Vec<Message>]) {
+    let wire = |messages: &[Message]| serde_json::to_string(messages).unwrap();
+    for pair in requests.windows(2) {
+        assert!(pair[1].len() > pair[0].len(), "a retry only appends");
+        assert_eq!(pair[1][..pair[0].len()], pair[0][..]);
+        let previous = wire(&pair[0]);
+        let previous = previous.trim_end_matches(']');
+        assert!(
+            wire(&pair[1]).starts_with(previous),
+            "the sent bytes were changed by a retry"
+        );
     }
 }
 

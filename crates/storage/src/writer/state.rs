@@ -271,13 +271,13 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
-            Ok(Command::AnswerUserQuestion(id, answer, origin, reply)) => {
+            Ok(Command::AnswerUserQuestion(id, answer, origin, mode, reply)) => {
                 let result = if state.writes_suspended {
                     Err(StorageError::Serialization(
                         "question writes suspended by storage limit".into(),
                     ))
                 } else {
-                    crate::repo::user_questions::answer(&state.conn, &id, &answer, &origin)
+                    crate::repo::user_questions::answer(&state.conn, &id, &answer, &origin, mode)
                 };
                 let _ = reply.send(result);
             }
@@ -397,12 +397,12 @@ pub(super) fn run_writer_with_index(
                 };
                 let _ = reply.send(result);
             }
-            Ok(Command::AnswerUserQuestionWithEvidence(id, answer, origin, rows, reply)) => {
+            Ok(Command::AnswerUserQuestionWithEvidence(id, answer, origin, rows, mode, reply)) => {
                 let result = review_transaction(&state, |conn| {
                     // Plan A: the answer's checked UPDATE is the first-answer-wins
                     // fence. Evidence shares this transaction; recipient-specific
                     // UPDATEs are unnecessary (runtime reflection uses synced/resync).
-                    crate::repo::user_questions::answer(conn, &id, &answer, &origin)?;
+                    crate::repo::user_questions::answer(conn, &id, &answer, &origin, mode)?;
                     crate::repo::review_evidence::insert(conn, &rows)
                 });
                 let _ = reply.send(result);

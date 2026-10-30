@@ -1,6 +1,6 @@
 //! Atomic host answers through the additive writer command.
 use event_bus::{AnswerOrigin, UserQuestion};
-use storage::{Database, ReviewEvidenceRow, Storage, StorageConfig, StorageError};
+use storage::{AnswerMode, Database, ReviewEvidenceRow, Storage, StorageConfig, StorageError};
 
 fn question() -> UserQuestion {
     UserQuestion {
@@ -159,4 +159,71 @@ fn concurrent_answers_commit_only_the_winners_evidence() {
     let rows = db.review_evidence_for_target("run-1").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].text, winner);
+}
+
+#[test]
+fn simultaneous_first_only_answers_with_the_same_text_commit_one_evidence_row() {
+    // Given: a pending question and several answerers that all give the same answer
+    // text with evidence rows of their own, released together by a barrier.
+    const ANSWERERS: usize = 4;
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("first-only.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    storage.handle().create_user_question(&question()).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(ANSWERERS));
+
+    // When: each answerer stores "yes" first-only.
+    let results: Vec<(String, Result<(), StorageError>)> = (0..ANSWERERS)
+        .map(|index| {
+            let handle = storage.handle();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut row = evidence();
+                row.id = format!("evidence-{index}");
+                barrier.wait();
+                let result = handle.answer_user_question_with_evidence_and_mode(
+                    &question().id,
+                    "yes",
+                    &AnswerOrigin::Host,
+                    &[row.clone()],
+                    AnswerMode::FirstOnly,
+                );
+                (row.id, result)
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+
+    // Then: one answerer succeeded, every other was told the question was already
+    // answered, and only the winner's evidence row was stored.
+    let winners: Vec<_> = results
+        .iter()
+        .filter(|(_, result)| result.is_ok())
+        .collect();
+    assert_eq!(winners.len(), 1, "{results:?}");
+    for (id, result) in &results {
+        if id != &winners[0].0 {
+            assert!(
+                matches!(result, Err(StorageError::QuestionAlreadyAnswered)),
+                "{id}: {result:?}"
+            );
+        }
+    }
+    let db = Database::open(&config).unwrap();
+    assert_eq!(
+        db.user_question(&question().id)
+            .unwrap()
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("yes")
+    );
+    let rows = db.review_evidence_for_target("run-1").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].id, winners[0].0);
 }
