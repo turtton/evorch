@@ -80,6 +80,52 @@ impl CompressionSample {
     }
 }
 
+/// Keep only the first 1,000 surviving IDs, even when delta groups are emitted
+/// out of order. Store lengths, not payloads, so sampling cannot retain 1,000
+/// arbitrarily large historical tool results.
+#[derive(Default)]
+pub(super) struct EventSample {
+    summary: CompressionSample,
+    lengths: BTreeMap<i64, (usize, usize)>,
+}
+
+impl EventSample {
+    pub(super) fn record(
+        &mut self,
+        id: i64,
+        plain_bytes: usize,
+        stored_bytes: impl FnOnce() -> usize,
+    ) {
+        if plain_bytes < codec::MIN_COMPRESSED_BYTES {
+            return;
+        }
+        self.summary.eligible_values += 1;
+        self.summary.eligible_bytes += plain_bytes as u64;
+        if self.lengths.len() < 1_000
+            || self
+                .lengths
+                .last_key_value()
+                .is_some_and(|(last, _)| id < *last)
+        {
+            self.lengths.insert(id, (plain_bytes, stored_bytes()));
+            if self.lengths.len() > 1_000 {
+                self.lengths.pop_last();
+            }
+        }
+    }
+
+    fn finish(mut self) -> CompressionSample {
+        for (_, (plain, stored)) in self.lengths {
+            self.summary.sampled_values += 1;
+            self.summary.sampled_plain_bytes += plain as u64;
+            self.summary.sampled_stored_bytes += stored as u64;
+            self.summary.sampled_compressed_values += u64::from(stored < plain);
+        }
+        self.summary.finish();
+        self.summary
+    }
+}
+
 pub(super) fn subkind(column: Option<String>, payload: ValueRef<'_>) -> String {
     column.unwrap_or_else(|| {
         codec::decode(payload)
@@ -147,14 +193,16 @@ pub(super) fn subtract_deleted(counts: &mut BTreeMap<String, EventCount>, stage:
 pub(super) fn compress_events(
     conn: &Connection,
     options: &CompactOptions,
+    preview_deltas: Option<EventSample>,
 ) -> Result<(CompressionSample, u64), StorageError> {
-    let mut sample = CompressionSample::default();
+    let virtual_deltas = preview_deltas.is_some();
+    let mut sample = preview_deltas.unwrap_or_default();
     let mut converted = 0;
     let mut after = i64::MIN;
     loop {
         let batch = {
             let mut stmt = conn.prepare(
-                "SELECT id,kind,subkind,payload FROM events WHERE id>?1
+                "SELECT id,kind,subkind,payload,session_id FROM events WHERE id>?1
                  AND kind IN ('Tool','Message','compaction') AND typeof(payload)='text'
                  AND OCTET_LENGTH(payload)>=2048 ORDER BY id LIMIT ?2",
             )?;
@@ -169,6 +217,7 @@ pub(super) fn compress_events(
                     row.get::<_, String>(1)?,
                     subkind(row.get(2)?, row.get_ref(3)?),
                     payload,
+                    row.get::<_, Option<String>>(4)?,
                 ));
                 if batch_bytes >= 16 * 1024 * 1024 {
                     break;
@@ -183,24 +232,48 @@ pub(super) fn compress_events(
             .apply
             .then(|| conn.unchecked_transaction())
             .transpose()?;
-        for (id, kind, subkind, payload) in batch {
+        for (id, kind, subkind, payload, session) in batch {
             after = id;
-            // Use the exact writer policy, not a parallel allowlist.
-            let should_sample = sample.sampled_values < 1_000;
-            let encoded =
-                (options.apply || should_sample).then(|| encode_payload(&kind, &subkind, &payload));
+            // Preview's planner already supplied the surviving deltas, including
+            // aggregates that were too small to qualify in the original store.
+            // Invalid historical payloads remain untouched and must still count.
+            if virtual_deltas
+                && kind == "Message"
+                && matches!(
+                    serde_json::from_str::<event_bus::EventKind>(&payload),
+                    Ok(event_bus::EventKind::Message(
+                        event_bus::MessageEvent::MessageDelta { .. }
+                            | event_bus::MessageEvent::ReasoningDelta { .. }
+                    ))
+                )
+            {
+                continue;
+            }
             let eligible = crate::repo::event::compressible_payload(&kind, &subkind);
             if !eligible {
                 continue;
             }
-            sample.add(
-                payload.len(),
-                should_sample.then(|| encoded.as_ref().unwrap().stored_len()),
-            );
+            // Use the exact writer policy, not a parallel allowlist.
+            let encoded = options
+                .apply
+                .then(|| encode_payload(&kind, &subkind, &payload));
+            sample.record(id, payload.len(), || {
+                encoded.as_ref().map_or_else(
+                    || encode_payload(&kind, &subkind, &payload).stored_len(),
+                    codec::Encoded::stored_len,
+                )
+            });
             if let (Some(tx), Some(codec::Encoded::Compressed(_))) = (&tx, &encoded) {
+                let encoded = encoded.as_ref().unwrap();
                 tx.execute(
                     "UPDATE events SET payload=?2 WHERE id=?1",
-                    params![id, encoded.as_ref().unwrap()],
+                    params![id, encoded],
+                )?;
+                super::adjust_session_bytes(
+                    tx,
+                    session.as_deref(),
+                    payload.len() as u64,
+                    encoded.stored_len() as u64,
                 )?;
                 converted += 1;
             }
@@ -210,8 +283,7 @@ pub(super) fn compress_events(
             checkpoint(conn)?;
         }
     }
-    sample.finish();
-    Ok((sample, converted))
+    Ok((sample.finish(), converted))
 }
 
 pub(super) fn compress_contexts(

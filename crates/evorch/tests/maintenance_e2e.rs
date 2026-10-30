@@ -65,6 +65,8 @@ fn compact_and_online_backfill_have_separate_safety_options() {
         "saved.db",
         "--batch-rows",
         "17",
+        "--sidebar",
+        "saved-sidebar.json",
     ])
     .unwrap();
     let options = args.compact.unwrap();
@@ -72,6 +74,7 @@ fn compact_and_online_backfill_have_separate_safety_options() {
     assert_eq!(options.delta_mode, DeltaMode::Delete);
     assert_eq!(options.provider_retention_days, 0);
     assert_eq!(options.batch_rows, 17);
+    assert_eq!(options.sidebar, Some("saved-sidebar.json".into()));
     let args = parse(&[
         "maintenance",
         "backfill-events",
@@ -96,6 +99,7 @@ fn compact_and_online_backfill_have_separate_safety_options() {
         vec!["compact-events", "--provider-retention-days", "-1"],
         vec!["backfill-events", "--apply"],
         vec!["backfill-events", "--backup", "saved.db"],
+        vec!["backfill-events", "--sidebar", "sidebar.json"],
         vec!["backfill-events", "--batch-rows", "0"],
         vec!["backfill-events", "--batch-rows", "100001"],
         vec!["backfill-events", "--db", "a", "--db", "b"],

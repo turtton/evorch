@@ -356,3 +356,117 @@ fn sidebar_saved_before_delivery_states_replays_messages_as_sent() {
     assert!(gui.has_label("You: from an older version"));
     assert!(!gui.has_label("Not delivered: from an older version"));
 }
+
+#[test]
+fn offline_compaction_preserves_legacy_sidebar_input_between_root_deltas() {
+    use event_bus::{Event, LifecycleEvent, MessageEvent};
+    use std::time::{Duration, UNIX_EPOCH};
+    use storage::maintenance::{CompactOptions, compact_events};
+
+    for reasoning in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = state(temp.path(), &FakeRuntime::default());
+        original.save_sidebar();
+        drop(original);
+        let sidebar = temp.path().join("sidebar.json");
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&sidebar).unwrap()).unwrap();
+        saved["user_messages"] = serde_json::json!([{
+            "thread_id": "thread", "text": "legacy input",
+            "at": {"secs_since_epoch": 150, "nanos_since_epoch": 0}
+        }]);
+        let sidebar_bytes = serde_json::to_vec(&saved).unwrap();
+        std::fs::write(&sidebar, &sidebar_bytes).unwrap();
+        let path = temp.path().join("events.db");
+        let storage = Storage::open(StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut started = Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "root".into(),
+            parent_run_id: None,
+            agent_name: "chat:thread".into(),
+            role: "orchestrator".into(),
+        });
+        started.meta.wall_clock = UNIX_EPOCH + Duration::from_secs(99);
+        storage.handle().append_event(None, &started).unwrap();
+        for (at, text) in [
+            (100, "before "),
+            (110, "input"),
+            (200, "after "),
+            (210, "input"),
+        ] {
+            let mut event = Event::new(if reasoning {
+                MessageEvent::ReasoningDelta {
+                    run_id: Some("root".into()),
+                    delta: text.into(),
+                }
+            } else {
+                MessageEvent::MessageDelta {
+                    run_id: Some("root".into()),
+                    delta: text.into(),
+                }
+            });
+            event.meta.wall_clock = UNIX_EPOCH + Duration::from_secs(at);
+            storage.handle().append_event(None, &event).unwrap();
+        }
+        storage.close();
+        let restored = reopen(temp.path());
+        let before_thread = restored.state().transcripts().thread().entries().to_vec();
+        let before_run = restored
+            .state()
+            .transcripts()
+            .run("root")
+            .unwrap()
+            .entries()
+            .to_vec();
+        let visible: Vec<_> = before_thread
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Reasoning { text, .. } | TranscriptEntry::Message { text, .. } => {
+                    Some(text.as_str())
+                }
+                TranscriptEntry::UserMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible, ["before input", "legacy input", "after input"]);
+        drop(restored);
+        let options = CompactOptions {
+            sidebar: Some(sidebar.clone()),
+            provider_retention_days: 0,
+            batch_rows: 2,
+            ..Default::default()
+        };
+        let preview = compact_events(&path, &options).unwrap();
+        assert!(preview.delta_aggregation_enabled);
+        assert_eq!(preview.sidebar_boundary_count, 1);
+        for _ in 0..2 {
+            let result = compact_events(
+                &path,
+                &CompactOptions {
+                    apply: true,
+                    ..options.clone()
+                },
+            )
+            .unwrap();
+            assert_eq!(preview.projected_event_rows, result.projected_event_rows);
+            let restored = reopen(temp.path());
+            assert_eq!(
+                before_thread,
+                restored.state().transcripts().thread().entries()
+            );
+            assert_eq!(
+                before_run,
+                restored
+                    .state()
+                    .transcripts()
+                    .run("root")
+                    .unwrap()
+                    .entries()
+            );
+            assert_eq!(sidebar_bytes, std::fs::read(&sidebar).unwrap());
+        }
+    }
+}

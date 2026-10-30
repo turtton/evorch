@@ -10,7 +10,7 @@ use storage::maintenance::{
 
 pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   compact-events [--apply] [--backup <new-path>] [--batch-rows <1..100000>]
-                 [--provider-retention-days <N>] [--delta-mode <preserve|delete>]
+                 [--provider-retention-days <N>] [--delta-mode <preserve|delete>] [--sidebar <path>]
   backfill-events [--batch-rows <1..100000>] [--max-rows <N>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
@@ -20,6 +20,7 @@ Other commands: default read-only preview. Stop ALL evorch GUI/runtime processes
 Preview requires an existing maintenance lease and a checkpointed DB (no nonempty WAL).
 compact-events --apply: mandatory verified backup, restartable batches, accounting repair, VACUUM.
 Default preserves message/reasoning display anchors; existing single oversized rows are reported, not split.
+--sidebar defaults to the GUI's <user-config-dir>/sidebar.json. Unreadable/missing/invalid sidebar disables delta aggregation with a warning.
 --delta-mode delete opts into deleting ALL message/reasoning deltas, including incomplete text.
 --provider-retention-days defaults to 90; 0 disables it. RequestStarted is always retained.
 Apply creates a backup, commits bounded batches, then full VACUUM and WAL TRUNCATE.
@@ -64,6 +65,9 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
             "--apply" if args.compact.is_some() => args.compact.as_mut().unwrap().apply = true,
             "--backup" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--sidebar" if args.compact.is_some() => {
+                args.compact.as_mut().unwrap().sidebar = Some(argv.next().ok_or(USAGE)?.into());
             }
             "--batch-rows" if args.compact.is_some() || args.backfill.is_some() => {
                 let n: usize = argv
@@ -132,7 +136,10 @@ pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
             .map(|summary| json!(summary))
             .map_err(|error| error.to_string());
     }
-    if let Some(options) = args.compact {
+    if let Some(mut options) = args.compact {
+        if options.sidebar.is_none() {
+            options.sidebar = config::user_config_dir().map(|dir| dir.join("sidebar.json"));
+        }
         if options.delta_mode == DeltaMode::Delete {
             eprintln!(
                 "WARNING: --delta-mode delete removes reasoning display and incomplete message text. Completed messages remain. This is irreversible without restoring the backup."

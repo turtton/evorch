@@ -46,6 +46,3 @@ pub use usage::{BucketKey, UsageAggregator, UsageBucket, UsageSink};
 pub fn escalation_thread_id(new_run_id: &str) -> String {
     format!("escalation-{new_run_id}")
 }
-
-mod run_order;
-pub use run_order::event_runs;

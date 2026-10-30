@@ -33,13 +33,16 @@ fn replay(path: &Path) -> BTreeMap<String, Vec<TranscriptEntry>> {
     .unwrap();
     let mut parts = MessagePartAssembler::new();
     let mut transcripts = TranscriptRegistry::new();
+    transcripts.bind_thread_root("thread", "a");
+    transcripts.bind_run("b", "thread");
+    transcripts.select_thread(Some("thread".into()));
     db.for_each_event_ordered(|stored| {
         if let Some(event) = parts.accept(&stored.event) {
             transcripts.apply(&event);
         }
     })
     .unwrap();
-    transcripts
+    let mut result: BTreeMap<_, _> = transcripts
         .run_ids()
         .map(|run| {
             (
@@ -47,10 +50,71 @@ fn replay(path: &Path) -> BTreeMap<String, Vec<TranscriptEntry>> {
                 transcripts.run(run).unwrap().entries().to_vec(),
             )
         })
-        .collect()
+        .collect();
+    result.insert("__thread__".into(), transcripts.thread().entries().to_vec());
+    result
+}
+
+fn empty_sidebar(path: &Path) {
+    std::fs::write(
+        path.parent().unwrap().join("sidebar.json"),
+        br#"{"user_messages":[]}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn child_terminal_notification_is_a_root_delta_boundary_in_both_run_and_thread() {
+    for reasoning in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        empty_sidebar(&path);
+        let storage = Storage::open(StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        for event in [
+            message("a", "before ", reasoning),
+            message("a", "child ", reasoning),
+            Event::new(event_bus::LifecycleEvent::AgentRunStateChanged {
+                run_id: "b".into(),
+                from: event_bus::AgentRunPhase::Running,
+                to: event_bus::AgentRunPhase::Done,
+                reason: None,
+            }),
+            message("a", "after ", reasoning),
+            message("a", "notification", reasoning),
+        ] {
+            storage.handle().append_event(None, &event).unwrap();
+        }
+        storage.close();
+        let before = replay(&path);
+        assert!(before.contains_key("a") && before.contains_key("b"));
+        assert!(before["__thread__"].len() >= 3);
+        let options = CompactOptions {
+            batch_rows: 2,
+            provider_retention_days: 0,
+            ..Default::default()
+        };
+        let preview = compact_events(&path, &options).unwrap();
+        for _ in 0..2 {
+            let result = compact_events(
+                &path,
+                &CompactOptions {
+                    apply: true,
+                    ..options.clone()
+                },
+            )
+            .unwrap();
+            assert_eq!(before, replay(&path), "reasoning={reasoning}");
+            assert_eq!(preview.projected_event_rows, result.projected_event_rows);
+        }
+    }
 }
 
 fn seed(path: &Path) {
+    empty_sidebar(path);
     let storage = Storage::open(StorageConfig {
         db_path: path.into(),
         ..Default::default()

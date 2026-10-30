@@ -7,6 +7,10 @@ use super::*;
 use crate::{StorageConfig, codec};
 
 fn seed(path: &Path) -> Database {
+    let sidebar = path.parent().unwrap().join("sidebar.json");
+    if !sidebar.exists() {
+        fs::write(sidebar, br#"{"user_messages":[]}"#).unwrap();
+    }
     let db = Database::open(&StorageConfig {
         db_path: path.into(),
         ..Default::default()
@@ -14,6 +18,48 @@ fn seed(path: &Path) -> Database {
     .unwrap();
     drop(offline::writer_lease(path).unwrap());
     db
+}
+
+#[test]
+fn unavailable_sidebar_disables_aggregation_but_not_other_compaction_stages() {
+    for saved in [
+        None,
+        Some("not json"),
+        Some("[]"),
+        Some(r#"{"user_messages":[{}]}"#),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let db = seed(&path);
+        insert(&db, delta("a", "one "), false);
+        insert(&db, delta("a", "two"), false);
+        drop(db);
+        let sidebar = dir.path().join("sidebar.json");
+        if let Some(saved) = saved {
+            fs::write(&sidebar, saved).unwrap();
+        } else {
+            fs::remove_file(&sidebar).unwrap();
+        }
+        let source = fs::read(&path).unwrap();
+        let preview = compact_events(&path, &options()).unwrap();
+        assert!(!preview.delta_aggregation_enabled);
+        assert_eq!(preview.warnings.len(), 1);
+        assert_eq!(source, fs::read(&path).unwrap());
+        let result = compact_events(
+            &path,
+            &CompactOptions {
+                apply: true,
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.reasoning_deltas.input_rows,
+            result.reasoning_deltas.output_rows
+        );
+        assert_eq!(preview.projected_event_rows, result.projected_event_rows);
+        assert_eq!(result.integrity_check.as_deref(), Some("ok"));
+    }
 }
 
 fn insert(db: &Database, event: Event, legacy: bool) {
@@ -183,6 +229,12 @@ fn escaped_utf8_chunks_reuse_first_ids_and_existing_oversize_row_is_reported() {
 #[test]
 fn failed_group_rolls_back_but_prior_groups_survive_and_retry_finishes() {
     let db = Database::open_in_memory().unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO sessions(id,status,created_at_ns,updated_at_ns) VALUES('s','running',0,0)",
+            [],
+        )
+        .unwrap();
     for run in ["a", "b"] {
         insert(&db, delta(run, "first"), false);
         insert(&db, delta(run, "second"), false);
@@ -195,6 +247,10 @@ fn failed_group_rolls_back_but_prior_groups_survive_and_retry_finishes() {
             false,
         );
     }
+    db.conn
+        .execute("UPDATE events SET session_id='s'", [])
+        .unwrap();
+    recalculate_accounting(&db.conn).unwrap();
     db.conn
         .execute_batch(
             "CREATE TRIGGER injected_failure BEFORE UPDATE OF payload ON events
@@ -216,11 +272,194 @@ fn failed_group_rolls_back_but_prior_groups_survive_and_retry_finishes() {
             .unwrap()
     };
     assert_eq!((count("a"), count("b")), (1, 2));
+    assert_accounting(&db.conn);
     db.conn
         .execute_batch("DROP TRIGGER injected_failure")
         .unwrap();
     deltas::compact(&db.conn, &options, true, None).unwrap();
     assert_eq!((count("a"), count("b")), (1, 1));
+    assert_accounting(&db.conn);
+}
+
+fn assert_accounting(conn: &Connection) {
+    for (actual, expected) in [
+        (
+            "SELECT total_event_bytes FROM sessions WHERE id='s'",
+            "SELECT COALESCE(SUM(OCTET_LENGTH(payload)),0) FROM events WHERE session_id='s'",
+        ),
+        (
+            "SELECT COALESCE(SUM(payload_bytes),0) FROM event_session_bytes",
+            "SELECT COALESCE(SUM(OCTET_LENGTH(payload)),0) FROM events WHERE session_id IS NOT NULL",
+        ),
+        (
+            "SELECT COALESCE(SUM(payload_bytes),0) FROM event_day_bytes",
+            "SELECT COALESCE(SUM(OCTET_LENGTH(payload)),0) FROM events",
+        ),
+    ] {
+        let read = |sql| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(read(actual), read(expected), "{actual}");
+    }
+}
+
+#[test]
+fn failed_later_batch_keeps_all_accounting_consistent_for_each_rewrite() {
+    for action in ["noise", "provider", "delete", "compress"] {
+        let db = Database::open_in_memory().unwrap();
+        db.conn.execute("INSERT INTO sessions(id,status,created_at_ns,updated_at_ns) VALUES('s','running',0,0)", []).unwrap();
+        for _ in 0..2 {
+            insert(&db, delta("a", &"body ".repeat(1000)), false);
+        }
+        db.conn
+            .execute("UPDATE events SET session_id='s'", [])
+            .unwrap();
+        if let Some((kind, subkind)) = match action {
+            "noise" => Some(("Fault", "SubscriberLagged")),
+            "provider" => Some(("Provider", "RequestCompleted")),
+            "compress" => Some(("Message", "MessageCompleted")),
+            _ => None,
+        } {
+            db.conn
+                .execute(
+                    "UPDATE events SET kind=?1,subkind=?2",
+                    params![kind, subkind],
+                )
+                .unwrap();
+        }
+        recalculate_accounting(&db.conn).unwrap();
+        let operation = if action == "compress" {
+            "UPDATE OF payload"
+        } else {
+            "DELETE"
+        };
+        db.conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER injected_failure BEFORE {operation} ON events
+             WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'injected interruption'); END;"
+            ))
+            .unwrap();
+        let options = CompactOptions {
+            apply: true,
+            batch_rows: 1,
+            delta_mode: DeltaMode::Delete,
+            ..options()
+        };
+        let apply = || match action {
+            "noise" => delete_matching(&db.conn, &options, None).map(|_| ()),
+            "provider" => delete_matching(&db.conn, &options, Some(1)).map(|_| ()),
+            "delete" => deltas::compact(&db.conn, &options, true, None).map(|_| ()),
+            "compress" => statistics::compress_events(&db.conn, &options, None).map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(apply().is_err(), "{action}");
+        assert_accounting(&db.conn);
+        let committed: bool = db
+            .conn
+            .query_row(
+                if action == "compress" {
+                    "SELECT typeof(payload)='blob' FROM events WHERE id=1"
+                } else {
+                    "SELECT NOT EXISTS(SELECT 1 FROM events WHERE id=1)"
+                },
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(committed, "{action}");
+        db.conn
+            .execute_batch("DROP TRIGGER injected_failure")
+            .unwrap();
+        apply().unwrap();
+        assert_accounting(&db.conn);
+    }
+}
+
+#[test]
+fn preview_samples_surviving_aggregates_that_cross_the_compression_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = seed(&path);
+    for reasoning in [false, true] {
+        for _ in 0..5 {
+            let body = "考え".repeat(100);
+            let event = if reasoning {
+                delta("a", &body)
+            } else {
+                Event::new(MessageEvent::MessageDelta {
+                    run_id: Some("a".into()),
+                    delta: body,
+                })
+            };
+            assert!(
+                serde_json::to_string(&event.kind).unwrap().len() < codec::MIN_COMPRESSED_BYTES
+            );
+            insert(&db, event, true);
+        }
+    }
+    drop(db);
+    let source = fs::read(&path).unwrap();
+    let preview = compact_events(&path, &options()).unwrap();
+    assert_eq!(preview.event_compression.eligible_values, 2);
+    assert_eq!(preview.event_compression.sampled_values, 2);
+    assert_eq!(preview.event_compression.estimated_compressed_values, 2);
+    assert_eq!(source, fs::read(&path).unwrap());
+    let result = compact_events(
+        &path,
+        &CompactOptions {
+            apply: true,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.compressed_event_rows, 2);
+    assert_eq!(
+        serde_json::to_value(preview.event_compression).unwrap(),
+        serde_json::to_value(result.event_compression).unwrap(),
+    );
+}
+
+#[test]
+fn preview_delete_mode_does_not_sample_deltas_that_will_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = seed(&path);
+    let body = "large content ".repeat(1000);
+    for event in [
+        delta("a", &body),
+        Event::new(MessageEvent::MessageDelta {
+            run_id: Some("a".into()),
+            delta: body.clone(),
+        }),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: "a".into(),
+            text: body,
+        }),
+    ] {
+        insert(&db, event, true);
+    }
+    drop(db);
+    let source = fs::read(&path).unwrap();
+    let options = CompactOptions {
+        delta_mode: DeltaMode::Delete,
+        ..options()
+    };
+    let preview = compact_events(&path, &options).unwrap();
+    assert_eq!(preview.event_compression.eligible_values, 1);
+    assert_eq!(preview.event_compression.estimated_compressed_values, 1);
+    assert_eq!(source, fs::read(&path).unwrap());
+    let result = compact_events(
+        &path,
+        &CompactOptions {
+            apply: true,
+            ..options
+        },
+    )
+    .unwrap();
+    assert_eq!(result.compressed_event_rows, 1);
+    assert_eq!(preview.projected_event_rows, result.projected_event_rows);
+    assert_eq!(
+        serde_json::to_value(preview.event_compression).unwrap(),
+        serde_json::to_value(result.event_compression).unwrap(),
+    );
 }
 
 #[test]
@@ -277,7 +516,7 @@ fn leases_nonempty_wal_existing_backup_and_sqlite_reader_refuse_without_payload_
 }
 
 #[test]
-fn compression_uses_writer_policy_mixed_contexts_and_recomputes_accounting() {
+fn compression_uses_writer_policy_and_recomputes_accounting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("events.db");
     let db = seed(&path);
@@ -304,18 +543,6 @@ fn compression_uses_writer_policy_mixed_contexts_and_recomputes_accounting() {
             params![kind, subkind, body],
         ).unwrap();
     }
-    for (run, compressed) in [("plain", false), ("blob", true)] {
-        let encoded = if compressed {
-            codec::encode(&body)
-        } else {
-            codec::Encoded::Plain(&body)
-        };
-        db.conn.execute(
-            "INSERT INTO run_contexts(run_id,role,name,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,messages_len,checkpoints_len)
-             VALUES(?1,'Worker','test','{}',?2,'[]','Done',0,0,?3,2)",
-            params![run, encoded, body.len() as i64],
-        ).unwrap();
-    }
     db.conn
         .execute("UPDATE events SET session_id='s'", [])
         .unwrap();
@@ -329,7 +556,6 @@ fn compression_uses_writer_policy_mixed_contexts_and_recomputes_accounting() {
     )
     .unwrap();
     assert_eq!(summary.compressed_event_rows, 3);
-    assert_eq!(summary.compressed_context_values, 1);
     let db = seed(&path);
     let sum: i64 = db
         .conn
@@ -380,20 +606,6 @@ fn compression_uses_writer_policy_mixed_contexts_and_recomputes_accounting() {
     );
     let mut stmt = db
         .conn
-        .prepare("SELECT messages_json,messages_len FROM run_contexts")
-        .unwrap();
-    for row in stmt
-        .query_map([], |row| {
-            Ok((codec::text_column(row, 0)?, row.get::<_, usize>(1)?))
-        })
-        .unwrap()
-    {
-        let (decoded, len) = row.unwrap();
-        assert_eq!(decoded, body);
-        assert_eq!(len, body.len());
-    }
-    let mut stmt = db
-        .conn
         .prepare("SELECT kind,subkind,typeof(payload) FROM events ORDER BY id")
         .unwrap();
     let types = stmt
@@ -412,6 +624,94 @@ fn compression_uses_writer_policy_mixed_contexts_and_recomputes_accounting() {
             ty == "blob",
             crate::repo::event::compressible_payload(&kind, &subkind)
         );
+    }
+}
+
+#[test]
+fn public_context_reader_round_trips_valid_messages_and_large_checkpoints_in_mixed_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = seed(&path);
+    let message = providers::Message {
+        role: providers::Role::User,
+        content: vec![providers::ContentBlock::Text {
+            text: "保持する本文🙂".repeat(1000),
+        }],
+    };
+    let messages = serde_json::to_string(&vec![&message]).unwrap();
+    let checkpoints = serde_json::json!([{
+        "id": "checkpoint", "summary": message, "range": [0,1]
+    }])
+    .to_string();
+    let runs = ["plain", "blob", "mixed"];
+    for run in runs {
+        let messages_value = if run == "blob" {
+            codec::encode(&messages)
+        } else {
+            codec::Encoded::Plain(&messages)
+        };
+        let checkpoints_value = if run == "plain" {
+            codec::Encoded::Plain(&checkpoints)
+        } else {
+            codec::encode(&checkpoints)
+        };
+        db.conn.execute(
+            "INSERT INTO run_contexts(run_id,role,name,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,messages_len,checkpoints_len)
+             VALUES(?1,'Worker','context','{}',?2,?3,'Done',1,42,?4,?5)",
+            params![run, messages_value, checkpoints_value, messages.len() as i64, checkpoints.len() as i64],
+        ).unwrap();
+    }
+    let before: Vec<_> = runs
+        .iter()
+        .map(|run| db.run_context(run).unwrap().unwrap())
+        .collect();
+    for record in &before {
+        assert_eq!(
+            serde_json::from_str::<Vec<providers::Message>>(&record.messages_json).unwrap(),
+            vec![message.clone()]
+        );
+        let checkpoint: serde_json::Value = serde_json::from_str(&record.checkpoints_json).unwrap();
+        assert_eq!(
+            checkpoint[0]["summary"],
+            serde_json::to_value(&message).unwrap()
+        );
+    }
+    drop(db);
+    let preview = compact_events(&path, &options()).unwrap();
+    assert_eq!(preview.context_compression.eligible_values, 3);
+    for iteration in 0..2 {
+        let result = compact_events(
+            &path,
+            &CompactOptions {
+                apply: true,
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.compressed_context_values,
+            if iteration == 0 { 3 } else { 0 }
+        );
+        let db = seed(&path);
+        let after: Vec<_> = runs
+            .iter()
+            .map(|run| db.run_context(run).unwrap().unwrap())
+            .collect();
+        assert_eq!(before, after);
+        for run in runs {
+            let (messages_len, checkpoints_len): (usize, usize) = db
+                .conn
+                .query_row(
+                    "SELECT messages_len,checkpoints_len FROM run_contexts WHERE run_id=?1",
+                    [run],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (messages_len, checkpoints_len),
+                (messages.len(), checkpoints.len())
+            );
+        }
     }
 }
 
@@ -658,7 +958,7 @@ fn preview_compression_samples_at_most_one_thousand_values_without_rewriting_the
         ).unwrap();
     }
     tx.commit().unwrap();
-    let (events, converted) = statistics::compress_events(&db.conn, &options()).unwrap();
+    let (events, converted) = statistics::compress_events(&db.conn, &options(), None).unwrap();
     assert_eq!(converted, 0);
     assert_eq!(
         (events.eligible_values, events.sampled_values),
