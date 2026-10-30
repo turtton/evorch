@@ -1547,3 +1547,697 @@ fn batches_are_bounded_and_nonempty() {
         );
     }
 }
+
+// ---- Bounded keyset scan (`conversation_scan_chunk`) ----
+
+const ALL_KINDS: &[IndexBlockKind] = &[
+    IndexBlockKind::Text,
+    IndexBlockKind::ToolUse,
+    IndexBlockKind::ToolResult,
+    IndexBlockKind::ToolError,
+];
+const KIND_NAMES: [&str; 4] = ["text", "tool_use", "tool_result", "tool_error"];
+const NO_BYTE_LIMIT: usize = usize::MAX;
+
+fn names(runs: &[&str]) -> Vec<String> {
+    runs.iter().map(|run| (*run).to_owned()).collect()
+}
+
+fn limits(max_blocks: usize, max_bytes: usize) -> ScanLimits {
+    ScanLimits {
+        max_blocks,
+        max_bytes,
+    }
+}
+
+fn chunk(
+    db: &Database,
+    runs: &[String],
+    kinds: &[IndexBlockKind],
+    after: Option<CandidatePosition>,
+    limits: ScanLimits,
+) -> ScanChunk {
+    db.conversation_scan_chunk(&ConversationScan { runs, kinds, after }, limits)
+        .unwrap()
+}
+
+/// Drain a scan chunk by chunk, checking each chunk's stop contract. Returns
+/// the blocks and the number of chunks. Ends on the `exhausted` signal only.
+fn drain(
+    db: &Database,
+    runs: &[String],
+    kinds: &[IndexBlockKind],
+    limits: ScanLimits,
+) -> (Vec<ConversationCandidate>, usize) {
+    let mut blocks = Vec::new();
+    let mut after = None;
+    let mut chunks = 0;
+    loop {
+        let next = chunk(db, runs, kinds, after, limits);
+        chunks += 1;
+        assert!(next.blocks.len() <= limits.max_blocks);
+        assert_eq!(
+            next.scanned_bytes,
+            next.blocks.iter().map(|b| b.text.len()).sum::<usize>()
+        );
+        if next.exhausted {
+            // Ran out of rows strictly before either limit was reached.
+            assert!(next.blocks.len() < limits.max_blocks, "{limits:?}");
+            assert!(next.scanned_bytes < limits.max_bytes, "{limits:?}");
+        } else {
+            // Stopped at a limit, and only on the row that reached it.
+            let last = next.blocks.last().unwrap();
+            let before = next.scanned_bytes - last.text.len();
+            assert!(
+                next.blocks.len() == limits.max_blocks || next.scanned_bytes >= limits.max_bytes,
+                "{limits:?}"
+            );
+            assert!(before < limits.max_bytes, "{limits:?}");
+        }
+        after = next.blocks.last().map(|b| b.position).or(after);
+        blocks.extend(next.blocks);
+        if next.exhausted {
+            return (blocks, chunks);
+        }
+    }
+}
+
+fn all_candidates(
+    db: &Database,
+    runs: &[String],
+    kinds: &[IndexBlockKind],
+) -> Vec<ConversationCandidate> {
+    db.conversation_candidates(&ConversationQuery {
+        runs,
+        kinds,
+        filter: &ConversationFilter::All,
+        after: None,
+        limit: MAX_SEARCH_PAGE_ROWS,
+    })
+    .unwrap()
+}
+
+/// Runs with the four kinds interleaved by id, text of varying length.
+fn interleaved_fixture(db: &Database, runs: &[&str], per_run: usize) {
+    for run in runs {
+        indexed(db, run);
+    }
+    for ordinal in 0..per_run {
+        for (index, run) in runs.iter().enumerate() {
+            let kind = KIND_NAMES[(ordinal + index) % KIND_NAMES.len()];
+            let text = "x".repeat(1 + (ordinal * 7 + index * 3) % 23);
+            block(db, run, ordinal, kind, &text);
+        }
+    }
+}
+
+#[test]
+fn scan_chunks_drain_to_exactly_the_unfiltered_candidates_in_order() {
+    let db = db();
+    let names_ = ["r0", "r1", "r2", "r3"];
+    interleaved_fixture(&db, &names_, 60);
+    // A duplicate run keeps its own seq, and an interleaved hidden run must
+    // not appear.
+    indexed(&db, "hidden");
+    block(&db, "hidden", 0, "text", "hidden");
+    let runs = names(&["r2", "r0", "r3", "r2", "r1"]);
+    let expected = all_candidates(&db, &runs, ALL_KINDS);
+    assert_eq!(expected.len(), 5 * 60);
+    let total: usize = expected.iter().map(|b| b.text.len()).sum();
+    for (max_blocks, max_bytes) in [
+        (1, NO_BYTE_LIMIT),
+        (7, NO_BYTE_LIMIT),
+        (MAX_SEARCH_PAGE_ROWS, NO_BYTE_LIMIT),
+        (MAX_SEARCH_PAGE_ROWS, 1),
+        (MAX_SEARCH_PAGE_ROWS, 40),
+        (MAX_SEARCH_PAGE_ROWS, total),
+        (13, 100),
+        (3, 1_000),
+    ] {
+        let (blocks, chunks) = drain(&db, &runs, ALL_KINDS, limits(max_blocks, max_bytes));
+        assert_eq!(blocks, expected, "{max_blocks} {max_bytes}");
+        assert!(chunks >= 1);
+        if max_blocks == 1 {
+            // One block per chunk plus the closing empty exhausted chunk.
+            assert_eq!(chunks, expected.len() + 1);
+        }
+    }
+    // Each kind subset is the same stream restricted to those kinds.
+    let kinds = [IndexBlockKind::ToolError, IndexBlockKind::Text];
+    let (subset, _) = drain(&db, &runs, &kinds, limits(11, NO_BYTE_LIMIT));
+    assert_eq!(subset, all_candidates(&db, &runs, &kinds));
+    assert!(subset.iter().all(|b| kinds.contains(&b.kind)));
+}
+
+#[test]
+fn scan_stops_on_block_count_or_byte_threshold_and_reports_exhaustion() {
+    let db = db();
+    indexed(&db, "run");
+    for ordinal in 0..4 {
+        block(&db, "run", ordinal, "text", &"y".repeat(10));
+    }
+    let runs = names(&["run"]);
+    let first =
+        |max_blocks, max_bytes| chunk(&db, &runs, TEXT, None, limits(max_blocks, max_bytes));
+
+    // Count limit: stops at the row, even though nothing else remains.
+    let by_count = first(4, NO_BYTE_LIMIT);
+    assert_eq!((by_count.blocks.len(), by_count.scanned_bytes), (4, 40));
+    assert!(!by_count.exhausted);
+    let tail = chunk(
+        &db,
+        &runs,
+        TEXT,
+        by_count.blocks.last().map(|b| b.position),
+        limits(4, NO_BYTE_LIMIT),
+    );
+    assert!(tail.blocks.is_empty() && tail.exhausted && tail.scanned_bytes == 0);
+
+    // More room than rows: exhausted in the same call.
+    let all = first(5, NO_BYTE_LIMIT);
+    assert_eq!((all.blocks.len(), all.exhausted), (4, true));
+
+    // Byte limit reached exactly, then crossed by the final included row.
+    let exact = first(MAX_SEARCH_PAGE_ROWS, 20);
+    assert_eq!((exact.blocks.len(), exact.scanned_bytes), (2, 20));
+    assert!(!exact.exhausted);
+    let crossing = first(MAX_SEARCH_PAGE_ROWS, 25);
+    assert_eq!((crossing.blocks.len(), crossing.scanned_bytes), (3, 30));
+    assert!(!crossing.exhausted);
+    let minimal = first(MAX_SEARCH_PAGE_ROWS, 1);
+    assert_eq!((minimal.blocks.len(), minimal.scanned_bytes), (1, 10));
+    // Total just below the threshold is consumed and exhausted.
+    let under = first(MAX_SEARCH_PAGE_ROWS, 41);
+    assert_eq!(
+        (under.blocks.len(), under.scanned_bytes, under.exhausted),
+        (4, 40, true)
+    );
+    // Reaching the threshold with the very last row does not claim exhaustion.
+    let last_row = first(MAX_SEARCH_PAGE_ROWS, 40);
+    assert_eq!((last_row.blocks.len(), last_row.exhausted), (4, false));
+
+    // Resuming after an early stop continues without repeating a row.
+    let rest = chunk(
+        &db,
+        &runs,
+        TEXT,
+        crossing.blocks.last().map(|b| b.position),
+        limits(MAX_SEARCH_PAGE_ROWS, NO_BYTE_LIMIT),
+    );
+    assert_eq!((rest.blocks.len(), rest.exhausted), (1, true));
+    assert_eq!(
+        rest.blocks[0].position.block_id,
+        all.blocks[3].position.block_id
+    );
+}
+
+#[test]
+fn scan_rejects_invalid_batches_limits_and_kinds() {
+    let db = db();
+    indexed(&db, "run");
+    let one = names(&["run"]);
+    let too_many: Vec<String> = (0..=MAX_SEARCH_BATCH_RUNS)
+        .map(|i| format!("run-{i}"))
+        .collect();
+    let scan = |runs: &[String], kinds: &[IndexBlockKind], limits| {
+        db.conversation_scan_chunk(
+            &ConversationScan {
+                runs,
+                kinds,
+                after: None,
+            },
+            limits,
+        )
+    };
+    assert!(scan(&one, TEXT, limits(1, 1)).is_ok());
+    assert!(scan(&one, TEXT, limits(MAX_SEARCH_PAGE_ROWS, usize::MAX)).is_ok());
+    assert!(scan(&[], TEXT, limits(1, 1)).is_err());
+    assert!(scan(&too_many, TEXT, limits(1, 1)).is_err());
+    assert!(scan(&too_many[..MAX_SEARCH_BATCH_RUNS], TEXT, limits(1, 1)).is_ok());
+    assert!(scan(&one, &[], limits(1, 1)).is_err());
+    assert!(scan(&one, TEXT, limits(0, 1)).is_err());
+    assert!(scan(&one, TEXT, limits(MAX_SEARCH_PAGE_ROWS + 1, 1)).is_err());
+    assert!(scan(&one, TEXT, limits(1, 0)).is_err());
+}
+
+#[test]
+fn scan_batch_boundary_duplicate_runs_kinds_and_cursor_extremes() {
+    let db = db();
+    // Exactly the largest batch, one block each.
+    let runs: Vec<String> = (0..MAX_SEARCH_BATCH_RUNS)
+        .map(|i| format!("run-{i}"))
+        .collect();
+    let mut ids = Vec::new();
+    for run in &runs {
+        indexed(&db, run);
+        ids.push(block(&db, run, 0, "text", "t"));
+        block(&db, run, 1, "tool_result", "r");
+    }
+    let (blocks, _) = drain(
+        &db,
+        &runs,
+        ALL_KINDS,
+        limits(MAX_SEARCH_PAGE_ROWS, NO_BYTE_LIMIT),
+    );
+    assert_eq!(blocks.len(), 2 * MAX_SEARCH_BATCH_RUNS);
+    assert_eq!(blocks, all_candidates(&db, &runs, ALL_KINDS));
+    let (small, _) = drain(&db, &runs, ALL_KINDS, limits(9, NO_BYTE_LIMIT));
+    assert_eq!(small, blocks);
+    for (seq, pair) in blocks.chunks(2).enumerate() {
+        assert_eq!(
+            pair[0].position,
+            CandidatePosition {
+                seq,
+                block_id: ids[seq]
+            }
+        );
+        assert_eq!(pair[1].position.seq, seq);
+    }
+
+    // The same run repeated: separate seqs. Repeated kinds: no repeated rows.
+    let repeated = vec!["run-0".to_owned(); 3];
+    let (rows, _) = drain(
+        &db,
+        &repeated,
+        &[IndexBlockKind::Text, IndexBlockKind::Text],
+        limits(2, NO_BYTE_LIMIT),
+    );
+    let positions: Vec<_> = rows.iter().map(|b| b.position).collect();
+    let expected: Vec<_> = (0..3)
+        .map(|seq| CandidatePosition {
+            seq,
+            block_id: ids[0],
+        })
+        .collect();
+    assert_eq!(positions, expected);
+
+    // Cursor beyond the batch, at usize::MAX, or past every id of its seq.
+    let done = |after| chunk(&db, &repeated, TEXT, Some(after), limits(5, 5));
+    for seq in [repeated.len(), usize::MAX] {
+        let past = done(CandidatePosition { seq, block_id: 0 });
+        assert!(past.blocks.is_empty() && past.exhausted && past.scanned_bytes == 0);
+    }
+    let last = done(CandidatePosition {
+        seq: 2,
+        block_id: i64::MAX,
+    });
+    assert!(last.blocks.is_empty() && last.exhausted);
+    let skip_first = done(CandidatePosition {
+        seq: 0,
+        block_id: i64::MAX,
+    });
+    let seqs: Vec<_> = skip_first.blocks.iter().map(|b| b.position.seq).collect();
+    assert_eq!(seqs, [1, 2]);
+    // A negative id sorts before every row of its seq.
+    let before_all = done(CandidatePosition {
+        seq: 0,
+        block_id: i64::MIN,
+    });
+    assert_eq!(before_all.blocks.len(), 3);
+}
+
+#[test]
+fn scan_returns_nothing_for_noncurrent_or_unknown_runs() {
+    let db = db();
+    run_row(&db, "stale", "indexed", 4, Some(3));
+    run_row(&db, "pending", "pending", 3, Some(3));
+    run_row(&db, "deleted", "deleted", 3, Some(3));
+    run_row(&db, "retry", "retry_wait", 3, Some(3));
+    run_row(&db, "blocked", "blocked", 3, Some(3));
+    run_row(&db, "evicted", "evicted", 3, Some(3));
+    indexed(&db, "current");
+    for run in [
+        "stale", "pending", "deleted", "retry", "blocked", "evicted", "current", "orphan",
+    ] {
+        block(&db, run, 0, "text", "body");
+    }
+    let hidden = names(&[
+        "stale", "pending", "deleted", "retry", "blocked", "evicted", "missing", "orphan",
+    ]);
+    let empty = chunk(
+        &db,
+        &hidden,
+        ALL_KINDS,
+        None,
+        limits(MAX_SEARCH_PAGE_ROWS, NO_BYTE_LIMIT),
+    );
+    assert!(empty.blocks.is_empty() && empty.exhausted && empty.scanned_bytes == 0);
+    let mixed = [&hidden[..3], &["current".to_owned()], &hidden[3..]].concat();
+    let (rows, _) = drain(&db, &mixed, ALL_KINDS, limits(1, NO_BYTE_LIMIT));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].run_id.as_str(), rows[0].position.seq),
+        ("current", 3)
+    );
+}
+
+#[test]
+fn scan_is_a_superset_of_every_literal_prefilter_result() {
+    let db = db();
+    for run in ["a", "b", "hidden"] {
+        indexed(&db, run);
+    }
+    run_row(&db, "stale", "indexed", 4, Some(3));
+    let corpus = [
+        "Kelvin KELVIN \u{212A}elvin kelvin",
+        "ſky SKY sky Sky",
+        "Ä Ö ä ö ÄBC äbc",
+        "検索語 データベース 日本語のテキスト",
+        "100% match, 50%off a%b",
+        "snake_case a_b under_score",
+        "back\\slash a\\b C:\\dir",
+        "nul\0inside A\0BC \0abc\0",
+        "alpha beta",
+        "alpha  beta\tgamma\nbeta alpha",
+        "  leading and trailing  ",
+        "é e\u{301} É",
+        "ab ba aab",
+        "x",
+        "",
+        "no relevant words",
+    ];
+    for run in ["a", "b", "hidden", "stale"] {
+        for (i, text) in corpus.iter().enumerate() {
+            block(&db, run, i, "text", text);
+            block(&db, run, i + corpus.len(), "tool_result", text);
+            block(&db, run, i + 2 * corpus.len(), "tool_error", text);
+        }
+    }
+    let runs = names(&["b", "stale", "a", "b"]);
+    let kinds = [
+        IndexBlockKind::Text,
+        IndexBlockKind::ToolResult,
+        IndexBlockKind::ToolError,
+    ];
+    let (scanned, _) = drain(&db, &runs, &kinds, limits(17, NO_BYTE_LIMIT));
+    assert_eq!(scanned, all_candidates(&db, &runs, &kinds));
+    let filters: &[&[&[&str]]] = &[
+        &[&["k"]],
+        &[&["K"]],
+        &[&["\u{212A}"]],
+        &[&["kelvin"]],
+        &[&["s"]],
+        &[&["\u{17F}"]],
+        &[&["sky"]],
+        &[&["ä"]],
+        &[&["Ä"]],
+        &[&["äbc"]],
+        &[&["日本語"]],
+        &[&["日"]],
+        &[&["日本"]],
+        &[&["%"]],
+        &[&["_"]],
+        &[&["\\"]],
+        &[&["a%b"]],
+        &[&["a_b"]],
+        &[&["\0"]],
+        &[&["a\0b"]],
+        &[&["alpha beta"]],
+        &[&["alpha  beta"]],
+        &[&["  leading"]],
+        &[&["alpha", "beta"]],
+        &[&["é"], &["nul"]],
+        &[&["ab"]],
+        &[&["x"]],
+        &[&["absent phrase"]],
+    ];
+    for alternatives in filters {
+        let filter = literals(alternatives);
+        for limit in [1, 50, MAX_SEARCH_PAGE_ROWS] {
+            let old = db
+                .conversation_candidates(&ConversationQuery {
+                    runs: &runs,
+                    kinds: &kinds,
+                    filter: &filter,
+                    after: None,
+                    limit,
+                })
+                .unwrap();
+            for candidate in &old {
+                assert!(
+                    scanned.contains(candidate),
+                    "scan misses {candidate:?} for {alternatives:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scan_statement_is_finalized_so_a_writer_can_checkpoint() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = crate::StorageConfig {
+        db_path: dir.path().join("scan.db"),
+        ..Default::default()
+    };
+    let db = Database::open(&cfg).unwrap();
+    let writer = Database::open(&cfg).unwrap();
+    writer.conn.busy_timeout(Duration::ZERO).unwrap();
+    assert_eq!(db.pragma_string("journal_mode").unwrap(), "wal");
+    indexed(&db, "run");
+    for ordinal in 0..20 {
+        block(&db, "run", ordinal, "text", "body");
+    }
+    let runs = names(&["run"]);
+    let truncate = |writer: &Database| -> i64 {
+        // Move the WAL forward so the checkpoint has work to wait on.
+        writer
+            .conn
+            .execute(
+                "UPDATE thread_index_runs SET snapshot_revision = snapshot_revision + 1",
+                [],
+            )
+            .unwrap();
+        writer
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .unwrap()
+    };
+    // Control: a statement stepped once and left alive pins the snapshot.
+    {
+        let scan = ConversationScan {
+            runs: &runs,
+            kinds: TEXT,
+            after: None,
+        };
+        let (sql, params) = conversation_scan_sql(&scan, 20);
+        let mut statement = db.conn.prepare(&sql).unwrap();
+        let mut rows = statement.query(params_from_iter(params)).unwrap();
+        assert!(rows.next().unwrap().is_some());
+        assert_eq!(truncate(&writer), 1, "a live statement must block TRUNCATE");
+    }
+    for max_blocks in [1, 5, 20, 21] {
+        // Early stop, count stop and exhaustion all release the snapshot.
+        let next = chunk(&db, &runs, TEXT, None, limits(max_blocks, NO_BYTE_LIMIT));
+        assert!(!next.blocks.is_empty());
+        assert_eq!(truncate(&writer), 0, "max_blocks={max_blocks}");
+    }
+    let by_bytes = chunk(&db, &runs, TEXT, None, limits(MAX_SEARCH_PAGE_ROWS, 9));
+    assert!(!by_bytes.exhausted);
+    assert_eq!(truncate(&writer), 0);
+}
+
+fn scan_plan(db: &Database, scan: &ConversationScan<'_>, limit: usize) -> (String, Vec<String>) {
+    let (sql, params) = conversation_scan_sql(scan, limit);
+    let plan = db
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap()
+        .query_map(params_from_iter(params), |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    (sql, plan)
+}
+
+/// `(chunk, VmStep, Sort, FullscanStep)` of one production call.
+fn measured_scan(
+    db: &Database,
+    scan: &ConversationScan<'_>,
+    limits: ScanLimits,
+) -> (ScanChunk, i32, i32, i32) {
+    let mut status = (0, 0, 0);
+    let result = db
+        .scan_chunk_observed(scan, limits, &mut |statement| {
+            status = (
+                statement.get_status(StatementStatus::VmStep),
+                statement.get_status(StatementStatus::Sort),
+                statement.get_status(StatementStatus::FullscanStep),
+            );
+        })
+        .unwrap();
+    (result, status.0, status.1, status.2)
+}
+
+#[test]
+fn scan_plan_is_scope_first_ordered_and_never_touches_fts() {
+    let db = db();
+    for count in [1, 4, MAX_SEARCH_BATCH_RUNS] {
+        let runs: Vec<_> = (0..count).map(|i| format!("run-{i}")).collect();
+        for after in [
+            None,
+            Some(CandidatePosition {
+                seq: 0,
+                block_id: 5,
+            }),
+        ] {
+            let scan = ConversationScan {
+                runs: &runs,
+                kinds: ALL_KINDS,
+                after,
+            };
+            let (sql, plan) = scan_plan(&db, &scan, MAX_SEARCH_PAGE_ROWS);
+            assert!(!sql.contains("evorch_fts5_exact") && !sql.contains("conversation_fts"));
+            let position = |text: &str| {
+                plan.iter()
+                    .position(|step| step.contains(text))
+                    .unwrap_or_else(|| panic!("missing {text}: {plan:#?}"))
+            };
+            assert!(
+                position("SEARCH r USING INDEX sqlite_autoindex_thread_index_runs_1")
+                    < position("SEARCH b USING INDEX idx_conversation_blocks_kind")
+            );
+            assert!(
+                plan.iter().all(|step| {
+                    !step.contains("conversation_fts")
+                        && !step.contains("TEMP B-TREE")
+                        && !step.starts_with("SCAN b")
+                }),
+                "{plan:#?}"
+            );
+            assert!(plan.iter().any(|step| step == "MERGE (UNION ALL)"));
+        }
+    }
+    // Runtime counters of a real call: no sorter, no full table scan.
+    let runs = names(&["a", "b"]);
+    for run in &runs {
+        indexed(&db, run);
+        for ordinal in 0..30 {
+            block(&db, run, ordinal, KIND_NAMES[ordinal % 4], "payload");
+        }
+    }
+    let scan = ConversationScan {
+        runs: &runs,
+        kinds: ALL_KINDS,
+        after: None,
+    };
+    let (result, _, sort, fullscan) =
+        measured_scan(&db, &scan, limits(MAX_SEARCH_PAGE_ROWS, NO_BYTE_LIMIT));
+    assert_eq!(result.blocks.len(), 60);
+    assert_eq!((sort, fullscan), (0, 0));
+}
+
+fn vm_fixture(db: &Database) -> Vec<String> {
+    let runs: Vec<_> = (0..8).map(|i| format!("run-{i}")).collect();
+    for run in &runs {
+        indexed(db, run);
+        for ordinal in 0..10 {
+            block(db, run, ordinal, "text", "scan payload % _ \\ Ä");
+            block(db, run, ordinal + 10, "tool_result", "scan payload");
+        }
+    }
+    runs
+}
+
+#[test]
+fn scan_vm_work_is_linear_in_rows_and_arms() {
+    let db = db();
+    let runs = vm_fixture(&db);
+    let kinds = [IndexBlockKind::Text, IndexBlockKind::ToolResult];
+    let arms = i32::try_from(runs.len() * kinds.len()).unwrap();
+    let scan = ConversationScan {
+        runs: &runs,
+        kinds: &kinds,
+        after: None,
+    };
+    let measured: Vec<_> = [1, 10, 40, 160]
+        .into_iter()
+        .map(|max_blocks| {
+            let (result, vm, _, _) = measured_scan(&db, &scan, limits(max_blocks, NO_BYTE_LIMIT));
+            let rows = i32::try_from(result.blocks.len()).unwrap();
+            eprintln!("scan rows={rows} arms={arms} VM={vm}");
+            (rows, vm)
+        })
+        .collect();
+    for (rows, vm) in measured {
+        assert!(
+            vm <= VM_PER_ROW * rows + VM_PER_ARM * arms,
+            "rows={rows} VM={vm}"
+        );
+    }
+}
+
+/// Measured on the bundled SQLite for `vm_fixture` (16 arms): 841 VM steps for
+/// 1 row, 1327 for 10, 2850 for 40 and 8636 for 160, i.e. about 49 steps per
+/// row and 49 per arm. The bounds keep ~10% headroom over that fit.
+const VM_PER_ROW: i32 = 60;
+const VM_PER_ARM: i32 = 56;
+
+#[test]
+fn scan_vm_work_ignores_invisible_and_noncurrent_blocks() {
+    let db = db();
+    let visible = vm_fixture(&db);
+    run_row(&db, "run-stale", "indexed", 4, Some(3));
+    run_row(&db, "run-pending", "pending", 3, Some(3));
+    run_row(&db, "run-deleted", "deleted", 3, Some(3));
+    let mut scope = names(&["run-stale", "run-pending", "run-deleted", "run-missing"]);
+    scope.extend(visible.iter().rev().cloned());
+    let kinds = [IndexBlockKind::Text, IndexBlockKind::ToolResult];
+    let scans: Vec<_> = [&visible[..1], &scope[..4], &scope[..]]
+        .into_iter()
+        .flat_map(|runs| {
+            [1, 7, MAX_SEARCH_PAGE_ROWS]
+                .into_iter()
+                .flat_map(move |max_blocks| {
+                    [
+                        None,
+                        Some(CandidatePosition {
+                            seq: 0,
+                            block_id: 1,
+                        }),
+                    ]
+                    .into_iter()
+                    .map(move |after| (runs, after, max_blocks))
+                })
+        })
+        .collect();
+    let measure = |db: &Database| -> Vec<_> {
+        scans
+            .iter()
+            .map(|(runs, after, max_blocks)| {
+                let scan = ConversationScan {
+                    runs,
+                    kinds: &kinds,
+                    after: *after,
+                };
+                let (result, vm, sort, fullscan) =
+                    measured_scan(db, &scan, limits(*max_blocks, NO_BYTE_LIMIT));
+                assert_eq!((sort, fullscan), (0, 0));
+                (result, vm)
+            })
+            .collect()
+    };
+    let before = measure(&db);
+    let tx = db.conn.unchecked_transaction().unwrap();
+    for i in 0..256 {
+        let run = format!("run-hidden-{i}");
+        indexed(&db, &run);
+        for target in [run.as_str(), "run-stale", "run-pending", "run-deleted"] {
+            for ordinal in 0..8 {
+                block(
+                    &db,
+                    target,
+                    1000 + i * 8 + ordinal,
+                    "text",
+                    "scan payload % _ \\ Ä",
+                );
+            }
+        }
+    }
+    tx.commit().unwrap();
+    for (scan, (before, after)) in scans.iter().zip(before.iter().zip(measure(&db))) {
+        assert_eq!(before.0, after.0, "{scan:?}");
+        assert_eq!(before.1, after.1, "VM steps changed: {scan:?}");
+    }
+}

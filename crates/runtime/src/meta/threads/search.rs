@@ -17,12 +17,11 @@ use storage::thread_index::{
     GUARDED_REFERENCE_VERSION, GuardedReference, GuardedSource, IndexBlockKind, IndexRole,
 };
 use storage::thread_search::{
-    ConversationCandidate, ConversationFilter, IndexCoverageSummary, MAX_SEARCH_BATCH_RUNS,
-    RunCoverage,
+    ConversationCandidate, IndexCoverageSummary, MAX_SEARCH_BATCH_RUNS, RunCoverage,
 };
 use storage::threads::{ThreadCursor, ThreadRow};
 
-use super::conversation::{Stream, guarded, guarded_text, scan_runs};
+use super::conversation::{ScanStats, Stream, guarded, guarded_text, scan_runs};
 use super::cursor::{self, CursorError, Position, Resume};
 use super::normalize::UNTRUSTED_NOTE;
 use super::{
@@ -37,11 +36,26 @@ const MAX_SCAN: usize = 100;
 const SNIPPET_CHARS: usize = 200;
 const MAX_SNIPPETS: usize = 3;
 const MAX_MATCHED_RUNS: usize = 10;
-/// Conversation candidates verified per call. Counted over visible runs only,
-/// so `partial` and the cursor never depend on runs the caller cannot see.
-pub(super) const MAX_CANDIDATES: usize = 2000;
-/// Index text bytes verified per call.
-pub(super) const MAX_CANDIDATE_BYTES: usize = 4 * 1024 * 1024;
+/// Conversation blocks examined per call, whether or not they match. Counted
+/// over visible runs only, so `partial` and the cursor never depend on runs
+/// the caller cannot see.
+pub(super) const MAX_SCANNED_BLOCKS: usize = 2000;
+/// Index text bytes examined per call.
+pub(super) const MAX_SCANNED_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much conversation one call may examine.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SearchLimits {
+    pub(super) max_blocks: usize,
+    pub(super) max_bytes: usize,
+}
+
+impl SearchLimits {
+    const PRODUCTION: Self = Self {
+        max_blocks: MAX_SCANNED_BLOCKS,
+        max_bytes: MAX_SCANNED_BYTES,
+    };
+}
 
 const CURSOR_INVALID: &str = "thread_cursor_invalid: pass next_cursor unchanged; cursors expire with the process and older formats are not accepted, so repeat the search without cursor";
 const CURSOR_MISMATCH: &str = "thread_cursor_mismatch: the cursor belongs to a search with a different query, match, kinds, include_children or updated_after; pass those unchanged or repeat the search without cursor";
@@ -142,15 +156,14 @@ pub(crate) struct SearchArgs {
 }
 
 /// OR of alternatives; an alternative matches when all of its patterns do.
-struct Matcher {
+pub(super) struct Matcher {
     alternatives: Vec<Vec<Regex>>,
     /// Normalized terms, the same shape as `alternatives`.
     terms: Vec<Vec<String>>,
-    mode: MatchMode,
 }
 
 impl Matcher {
-    fn new(query: Option<Query>, mode: MatchMode) -> Result<Option<Self>, String> {
+    pub(super) fn new(query: Option<Query>, mode: MatchMode) -> Result<Option<Self>, String> {
         let raw = match query {
             None => return Ok(None),
             Some(Query::One(term)) => vec![term],
@@ -183,12 +196,11 @@ impl Matcher {
         Ok(Some(Self {
             alternatives,
             terms,
-            mode,
         }))
     }
 
     /// Span of the first pattern of the first satisfied alternative.
-    fn find(&self, text: &str) -> Option<(usize, usize)> {
+    pub(super) fn find(&self, text: &str) -> Option<(usize, usize)> {
         self.alternatives.iter().find_map(|patterns| {
             let mut spans = patterns.iter().map(|pattern| pattern.find(text));
             let first = spans.next()??;
@@ -196,16 +208,6 @@ impl Matcher {
                 .all(|span| span.is_some())
                 .then_some((first.start(), first.end()))
         })
-    }
-
-    /// What storage may narrow by: literal terms, or every block for regex.
-    fn filter(&self) -> ConversationFilter {
-        match self.mode {
-            MatchMode::Regex => ConversationFilter::All,
-            MatchMode::Words | MatchMode::Phrase => {
-                ConversationFilter::Literals(self.terms.clone())
-            }
-        }
     }
 }
 
@@ -242,24 +244,51 @@ struct Examined {
     revision: String,
 }
 
-#[derive(Default)]
+/// Blocks and bytes examined so far. A block is charged once it has been
+/// examined, matching or not, so a query that matches nothing is bounded too.
 struct Budget {
-    candidates: usize,
+    limits: SearchLimits,
+    blocks: usize,
     bytes: usize,
 }
 
 impl Budget {
-    fn exhausted(&self) -> bool {
-        self.candidates >= MAX_CANDIDATES || self.bytes >= MAX_CANDIDATE_BYTES
+    const fn new(limits: SearchLimits) -> Self {
+        Self {
+            limits,
+            blocks: 0,
+            bytes: 0,
+        }
     }
 
-    fn charge(&mut self, candidate: &ConversationCandidate) {
-        self.candidates += 1;
+    const fn exhausted(&self) -> bool {
+        self.blocks >= self.limits.max_blocks || self.bytes >= self.limits.max_bytes
+    }
+
+    const fn remaining_blocks(&self) -> usize {
+        self.limits.max_blocks.saturating_sub(self.blocks)
+    }
+
+    const fn remaining_bytes(&self) -> usize {
+        self.limits.max_bytes.saturating_sub(self.bytes)
+    }
+
+    const fn charge(&mut self, candidate: &ConversationCandidate) {
+        self.blocks += 1;
         self.bytes += candidate.text.len();
     }
 }
 
 pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> {
+    run_with_limits(scope, args, SearchLimits::PRODUCTION).map(|(output, _)| output)
+}
+
+/// [`run`] with explicit work limits, also reporting what the scan fetched.
+pub(super) fn run_with_limits(
+    scope: &Scope<'_>,
+    args: SearchArgs,
+    limits: SearchLimits,
+) -> Result<(Value, ScanStats), String> {
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(format!(
@@ -365,17 +394,11 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
     let mut stream = conversation.map(|matcher| {
         (
             matcher,
-            Stream::new(
-                scope,
-                slots,
-                index_kinds.clone(),
-                matcher.filter(),
-                resume_block,
-            ),
+            Stream::new(scope, slots, index_kinds.clone(), resume_block),
         )
     });
 
-    let mut budget = Budget::default();
+    let mut budget = Budget::new(limits);
     let mut summary = IndexCoverageSummary::default();
     let mut results = Vec::new();
     let mut positions = Vec::new();
@@ -424,7 +447,9 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
         }
         let mut cut = None;
         if let Some((matcher, stream)) = &mut stream {
-            while let Some((slot, candidate)) = stream.peek()? {
+            while let Some((slot, candidate)) =
+                stream.peek(budget.remaining_blocks(), budget.remaining_bytes())?
+            {
                 if !item.slots.contains(slot) {
                     break;
                 }
@@ -484,7 +509,13 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             "backfill_in_progress": summary.backfill_in_progress(),
         })
     });
-    fit(MAX_OUTPUT_BYTES, total, |count| {
+    let mut stats = stream
+        .as_ref()
+        .map(|(_, stream)| stream.stats())
+        .unwrap_or_default();
+    stats.charged_blocks = budget.blocks;
+    stats.charged_bytes = budget.bytes;
+    let output = fit(MAX_OUTPUT_BYTES, total, |count| {
         // A trimmed page resumes after the last thread it still shows.
         let next_cursor = if count < total {
             count
@@ -507,7 +538,8 @@ pub(super) fn run(scope: &Scope<'_>, args: SearchArgs) -> Result<Value, String> 
             output["index"] = index.clone();
         }
         scope.output(output)
-    })
+    })?;
+    Ok((output, stats))
 }
 
 /// Decide ownership before paging, not from this page's hits. Only a verified
@@ -589,7 +621,7 @@ fn decode(
 }
 
 /// Bind to the exact invoking run as well as its thread/project scope.
-fn caller_key(scope: &Scope<'_>) -> String {
+pub(super) fn caller_key(scope: &Scope<'_>) -> String {
     let caller = &scope.caller;
     let project = caller.project_root.as_deref().unwrap_or("");
     cursor::digest(&[
@@ -600,7 +632,7 @@ fn caller_key(scope: &Scope<'_>) -> String {
 }
 
 /// Every argument that changes which hits exist or their order.
-fn conditions_key(
+pub(super) fn conditions_key(
     matcher: Option<&Matcher>,
     mode: MatchMode,
     kinds: &BTreeSet<SearchKind>,
