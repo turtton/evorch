@@ -156,14 +156,14 @@ pub(crate) struct SearchArgs {
 }
 
 /// OR of alternatives; an alternative matches when all of its patterns do.
-struct Matcher {
+pub(super) struct Matcher {
     alternatives: Vec<Vec<Regex>>,
     /// Normalized terms, the same shape as `alternatives`.
     terms: Vec<Vec<String>>,
 }
 
 impl Matcher {
-    fn new(query: Option<Query>, mode: MatchMode) -> Result<Option<Self>, String> {
+    pub(super) fn new(query: Option<Query>, mode: MatchMode) -> Result<Option<Self>, String> {
         let raw = match query {
             None => return Ok(None),
             Some(Query::One(term)) => vec![term],
@@ -200,7 +200,7 @@ impl Matcher {
     }
 
     /// Span of the first pattern of the first satisfied alternative.
-    fn find(&self, text: &str) -> Option<(usize, usize)> {
+    pub(super) fn find(&self, text: &str) -> Option<(usize, usize)> {
         self.alternatives.iter().find_map(|patterns| {
             let mut spans = patterns.iter().map(|pattern| pattern.find(text));
             let first = spans.next()??;
@@ -619,7 +619,7 @@ fn decode(
 }
 
 /// Bind to the exact invoking run as well as its thread/project scope.
-fn caller_key(scope: &Scope<'_>) -> String {
+pub(super) fn caller_key(scope: &Scope<'_>) -> String {
     let caller = &scope.caller;
     let project = caller.project_root.as_deref().unwrap_or("");
     cursor::digest(&[
@@ -630,7 +630,7 @@ fn caller_key(scope: &Scope<'_>) -> String {
 }
 
 /// Every argument that changes which hits exist or their order.
-fn conditions_key(
+pub(super) fn conditions_key(
     matcher: Option<&Matcher>,
     mode: MatchMode,
     kinds: &BTreeSet<SearchKind>,

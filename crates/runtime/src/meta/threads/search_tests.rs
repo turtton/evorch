@@ -1,8 +1,13 @@
 //! Phase B search tests use explicitly native fixtures and the shared extractor.
 //! Index rows are installed synchronously, without a background owner or sleeps.
+use super::super::conversation::{CHUNK_BLOCKS, CHUNK_BYTES, ScanStats};
+use super::super::cursor;
+use super::search::{MatchMode, Matcher, SearchKind, SearchLimits};
 use super::*;
 use rusqlite::{Connection, params};
-use storage::thread_index::{BlockLocator, extract_snapshot_bundle};
+use std::collections::{BTreeMap, BTreeSet};
+use storage::thread_index::{BlockLocator, IndexBlockKind, extract_snapshot_bundle};
+use storage::thread_search::{ConversationFilter, ConversationQuery, MAX_SEARCH_BATCH_RUNS};
 
 fn label(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value)
@@ -94,6 +99,90 @@ impl Fixture {
         .unwrap();
         tx.commit().unwrap();
     }
+}
+
+type Who<'a> = (&'a str, Option<&'a str>, Option<&'a Path>);
+
+impl Fixture {
+    fn scope(&self, who: Who<'_>) -> Scope<'_> {
+        let caller = Caller::new(who.0.parse().unwrap(), who.1.map(Into::into), who.2);
+        Scope::new(
+            self.store(),
+            &self.runtime,
+            caller,
+            SecretRedactor::with_known_values([SECRET.into()]),
+        )
+    }
+
+    /// One `thread_search` call under explicit work limits.
+    fn search_limited(
+        &self,
+        who: Who<'_>,
+        input: Value,
+        limits: SearchLimits,
+    ) -> Result<(Value, ScanStats), String> {
+        let scope = self.scope(who);
+        let (page, stats) =
+            search::run_with_limits(&scope, serde_json::from_value(input).unwrap(), limits)?;
+        assert_eq!(page["note"], UNTRUSTED_NOTE);
+        assert!(page.to_string().len() <= MAX_OUTPUT_BYTES);
+        Ok((page, stats))
+    }
+
+    /// Follow `next_cursor` until the search ends.
+    fn drain(
+        &self,
+        who: Who<'_>,
+        mut args: Value,
+        limits: SearchLimits,
+    ) -> Vec<(Value, ScanStats)> {
+        let mut pages = Vec::new();
+        loop {
+            let (page, stats) = self.search_limited(who, args.clone(), limits).unwrap();
+            let next = page["next_cursor"].clone();
+            pages.push((page, stats));
+            if next.is_null() {
+                return pages;
+            }
+            assert!(pages.len() < 5000, "the cursor does not make progress");
+            args["cursor"] = next;
+        }
+    }
+
+    fn max_block_bytes(&self) -> usize {
+        Connection::open(&self.store().db_path)
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(MAX(length(CAST(text AS BLOB))), 0) FROM conversation_blocks",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap() as usize
+    }
+}
+
+const fn limits(max_blocks: usize, max_bytes: usize) -> SearchLimits {
+    SearchLimits {
+        max_blocks,
+        max_bytes,
+    }
+}
+
+/// The deterministic work bounds of one call (#374).
+fn assert_scan_bounds(stats: ScanStats, limits: SearchLimits, max_block_bytes: usize, runs: usize) {
+    let batches = runs.div_ceil(MAX_SEARCH_BATCH_RUNS);
+    assert!(
+        stats.fetched_blocks <= limits.max_blocks + CHUNK_BLOCKS,
+        "{stats:?} {limits:?}"
+    );
+    assert!(
+        stats.fetched_bytes <= limits.max_bytes + CHUNK_BYTES + max_block_bytes,
+        "{stats:?} {limits:?}"
+    );
+    assert!(
+        stats.statements <= limits.max_blocks.div_ceil(CHUNK_BLOCKS) + batches + 1,
+        "{stats:?} {limits:?}"
+    );
 }
 
 fn count(value: &Value) -> u64 {
@@ -976,6 +1065,15 @@ fn regex_scan_budget_continues_and_invisible_runs_do_not_change_any_output() {
     assert_eq!(no_hit["partial"], true);
     assert!(no_hit["next_cursor"].is_string());
     assert!(first["next_cursor"].as_str().unwrap().starts_with("ts2."));
+    // Literal and phrase queries examine every block too, so they are cut and
+    // continue at the same places.
+    let literal_args = json!({"query": "scan", "kinds": ["conversation"]});
+    let phrase_args = json!({"query": "scan-1", "match": "phrase", "kinds": ["conversation"]});
+    let literal_first = f.call(own, "thread_search", literal_args.clone()).unwrap();
+    let phrase_first = f.call(own, "thread_search", phrase_args.clone()).unwrap();
+    assert_eq!(count(&literal_first), search::MAX_SCANNED_BLOCKS as u64);
+    assert_eq!(literal_first["partial"], true);
+    assert_eq!(phrase_first["partial"], true);
     for i in 0..105 {
         let run = format!("run-{}", 1000 + i);
         let thread = format!("hidden-{i}");
@@ -991,6 +1089,14 @@ fn regex_scan_budget_continues_and_invisible_runs_do_not_change_any_output() {
         f.index(&run);
     }
     assert_eq!(f.call(own, "thread_search", args.clone()).unwrap(), first);
+    assert_eq!(
+        f.call(own, "thread_search", literal_args).unwrap(),
+        literal_first
+    );
+    assert_eq!(
+        f.call(own, "thread_search", phrase_args).unwrap(),
+        phrase_first
+    );
     let mut next_args = args.clone();
     next_args["cursor"] = first["next_cursor"].clone();
     let second = f.call(own, "thread_search", next_args.clone()).unwrap();
@@ -1599,4 +1705,634 @@ fn host_search_lists_a_thread_once_when_its_title_and_body_both_match() {
         assert_eq!(flat.len(), titles + 1, "{pages:?}");
         assert!(pages.iter().all(|page| page.len() <= limit));
     }
+}
+
+// ---- Bounded scan (#374): the matcher alone decides, the budget counts what
+// ---- was examined, and every page advances.
+
+const CORPUS_KINDS: [&str; 3] = ["conversation", "tool_use", "tool_result"];
+
+/// Block text whose match class depends deterministically on run and slot:
+/// both words, one word, or neither.
+fn corpus_text(run: u64, slot: u64) -> String {
+    match (run + slot) % 3 {
+        0 => format!("needle alpha {run}.{slot}"),
+        1 => format!("needle {run}.{slot}"),
+        _ => format!("plain {run}.{slot}"),
+    }
+}
+
+/// Five blocks of five kinds: user text, tool use, tool result, tool error,
+/// assistant text.
+fn corpus_messages(run: u64) -> Vec<Message> {
+    let result = |id: &str, slot: u64, is_error: bool| ContentBlock::ToolResult {
+        tool_call_id: id.into(),
+        content: vec![ToolResultContent::Text {
+            text: corpus_text(run, slot),
+        }],
+        is_error,
+    };
+    vec![
+        user(vec![text(&corpus_text(run, 0))]),
+        assistant(vec![ContentBlock::ToolUse {
+            id: "c1".into(),
+            name: "shell".into(),
+            input: json!({"command": corpus_text(run, 1)}),
+        }]),
+        user(vec![result("c1", 2, false), result("c2", 3, true)]),
+        assistant(vec![text(&corpus_text(run, 4))]),
+    ]
+}
+
+struct Corpus {
+    /// Thread ID and the runs it owns.
+    threads: Vec<(String, Vec<String>)>,
+}
+
+impl Corpus {
+    fn runs(&self) -> usize {
+        self.threads.iter().map(|(_, runs)| runs.len()).sum()
+    }
+}
+
+/// Three threads, each a root with children; `t2` has 101 runs, one more
+/// than a storage batch.
+fn seed_corpus(f: &Fixture) -> Corpus {
+    let mut threads = Vec::new();
+    let layout: [(&str, u64, Vec<u64>); 3] = [
+        ("t1", 301, vec![311]),
+        ("t2", 302, (400..500).collect()),
+        ("t3", 303, vec![313]),
+    ];
+    for (index, (thread, root, children)) in layout.into_iter().enumerate() {
+        let root_id = format!("run-{root}");
+        f.thread(thread, Some(f.project.path()), &root_id, |row| {
+            row.updated_at_ns = 100 + 10 * index as i64;
+        });
+        f.native_run(&root_id, Some(thread), None, corpus_messages(root));
+        f.index(&root_id);
+        let mut runs = vec![root_id.clone()];
+        for child in children {
+            let child_id = format!("run-{child}");
+            f.native_run(&child_id, None, Some(&root_id), corpus_messages(child));
+            f.index(&child_id);
+            runs.push(child_id);
+        }
+        threads.push((thread.to_owned(), runs));
+    }
+    Corpus { threads }
+}
+
+fn matcher_of(query: &Value, mode: &str) -> Matcher {
+    Matcher::new(
+        Some(serde_json::from_value(query.clone()).unwrap()),
+        serde_json::from_value(json!(mode)).unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+}
+
+fn db_kinds(kinds: &[&str]) -> Vec<&'static str> {
+    kinds
+        .iter()
+        .flat_map(|kind| match *kind {
+            "conversation" => &["text"][..],
+            "tool_use" => &["tool_use"][..],
+            "tool_result" => &["tool_result", "tool_error"][..],
+            other => panic!("unexpected kind {other}"),
+        })
+        .copied()
+        .collect()
+}
+
+/// Brute force: every stored block of the corpus, redacted and judged by the
+/// same matcher, as `(thread, ref)` sorted.
+fn oracle(
+    f: &Fixture,
+    who: Who<'_>,
+    corpus: &Corpus,
+    matcher: &Matcher,
+    kinds: &[&str],
+) -> Vec<(String, String)> {
+    let scope = f.scope(who);
+    let kinds = db_kinds(kinds);
+    let conn = Connection::open(&f.store().db_path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT ordinal, block_index, kind, text FROM conversation_blocks WHERE run_id = ?1",
+        )
+        .unwrap();
+    let mut hits = Vec::new();
+    for (thread, runs) in &corpus.threads {
+        for run in runs {
+            let rows = statement
+                .query_map([run], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (ordinal, block, kind, body) = row.unwrap();
+                if kinds.contains(&kind.as_str()) && matcher.find(&scope.redact(&body)).is_some() {
+                    hits.push((thread.clone(), format!("{run}#{ordinal}.{block}")));
+                }
+            }
+        }
+    }
+    hits.sort();
+    hits
+}
+
+/// The previous storage-routed path: literal prefilter, then the matcher.
+fn legacy_hits(
+    f: &Fixture,
+    who: Who<'_>,
+    corpus: &Corpus,
+    matcher: &Matcher,
+    terms: Vec<Vec<String>>,
+    kinds: &[&str],
+) -> BTreeSet<(String, String)> {
+    let scope = f.scope(who);
+    let index_kinds: Vec<IndexBlockKind> = db_kinds(kinds)
+        .into_iter()
+        .map(|kind| serde_json::from_value(json!(kind)).unwrap())
+        .collect();
+    let filter = ConversationFilter::Literals(terms);
+    let mut hits = BTreeSet::new();
+    for (thread, runs) in &corpus.threads {
+        for batch in runs.chunks(MAX_SEARCH_BATCH_RUNS) {
+            let mut after = None;
+            loop {
+                let rows = f
+                    .store()
+                    .with_database(|db| {
+                        db.conversation_candidates(&ConversationQuery {
+                            runs: batch,
+                            kinds: &index_kinds,
+                            filter: &filter,
+                            after,
+                            limit: 500,
+                        })
+                    })
+                    .unwrap();
+                for row in &rows {
+                    if matcher.find(&scope.redact(&row.text)).is_some() {
+                        let BlockLocator::Message {
+                            ordinal,
+                            block_index,
+                        } = row.locator
+                        else {
+                            panic!("unexpected note");
+                        };
+                        hits.insert((
+                            thread.clone(),
+                            format!("{}#{ordinal}.{block_index}", row.run_id),
+                        ));
+                    }
+                }
+                if rows.len() < 500 {
+                    break;
+                }
+                after = rows.last().map(|row| row.position);
+            }
+        }
+    }
+    hits
+}
+
+/// Hit counts per thread and every snippet ref (without the guard) of a drain.
+fn collected(pages: &[(Value, ScanStats)]) -> (BTreeMap<String, u64>, Vec<(String, String)>) {
+    let mut counts = BTreeMap::new();
+    let mut refs = Vec::new();
+    for (page, _) in pages {
+        for thread in page["threads"].as_array().unwrap() {
+            let id = thread["thread_id"].as_str().unwrap().to_owned();
+            *counts.entry(id.clone()).or_insert(0) += thread["hit_count"].as_u64().unwrap();
+            for snippet in thread["snippets"].as_array().unwrap() {
+                // Metadata snippets have no ref.
+                if let Some(reference) = snippet["ref"].as_str() {
+                    refs.push((id.clone(), reference.split('@').next().unwrap().to_owned()));
+                }
+            }
+        }
+    }
+    refs.sort();
+    (counts, refs)
+}
+
+struct Case {
+    query: Value,
+    mode: &'static str,
+    kinds: Vec<&'static str>,
+    /// Literal terms the previous path routed by, for words and phrases.
+    terms: Option<Vec<Vec<String>>>,
+}
+
+#[test]
+fn bounded_drain_neither_skips_nor_repeats_any_block_for_every_query_shape() {
+    let f = Fixture::new();
+    let own = f.own();
+    let corpus = seed_corpus(&f);
+    let runs = corpus.runs() + 1;
+    let max_block = f.max_block_bytes();
+    let words = |terms: &[&[&str]]| {
+        Some(
+            terms
+                .iter()
+                .map(|alternative| alternative.iter().map(|term| (*term).to_owned()).collect())
+                .collect(),
+        )
+    };
+    let cases = [
+        Case {
+            query: json!("needle alpha"),
+            mode: "words",
+            kinds: CORPUS_KINDS.to_vec(),
+            terms: words(&[&["needle", "alpha"]]),
+        },
+        Case {
+            query: json!(["alpha 30", "needle 44"]),
+            mode: "words",
+            kinds: CORPUS_KINDS.to_vec(),
+            terms: words(&[&["alpha", "30"], &["needle", "44"]]),
+        },
+        Case {
+            query: json!("needle alpha 4"),
+            mode: "phrase",
+            kinds: CORPUS_KINDS.to_vec(),
+            terms: words(&[&["needle alpha 4"]]),
+        },
+        Case {
+            query: json!(r"needle (alpha )?3\d\d\."),
+            mode: "regex",
+            kinds: CORPUS_KINDS.to_vec(),
+            terms: None,
+        },
+        Case {
+            query: json!("needle"),
+            mode: "words",
+            kinds: vec!["tool_use"],
+            terms: words(&[&["needle"]]),
+        },
+        Case {
+            query: json!("needle"),
+            mode: "words",
+            kinds: vec!["tool_result"],
+            terms: words(&[&["needle"]]),
+        },
+        Case {
+            query: json!("alpha"),
+            mode: "words",
+            kinds: vec!["conversation"],
+            terms: words(&[&["alpha"]]),
+        },
+    ];
+    for (index, case) in cases.iter().enumerate() {
+        let matcher = matcher_of(&case.query, case.mode);
+        let expected = oracle(&f, own, &corpus, &matcher, &case.kinds);
+        assert!(expected.len() > 10, "case {index} must hit");
+        let mut expected_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for (thread, _) in &expected {
+            *expected_counts.entry(thread.clone()).or_insert(0) += 1;
+        }
+        let args =
+            json!({"query": case.query, "match": case.mode, "kinds": case.kinds, "limit": 20});
+        // Small budgets give many pages; keep them to one case so the suite
+        // stays fast. The others still cross several pages and both batches.
+        let sweeps: &[SearchLimits] = if index == 0 {
+            &[limits(7, 1024)]
+        } else {
+            &[limits(64, 4096)]
+        };
+        for &sweep in sweeps {
+            let pages = f.drain(own, args.clone(), sweep);
+            assert!(pages.len() > 1, "case {index} {sweep:?}");
+            for (_, stats) in &pages {
+                assert_scan_bounds(*stats, sweep, max_block, runs);
+            }
+            let (counts, refs) = collected(&pages);
+            assert_eq!(counts, expected_counts, "case {index} {sweep:?}");
+            let unique: BTreeSet<_> = refs.iter().collect();
+            assert_eq!(unique.len(), refs.len(), "a ref repeated: case {index}");
+            let oracle_refs: BTreeSet<_> = expected.iter().collect();
+            assert!(
+                refs.iter().all(|reference| oracle_refs.contains(reference)),
+                "case {index} {sweep:?}"
+            );
+            let last = pages.last().unwrap();
+            assert_eq!(last.0["partial"], false);
+            assert_eq!(last.0["next_cursor"], Value::Null);
+        }
+        if let Some(terms) = &case.terms {
+            let legacy = legacy_hits(&f, own, &corpus, &matcher, terms.clone(), &case.kinds);
+            let current: BTreeSet<_> = expected.iter().cloned().collect();
+            assert!(!legacy.is_empty(), "case {index}");
+            assert!(
+                legacy.is_subset(&current),
+                "the scan must find everything the FTS-routed path found: case {index}"
+            );
+        }
+    }
+    // A selective regex makes every returned position observable despite the
+    // per-thread snippet bound: the union of all pages is exactly the oracle.
+    let rare = json!(r"needle alpha (301|313|440)\.");
+    let matcher = matcher_of(&rare, "regex");
+    let expected = oracle(&f, own, &corpus, &matcher, &CORPUS_KINDS);
+    assert!((3..=9).contains(&expected.len()), "{expected:?}");
+    for sweep in [limits(13, 1 << 20), limits(2000, 4 << 20)] {
+        let pages = f.drain(
+            own,
+            json!({"query": rare, "match": "regex", "kinds": CORPUS_KINDS, "limit": 20}),
+            sweep,
+        );
+        assert_eq!(collected(&pages).1, expected, "{sweep:?}");
+    }
+}
+
+#[test]
+fn pages_without_hits_still_advance_strictly_to_the_end() {
+    let f = Fixture::new();
+    let own = f.own();
+    let messages = (0..23)
+        .map(|i| user(vec![text(&format!("filler {i}"))]))
+        .collect();
+    f.thread("t8", Some(f.project.path()), "run-801", |row| {
+        row.updated_at_ns = 100;
+    });
+    f.native_run("run-801", Some("t8"), None, messages);
+    f.index("run-801");
+    let query = json!("zzz-absent");
+    let args = json!({"query": query, "match": "phrase", "kinds": ["conversation"]});
+    let pages = f.drain(own, args, limits(5, 1 << 20));
+    assert_eq!(pages.len(), 5);
+    let scope = f.scope(own);
+    let matcher = Matcher::new(
+        Some(serde_json::from_value(query).unwrap()),
+        MatchMode::Phrase,
+    )
+    .unwrap();
+    let conditions = search::conditions_key(
+        matcher.as_ref(),
+        MatchMode::Phrase,
+        &BTreeSet::from([SearchKind::Conversation]),
+        true,
+        None,
+    );
+    let caller = search::caller_key(&scope);
+    let mut from_blocks = Vec::new();
+    let mut cursors = BTreeSet::new();
+    for (page, _) in &pages[..4] {
+        assert_eq!(page["threads"], json!([]), "{page}");
+        assert_eq!(page["partial"], true);
+        let token = page["next_cursor"].as_str().unwrap();
+        assert!(cursors.insert(token.to_owned()), "cursor repeated");
+        let position = cursor::decode(token, &caller, &conditions).unwrap();
+        from_blocks.push(
+            position
+                .resume
+                .expect("a cut resumes inside the thread")
+                .from_block,
+        );
+    }
+    assert!(
+        from_blocks.windows(2).all(|pair| pair[0] < pair[1]),
+        "{from_blocks:?}"
+    );
+    let (last, _) = &pages[4];
+    assert_eq!(last["threads"], json!([]));
+    assert_eq!(last["partial"], false);
+    assert_eq!(last["next_cursor"], Value::Null);
+}
+
+#[test]
+fn budget_spent_exactly_at_a_thread_end_cuts_at_the_next_thread_start() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("tA", Some(f.project.path()), "run-901", |row| {
+        row.updated_at_ns = 200;
+    });
+    f.thread("tB", Some(f.project.path()), "run-902", |row| {
+        row.updated_at_ns = 100;
+        row.title = Some("bound title".into());
+    });
+    let messages = |prefix: &str, n: usize| {
+        (0..n)
+            .map(|i| user(vec![text(&format!("bound {prefix}{i}"))]))
+            .collect::<Vec<_>>()
+    };
+    f.native_run("run-901", Some("tA"), None, messages("a", 5));
+    f.native_run("run-902", Some("tB"), None, messages("b", 3));
+    f.index("run-901");
+    f.index("run-902");
+    let args = json!({"query": "bound", "kinds": ["title", "conversation"]});
+    let pages = f.drain(own, args, limits(5, 1 << 20));
+    assert_eq!(pages.len(), 2);
+    let first = pages[0].0["threads"].as_array().unwrap();
+    assert_eq!(first.len(), 2, "{}", pages[0].0);
+    assert_eq!(first[0]["thread_id"], "tA");
+    assert_eq!(first[0]["hit_count"], 5);
+    assert!(first[0].get("partial").is_none(), "tA is complete");
+    assert_eq!(first[1]["thread_id"], "tB");
+    assert_eq!(first[1]["hit_count"], 1, "only the title before the cut");
+    assert_eq!(first[1]["snippets"][0]["kind"], "title");
+    assert_eq!(first[1]["partial"], true);
+    assert_eq!(pages[0].0["partial"], true);
+    let second = pages[1].0["threads"].as_array().unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0]["thread_id"], "tB");
+    assert_eq!(
+        second[0]["hit_count"], 3,
+        "the title is not found a second time"
+    );
+    let titles = pages
+        .iter()
+        .flat_map(|(page, _)| page["threads"].as_array().unwrap())
+        .flat_map(|thread| thread["snippets"].as_array().unwrap())
+        .filter(|snippet| snippet["kind"] == "title")
+        .count();
+    assert_eq!(titles, 1);
+    // One block per page still reaches every hit exactly once.
+    let args = json!({"query": "bound", "kinds": ["title", "conversation"]});
+    let pages = f.drain(own, args, limits(1, 1));
+    let (counts, _) = collected(&pages);
+    assert_eq!(
+        counts,
+        BTreeMap::from([("tA".to_owned(), 5), ("tB".to_owned(), 4)])
+    );
+}
+
+#[test]
+fn secrets_never_match_even_when_the_index_holds_them() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("t11", Some(f.project.path()), "run-1101", |_| {});
+    f.native_run(
+        "run-1101",
+        Some("t11"),
+        None,
+        vec![
+            user(vec![text(&format!("prefix {SECRET} suffix"))]),
+            user(vec![text("second line")]),
+        ],
+    );
+    f.index("run-1101");
+    let search = |query: &str, mode: &str| {
+        f.call(
+            own,
+            "thread_search",
+            json!({"query": query, "match": mode, "kinds": ["conversation"]}),
+        )
+        .unwrap()
+    };
+    for (query, mode) in [
+        ("known-secret-value", "phrase"),
+        (SECRET, "phrase"),
+        (SECRET, "words"),
+        (r"secret-value-\d+", "regex"),
+    ] {
+        assert_eq!(count(&search(query, mode)), 0, "{query} {mode}");
+    }
+    assert_eq!(count(&search("prefix", "words")), 1);
+    // An unredacted row (an older extractor, a bug) is redacted again on read.
+    Connection::open(&f.store().db_path)
+        .unwrap()
+        .execute(
+            "UPDATE conversation_blocks SET text = ?1 WHERE run_id = 'run-1101' AND ordinal = 0",
+            [format!("leak {SECRET} tail")],
+        )
+        .unwrap();
+    for (query, mode) in [
+        ("known-secret-value", "phrase"),
+        (SECRET, "words"),
+        (r"secret-value-\d+", "regex"),
+    ] {
+        assert_eq!(count(&search(query, mode)), 0, "{query} {mode}");
+    }
+    let leak = search("leak", "words");
+    assert_eq!(count(&leak), 1);
+    assert!(!leak.to_string().contains(SECRET), "{leak}");
+}
+
+#[test]
+fn invisible_threads_and_runs_change_neither_pages_nor_cursors() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("vis", Some(f.project.path()), "run-1201", |row| {
+        row.updated_at_ns = 50;
+    });
+    f.native_run(
+        "run-1201",
+        Some("vis"),
+        None,
+        (0..40)
+            .map(|i| user(vec![text(&format!("scan-{i} common"))]))
+            .collect(),
+    );
+    f.index("run-1201");
+    let queries = [
+        json!({"query": "scan common", "kinds": ["conversation"]}),
+        json!({"query": "scan-1", "match": "phrase", "kinds": ["conversation"]}),
+        json!({"query": "^scan-[1-3]", "match": "regex", "kinds": ["conversation"]}),
+        json!({"query": "absent-phrase", "match": "phrase", "kinds": ["conversation"]}),
+    ];
+    let snapshot = |f: &Fixture| -> Vec<Vec<Value>> {
+        queries
+            .iter()
+            .map(|args| {
+                f.drain(own, args.clone(), limits(7, 1024))
+                    .into_iter()
+                    .map(|(page, _)| page)
+                    .collect()
+            })
+            .collect()
+    };
+    let before = snapshot(&f);
+    assert!(before.iter().all(|pages| pages.len() > 1));
+    for i in 0..105 {
+        let run = format!("run-{}", 2000 + i);
+        let thread = format!("hidden-{i}");
+        f.thread(&thread, Some(f.other.path()), &run, |row| {
+            row.updated_at_ns = 999;
+        });
+        f.native_run(
+            &run,
+            Some(&thread),
+            None,
+            vec![user(vec![text("scan-1 common absent-phrase")]); 3],
+        );
+        f.index(&run);
+    }
+    // A run no visible thread owns, and a child of a hidden thread's run.
+    f.native_run(
+        "run-3000",
+        None,
+        None,
+        vec![user(vec![text("scan-1 common")])],
+    );
+    f.index("run-3000");
+    f.native_run(
+        "run-3001",
+        None,
+        Some("run-2000"),
+        vec![user(vec![text("scan-1 common")])],
+    );
+    f.index("run-3001");
+    assert_eq!(snapshot(&f), before);
+}
+
+#[test]
+fn one_call_fetches_a_bounded_amount_even_when_nothing_or_everything_matches() {
+    let f = Fixture::new();
+    let own = f.own();
+    f.thread("perf", Some(f.project.path()), "run-1301", |_| {});
+    let mut messages = Vec::new();
+    for i in 0..300 {
+        messages.push(assistant(vec![ContentBlock::ToolUse {
+            id: format!("c{i}"),
+            name: "shell".into(),
+            input: json!({"command": format!("frequentneedle step {i}")}),
+        }]));
+        messages.push(user(vec![ContentBlock::ToolResult {
+            tool_call_id: format!("c{i}"),
+            content: vec![ToolResultContent::Text {
+                text: format!("frequentneedle output {i}"),
+            }],
+            is_error: false,
+        }]));
+    }
+    f.native_run("run-1301", Some("perf"), None, messages);
+    f.index("run-1301");
+    let max_block = f.max_block_bytes();
+    let kinds = json!(["conversation", "tool_use", "tool_result"]);
+    for args in [
+        json!({"query": "zzz-no-such-phrase", "match": "phrase", "kinds": kinds}),
+        json!({"query": "frequentneedle", "kinds": kinds}),
+    ] {
+        for sweep in [
+            limits(7, 1024),
+            limits(450, 1 << 20),
+            limits(1000, 2048),
+            limits(2000, 4 << 20),
+        ] {
+            let (page, stats) = f.search_limited(own, args.clone(), sweep).unwrap();
+            assert_scan_bounds(stats, sweep, max_block, 2);
+            assert!(stats.fetched_blocks > 0, "{page}");
+        }
+    }
+    // The budget is spent on blocks examined, not on hits: a query that matches
+    // nothing is cut exactly like one that matches everything.
+    let (page, stats) = f
+        .search_limited(
+            own,
+            json!({"query": "zzz-no-such-phrase", "match": "phrase", "kinds": kinds}),
+            limits(450, 1 << 20),
+        )
+        .unwrap();
+    assert_eq!(page["partial"], true);
+    assert!(page["next_cursor"].is_string());
+    assert_eq!(stats.fetched_blocks, 450 + 1);
 }
