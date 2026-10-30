@@ -62,7 +62,7 @@ const EXPECTED_TABLES: [&str; 50] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 49] = [
+const EXPECTED_INDICES: [&str; 50] = [
     "learning_claims_day",
     "learning_claim_roots_run",
     "idx_thread_index_runs_work",
@@ -70,6 +70,7 @@ const EXPECTED_INDICES: [&str; 49] = [
     "idx_thread_index_runs_retry",
     "idx_conversation_blocks_kind",
     "idx_thread_index_request_targets_run",
+    "idx_thread_index_requests_state_created",
     "idx_events_durable_retention",
     "idx_events_durable_retention_scan",
     "idx_events_task_lifecycle",
@@ -895,7 +896,8 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE thread_index_state DROP COLUMN wal_wait_since_ns;
+            "DROP INDEX idx_thread_index_requests_state_created;
+             ALTER TABLE thread_index_state DROP COLUMN wal_wait_since_ns;
              ALTER TABLE review_evidence DROP COLUMN attachments_json;
              DROP INDEX host_input_receipts_seq;
              ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq;

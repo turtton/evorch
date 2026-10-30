@@ -2667,7 +2667,13 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
     for pinned in [false, true] {
         let mut fx = Fixture::new(512 * MIB);
         fx.save(&verified("run-a", "private body", 1));
-        let lease = fx.lease(&gui(), S);
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        let LeaseResult::Acquired(lease) = submitted.lease else {
+            panic!("lease")
+        };
         let reader = Connection::open(&fx.config.db_path).unwrap();
         if pinned {
             reader
@@ -2703,7 +2709,7 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
         let outcome = fx.control(2 * S).step(&lease, 2 * S).unwrap();
         assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
         if pinned {
-            let next = waiting(outcome);
+            let mut next = waiting(outcome);
             assert_eq!(fx.rt.counters.pauses, 0);
             checkpoints.store(0, Ordering::SeqCst);
             transactions.store(0, Ordering::SeqCst);
@@ -2713,12 +2719,84 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
             );
             assert_eq!(checkpoints.load(Ordering::SeqCst), 0);
             assert_eq!(transactions.load(Ordering::SeqCst), 0);
-            waiting(fx.control(next).step(&lease, next).unwrap());
-            assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+            let blocker = Connection::open(&fx.config.db_path).unwrap();
+            // Neither a pinned reader nor a concurrent writer makes a
+            // pre-deadline probe eligible to acquire the writer lock.
+            let mut probes = 0;
+            for writer_holds_lock in [false, true] {
+                if writer_holds_lock {
+                    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+                }
+                for _ in 0..6 {
+                    assert!(next < 2 * S + super::wait::WAL_WAIT_LIMIT_NS);
+                    next = waiting(fx.control(next).step(&lease, next).unwrap());
+                    probes += 1;
+                    assert_eq!(checkpoints.load(Ordering::SeqCst), probes);
+                    assert_eq!(transactions.load(Ordering::SeqCst), 0);
+                }
+                if writer_holds_lock {
+                    blocker.execute_batch("COMMIT").unwrap();
+                }
+            }
+            assert!(matches!(
+                fx.control(next)
+                    .request_status(&submitted.request_id, next)
+                    .unwrap()
+                    .progress,
+                RequestProgress::Pending(_)
+            ));
             reader.execute_batch("COMMIT").unwrap();
         } else {
             assert_eq!(outcome, IndexStepResult::Progress);
         }
+    }
+}
+
+#[test]
+fn pending_request_detection_does_not_scan_terminal_history() {
+    fn measured(conn: &Connection) -> (bool, i32) {
+        let mut statement = conn
+            .prepare(super::requests::HAS_PENDING_TARGETS_SQL)
+            .unwrap();
+        let pending = statement
+            .query_row([], |row| row.get::<_, bool>(0))
+            .unwrap();
+        assert_eq!(pending, super::requests::has_pending_targets(conn).unwrap());
+        assert_eq!(
+            statement.get_status(rusqlite::StatementStatus::FullscanStep),
+            0
+        );
+        (
+            pending,
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        )
+    }
+
+    for pending in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "pending target", 1));
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        if !pending {
+            fx.control(2 * S)
+                .cancel_request(&submitted.request_id)
+                .unwrap();
+        }
+        // A pending request without pending targets is not work for an owner.
+        fx.conn().execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
+             VALUES ('empty', 0, 'pending', 0)", [],
+        ).unwrap();
+        let before = measured(fx.conn());
+        assert_eq!(before.0, pending);
+        fx.conn().execute_batch(
+            "WITH RECURSIVE history(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM history WHERE n<4000) \
+             INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns, finished_at_ns) \
+             SELECT printf('terminal-%d', n), 0, 'completed', n, n FROM history",
+        ).unwrap();
+        assert_eq!(measured(fx.conn()), before);
     }
 }
 

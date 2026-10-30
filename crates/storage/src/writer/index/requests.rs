@@ -400,6 +400,15 @@ pub(crate) fn latest_pending_created_at(conn: &Connection) -> Result<Option<i64>
     )?)
 }
 
+pub(super) const HAS_PENDING_TARGETS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM thread_index_requests q \
+     WHERE q.state = 'pending' AND EXISTS (SELECT 1 FROM thread_index_request_targets t \
+     WHERE t.request_id = q.request_id AND t.state = 'pending'))";
+
+/// Heartbeats need only existence, not the latest timestamp across all work.
+pub(crate) fn has_pending_targets(conn: &Connection) -> Result<bool, StorageError> {
+    Ok(conn.query_row(HAS_PENDING_TARGETS_SQL, [], |row| row.get(0))?)
+}
+
 /// Terminalizes requests without pending targets after re-checking that
 /// succeeded targets are still held at their frozen revision/versions.
 pub(crate) fn finalize(conn: &Connection, now_ns: i64) -> Result<usize, StorageError> {

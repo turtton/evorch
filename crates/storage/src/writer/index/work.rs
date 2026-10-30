@@ -363,7 +363,7 @@ pub(crate) fn resume_pending_wal_request(
         && rt.pause.is_some_and(|status| {
             status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
         })
-        && requests::latest_pending_created_at(conn)?.is_some()
+        && requests::has_pending_targets(conn)?
     {
         rt.pause = None;
         rt.paused_growth = None;
@@ -858,33 +858,42 @@ fn wal_wait_step(
     ) {
         return refuse(env, rt, status, now_ns).map(|refusal| Some(refusal.action()));
     }
-    // The deadline, current pending set, individual gaps and episode end share
-    // one IMMEDIATE. A concurrent submission either participates in this
-    // decision (and keeps the job alive) or starts after the completed episode.
-    let (deadline, expired, ended) = immediate(env.conn, |conn| {
-        let deadline = wait_deadline(conn, waiting.since_ns)?;
-        let expired =
-            if requests::earliest_wait_deadline(conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
-                .is_some_and(|deadline| now_ns >= deadline)
-            {
-                let expired = requests::gap_expired(
-                    conn,
-                    waiting.since_ns,
-                    WAL_WAIT_LIMIT_NS,
-                    now_ns,
-                    RequestGapReason::CapacityWaitExpired,
-                )?;
-                requests::finalize(conn, now_ns)?;
-                expired
-            } else {
-                0
-            };
-        let ended = now_ns >= deadline;
-        if ended {
-            wait::clear_since(conn)?;
-        }
-        Ok((deadline, expired, ended))
-    })?;
+    // Ordinary probes must remain read-only, even if another writer owns the
+    // lock. These reads only decide whether expiry work might be necessary.
+    let deadline = wait_deadline(env.conn, waiting.since_ns)?;
+    let expiry_due = now_ns >= deadline
+        || requests::earliest_wait_deadline(env.conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
+            .is_some_and(|deadline| now_ns >= deadline);
+    let (deadline, expired, ended) = if expiry_due {
+        // Re-read the pending set after obtaining IMMEDIATE: a submission
+        // racing the read-only check must not be closed before its deadline.
+        immediate(env.conn, |conn| {
+            let deadline = wait_deadline(conn, waiting.since_ns)?;
+            let expired =
+                if requests::earliest_wait_deadline(conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
+                    .is_some_and(|deadline| now_ns >= deadline)
+                {
+                    let expired = requests::gap_expired(
+                        conn,
+                        waiting.since_ns,
+                        WAL_WAIT_LIMIT_NS,
+                        now_ns,
+                        RequestGapReason::CapacityWaitExpired,
+                    )?;
+                    requests::finalize(conn, now_ns)?;
+                    expired
+                } else {
+                    0
+                };
+            let ended = now_ns >= deadline;
+            if ended {
+                wait::clear_since(conn)?;
+            }
+            Ok((deadline, expired, ended))
+        })?
+    } else {
+        (deadline, 0, false)
+    };
     rt.counters.wal_wait_expiries += expired as u64;
     if expired > 0 {
         tracing::warn!(expired, "thread index WAL request wait expired");
