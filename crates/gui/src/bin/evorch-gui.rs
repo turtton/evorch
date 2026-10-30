@@ -30,7 +30,7 @@ use sandbox::{CredentialError, CredentialStore, Secret};
 use storage::{Database, Storage, StorageConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
-const EVENT_CAPACITY: usize = 256;
+const EVENT_CAPACITY: usize = 2048;
 
 /// Keeps the Rust heap out of glibc malloc. CEF runs its browser process inside this
 /// one, and its memory dumps read glibc's `mallinfo()`, whose `int` fields overflow
@@ -1977,7 +1977,7 @@ mod storage_shutdown_tests {
         // Unwinding must resume the writer before the constructor's captured
         // resources try to flush it, even before the helper thread is started.
         let resume_write = ResumeWriteOnDrop(resume_write);
-        let event = Event::new(event_bus::MessageEvent::MessageDelta {
+        let event = Event::new(event_bus::MessageEvent::ReasoningDelta {
             run_id: Some("run".into()),
             delta: "tail before a later startup failure".into(),
         });

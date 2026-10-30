@@ -56,6 +56,84 @@ fn recorded(events: &[Event], requests: Vec<storage::usage::UsageRequestRecord>)
 }
 
 #[test]
+fn split_storage_responses_are_complete_in_conversations_records_and_child_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("parts.db"),
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 512,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let mut bridge = recorder::storage_bridge::StorageBridge::new(storage.handle(), "eval");
+    for event in [
+        started("root", None, "orchestrator"),
+        started("child", Some("root"), "worker"),
+    ] {
+        bridge.handle_event(&event).unwrap();
+    }
+    let root_text = "あ\"\\\n".repeat(300);
+    let child_text = "worker answer ".repeat(100);
+    for (run, text) in [("root", &root_text), ("child", &child_text)] {
+        bridge
+            .handle_event(&Event::new(MessageEvent::MessageCompleted {
+                run_id: run.into(),
+                text: text.clone(),
+            }))
+            .unwrap();
+    }
+    let database = storage::Database::open(&config).unwrap();
+    let raw: Vec<_> = database
+        .events_all_ordered()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.event)
+        .collect();
+    assert!(
+        raw.iter()
+            .all(|event| serde_json::to_vec(&event.kind).unwrap().len() <= 512)
+    );
+    assert!(
+        raw.iter()
+            .filter(|event| matches!(
+                event.kind,
+                EventKind::Message(MessageEvent::MessagePart { .. })
+            ))
+            .count()
+            > 2
+    );
+    let expected = vec![crate::conversation::Entry::Assistant { text: root_text }];
+    assert_eq!(
+        crate::conversation::recorded(&[], &raw, &["root".into()]),
+        expected
+    );
+
+    let (filtered, truncated) =
+        RunRecord::of_runs(&database, &["root".into(), "child".into()], i64::MIN, 1024).unwrap();
+    assert!(!truncated);
+    for record in [RunRecord::load(&config.db_path).unwrap(), filtered] {
+        assert_eq!(
+            crate::conversation::recorded(&[], &record.events, &["root".into()]),
+            expected
+        );
+        assert_eq!(
+            child_outputs(&record)[0].final_output.as_deref(),
+            Some(child_text.as_str())
+        );
+        assert!(!record.events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::Message(MessageEvent::MessagePart { .. })
+        )));
+    }
+    // Truncation within a response must not publish a partial assistant entry.
+    let (truncated, more) = RunRecord::of_runs(&database, &["root".into()], i64::MIN, 2).unwrap();
+    assert!(more);
+    assert!(crate::conversation::recorded(&[], &truncated.events, &["root".into()]).is_empty());
+}
+
+#[test]
 fn metrics_count_the_agent_and_keep_the_simulated_user_apart() {
     // Given: a root that delegates to a worker, three tool calls of which one fails, a failed
     // provider request with a fallback, and a simulated user's request beside the agent's.

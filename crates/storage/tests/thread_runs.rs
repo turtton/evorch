@@ -91,6 +91,47 @@ fn descendants_follow_context_and_ledger_parent_links() {
 }
 
 #[test]
+fn message_parts_are_saved_and_found_by_their_subkind_and_exact_run() {
+    let (_dir, storage, database) = fixture();
+    let parts = [
+        ("run-1", "one", 0),
+        ("run-10", "other", 0),
+        ("run-1", "two", 1),
+    ]
+    .map(|(run, text, index)| {
+        Event::new(MessageEvent::MessagePart {
+            run_id: run.into(),
+            response_id: format!("{run}-response"),
+            text: text.into(),
+            index,
+            total: 2,
+        })
+    });
+    for part in &parts {
+        assert_eq!(part.primary_run_id(), part.kind.primary_run_id());
+        assert_eq!(part.kind.subkind_name(), "MessagePart");
+        let wire = serde_json::to_value(part).unwrap();
+        assert_eq!(wire["kind"]["payload"]["kind"], "MessagePart");
+        storage.handle().append_event(Some("gui"), part).unwrap();
+    }
+    let mut found = Vec::new();
+    database
+        .for_each_event_matching(&[("Message", Some("MessagePart"))], |row| {
+            found.push(row.event)
+        })
+        .unwrap();
+    assert_eq!(found, parts);
+    let (found, truncated) = database
+        .events_for_runs(&["run-1".into()], i64::MIN, 10)
+        .unwrap();
+    assert!(!truncated);
+    assert_eq!(
+        found.iter().map(|row| &row.event).collect::<Vec<_>>(),
+        [&parts[0], &parts[2]]
+    );
+}
+
+#[test]
 fn events_for_runs_match_run_fields_and_approval_call_ids_only() {
     // Given: events of the run, an approval of it, an event of another run that
     // mentions the run only in its text, and an event of a run with a longer id.

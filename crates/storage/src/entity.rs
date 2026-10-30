@@ -278,6 +278,9 @@ impl SecretGuard {
             EventKind::Message(MessageEvent::FinalResultPublished { text, .. }) => {
                 self.check_text("event", "FinalResultPublished.text", text)
             }
+            EventKind::Message(MessageEvent::MessagePart { text, .. }) => {
+                self.check_text("event", "MessagePart.text", text)
+            }
             EventKind::Message(MessageEvent::MessageDelta { delta, .. }) => {
                 self.check_text("event", "MessageDelta.delta", delta)
             }

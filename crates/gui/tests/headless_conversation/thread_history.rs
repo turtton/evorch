@@ -25,6 +25,197 @@ fn state(root: &std::path::Path) -> WorkbenchState<DemoSource> {
         .with_provider_status(ProviderStatus::Configured)
 }
 
+#[test]
+fn oversized_accepted_responses_restore_in_full_before_later_tools_and_responses() {
+    use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("parts.db"),
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 512,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(1024));
+    let mut owner = OwnedStorageBridge::spawn(
+        bus.clone(),
+        storage,
+        |handle| StorageBridge::new(handle, "session"),
+        std::time::Duration::from_secs(3600),
+    )
+    .unwrap();
+    let mut live = state(dir.path());
+    let first_text = "あ\"\\\n🦀".repeat(300);
+    let second_text = "次の応答\u{1}".repeat(300);
+    let mut events = vec![reply("run", "one", "first partial")[0].clone()];
+    for text in [&first_text, &second_text] {
+        for chunk in ["first partial", " second partial", " third partial"] {
+            events.push(Event::new(MessageEvent::MessageDelta {
+                run_id: Some("run".into()),
+                delta: chunk.into(),
+            }));
+        }
+        events.push(Event::new(MessageEvent::MessageCompleted {
+            run_id: "run".into(),
+            text: text.clone(),
+        }));
+        events.push(Event::new(event_bus::ToolEvent::ToolStarted {
+            tool_name: "read".into(),
+            call_id: format!("run:{}", events.len()),
+            input: None,
+            run_id: Some("run".into()),
+            parent_call_id: None,
+        }));
+    }
+    events.push(Event::new(MessageEvent::MessageCompleted {
+        run_id: "run".into(),
+        text: "last response".into(),
+    }));
+    for event in &events {
+        live.apply_events([event.clone()]);
+        bus.emit(event.clone());
+    }
+    owner.flush().unwrap();
+    owner.shutdown();
+    drop(owner);
+    let db = Database::open(&config).unwrap();
+    let rows = db.events_all_ordered().unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| serde_json::to_vec(&row.event.kind).unwrap().len() <= 512)
+    );
+    assert!(!rows.iter().any(|row| matches!(
+        row.event.kind,
+        event_bus::EventKind::Message(MessageEvent::MessageDelta { .. })
+    )));
+    assert!(
+        rows.iter()
+            .filter(|row| matches!(
+                row.event.kind,
+                event_bus::EventKind::Message(MessageEvent::MessagePart { .. })
+            ))
+            .count()
+            > 2
+    );
+
+    let mut reopened = state(dir.path());
+    reopened.restore_history(&db).unwrap();
+    assert_eq!(reopened.transcript().entries(), live.transcript().entries());
+    let answers: Vec<_> = reopened
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [first_text.as_str(), second_text.as_str(), "last response"]
+    );
+}
+
+#[test]
+fn stopped_and_failed_streams_do_not_restore_unaccepted_answer_drafts() {
+    use event_bus::{AgentRunPhase, FaultEvent, SkillDiagnosticKind, ToolEvent};
+    use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
+    for terminal in [AgentRunPhase::Stopped, AgentRunPhase::Error] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("interrupted.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        let bus = std::sync::Arc::new(event_bus::EventBus::new(64));
+        let mut owner = OwnedStorageBridge::spawn(
+            bus.clone(),
+            storage,
+            |handle| StorageBridge::new(handle, "session"),
+            std::time::Duration::from_secs(3600),
+        )
+        .unwrap();
+        let thought = |text: &str| {
+            Event::new(MessageEvent::ReasoningDelta {
+                run_id: Some("run".into()),
+                delta: text.into(),
+            })
+        };
+        let events = [
+            reply("run", "one", "")[0].clone(),
+            thought("before approval"),
+            Event::new(ToolEvent::ApprovalRequested {
+                tool_name: "shell".into(),
+                call_id: "unknown".into(),
+                input: None,
+            }),
+            thought("before fault"),
+            Event::new(FaultEvent::SkillDiagnostic {
+                kind: SkillDiagnosticKind::DiscoveryError,
+                skill: "example".into(),
+                scope: "project".into(),
+                detail: "unavailable".into(),
+            }),
+            thought("before stop"),
+            Event::new(MessageEvent::MessageDelta {
+                run_id: Some("run".into()),
+                delta: "unaccepted draft".into(),
+            }),
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run".into(),
+                from: AgentRunPhase::Running,
+                to: terminal,
+                reason: Some("interrupted".into()),
+            }),
+        ];
+        // Check the ordered transcript projection, independently of sidebar
+        // ownership: run-less events cannot identify a particular thread.
+        let mut durable_live = gui::model::transcript::TranscriptModel::new();
+        for event in &events {
+            // The persisted view intentionally excludes unaccepted answer text.
+            if !matches!(
+                event.kind,
+                event_bus::EventKind::Message(MessageEvent::MessageDelta { .. })
+            ) {
+                durable_live.apply(event);
+            }
+            bus.emit(event.clone());
+        }
+        owner.flush().unwrap();
+        owner.shutdown();
+        drop(owner);
+        let db = Database::open(&config).unwrap();
+        let sessions = db.restore_sessions().unwrap();
+        assert!(!sessions.is_empty());
+        assert!(
+            sessions
+                .iter()
+                .all(|session| session.pending_message.is_empty())
+        );
+        let mut reopened = gui::model::transcript::TranscriptModel::new();
+        for row in db.events_all_ordered().unwrap() {
+            reopened.apply(&row.event);
+        }
+        assert_eq!(reopened.entries(), durable_live.entries());
+        assert!(!reopened.entries().iter().any(|entry| matches!(entry,
+            TranscriptEntry::Message { text, .. } if text.contains("unaccepted"))));
+        let reasoning: Vec<_> = reopened
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Reasoning { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning,
+            ["before approval", "before fault", "before stop"]
+        );
+    }
+}
+
 fn reply(run: &str, thread: &str, text: &str) -> [Event; 2] {
     [
         Event::new(LifecycleEvent::AgentRunStarted {
@@ -103,7 +294,15 @@ fn events_appended_before_gui_close_survive_restart() {
     original.composer_mut().input = "new question".into();
     original.submit_composer();
     // When: the real bridge acknowledges events, then the GUI and writer close.
-    for event in reply("new-run", "one", "new answer") {
+    // Streamed answer text is live-only; the completed message is what persists.
+    let completion = Event::new(MessageEvent::MessageCompleted {
+        run_id: "new-run".into(),
+        text: "new answer".into(),
+    });
+    for event in reply("new-run", "one", "new answer")
+        .into_iter()
+        .chain([completion])
+    {
         let result = bridge.handle_event(&event);
         assert!(
             result.is_ok(),

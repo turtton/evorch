@@ -31,6 +31,8 @@ pub(super) enum SharedFeed {
 #[derive(Default)]
 pub(super) struct SharedFeedState {
     pub feed: Option<SharedFeed>,
+    /// Response slices may span feed batches or a restart's replay boundary.
+    pub parts: event_bus::MessagePartAssembler,
     /// Events not folded yet, oldest first.
     pub pending: std::collections::VecDeque<FedEvent>,
     pub blocked_since: Option<Instant>,
@@ -239,6 +241,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// The display half of `fold_event`: the projections a restart's replay
     /// also builds.
     fn fold_shared_event(&mut self, event: &Event) {
+        let Some(assembled) = self.shared_feed.parts.accept(event) else {
+            return;
+        };
+        let event: &Event = &assembled;
         if let EventKind::Lifecycle(
             LifecycleEvent::AgentRunStarted { run_id, .. }
             | LifecycleEvent::AgentRunStateChanged { run_id, .. },
@@ -359,6 +365,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // Read through what is already shown, a page at a time; whatever
             // follows is folded by the feed.
             let mut after = 0;
+            let mut parts = event_bus::MessagePartAssembler::new();
             loop {
                 let (events, more) = match db.events_for_runs_between(
                     runs,
@@ -376,15 +383,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     break;
                 };
                 for stored in events {
+                    let Some(assembled) = parts.accept(&stored.event) else {
+                        continue;
+                    };
+                    let event: &Event = &assembled;
                     while messages
                         .peek()
-                        .is_some_and(|message| message.at <= stored.event.meta.wall_clock)
+                        .is_some_and(|message| message.at <= event.meta.wall_clock)
                     {
                         if let Some(message) = messages.next() {
                             self.restore_user_message(message);
                         }
                     }
-                    self.apply_conversation_event(&stored.event);
+                    self.apply_conversation_event(event);
                 }
                 if !more {
                     break;

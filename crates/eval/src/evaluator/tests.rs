@@ -235,6 +235,41 @@ fn every_role_tool_is_provided() {
 }
 
 #[tokio::test]
+async fn inspect_thread_reassembles_responses_written_under_a_small_event_limit() {
+    let fixture = Fixture::new();
+    let root = fixture.thread("split-thread").await;
+    let config = storage::StorageConfig {
+        hard_limits: storage::HardLimits {
+            max_event_bytes: 512,
+            ..Default::default()
+        },
+        ..fixture.recorded.config.clone()
+    };
+    let storage = storage::Storage::open(config).unwrap();
+    let mut bridge = recorder::storage_bridge::StorageBridge::new(storage.handle(), "eval-parts");
+    // Under the inspector's character bound, but well above the byte row limit.
+    let text = "あ".repeat(300);
+    bridge
+        .handle_event(&Event::new(MessageEvent::MessageCompleted {
+            run_id: root,
+            text: text.clone(),
+        }))
+        .unwrap();
+    let inspected = fixture
+        .json("eval_inspect_thread", json!({"thread_id": "split-thread"}))
+        .await;
+    let assistant: Vec<_> = inspected["conversation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "assistant")
+        .collect();
+    assert_eq!(assistant.len(), 2);
+    assert_eq!(assistant.last().unwrap()["text"], text);
+    assert!(inspected.get("events_note").is_none());
+}
+
+#[tokio::test]
 async fn threads_are_listed_and_inspected_with_their_runs_cost_and_denials() {
     // Given: a recorded thread with a delegated run, a denied command and a priced request.
     let fixture = Fixture::new();
