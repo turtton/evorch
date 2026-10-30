@@ -112,6 +112,68 @@ deadline で打ち切っていた。さらに event bus の run fence はイベ�
   接続の使い回しは見送った。新規接続の読み取りは約 47 µs と 6 µs の差で、run のイベント fence が
   registry を開かなくなった後は、操作ごとの接続オープンは負荷の主因でない。
 
+## Addendum（2026-10-30、attach 時の表示同期、PR #415）
+
+### Context
+
+複数の GUI プロセスが 1 つの events DB と `sidebar.json` を共有しても、各プロセスは起動時に復元した
+内容と自分の run のイベントしか表示しなかった。別プロセスが owner として実行している thread に attach
+しても、会話は更新されず、run は止まったまま（または動いたまま）に見えた。Decision 6 は read-only
+attach を定めたが、attach 先の会話を最新に保つ経路は定めていなかった。
+sidebar と thread ID の共有は [ADR 0041](0041-thread-context-reference.md) の同日付 addendum に記録する。
+
+### Decision
+
+1. **配信は共有 storage の events で行い、owner の socket（owner IPC）は会話の配信に使わない。**
+   理由: owner IPC を購読型にするのは大改修になる。また、接続が切れた場合はどのみち storage から
+   再同期する必要があり、storage の読み取りが唯一の経路として残る。socket は従来どおり
+   status 通知・claim/handoff・heartbeat に使う。
+2. **取得は読み取り専用接続で、変化した時だけ行う。** 他プロセスの events は読み取り専用の SQLite 接続で読む。
+   毎回問い合わせるのは `PRAGMA data_version` だけで、他の接続が commit して値が変わった時に限り、
+   `events.id` のカーソル（`events_after_excluding`）で続きを取得する。1 回の poll は 256 件ずつ最大
+   2048 行を走査し、残りは次の poll へ回す（残りがある間は待たずに続ける）。カーソルの起点は、
+   起動時の履歴復元が表示済みにした最後の event id である。バックグラウンドのスレッドが poll し、
+   GUI スレッドはキューに溜まった batch を受け取って表示する。
+3. **stream id を分け、自分の行は読まない。** 各 GUI プロセスは events を専用の stream id
+   `evorch-gui:<pid>-<random>`（`new_stream_id`。random は UUID の先頭 8 文字）で書く。外来の取得では
+   この stream の行を除外する。自分の行は live で表示済みであり、再度 fold すると二重になるためである。
+   除外した行は payload を読まずに（SQL の `CASE` で NULL にして）カーソルだけ進める。
+4. **外来イベントは表示にだけ fold する。** 再起動時の replay と同じ投影（transcript、run の phase、
+   カウンタ、ledger、user question、goal の束縛、branch の seed）を作るだけで、次は行わない。
+   - event bus への再 emit（emit すると二重に永続化される）
+   - runtime への command
+   - lifecycle の observe、承認、wake-up の実行
+   - OS 通知（通知の重複判定用に既読として記録するだけで、送らない）
+   fold 中は transcript 側を外来スコープにする。run にも thread にも帰属しないイベントは、
+   active thread へ配送せず捨てる。
+5. **帰属と root の切り替えはイベント順で決める。** sidebar の最新状態を過去のイベントに遡って適用しない。
+   未知の run は sidebar の `run_ids` で thread に束縛するが、既知の run と各 thread の現在の root は
+   イベント順に従い、root は root run の開始イベントを fold した時に切り替わる。新しい sidebar が先に
+   別の root を示していても、それ以前のイベントの帰属は変えない。thread が sidebar に無い chat run の
+   開始イベントは、その thread を導入する sidebar を待たせる（上限 10 秒。超えたら帰属なしとして fold する）。
+   後から帰属が判明した run（sidebar の取り込みで、すでに帰属なしで表示した run が thread に束縛された場合）は、
+   その run の events を DB から、表示済みのカーソルまで 1 ページ 5000 件で読み直し、thread の transcript に
+   再構築する。表示済みより後ろは通常の feed が 1 回だけ fold する。
+6. **ポーリング間隔。** 他プロセスの active な run（Running/Pending/Waiting の外来 run）がある間、
+   または最後に変化を観測してから 3 秒以内は約 200 ms、それ以外は約 1 s とする。取得の残り（backlog）がある間は
+   待たずに続ける。フレームごとに GUI スレッドが外来 run の有無を worker へ伝える。
+7. **owner の Released/Handoff を受けた時の補正。** 外来の `Ownership` の Released/Handoff を fold した時点で、
+   その thread がこのプロセスの所有でなければ、その時点で active と表示していた run だけを終了表示にする。
+   終了状態は run の最後の snapshot（`Done`/`Error`）に従い、無ければ Stopped とする。同じ batch で後から
+   別の owner が開始した run には触れない。これは表示の補正だけであり、書き込み権限は従来どおり
+   ownership registry（Decision 3・5、2026-10-23 の addendum）が決める。
+
+### Consequences
+
+- 別プロセスの会話は、200 ms〜1 s の遅延で表示に反映される。遅延は poll 間隔で決まり、owner IPC の状態には依存しない。
+- 非 active 時の負荷は、読み取り専用接続への `data_version` 照会 1 回（共有メモリ参照）と `sidebar.json` の stat に限る。
+- 外来イベントを fold しても runtime・bus・永続化には何も書かないため、表示の不具合が実行や記録を汚さない。
+- **既知の制約:** owner が異常終了して Released が残らない場合、その run は Running 表示のまま残る。
+  補正の契機が Released/Handoff のイベントだけだからである。claim したプロセスは従来どおり
+  2026-10-23 の addendum Decision 4 で Stopped 表示に解消するが、attach しているだけのプロセスは解消しない。
+- feed が行を除外する基準は stream id であり、このプロセスが owner かどうかでは切り替えない。
+  どのプロセスも、自分以外の stream の行を同じ経路で表示に fold する。
+
 ## Related
 
 - tmux: session / client の分離（attach/detach）

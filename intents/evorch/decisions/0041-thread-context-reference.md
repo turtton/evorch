@@ -902,3 +902,83 @@ Phase B の進捗を記録する。各項目の完了時に `[x]` にして、co
 2. 「Phase B の設計」と、このチェックリストの最初の未チェック項目から再開する。
 3. マイグレーション番号（v25）、`writer/state.rs` の行番号などは、実装前に現行のコードで確認する（この ADR の番号は `870a969b` の時点）。
 4. 実 store を使う作業は、原本を `mode=ro` で開いて backup API でコピーしたものだけに行う。
+
+## Addendum（2026-10-30、sidebar の複数プロセス共有と thread ID、PR #415）
+
+### Context
+
+決定 c は `sidebar.json` を thread 定義の正とし、GUI から DB の `threads` へ一方向にミラーすると定めた。
+この前提は GUI が 1 プロセスであることだった。複数の GUI プロセスが 1 つの `sidebar.json` を保存すると、
+後から保存したプロセスが他方の変更を上書きして失った。thread ID は `thread-<件数+1>` の連番で、別プロセスが
+同じ ID の別 thread を作りうるうえ、ID が衝突すると `threads` のミラーと thread ツールの参照先が混ざる。
+attach 時の events の表示同期は [ADR 0024](0024-process-owner-claim.md) の同日付 addendum に記録する。
+
+### Decision
+
+#### sidebar.json の共有と 3-way merge
+
+1. **`sidebar.json` は全 GUI プロセスで共有する。** 保存は `<file>.lock` を排他ロックした下での
+   read-merge-write とする。ロックは数ミリ秒（5 ms 間隔で 3 回の試行）だけ待つ。取れなければ保存を保留
+   （deferred）にして、後のフレームで再試行する。**ロックを取らずには保存しない。** 保存はファイルの
+   atomic な置換（一時ファイル + rename）で行う。
+2. **base は、最後にディスクと一致させた内容である。** 保存時は、そのプロセスが書いた内容（merge 前の自分の
+   state をシリアライズしたもの）、取り込み時は、その時にディスクから読んだ内容を base とする。保存の際、
+   ファイルの stamp（長さ・更新時刻・inode）が最後に記録した stamp と違うか、取り込みが保留中なら、
+   ディスクを読んで `merge(base, local, disk)` した結果を書く。同じなら local をそのまま書く。
+   merge に失敗したら（パース不能や検証エラー）警告を出し、そのプロセスの state だけを保存する。
+   merge 結果が local と異なる場合は、取り込みが保留中（`import_pending`）になる。
+3. **merge 規則**（`SidebarState::merge_three_way`、`merge_keyed`）。project と thread は id で対応させる。
+   - 一方だけが変更したレコードは、その変更に従う。一方が base のままなら他方に従い、削除も同様に伝わる。
+     他方が変更していれば、削除より変更を残す。
+   - 両方が変更したレコードは、フィールドごとに決める。local が base から変えたフィールドは local、
+     そうでなければ disk の値を取る（両方が変更したフィールドは local 優先）。
+   - `run_ids` は和集合（local の順、続けて disk だけにあるもの）。`updated_at` は max。
+   - 選択状態（`active_thread`、`selected_project`）は常に local のもの。
+   - 一方が作った thread の project を、他方が変更せずに削除していた場合は、project を戻す。
+   - 順序は local の順に、disk だけにあるレコードを続ける。
+   - 同じ規則（`merge_keyed`）で、ユーザーメッセージ（`id`、旧形式は内容から作ったキー）と composer の下書き
+     （`draft_id`）も merge する。両方が変更した場合は local を取る。
+4. **他プロセスの変更は検知して取り込む。** feed は poll のたびに `sidebar.json` の stamp を見る。最後に記録した
+   stamp と違えば、ファイルを読んで `merge(base, 現在の local, disk)` を現在の state に反映する
+   （自分の保存は保存後の stamp を記録するので、取り込み直さない）。active thread・選択中の project・
+   composer のテキストは動かさない。stamp は events の取得の後に読むので、sidebar を先に保存して events を
+   後で書く owner の新しい thread は、その events を見る時点で sidebar に載っている。
+   未保存の自分の変更（保存が保留中のもの）は、base がディスクの内容のままなので、次の保存で書かれる。
+   取り込みでは、新しく知った thread の分岐の seed、新しく現れたユーザーメッセージの表示、
+   すでに表示した run が後から thread に束縛された場合の履歴の再読込（ADR 0024 の同日付 addendum Decision 5）、
+   draft バナー・project の trust の更新を行う。
+
+#### 決定 c との関係（ミラーの echo 抑止）
+
+5. **決定 c（`sidebar.json` が正）は変えない。** 変わったのは、正である `sidebar.json` を複数のプロセスが
+   merge しながら書くことだけである。DB の `threads` から sidebar へ戻す経路はなく、ミラーは一方向の
+   ままである。ミラーの規則（`COALESCE`、`source` 列、1 秒ごとの同期）も変えない。
+6. **mirror は取り込んだ分を再送しない（echo 抑止）。** 他プロセスが保存した定義は、そのプロセスが自分のミラーで
+   すでに DB へ送っている。取り込みで変わった thread の定義は「送信済み」として記録し、このプロセスのミラーは
+   次に変わるまで再送しない。これで、同じ定義が複数のプロセスから繰り返し書かれるのを避ける。
+
+#### thread ID
+
+7. **thread ID は `thread-` + 小文字 Crockford base32 のランダム 8 文字（40 bit）とする。** 文字集合は
+   `0123456789abcdefghjkmnpqrstvwxyz`（`i`、`l`、`o`、`u` を含まない）。OS の乱数が取れない場合は、時刻と
+   プロセス ID から作る。生成した ID がそのプロセスの sidebar に既知の ID と重複したら、再生成する。
+   別プロセスが同時に作った ID とは調整しない（衝突確率は 40 bit のランダムに任せる）。
+8. **fork / rewind の ID も、派生元に基づいてランダムな suffix を付けて一意にする。** fork は
+   `<fork 元>-fork-<8 文字>`、rewind は `<版の root>-v-<8 文字>` で、既知の ID と重複したら再生成する。
+9. **既定タイトル `thread-N` は表示用であり、ID ではない。** 新しい thread の既定タイトルは
+   `thread-<thread 件数 + 1>` のままだが、重複してよく、ID としては使われない。
+10. **pre-v1 のため、既存 ID の移行はしない**（AGENTS.md の Compatibility policy）。連番時代の ID
+    （`thread-1` など）は、そのまま文字列の ID として残る。
+
+### Consequences
+
+- 複数の GUI が同時に thread を作成・編集しても、一方の変更が他方の保存で失われない。競合は、フィールド単位では
+  local 優先で解消され、レコード単位では独立した変更が両方残る。
+- 保存のロック待ちは 5 ms の sleep を最大 2 回に限るので、UI スレッドを止めるのは数ミリ秒である。
+  ロックが取れない間は保存が保留され、次のフレーム以降に再試行する。
+- ID が衝突しうるのは、2 つのプロセスが同時に同じ 40 bit を引いた場合に限る。その場合、merge は同じ id を
+  同じレコードとして扱い、local 側が残って他方の thread は失われる。確率は無視できるほど小さいため、検出と
+  修復は設けない。
+- merge に失敗した保存は、そのプロセスの state だけを書くので、他プロセスの変更を上書きしうる。パース不能な
+  ファイルが原因の場合に限る。
+- ロックの open 自体に失敗した場合（読み取り専用のディレクトリなど）は、保留にせず保存のエラーとなる。
