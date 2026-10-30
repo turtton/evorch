@@ -427,7 +427,7 @@ fn offline_compaction_preserves_legacy_sidebar_input_between_root_deltas() {
                 TranscriptEntry::Reasoning { text, .. } | TranscriptEntry::Message { text, .. } => {
                     Some(text.as_str())
                 }
-                TranscriptEntry::UserMessage { text } => Some(text.as_str()),
+                TranscriptEntry::UserMessage { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
