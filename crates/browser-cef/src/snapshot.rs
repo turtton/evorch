@@ -18,6 +18,7 @@ pub fn render_snapshot(html: Vec<u8>, timeout: Duration) -> Result<ColorImage, S
         SNAPSHOT_SIZE,
         1.0,
         Dialogs::Suppress,
+        60,
     )?;
     browser.capture_settled(timeout)
 }

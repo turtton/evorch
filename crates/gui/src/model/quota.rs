@@ -156,6 +156,17 @@ impl<T: QuotaData> QuotaState<T> {
         self.in_flight
     }
 
+    /// Whether a fetch or a worker shutdown is pending that only [`Self::poll`] observes. The
+    /// refresh timer is not work: a later frame starts the next fetch.
+    pub fn is_busy(&self) -> bool {
+        self.in_flight
+            || self
+                .job
+                .as_ref()
+                .is_some_and(|job| job.stopping.load(Ordering::Acquire))
+            || self.subscriptions.values().any(Self::is_busy)
+    }
+
     /// Whether a subscription profile or an injected backend feeds this state.
     pub fn configured(&self) -> bool {
         self.injected || !self.subscriptions.is_empty()

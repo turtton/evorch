@@ -95,3 +95,28 @@ fn repeated_fetch_uses_same_owner_thread_and_post_fetch_interval() {
         .recv_timeout(Duration::from_secs(5))
         .expect("completed");
 }
+
+#[test]
+fn a_fetch_in_flight_keeps_the_state_busy_until_its_result_is_collected() {
+    let (started, starts) = mpsc::channel();
+    let (release, gate) = tokio::sync::mpsc::unbounded_channel();
+    let (completed, completions) = mpsc::channel();
+    let mut state = QuotaState::with_backend(Box::new(Gated {
+        started,
+        release: gate,
+        completed,
+    }));
+    assert!(!state.is_busy());
+    let now = Instant::now();
+    state.poll(now);
+    starts.recv().expect("worker started");
+    assert!(state.is_busy());
+    release.send(()).expect("release");
+    completions.recv().expect("completed");
+    // The worker never wakes the UI, so only polling ends the busy state.
+    while state.is_busy() {
+        state.poll(now);
+        std::thread::yield_now();
+    }
+    assert!(!state.is_busy(), "the refresh timer is not busy work");
+}

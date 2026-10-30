@@ -14,6 +14,7 @@ mod accounting;
 #[cfg(test)]
 mod compaction_window_tests;
 pub(crate) mod diagnostic;
+pub(crate) mod select;
 use accounting::{day_start_ns, enforce_limit};
 
 const NANOS_PER_DAY: i64 = 86_400_000_000_000;
@@ -117,19 +118,23 @@ pub fn append_event(
     let wall_clock_ns = system_time_to_ns(event.meta.wall_clock)?;
     let schema_version = i64::from(event.meta.schema_version);
     let kind = kind_name(&event.kind);
+    let subkind = event.kind.subkind_name();
+    let run_id = event.kind.primary_run_id();
     let event_len_i64 =
         i64::try_from(event_len).map_err(|_| StorageError::OutOfRange("event payload length"))?;
     transaction.execute(
         "INSERT INTO events \
-         (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind, run_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             session_id,
             schema_version,
             monotonic_ns,
             wall_clock_ns,
             kind,
-            payload
+            payload,
+            subkind,
+            run_id
         ],
     )?;
     let id = transaction.last_insert_rowid();
@@ -192,71 +197,9 @@ pub fn list_all_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageEr
 /// Orchestrator events in ID order. Only these rows' payloads are decoded,
 /// a small share of a long history.
 pub fn list_orchestrator_ordered(conn: &Connection) -> Result<Vec<StoredEvent>, StorageError> {
-    list_events(
-        conn,
-        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
-         FROM events WHERE kind = 'Orchestrator' ORDER BY id ASC",
-        [],
-    )
-}
-
-/// Events at or after `from_ns` that name one of `run_ids` in a `run_id` field or
-/// carry an approval call ID (`<run>:<call>`) of one, oldest first. At most
-/// `limit` are returned, with whether more matched.
-pub fn list_for_runs(
-    conn: &Connection,
-    run_ids: &[String],
-    from_ns: i64,
-    limit: usize,
-) -> Result<(Vec<StoredEvent>, bool), StorageError> {
-    let ids = serde_json::to_string(run_ids)
-        .map_err(|error| StorageError::Serialization(error.to_string()))?;
-    let runs: std::collections::HashSet<&str> = run_ids.iter().map(String::as_str).collect();
-    // The substring check only narrows the scan; the parsed payload decides.
-    let mut statement = conn.prepare(
-        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
-         FROM events WHERE wall_clock_ns >= ?2 AND EXISTS (SELECT 1 FROM json_each(?1) run \
-         WHERE instr(payload, '\"run_id\":' || json_quote(run.value)) > 0 \
-         OR instr(payload, '\"call_id\":' || rtrim(json_quote(run.value), '\"') || ':') > 0) \
-         ORDER BY id ASC",
-    )?;
-    let mut rows = statement.query(params![ids, from_ns])?;
     let mut events = Vec::new();
-    while let Some(row) = rows.next()? {
-        let payload: String = row.get(6)?;
-        let concerns = serde_json::from_str::<serde_json::Value>(&payload)
-            .is_ok_and(|payload| concerns_runs(&payload, &runs));
-        if !concerns {
-            continue;
-        }
-        if events.len() == limit {
-            return Ok((events, true));
-        }
-        match row_to_event(row) {
-            Ok(event) => events.push(event),
-            Err(StorageError::Serialization(_)) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok((events, false))
-}
-
-fn concerns_runs(value: &serde_json::Value, runs: &std::collections::HashSet<&str>) -> bool {
-    match value {
-        serde_json::Value::Object(object) => {
-            object
-                .iter()
-                .any(|(key, value)| match (key.as_str(), value.as_str()) {
-                    ("run_id", Some(run)) => runs.contains(run),
-                    ("call_id", Some(call)) => call
-                        .split_once(':')
-                        .is_some_and(|(run, _)| runs.contains(run)),
-                    _ => concerns_runs(value, runs),
-                })
-        }
-        serde_json::Value::Array(items) => items.iter().any(|item| concerns_runs(item, runs)),
-        _ => false,
-    }
+    select::for_each_matching(conn, &[("Orchestrator", None)], |event| events.push(event))?;
+    Ok(events)
 }
 
 /// Whether any persisted thread goal snapshot was bound to `thread_id`.
@@ -367,6 +310,8 @@ const fn kind_name(kind: &EventKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod columns_tests;
 #[cfg(test)]
 mod limits_tests;
 #[cfg(test)]

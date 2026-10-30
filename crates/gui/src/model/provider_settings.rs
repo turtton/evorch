@@ -314,6 +314,20 @@ impl ProviderSettingsModel {
         }
     }
 
+    /// Whether a worker the frame loop polls is running: the catalog fetch, or the open editor's
+    /// model fetch or subscription login. None of them wakes the UI when it finishes.
+    pub fn has_background_work(&self) -> bool {
+        self.catalog.is_busy()
+            || match &self.editor {
+                Some(ProfileEditor::OpenAiCompatible(editor)) => editor.models_rx.is_some(),
+                Some(ProfileEditor::Codex(editor)) => editor.fetch.models_rx.is_some(),
+                Some(ProfileEditor::Subscription(editor)) => {
+                    editor.models.models_rx.is_some() || editor.login_in_flight()
+                }
+                None => false,
+            }
+    }
+
     pub fn poll_models(&mut self) -> bool {
         match &mut self.editor {
             Some(ProfileEditor::OpenAiCompatible(editor)) => editor.poll_models(),

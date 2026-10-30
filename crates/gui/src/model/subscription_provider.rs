@@ -296,6 +296,10 @@ impl SubscriptionEditorModel {
             self.auth = SubscriptionAuthState::SignedOut;
         }
     }
+    /// Whether a login worker is running whose events [`Self::poll_login`] collects.
+    pub const fn login_in_flight(&self) -> bool {
+        self.login_rx.is_some()
+    }
     pub fn poll_login(&mut self) -> bool {
         if self
             .login_account

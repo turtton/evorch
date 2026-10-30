@@ -1189,11 +1189,11 @@ fn run() -> Result<(), GuiError> {
             state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
             #[cfg(feature = "cef")]
             html_previews.install_snapshots(&creation_context.egui_ctx);
-            // CEF must start on this thread, which also drops it. Starting it here
-            // rather than on demand lets agents inspect artifacts while the window
-            // draws no frames.
+            // Fix tool availability now without starting CEF. The first page
+            // request wakes this GUI thread to initialize it; shutdown stays
+            // on the same thread and the tool schema never changes.
             #[cfg(feature = "cef")]
-            match html_previews.artifact_pages() {
+            match html_previews.artifact_pages(&creation_context.egui_ctx) {
                 Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
                 Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
             }
@@ -1251,6 +1251,8 @@ impl Drop for GuiStorageResources {
 impl eframe::App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workbench.logic(ctx, frame);
+        #[cfg(feature = "cef")]
+        self.html_previews.logic();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

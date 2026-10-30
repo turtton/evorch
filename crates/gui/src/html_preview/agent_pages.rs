@@ -8,6 +8,8 @@ use browser::agent::PageAgent;
 use browser_cef::AgentPage;
 use runtime::artifacts::{ArtifactPage, ArtifactPages};
 
+use super::runtime_requests::RuntimeRequestSender;
+
 /// Each page has its own renderer process, so only a few runs inspect at once.
 const MAX_PAGES: usize = 4;
 
@@ -16,6 +18,7 @@ const MAX_PAGES: usize = 4;
 /// CEF shuts down even while tool calls still hold them.
 pub struct CefArtifactPages {
     inner: Arc<Inner>,
+    initializer: RuntimeRequestSender,
 }
 
 struct Inner {
@@ -44,13 +47,14 @@ impl ArtifactPage for CefPage {
 
 impl CefArtifactPages {
     /// `timeout` bounds loading a page and each DevTools command on it.
-    pub(super) fn new(timeout: Duration) -> Self {
+    pub(super) fn new(timeout: Duration, initializer: RuntimeRequestSender) -> Self {
         Self {
             inner: Arc::new(Inner {
                 alive: RwLock::new(true),
                 pages: Mutex::default(),
                 timeout,
             }),
+            initializer,
         }
     }
 
@@ -108,10 +112,16 @@ impl Inner {
 impl ArtifactPages for CefArtifactPages {
     async fn open(&self, key: &str, html: Vec<u8>) -> Result<Arc<dyn ArtifactPage>, String> {
         let inner = Arc::clone(&self.inner);
+        let initializer = self.initializer.clone();
         let key = key.to_owned();
-        let page = tokio::task::spawn_blocking(move || inner.open(key, html))
-            .await
-            .map_err(|error| format!("opening the artifact page failed: {error}"))??;
+        let page = tokio::task::spawn_blocking(move || {
+            // Do not hold Inner::alive while waiting for the GUI: shutdown
+            // must be able to reject pages even before CEF has initialized.
+            initializer.ensure_runtime()?;
+            inner.open(key, html)
+        })
+        .await
+        .map_err(|error| format!("opening the artifact page failed: {error}"))??;
         Ok(page)
     }
 

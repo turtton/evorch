@@ -92,6 +92,7 @@ impl AgentPage {
             SNAPSHOT_SIZE,
             1.0,
             Dialogs::Suppress,
+            10,
         )?;
         browser
             .wait_settled(timeout)

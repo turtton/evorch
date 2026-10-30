@@ -157,13 +157,15 @@ pub struct OsrBrowser {
 
 impl OsrBrowser {
     /// Opens `url` (normally [`ArtifactContext::url`]) at `width`×`height`
-    /// DIP rendered at `scale` physical pixels per DIP.
+    /// DIP rendered at `scale` physical pixels per DIP. `frame_rate` is the
+    /// maximum off-screen frame rate (CEF requires at least 1).
     pub fn create(
         artifact: ArtifactContext,
         url: &str,
         [width, height]: [i32; 2],
         scale: f32,
         dialogs: Dialogs,
+        frame_rate: i32,
     ) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             view: Mutex::new(ViewGeometry {
@@ -186,7 +188,7 @@ impl OsrBrowser {
             ..Default::default()
         };
         let settings = BrowserSettings {
-            windowless_frame_rate: 60,
+            windowless_frame_rate: frame_rate.max(1),
             background_color: 0xFFFF_FFFF,
             ..Default::default()
         };
