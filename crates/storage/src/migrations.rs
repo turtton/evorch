@@ -7,6 +7,9 @@ use crate::StorageError;
 #[path = "migrations/sql.rs"]
 mod sql;
 
+#[path = "migrations/backfill.rs"]
+pub(crate) mod backfill;
+
 pub(crate) const MIGRATIONS: &[&str] = &[
     sql::V1,
     sql::V2,
@@ -37,6 +40,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v27.sql"),
     include_str!("migrations/v28.sql"),
     include_str!("migrations/v29.sql"),
+    include_str!("migrations/v30.sql"),
 ];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
