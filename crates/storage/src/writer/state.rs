@@ -34,6 +34,7 @@ struct WriterState {
     reclaim_wal_pending: bool,
     index: super::index::IndexJob,
     task_progress_cursor: crate::maintenance::retention::Cursor,
+    event_retention_cursor: crate::maintenance::retention_events::Cursor,
 }
 
 /// All review mutations share the same suspension gate and rollback boundary.
@@ -154,6 +155,7 @@ pub(super) fn run_writer_with_index(
         reclaim_wal_pending: false,
         index,
         task_progress_cursor: Default::default(),
+        event_retention_cursor: Default::default(),
     };
     loop {
         let deadline = state.next_flush_at.min(state.next_checkpoint_at);
@@ -710,6 +712,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
             );
         }
     }
+    removed += retain_observation_events(state, now)?;
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
@@ -724,6 +727,29 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
+}
+
+/// Delete one bounded batch of observational events: leftover
+/// `SubscriberLagged` / `RunProgress` rows and expired provider observations.
+fn retain_observation_events(
+    state: &mut WriterState,
+    now: std::time::SystemTime,
+) -> Result<u64, StorageError> {
+    let summary = crate::maintenance::retention_events::tick(
+        &state.conn,
+        &mut state.event_retention_cursor,
+        crate::system_time_to_ns(now)?,
+        state.config.provider_event_retention_days,
+    )?;
+    if summary.event_count > 0 {
+        state.accounting = event::EventAccounting::default();
+        tracing::info!(
+            events_removed = summary.event_count,
+            bytes_removed = summary.payload_bytes,
+            "observational event history removed"
+        );
+    }
+    Ok(summary.event_count)
 }
 
 /// Fold one bounded batch of ledger rows older than the retention window into
@@ -1128,6 +1154,7 @@ mod tests {
             reclaim_wal_pending: false,
             index: crate::writer::index::IndexJob::inert(),
             task_progress_cursor: Default::default(),
+            event_retention_cursor: Default::default(),
         }
     }
 

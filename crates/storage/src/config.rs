@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use crate::thread_index::{DEFAULT_THREAD_INDEX_MAX_BYTES, ThreadIndexSettings};
 
+/// provider 観測イベントを保持する既定の日数です。
+pub const PROVIDER_EVENT_RETENTION_DAYS: u32 = 90;
+
 /// 超過を検査するストレージ容量上限の種別です。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
@@ -78,6 +81,10 @@ pub struct StorageConfig {
     pub usage_retention_days: u32,
     /// thread 開始状態を保持する日数です。0 は削除を無効化します。
     pub thread_start_retention_days: u32,
+    /// provider 観測イベント（`RequestStarted` / `RequestCompleted` /
+    /// `FirstTokenObserved` / `CacheReuseObserved`）を保持する日数です。過ぎた行は
+    /// 削除します。0 はこの削除だけを無効化します。
+    pub provider_event_retention_days: u32,
     /// 会話全文索引の起動時設定です（ADR 0041 Phase B）。利用者設定
     /// `[storage.thread_index]`（`config::ThreadIndexConfig`、検証済み）から写します。
     /// `Storage::open` 時点の値が初期世代になり、実行中の変更は writer の
@@ -101,6 +108,7 @@ impl Default for StorageConfig {
             temp_warn_bytes: 268_435_456,
             usage_retention_days: crate::usage::USAGE_RETENTION_DAYS,
             thread_start_retention_days: crate::thread_start::THREAD_START_RETENTION_DAYS,
+            provider_event_retention_days: PROVIDER_EVENT_RETENTION_DAYS,
             thread_index: ThreadIndexSettings {
                 enabled: true,
                 max_bytes: DEFAULT_THREAD_INDEX_MAX_BYTES,
@@ -149,6 +157,7 @@ mod tests {
         assert_eq!(config.temp_warn_bytes, 268_435_456);
         assert_eq!(config.usage_retention_days, 90);
         assert_eq!(config.thread_start_retention_days, 14);
+        assert_eq!(config.provider_event_retention_days, 90);
         assert_eq!(
             config.thread_index,
             ThreadIndexSettings {
