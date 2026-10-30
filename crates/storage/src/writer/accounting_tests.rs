@@ -27,6 +27,7 @@ fn writer_state(conn: Connection, config: StorageConfig) -> WriterState {
         reclaim_wal_pending: false,
         index: crate::writer::index::IndexJob::inert(),
         task_progress_cursor: Default::default(),
+        event_retention_cursor: Default::default(),
     }
 }
 

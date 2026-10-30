@@ -347,3 +347,152 @@ fn stopped_history_replays_as_resumable_with_role_and_partial_output_intact() {
     assert!(!harness.has_label("Stopped (resumable) — send a message or /continue to resume"));
     assert!(harness.has_label("Send"));
 }
+
+/// Replays a history with an incomplete second answer after the storage
+/// retention tick ran with `retention_days`, returning the restored answers
+/// of the run and the provider observations left in the database.
+fn restored_after_retention(retention_days: u32) -> (Vec<String>, Vec<String>) {
+    use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent};
+    use event_bus::{ProviderEvent, RequestPurpose};
+    use gui::model::transcript::TranscriptEntry;
+    use providers::{ContentBlock, Message, Role};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        provider_event_retention_days: retention_days,
+        ..StorageConfig::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let db = Database::open(&config).unwrap();
+    let mut record = context("run-104", "Worker", "chat:Worker:old", "Checkpoint");
+    record.messages_json = serde_json::to_string(&vec![Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "complete second answer".into(),
+        }],
+    }])
+    .unwrap();
+    storage.handle().upsert_run_context(&record).unwrap();
+    let run_id = || Some("run-104".to_owned());
+    let request = |id: &str| ProviderEvent::RequestStarted {
+        request_id: id.into(),
+        provider: "p".into(),
+        profile: None,
+        protocol: "x".into(),
+        model: "m".into(),
+        streaming: true,
+        run_id: run_id(),
+        reasoning_effort: None,
+        purpose: None::<RequestPurpose>,
+    };
+    let first_token = |id: &str| ProviderEvent::FirstTokenObserved {
+        request_id: id.into(),
+        provider: "p".into(),
+        profile: None,
+        protocol: "x".into(),
+        model: "m".into(),
+        ttft_ms: 5,
+        run_id: run_id(),
+    };
+    let completed = |id: &str| ProviderEvent::RequestCompleted {
+        request_id: id.into(),
+        provider: "p".into(),
+        profile: None,
+        protocol: "x".into(),
+        model: "m".into(),
+        streaming: true,
+        duration_ms: 10,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        finish_reason: "stop".into(),
+        service_tier: None,
+        run_id: run_id(),
+        purpose: None,
+        reasoning_tokens: None,
+    };
+    let waiting = || {
+        Event::new(LifecycleEvent::AgentRunStateChanged {
+            run_id: "run-104".into(),
+            from: AgentRunPhase::Running,
+            to: AgentRunPhase::Waiting,
+            reason: None,
+        })
+    };
+    // Request A answers and waits; request B loses its answer and waits.
+    let events: Vec<Event> = vec![
+        Event::new(LifecycleEvent::AgentRunStarted {
+            run_id: "run-104".into(),
+            parent_run_id: None,
+            agent_name: "chat:Worker:old".into(),
+            role: "worker".into(),
+        }),
+        Event::new(request("a")),
+        Event::new(first_token("a")),
+        Event::new(MessageEvent::MessageCompleted {
+            run_id: "run-104".into(),
+            text: "first answer".into(),
+        }),
+        Event::new(completed("a")),
+        waiting(),
+        Event::new(request("b")),
+        Event::new(first_token("b")),
+        Event::new(MessageEvent::MessageDelta {
+            run_id: run_id(),
+            delta: "incomplete".into(),
+        }),
+        Event::new(completed("b")),
+        waiting(),
+    ];
+    for mut event in events {
+        // Old enough to be outside any retention window.
+        event.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    storage.handle().checkpoint_now().unwrap();
+
+    let mut sidebar = sidebar(dir.path());
+    sidebar.threads[0].run_ids.push("run-104".into());
+    let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar)
+        .with_sidebar_path(dir.path().join("sidebar.json"));
+    state.save_sidebar();
+    state.restore_history(&db).unwrap();
+
+    let answers = state
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message { text, run_id } if run_id.as_deref() == Some("run-104") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut observations = Vec::new();
+    db.for_each_event_ordered(|stored| {
+        if let EventKind::Provider(event) = &stored.event.kind {
+            observations.push(format!("{event:?}").split(' ').next().unwrap().to_owned());
+        }
+    })
+    .unwrap();
+    (answers, observations)
+}
+
+#[test]
+fn provider_retention_does_not_change_the_restored_final_answer() {
+    // Given/When: the same history restored without and with retention
+    let (kept_answers, kept) = restored_after_retention(0);
+    let (answers, remaining) = restored_after_retention(90);
+
+    // Then: the snapshot still repairs the second answer, as it does without
+    // retention, because the request boundary survives expiry.
+    assert_eq!(kept_answers, vec!["first answer", "complete second answer"]);
+    assert_eq!(answers, kept_answers);
+    assert_eq!(kept.len(), 6);
+    assert_eq!(remaining, vec!["RequestStarted", "RequestStarted"]);
+}
