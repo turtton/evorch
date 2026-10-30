@@ -169,6 +169,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.fold_pending_shared();
     }
 
+    /// Whether events of other processes are held back, waiting for the sidebar.
+    pub(super) fn shared_events_held(&self) -> bool {
+        !self.shared_feed.pending.is_empty()
+    }
+
     /// Folds the queued events of other processes in order, stopping at one that
     /// waits for the sidebar. Run once per frame while events are queued.
     pub fn retry_pending_shared_events(&mut self) {
