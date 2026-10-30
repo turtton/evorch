@@ -18,6 +18,9 @@ mod diagnostic;
 #[path = "accounting_tests.rs"]
 mod accounting_tests;
 
+/// Maintenance interval while observation-event retention still has rows to remove.
+const RETENTION_BACKLOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct WriterState {
     conn: Connection,
     accounting: event::EventAccounting,
@@ -683,7 +686,17 @@ fn run_due_work(state: &mut WriterState, idle: bool) {
         if let Err(error) = maintenance(state) {
             tracing::warn!(error = %error, "storage maintenance failed");
         }
-        state.next_checkpoint_at = now + state.config.checkpoint_interval;
+        // Observation events deleted under a time budget leave a backlog; drain
+        // it in short ticks instead of one tick per checkpoint interval.
+        let interval = if state.event_retention_cursor.has_backlog() {
+            state
+                .config
+                .checkpoint_interval
+                .min(RETENTION_BACKLOG_INTERVAL)
+        } else {
+            state.config.checkpoint_interval
+        };
+        state.next_checkpoint_at = now + interval;
     }
     super::index::run_due(
         &mut state.index,
@@ -740,6 +753,7 @@ fn retain_observation_events(
         &mut state.event_retention_cursor,
         crate::system_time_to_ns(now)?,
         state.config.provider_event_retention_days,
+        crate::maintenance::retention_events::TIME_BUDGET,
     )?;
     if summary.event_count > 0 {
         state.accounting = event::EventAccounting::default();

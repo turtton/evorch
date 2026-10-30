@@ -206,7 +206,7 @@ fn observation_retention_follows_the_configured_provider_window() {
     let mut state = fixture();
     for (kind, tag) in [
         ("Fault", "SubscriberLagged"),
-        ("Provider", "RequestStarted"),
+        ("Provider", "RequestCompleted"),
     ] {
         state
             .conn

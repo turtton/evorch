@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rusqlite::{Connection, params};
 
 use super::*;
@@ -56,7 +58,11 @@ fn count(conn: &Connection) -> i64 {
 }
 
 fn run(conn: &Connection, cursor: &mut Cursor, days: u32) -> Summary {
-    tick(conn, cursor, NOW, days).unwrap()
+    run_at(conn, cursor, NOW, days)
+}
+
+fn run_at(conn: &Connection, cursor: &mut Cursor, now_ns: i64, days: u32) -> Summary {
+    tick(conn, cursor, now_ns, days, Duration::from_secs(3_600)).unwrap()
 }
 
 fn old() -> i64 {
@@ -67,8 +73,7 @@ fn recent() -> i64 {
     NOW - DAY
 }
 
-const PROVIDER: [&str; 4] = [
-    "RequestStarted",
+const PROVIDER: [&str; 3] = [
     "RequestCompleted",
     "FirstTokenObserved",
     "CacheReuseObserved",
@@ -84,6 +89,7 @@ fn removes_leftover_fault_and_progress_rows_but_nothing_else() {
         let keep = [
             insert(&conn, "Fault", "SkillDiagnostic", converted, recent()),
             insert(&conn, "Lifecycle", "Started", converted, recent()),
+            insert(&conn, "Provider", "RequestStarted", converted, old()),
             insert(&conn, "Provider", "RequestFailed", converted, old()),
             insert(&conn, "Provider", "ProviderFallback", converted, old()),
             insert(&conn, "Message", "MessageDelta", converted, old()),
@@ -143,7 +149,7 @@ fn zero_days_keeps_provider_observations_but_still_removes_leftover_noise() {
 
     assert_eq!(first.event_count, 1);
     assert_eq!(second.event_count, 0);
-    assert_eq!(count(&conn), 8);
+    assert_eq!(count(&conn), 6);
 }
 
 #[test]
@@ -155,7 +161,7 @@ fn a_tick_never_deletes_more_than_its_budget_and_later_ticks_finish() {
         match index % 4 {
             0 => insert(&conn, "Fault", "SubscriberLagged", true, recent()),
             1 => insert(&conn, "Lifecycle", "RunProgress", false, recent()),
-            2 => insert(&conn, "Provider", "RequestStarted", true, old()),
+            2 => insert(&conn, "Provider", "FirstTokenObserved", true, old()),
             _ => insert(&conn, "Provider", "RequestCompleted", false, old()),
         };
     }
@@ -183,9 +189,9 @@ fn filtering_targets_examine_a_bounded_window_and_resume_where_they_stopped() {
         // Given: more in-window rows than one scan covers, then an expired one
         let conn = open();
         for _ in 0..MAX_SCANNED_PER_TARGET + 500 {
-            insert(&conn, "Provider", "RequestStarted", converted, recent());
+            insert(&conn, "Provider", "RequestCompleted", converted, recent());
         }
-        let expired = insert(&conn, "Provider", "RequestStarted", converted, old());
+        let expired = insert(&conn, "Provider", "RequestCompleted", converted, old());
         let mut cursor = Cursor::default();
 
         // When/Then: the first tick stops short of it, a following one reaches it
@@ -198,14 +204,88 @@ fn filtering_targets_examine_a_bounded_window_and_resume_where_they_stopped() {
 }
 
 #[test]
+fn a_budget_that_runs_out_inside_a_target_resumes_at_the_next_row() {
+    let conn = open();
+    for _ in 0..MAX_DELETIONS_PER_TICK - 500 {
+        insert(&conn, "Fault", "SubscriberLagged", true, recent());
+    }
+    let progress: Vec<i64> = (0..MAX_SCANNED_PER_TARGET)
+        .map(|_| insert(&conn, "Lifecycle", "RunProgress", false, recent()))
+        .collect();
+    let mut cursor = Cursor::default();
+
+    let first = run(&conn, &mut cursor, RETENTION_DAYS);
+
+    // The ordered target stops after the 500th row, exactly at the budget.
+    assert_eq!(first.event_count, MAX_DELETIONS_PER_TICK as u64);
+    assert_eq!(ids(&conn), progress[500..].to_vec());
+    let second = run(&conn, &mut cursor, RETENTION_DAYS);
+    assert_eq!(second.event_count, 500);
+    assert_eq!(count(&conn), 0);
+}
+
+#[test]
+fn an_unconditional_target_larger_than_the_budget_finishes_over_two_ticks() {
+    let conn = open();
+    for _ in 0..MAX_DELETIONS_PER_TICK + 300 {
+        insert(&conn, "Fault", "SubscriberLagged", true, recent());
+    }
+    let mut cursor = Cursor::default();
+
+    assert_eq!(
+        run(&conn, &mut cursor, RETENTION_DAYS).event_count,
+        MAX_DELETIONS_PER_TICK as u64
+    );
+    assert_eq!(count(&conn), 300);
+    assert_eq!(run(&conn, &mut cursor, RETENTION_DAYS).event_count, 300);
+    assert_eq!(count(&conn), 0);
+}
+
+#[test]
+fn a_row_that_expires_behind_the_cursor_is_only_found_after_the_pass_wraps() {
+    let conn = open();
+    // Inside the window now, but its low id is already behind the cursor
+    // once the first tick has scanned past it.
+    let aging = insert(
+        &conn,
+        "Provider",
+        "RequestCompleted",
+        true,
+        NOW - (i64::from(RETENTION_DAYS) - 1) * DAY,
+    );
+    for _ in 0..MAX_SCANNED_PER_TARGET + 500 {
+        insert(&conn, "Provider", "RequestCompleted", true, recent());
+    }
+    let mut cursor = Cursor::default();
+    let later = NOW + 2 * DAY;
+
+    assert_eq!(
+        run_at(&conn, &mut cursor, NOW, RETENTION_DAYS).event_count,
+        0
+    );
+    // The row is expired now, but the pass has moved on and finishes first.
+    assert_eq!(
+        run_at(&conn, &mut cursor, later, RETENTION_DAYS).event_count,
+        0
+    );
+    assert!(ids(&conn).contains(&aging));
+    // The finished pass starts over and reaches it.
+    assert_eq!(
+        run_at(&conn, &mut cursor, later, RETENTION_DAYS).event_count,
+        1
+    );
+    assert!(!ids(&conn).contains(&aging));
+}
+
+#[test]
 fn a_finished_pass_restarts_and_finds_rows_that_arrived_behind_the_cursor() {
     let conn = open();
-    insert(&conn, "Provider", "RequestStarted", true, recent());
+    insert(&conn, "Provider", "CacheReuseObserved", true, recent());
     let mut cursor = Cursor::default();
     assert_eq!(run(&conn, &mut cursor, RETENTION_DAYS).event_count, 0);
 
     // A backdated arrival gets a higher id, but the cursor already wrapped.
-    let late = insert(&conn, "Provider", "RequestStarted", true, old());
+    let late = insert(&conn, "Provider", "CacheReuseObserved", true, old());
     assert_eq!(run(&conn, &mut cursor, RETENTION_DAYS).event_count, 1);
     assert!(!ids(&conn).contains(&late));
 }
@@ -305,4 +385,42 @@ fn candidate_lookup_seeks_the_kind_subkind_index() {
             "{plan:?}"
         );
     }
+}
+
+#[test]
+fn a_spent_time_budget_still_makes_progress_and_flags_a_backlog() {
+    let conn = open();
+    let total = TIME_CHECK_ROWS as usize * 3 + 5;
+    for _ in 0..total {
+        insert(&conn, "Fault", "SubscriberLagged", true, recent());
+    }
+    let mut cursor = Cursor::default();
+
+    let first = tick(&conn, &mut cursor, NOW, RETENTION_DAYS, Duration::ZERO).unwrap();
+
+    // The clock is only read after TIME_CHECK_ROWS deletions.
+    assert_eq!(first.event_count, TIME_CHECK_ROWS);
+    assert!(cursor.has_backlog());
+    let mut removed = first.event_count;
+    while count(&conn) > 0 {
+        removed += tick(&conn, &mut cursor, NOW, RETENTION_DAYS, Duration::ZERO)
+            .unwrap()
+            .event_count;
+    }
+    assert_eq!(removed, total as u64);
+    assert!(!cursor.has_backlog());
+}
+
+#[test]
+fn reaching_the_deletion_cap_flags_a_backlog_and_finishing_clears_it() {
+    let conn = open();
+    for _ in 0..MAX_DELETIONS_PER_TICK + 1 {
+        insert(&conn, "Fault", "SubscriberLagged", true, recent());
+    }
+    let mut cursor = Cursor::default();
+
+    run(&conn, &mut cursor, RETENTION_DAYS);
+    assert!(cursor.has_backlog());
+    run(&conn, &mut cursor, RETENTION_DAYS);
+    assert!(!cursor.has_backlog());
 }

@@ -3,16 +3,25 @@
 //! Three kinds of rows dominate the event table without being needed to rebuild
 //! any state: `Fault/SubscriberLagged`, `Lifecycle/RunProgress` (both are no
 //! longer stored; this removes what older versions left behind) and the
-//! provider request observations (`RequestStarted`, `RequestCompleted`,
-//! `FirstTokenObserved`, `CacheReuseObserved`), which expire after
+//! provider request observations (`RequestCompleted`, `FirstTokenObserved`,
+//! `CacheReuseObserved`), which expire after
 //! [`StorageConfig::provider_event_retention_days`](crate::StorageConfig).
 //!
-//! One [`tick`] runs in one immediate transaction and is bounded twice: it
-//! deletes at most [`MAX_DELETIONS_PER_TICK`] rows and examines at most
-//! [`MAX_SCANNED_PER_TARGET`] candidate rows per target that has to filter
-//! (everything except the unconditional `(kind, subkind)` deletes). Targets
-//! that filter remember how far they have looked in a [`Cursor`], so a long
-//! history is covered over several ticks instead of one long write lock.
+//! `RequestStarted` is deliberately kept: replaying history uses it as the
+//! boundary that tells whether a run's final answer was already completed
+//! (`gui::app::history`), so removing it would change what is restored.
+//!
+//! One [`tick`] runs in one immediate transaction, so it holds the write lock
+//! for its whole duration, and is bounded three ways: it deletes at most
+//! [`MAX_DELETIONS_PER_TICK`] rows, stops deleting once its time budget
+//! ([`TIME_BUDGET`] in production) has passed (checked every
+//! [`TIME_CHECK_ROWS`] deletions, so a tick always makes progress), and
+//! examines at most [`MAX_SCANNED_PER_TARGET`] candidate rows per target that
+//! has to filter (everything except the unconditional `(kind, subkind)`
+//! deletes). Targets remember how far they have looked in a [`Cursor`], so a
+//! long history is covered over several ticks instead of one long write lock.
+//! When a tick stops early with work left, [`Cursor::has_backlog`] tells the
+//! writer to run the next maintenance sooner than the usual interval.
 //!
 //! Rows the event backfill has not converted yet (`subkind IS NULL`) are found
 //! through the same `(kind, subkind, id)` index, which stores NULL subkinds
@@ -23,6 +32,7 @@
 //! other retention paths.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
@@ -32,11 +42,14 @@ use crate::StorageError;
 pub(crate) const MAX_DELETIONS_PER_TICK: usize = 5_000;
 /// Candidate rows one filtering target examines per tick.
 pub(crate) const MAX_SCANNED_PER_TARGET: usize = 1_000;
+/// How long the writer's tick may keep deleting before it yields the lock.
+pub(crate) const TIME_BUDGET: Duration = Duration::from_millis(50);
+/// Deletions between two looks at the clock; also the least a tick deletes.
+pub(crate) const TIME_CHECK_ROWS: u64 = 64;
 
 const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
 
 const PROVIDER_SUBKINDS: &[&str] = &[
-    "RequestStarted",
     "RequestCompleted",
     "FirstTokenObserved",
     "CacheReuseObserved",
@@ -75,17 +88,11 @@ const fn target(
 
 /// Unconditional indexed deletes first (they drain and never look at a row they
 /// keep), then the targets that filter.
-const TARGETS: [Target; 9] = [
+const TARGETS: [Target; 8] = [
     target("Fault", &["SubscriberLagged"], false, Expiry::Always),
     target("Lifecycle", &["RunProgress"], false, Expiry::Always),
     target("Fault", &["SubscriberLagged"], true, Expiry::Always),
     target("Lifecycle", &["RunProgress"], true, Expiry::Always),
-    target(
-        "Provider",
-        &["RequestStarted"],
-        false,
-        Expiry::ProviderWindow,
-    ),
     target(
         "Provider",
         &["RequestCompleted"],
@@ -111,12 +118,21 @@ const TARGETS: [Target; 9] = [
 #[derive(Debug)]
 pub(crate) struct Cursor {
     after: [i64; TARGETS.len()],
+    backlog: bool,
+}
+
+impl Cursor {
+    /// Whether the last tick stopped at a budget with rows still to remove.
+    pub(crate) fn has_backlog(&self) -> bool {
+        self.backlog
+    }
 }
 
 impl Default for Cursor {
     fn default() -> Self {
         Self {
             after: [i64::MIN; TARGETS.len()],
+            backlog: false,
         }
     }
 }
@@ -139,13 +155,16 @@ struct Candidate {
 
 /// Removes one bounded batch. `now_ns` is the wall clock in nanoseconds since
 /// the Unix epoch; `provider_retention_days == 0` keeps every provider
-/// observation (the unconditional targets still run).
+/// observation (the unconditional targets still run). Deleting stops at
+/// `time_budget`, but not before [`TIME_CHECK_ROWS`] rows are gone.
 pub(crate) fn tick(
     conn: &Connection,
     cursor: &mut Cursor,
     now_ns: i64,
     provider_retention_days: u32,
+    time_budget: Duration,
 ) -> Result<Summary, StorageError> {
+    let deadline = Instant::now().checked_add(time_budget);
     let provider_cutoff = if provider_retention_days == 0 {
         None
     } else {
@@ -156,9 +175,11 @@ pub(crate) fn tick(
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let mut summary = Summary::default();
     let mut sessions: HashMap<String, i64> = HashMap::new();
+    let mut backlog = false;
     for (index, target) in TARGETS.iter().enumerate() {
         let budget = MAX_DELETIONS_PER_TICK.saturating_sub(summary.event_count as usize);
-        if budget == 0 {
+        if budget == 0 || out_of_time(summary.event_count, deadline) {
+            backlog = true;
             break;
         }
         let cutoff = match target.expiry {
@@ -168,16 +189,18 @@ pub(crate) fn tick(
                 None => continue,
             },
         };
-        run_target(
+        backlog |= run_target(
             &tx,
             target,
             &mut cursor.after[index],
             cutoff,
             budget,
+            deadline,
             &mut summary,
             &mut sessions,
         )?;
     }
+    cursor.backlog = backlog;
     for (session, bytes) in sessions {
         tx.execute(
             "UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) WHERE id = ?2",
@@ -188,15 +211,24 @@ pub(crate) fn tick(
     Ok(summary)
 }
 
+fn out_of_time(deleted: u64, deadline: Option<Instant>) -> bool {
+    deleted > 0
+        && deleted.is_multiple_of(TIME_CHECK_ROWS)
+        && deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+/// Returns whether the target stopped at a budget with rows possibly left.
+#[allow(clippy::too_many_arguments)]
 fn run_target(
     tx: &Transaction<'_>,
     target: &Target,
     after: &mut i64,
     cutoff: Option<i64>,
     budget: usize,
+    deadline: Option<Instant>,
     summary: &mut Summary,
     sessions: &mut HashMap<String, i64>,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
     // Unconditional indexed rows are all deleted, so what is examined is
     // bounded by the deletion budget; filtering targets by their scan cap.
     let filtering = target.unconverted || cutoff.is_some();
@@ -218,7 +250,7 @@ fn run_target(
                     .as_deref()
                     .is_some_and(|tag| target.subkinds.contains(&tag)));
         if delete {
-            if deleted_here == budget {
+            if deleted_here == budget || out_of_time(summary.event_count, deadline) {
                 cut_by_budget = true;
                 break;
             }
@@ -241,7 +273,7 @@ fn run_target(
         Some(id) => id,
         None => *after,
     };
-    Ok(())
+    Ok(cut_by_budget)
 }
 
 /// The inner query reads index entries only and carries the LIMIT, so the

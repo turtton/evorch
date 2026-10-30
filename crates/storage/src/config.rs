@@ -81,9 +81,10 @@ pub struct StorageConfig {
     pub usage_retention_days: u32,
     /// thread 開始状態を保持する日数です。0 は削除を無効化します。
     pub thread_start_retention_days: u32,
-    /// provider 観測イベント（`RequestStarted` / `RequestCompleted` /
-    /// `FirstTokenObserved` / `CacheReuseObserved`）を保持する日数です。過ぎた行は
-    /// 削除します。0 はこの削除だけを無効化します。
+    /// provider 観測イベント（`RequestCompleted` / `FirstTokenObserved` /
+    /// `CacheReuseObserved`）を保持する日数です。過ぎた行は削除します。
+    /// `RequestStarted` は履歴復元が参照するため削除しません。
+    /// 0 はこの削除だけを無効化します。
     pub provider_event_retention_days: u32,
     /// 会話全文索引の起動時設定です（ADR 0041 Phase B）。利用者設定
     /// `[storage.thread_index]`（`config::ThreadIndexConfig`、検証済み）から写します。
