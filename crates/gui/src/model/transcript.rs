@@ -154,11 +154,14 @@ pub enum TranscriptEntry {
 
 #[derive(Debug, Clone)]
 pub struct TranscriptModel {
+    instance_id: usize,
     entries: Vec<TranscriptEntry>,
+    entry_meta: Vec<EntryMeta>,
+    next_entry_id: usize,
+    history_evicted: bool,
     capacity: usize,
     view_start: usize,
     view_len: usize,
-    first_entry_id: usize,
     host_inputs: std::collections::BTreeMap<String, usize>,
     thinking: std::collections::BTreeMap<Option<String>, usize>,
     streaming_messages: std::collections::BTreeMap<Option<String>, Vec<usize>>,
@@ -169,6 +172,12 @@ pub struct TranscriptModel {
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
     drafts: drafts::DraftIndex,
+}
+
+#[derive(Debug, Clone)]
+struct EntryMeta {
+    id: usize,
+    revision: u64,
 }
 
 impl Default for TranscriptModel {
@@ -183,12 +192,17 @@ impl TranscriptModel {
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
+        static NEXT_INSTANCE: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
         Self {
+            instance_id: NEXT_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             entries: Vec::new(),
+            entry_meta: Vec::new(),
+            next_entry_id: 0,
+            history_evicted: false,
             capacity,
             view_start: 0,
             view_len: capacity,
-            first_entry_id: 0,
             host_inputs: Default::default(),
             thinking: std::collections::BTreeMap::new(),
             streaming_messages: std::collections::BTreeMap::new(),
@@ -205,6 +219,10 @@ impl TranscriptModel {
         &self.shell_jobs
     }
 
+    pub(crate) fn cache_identity(&self) -> usize {
+        self.instance_id
+    }
+
     pub fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
     }
@@ -213,6 +231,31 @@ impl TranscriptModel {
         let start = self.view_start.min(self.entries.len());
         let end = start.saturating_add(self.view_len).min(self.entries.len());
         &self.entries[start..end]
+    }
+
+    /// IDs are allocated once and never reused after removal or eviction.
+    pub fn visible_entry_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        let start = self.view_start.min(self.entries.len());
+        self.entry_meta[start..]
+            .iter()
+            .take(self.view_len)
+            .map(|meta| meta.id)
+    }
+
+    /// Changes whenever the entry's displayed content is mutated.
+    pub fn entry_revision(&self, entry_id: usize) -> Option<u64> {
+        Some(self.entry_meta[self.entry_index(entry_id)?].revision)
+    }
+
+    fn entry_index(&self, entry_id: usize) -> Option<usize> {
+        self.entry_meta
+            .binary_search_by_key(&entry_id, |meta| meta.id)
+            .ok()
+    }
+
+    fn entry_mut(&mut self, index: usize) -> Option<&mut TranscriptEntry> {
+        self.entry_meta.get_mut(index)?.revision += 1;
+        self.entries.get_mut(index)
     }
 
     pub fn set_view_window(&mut self, start: usize, len: usize) {
@@ -310,6 +353,10 @@ impl TranscriptModel {
                     // The spawn notice arrives first, but the run's instruction leads its transcript.
                     if only_start_notice && self.entries.len() == 2 {
                         self.entries.swap(0, 1);
+                        // Keep allocated IDs sorted for ID lookup; both slots
+                        // now contain different displayed content.
+                        self.entry_meta[0].revision += 1;
+                        self.entry_meta[1].revision += 1;
                     }
                 }
             }
@@ -547,7 +594,7 @@ impl TranscriptModel {
         let matching = self.entries.last().is_some_and(|entry| {
             let open_message = !matches!(message, MessageEvent::MessageDelta { .. })
                 || self.streaming_messages.get(run_id).is_some_and(|ids| {
-                    ids.last() == Some(&(self.first_entry_id + self.entries.len() - 1))
+                    ids.last() == self.entry_meta.last().map(|meta| &meta.id)
                 });
             open_message && matches!(
                 (message, entry),
@@ -557,7 +604,7 @@ impl TranscriptModel {
             )
         });
         if matching {
-            if let Some(entry) = self.entries.last_mut() {
+            if let Some(entry) = self.entry_mut(self.entries.len() - 1) {
                 match entry {
                     TranscriptEntry::Message { text, .. }
                     | TranscriptEntry::Reasoning { text, .. } => text.push_str(delta),
@@ -591,15 +638,17 @@ impl TranscriptModel {
             });
         }
         if matches!(message, MessageEvent::MessageDelta { .. }) && !self.entries.is_empty() {
-            let id = self.first_entry_id + self.entries.len() - 1;
+            let id = self.entry_meta.last().expect("entry exists").id;
             let ids = self.streaming_messages.entry(run_id.clone()).or_default();
             if ids.last() != Some(&id) {
                 ids.push(id);
             }
         }
         if matches!(message, MessageEvent::ReasoningDelta { .. }) && !self.entries.is_empty() {
-            self.thinking
-                .insert(run_id.clone(), self.first_entry_id + self.entries.len() - 1);
+            self.thinking.insert(
+                run_id.clone(),
+                self.entry_meta.last().expect("entry exists").id,
+            );
         }
     }
 
@@ -612,13 +661,14 @@ impl TranscriptModel {
         self.thinking.remove(&key);
         let ids = self.streaming_messages.remove(&key).unwrap_or_default();
         let mut indices = ids.into_iter().filter_map(|id| {
-            let index = id.checked_sub(self.first_entry_id)?;
+            let index = self.entry_index(id)?;
             matches!(self.entries.get(index), Some(TranscriptEntry::Message { run_id, .. }) if run_id == &key)
                 .then_some(index)
         }).collect::<Vec<_>>();
         if !text.is_empty() {
             if let Some(&index) = indices.first() {
-                if let TranscriptEntry::Message { text: current, .. } = &mut self.entries[index] {
+                if let Some(TranscriptEntry::Message { text: current, .. }) = self.entry_mut(index)
+                {
                     text.clone_into(current);
                 }
                 indices.remove(0);
@@ -638,27 +688,12 @@ impl TranscriptModel {
 
     fn remove_entry(&mut self, index: usize) {
         self.entries.remove(index);
-        let removed_id = self.first_entry_id + index;
+        let removed_id = self.entry_meta.remove(index).id;
         self.host_inputs.retain(|_, id| *id != removed_id);
-        for id in self.host_inputs.values_mut() {
-            if *id > removed_id {
-                *id -= 1;
-            }
-        }
         self.drafts.entry_removed(removed_id);
         self.thinking.retain(|_, id| *id != removed_id);
-        for id in self.thinking.values_mut() {
-            if *id > removed_id {
-                *id -= 1;
-            }
-        }
         for ids in self.streaming_messages.values_mut() {
             ids.retain(|id| *id != removed_id);
-            for id in ids {
-                if *id > removed_id {
-                    *id -= 1;
-                }
-            }
         }
         if self.view_start > index {
             self.view_start -= 1;
@@ -751,6 +786,7 @@ impl TranscriptModel {
             });
             return;
         };
+        self.entry_meta[index].revision += 1;
         let TranscriptEntry::Tool {
             status: current, ..
         } = &mut self.entries[index]
@@ -815,14 +851,14 @@ impl TranscriptModel {
         run: Option<&str>,
     ) -> Option<&mut TranscriptEntry> {
         let index = self.scoped_tool_index(call_id, run)?;
-        self.entries.get_mut(index)
+        self.entry_mut(index)
     }
 
     pub(crate) fn push_host_input(&mut self, id: &str, text: String) {
         if self.capacity == 0 || (!id.is_empty() && self.host_inputs.contains_key(id)) {
             return;
         }
-        let entry_id = self.first_entry_id + self.entries.len();
+        let entry_id = self.next_entry_id;
         self.push(TranscriptEntry::UserMessage { text });
         if !id.is_empty() {
             self.host_inputs.insert(id.into(), entry_id);
@@ -831,7 +867,7 @@ impl TranscriptModel {
 
     pub(crate) fn remove_host_input(&mut self, id: &str) {
         if let Some(entry) = self.host_inputs.get(id).copied()
-            && let Some(index) = entry.checked_sub(self.first_entry_id)
+            && let Some(index) = self.entry_index(entry)
             && matches!(
                 self.entries.get(index),
                 Some(TranscriptEntry::UserMessage { .. })
@@ -846,16 +882,14 @@ impl TranscriptModel {
             return;
         }
         self.entries.push(entry);
+        self.entry_meta.push(EntryMeta {
+            id: self.next_entry_id,
+            revision: 0,
+        });
+        self.next_entry_id += 1;
         if self.entries.len() > self.capacity {
-            self.entries.remove(0);
-            self.first_entry_id += 1;
-            self.host_inputs.retain(|_, id| *id >= self.first_entry_id);
-            self.drafts.entries_evicted(self.first_entry_id);
-            self.thinking.retain(|_, id| *id >= self.first_entry_id);
-            self.streaming_messages.retain(|_, ids| {
-                ids.retain(|id| *id >= self.first_entry_id);
-                !ids.is_empty()
-            });
+            self.remove_entry(0);
+            self.history_evicted = true;
         }
         self.view_start = self.view_start.min(self.entries.len());
     }

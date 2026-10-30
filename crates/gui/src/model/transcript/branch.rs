@@ -7,7 +7,7 @@ use super::{TranscriptEntry, TranscriptModel};
 impl TranscriptModel {
     /// Entry by absolute id, if it has not been evicted.
     pub fn entry_by_id(&self, entry_id: usize) -> Option<&TranscriptEntry> {
-        self.entries.get(entry_id.checked_sub(self.first_entry_id)?)
+        self.entries.get(self.entry_index(entry_id)?)
     }
 
     /// The boundary recorded for a completed turn, if `entry_id` is one.
@@ -29,7 +29,7 @@ impl TranscriptModel {
         self.entries
             .iter()
             .rposition(|entry| matches!(entry, TranscriptEntry::Branch { .. }))
-            .map(|index| self.first_entry_id + index)
+            .map(|index| self.entry_meta[index].id)
     }
 
     /// The latest completed turn in this transcript.
@@ -38,14 +38,12 @@ impl TranscriptModel {
             .entries
             .iter()
             .rposition(|entry| matches!(entry, TranscriptEntry::TurnEnd { .. }))?;
-        self.fork_point(self.first_entry_id + index)
+        self.fork_point(self.entry_meta[index].id)
     }
 
     /// Completed turns before `entry_id`, for "turn N" labels.
     pub fn turn_number(&self, entry_id: usize) -> usize {
-        let end = entry_id
-            .saturating_sub(self.first_entry_id)
-            .min(self.entries.len());
+        let end = self.entry_meta.partition_point(|meta| meta.id < entry_id);
         self.entries[..end]
             .iter()
             .filter(|entry| matches!(entry, TranscriptEntry::TurnEnd { .. }))
@@ -56,7 +54,7 @@ impl TranscriptModel {
     /// `Some(None)` is the start of the conversation. Later messages of the same
     /// turn and other entries return `None`.
     pub fn edit_point(&self, entry_id: usize) -> Option<Option<ForkPoint>> {
-        let index = entry_id.checked_sub(self.first_entry_id)?;
+        let index = self.entry_index(entry_id)?;
         if !matches!(
             self.entries.get(index)?,
             TranscriptEntry::UserMessage { .. }
@@ -78,16 +76,16 @@ impl TranscriptModel {
         match previous {
             Some((_, TranscriptEntry::UserMessage { .. })) => None,
             Some((previous, TranscriptEntry::TurnEnd { .. })) => {
-                Some(Some(self.fork_point(self.first_entry_id + previous)?))
+                Some(Some(self.fork_point(self.entry_meta[previous].id)?))
             }
             Some((previous, _)) => {
                 // A branch marker: rewind to the inherited boundary just before it.
                 let turn = self.entries[..previous]
                     .iter()
                     .rposition(|entry| matches!(entry, TranscriptEntry::TurnEnd { .. }));
-                Some(turn.and_then(|turn| self.fork_point(self.first_entry_id + turn)))
+                Some(turn.and_then(|turn| self.fork_point(self.entry_meta[turn].id)))
             }
-            None if self.first_entry_id == 0 => Some(None),
+            None if !self.history_evicted => Some(None),
             None => None,
         }
     }
@@ -96,28 +94,26 @@ impl TranscriptModel {
     /// when editing it rewinds to that same boundary; it then offers that rewind.
     pub fn edit_after_turn(&self, entry_id: usize) -> Option<usize> {
         let point = self.fork_point(entry_id)?;
-        let index = entry_id - self.first_entry_id;
+        let index = self.entry_index(entry_id)?;
         let next = self.entries[index + 1..].iter().position(|entry| {
             matches!(
                 entry,
                 TranscriptEntry::UserMessage { .. } | TranscriptEntry::TurnEnd { .. }
             )
         })?;
-        let next_id = entry_id + 1 + next;
+        let next_id = self.entry_meta[index + 1 + next].id;
         (self.edit_point(next_id) == Some(Some(point))).then_some(next_id)
     }
 
     /// Whether anything but branch markers follows `entry_id`: a rewind to it
     /// would drop something.
     pub fn continues_after(&self, entry_id: usize) -> bool {
-        entry_id
-            .checked_sub(self.first_entry_id)
-            .is_some_and(|index| {
-                self.entries
-                    .iter()
-                    .skip(index + 1)
-                    .any(|entry| !matches!(entry, TranscriptEntry::Branch { .. }))
-            })
+        self.entry_index(entry_id).is_some_and(|index| {
+            self.entries
+                .iter()
+                .skip(index + 1)
+                .any(|entry| !matches!(entry, TranscriptEntry::Branch { .. }))
+        })
     }
 
     /// The first user message, when editing it restarts the conversation.
@@ -128,7 +124,7 @@ impl TranscriptModel {
                 TranscriptEntry::UserMessage { .. } | TranscriptEntry::TurnEnd { .. }
             )
         })?;
-        let id = self.first_entry_id + index;
+        let id = self.entry_meta[index].id;
         (self.edit_point(id) == Some(None)).then_some(id)
     }
 

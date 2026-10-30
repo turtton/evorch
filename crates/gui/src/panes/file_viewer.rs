@@ -243,6 +243,7 @@ fn start_file_load(ctx: &egui::Context, path: &Path) -> FileCache {
     let slot = cache.slot.clone();
     let path_owned = path.to_path_buf();
     let ctx_owned = ctx.clone();
+    let layout_generation = super::agent::async_layout::generation(ctx);
     std::thread::spawn(move || {
         let stamp = file_stamp(&path_owned);
         let result = load_file(&path_owned);
@@ -250,6 +251,7 @@ fn start_file_load(ctx: &egui::Context, path: &Path) -> FileCache {
             .loaded
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(Loaded { result, stamp });
+        layout_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
         slot.ready.notify_all();
         ctx_owned.request_repaint();
     });

@@ -42,6 +42,7 @@ impl ShellJobKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJob {
+    revision: u64,
     pub key: ShellJobKey,
     pub id: String,
     pub command: Option<String>,
@@ -70,6 +71,7 @@ struct LiveLog {
 impl ShellJob {
     fn new(key: ShellJobKey) -> Self {
         Self {
+            revision: 0,
             id: key.handle.clone(),
             run_id: key.run_id.clone(),
             key,
@@ -82,6 +84,11 @@ impl ShellJob {
             polled: String::new(),
             polled_truncated: false,
         }
+    }
+
+    /// Changes on live output or a tool result, including bounded log rollover.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn is_running(&self) -> bool {
@@ -149,6 +156,7 @@ impl ShellJob {
 #[derive(Debug, Clone, Default)]
 pub struct ShellJobs {
     jobs: VecDeque<ShellJob>,
+    generation: u64,
 }
 
 impl ShellJobs {
@@ -188,7 +196,9 @@ impl ShellJobs {
     }
 
     fn job_mut(&mut self, key: ShellJobKey) -> &mut ShellJob {
+        self.generation += 1;
         if let Some(index) = self.jobs.iter().position(|job| job.key == key) {
+            self.jobs[index].revision = self.generation;
             return &mut self.jobs[index];
         }
         if self.jobs.len() >= MAX_JOBS {
@@ -200,7 +210,9 @@ impl ShellJobs {
             self.jobs.remove(evict);
         }
         self.jobs.push_back(ShellJob::new(key));
-        self.jobs.back_mut().expect("job was just pushed")
+        let job = self.jobs.back_mut().expect("job was just pushed");
+        job.revision = self.generation;
+        job
     }
 
     pub(crate) fn apply_live(

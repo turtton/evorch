@@ -238,6 +238,56 @@ fn a_missing_artifact_is_rechecked_and_shown_when_the_store_reappears() {
 }
 
 #[test]
+fn offscreen_missing_artifacts_keep_the_retry_repaint_scheduled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovering.txt");
+    let ctx = egui::Context::default();
+    let interval = AVAILABILITY_RECHECK_INTERVAL.as_secs_f64();
+    let id = egui::Id::new(("artifact-available", &path));
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            id,
+            Availability {
+                available: false,
+                retry_at: interval,
+            },
+        );
+    });
+    // Recovery before the cached deadline must not cause an early metadata
+    // check, but every intervening frame must retain the deadline's repaint.
+    std::fs::write(&path, "recovered").unwrap();
+    let run = |now| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(now),
+                predicted_dt: 0.0,
+                ..Default::default()
+            },
+            |ui| poll_availability(ui.ctx(), &path),
+        );
+        output.textures_delta.clear();
+        output
+    };
+    // Settle egui's startup repaints, without drawing an artifact card or
+    // relying on the app's periodic repaint.
+    for _ in 0..3 {
+        run(0.0);
+    }
+    for now in [interval / 4.0, interval / 2.0] {
+        let output = run(now);
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::from_secs_f64(interval - now)
+        );
+        let cached = ctx.data(|data| data.get_temp::<Availability>(id).unwrap());
+        assert!(!cached.available);
+        assert_eq!(cached.retry_at, interval);
+    }
+    run(interval);
+    assert!(ctx.data(|data| data.get_temp::<Availability>(id).unwrap().available));
+}
+
+#[test]
 fn missing_artifact_checks_are_throttled_and_detect_recovery_at_the_deadline() {
     let ctx = egui::Context::default();
     let path = Path::new("/artifacts/recovering.png");
