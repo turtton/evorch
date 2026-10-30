@@ -254,8 +254,24 @@ popups are listed in the next outline. Nobody sees the page's JS dialogs:
   is checked against the artifact store as for `present`.
 - Pages: each run has one page, and at most four are open at once. A run's
   page closes when the run ends or on `close`.
-- Startup: the GUI starts CEF when its window is created, so tool calls do not
-  depend on the window drawing frames.
+- Startup: CEF is not started with the GUI. At startup evorch only checks that
+  the helper (`evorch-cef-helper`) exists and registers the artifact pages
+  and the tool, so the tool schema does not change after startup. CEF is
+  initialized on the GUI thread (which also shuts it down) when the first HTML
+  preview, card snapshot or `inspect_artifact` call needs it.
+  - An `inspect_artifact` call that arrives first asks the GUI thread to
+    initialize CEF and waits for it up to the page timeout (30 seconds). A
+    request that timed out does not start CEF later.
+  - If initialization fails, the tool call returns it as an error; the
+    registered tool is not removed. The result, success or failure, is kept, so
+    later calls do not try again. A preview that cannot start goes to the XDG
+    Portal.
+  - While the window is hidden or minimized, eframe skips `ui` but still runs
+    `logic`. The request is served in the `logic` pass, so tool calls do not
+    depend on the window drawing frames.
+- Frame rates: off-screen rendering is capped at 30 fps for the preview window
+  and 10 fps for agent pages. Card snapshots stay at 60 fps: a lower rate
+  exposed a blank-frame capture in the isolation test when it was tried.
 - Builds without CEF, and runtimes without the GUI, do not offer the tool.
 - Why it is separate from `browser_*`:
   - It reaches different agents.
@@ -321,6 +337,9 @@ are:
 
 - `card_snapshot_requests_render_through_cef`: drives a card's snapshot
   request through CEF.
+- `logic_only_initializes_then_opens_again_without_any_gui_pass`: registers
+  agent pages without starting CEF, initializes it from a `logic` pass alone
+  (no `ui` pass), and opens a second page without another GUI pass.
 - `agent_operates_the_artifact_it_presented_through_cef`: runs a scripted
   conversation root Worker. It captures and presents a counter mock, opens it
   with `inspect_artifact`, clicks, types, chooses a `<select>` option and

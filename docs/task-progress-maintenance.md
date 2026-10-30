@@ -5,6 +5,9 @@ run either preview or `--apply` until all evorch GUI/runtime processes have exit
 containing this command; do not run older binaries against a store while it is
 under maintenance.
 
+For offline event compaction (delta aggregation, compression, VACUUM) and the
+online `subkind` / `run_id` backfill, see [storage-maintenance.md](storage-maintenance.md).
+
 ## Offline: strip the obsolete cursor, not task history
 
 ```sh

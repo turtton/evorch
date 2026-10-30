@@ -43,10 +43,8 @@ persistence = "warnings"
 enabled = true
 ```
 
-GUI 保存では通常の ownership heartbeat を省略する。同じ run の隣接した差分を
-最大 100 ms / 32 KiB / 元イベント 256 件でまとめ、意味のあるイベント境界と
-終了時には残りを保存する。設定されたイベント上限が32 KiBより小さい場合は
-その上限を使い、UTCの日付境界でも分割する。元の event bus には変更を加えない。
+GUI 保存では通常の ownership heartbeat と、表示専用のイベントを保存しない。
+保存する種別と保持の詳細は次節に示す。元の event bus には変更を加えない。
 `StorageBridge::monitor().snapshot()` は未保存件数・バイト数・最古の待ち時間、
 保存・結合・省略・失敗件数をメモリ上で返す。5 秒以上の滞留警告は stderr へ
 最大 1 分に 1 回出し、警告自身を同じ保存経路へ流さない。
@@ -69,6 +67,63 @@ INSERT/UPDATE/DELETEと同じトランザクション内のtriggerで更新し�
 
 所有権のGUI表示用照会はreadonly接続を再利用し、繰り返しの接続・スキーマDDLを除く。
 世代・leaseの値は毎回DBから読み、実際の変更の検証は新しい接続とtransactionで行う。
+
+## イベントの永続化と保持
+
+イベント DB の大半は、読み戻されない表示用の行だった（2.7 GiB の DB で
+MessageDelta 約 57.5 万行、ReasoningDelta 約 55.1 万行、RunProgress 約 30.1 万行、
+SubscriberLagged 約 26.6 万行）。#419 / #427 / #428 / #430 で入口、ライブの保持、
+圧縮、オフライン保守に分けて対処した。
+
+### 保存しないイベント（#419）
+
+`StorageBridge` の `PersistencePolicy` は次を保存しない。bus は引き続き配送し、
+monitor が件数を数える。
+
+- `MessageDelta`: 本文の正本は `MessageCompleted`（受理された全文）。
+- `RunProgress`: ライブ表示専用。状態遷移と ledger の行が正本。
+- `SubscriberLagged`: lag は bus が lag エピソードの最初に `tracing::warn!` で出し、
+  `StorageBridgeSnapshot`（`skipped_subscriber_lags` / `lagged_events`）で件数を観測する。
+
+`ToolCallDelta`、`StreamRetried`、`ShellJobOutput` も保存しない。
+
+### 保存を集約・分割するイベント（#419）
+
+- `ReasoningDelta` は run 別に集約する。1 行は最大 64 KiB（storage の
+  `max_event_bytes` が小さければその値）で、最初の断片から最大 5 秒保持する。
+  その run に帰属する他のイベントは、集約行を先に flush してから保存する。
+  ほかの run は集約を続ける。満杯、5 秒経過、ストリームの再試行、flush barrier と
+  終了時にも書く。日付境界は越えない。
+- 上限を超える `MessageCompleted` は、秘密検査を全文に行った後で
+  `MessagePart`（`response_id` / `index` / `total`）に分割して保存する。
+  GUI の履歴復元と eval の reader が `MessagePartAssembler` で再構成する。
+  `total` 個の連続した部分がそろわない応答は完了済みメッセージにしない。
+
+### ライブの retention（#427）
+
+writer の保守 tick（`maintenance::retention_events`）が、1 transaction で次を削除する。
+1 tick あたり最大 5,000 行・50 ms の時間予算で、対象ごとに最大 1,000 候補を調べる。
+
+- `Fault/SubscriberLagged` と `Lifecycle/RunProgress`（旧版が残した行）。
+- Provider の `RequestCompleted` / `FirstTokenObserved` / `CacheReuseObserved` のうち、
+  `StorageConfig::provider_event_retention_days`（既定 90 日、0 でこの期限削除だけ無効）
+  を過ぎた行。
+
+`RequestStarted` は削除しない。GUI の履歴復元が、run の最終応答が完了済みかを
+判定する境界に使うため。大きな既存の滞留はこの tick では少しずつ減るため、
+一括で処理するには [storage-maintenance.md](storage-maintenance.md) を使う。
+
+### zstd 圧縮（#428）
+
+2 KiB 以上の値を zstd（level 3）の BLOB で保存し、それ未満や縮まない値は TEXT のまま。
+読み取りは両方の形式を受け入れる。対象は次のとおり。
+
+- `run_contexts` の `messages_json` / `checkpoints_json`。
+- イベントのうち Tool（承認系を除く）、Message、compaction の payload。
+
+`AgentMessage` と承認系の Tool は、payload 内の文字列で run に帰属させるため
+圧縮しない。容量の会計は伸長後ではなく保存されたバイト数で行い、1 件の上限判定は
+平文で行う。
 
 ## PR ごとの決定的なゲート
 
