@@ -101,5 +101,5 @@ pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewE
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};
 pub use writer::{
     Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
-    ThreadIndexJobStatus,
+    ThreadIndexJobStatus, WalWaitStatus,
 };

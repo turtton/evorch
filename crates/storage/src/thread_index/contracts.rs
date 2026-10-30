@@ -429,6 +429,9 @@ pub struct ReindexRequest {
 pub enum RequestGapReason {
     Blocked(IndexBlockedReason),
     CapacityPaused,
+    /// A WAL-only admission refusal waited for the checkpoint to recover and
+    /// the bounded wait expired (ADR 0041 R5).
+    CapacityWaitExpired,
     /// Index disabled by settings while the request was pending.
     IndexDisabled,
     /// One run alone exceeds `max_bytes` (`evicted(oversized)`).

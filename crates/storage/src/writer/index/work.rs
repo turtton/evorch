@@ -215,7 +215,7 @@ fn admitted_transaction<T>(
             if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit))
         {
             let before = env.measure()?.sizes;
-            let checkpointed = capacity::checkpoint_truncate(env.conn)?;
+            let checkpointed = capacity::checkpoint_truncate(env.conn)?.complete();
             let after = env.measure()?.sizes;
             tracing::debug!(
                 checkpointed,
@@ -688,7 +688,7 @@ fn reclaim(env: Env<'_>, rt: &mut IndexRuntime) -> Result<IndexCapacityStatus, S
                 Ok(true)
             })?;
         }
-        if !capacity::checkpoint_truncate(conn)? {
+        if !capacity::checkpoint_truncate(conn)?.complete() {
             let status = sticky(env, rt, IndexPauseReason::WalReaderPinned)?;
             log_reclaim(cycle, before, env, &status)?;
             return Ok(status);
@@ -717,7 +717,7 @@ fn reclaim(env: Env<'_>, rt: &mut IndexRuntime) -> Result<IndexCapacityStatus, S
                     }
                     Ok(())
                 })?;
-                if !capacity::checkpoint_truncate(conn)? {
+                if !capacity::checkpoint_truncate(conn)?.complete() {
                     let status = sticky(env, rt, IndexPauseReason::WalReaderPinned)?;
                     log_reclaim(cycle, before, env, &status)?;
                     return Ok(status);
@@ -818,7 +818,7 @@ pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool,
     }
     if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit) {
         // A fully checkpointed WAL keeps its high-water size until truncated.
-        let _ = capacity::checkpoint_truncate(env.conn)?;
+        capacity::checkpoint_truncate(env.conn)?;
     }
     let page_size = capacity::page_size(env.conn)?;
     let freelist = capacity::freelist_bytes(env.conn, page_size)?;

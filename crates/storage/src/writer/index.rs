@@ -32,6 +32,11 @@ mod lease;
 mod requests;
 #[cfg(test)]
 mod tests;
+#[allow(
+    dead_code,
+    reason = "the bounded WAL wait is wired into the step in a later stage"
+)]
+mod wait;
 mod work;
 
 pub use work::ThreadIndexCounters;
@@ -193,6 +198,20 @@ impl IndexCapacity for Control<'_> {
     }
 }
 
+/// The job is waiting for a pinned WAL to be checkpointed instead of pausing
+/// (ADR 0041 R5). No index content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalWaitStatus {
+    /// When the wait began (`thread_index_state.wal_wait_since_ns`).
+    pub since_ns: i64,
+    /// The WAL-only admission refusal that started the wait.
+    pub refused: IndexCapacityStatus,
+    /// When the next non-blocking checkpoint probe is due.
+    pub next_retry_at_ns: i64,
+    /// Probes run since the wait began.
+    pub probes: u32,
+}
+
 /// Diagnostics of the background job (no index content).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadIndexJobStatus {
@@ -200,6 +219,8 @@ pub struct ThreadIndexJobStatus {
     pub settings_generation: u64,
     pub owner_lease: Option<IndexLease>,
     pub paused: Option<IndexCapacityStatus>,
+    /// Waiting for the WAL to recover before pausing; `None` while not waiting.
+    pub wal_wait: Option<WalWaitStatus>,
     pub in_flight: bool,
     /// The writer will wake for index work without a new command.
     pub wake_scheduled: bool,
@@ -388,6 +409,7 @@ impl IndexJob {
             settings_generation: self.rt.settings_generation,
             owner_lease: self.lease().cloned(),
             paused: self.rt.pause,
+            wal_wait: None,
             in_flight: self.in_flight,
             wake_scheduled: self.wants_step(),
             retry_wake_in: self

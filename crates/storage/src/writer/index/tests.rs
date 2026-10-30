@@ -468,7 +468,7 @@ fn settings_shrink_preserves_old_blocks_when_db_or_pinned_wal_cannot_admit_delet
         assert_eq!(fx.row("run-old").blocks, 1);
         assert_eq!(fx.rt.counters.evictions, 0);
         assert!(
-            !capacity::checkpoint_truncate(fx.conn()).unwrap(),
+            !capacity::checkpoint_truncate(fx.conn()).unwrap().complete(),
             "reader pins WAL"
         );
         reader.execute_batch("ROLLBACK").unwrap();
@@ -639,7 +639,7 @@ fn admitted_settings_delete_grows_pinned_wal_within_the_planned_bound() {
     assert!(after.wal <= before.wal + wal);
     assert!(after.total() <= before.total() + db + wal + shm);
     assert!(after.total() + MEASURED_POLICY.reserve_bytes() < fx.config.hard_limits.max_db_bytes);
-    assert!(!capacity::checkpoint_truncate(fx.conn()).unwrap());
+    assert!(!capacity::checkpoint_truncate(fx.conn()).unwrap().complete());
     reader.execute_batch("ROLLBACK").unwrap();
 }
 
