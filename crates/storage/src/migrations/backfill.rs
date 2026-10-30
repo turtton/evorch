@@ -182,8 +182,12 @@ fn convert_batch(
         let mut derived = Vec::new();
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let payload: String = row.get(1)?;
-            derived.push((id, derive_columns(&payload)));
+            // A payload that cannot even be read back is blank like one that no longer decodes.
+            let columns = match crate::codec::decode(row.get_ref(1)?) {
+                Ok(payload) => derive_columns(&payload),
+                Err(_) => derive_columns(""),
+            };
+            derived.push((id, columns));
         }
         derived
     };

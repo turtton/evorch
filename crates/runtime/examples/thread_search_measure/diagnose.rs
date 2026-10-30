@@ -48,7 +48,7 @@ pub fn reads(db: &Database, path: &Path, corpus: &Corpus) -> Result<Value> {
                 *totals.entry(key).or_default() += value;
             }
             let bytes: i64 = conn.query_row(
-                "SELECT coalesce(sum(length(messages_json)),0) FROM run_contexts \
+                "SELECT coalesce(sum(messages_len),0) FROM run_contexts \
                  WHERE run_id IN(SELECT value FROM json_each(?1))",
                 [serde_json::to_string(&ids)?],
                 |row| row.get(0),

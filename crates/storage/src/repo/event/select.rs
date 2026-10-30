@@ -34,10 +34,12 @@ pub(crate) const IDS_BY_SUBKIND_SQL: &str =
 pub(crate) const IDS_UNCONVERTED_BY_KIND_SQL: &str =
     "SELECT id FROM events WHERE kind = ?1 AND subkind IS NULL";
 pub(crate) const IDS_BY_RUN_SQL: &str = "SELECT id FROM events WHERE run_id = ?1";
-pub(crate) const IDS_UNCONVERTED_MENTIONING_SQL: &str =
-    "SELECT id FROM events WHERE subkind IS NULL AND instr(payload, ?1) > 0";
-pub(crate) const IDS_BLANK_MENTIONING_SQL: &str =
-    "SELECT id FROM events WHERE subkind = '' AND instr(payload, ?1) > 0";
+// `instr` cannot see inside a compressed payload, so every compressed row stays a
+// candidate and the caller's confirmation decodes it.
+pub(crate) const IDS_UNCONVERTED_MENTIONING_SQL: &str = "SELECT id FROM events WHERE subkind IS NULL \
+     AND (typeof(payload) = 'blob' OR instr(payload, ?1) > 0)";
+pub(crate) const IDS_BLANK_MENTIONING_SQL: &str = "SELECT id FROM events WHERE subkind = '' \
+     AND (typeof(payload) = 'blob' OR instr(payload, ?1) > 0)";
 
 /// Whether any row still lacks `subkind` and `run_id`.
 pub(crate) fn has_unbackfilled(conn: &Connection) -> Result<bool, StorageError> {
@@ -178,8 +180,25 @@ pub(crate) fn for_each_matching(
 const RUN_MENTIONED: &str = "EXISTS (SELECT 1 FROM json_each(?1) AS mentioned \
      WHERE instr(payload, substr(json_quote(mentioned.value), 2, \
      length(json_quote(mentioned.value)) - 2)) > 0)";
+/// [`RUN_MENTIONED`] for rows of unknown form (not backfilled): a compressed one
+/// cannot be searched, so it stays a candidate. Kinds read through
+/// `RUN_MENTIONED` alone are never compressed.
+const RUN_MENTIONED_OR_COMPRESSED: &str = "(typeof(payload) = 'blob' OR EXISTS (SELECT 1 \
+     FROM json_each(?1) AS mentioned WHERE instr(payload, substr(json_quote(mentioned.value), 2, \
+     length(json_quote(mentioned.value)) - 2)) > 0))";
 
-const APPROVAL_SUBKINDS: &str = "('ApprovalRequested', 'ApprovalResolved', 'ExecutionDenied')";
+/// Tool subkinds attributed to a run by their call ID, which only the payload
+/// holds. They are stored uncompressed so that `RUN_MENTIONED` can search them.
+pub(crate) const PAYLOAD_ATTRIBUTED_SUBKINDS: [&str; 3] =
+    ["ApprovalRequested", "ApprovalResolved", "ExecutionDenied"];
+
+fn approval_subkinds_sql() -> String {
+    let names: Vec<_> = PAYLOAD_ATTRIBUTED_SUBKINDS
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect();
+    format!("({})", names.join(", "))
+}
 
 /// IDs of the events that concern `run_ids`: those whose `run_id` column names
 /// one, plus the kinds the column cannot attribute (agent messages by sender,
@@ -203,8 +222,9 @@ pub(crate) fn run_candidates(
     for sql in [
         format!("SELECT id FROM events WHERE kind = 'AgentMessage' AND {RUN_MENTIONED}"),
         format!(
-            "SELECT id FROM events WHERE kind = 'Tool' AND subkind IN {APPROVAL_SUBKINDS} \
-             AND {RUN_MENTIONED}"
+            "SELECT id FROM events WHERE kind = 'Tool' AND subkind IN {} \
+             AND {RUN_MENTIONED}",
+            approval_subkinds_sql()
         ),
     ] {
         push_ids(conn, &sql, params![listed], true, &mut candidates)?;
@@ -212,7 +232,9 @@ pub(crate) fn run_candidates(
     if has_unbackfilled(conn)? {
         push_ids(
             conn,
-            &format!("SELECT id FROM events WHERE subkind IS NULL AND {RUN_MENTIONED}"),
+            &format!(
+                "SELECT id FROM events WHERE subkind IS NULL AND {RUN_MENTIONED_OR_COMPRESSED}"
+            ),
             params![listed],
             true,
             &mut candidates,

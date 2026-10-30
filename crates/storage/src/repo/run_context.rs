@@ -81,29 +81,37 @@ pub(crate) fn write(
         .map_err(|_| StorageError::OutOfRange("snapshot revision"))?;
     let host_inputs_json =
         crate::repo::host_input_receipt::normalized_ids(&record.host_inputs_json)?;
+    let messages = crate::codec::encode(&redacted.messages_json);
+    let checkpoints = crate::codec::encode(&redacted.checkpoints_json);
     conn.execute(
         "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json, \
+         messages_len, checkpoints_len) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
          ON CONFLICT(run_id) DO UPDATE SET role = excluded.role, name = excluded.name, \
          parent_run_id = excluded.parent_run_id, config_json = excluded.config_json, \
          messages_json = excluded.messages_json, checkpoints_json = excluded.checkpoints_json, \
          terminal_phase = excluded.terminal_phase, restorable = excluded.restorable, \
          updated_at_ns = excluded.updated_at_ns, snapshot_revision = excluded.snapshot_revision, \
-         host_inputs_json = excluded.host_inputs_json",
+         host_inputs_json = excluded.host_inputs_json, messages_len = excluded.messages_len, \
+         checkpoints_len = excluded.checkpoints_len",
         params![
             record.run_id,
             record.role,
             record.name,
             record.parent_run_id,
             record.config_json,
-            redacted.messages_json,
-            redacted.checkpoints_json,
+            messages,
+            checkpoints,
             record.terminal_phase,
             record.restorable,
             record.updated_at_ns,
             snapshot_revision,
-            host_inputs_json
+            host_inputs_json,
+            i64::try_from(redacted.messages_json.len())
+                .map_err(|_| StorageError::OutOfRange("messages length"))?,
+            i64::try_from(redacted.checkpoints_json.len())
+                .map_err(|_| StorageError::OutOfRange("checkpoints length"))?
         ],
     )?;
     Ok(())
@@ -274,8 +282,8 @@ pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRe
         name: row.get(2)?,
         parent_run_id: row.get(3)?,
         config_json: row.get(4)?,
-        messages_json: row.get(5)?,
-        checkpoints_json: row.get(6)?,
+        messages_json: crate::codec::text_column(row, 5)?,
+        checkpoints_json: crate::codec::text_column(row, 6)?,
         terminal_phase: row.get(7)?,
         restorable: row.get(8)?,
         updated_at_ns: row.get(9)?,

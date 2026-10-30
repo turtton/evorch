@@ -422,7 +422,7 @@ fn percentile(sorted: &[u128], pct: usize) -> u128 {
 fn foreground(conn: &Connection, path: &Path) -> Result<Value> {
     let store = SqliteSnapshotStore::new(conn);
     let (largest, json_bytes): (String, i64) = conn.query_row(
-        "SELECT run_id, length(messages_json) + length(checkpoints_json) FROM run_contexts \
+        "SELECT run_id, messages_len + checkpoints_len FROM run_contexts \
          ORDER BY 2 DESC LIMIT 1",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -458,7 +458,7 @@ fn foreground(conn: &Connection, path: &Path) -> Result<Value> {
     })?;
     let max_event: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(length(payload)), 0) FROM events",
+            "SELECT COALESCE(MAX(OCTET_LENGTH(payload)), 0) FROM events",
             [],
             |row| row.get(0),
         )
