@@ -11,8 +11,6 @@ enum RouteFailure {
 impl RoutedModel {
     /// Verify every composed profile, including cross-role fallbacks and explicit selections.
     /// Results, including failures, are retained until this composition is replaced.
-    /// Degraded absence fails early and requires a new composition; refreshing a
-    /// running client's version would invalidate its prompt-cache affinity.
     pub async fn verify_candidates(&self) -> BTreeSet<String> {
         self.verification
             .get_or_init(|| async {
