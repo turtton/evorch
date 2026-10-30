@@ -808,3 +808,61 @@ fn attachment_acceptances_keep_their_sequence_across_a_reopen() {
         .collect();
     assert_eq!(bodies, ["first", "second", "first", "third"]);
 }
+
+#[test]
+fn attachments_of_the_wrong_shape_are_unreadable_one_by_one() {
+    let (dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let mut good = evidence("evidence-shape-good", "run-shape", "good words");
+    good.attachments = vec![storage::EvidenceAttachment {
+        name: "kept".into(),
+        scope: "user".into(),
+        body: "steps".into(),
+    }];
+    let shapes = [
+        ("not-an-object", r#"["not-an-object"]"#),
+        ("root-object", r#"{"name":"demo"}"#),
+        ("name-number", r#"[{"name":3}]"#),
+        ("no-name", r#"[{"body":"x"}]"#),
+        ("null-root", "null"),
+        ("mixed", r#"[{"name":"fine"},7]"#),
+    ];
+    let mut rows = vec![("prompt-good".to_owned(), good)];
+    rows.extend(shapes.iter().map(|(label, _)| {
+        (
+            format!("prompt-{label}"),
+            evidence(&format!("evidence-{label}"), "run-shape", label),
+        )
+    }));
+    for (prompt, row) in &rows {
+        let mut receipt = receipt(prompt, "run-shape", HostInputStatus::Accepted);
+        receipt.evidence_id = Some(row.id.clone());
+        handle
+            .append_host_input_accepted(std::slice::from_ref(row), &[], None, &receipt)
+            .unwrap();
+    }
+    storage.close();
+    let connection = rusqlite::Connection::open(dir.path().join("receipts.sqlite3")).unwrap();
+    for (label, json) in shapes {
+        connection
+            .execute(
+                "UPDATE review_evidence SET attachments_json = ?1 WHERE id = ?2",
+                rusqlite::params![json, format!("evidence-{label}")],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let ids: Vec<_> = rows.iter().map(|(prompt, _)| prompt.clone()).collect();
+    let origins = Database::open(&config)
+        .unwrap()
+        .host_input_origins(&ids)
+        .unwrap();
+    assert_eq!(origins.len(), rows.len());
+    assert_eq!(origins[0].skills, ["kept"]);
+    assert_eq!(origins[0].unreadable, None);
+    for origin in &origins[1..] {
+        assert!(origin.skills.is_empty(), "{origin:?}");
+        assert!(origin.unreadable.is_some(), "{origin:?}");
+    }
+}

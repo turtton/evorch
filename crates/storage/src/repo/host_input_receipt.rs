@@ -218,8 +218,13 @@ pub(crate) fn origins(
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let mut statement = conn.prepare(
         "SELECT receipt.prompt_id, receipt.text, receipt.evidence_id, evidence.id, \
-                CASE WHEN evidence.id IS NULL OR NOT json_valid(evidence.attachments_json) \
-                     THEN NULL \
+                CASE WHEN evidence.id IS NULL THEN NULL \
+                     WHEN NOT json_valid(evidence.attachments_json) THEN NULL \
+                     WHEN json_type(evidence.attachments_json) <> 'array' THEN NULL \
+                     WHEN EXISTS (SELECT 1 FROM json_each(evidence.attachments_json) AS item \
+                                  WHERE CASE WHEN item.type <> 'object' THEN 1 \
+                                             WHEN json_type(item.value, '$.name') IS NOT 'text' \
+                                             THEN 1 ELSE 0 END = 1) THEN NULL \
                      ELSE (SELECT json_group_array(json_extract(attachment.value, '$.name') \
                                                    ORDER BY attachment.key) \
                            FROM json_each(evidence.attachments_json) AS attachment) END \
@@ -245,7 +250,7 @@ pub(crate) fn origins(
             (Some(_), None, _) => (Vec::new(), Some("its evidence row is missing".to_owned())),
             (Some(_), Some(_), None) => (
                 Vec::new(),
-                Some("its attachments are not valid JSON".to_owned()),
+                Some("its attachments are not a list of named skills".to_owned()),
             ),
             (Some(_), Some(_), Some(names)) => match serde_json::from_str::<Vec<String>>(&names) {
                 Ok(names) => (names, None),

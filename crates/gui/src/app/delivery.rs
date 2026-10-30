@@ -128,14 +128,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             OriginLookup::Recorded(origins) => origins,
         };
+        let index: HashMap<String, usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .map(|(position, message)| (message.id.clone(), position))
+            .collect();
         let mut changed = false;
         let mut still_unreadable = None;
         for origin in origins {
-            let Some(position) = self
-                .history
-                .iter()
-                .position(|message| message.id == origin.prompt_id)
-            else {
+            let Some(&position) = index.get(&origin.prompt_id) else {
                 continue;
             };
             if let Some(reason) = &origin.unreadable {
