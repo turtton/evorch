@@ -52,7 +52,7 @@ impl Default for EventBackfillOptions {
 }
 
 /// What one backfill call did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct EventBackfillSummary {
     /// Rows converted by this call.
     pub converted: u64,

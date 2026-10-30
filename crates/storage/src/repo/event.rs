@@ -369,15 +369,18 @@ pub(crate) fn encode_payload<'a>(
     subkind: &str,
     payload: &'a str,
 ) -> crate::codec::Encoded<'a> {
-    let compressible = match kind {
-        "Tool" => !select::PAYLOAD_ATTRIBUTED_SUBKINDS.contains(&subkind),
-        "Message" | "compaction" => true,
-        _ => false,
-    };
-    if compressible {
+    if compressible_payload(kind, subkind) {
         crate::codec::encode(payload)
     } else {
         crate::codec::Encoded::Plain(payload)
+    }
+}
+
+pub(crate) fn compressible_payload(kind: &str, subkind: &str) -> bool {
+    match kind {
+        "Tool" => !select::PAYLOAD_ATTRIBUTED_SUBKINDS.contains(&subkind),
+        "Message" | "compaction" => true,
+        _ => false,
     }
 }
 

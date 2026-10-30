@@ -79,7 +79,7 @@ pub(super) fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
     Ok(name.into())
 }
 
-fn lease_file(path: &Path) -> Result<File, StorageError> {
+pub(super) fn lease_file(path: &Path) -> Result<File, StorageError> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
