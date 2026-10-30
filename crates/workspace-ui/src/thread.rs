@@ -329,32 +329,102 @@ impl ThreadRecord {
     }
 }
 
+/// Latest activity in each displayed subtree of `section`: a thread's own
+/// activity, raised by every other section thread that reaches it by following
+/// displayed parents inside the section. A walk ends at a parent outside the
+/// section and never counts a thread for itself, so the members of a parent
+/// cycle all see the rest of the cycle.
+///
+/// Parent links form a functional graph, so one pass in leaf-to-root order
+/// settles every thread (O(threads)); cycles are what remains once the leaves
+/// are peeled off.
 fn subtree_activity<'a>(
     section: &[&'a ThreadRecord],
     lineage: &crate::LineageIndex<'_>,
 ) -> HashMap<&'a ThreadId, i64> {
-    let mut activity: HashMap<&ThreadId, i64> = section
-        .iter()
-        .map(|thread| (&thread.id, thread.last_activity()))
-        .collect();
-    let parents: HashMap<&ThreadId, &ThreadId> = section
-        .iter()
-        .filter_map(|thread| Some((&thread.id, lineage.display_parent(&thread.id)?)))
-        .collect();
+    let mut node_of: HashMap<&ThreadId, usize> = HashMap::with_capacity(section.len());
+    let mut own = Vec::new();
+    let mut offered = Vec::new();
+    let mut parent_id: Vec<Option<&ThreadId>> = Vec::new();
+    let mut ids = Vec::new();
     for thread in section {
         let at = thread.last_activity();
-        // Cyclic parent links stop at the first repeated ancestor.
-        let mut seen = HashSet::from([&thread.id]);
-        let mut current = &thread.id;
-        while let Some(&parent) = parents.get(current)
-            && let Some((&ancestor, &latest)) = activity.get_key_value(parent)
-            && seen.insert(ancestor)
-        {
-            activity.insert(ancestor, latest.max(at));
-            current = ancestor;
+        match node_of.get(&thread.id) {
+            // A repeated ID keeps one entry: the last record's own activity,
+            // the highest activity it offers upward, the last parent link.
+            Some(&node) => {
+                own[node] = at;
+                offered[node] = i64::max(offered[node], at);
+                parent_id[node] = lineage.display_parent(&thread.id);
+            }
+            None => {
+                node_of.insert(&thread.id, ids.len());
+                ids.push(&thread.id);
+                own.push(at);
+                offered.push(at);
+                parent_id.push(lineage.display_parent(&thread.id));
+            }
         }
     }
-    activity
+    let parent: Vec<Option<usize>> = parent_id
+        .iter()
+        .map(|parent| node_of.get(parent.as_ref()?).copied())
+        .collect();
+
+    // What strictly reaches a node, accumulated leaf to root.
+    let mut reached = vec![i64::MIN; ids.len()];
+    let mut children = vec![0usize; ids.len()];
+    for parent in parent.iter().flatten() {
+        children[*parent] += 1;
+    }
+    let mut ready: Vec<usize> = (0..ids.len()).filter(|&node| children[node] == 0).collect();
+    let mut settled = vec![false; ids.len()];
+    while let Some(node) = ready.pop() {
+        settled[node] = true;
+        if let Some(parent) = parent[node] {
+            reached[parent] = reached[parent].max(offered[node]).max(reached[node]);
+            children[parent] -= 1;
+            if children[parent] == 0 {
+                ready.push(parent);
+            }
+        }
+    }
+    // Unsettled nodes lie on cycles (a self-parent is a cycle of one). Every
+    // member sees all others, plus what hangs off each of them.
+    for start in 0..ids.len() {
+        if settled[start] {
+            continue;
+        }
+        let mut cycle = vec![start];
+        settled[start] = true;
+        let mut next = parent[start];
+        while let Some(node) = next.filter(|&node| !settled[node]) {
+            settled[node] = true;
+            cycle.push(node);
+            next = parent[node];
+        }
+        let up: Vec<i64> = cycle
+            .iter()
+            .map(|&node| offered[node].max(reached[node]))
+            .collect();
+        let (mut best, mut second) = (i64::MIN, i64::MIN);
+        for &value in &up {
+            if value > best {
+                second = best;
+                best = value;
+            } else {
+                second = second.max(value);
+            }
+        }
+        for (&node, &value) in cycle.iter().zip(&up) {
+            let others = if value == best { second } else { best };
+            reached[node] = reached[node].max(others);
+        }
+    }
+    ids.into_iter()
+        .zip(own.into_iter().zip(reached))
+        .map(|(id, (own, reached))| (id, own.max(reached)))
+        .collect()
 }
 
 /// Threads of `section` that show a pending or running run of their own, of a

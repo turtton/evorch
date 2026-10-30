@@ -14,7 +14,8 @@ use crate::theme::widgets::{accessible, ghost, icon_text};
 /// The active thread's branching state, present only for the thread conversation.
 pub struct BranchContext<'a> {
     pub thread: &'a ThreadRecord,
-    pub threads: &'a [ThreadRecord],
+    /// Version groups of the sidebar's threads, built once for this frame.
+    pub lineage: &'a workspace_ui::LineageIndex<'a>,
     /// Why rewinds are unavailable now; forks stay available.
     pub rewind_block: Option<&'static str>,
 }
@@ -81,7 +82,7 @@ pub(super) fn turn_footer(
     let versions = if edit_follows {
         Vec::new()
     } else {
-        workspace_ui::point_versions(branch.threads, thread, Some(&point))
+        branch.lineage.point_versions(thread, Some(&point))
     };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
@@ -138,7 +139,9 @@ pub(super) fn edit_row(
     let Some(point) = model.edit_point(entry_id) else {
         return;
     };
-    let versions = workspace_ui::point_versions(branch.threads, &branch.thread.id, point.as_ref());
+    let versions = branch
+        .lineage
+        .point_versions(&branch.thread.id, point.as_ref());
     // One row tall: a centered horizontal layout grows each widget to the
     // height it is given, and `with_layout` would give it the rest of the
     // scroll viewport, pushing the transcript below the first message down.
@@ -199,9 +202,8 @@ pub(super) fn branch_divider(
             return;
         };
         let title = branch
-            .threads
-            .iter()
-            .find(|thread| &thread.id == parent)
+            .lineage
+            .get(parent)
             .map_or_else(|| parent.to_string(), |thread| thread.title.clone());
         if small_button(
             ui,
@@ -228,7 +230,7 @@ pub(super) fn start_versions(
     if model.start_edit_message().is_some() {
         return;
     }
-    let versions = workspace_ui::point_versions(branch.threads, &branch.thread.id, None);
+    let versions = branch.lineage.point_versions(&branch.thread.id, None);
     let Some(current) = version_position(branch, &versions) else {
         return;
     };

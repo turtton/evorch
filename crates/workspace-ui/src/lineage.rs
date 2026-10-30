@@ -1,13 +1,9 @@
 //! Version groups: a rewind replaces its parent in place, so the sidebar shows
 //! one visible version per group while every version stays restorable.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use crate::thread::{ForkPoint, ThreadId, ThreadRecord};
-
-fn find<'a>(threads: &'a [ThreadRecord], id: &ThreadId) -> Option<&'a ThreadRecord> {
-    threads.iter().find(|thread| &thread.id == id)
-}
 
 /// Version groups and parent links of one thread list, resolved once.
 ///
@@ -185,6 +181,43 @@ impl<'a> LineageIndex<'a> {
             .map(|&index| &self.threads[index])
     }
 
+    /// The versions of what follows `point` in `id`'s conversation; see
+    /// [`point_versions`]. The walk up to the anchor is bounded by the rewind
+    /// chain and the descent follows the children index, so a call without
+    /// rewinds at `point` costs O(depth) instead of a pass over every thread.
+    pub fn point_versions(&self, id: &ThreadId, point: Option<&ForkPoint>) -> Vec<ThreadId> {
+        let mut anchor = id;
+        let mut visited = HashSet::new();
+        while visited.insert(anchor) {
+            match self.get(anchor) {
+                Some(thread) if rewound_to(thread, point) => match &thread.parent_thread_id {
+                    Some(parent) if self.position.contains_key(parent) => anchor = parent,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        let mut members = HashSet::from([anchor]);
+        let mut pending = vec![anchor];
+        while let Some(parent) = pending.pop() {
+            for child in self.children(parent) {
+                if rewound_to(child, point) && members.insert(&child.id) {
+                    pending.push(&child.id);
+                }
+            }
+        }
+        let mut versions = vec![anchor.clone()];
+        if members.len() > 1 {
+            versions.extend(
+                self.threads
+                    .iter()
+                    .filter(|thread| &thread.id != anchor && members.contains(&thread.id))
+                    .map(|thread| thread.id.clone()),
+            );
+        }
+        versions
+    }
+
     /// Record indices of every version group, one slice per group.
     fn groups(&self) -> impl Iterator<Item = &[usize]> {
         self.members
@@ -227,47 +260,14 @@ fn rewound_to(thread: &ThreadRecord, point: Option<&ForkPoint>) -> bool {
 /// The versions of what follows `point` in `id`'s conversation: the conversation
 /// that was first rewound there, then every rewind to `point` reached from it
 /// (rewinds of rewinds included) in creation order. `id` is always included.
+///
+/// Builds an index per call: for many lookups share one [`LineageIndex`].
 pub fn point_versions(
     threads: &[ThreadRecord],
     id: &ThreadId,
     point: Option<&ForkPoint>,
 ) -> Vec<ThreadId> {
-    let mut anchor = id.clone();
-    let mut visited = BTreeSet::new();
-    while visited.insert(anchor.clone()) {
-        match find(threads, &anchor) {
-            Some(thread) if rewound_to(thread, point) => match &thread.parent_thread_id {
-                Some(parent) if find(threads, parent).is_some() => anchor = parent.clone(),
-                _ => break,
-            },
-            _ => break,
-        }
-    }
-    let mut members = BTreeSet::from([anchor.clone()]);
-    loop {
-        let before = members.len();
-        for thread in threads {
-            if rewound_to(thread, point)
-                && thread
-                    .parent_thread_id
-                    .as_ref()
-                    .is_some_and(|parent| members.contains(parent))
-            {
-                members.insert(thread.id.clone());
-            }
-        }
-        if members.len() == before {
-            break;
-        }
-    }
-    let mut versions = vec![anchor.clone()];
-    versions.extend(
-        threads
-            .iter()
-            .filter(|thread| thread.id != anchor && members.contains(&thread.id))
-            .map(|thread| thread.id.clone()),
-    );
-    versions
+    LineageIndex::new(threads).point_versions(id, point)
 }
 
 /// Make `target` the only visible version of its group.

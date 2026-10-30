@@ -127,11 +127,13 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 .unwrap_or_default(),
             branch: match (self.focus, active_thread) {
                 (ConversationFocus::Thread, Some(thread)) => {
-                    Some(crate::panes::agent::BranchContext {
-                        thread,
-                        threads: &self.sidebar.threads,
-                        rewind_block: self.rewind_block,
-                    })
+                    lineage
+                        .as_ref()
+                        .map(|lineage| crate::panes::agent::BranchContext {
+                            thread,
+                            lineage,
+                            rewind_block: self.rewind_block,
+                        })
                 }
                 _ => None,
             },

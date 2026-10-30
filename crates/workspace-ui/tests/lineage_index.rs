@@ -11,7 +11,7 @@ use workspace_ui::{
 mod oracle {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use workspace_ui::{ProjectId, ThreadId, ThreadRecord, ThreadRunPhase};
+    use workspace_ui::{ForkPoint, ProjectId, ThreadId, ThreadRecord, ThreadRunPhase};
 
     fn find<'a>(threads: &'a [ThreadRecord], id: &ThreadId) -> Option<&'a ThreadRecord> {
         threads.iter().find(|thread| &thread.id == id)
@@ -92,6 +92,58 @@ mod oracle {
                 show_version(threads, &keep);
             }
         }
+    }
+
+    fn rewound_to(thread: &ThreadRecord, point: Option<&ForkPoint>) -> bool {
+        thread.is_rewind()
+            && thread
+                .lineage
+                .as_ref()
+                .and_then(|lineage| lineage.point.as_ref())
+                == point
+    }
+
+    pub fn point_versions(
+        threads: &[ThreadRecord],
+        id: &ThreadId,
+        point: Option<&ForkPoint>,
+    ) -> Vec<ThreadId> {
+        let mut anchor = id.clone();
+        let mut visited = BTreeSet::new();
+        while visited.insert(anchor.clone()) {
+            match find(threads, &anchor) {
+                Some(thread) if rewound_to(thread, point) => match &thread.parent_thread_id {
+                    Some(parent) if find(threads, parent).is_some() => anchor = parent.clone(),
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        let mut members = BTreeSet::from([anchor.clone()]);
+        loop {
+            let before = members.len();
+            for thread in threads {
+                if rewound_to(thread, point)
+                    && thread
+                        .parent_thread_id
+                        .as_ref()
+                        .is_some_and(|parent| members.contains(parent))
+                {
+                    members.insert(thread.id.clone());
+                }
+            }
+            if members.len() == before {
+                break;
+            }
+        }
+        let mut versions = vec![anchor.clone()];
+        versions.extend(
+            threads
+                .iter()
+                .filter(|thread| thread.id != anchor && members.contains(&thread.id))
+                .map(|thread| thread.id.clone()),
+        );
+        versions
     }
 
     /// Ordering of `ThreadRecord::partition_for_project` before the index.
@@ -185,19 +237,31 @@ mod oracle {
     }
 }
 
+/// Activity times are the tests' own: `created_at` is pinned so that only
+/// `updated_at` decides a thread's `last_activity`.
 fn thread(id: &str) -> ThreadRecord {
-    ThreadRecord::new(ThreadId::new(id), ProjectId::new("project"), id)
+    let mut record = ThreadRecord::new(ThreadId::new(id), ProjectId::new("project"), id);
+    record.created_at = 0;
+    record
+}
+
+fn at(context_len: u64) -> ForkPoint {
+    ForkPoint {
+        run_id: "run-1".into(),
+        context_len,
+    }
 }
 
 fn rewind_of(id: &str, parent: &str) -> ThreadRecord {
+    rewind_at(id, parent, 2)
+}
+
+fn rewind_at(id: &str, parent: &str, context_len: u64) -> ThreadRecord {
     let mut record = thread(id);
     record.parent_thread_id = Some(ThreadId::new(parent));
     record.lineage = Some(ThreadLineage {
         kind: LineageKind::Rewind,
-        point: Some(ForkPoint {
-            run_id: "run-1".into(),
-            context_len: 2,
-        }),
+        point: Some(at(context_len)),
     });
     record
 }
@@ -220,6 +284,20 @@ fn ids(records: &[&ThreadRecord]) -> Vec<String> {
     records.iter().map(|thread| thread.id.to_string()).collect()
 }
 
+/// Which record of `threads` each reference is, so records sharing an ID are
+/// told apart.
+fn positions(threads: &[ThreadRecord], records: &[&ThreadRecord]) -> Vec<usize> {
+    records
+        .iter()
+        .map(|record| {
+            threads
+                .iter()
+                .position(|thread| std::ptr::eq(thread, *record))
+                .expect("a reference into the list")
+        })
+        .collect()
+}
+
 /// Every query of the index against the walks it replaced, for each thread and
 /// for IDs that are not in the list.
 fn assert_matches_oracle(threads: &[ThreadRecord]) {
@@ -236,10 +314,21 @@ fn assert_matches_oracle(threads: &[ThreadRecord]) {
             "version_root of {id}"
         );
         assert_eq!(
-            ids(&index.version_members(id).collect::<Vec<_>>()),
-            ids(&oracle::version_members(threads, id)),
+            positions(threads, &index.version_members(id).collect::<Vec<_>>()),
+            positions(threads, &oracle::version_members(threads, id)),
             "version_members of {id}"
         );
+        for point in [None, Some(&at(2)), Some(&at(3))] {
+            assert_eq!(
+                index.point_versions(id, point),
+                oracle::point_versions(threads, id, point),
+                "point_versions of {id} at {point:?}"
+            );
+            assert_eq!(
+                workspace_ui::point_versions(threads, id, point),
+                oracle::point_versions(threads, id, point)
+            );
+        }
         assert_eq!(
             index.visible_version(id).cloned(),
             oracle::visible_version(threads, id),
@@ -280,10 +369,14 @@ fn assert_matches_oracle(threads: &[ThreadRecord]) {
         let (main, archived) = ThreadRecord::partition_for_project(threads, &project, &phases);
         let (expected_main, expected_archived) =
             oracle::partition_for_project(threads, &project, &phases);
-        assert_eq!(ids(&main), ids(&expected_main), "main list of {project:?}");
         assert_eq!(
-            ids(&archived),
-            ids(&expected_archived),
+            positions(threads, &main),
+            positions(threads, &expected_main),
+            "main list of {project:?}"
+        );
+        assert_eq!(
+            positions(threads, &archived),
+            positions(threads, &expected_archived),
             "archived list of {project:?}"
         );
     }
@@ -389,6 +482,74 @@ fn archive_mix_and_several_roots_partition_like_before() {
     assert_matches_oracle(&threads);
 }
 
+#[test]
+fn a_reply_in_a_child_lifts_the_whole_family_above_newer_roots() {
+    let mut old_root = thread("a");
+    old_root.updated_at = 10;
+    let mut newer_root = thread("b");
+    newer_root.updated_at = 20;
+    let mut child = fork_of("a-child", "a");
+    child.created_at = 0;
+    child.updated_at = 5;
+    let project = ProjectId::new("project");
+    let order = |threads: &[ThreadRecord]| {
+        let (main, _) = ThreadRecord::partition_for_project(threads, &project, &BTreeMap::new());
+        let roots: Vec<_> = main
+            .into_iter()
+            .filter(|thread| workspace_ui::display_parent(threads, &thread.id).is_none())
+            .map(|thread| thread.id.to_string())
+            .collect();
+        roots
+    };
+    let mut threads = [old_root, newer_root, child];
+    // Given the child is older than both roots, the newer root leads.
+    assert_eq!(order(&threads), ["b", "a"]);
+    assert_matches_oracle(&threads);
+    // When the child gets the latest reply, its family moves to the top.
+    threads[2].updated_at = 30;
+    assert_eq!(order(&threads), ["a", "b"]);
+    assert_matches_oracle(&threads);
+    // A grandchild reaches the root through its parent, across a rewind.
+    threads[2].updated_at = 5;
+    let mut hidden = rewind_of("a-child-v2", "a");
+    hidden.superseded = true;
+    let mut grandchild = fork_of("grand", "a-child");
+    grandchild.updated_at = 40;
+    let threads = [
+        threads[0].clone(),
+        threads[1].clone(),
+        threads[2].clone(),
+        hidden,
+        grandchild,
+    ];
+    assert_eq!(order(&threads), ["a", "b"]);
+    assert_matches_oracle(&threads);
+}
+
+#[test]
+fn repeated_ids_keep_the_first_record_for_lookups_and_every_record_for_members() {
+    let mut first = thread("dup");
+    first.superseded = true;
+    let mut rewind = rewind_of("v2", "dup");
+    rewind.updated_at = 9;
+    let mut again = thread("dup");
+    again.superseded = false;
+    again.updated_at = 3;
+    let child = fork_of("child", "dup");
+    let threads = [first, rewind, again, child];
+    let index = LineageIndex::new(&threads);
+    assert_eq!(index.get(&tid("dup")), Some(&threads[0]));
+    assert_eq!(index.version_root(&tid("v2")), &tid("dup"));
+    assert_eq!(
+        positions(
+            &threads,
+            &index.version_members(&tid("dup")).collect::<Vec<_>>()
+        ),
+        [0, 1, 2]
+    );
+    assert_matches_oracle(&threads);
+}
+
 /// Deterministic xorshift, so a failure reproduces from its seed.
 struct Rng(u64);
 
@@ -406,9 +567,12 @@ fn generated_lists_with_cycles_orphans_and_mixed_flags_match_the_chain_walk() {
     for seed in 1..=300u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let count = 1 + rng.below(14);
+        // Every third list repeats IDs, as a corrupted sidebar file could.
+        let repeats = seed % 3 == 0;
         let threads: Vec<ThreadRecord> = (0..count)
             .map(|index| {
-                let mut record = thread(&format!("t{index}"));
+                let own = if repeats { rng.below(count) } else { index };
+                let mut record = thread(&format!("t{own}"));
                 record.parent_thread_id = match rng.below(5) {
                     0 | 1 => None,
                     2 => Some(tid("ghost")),
@@ -419,7 +583,7 @@ fn generated_lists_with_cycles_orphans_and_mixed_flags_match_the_chain_walk() {
                     record.lineage = match rng.below(3) {
                         0 => None,
                         1 => fork_of("x", "x").lineage,
-                        _ => rewind_of("x", "x").lineage,
+                        _ => rewind_at("x", "x", 2 + rng.below(2) as u64).lineage,
                     };
                 }
                 record.superseded = rng.below(3) == 0;
@@ -427,6 +591,7 @@ fn generated_lists_with_cycles_orphans_and_mixed_flags_match_the_chain_walk() {
                 record.pinned = rng.below(4) == 0;
                 record.updated_at = i64::try_from(rng.below(6)).unwrap();
                 record.title = format!("title{}", rng.below(3));
+                record.created_at = i64::try_from(rng.below(3)).unwrap();
                 record.project_id = ProjectId::new(if rng.below(6) == 0 {
                     "other"
                 } else {
@@ -480,4 +645,37 @@ fn deep_rewind_chain_and_many_threads_resolve_without_repeated_walks() {
         threads.iter().filter(|thread| !thread.superseded).count(),
         FORKS + 1
     );
+}
+
+#[test]
+fn a_deep_chain_of_plain_children_orders_by_the_deepest_activity() {
+    // Each thread is the child of the previous one; no rewinds are involved, so
+    // the rewind-chain index does not help and the subtree pass must itself be
+    // linear. Only the deepest thread is recent, and it lifts every ancestor.
+    const DEPTH: usize = 5_000;
+    let mut threads: Vec<ThreadRecord> = (0..DEPTH)
+        .map(|index| {
+            let mut record = if index == 0 {
+                thread("c0")
+            } else {
+                fork_of(&format!("c{index}"), &format!("c{}", index - 1))
+            };
+            record.title = "chain".into();
+            record
+        })
+        .collect();
+    threads[DEPTH - 1].updated_at = 1_000;
+    let mut other = thread("other");
+    other.updated_at = 500;
+    other.title = "other".into();
+    threads.push(other);
+
+    let project = ProjectId::new("project");
+    let (main, archived) =
+        ThreadRecord::partition_for_project(&threads, &project, &BTreeMap::new());
+    assert!(archived.is_empty());
+    assert_eq!(main.len(), DEPTH + 1);
+    // Every chain member shows activity 1000 and precedes the other root.
+    assert_eq!(main.last().unwrap().id, tid("other"));
+    assert_eq!(main[0].id, tid("c0"));
 }
