@@ -13,6 +13,19 @@ pub(super) struct ReceiptReconciliation {
     pub dirty: bool,
     pub notified: HashSet<String>,
     pub last_repair: Option<Instant>,
+    /// The periodic pass is due: also look up messages whose recorded origin
+    /// could not be read.
+    pub origin_check: bool,
+    /// The user was already told that a record could not be read.
+    pub origin_notice: bool,
+}
+
+/// What asking the sink for the runtime's records came to.
+pub(super) enum OriginLookup {
+    /// The sink records nothing (a fixture); the composer's copy stands.
+    Unsupported,
+    Recorded(Vec<storage::HostInputOrigin>),
+    Failed(String),
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -24,24 +37,127 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
+    fn lookup_origins(&self, ids: &[String]) -> OriginLookup {
+        match self.sink.host_input_origins(ids) {
+            None => OriginLookup::Unsupported,
+            Some(Ok(origins)) => OriginLookup::Recorded(origins),
+            Some(Err(error)) => OriginLookup::Failed(error.to_string()),
+        }
+    }
+
+    /// Tells the user once, and logs every time, that the runtime's record of
+    /// an accepted message could not be read. The message was accepted and is
+    /// not sent again; it shows the composer's copy until the record is read.
+    fn report_unverified_origin(&mut self, detail: &str) {
+        tracing::warn!(
+            detail,
+            "could not read what the runtime recorded for a message"
+        );
+        if !std::mem::replace(&mut self.receipt_reconciliation.origin_notice, true) {
+            self.push_notice(format!(
+                "Could not confirm which skills the runtime attached to a sent message \
+                 ({detail}). It was accepted and is not sent again; the skill chips will \
+                 be corrected once the record can be read."
+            ));
+        }
+    }
+
     /// Takes the words and skill names the runtime recorded for a submission it
-    /// accepted as the message's own, saving them, and returns them. The
-    /// composer's copy is only a fallback for a sink that records nothing.
+    /// accepted as the message's own, saving them, and returns them. A sink that
+    /// records nothing leaves the composer's copy. A lookup that fails, or a
+    /// record that cannot be read, also leaves it, but marks the message
+    /// unverified, tells the user and is looked up again later.
     pub(super) fn adopt_runtime_origin(&mut self, id: &str) -> Option<(String, Vec<String>)> {
-        let origin = self
-            .sink
-            .host_input_origins(&[id.to_owned()])?
-            .ok()?
-            .into_iter()
-            .find(|origin| origin.prompt_id == id)?;
-        let message = self.history.iter_mut().find(|message| message.id == id)?;
-        let changed = message.text != origin.text || message.skills != origin.skills;
-        message.text.clone_from(&origin.text);
-        message.skills.clone_from(&origin.skills);
-        if changed && let Err(error) = self.persist_history() {
+        let position = self.history.iter().position(|message| message.id == id)?;
+        match self.lookup_origins(&[id.to_owned()]) {
+            OriginLookup::Unsupported => None,
+            OriginLookup::Failed(error) => {
+                self.history[position].origin_unverified = true;
+                self.persist_after_origin_change();
+                self.report_unverified_origin(&error);
+                None
+            }
+            OriginLookup::Recorded(origins) => {
+                let origin = origins.into_iter().find(|origin| origin.prompt_id == id)?;
+                let unreadable = origin.unreadable.clone();
+                let changed = self.apply_origin_at(position, origin);
+                if changed {
+                    self.persist_after_origin_change();
+                }
+                if let Some(reason) = unreadable {
+                    self.report_unverified_origin(&reason);
+                    return None;
+                }
+                let message = &self.history[position];
+                Some((message.text.clone(), message.skills.clone()))
+            }
+        }
+    }
+
+    fn persist_after_origin_change(&mut self) {
+        if let Err(error) = self.persist_history() {
             self.push_notice(format!("Could not save the recorded message: {error}"));
         }
-        Some((origin.text, origin.skills))
+    }
+
+    /// Looks up the messages whose record could not be read before and puts
+    /// what the runtime recorded into the history, the bubble and the queue.
+    /// Nothing is sent again. Returns whether anything changed.
+    pub(super) fn repair_unverified_origins(&mut self) -> bool {
+        let ids: Vec<String> = self
+            .history
+            .iter()
+            .filter(|message| message.origin_unverified && !message.id.is_empty())
+            .map(|message| message.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.receipt_reconciliation.origin_notice = false;
+            return false;
+        }
+        let origins = match self.lookup_origins(&ids) {
+            OriginLookup::Unsupported => {
+                // A sink that records nothing will never answer.
+                for message in &mut self.history {
+                    message.origin_unverified = false;
+                }
+                return true;
+            }
+            OriginLookup::Failed(error) => {
+                self.report_unverified_origin(&error);
+                return false;
+            }
+            OriginLookup::Recorded(origins) => origins,
+        };
+        let mut changed = false;
+        let mut still_unreadable = None;
+        for origin in origins {
+            let Some(position) = self
+                .history
+                .iter()
+                .position(|message| message.id == origin.prompt_id)
+            else {
+                continue;
+            };
+            if let Some(reason) = &origin.unreadable {
+                still_unreadable = Some(reason.clone());
+            }
+            if self.apply_origin_at(position, origin) {
+                changed = true;
+                let message = &self.history[position];
+                self.transcripts.update_host_input(
+                    &message.thread_id,
+                    &message.id,
+                    &message.text,
+                    &message.skills,
+                );
+            }
+        }
+        if let Some(reason) = still_unreadable {
+            self.report_unverified_origin(&reason);
+        } else if !self.history.iter().any(|message| message.origin_unverified) {
+            self.receipt_reconciliation.origin_notice = false;
+        }
+        changed
     }
 
     pub(super) fn mark_delivered(&mut self, ids: &[String]) -> bool {
@@ -190,6 +306,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         state.dirty = false;
         if repair {
             state.last_repair = Some(now);
+            state.origin_check = true;
         }
         let ids: Vec<_> = self
             .history
@@ -223,7 +340,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn finish_receipt_reconciliation(&mut self, changed: bool) {
-        if changed {
+        let repaired = std::mem::take(&mut self.receipt_reconciliation.origin_check)
+            && self.repair_unverified_origins();
+        if changed || repaired {
             self.rebuild_delivery_rows();
             self.save_sidebar();
         }

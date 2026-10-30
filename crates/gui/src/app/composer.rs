@@ -238,6 +238,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             thread_id: submission.thread_id.clone(),
                             text: text.into(),
                             skills: skills.clone(),
+                            origin_unverified: false,
                             at: sent_at,
                             image_count: submission.images.len(),
                             resent_from,

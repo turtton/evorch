@@ -698,3 +698,113 @@ fn origins_report_the_words_and_skill_names_each_submission_recorded() {
         ]
     );
 }
+
+#[test]
+fn one_unreadable_record_does_not_hide_the_others() {
+    let (dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let good = {
+        let mut row = evidence("evidence-good", "run-bad", "good words");
+        row.attachments = vec![storage::EvidenceAttachment {
+            name: "kept".into(),
+            scope: "user".into(),
+            body: "x".repeat(64 * 1024),
+        }];
+        row
+    };
+    let broken = evidence("evidence-broken", "run-bad", "broken words");
+    for (row, id) in [(good, "prompt-good"), (broken, "prompt-broken")] {
+        let mut receipt = receipt(id, "run-bad", HostInputStatus::Accepted);
+        receipt.evidence_id = Some(row.id.clone());
+        handle
+            .append_host_input_accepted(&[row], &[], None, &receipt)
+            .unwrap();
+    }
+    // A receipt whose evidence row never arrived.
+    let mut orphan = receipt("prompt-orphan", "run-bad", HostInputStatus::Accepted);
+    orphan.evidence_id = Some("no-such-evidence".into());
+    handle
+        .append_host_input_accepted(&[], &[], None, &orphan)
+        .unwrap();
+    storage.close();
+    let connection = rusqlite::Connection::open(dir.path().join("receipts.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE review_evidence SET attachments_json = '{not json' WHERE id = 'evidence-broken'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let database = Database::open(&config).unwrap();
+    let ids = [
+        "prompt-good".to_owned(),
+        "prompt-broken".to_owned(),
+        "prompt-orphan".to_owned(),
+    ];
+    let origins = database.host_input_origins(&ids).unwrap();
+    assert_eq!(origins.len(), 3);
+    assert_eq!(origins[0].skills, ["kept"]);
+    assert_eq!(origins[0].unreadable, None);
+    for broken in &origins[1..] {
+        assert!(broken.skills.is_empty());
+        assert!(broken.unreadable.is_some(), "{broken:?}");
+    }
+    assert_eq!(origins[1].text, "message prompt-broken");
+}
+
+#[test]
+fn attachment_acceptances_keep_their_sequence_across_a_reopen() {
+    let (_dir, storage, _database, config) = fixture();
+    let handle = storage.handle();
+    let skills = |body: &str| {
+        let mut row = evidence(&format!("evidence-{body}"), "run-seq", "use @demo");
+        row.attachments = vec![storage::EvidenceAttachment {
+            name: "demo".into(),
+            scope: "user".into(),
+            body: body.into(),
+        }];
+        row
+    };
+    // The same evidence twice around another, with the clock running backwards.
+    for (index, body) in ["first", "second", "first"].into_iter().enumerate() {
+        let row = skills(body);
+        let mut receipt = receipt(
+            &format!("prompt-{index}"),
+            "run-seq",
+            HostInputStatus::Accepted,
+        );
+        receipt.evidence_id = Some(row.id.clone());
+        receipt.accepted_at_ns = 100 - i64::try_from(index).unwrap();
+        handle
+            .append_host_input_accepted(&[row], &[], None, &receipt)
+            .unwrap();
+    }
+    storage.close();
+    let reopened = Database::open(&config).unwrap();
+    let bodies: Vec<_> = reopened
+        .review_attachment_acceptances_for_lineage(&["run-seq".to_owned()])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.attachments[0].body.clone())
+        .collect();
+    assert_eq!(bodies, ["first", "second", "first"]);
+    // A later acceptance after the reopen continues the sequence.
+    let storage = Storage::open(config.clone()).unwrap();
+    let row = skills("third");
+    let mut later = receipt("prompt-3", "run-seq", HostInputStatus::Accepted);
+    later.evidence_id = Some(row.id.clone());
+    later.accepted_at_ns = 1;
+    storage
+        .handle()
+        .append_host_input_accepted(&[row], &[], None, &later)
+        .unwrap();
+    let bodies: Vec<_> = Database::open(&config)
+        .unwrap()
+        .review_attachment_acceptances_for_lineage(&["run-seq".to_owned()])
+        .unwrap()
+        .into_iter()
+        .map(|row| row.attachments[0].body.clone())
+        .collect();
+    assert_eq!(bodies, ["first", "second", "first", "third"]);
+}

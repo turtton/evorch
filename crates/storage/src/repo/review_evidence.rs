@@ -59,7 +59,7 @@ pub fn for_lineage(
 }
 
 /// The evidence of every submission that attached skills, one entry per
-/// acceptance in acceptance order (the receipt table's insertion order).
+/// acceptance in acceptance order (`acceptance_seq`).
 pub fn attachment_acceptances(
     conn: &Connection,
     run_ids: &[String],
@@ -76,7 +76,7 @@ pub fn attachment_acceptances(
          JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
          WHERE evidence.target_run_id IN (SELECT value FROM json_each(?1)) \
            AND evidence.attachments_json <> '[]' \
-         ORDER BY receipt.rowid"
+         ORDER BY receipt.acceptance_seq"
     ))?;
     let rows = statement.query_map([ids], from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)

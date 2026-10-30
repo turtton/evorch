@@ -844,6 +844,20 @@ impl TranscriptModel {
         }
     }
 
+    /// Replaces the words and chips of an already shown host input.
+    pub(crate) fn update_host_input(&mut self, id: &str, text: &str, skills: &[String]) {
+        if let Some(entry) = self.host_inputs.get(id).copied()
+            && let Some(index) = entry.checked_sub(self.first_entry_id)
+            && let Some(TranscriptEntry::UserMessage {
+                text: shown,
+                skills: chips,
+            }) = self.entries.get_mut(index)
+        {
+            text.clone_into(shown);
+            skills.clone_into(chips);
+        }
+    }
+
     pub(crate) fn remove_host_input(&mut self, id: &str) {
         if let Some(entry) = self.host_inputs.get(id).copied()
             && let Some(index) = entry.checked_sub(self.first_entry_id)

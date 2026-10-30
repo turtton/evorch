@@ -70,6 +70,9 @@ pub struct HostInputOrigin {
     pub prompt_id: String,
     pub text: String,
     pub skills: Vec<String>,
+    /// Why the skill names could not be read for this submission alone (the
+    /// text is still the receipt's); `skills` is empty then.
+    pub unreadable: Option<String>,
 }
 
 impl HostInputReceipt {

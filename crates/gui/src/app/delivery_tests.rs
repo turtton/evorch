@@ -51,6 +51,7 @@ pub(super) fn state(path: &std::path::Path) -> WorkbenchState<DemoSource> {
         thread_id: "thread".into(),
         text: "retry this".into(),
         skills: Vec::new(),
+        origin_unverified: false,
         at: std::time::SystemTime::now(),
         image_count: 2,
         resent_from: None,

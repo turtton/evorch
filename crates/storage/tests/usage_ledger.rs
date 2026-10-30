@@ -86,7 +86,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE review_evidence DROP COLUMN attachments_json; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -325,7 +325,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE review_evidence DROP COLUMN attachments_json; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;

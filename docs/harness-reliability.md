@@ -133,7 +133,8 @@ agent loaded, and a user attachment replaces an agent-loaded skill of the
 same name. Evidence is immutable and keyed by content, so the same words with
 the same skills sent twice are one evidence row; "newest" is the order the
 messages were accepted, which each host-input receipt keeps by naming the
-evidence it stands for (`host_input_receipts.evidence_id`), so a restored
+evidence it stands for (`host_input_receipts.evidence_id`) and numbering the
+acceptance in the same transaction (`acceptance_seq`), so a restored
 review context lists the attachments in the same order, repeats included, as
 the live one. The saved conversation keeps the sent prompt as it was, and a
 restore, fork or rewind never expands mentions again. Evidence saved before
@@ -142,7 +143,13 @@ words. The GUI shows what the runtime recorded
 for a submission (`AgentRuntime::host_input_origins`: the typed words and the
 skill names), taking it over its own copy right after acceptance and again for
 every saved message when history is restored, so a message shows its skill
-chips also after a restart. A run's published instruction
+chips also after a restart. A lookup that fails, or a record that cannot be
+read, is never taken for "nothing recorded": the message keeps the composer's
+copy, is marked unverified (saved with the history), the user is told once,
+and the record is looked up again on the periodic receipt pass and corrected
+in the history, the bubble and the queue without sending anything again. One
+unreadable record does not hide the others, and only the skill names, not the
+bodies, are read for this. A run's published instruction
 (`TaskPromptPublished`) names the typed words and skills beside the prompt.
 
 The `shell` tool description gained a sentence about splitting host-access work

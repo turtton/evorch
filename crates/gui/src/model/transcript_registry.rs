@@ -394,6 +394,18 @@ impl TranscriptRegistry {
             .push_host_input(id, text, skills);
     }
 
+    pub(crate) fn update_host_input(
+        &mut self,
+        thread: &str,
+        id: &str,
+        text: &str,
+        skills: &[String],
+    ) {
+        if let Some(model) = self.threads.get_mut(thread) {
+            model.update_host_input(id, text, skills);
+        }
+    }
+
     pub(crate) fn remove_host_input(&mut self, thread: &str, id: &str) {
         if let Some(model) = self.threads.get_mut(thread) {
             model.remove_host_input(id);

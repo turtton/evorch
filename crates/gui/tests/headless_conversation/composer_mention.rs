@@ -94,6 +94,7 @@ impl CommandSink for RecordingRuntime {
                 prompt_id: id.clone(),
                 text: "use @git-best-practices please".into(),
                 skills: vec!["git-best-practices".into()],
+                unreadable: None,
             })
             .collect()))
     }

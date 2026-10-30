@@ -13,6 +13,10 @@ pub(super) struct UserMessage {
     /// what the agent receives, and the bubble shows them as chips.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// The runtime's record of this message could not be read (yet), so `text`
+    /// and `skills` are still the composer's copy. Checked again until read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub origin_unverified: bool,
     #[serde(default)]
     pub image_count: usize,
     #[serde(default)]
@@ -693,19 +697,62 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|message| !message.id.is_empty())
             .map(|message| message.id.clone())
             .collect();
-        let Ok(origins) = db.host_input_origins(&ids) else {
-            return;
-        };
-        for origin in origins {
-            if let Some(message) = self
-                .history
-                .iter_mut()
-                .find(|message| message.id == origin.prompt_id)
-            {
-                message.text = origin.text;
-                message.skills = origin.skills;
+        self.apply_recorded_origins(db.host_input_origins(&ids));
+    }
+
+    /// Applies a lookup of the runtime's records to the saved history. A failed
+    /// lookup, or a record that cannot be read, leaves the saved copy but marks
+    /// the message unverified so it is looked up again; it is never taken for
+    /// "the runtime recorded nothing".
+    pub(super) fn apply_recorded_origins(
+        &mut self,
+        result: Result<Vec<storage::HostInputOrigin>, storage::StorageError>,
+    ) {
+        let index: std::collections::HashMap<String, usize> = self
+            .history
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.id.is_empty())
+            .map(|(position, message)| (message.id.clone(), position))
+            .collect();
+        match result {
+            Ok(origins) => {
+                for origin in origins {
+                    if let Some(&position) = index.get(&origin.prompt_id) {
+                        self.apply_origin_at(position, origin);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not read what the runtime recorded for saved messages");
+                for &position in index.values() {
+                    self.history[position].origin_unverified = true;
+                }
             }
         }
+    }
+
+    /// Takes one record as the message's own, or marks the message unverified
+    /// when the record could not be read. Returns whether the message changed.
+    pub(super) fn apply_origin_at(
+        &mut self,
+        position: usize,
+        origin: storage::HostInputOrigin,
+    ) -> bool {
+        let message = &mut self.history[position];
+        if let Some(reason) = &origin.unreadable {
+            tracing::warn!(prompt_id = %origin.prompt_id, %reason, "recorded skills are unreadable");
+            let changed = !message.origin_unverified;
+            message.origin_unverified = true;
+            return changed;
+        }
+        let changed = message.text != origin.text
+            || message.skills != origin.skills
+            || message.origin_unverified;
+        message.text = origin.text;
+        message.skills = origin.skills;
+        message.origin_unverified = false;
+        changed
     }
 
     fn restore_user_message(&mut self, message: UserMessage) {
