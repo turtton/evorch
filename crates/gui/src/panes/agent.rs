@@ -22,11 +22,12 @@ pub use branch::BranchContext;
 mod composer_panel;
 mod header;
 use header::header_strip;
+pub(crate) mod async_layout;
 mod queue;
 mod sandbox_review;
 mod thinking;
 mod virtual_list;
-pub(crate) use virtual_list::mark_pending_layout;
+pub(crate) use virtual_list::mark_async_layout;
 #[doc(hidden)]
 pub use virtual_list::{set_transcript_virtualization_for_tests, transcript_layout_for_tests};
 
@@ -282,6 +283,16 @@ fn run_detail_body(
         pane_id.with(("transcript", model.cache_identity()))
     };
     let cache_key = model_id.with("entry-heights");
+    for entry in model.visible_entries() {
+        if let TranscriptEntry::Artifacts { presentation } = entry {
+            for artifact in &presentation.artifacts {
+                super::artifact_card::poll_availability(
+                    ui.ctx(),
+                    std::path::Path::new(&artifact.path),
+                );
+            }
+        }
+    }
     let own_branch = model.last_branch_entry_id();
     if branch.is_some() {
         branch::confirm_modal(ui, branch_action);

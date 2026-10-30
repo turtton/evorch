@@ -9,6 +9,8 @@ struct MeasuredRow {
     height: f32,
     settled: bool,
     frame_nr: u64,
+    contains_async: bool,
+    async_generation: u64,
 }
 
 #[derive(Clone, Default)]
@@ -17,6 +19,7 @@ pub(super) struct VirtualList {
     width: f32,
     enabled: bool,
     scope_id: Option<egui::Id>,
+    async_generation: u64,
 }
 
 fn override_id() -> egui::Id {
@@ -24,18 +27,20 @@ fn override_id() -> egui::Id {
 }
 
 fn measurement_id(ctx: &egui::Context) -> egui::Id {
-    egui::Id::new("transcript-layout-pending").with(ctx.viewport_id())
+    egui::Id::new("transcript-layout-async").with(ctx.viewport_id())
 }
 
-/// A renderer awaiting external layout data must not publish a final height.
-/// The enclosing measurement propagates this through nested child renderers.
-pub(crate) fn mark_pending_layout(ctx: &egui::Context) {
+/// Record external layout dependencies through nested child renderers.
+pub(crate) fn mark_async_layout(ctx: &egui::Context) -> bool {
     let id = measurement_id(ctx);
     ctx.data_mut(|data| {
         if data.get_temp::<bool>(id).is_some() {
             data.insert_temp(id, true);
+            true
+        } else {
+            false
         }
-    });
+    })
 }
 
 /// Internal test hook: kittest enables AccessKit, which normally requires the
@@ -77,6 +82,7 @@ impl VirtualList {
             cache.width = width;
         }
         cache.enabled = enabled;
+        cache.async_generation = super::async_layout::poll(ui.ctx());
         cache.scope_id = Some(id);
         let retained: HashSet<_> = entries.collect();
         cache.heights.retain(|entry, _| retained.contains(entry));
@@ -99,13 +105,17 @@ impl VirtualList {
         let height = previous.map(|row| row.height);
         let top = ui.cursor().top();
         let skip = self.enabled
-            && previous.is_some_and(|row| row.revision == revision && row.settled)
+            && previous.is_some_and(|row| {
+                row.revision == revision
+                    && row.settled
+                    && (!row.contains_async || row.async_generation == self.async_generation)
+            })
             && height
                 .is_some_and(|height| top + height < viewport.top() || top > viewport.bottom());
         // An explicit ID also severs egui's parent auto-ID counter dependency:
         // eviction or consolidation of earlier rows must not lose selection.
         let scope = self.scope_id.expect("list loaded").with(entry_id);
-        let mut pending = false;
+        let mut contains_async = false;
         let response = ui.scope_builder(egui::UiBuilder::new().id(scope), |ui| {
             if skip {
                 ui.add_space(height.unwrap_or_default());
@@ -117,12 +127,12 @@ impl VirtualList {
                     outer
                 });
                 draw(ui);
-                pending = ui.data_mut(|data| {
-                    let pending = data.remove_temp::<bool>(measurement).unwrap_or(false);
+                contains_async = ui.data_mut(|data| {
+                    let contains_async = data.remove_temp::<bool>(measurement).unwrap_or(false);
                     if let Some(outer) = outer {
-                        data.insert_temp(measurement, outer || pending);
+                        data.insert_temp(measurement, outer || contains_async);
                     }
-                    pending
+                    contains_async
                 });
             }
         });
@@ -131,8 +141,13 @@ impl VirtualList {
             // add_space reproduces precisely that rect on a skipped pass.
             let measured = response.response.rect.height();
             let frame_nr = ui.ctx().cumulative_frame_nr();
-            let unchanged =
-                previous.is_some_and(|row| row.revision == revision && row.height == measured);
+            let unchanged = previous.is_some_and(|row| {
+                row.revision == revision
+                    && row.height == measured
+                    && (!row.contains_async || row.async_generation == self.async_generation)
+            });
+            contains_async |=
+                previous.is_some_and(|row| row.revision == revision && row.contains_async);
             // Repeated layout passes within one frame do not advance
             // animation time, so they cannot establish a stable height.
             let stable =
@@ -142,14 +157,16 @@ impl VirtualList {
                 MeasuredRow {
                     revision,
                     height: measured,
-                    settled: stable && !pending,
+                    settled: stable,
                     frame_nr,
+                    contains_async,
+                    async_generation: self.async_generation,
                 },
             );
-            if !unchanged || (!stable && !pending) {
+            if !stable {
                 // Keep measuring changing geometry (including animations),
-                // even offscreen. Pending I/O alone waits for its producer's
-                // wake-up rather than creating a continuous repaint loop.
+                // even offscreen. Pending data can settle too; its completion
+                // invalidates dependent rows via the external generation.
                 ui.ctx().request_repaint();
             }
         }

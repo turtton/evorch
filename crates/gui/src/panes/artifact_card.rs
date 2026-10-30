@@ -73,6 +73,7 @@ pub fn summary(presentation: &ArtifactPresentation) -> String {
 }
 
 pub fn show(ui: &mut Ui, id: egui::Id, presentation: &ArtifactPresentation) {
+    crate::panes::agent::mark_async_layout(ui.ctx());
     soft_frame(palette().SURFACE).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if let Some(title) = &presentation.title {
@@ -100,6 +101,18 @@ fn is_available(ctx: &egui::Context, path: &Path) -> bool {
     is_available_at(ctx, path, ctx.input(|input| input.time), Path::is_file)
 }
 
+/// Recheck due resources without requiring their transcript card to be drawn.
+pub(crate) fn poll_availability(ctx: &egui::Context, path: &Path) {
+    let id = egui::Id::new(("artifact-available", path));
+    let now = ctx.input(|input| input.time);
+    if ctx.data(|data| {
+        data.get_temp::<Availability>(id)
+            .is_none_or(|cached| !cached.available && now >= cached.retry_at)
+    }) {
+        is_available(ctx, path);
+    }
+}
+
 /// Stored files are immutable, but an unavailable store can recover. Limit
 /// metadata I/O during repeated frames while scheduling a repaint for recovery.
 fn is_available_at(
@@ -117,6 +130,9 @@ fn is_available_at(
                 available: check_file(path),
                 retry_at: now + AVAILABILITY_RECHECK_INTERVAL.as_secs_f64(),
             };
+            if cached.is_some_and(|previous| previous.available != checked.available) {
+                crate::panes::agent::async_layout::invalidate(ctx);
+            }
             ctx.data_mut(|data| data.insert_temp(id, checked));
             checked
         }
@@ -162,7 +178,6 @@ fn artifact_item(ui: &mut Ui, artifact: &PresentedArtifact) {
         ui.label(RichText::new(caption).color(palette().TEXT_MUTED));
     }
     if !available {
-        crate::panes::agent::mark_pending_layout(ui.ctx());
         ui.label(
             RichText::new(format!(
                 "Artifact unavailable: {} (file missing or inaccessible)",
@@ -226,6 +241,7 @@ fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response
         return None;
     };
     crate::panes::file_viewer::install_image_loader(ui.ctx());
+    crate::panes::agent::async_layout::observe_image(ui.ctx(), &uri);
     let image = egui::Image::new(uri)
         .alt_text(format!("{title} preview"))
         // Remaining height can be zero below a transcript's scroll viewport.
@@ -240,7 +256,6 @@ fn image_preview(ui: &mut Ui, path: &Path, title: &str) -> Option<egui::Response
             Some(ui.add(image))
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
-            crate::panes::agent::mark_pending_layout(ui.ctx());
             preview_note(ui, "Loading preview…");
             None
         }
@@ -270,7 +285,6 @@ fn html_snapshot(
             }
         }
         SnapshotState::Pending => {
-            crate::panes::agent::mark_pending_layout(ui.ctx());
             preview_note(ui, "Rendering preview…");
             // The host drains snapshot requests after the card has rendered.
             let id = ui.id().with(("snapshot-requested", &artifact.sha256));
