@@ -195,10 +195,31 @@ pub(crate) fn evaluate(
     status(CapacityState::Normal)
 }
 
-/// `PRAGMA wal_checkpoint(TRUNCATE)` without waiting on readers; `false` when
-/// a reader keeps frames that could not be checkpointed. The busy handler is
-/// suspended for the call so a pinned WAL never stalls the writer thread.
-pub(crate) fn checkpoint_truncate(conn: &Connection) -> Result<bool, StorageError> {
+/// Result of one `PRAGMA wal_checkpoint(TRUNCATE)` attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CheckpointOutcome {
+    /// The pragma's `busy` column: a reader or writer blocked the checkpoint.
+    pub busy: bool,
+    /// WAL frames when the checkpoint ran (`-1` when it could not run).
+    pub log_frames: i64,
+    /// Frames moved into the main file.
+    pub checkpointed_frames: i64,
+    /// The pragma itself failed with `SQLITE_BUSY` (no pragma row).
+    pub locked: bool,
+}
+
+impl CheckpointOutcome {
+    /// The WAL was fully checkpointed and truncated.
+    pub(crate) fn complete(&self) -> bool {
+        !self.locked && !self.busy && self.log_frames == self.checkpointed_frames
+    }
+}
+
+/// `PRAGMA wal_checkpoint(TRUNCATE)` without waiting on readers; the outcome is
+/// not [`complete`](CheckpointOutcome::complete) when a reader keeps frames that
+/// could not be checkpointed. The busy handler is suspended for the call so a
+/// pinned WAL never stalls the writer thread.
+pub(crate) fn checkpoint_truncate(conn: &Connection) -> Result<CheckpointOutcome, StorageError> {
     // A checkpoint on the writer's own transaction cannot recover capacity.
     debug_assert!(
         conn.is_autocommit(),
@@ -214,16 +235,25 @@ pub(crate) fn checkpoint_truncate(conn: &Connection) -> Result<bool, StorageErro
     });
     // Same value `db.rs` installs on every connection.
     conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
-    let (busy, log, checkpointed) = match result {
-        Ok(row) => row,
+    match result {
+        Ok((busy, log_frames, checkpointed_frames)) => Ok(CheckpointOutcome {
+            busy: busy != 0,
+            log_frames,
+            checkpointed_frames,
+            locked: false,
+        }),
         Err(rusqlite::Error::SqliteFailure(error, _))
             if error.code == rusqlite::ErrorCode::DatabaseBusy =>
         {
-            return Ok(false);
+            Ok(CheckpointOutcome {
+                busy: true,
+                log_frames: -1,
+                checkpointed_frames: -1,
+                locked: true,
+            })
         }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(busy == 0 && log == checkpointed)
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn page_size(conn: &Connection) -> Result<u64, StorageError> {

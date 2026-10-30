@@ -348,6 +348,67 @@ pub(crate) fn gap_pending(
     )?)
 }
 
+/// Pending targets of live requests whose bounded WAL wait is over become
+/// `reason`. The wait of one request started at `max(since_ns, created_at_ns)`
+/// (a request submitted during the wait waits from its own submission), so a
+/// request is expired when that instant plus `limit_ns` is `<= now_ns`.
+pub(crate) fn gap_expired(
+    conn: &Connection,
+    since_ns: i64,
+    limit_ns: i64,
+    now_ns: i64,
+    reason: RequestGapReason,
+) -> Result<usize, StorageError> {
+    // Compare against `now - limit` so no sum can overflow.
+    let started_by = now_ns.saturating_sub(limit_ns);
+    Ok(conn.execute(
+        "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?1 \
+         WHERE state = 'pending' AND request_id IN \
+         (SELECT request_id FROM thread_index_requests \
+          WHERE state = 'pending' AND max(?2, created_at_ns) <= ?3)",
+        params![to_json(&reason)?, since_ns, started_by],
+    )?)
+}
+
+/// The earliest wait deadline among live requests that still have a pending
+/// target; `None` when nothing waits. Cancelled and finished requests are not
+/// considered.
+pub(crate) fn earliest_wait_deadline(
+    conn: &Connection,
+    since_ns: i64,
+    limit_ns: i64,
+) -> Result<Option<i64>, StorageError> {
+    let started: Option<i64> = conn.query_row(
+        "SELECT MIN(max(?1, q.created_at_ns)) FROM thread_index_requests q \
+         WHERE q.state = 'pending' AND EXISTS (SELECT 1 FROM thread_index_request_targets t \
+         WHERE t.request_id = q.request_id AND t.state = 'pending')",
+        [since_ns],
+        |row| row.get(0),
+    )?;
+    Ok(started.map(|started| started.saturating_add(limit_ns)))
+}
+
+/// The newest `created_at_ns` among live requests that still have a pending
+/// target. Cancelled and finished requests are not considered.
+pub(crate) fn latest_pending_created_at(conn: &Connection) -> Result<Option<i64>, StorageError> {
+    Ok(conn.query_row(
+        "SELECT MAX(q.created_at_ns) FROM thread_index_requests q \
+         WHERE q.state = 'pending' AND EXISTS (SELECT 1 FROM thread_index_request_targets t \
+         WHERE t.request_id = q.request_id AND t.state = 'pending')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) const HAS_PENDING_TARGETS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM thread_index_requests q \
+     WHERE q.state = 'pending' AND EXISTS (SELECT 1 FROM thread_index_request_targets t \
+     WHERE t.request_id = q.request_id AND t.state = 'pending'))";
+
+/// Heartbeats need only existence, not the latest timestamp across all work.
+pub(crate) fn has_pending_targets(conn: &Connection) -> Result<bool, StorageError> {
+    Ok(conn.query_row(HAS_PENDING_TARGETS_SQL, [], |row| row.get(0))?)
+}
+
 /// Terminalizes requests without pending targets after re-checking that
 /// succeeded targets are still held at their frozen revision/versions.
 pub(crate) fn finalize(conn: &Connection, now_ns: i64) -> Result<usize, StorageError> {

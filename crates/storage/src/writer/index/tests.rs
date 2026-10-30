@@ -160,7 +160,7 @@ impl Fixture {
             limits: &config.hard_limits,
             source_suspended: false,
         };
-        work::apply_settings(env, &mut rt, config.thread_index).unwrap();
+        work::apply_settings(env, &mut rt, config.thread_index, S).unwrap();
         Self {
             _dir: Some(dir),
             db,
@@ -181,7 +181,7 @@ impl Fixture {
             limits: &self.config.hard_limits,
             source_suspended: false,
         };
-        work::apply_settings(env, &mut rt, self.config.thread_index).unwrap();
+        work::apply_settings(env, &mut rt, self.config.thread_index, S).unwrap();
         Self {
             _dir: None,
             db,
@@ -461,14 +461,16 @@ fn settings_shrink_preserves_old_blocks_when_db_or_pinned_wal_cannot_admit_delet
             "indexed",
             "no unadmitted settings delete"
         );
-        assert!(matches!(
-            fx.drive(&lease, 4 * S),
-            IndexStepResult::Paused(_)
-        ));
+        let outcome = fx.drive(&lease, 4 * S);
+        if wal_limited {
+            waiting(outcome);
+        } else {
+            assert!(matches!(outcome, IndexStepResult::Paused(_)));
+        }
         assert_eq!(fx.row("run-old").blocks, 1);
         assert_eq!(fx.rt.counters.evictions, 0);
         assert!(
-            !capacity::checkpoint_truncate(fx.conn()).unwrap(),
+            !capacity::checkpoint_truncate(fx.conn()).unwrap().complete(),
             "reader pins WAL"
         );
         reader.execute_batch("ROLLBACK").unwrap();
@@ -501,10 +503,7 @@ fn self_eviction_of_previous_revision_requires_delete_admission() {
             .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
             .unwrap();
         fx.config.hard_limits.max_wal_bytes = fx.sizes().wal + 1;
-        assert!(matches!(
-            fx.drive(&lease, 4 * S),
-            IndexStepResult::Paused(_)
-        ));
+        waiting(fx.drive(&lease, 4 * S));
         let retained = fx.row("run-old");
         assert_eq!(
             (retained.state.as_str(), retained.blocks, retained.charged),
@@ -543,10 +542,7 @@ fn reaccounting_is_deferred_and_cannot_delete_through_pinned_wal_limit() {
         old_charge,
         "receipt must not reaccount eagerly"
     );
-    assert!(matches!(
-        fx.drive(&lease, 4 * S),
-        IndexStepResult::Paused(_)
-    ));
+    waiting(fx.drive(&lease, 4 * S));
     assert_eq!(fx.row("run-old").blocks, 1);
     reader.execute_batch("ROLLBACK").unwrap();
     fx.config.hard_limits = HardLimits::default();
@@ -639,7 +635,7 @@ fn admitted_settings_delete_grows_pinned_wal_within_the_planned_bound() {
     assert!(after.wal <= before.wal + wal);
     assert!(after.total() <= before.total() + db + wal + shm);
     assert!(after.total() + MEASURED_POLICY.reserve_bytes() < fx.config.hard_limits.max_db_bytes);
-    assert!(!capacity::checkpoint_truncate(fx.conn()).unwrap());
+    assert!(!capacity::checkpoint_truncate(fx.conn()).unwrap().complete());
     reader.execute_batch("ROLLBACK").unwrap();
 }
 
@@ -905,10 +901,7 @@ fn obsolete_extractor_is_hidden_without_owner_during_adjustment_and_capacity_pau
         .execute_batch("BEGIN; SELECT COUNT(*) FROM conversation_blocks;")
         .unwrap();
     restarted.config.hard_limits.max_wal_bytes = restarted.sizes().wal + 1;
-    assert!(matches!(
-        restarted.drive(&lease, 5 * S),
-        IndexStepResult::Paused(_)
-    ));
+    waiting(restarted.drive(&lease, 5 * S));
     check_hidden(&restarted);
     reader.execute_batch("ROLLBACK").unwrap();
 }
@@ -2000,6 +1993,515 @@ fn wal_high_water(fx: &Fixture) {
     fx.conn().execute_batch("CREATE TABLE wal_pressure(payload BLOB); INSERT INTO wal_pressure VALUES(zeroblob(1048576));").unwrap();
 }
 
+fn waiting(result: IndexStepResult) -> i64 {
+    match result {
+        IndexStepResult::Idle {
+            next_wake_at_ns: Some(at),
+        } => at,
+        other => panic!("expected bounded WAL wait, got {other:?}"),
+    }
+}
+
+/// Holds a snapshot in a single statement, without an explicit read transaction.
+/// The barriers synchronize with the first UDF call, after SQLite has read the
+/// first row and acquired its snapshot, and with statement completion.
+struct StatementPin {
+    release: std::sync::Arc<std::sync::Barrier>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StatementPin {
+    fn new(path: &std::path::Path) -> Self {
+        use std::sync::{Arc, Barrier};
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let entered_reader = entered.clone();
+        let release_reader = release.clone();
+        let path = path.to_owned();
+        let handle = std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            let first = std::sync::atomic::AtomicBool::new(true);
+            conn.create_scalar_function(
+                "pin_snapshot",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |ctx| {
+                    if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        entered_reader.wait();
+                        release_reader.wait();
+                    }
+                    ctx.get::<i64>(0)
+                },
+            )
+            .unwrap();
+            let mut statement = conn
+                .prepare("SELECT pin_snapshot(rowid) FROM run_contexts")
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(!rows.is_empty());
+            assert!(conn.is_autocommit());
+        });
+        entered.wait();
+        Self {
+            release,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for StatementPin {
+    fn drop(&mut self) {
+        self.release.wait();
+        self.handle.take().unwrap().join().unwrap();
+    }
+}
+
+fn select_ready(fx: &mut Fixture, lease: &IndexLease) {
+    for _ in 0..100 {
+        if fx.rt.ready.is_some() {
+            return;
+        }
+        assert_eq!(
+            fx.control(2 * S).step(lease, 2 * S).unwrap(),
+            IndexStepResult::Progress
+        );
+    }
+    panic!("no extraction selected");
+}
+
+fn pressure_for_wait(fx: &mut Fixture) {
+    wal_high_water(fx);
+    let wal = if fx.rt.ready.is_some() {
+        // The commit bound is smaller than the subsequent merge bound. Keep
+        // enough high-water that both fit after truncation without settings.
+        fx.conn()
+            .execute_batch("INSERT INTO wal_pressure VALUES(zeroblob(8388608))")
+            .unwrap();
+        let page_size = capacity::page_size(fx.conn()).unwrap();
+        let PlannedGrowth::Bounded { wal, .. } = fx.rt.policy.planned_growth(
+            fx.charge("run-a"),
+            page_size,
+            capacity::freelist_bytes(fx.conn(), page_size).unwrap(),
+            false,
+        ) else {
+            panic!("bounded commit");
+        };
+        wal
+    } else {
+        8_437_792 // Existing, measured merge bound.
+    };
+    fx.config.hard_limits.max_wal_bytes = wal + fx.sizes().wal;
+}
+
+#[test]
+fn wal_statement_snapshot_wait_recovers_without_gaps_and_clears_since_in_admission() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for commit_path in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "statement snapshot searchable", 1));
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        let LeaseResult::Acquired(lease) = submitted.lease else {
+            panic!("lease");
+        };
+        if commit_path {
+            select_ready(&mut fx, &lease);
+        }
+        let pin = StatementPin::new(&fx.config.db_path);
+        pressure_for_wait(&mut fx);
+        let next = waiting(fx.drive(&lease, 3 * S));
+        assert_eq!(super::wait::get_since(fx.conn()).unwrap(), Some(3 * S));
+        assert_eq!(fx.rt.counters.pauses, 0);
+        assert_eq!(fx.rt.counters.wal_waits, 1);
+        assert!(matches!(
+            fx.control(3 * S)
+                .request_status(&submitted.request_id, 3 * S)
+                .unwrap()
+                .progress,
+            RequestProgress::Pending(_)
+        ));
+        drop(pin);
+        let checkpoints = Arc::new(AtomicUsize::new(0));
+        let observed = checkpoints.clone();
+        fx.conn()
+            .authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Pragma {
+                        pragma_name: "wal_checkpoint",
+                        ..
+                    }
+                ) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        assert_eq!(
+            fx.control(next).step(&lease, next).unwrap(),
+            IndexStepResult::Progress
+        );
+        assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+        assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+        assert!(fx.rt.wal_wait.is_none());
+        if commit_path {
+            assert_eq!(fx.rt.counters.commits, 1);
+        } else {
+            assert_eq!(fx.rt.counters.merges, 1);
+        }
+        assert_eq!(fx.drive(&lease, next), idle());
+        assert!(matches!(
+            terminal(&mut fx, &submitted.request_id, next),
+            ReindexResult::Completed { summary, .. } if summary.succeeded == 1
+        ));
+        assert_eq!(fx.rt.counters.pauses, 0);
+        assert_eq!(fx.rt.counters.wal_waits, 1);
+    }
+}
+
+#[test]
+fn wal_wait_backoff_is_due_inclusive_capped_and_never_past_the_job_deadline() {
+    use super::wait::{BACKOFF_MAX_NS, BACKOFF_MIN_NS, WAL_WAIT_LIMIT_NS};
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "backoff source", 1));
+    let lease = fx.lease(&gui(), S);
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    let since = 2 * S;
+    let mut next = waiting(fx.drive(&lease, since));
+    assert_eq!(next, since + BACKOFF_MIN_NS);
+    let deadline = since + WAL_WAIT_LIMIT_NS;
+    for delay in [
+        200_000_000,
+        400_000_000,
+        800_000_000,
+        BACKOFF_MAX_NS,
+        BACKOFF_MAX_NS,
+    ] {
+        let counters = fx.rt.counters;
+        assert_eq!(waiting(fx.drive(&lease, next - 1)), next);
+        assert_eq!(fx.rt.counters.wal_wait_probes, counters.wal_wait_probes);
+        let now = next;
+        next = waiting(fx.drive(&lease, now));
+        assert_eq!(next - now, delay);
+        assert!(next <= deadline);
+        assert_eq!(fx.rt.counters.wal_wait_probes, counters.wal_wait_probes + 1);
+    }
+    assert_eq!(waiting(fx.drive(&lease, deadline - 1)), deadline);
+    assert!(matches!(
+        fx.drive(&lease, deadline),
+        IndexStepResult::Paused(_)
+    ));
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+    drop(pin);
+}
+
+#[test]
+fn wal_wait_owner_handoff_inherits_since_without_extending_the_deadline() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "handoff source", 1));
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    fx.control(3 * S).release_lease(&lease).unwrap();
+    let mut peer = fx.peer();
+    let successor = peer.lease(&cli(), 3 * S);
+    assert!(successor.epoch > lease.epoch);
+    assert_eq!(fx.drive(&lease, 3 * S), IndexStepResult::LeaseLost);
+    waiting(peer.drive(&successor, 3 * S));
+    assert_eq!(
+        peer.rt.counters.wal_wait_probes, 1,
+        "inherited probe is immediately due"
+    );
+    assert_eq!(peer.rt.wal_wait.unwrap().since_ns, 2 * S);
+    let deadline = 2 * S + WAL_WAIT_LIMIT_NS;
+    assert_eq!(waiting(peer.drive(&successor, deadline - 1)), deadline);
+    assert!(matches!(
+        peer.drive(&successor, deadline),
+        IndexStepResult::Paused(_)
+    ));
+    let before = terminal(&mut peer, &submitted.request_id, deadline);
+    assert!(
+        matches!(&before, ReindexResult::CompletedWithGaps { summary, .. }
+        if summary.gaps.len() == 1
+            && summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired)
+    );
+    assert_eq!(super::wait::get_since(peer.conn()).unwrap(), None);
+    assert_eq!(peer.rt.counters.wal_wait_expiries, 1);
+    assert_eq!(fx.drive(&lease, deadline), IndexStepResult::LeaseLost);
+    assert_eq!(terminal(&mut peer, &submitted.request_id, deadline), before);
+    drop(pin);
+}
+
+#[test]
+fn wal_wait_cancellation_does_not_cancel_shared_work_or_expire_cancelled_targets() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "cancel source", 1));
+    let submitted = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = submitted.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    assert_eq!(
+        fx.control(3 * S)
+            .cancel_request(&submitted.request_id)
+            .unwrap()
+            .progress,
+        RequestProgress::Cancelled
+    );
+    waiting(fx.drive(&lease, 3 * S));
+    assert!(fx.rt.wal_wait.is_some());
+    let deadline = 2 * S + WAL_WAIT_LIMIT_NS;
+    assert!(matches!(
+        fx.drive(&lease, deadline),
+        IndexStepResult::Paused(_)
+    ));
+    assert_eq!(fx.rt.counters.wal_wait_expiries, 0);
+    let gap_count: u64 = fx
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM thread_index_request_targets WHERE state = 'gap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(gap_count, 0);
+    assert_eq!(
+        fx.control(deadline)
+            .request_status(&submitted.request_id, deadline)
+            .unwrap()
+            .progress,
+        RequestProgress::Cancelled
+    );
+    drop(pin);
+    fx.config.hard_limits = HardLimits::default();
+    assert_eq!(fx.drive(&lease, deadline + S), idle());
+    assert_eq!(fx.row("run-a").state, "indexed");
+}
+
+#[test]
+fn wal_wait_source_update_discards_frozen_input_but_preserves_the_episode() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "obsoleteword", 1));
+    let lease = fx.lease(&gui(), S);
+    select_ready(&mut fx, &lease);
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 3 * S));
+    assert!(fx.rt.ready.is_some());
+    fx.save(&verified("run-a", "replacementword", 4 * S));
+    let env = Env {
+        conn: &fx.db.conn,
+        db_path: &fx.config.db_path,
+        limits: &fx.config.hard_limits,
+        source_suspended: false,
+    };
+    assert!(work::discard_stale_pause(env, &mut fx.rt).unwrap());
+    assert!(fx.rt.ready.is_none());
+    assert_eq!(fx.rt.wal_wait.unwrap().since_ns, 3 * S);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), Some(3 * S));
+    drop(pin);
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    assert_eq!(fx.row("run-a").state, "indexed");
+    let matches = |word: &str| -> u64 {
+        fx.conn()
+            .query_row(
+                "SELECT count(*) FROM conversation_fts WHERE conversation_fts MATCH ?1",
+                [word],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(matches("obsoleteword"), 0);
+    assert_eq!(matches("replacementword"), 1);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+    assert_eq!(fx.rt.counters.wal_waits, 1);
+}
+
+#[test]
+fn non_pinned_wal_and_reserve_refusals_pause_immediately_without_a_wait() {
+    for wal_limit in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "impossible envelope", 1));
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        let LeaseResult::Acquired(lease) = submitted.lease else {
+            panic!("lease")
+        };
+        if wal_limit {
+            fx.config.hard_limits.max_wal_bytes = 8_437_791;
+        } else {
+            fx.config.hard_limits.max_db_bytes = MEASURED_POLICY.reserve_bytes();
+        }
+        assert!(
+            matches!(fx.drive(&lease, 2 * S), IndexStepResult::Paused(status)
+            if status.state == CapacityState::IndexPaused(
+                if wal_limit { IndexPauseReason::WalLimit } else { IndexPauseReason::ReserveInsufficient }
+            ))
+        );
+        assert_eq!(fx.rt.counters.wal_waits, 0);
+        assert_eq!(fx.rt.counters.pauses, 1);
+        assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+        assert!(fx.rt.wal_wait.is_none());
+        if wal_limit {
+            assert!(fx.rt.last_checkpoint.unwrap().complete());
+        }
+        assert!(matches!(
+            terminal(&mut fx, &submitted.request_id, 2 * S),
+            ReindexResult::CompletedWithGaps { summary, .. }
+                if summary.gaps.len() == 1 && summary.gaps[0].reason == RequestGapReason::CapacityPaused
+        ));
+    }
+}
+
+#[test]
+fn wal_wait_settings_probe_is_immediate_and_a_complete_probe_cannot_retry_checkpoint() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "settings source", 1));
+    let lease = fx.lease(&gui(), S);
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    let next = waiting(fx.drive(&lease, 2 * S));
+    let early = 2 * S + 1;
+    fx.control(early)
+        .apply_index_settings(enabled(512 * MIB))
+        .unwrap();
+    assert!(early < next);
+    waiting(fx.drive(&lease, early));
+    assert_eq!(fx.rt.counters.wal_wait_probes, 1);
+    assert_eq!(fx.rt.wal_wait.unwrap().since_ns, 2 * S);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), Some(2 * S));
+    drop(pin);
+    // Even a complete checkpoint cannot admit G_wal >= max_wal. This ends
+    // the episode with the normal capacity gap, rather than another wait.
+    fx.config.hard_limits.max_wal_bytes = 8_437_792;
+    let checkpoints = Arc::new(AtomicUsize::new(0));
+    let observed = checkpoints.clone();
+    let begins = Arc::new(AtomicUsize::new(0));
+    let observed_begins = begins.clone();
+    fx.conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::Pragma {
+                    pragma_name: "wal_checkpoint",
+                    ..
+                }
+            ) {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(
+                ctx.action,
+                AuthAction::Transaction {
+                    operation: rusqlite::hooks::TransactionOperation::Begin,
+                }
+            ) {
+                observed_begins.fetch_add(1, Ordering::SeqCst);
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    let due = fx.rt.wal_wait.unwrap().next_retry_at_ns;
+    assert!(
+        matches!(fx.drive(&lease, due), IndexStepResult::Paused(status)
+        if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit))
+    );
+    assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
+    // Bookkeeping, admission attempt 0, and pause publication: no attempt 1.
+    assert_eq!(begins.load(Ordering::SeqCst), 3);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+    assert!(fx.rt.wal_wait.is_none());
+}
+
+#[test]
+fn wal_wait_expires_requests_individually_and_the_job_waits_for_the_last_deadline() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "independent request deadlines", 1));
+    let early = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = early.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    // Exercise the state machine with an already-accepted request. Admission
+    // of new requests during a wait is wired separately in U3.
+    let late_id = {
+        let transaction = fx.conn().unchecked_transaction().unwrap();
+        let (id, _) = super::requests::submit_in(&transaction, &all(), 10 * S).unwrap();
+        transaction.commit().unwrap();
+        id
+    };
+    let early_deadline = 2 * S + WAL_WAIT_LIMIT_NS;
+    let late_deadline = 10 * S + WAL_WAIT_LIMIT_NS;
+    let next = waiting(fx.drive(&lease, early_deadline));
+    assert!(next <= late_deadline);
+    assert_eq!(fx.rt.counters.pauses, 0);
+    let early_result = terminal(&mut fx, &early.request_id, early_deadline);
+    assert!(
+        matches!(&early_result, ReindexResult::CompletedWithGaps { summary, .. }
+        if summary.gaps.len() == 1
+            && summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired)
+    );
+    assert!(matches!(
+        fx.control(early_deadline)
+            .request_status(&late_id, early_deadline)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    assert!(matches!(
+        fx.drive(&lease, late_deadline),
+        IndexStepResult::Paused(_)
+    ));
+    assert_eq!(fx.rt.counters.wal_wait_expiries, 2);
+    assert_eq!(fx.rt.counters.pauses, 1);
+    assert!(matches!(terminal(&mut fx, &late_id, late_deadline),
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps.len() == 1
+                && summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired));
+    assert_eq!(
+        terminal(&mut fx, &early.request_id, late_deadline),
+        early_result
+    );
+    drop(pin);
+}
+
 #[test]
 fn wal_admission_recovers_high_water_before_terminalizing_a_request() {
     let mut fx = Fixture::new(512 * MIB);
@@ -2038,7 +2540,17 @@ fn wal_admission_pinned_reader_pauses_without_index_writes_and_gap_stays_termina
     wal_high_water(&fx);
     let before = fx.sizes();
     fx.config.hard_limits.max_wal_bytes = 8_437_792 + before.wal;
-    let IndexStepResult::Paused(status) = fx.drive(&lease, 2 * S) else {
+    waiting(fx.drive(&lease, 2 * S));
+    assert_eq!(fx.rt.counters.pauses, 0);
+    assert!(matches!(
+        fx.control(2 * S)
+            .request_status(&submitted.request_id, 2 * S)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    let expired_at = 2 * S + super::wait::WAL_WAIT_LIMIT_NS;
+    let IndexStepResult::Paused(status) = fx.drive(&lease, expired_at) else {
         panic!("pause")
     };
     assert_eq!(
@@ -2048,7 +2560,24 @@ fn wal_admission_pinned_reader_pauses_without_index_writes_and_gap_stays_termina
     assert_eq!(fx.rt.counters.merges, 0);
     assert_eq!(fx.rt.counters.commits, 0);
     assert_eq!(fx.row("run-a").attempts, 0);
-    let terminal_before = terminal(&mut fx, &submitted.request_id, 2 * S);
+    assert_eq!(fx.rt.counters.wal_wait_expiries, 1);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), None);
+    let terminal_before = terminal(&mut fx, &submitted.request_id, expired_at);
+    assert!(matches!(
+        &terminal_before,
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps.len() == 1
+                && summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    let finished_at: i64 = fx
+        .conn()
+        .query_row(
+            "SELECT finished_at_ns FROM thread_index_requests WHERE request_id = ?1",
+            [&submitted.request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(finished_at, expired_at);
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     // At equality with +J even a truncated WAL must remain paused.
@@ -2086,10 +2615,10 @@ fn wal_admission_pinned_reader_pauses_without_index_writes_and_gap_stays_termina
         source_suspended: false,
     };
     assert!(work::recheck_pause(env, &mut fx.rt).unwrap());
-    assert_eq!(fx.drive(&lease, 3 * S), idle());
+    assert_eq!(fx.drive(&lease, expired_at + S), idle());
     assert_eq!(fx.row("run-a").state, "indexed");
     assert_eq!(
-        terminal(&mut fx, &submitted.request_id, 3 * S),
+        terminal(&mut fx, &submitted.request_id, expired_at + S),
         terminal_before
     );
 }
@@ -2138,7 +2667,13 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
     for pinned in [false, true] {
         let mut fx = Fixture::new(512 * MIB);
         fx.save(&verified("run-a", "private body", 1));
-        let lease = fx.lease(&gui(), S);
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        let LeaseResult::Acquired(lease) = submitted.lease else {
+            panic!("lease")
+        };
         let reader = Connection::open(&fx.config.db_path).unwrap();
         if pinned {
             reader
@@ -2149,6 +2684,8 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
         fx.config.hard_limits.max_wal_bytes = 8_437_792 + fx.sizes().wal;
         let checkpoints = Arc::new(AtomicUsize::new(0));
         let observed = checkpoints.clone();
+        let transactions = Arc::new(AtomicUsize::new(0));
+        let observed_transactions = transactions.clone();
         fx.conn()
             .authorizer(Some(move |ctx: AuthContext<'_>| {
                 if let AuthAction::Pragma {
@@ -2161,15 +2698,105 @@ fn wal_checkpoint_attempt_is_single_and_outside_immediate_even_when_busy() {
                     // checkpoint_truncate asserts is_autocommit immediately before
                     // this PRAGMA, so moving it into IMMEDIATE fails this test too.
                 }
+                if let AuthAction::Transaction { operation } = ctx.action
+                    && operation == rusqlite::hooks::TransactionOperation::Begin
+                {
+                    observed_transactions.fetch_add(1, Ordering::SeqCst);
+                }
                 Authorization::Allow
             }))
             .unwrap();
         let outcome = fx.control(2 * S).step(&lease, 2 * S).unwrap();
         assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
-        assert_eq!(matches!(outcome, IndexStepResult::Paused(_)), pinned);
         if pinned {
+            let mut next = waiting(outcome);
+            assert_eq!(fx.rt.counters.pauses, 0);
+            checkpoints.store(0, Ordering::SeqCst);
+            transactions.store(0, Ordering::SeqCst);
+            assert_eq!(
+                waiting(fx.control(next - 1).step(&lease, next - 1).unwrap()),
+                next
+            );
+            assert_eq!(checkpoints.load(Ordering::SeqCst), 0);
+            assert_eq!(transactions.load(Ordering::SeqCst), 0);
+            let blocker = Connection::open(&fx.config.db_path).unwrap();
+            // Neither a pinned reader nor a concurrent writer makes a
+            // pre-deadline probe eligible to acquire the writer lock.
+            let mut probes = 0;
+            for writer_holds_lock in [false, true] {
+                if writer_holds_lock {
+                    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+                }
+                for _ in 0..6 {
+                    assert!(next < 2 * S + super::wait::WAL_WAIT_LIMIT_NS);
+                    next = waiting(fx.control(next).step(&lease, next).unwrap());
+                    probes += 1;
+                    assert_eq!(checkpoints.load(Ordering::SeqCst), probes);
+                    assert_eq!(transactions.load(Ordering::SeqCst), 0);
+                }
+                if writer_holds_lock {
+                    blocker.execute_batch("COMMIT").unwrap();
+                }
+            }
+            assert!(matches!(
+                fx.control(next)
+                    .request_status(&submitted.request_id, next)
+                    .unwrap()
+                    .progress,
+                RequestProgress::Pending(_)
+            ));
             reader.execute_batch("COMMIT").unwrap();
+        } else {
+            assert_eq!(outcome, IndexStepResult::Progress);
         }
+    }
+}
+
+#[test]
+fn pending_request_detection_does_not_scan_terminal_history() {
+    fn measured(conn: &Connection) -> (bool, i32) {
+        let mut statement = conn
+            .prepare(super::requests::HAS_PENDING_TARGETS_SQL)
+            .unwrap();
+        let pending = statement
+            .query_row([], |row| row.get::<_, bool>(0))
+            .unwrap();
+        assert_eq!(pending, super::requests::has_pending_targets(conn).unwrap());
+        assert_eq!(
+            statement.get_status(rusqlite::StatementStatus::FullscanStep),
+            0
+        );
+        (
+            pending,
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        )
+    }
+
+    for pending in [false, true] {
+        let mut fx = Fixture::new(512 * MIB);
+        fx.save(&verified("run-a", "pending target", 1));
+        let submitted = fx
+            .control(S)
+            .submit_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        if !pending {
+            fx.control(2 * S)
+                .cancel_request(&submitted.request_id)
+                .unwrap();
+        }
+        // A pending request without pending targets is not work for an owner.
+        fx.conn().execute(
+            "INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns) \
+             VALUES ('empty', 0, 'pending', 0)", [],
+        ).unwrap();
+        let before = measured(fx.conn());
+        assert_eq!(before.0, pending);
+        fx.conn().execute_batch(
+            "WITH RECURSIVE history(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM history WHERE n<4000) \
+             INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns, finished_at_ns) \
+             SELECT printf('terminal-%d', n), 0, 'completed', n, n FROM history",
+        ).unwrap();
+        assert_eq!(measured(fx.conn()), before);
     }
 }
 
@@ -2438,4 +3065,448 @@ fn wal_retry_expiration_stops_merge_adjustment_and_self_eviction() {
             assert_eq!(fx.row("run-old").blocks, 1);
         }
     }
+}
+
+#[test]
+fn wal_pause_left_by_an_expiry_admits_new_requests_that_wait_for_their_own_deadline() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "request deadlines", 1));
+    let first = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = first.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    let expired_at = 2 * S + WAL_WAIT_LIMIT_NS;
+    assert!(matches!(
+        fx.drive(&lease, expired_at),
+        IndexStepResult::Paused(_)
+    ));
+    assert!(matches!(
+        fx.rt.pause,
+        Some(status) if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    ));
+    assert!(matches!(
+        terminal(&mut fx, &first.request_id, expired_at),
+        ReindexResult::CompletedWithGaps { .. }
+    ));
+
+    // The expired WAL pause does not turn the next request into a gap.
+    let second_at = expired_at + S;
+    let second = fx
+        .control(second_at)
+        .submit_request(&all(), &gui(), second_at, HOUR)
+        .unwrap();
+    assert!(matches!(second.progress, RequestProgress::Pending(_)));
+    assert_eq!(fx.rt.pause, None);
+    waiting(fx.drive(&lease, second_at));
+    assert_eq!(fx.rt.wal_wait.unwrap().since_ns, second_at);
+    assert_eq!(fx.rt.counters.wal_waits, 2);
+
+    // A later request keeps waiting after the earlier one has expired.
+    let third_at = second_at + 100 * S;
+    let third = fx
+        .control(third_at)
+        .submit_request(&all(), &gui(), third_at, HOUR)
+        .unwrap();
+    assert!(matches!(third.progress, RequestProgress::Pending(_)));
+    let next = waiting(fx.drive(&lease, second_at + WAL_WAIT_LIMIT_NS));
+    assert!(matches!(
+        terminal(&mut fx, &second.request_id, second_at + WAL_WAIT_LIMIT_NS),
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    assert!(matches!(
+        fx.control(next)
+            .request_status(&third.request_id, next)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    assert!(next < third_at + WAL_WAIT_LIMIT_NS);
+
+    drop(pin);
+    assert_eq!(fx.drive(&lease, next), idle());
+    assert!(matches!(
+        terminal(&mut fx, &third.request_id, next),
+        ReindexResult::Completed { summary, .. } if summary.succeeded == 1
+    ));
+    assert_eq!(fx.rt.counters.pauses, 1);
+}
+
+#[test]
+fn db_size_pause_still_closes_new_requests_at_acceptance() {
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "fits the logical budget easily", 10 * S));
+    let lease = fx.lease(&gui(), S);
+    fx.config.hard_limits = tight_limits(fx.sizes(), 64 * 1024);
+    assert!(matches!(
+        fx.drive(&lease, 2 * S),
+        IndexStepResult::Paused(_)
+    ));
+    let submitted = fx
+        .control(3 * S)
+        .submit_request(&all(), &gui(), 3 * S, HOUR)
+        .unwrap();
+    assert!(matches!(
+        submitted.progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { ref summary, .. })
+            if summary.gaps[0].reason == RequestGapReason::CapacityPaused
+    ));
+}
+
+#[test]
+fn wal_job_expiry_rechecks_a_concurrent_submission_inside_immediate() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let mut fx = Fixture::new(512 * MIB);
+    fx.save(&verified("run-a", "concurrent request deadline", 1));
+    let first = fx
+        .control(S)
+        .submit_request(&all(), &gui(), S, HOUR)
+        .unwrap();
+    let LeaseResult::Acquired(lease) = first.lease else {
+        panic!("lease")
+    };
+    let pin = StatementPin::new(&fx.config.db_path);
+    pressure_for_wait(&mut fx);
+    waiting(fx.drive(&lease, 2 * S));
+    let at = 2 * S + WAL_WAIT_LIMIT_NS;
+    let path = fx.config.db_path.clone();
+    let entering = Arc::new(Barrier::new(2));
+    let submitted = Arc::new(Barrier::new(2));
+    let submit_entering = entering.clone();
+    let submit_done = submitted.clone();
+    let peer = std::thread::spawn(move || {
+        let mut conn = Connection::open(path).unwrap();
+        submit_entering.wait();
+        let transaction = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let (request_id, targets) = super::requests::submit_in(&transaction, &all(), at).unwrap();
+        assert_eq!(targets, 1);
+        transaction.commit().unwrap();
+        submit_done.wait();
+        request_id
+    });
+    let first_begin = AtomicBool::new(true);
+    fx.conn()
+        .authorizer(Some(move |ctx: AuthContext<'_>| {
+            if matches!(
+                ctx.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) && first_begin.swap(false, Ordering::SeqCst)
+            {
+                // BEGIN has been prepared but has not acquired the writer lock.
+                // The old implementation had already read the job deadline here.
+                entering.wait();
+                submitted.wait();
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    let next = waiting(fx.drive(&lease, at));
+    fx.conn()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    let second_id = peer.join().unwrap();
+    assert_eq!(fx.rt.counters.pauses, 0);
+    assert_eq!(super::wait::get_since(fx.conn()).unwrap(), Some(2 * S));
+    assert!(matches!(
+        terminal(&mut fx, &first.request_id, at),
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    assert!(matches!(
+        fx.control(next)
+            .request_status(&second_id, next)
+            .unwrap()
+            .progress,
+        RequestProgress::Pending(_)
+    ));
+    assert!(next < at + WAL_WAIT_LIMIT_NS);
+    assert!(matches!(
+        fx.drive(&lease, at + WAL_WAIT_LIMIT_NS),
+        IndexStepResult::Paused(_)
+    ));
+    assert!(matches!(
+        terminal(&mut fx, &second_id, at + WAL_WAIT_LIMIT_NS),
+        ReindexResult::CompletedWithGaps { summary, .. }
+            if summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    drop(pin);
+}
+
+#[test]
+fn failed_wal_probe_rejudges_non_wal_pressure_including_after_restart() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    for restart in [false, true] {
+        for pressure in ["total", "reserve", "source"] {
+            for at in [3 * S, 2 * S + WAL_WAIT_LIMIT_NS] {
+                let mut fx = Fixture::new(512 * MIB);
+                fx.save(&verified("run-a", "pressure transition", 1));
+                let submitted = fx
+                    .control(S)
+                    .submit_request(&all(), &gui(), S, HOUR)
+                    .unwrap();
+                let LeaseResult::Acquired(lease) = submitted.lease else {
+                    panic!("lease")
+                };
+                let pin = StatementPin::new(&fx.config.db_path);
+                pressure_for_wait(&mut fx);
+                waiting(fx.drive(&lease, 2 * S));
+                match pressure {
+                    "total" => {
+                        fx.config.hard_limits.max_db_bytes =
+                            fx.sizes().total() + MEASURED_POLICY.reserve_bytes()
+                    }
+                    "reserve" => {
+                        fx.config.hard_limits.max_db_bytes = MEASURED_POLICY.reserve_bytes()
+                    }
+                    "source" => {}
+                    _ => unreachable!(),
+                }
+                let mut restarted = restart.then(|| fx.peer());
+                let active = restarted.as_mut().unwrap_or(&mut fx);
+                active.source_suspended = pressure == "source";
+                assert_eq!(super::wait::get_since(active.conn()).unwrap(), Some(2 * S));
+                let IndexStepResult::Paused(status) = active.drive(&lease, at) else {
+                    panic!("non-WAL pressure must pause: {pressure} restart={restart}");
+                };
+                assert_ne!(
+                    status.state,
+                    CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+                );
+                assert_eq!(active.rt.wal_wait, None);
+                assert_eq!(super::wait::get_since(active.conn()).unwrap(), None);
+                assert_eq!(active.rt.counters.wal_wait_expiries, 0);
+                assert_eq!(active.rt.counters.wal_wait_probes, 1);
+                assert_eq!(active.rt.counters.commits, 0);
+                assert!(matches!(
+                    terminal(active, &submitted.request_id, at),
+                    ReindexResult::CompletedWithGaps { summary, .. }
+                        if summary.gaps.len() == 1
+                            && summary.gaps[0].reason == RequestGapReason::CapacityPaused
+                ));
+                drop(pin);
+            }
+        }
+    }
+}
+
+struct BackgroundWalWait {
+    dir: TempDir,
+    storage: Storage,
+    pressure: Connection,
+    pin: Option<StatementPin>,
+    clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    observer: mpsc::Receiver<ThreadIndexCounters>,
+    request_id: String,
+    limits: HardLimits,
+}
+
+impl BackgroundWalWait {
+    fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("writer.db");
+        storage(&dir, HardLimits::default())
+            .handle()
+            .save_snapshot_bundle(&verified("run-a", "pinned wal background", 10 * S))
+            .unwrap();
+        // A real, uncheckpointed WAL high-water kept by another connection.
+        let pressure = Connection::open(&db_path).unwrap();
+        pressure
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        pressure
+            .execute_batch(
+                "CREATE TABLE wal_pressure(payload BLOB); \
+                 INSERT INTO wal_pressure VALUES(zeroblob(12582912));",
+            )
+            .unwrap();
+        let high_water = file_sizes(&db_path).unwrap().wal;
+        assert!(high_water > 12 * MIB);
+        let limits = HardLimits {
+            max_wal_bytes: high_water + 1,
+            ..HardLimits::default()
+        };
+        let storage = storage(&dir, limits.clone());
+        let handle = storage.handle();
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(S));
+        handle
+            .0
+            .send(Command::Index(super::IndexCommand::Clock(clock.clone())))
+            .unwrap();
+        let submitted = handle
+            .submit_thread_index_request(&all(), &gui(), S, HOUR)
+            .unwrap();
+        let pin = Some(StatementPin::new(&db_path));
+        let (observe, observer) = mpsc::channel();
+        handle
+            .0
+            .send(Command::Index(super::IndexCommand::Observe(observe)))
+            .unwrap();
+        assert!(matches!(
+            handle.start_thread_index_owner(gui()),
+            Ok(LeaseResult::Acquired(_))
+        ));
+        wait_for(&observer, |counters| counters.wal_waits >= 1);
+        Self {
+            dir,
+            storage,
+            pressure,
+            pin,
+            clock,
+            observer,
+            request_id: submitted.request_id,
+            limits,
+        }
+    }
+
+    fn tick(&self, at: i64) -> super::ThreadIndexJobStatus {
+        self.clock.store(at, std::sync::atomic::Ordering::SeqCst);
+        let handle = self.storage.handle();
+        handle
+            .0
+            .send(Command::Index(super::IndexCommand::Tick))
+            .unwrap();
+        // Writer ordering puts run_due_work between Tick and JobStatus.
+        handle.thread_index_job_status().unwrap()
+    }
+}
+
+#[test]
+fn background_owner_waits_for_a_pinned_wal_and_probes_when_capacity_changes() {
+    let mut fx = BackgroundWalWait::new();
+    let handle = fx.storage.handle();
+
+    // Waiting: no wake-up without a timer, no pause, no index write.
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.wal_wait.is_some(), "{status:?}");
+    assert!(!status.wake_scheduled, "{status:?}");
+    assert!(
+        status
+            .retry_wake_in
+            .is_some_and(|in_| in_ <= Duration::from_secs(1)),
+        "{status:?}"
+    );
+    assert_eq!(status.paused, None);
+    assert_eq!(status.counters.pauses, 0);
+    assert_eq!(status.counters.commits, 0);
+
+    // A maintenance checkpoint is a capacity notification: the probe runs in
+    // the same writer iteration, before the next command is handled.
+    let wait = status.wal_wait.unwrap();
+    let frozen_now = fx.clock.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(wait.next_retry_at_ns > frozen_now);
+    let probes = status.counters.wal_wait_probes;
+    handle.checkpoint_now().unwrap();
+    let status = handle.thread_index_job_status().unwrap();
+    assert!(status.counters.wal_wait_probes > probes, "{status:?}");
+    assert_eq!(
+        fx.clock.load(std::sync::atomic::Ordering::SeqCst),
+        frozen_now
+    );
+    assert!(status.wal_wait.is_some(), "{status:?}");
+    assert_eq!(status.counters.pauses, 0);
+
+    drop(fx.pin.take());
+    fx.clock.store(2 * S, std::sync::atomic::Ordering::SeqCst);
+    handle.checkpoint_now().unwrap();
+    wait_for(&fx.observer, |counters| counters.commits >= 1);
+    let status = handle.thread_index_job_status().unwrap();
+    assert_eq!(status.paused, None);
+    assert_eq!(status.counters.pauses, 0);
+    assert_eq!(status.counters.wal_wait_expiries, 0);
+    handle.stop_thread_index_owner().unwrap();
+}
+
+#[test]
+fn background_disable_terminalizes_waiting_requests_without_another_step() {
+    let fx = BackgroundWalWait::new();
+    let handle = fx.storage.handle();
+    handle
+        .apply_thread_index_settings(ThreadIndexSettings {
+            enabled: false,
+            max_bytes: 512 * MIB,
+        })
+        .unwrap();
+    let after = handle.thread_index_job_status().unwrap();
+    assert!(!after.wake_scheduled);
+    assert_eq!(after.wal_wait, None);
+    assert_eq!(super::wait::get_since(&fx.pressure).unwrap(), None);
+    assert!(matches!(
+        handle.thread_index_request_status(&fx.request_id, S).unwrap().progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. })
+            if summary.gaps.len() == 1 && summary.gaps[0].reason == RequestGapReason::IndexDisabled
+    ));
+}
+
+#[test]
+fn background_owner_detects_another_storages_request_after_wal_expiry() {
+    use super::wait::WAL_WAIT_LIMIT_NS;
+    let fx = BackgroundWalWait::new();
+    let handle = fx.storage.handle();
+    // Keep the GUI lease live through a virtual five minutes.
+    for n in 1..=30 {
+        fx.tick(S + n * 10 * S);
+    }
+    let expired = handle.thread_index_job_status().unwrap();
+    assert!(matches!(expired.paused, Some(status)
+        if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)));
+    assert_eq!(super::wait::get_since(&fx.pressure).unwrap(), None);
+    let terminal_before = handle
+        .thread_index_request_status(&fx.request_id, S + WAL_WAIT_LIMIT_NS)
+        .unwrap()
+        .progress;
+    assert!(matches!(terminal_before, RequestProgress::Terminal(_)));
+    let still_paused = fx.tick(2 * S + WAL_WAIT_LIMIT_NS);
+    assert!(still_paused.paused.is_some());
+    assert_eq!(still_paused.counters.wal_waits, 1);
+    assert_eq!(super::wait::get_since(&fx.pressure).unwrap(), None);
+
+    let peer = storage(&fx.dir, fx.limits.clone());
+    let second_at = 3 * S + WAL_WAIT_LIMIT_NS;
+    let submitted = peer
+        .handle()
+        .submit_thread_index_request(&all(), &cli(), second_at, HOUR)
+        .unwrap();
+    assert!(matches!(submitted.lease, LeaseResult::HeldByOther(_)));
+    assert!(matches!(submitted.progress, RequestProgress::Pending(_)));
+    // Submission changed only B's runtime: A stays paused until its owner tick.
+    assert!(handle.thread_index_job_status().unwrap().paused.is_some());
+    let resumed = fx.tick(second_at);
+    assert_eq!(resumed.paused, None);
+    assert_eq!(resumed.wal_wait.unwrap().since_ns, second_at);
+    assert_eq!(resumed.counters.wal_waits, 2);
+    for n in 1..=30 {
+        fx.tick(second_at + n * 10 * S);
+    }
+    assert!(matches!(
+        peer.handle()
+            .thread_index_request_status(&submitted.request_id, second_at + WAL_WAIT_LIMIT_NS)
+            .unwrap().progress,
+        RequestProgress::Terminal(ReindexResult::CompletedWithGaps { summary, .. })
+            if summary.gaps[0].reason == RequestGapReason::CapacityWaitExpired
+    ));
+    assert_eq!(
+        handle
+            .thread_index_request_status(&fx.request_id, second_at + WAL_WAIT_LIMIT_NS)
+            .unwrap()
+            .progress,
+        terminal_before
+    );
+    assert_eq!(handle.thread_index_job_status().unwrap().counters.pauses, 2);
 }

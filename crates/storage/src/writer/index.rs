@@ -32,6 +32,7 @@ mod lease;
 mod requests;
 #[cfg(test)]
 mod tests;
+mod wait;
 mod work;
 
 pub use work::ThreadIndexCounters;
@@ -77,6 +78,7 @@ impl ThreadIndexControl for Control<'_> {
         requests::validate(request)?;
         let conn = self.env.conn;
         let rt = &mut *self.rt;
+        let mut wal_pending = false;
         let (request_id, lease) = (|| {
             let transaction = rusqlite::Transaction::new_unchecked(
                 conn,
@@ -96,7 +98,14 @@ impl ThreadIndexControl for Control<'_> {
                     shm: 0,
                 },
             )?;
-            if status.state != CapacityState::Normal
+            // A WAL-only refusal is the bounded wait, not a policy gap: the
+            // request stays pending and expires on its own deadline. A WAL
+            // pause left by an earlier expiry is released so the next step
+            // admits (or waits) again from this request's own start.
+            wal_pending = status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+                && rt.pause.is_none_or(|pause| pause.state == status.state);
+            if !wal_pending
+                && status.state != CapacityState::Normal
                 && status.state != CapacityState::IndexPaused(IndexPauseReason::SettingsAdjustment)
             {
                 let gap = if !rt.settings.enabled {
@@ -111,6 +120,15 @@ impl ThreadIndexControl for Control<'_> {
             Ok::<_, StorageError>((request_id, lease))
         })()
         .map_err(persistence)?;
+        if wal_pending {
+            let rt = &mut *self.rt;
+            rt.pause = None;
+            rt.paused_growth = None;
+            rt.paused_work = None;
+            if let Some(wait) = rt.wal_wait.as_mut() {
+                wait.advance_to(self.now_ns);
+            }
+        }
         let status = self.request_status(&request_id, now_ns)?;
         Ok(RequestSubmission {
             request_id,
@@ -189,8 +207,22 @@ impl IndexCapacity for Control<'_> {
         &mut self,
         settings: ThreadIndexSettings,
     ) -> Result<IndexSettingsReceipt, StorageError> {
-        work::apply_settings(self.env, self.rt, settings)
+        work::apply_settings(self.env, self.rt, settings, self.now_ns)
     }
+}
+
+/// The job is waiting for a pinned WAL to be checkpointed instead of pausing
+/// (ADR 0041 R5). No index content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalWaitStatus {
+    /// When the wait began (`thread_index_state.wal_wait_since_ns`).
+    pub since_ns: i64,
+    /// The WAL-only admission refusal that started the wait.
+    pub refused: IndexCapacityStatus,
+    /// When the next non-blocking checkpoint probe is due.
+    pub next_retry_at_ns: i64,
+    /// Probes run since the wait began.
+    pub probes: u32,
 }
 
 /// Diagnostics of the background job (no index content).
@@ -200,6 +232,8 @@ pub struct ThreadIndexJobStatus {
     pub settings_generation: u64,
     pub owner_lease: Option<IndexLease>,
     pub paused: Option<IndexCapacityStatus>,
+    /// Waiting for the WAL to recover before pausing; `None` while not waiting.
+    pub wal_wait: Option<WalWaitStatus>,
     pub in_flight: bool,
     /// The writer will wake for index work without a new command.
     pub wake_scheduled: bool,
@@ -247,12 +281,20 @@ pub(super) enum IndexCommand {
     /// Test observer: receives the counters after every background step.
     #[cfg(test)]
     Observe(Sender<ThreadIndexCounters>),
+    /// Freeze the state machine's clock independently of real scheduler time.
+    #[cfg(test)]
+    Clock(std::sync::Arc<std::sync::atomic::AtomicI64>),
+    /// Make a periodic owner tick due without sleeping in tests.
+    #[cfg(test)]
+    Tick,
 }
 
 struct OwnerState {
     owner: IndexOwner,
     lease: Option<IndexLease>,
     next_heartbeat: Instant,
+    #[cfg(test)]
+    next_heartbeat_ns: i64,
     sender: SyncSender<super::Command>,
 }
 
@@ -278,6 +320,8 @@ pub(super) struct IndexJob {
     observer: Option<Sender<ThreadIndexCounters>>,
     #[cfg(test)]
     step_timings_us: Vec<(&'static str, u128)>,
+    #[cfg(test)]
+    clock: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
 }
 
 /// Whether a ready index step runs now: idle first, but never starved.
@@ -300,9 +344,9 @@ impl IndexJob {
     pub(super) fn new(conn: &Connection, config: &StorageConfig, source_suspended: bool) -> Self {
         let mut rt = IndexRuntime::new(config.thread_index);
         let env = env(conn, config, source_suspended);
-        if let Err(error) = work::configure_fts(conn)
-            .and_then(|()| work::apply_settings(env, &mut rt, config.thread_index).map(drop))
-        {
+        if let Err(error) = work::configure_fts(conn).and_then(|()| {
+            work::apply_settings(env, &mut rt, config.thread_index, now_ns()).map(drop)
+        }) {
             tracing::warn!(error = %error, "thread index settings could not be applied");
         }
         Self {
@@ -321,6 +365,8 @@ impl IndexJob {
             observer: None,
             #[cfg(test)]
             step_timings_us: Vec::new(),
+            #[cfg(test)]
+            clock: None,
         }
     }
 
@@ -346,6 +392,8 @@ impl IndexJob {
             observer: None,
             #[cfg(test)]
             step_timings_us: Vec::new(),
+            #[cfg(test)]
+            clock: None,
         }
     }
 
@@ -353,11 +401,20 @@ impl IndexJob {
         self.owner.as_ref().and_then(|owner| owner.lease.as_ref())
     }
 
+    fn now_ns(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return clock.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        now_ns()
+    }
+
     fn wants_step(&self) -> bool {
         self.lease().is_some()
             && self.rt.settings.enabled
             && self.rt.pause.is_none()
             && !self.in_flight
+            && !(self.rt.wal_wait.is_some() && self.retry_wake.is_some())
             && (self.rt.ready.is_some()
                 || self.rt.merge_pending
                 || !self.rt.discovery_complete
@@ -376,6 +433,15 @@ impl IndexJob {
         Some(deadline)
     }
 
+    /// A due WAL wait must not sit behind its backoff timer: the next step
+    /// runs the probe.
+    fn wake_due_wait(&mut self, now_ns: i64) {
+        if self.rt.wal_wait.is_some_and(|wait| wait.probe_due(now_ns)) {
+            self.retry_wake = None;
+            self.maybe_work = true;
+        }
+    }
+
     /// Called once per handled ordinary command.
     pub(super) fn note_command(&mut self) {
         self.commands_since_step = self.commands_since_step.saturating_add(1);
@@ -388,6 +454,12 @@ impl IndexJob {
             settings_generation: self.rt.settings_generation,
             owner_lease: self.lease().cloned(),
             paused: self.rt.pause,
+            wal_wait: self.rt.wal_wait.map(|wait| WalWaitStatus {
+                since_ns: wait.since_ns,
+                refused: wait.refused,
+                next_retry_at_ns: wait.next_retry_at_ns,
+                probes: wait.probes,
+            }),
             in_flight: self.in_flight,
             wake_scheduled: self.wants_step(),
             retry_wake_in: self
@@ -404,14 +476,25 @@ impl IndexJob {
     }
 
     fn heartbeat(&mut self, conn: &Connection, now: Instant) {
+        let now_ns = self.now_ns();
+        #[cfg(test)]
+        let clock_frozen = self.clock.is_some();
         let Some(owner) = self.owner.as_mut() else {
             return;
         };
+        #[cfg(test)]
+        if clock_frozen && now_ns < owner.next_heartbeat_ns {
+            owner.next_heartbeat = now + HEARTBEAT;
+            return;
+        }
         if now < owner.next_heartbeat {
             return;
         }
         owner.next_heartbeat = now + HEARTBEAT;
-        let now_ns = now_ns();
+        #[cfg(test)]
+        {
+            owner.next_heartbeat_ns = now_ns.saturating_add(HEARTBEAT.as_nanos() as i64);
+        }
         let result = match owner.lease.as_ref() {
             Some(lease) => lease::heartbeat(conn, lease, now_ns, THREAD_INDEX_LEASE_NS),
             None => lease::acquire(conn, &owner.owner, now_ns, THREAD_INDEX_LEASE_NS),
@@ -426,6 +509,13 @@ impl IndexJob {
         };
         if owner.lease.is_some() {
             self.maybe_work = true;
+            match work::resume_pending_wal_request(conn, &mut self.rt) {
+                Ok(true) => self.retry_wake = None,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "thread index pending request recheck failed")
+                }
+            }
         }
     }
 
@@ -529,7 +619,7 @@ pub(super) fn run_due(
         return;
     };
     let env = env(conn, config, source_suspended);
-    let now_ns = now_ns();
+    let now_ns = job.now_ns();
     #[cfg(test)]
     let before = (Instant::now(), job.rt.counters, job.rt.discovery_complete);
     match work::prepare(env, &mut job.rt, &lease, now_ns) {
@@ -597,6 +687,16 @@ pub(super) fn on_capacity_change(
     config: &StorageConfig,
     source_suspended: bool,
 ) {
+    let now_ns = job.now_ns();
+    if let Some(wait) = job.rt.wal_wait.as_mut() {
+        // A reader may have left: probe now instead of after the backoff.
+        wait.advance_to(now_ns);
+        job.retry_wake = None;
+        job.maybe_work = true;
+        // The notification itself is the retry event: step in this iteration
+        // instead of waiting for the idle timer.
+        job.commands_since_step = STEP_EVERY_COMMANDS;
+    }
     if job.rt.pause.is_none() {
         return;
     }
@@ -616,7 +716,7 @@ pub(super) fn handle(
     command: IndexCommand,
 ) {
     let env = env(conn, config, source_suspended);
-    let now = now_ns();
+    let now = job.now_ns();
     let mut control = Control {
         env,
         rt: &mut job.rt,
@@ -634,6 +734,8 @@ pub(super) fn handle(
                 owner,
                 lease,
                 next_heartbeat: Instant::now() + HEARTBEAT,
+                #[cfg(test)]
+                next_heartbeat_ns: now.saturating_add(HEARTBEAT.as_nanos() as i64),
                 sender,
             });
             job.maybe_work = true;
@@ -645,6 +747,7 @@ pub(super) fn handle(
         IndexCommand::Submit(request, owner, now_ns, duration, reply) => {
             let _ = reply.send(control.submit_request(&request, &owner, now_ns, duration));
             job.maybe_work = true;
+            job.wake_due_wait(now);
         }
         IndexCommand::Status(request_id, now_ns, reply) => {
             let _ = reply.send(control.request_status(&request_id, now_ns));
@@ -707,6 +810,7 @@ pub(super) fn handle(
         IndexCommand::ApplySettings(settings, reply) => {
             let _ = reply.send(control.apply_index_settings(settings));
             job.maybe_work = true;
+            job.wake_due_wait(now);
         }
         IndexCommand::JobStatus(reply) => {
             let _ = reply.send(Ok(job.status(Instant::now())));
@@ -722,11 +826,28 @@ pub(super) fn handle(
         }
         #[cfg(test)]
         IndexCommand::Observe(observer) => job.observer = Some(observer),
+        #[cfg(test)]
+        IndexCommand::Clock(clock) => {
+            job.rt.admission_clock = Some(clock.clone());
+            job.clock = Some(clock);
+        }
+        #[cfg(test)]
+        IndexCommand::Tick => {
+            if let Some(owner) = job.owner.as_mut() {
+                owner.next_heartbeat = Instant::now();
+                owner.next_heartbeat_ns = now;
+            }
+            job.retry_wake = None;
+            job.maybe_work = true;
+            job.commands_since_step = STEP_EVERY_COMMANDS;
+        }
     }
 }
 
 fn stop_owner(job: &mut IndexJob, conn: &Connection) -> Result<(), StorageError> {
     job.rt.ready = None;
+    // Only the start of the wait is durable; the next owner rebuilds the rest.
+    job.rt.wal_wait = None;
     // Keep the single worker across owner restarts. Joining here can deadlock:
     // its completion sender may be waiting on this writer's full queue.
     match job.owner.take().and_then(|owner| owner.lease) {

@@ -20,7 +20,7 @@ use crate::thread_index::{
     LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
     ThreadIndexSettings,
 };
-pub use index::{THREAD_INDEX_LEASE_NS, ThreadIndexCounters, ThreadIndexJobStatus};
+pub use index::{THREAD_INDEX_LEASE_NS, ThreadIndexCounters, ThreadIndexJobStatus, WalWaitStatus};
 #[cfg(test)]
 mod manual_cleanup_tests;
 mod state;

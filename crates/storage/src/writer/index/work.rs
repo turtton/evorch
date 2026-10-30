@@ -8,8 +8,10 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use secret_guard::SecretRedactor;
 
 use super::capacity::{
-    self, CapacityPolicy, MEASURED_POLICY, MERGE_GROWTH_PAGES, MERGE_STEP_PAGES, Measurement,
+    self, CapacityPolicy, CheckpointOutcome, MEASURED_POLICY, MERGE_GROWTH_PAGES, MERGE_STEP_PAGES,
+    Measurement,
 };
+use super::wait::{self, WAL_WAIT_LIMIT_NS, WalWait};
 use super::{lease, requests};
 use crate::db::file_sizes;
 use crate::repo::thread_index::{LegacyDependencies, SqliteSnapshotStore, SqliteThreadIndex};
@@ -62,6 +64,9 @@ pub(crate) struct IndexRuntime {
     pub accounting: AccountingPolicy,
     /// Last refused admission; `None` while admitting.
     pub pause: Option<IndexCapacityStatus>,
+    pub wal_wait: Option<WalWait>,
+    /// At most one admission checkpoint per step, including a wait probe.
+    pub last_checkpoint: Option<CheckpointOutcome>,
     /// Retry the refused operation's actual bound (a deletion can be larger
     /// than a new-index step). This prevents false resume/pause cycles.
     pub paused_growth: Option<PlannedGrowth>,
@@ -88,6 +93,9 @@ pub struct ThreadIndexCounters {
     pub evictions: u64,
     pub merges: u64,
     pub pauses: u64,
+    pub wal_waits: u64,
+    pub wal_wait_probes: u64,
+    pub wal_wait_expiries: u64,
     pub reclaim_cycles: u64,
 }
 
@@ -99,6 +107,8 @@ impl IndexRuntime {
             policy: MEASURED_POLICY,
             accounting: DEFAULT_ACCOUNTING_POLICY,
             pause: None,
+            wal_wait: None,
+            last_checkpoint: None,
             paused_growth: None,
             paused_work: None,
             sticky_total_bytes: 0,
@@ -211,14 +221,16 @@ fn admitted_transaction<T>(
             ]);
         }
         if attempt == 0
+            && rt.last_checkpoint.is_none()
             && matches!(&result, Err(status)
             if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit))
         {
             let before = env.measure()?.sizes;
-            let checkpointed = capacity::checkpoint_truncate(env.conn)?;
+            let outcome = capacity::checkpoint_truncate(env.conn)?;
+            rt.last_checkpoint = Some(outcome);
             let after = env.measure()?.sizes;
             tracing::debug!(
-                checkpointed,
+                checkpointed = outcome.complete(),
                 before_db_bytes = before.db,
                 before_wal_bytes = before.wal,
                 before_shm_bytes = before.shm,
@@ -281,8 +293,16 @@ pub(crate) fn apply_settings(
     env: Env<'_>,
     rt: &mut IndexRuntime,
     settings: ThreadIndexSettings,
+    now_ns: i64,
 ) -> Result<IndexSettingsReceipt, StorageError> {
     immediate(env.conn, |conn| {
+        if !settings.enabled {
+            // Disabled owners do not get scheduled. Finish control work here,
+            // atomically with clearing the durable episode, not in prepare.
+            requests::gap_pending(conn, RequestGapReason::IndexDisabled)?;
+            requests::finalize(conn, now_ns)?;
+            wait::clear_since(conn)?;
+        }
         if applied_versions(conn)? == (EXTRACTOR_VERSION, rt.accounting.version) {
             return Ok(());
         }
@@ -319,10 +339,38 @@ pub(crate) fn apply_settings(
     rt.pause = None;
     rt.paused_growth = None;
     rt.paused_work = None;
+    if !settings.enabled {
+        rt.wal_wait = None;
+        rt.ready = None;
+    }
+    if let Some(wait) = rt.wal_wait.as_mut() {
+        // Settings affect admission immediately, but never extend the episode.
+        wait.advance_to(i64::MIN);
+    }
     Ok(IndexSettingsReceipt {
         applied_generation: rt.settings_generation,
         settings,
     })
+}
+
+/// A request accepted by another writer is also an explicit new WAL episode.
+/// Only WalLimit pauses are released; ordinary capacity pauses retain +J.
+pub(crate) fn resume_pending_wal_request(
+    conn: &Connection,
+    rt: &mut IndexRuntime,
+) -> Result<bool, StorageError> {
+    if rt.settings.enabled
+        && rt.pause.is_some_and(|status| {
+            status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+        })
+        && requests::has_pending_targets(conn)?
+    {
+        rt.pause = None;
+        rt.paused_growth = None;
+        rt.paused_work = None;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn adjustment_pending(conn: &Connection, rt: &IndexRuntime) -> Result<bool, StorageError> {
@@ -522,7 +570,7 @@ fn adjustment_step(
             );
             Ok(Some(Action::Progress))
         }
-        Err(status) => pause(env, rt, status, now_ns).map(|status| Some(Action::Paused(status))),
+        Err(status) => refuse(env, rt, status, now_ns).map(|refusal| Some(refusal.action())),
     }
 }
 
@@ -589,15 +637,99 @@ fn admit(
     status.operation = Some(operation);
     if status.state != CapacityState::Normal {
         rt.paused_growth = Some(growth);
+    } else {
+        // `env.conn` is the very same IMMEDIATE that admitted the write.
+        wait::clear_since(env.conn)?;
+        rt.wal_wait = None;
     }
     Ok(status)
 }
 
-fn pause(
+enum Refusal {
+    Paused(IndexCapacityStatus),
+    Waiting { next_wake_at_ns: i64 },
+}
+
+impl Refusal {
+    fn action(self) -> Action {
+        match self {
+            Self::Paused(status) => Action::Paused(status),
+            Self::Waiting { next_wake_at_ns } => Action::Idle {
+                next_wake_at_ns: Some(next_wake_at_ns),
+            },
+        }
+    }
+}
+
+fn wait_deadline(conn: &Connection, since_ns: i64) -> Result<i64, StorageError> {
+    Ok(requests::latest_pending_created_at(conn)?
+        .unwrap_or(since_ns)
+        .max(since_ns)
+        .saturating_add(WAL_WAIT_LIMIT_NS))
+}
+
+fn merge_growth(page_size: u64) -> PlannedGrowth {
+    PlannedGrowth::Bounded {
+        db: MERGE_GROWTH_PAGES * page_size,
+        wal: MERGE_GROWTH_PAGES * (page_size + 24) + 32,
+        shm: 32 * 1024 * (MERGE_GROWTH_PAGES / 4096 + 1),
+    }
+}
+
+fn refuse(
     env: Env<'_>,
     rt: &mut IndexRuntime,
     status: IndexCapacityStatus,
     now_ns: i64,
+) -> Result<Refusal, StorageError> {
+    if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+        && rt
+            .last_checkpoint
+            .is_some_and(|outcome| !outcome.complete())
+    {
+        if rt.wal_wait.is_none() {
+            let since_ns = immediate(env.conn, |conn| wait::set_since(conn, now_ns))?;
+            let deadline = wait_deadline(env.conn, since_ns)?;
+            rt.wal_wait = Some(WalWait::begin(
+                since_ns,
+                status,
+                now_ns,
+                Some(deadline),
+                rt.last_checkpoint,
+            ));
+            rt.counters.wal_waits += 1;
+            let growth_wal = match status.growth {
+                PlannedGrowth::Bounded { wal, .. } => wal,
+                PlannedGrowth::Unbounded => unreachable!("WAL-only refusal is bounded"),
+            };
+            tracing::info!(
+                checkpoint = ?rt.last_checkpoint,
+                wal_bytes = status.wal_bytes,
+                growth_wal_bytes = growth_wal,
+                max_wal_bytes = status.max_wal_bytes,
+                operation = ?status.operation,
+                deadline_ns = deadline,
+                "thread index WAL wait started"
+            );
+        }
+        return Ok(Refusal::Waiting {
+            next_wake_at_ns: rt.wal_wait.expect("wait started").next_retry_at_ns,
+        });
+    }
+    let reason = if status.state == CapacityState::IndexPaused(IndexPauseReason::Disabled) {
+        RequestGapReason::IndexDisabled
+    } else {
+        RequestGapReason::CapacityPaused
+    };
+    pause_with(env, rt, status, now_ns, reason).map(Refusal::Paused)
+}
+
+fn pause_with(
+    env: Env<'_>,
+    rt: &mut IndexRuntime,
+    status: IndexCapacityStatus,
+    now_ns: i64,
+    reason: RequestGapReason,
 ) -> Result<IndexCapacityStatus, StorageError> {
     let refused_operation = status.operation;
     let status = match status.state {
@@ -614,6 +746,8 @@ fn pause(
         ..status
     };
     if status.state == CapacityState::Normal {
+        immediate(env.conn, wait::clear_since)?;
+        rt.wal_wait = None;
         rt.pause = None;
         rt.paused_growth = None;
         rt.paused_work = None;
@@ -630,16 +764,162 @@ fn pause(
         );
     }
     rt.pause = Some(status);
-    let reason = if status.state == CapacityState::IndexPaused(IndexPauseReason::Disabled) {
-        RequestGapReason::IndexDisabled
-    } else {
-        RequestGapReason::CapacityPaused
-    };
     immediate(env.conn, |conn| {
+        wait::clear_since(conn)?;
         requests::gap_pending(conn, reason)?;
         requests::finalize(conn, now_ns)
     })?;
+    rt.wal_wait = None;
     Ok(status)
+}
+
+/// A parked WAL wait does no write work before its scheduled probe. The start
+/// is durable; all other fields are reconstructed on owner handoff/restart.
+fn wal_wait_step(
+    env: Env<'_>,
+    rt: &mut IndexRuntime,
+    lease: &IndexLease,
+    now_ns: i64,
+) -> Result<Option<Action>, StorageError> {
+    if rt.wal_wait.is_none()
+        && let Some(since_ns) = wait::get_since(env.conn)?
+    {
+        let page_size = capacity::page_size(env.conn)?;
+        // The old owner's frozen result is gone. Use the operation this owner
+        // will attempt next, so expiry retains its actual +J resume boundary.
+        let phase = adjustment_phase(env.conn, rt)?;
+        let (growth, operation) = match phase {
+            Some(IndexAdjustmentPhase::Evicting) => {
+                let candidate = SqliteThreadIndex::new(env.conn).eviction_candidates(1)?;
+                let growth = if let Some((run_id, _)) = candidate.first() {
+                    deletion_growth(env.conn, rt, run_id)?
+                } else {
+                    PlannedGrowth::Unbounded
+                };
+                (growth, IndexOperation::Adjustment)
+            }
+            Some(IndexAdjustmentPhase::Reaccounting) => (
+                rt.policy.planned_growth(
+                    0,
+                    page_size,
+                    capacity::freelist_bytes(env.conn, page_size)?,
+                    false,
+                ),
+                IndexOperation::Adjustment,
+            ),
+            None => (merge_growth(page_size), IndexOperation::Merge),
+        };
+        let mut refused = physical_capacity_status(env, rt, growth)?;
+        refused.state = CapacityState::IndexPaused(IndexPauseReason::WalLimit);
+        refused.operation = Some(operation);
+        rt.paused_growth = Some(growth);
+        let mut inherited = WalWait::begin(since_ns, refused, now_ns, None, None);
+        inherited.advance_to(now_ns);
+        rt.wal_wait = Some(inherited);
+    }
+    let Some(waiting) = rt.wal_wait else {
+        return Ok(None);
+    };
+    if !waiting.probe_due(now_ns) {
+        return Ok(Some(Action::Idle {
+            next_wake_at_ns: Some(waiting.next_retry_at_ns),
+        }));
+    }
+    let outcome = capacity::checkpoint_truncate(env.conn)?;
+    rt.last_checkpoint = Some(outcome);
+    rt.counters.wal_wait_probes += 1;
+    tracing::debug!(
+        checkpoint = ?outcome,
+        probes = waiting.probes.saturating_add(1),
+        "thread index WAL wait probe"
+    );
+    if !lease::is_valid(env.conn, lease, rt.admission_now_ns(now_ns))? {
+        rt.ready = None;
+        return Ok(Some(Action::LeaseLost));
+    }
+    if outcome.complete() {
+        rt.wal_wait.as_mut().expect("waiting").probes = waiting.probes.saturating_add(1);
+        tracing::info!(
+            waited_ms = now_ns.saturating_sub(waiting.since_ns) / 1_000_000,
+            probes = waiting.probes.saturating_add(1),
+            "thread index WAL wait resumed"
+        );
+        return Ok(None);
+    }
+    // A failed probe permits waiting only while WAL is still the sole refusal.
+    // In particular a restart must not restore an old WAL reason over current
+    // source suspension or total/reserve pressure.
+    let mut status =
+        physical_capacity_status(env, rt, rt.paused_growth.unwrap_or(waiting.refused.growth))?;
+    status.operation = waiting.refused.operation;
+    if !matches!(
+        status.state,
+        CapacityState::Normal | CapacityState::IndexPaused(IndexPauseReason::WalLimit)
+    ) {
+        return refuse(env, rt, status, now_ns).map(|refusal| Some(refusal.action()));
+    }
+    // Ordinary probes must remain read-only, even if another writer owns the
+    // lock. These reads only decide whether expiry work might be necessary.
+    let deadline = wait_deadline(env.conn, waiting.since_ns)?;
+    let expiry_due = now_ns >= deadline
+        || requests::earliest_wait_deadline(env.conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
+            .is_some_and(|deadline| now_ns >= deadline);
+    let (deadline, expired, ended) = if expiry_due {
+        // Re-read the pending set after obtaining IMMEDIATE: a submission
+        // racing the read-only check must not be closed before its deadline.
+        immediate(env.conn, |conn| {
+            let deadline = wait_deadline(conn, waiting.since_ns)?;
+            let expired =
+                if requests::earliest_wait_deadline(conn, waiting.since_ns, WAL_WAIT_LIMIT_NS)?
+                    .is_some_and(|deadline| now_ns >= deadline)
+                {
+                    let expired = requests::gap_expired(
+                        conn,
+                        waiting.since_ns,
+                        WAL_WAIT_LIMIT_NS,
+                        now_ns,
+                        RequestGapReason::CapacityWaitExpired,
+                    )?;
+                    requests::finalize(conn, now_ns)?;
+                    expired
+                } else {
+                    0
+                };
+            let ended = now_ns >= deadline;
+            if ended {
+                wait::clear_since(conn)?;
+            }
+            Ok((deadline, expired, ended))
+        })?
+    } else {
+        (deadline, 0, false)
+    };
+    rt.counters.wal_wait_expiries += expired as u64;
+    if expired > 0 {
+        tracing::warn!(expired, "thread index WAL request wait expired");
+    }
+    if ended {
+        tracing::warn!(
+            since_ns = waiting.since_ns,
+            deadline_ns = deadline,
+            "thread index WAL job wait expired"
+        );
+        // All expired targets were settled in the transaction above. Never
+        // gap_pending here: a different writer may already have submitted.
+        status.state = CapacityState::IndexPaused(IndexPauseReason::WalLimit);
+        rt.pause = Some(status);
+        rt.counters.pauses += 1;
+        rt.wal_wait = None;
+        return Ok(Some(Action::Paused(status)));
+    }
+    let waiting = rt.wal_wait.as_mut().expect("waiting");
+    if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit) {
+        waiting.refused = status;
+    }
+    waiting.probed(outcome, now_ns, Some(deadline));
+    Ok(Some(Action::Idle {
+        next_wake_at_ns: Some(waiting.next_retry_at_ns),
+    }))
 }
 
 /// Physical reclaim for DbSize pressure only: at most two cycles of budgeted
@@ -688,7 +968,7 @@ fn reclaim(env: Env<'_>, rt: &mut IndexRuntime) -> Result<IndexCapacityStatus, S
                 Ok(true)
             })?;
         }
-        if !capacity::checkpoint_truncate(conn)? {
+        if !capacity::checkpoint_truncate(conn)?.complete() {
             let status = sticky(env, rt, IndexPauseReason::WalReaderPinned)?;
             log_reclaim(cycle, before, env, &status)?;
             return Ok(status);
@@ -717,7 +997,7 @@ fn reclaim(env: Env<'_>, rt: &mut IndexRuntime) -> Result<IndexCapacityStatus, S
                     }
                     Ok(())
                 })?;
-                if !capacity::checkpoint_truncate(conn)? {
+                if !capacity::checkpoint_truncate(conn)?.complete() {
                     let status = sticky(env, rt, IndexPauseReason::WalReaderPinned)?;
                     log_reclaim(cycle, before, env, &status)?;
                     return Ok(status);
@@ -818,7 +1098,7 @@ pub(crate) fn recheck_pause(env: Env<'_>, rt: &mut IndexRuntime) -> Result<bool,
     }
     if status.state == CapacityState::IndexPaused(IndexPauseReason::WalLimit) {
         // A fully checkpointed WAL keeps its high-water size until truncated.
-        let _ = capacity::checkpoint_truncate(env.conn)?;
+        rt.last_checkpoint = Some(capacity::checkpoint_truncate(env.conn)?);
     }
     let page_size = capacity::page_size(env.conn)?;
     let freelist = capacity::freelist_bytes(env.conn, page_size)?;
@@ -1026,6 +1306,7 @@ pub(crate) fn prepare(
     lease: &IndexLease,
     now_ns: i64,
 ) -> Result<Action, StorageError> {
+    rt.last_checkpoint = None;
     if !lease::is_valid(env.conn, lease, now_ns)? {
         rt.ready = None;
         return Ok(Action::LeaseLost);
@@ -1042,7 +1323,7 @@ pub(crate) fn prepare(
                 shm: 0,
             },
         )?;
-        return pause(env, rt, status, now_ns).map(Action::Paused);
+        return refuse(env, rt, status, now_ns).map(Refusal::action);
     }
     if rt.pause.is_some() && (rt.sticky() || !recheck_pause(env, rt)?) {
         let status = rt.pause.expect("still paused");
@@ -1051,6 +1332,9 @@ pub(crate) fn prepare(
             requests::finalize(conn, now_ns)
         })?;
         return Ok(Action::Paused(status));
+    }
+    if let Some(action) = wal_wait_step(env, rt, lease, now_ns)? {
+        return Ok(action);
     }
     if let Some(action) = adjustment_step(env, rt, lease, now_ns)? {
         return Ok(action);
@@ -1100,11 +1384,7 @@ fn merge_step(
                 return Ok(Ok(None));
             }
             let page_size = capacity::page_size(conn)?;
-            let growth = PlannedGrowth::Bounded {
-                db: MERGE_GROWTH_PAGES * page_size,
-                wal: MERGE_GROWTH_PAGES * (page_size + 24) + 32,
-                shm: 32 * 1024 * (MERGE_GROWTH_PAGES / 4096 + 1),
-            };
+            let growth = merge_growth(page_size);
             let status = admit(Env { conn, ..env }, rt, growth, IndexOperation::Merge)?;
             if status.state != CapacityState::Normal {
                 return Ok(Err(status));
@@ -1127,7 +1407,7 @@ fn merge_step(
             rt.merge_pending = more;
             Ok(Action::Progress)
         }
-        Err(status) => pause(env, rt, status, now_ns).map(Action::Paused),
+        Err(status) => refuse(env, rt, status, now_ns).map(Refusal::action),
     }
 }
 
@@ -1200,7 +1480,7 @@ fn oversized(
         Budget::LeaseLost => Ok(Action::LeaseLost),
         Budget::Paused(status, now_ns) => {
             rt.ready = Some((work, Ok(input)));
-            pause(env, rt, status, now_ns).map(Action::Paused)
+            refuse(env, rt, status, now_ns).map(Refusal::action)
         }
         _ => Ok(Action::Progress),
     }
@@ -1333,7 +1613,7 @@ fn handle_extracted(
         Budget::EvictedSelf => Ok(Action::Progress),
         Budget::Paused(status, now_ns) => {
             rt.ready = Some((work, Ok(input)));
-            pause(env, rt, status, now_ns).map(Action::Paused)
+            refuse(env, rt, status, now_ns).map(Refusal::action)
         }
     }
 }
@@ -1501,7 +1781,7 @@ fn commit(
         }
         Err(status) => {
             rt.ready = Some((work, Ok(input)));
-            pause(env, rt, status, now_ns).map(Action::Paused)
+            refuse(env, rt, status, now_ns).map(Refusal::action)
         }
     }
 }

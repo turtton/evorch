@@ -77,3 +77,19 @@ fn request_target_gaps_are_not_control_failures_and_settings_match_adr() {
     );
     assert_eq!(DEFAULT_THREAD_INDEX_MAX_BYTES, 536_870_912);
 }
+
+#[test]
+fn capacity_wait_expired_gap_reason_round_trips_under_its_stable_name() {
+    let json = serde_json::to_value(RequestGapReason::CapacityWaitExpired).unwrap();
+    assert_eq!(json["reason"], "capacity_wait_expired");
+    assert_eq!(
+        serde_json::from_value::<RequestGapReason>(json).unwrap(),
+        RequestGapReason::CapacityWaitExpired
+    );
+    let state = RequestTargetState::Gap(RequestGapReason::CapacityWaitExpired);
+    let json = serde_json::to_string(&state).unwrap();
+    assert_eq!(
+        serde_json::from_str::<RequestTargetState>(&json).unwrap(),
+        state
+    );
+}
