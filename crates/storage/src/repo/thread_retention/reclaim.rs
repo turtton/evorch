@@ -962,7 +962,7 @@ fn delete_oversized(
                 Work {
                     rows: progress.rows as u64,
                     bytes: progress.text_bytes,
-                    ..Work::default()
+                    updated: progress.gapped as u64,
                 },
                 !progress.remaining,
             )

@@ -2802,6 +2802,64 @@ fn thousands_of_tasks_and_links_are_reclaimed_task_by_task_through_a_cursor() {
 }
 
 #[test]
+fn the_exclusive_phase_closes_pending_targets_one_batch_per_call_and_resumes_after_a_restart() {
+    // Given: a confirmed run whose blocks are gone, registered for the exclusive
+    // phase, with 600 pending request targets left.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run_payload("ra", "session-1");
+    f.sql("DELETE FROM conversation_blocks WHERE run_id = 'ra'");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 600)
+         INSERT INTO thread_index_request_targets(request_id, run_id, source_revision,
+             extractor_version, accounting_version, work_generation, state)
+         SELECT 'req-' || x, 'ra', 1, 1, 0, 0, 'pending' FROM n;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+    f.sql(
+        "INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
+         VALUES ('A', 'conversation_blocks', 'ra', 10000000);",
+    );
+    let pending =
+        || f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
+
+    // When: the exclusive phase runs with a zero budget, reopening the database
+    // between calls.
+    let mut history = Vec::new();
+    for _ in 0..10 {
+        let database = f.database();
+        let before = pending();
+        let progress = database.reclaim_oversized_step(0).unwrap();
+        assert_eq!(progress.last_error, None);
+        history.push((before - pending(), progress.rows, progress.remaining));
+        if progress.remaining == 0 {
+            break;
+        }
+    }
+
+    // Then: each call closed one batch and deleted nothing; the last one finished the
+    // run's index row, and no deletion was claimed.
+    assert_eq!(history, [(200, 0, 1), (200, 0, 1), (200, 0, 0)]);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_runs WHERE run_id = 'ra' AND state = 'deleted'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'gap'"),
+        600
+    );
+    assert_eq!(f.count("SELECT reclaimed_rows FROM reclaim_jobs"), 0);
+}
+
+#[test]
 fn stale_registrations_do_not_stop_the_exclusive_phase_from_reaching_a_real_one() {
     // Given: 300 registrations whose rows are gone, sorting before one real 5 MiB row.
     let f = Fixture::new();
