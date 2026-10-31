@@ -1,15 +1,18 @@
 //! `evorch inspect storage`: where the database's bytes go.
 //!
-//! Every figure is a count or a byte length. No column that can hold conversation text
-//! is ever selected, only its `OCTET_LENGTH`, which SQLite answers from the record
-//! header without reading overflow pages. All reads share one transaction so the
-//! numbers describe a single snapshot even while another process writes.
+//! Every figure is a count or a byte length. Large text columns are only ever measured
+//! with `OCTET_LENGTH`, which SQLite answers from the record header without reading
+//! overflow pages. To keep it that way no query here groups, sorts or joins rows that
+//! carry such a column: each big table is streamed once and tallied in Rust, and the
+//! tests check the query plans for sorters and temporary b-trees. All reads share one
+//! transaction so the numbers describe a single snapshot even while another process
+//! writes.
 //!
 //! The default (logical) view takes seconds on a large store. `physical` adds a `dbstat`
-//! walk of every page, which is slow, and the file and pragma figures that explain
-//! the difference between logical bytes and file size.
+//! walk of every page, which is slow, and the pragma figures that explain the difference
+//! between logical bytes and file size.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -23,11 +26,10 @@ const MAX_TOP_THREADS: usize = 1_000;
 /// Rows whose `subkind` the event backfill has not filled yet.
 const UNBACKFILLED: &str = "(unbackfilled)";
 const BUCKETS: [&str; 4] = ["active", "archived", "orphan", "unattributed"];
-
-/// Bytes a run snapshot row occupies in its four large columns, as stored (a
-/// compressed value counts its compressed length).
-const RUN_CONTEXT_BYTES: &str = "(OCTET_LENGTH(s.messages_json) + OCTET_LENGTH(s.checkpoints_json) \
-     + OCTET_LENGTH(s.config_json) + OCTET_LENGTH(s.host_inputs_json))";
+const ACTIVE: usize = 0;
+const ARCHIVED: usize = 1;
+const ORPHAN: usize = 2;
+const UNATTRIBUTED: usize = 3;
 
 /// What `storage_summary` measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +49,135 @@ impl Default for StorageSummaryOptions {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct Tally {
+    rows: i64,
+    bytes: i64,
+}
+
+impl Tally {
+    fn add(&mut self, rows: i64, bytes: i64) {
+        self.rows += rows;
+        self.bytes += bytes;
+    }
+
+    fn merge(&mut self, other: Tally) {
+        self.add(other.rows, other.bytes);
+    }
+
+    fn json(self) -> Value {
+        json!({ "rows": self.rows, "bytes": self.bytes })
+    }
+}
+
+/// Rows of one table tallied by the run they name.
+#[derive(Debug, Default)]
+struct ByRun {
+    runs: HashMap<String, Tally>,
+    no_run: Tally,
+}
+
+impl ByRun {
+    fn add(&mut self, run: Option<&str>, bytes: i64) {
+        let Some(run) = run else {
+            return self.no_run.add(1, bytes);
+        };
+        match self.runs.get_mut(run) {
+            Some(tally) => tally.add(1, bytes),
+            None => {
+                self.runs.insert(run.to_owned(), Tally { rows: 1, bytes });
+            }
+        }
+    }
+}
+
+/// The SQL of every scan over the data tables. Kept apart from running it so the tests
+/// can check each statement's plan.
+#[derive(Debug)]
+struct Queries {
+    events: String,
+    run_contexts: String,
+    index: String,
+    /// `(table, sql)`: row count and value bytes of each remaining ordinary table.
+    others: Vec<(String, String)>,
+}
+
+impl Queries {
+    fn new(conn: &Connection) -> Result<Self, StorageError> {
+        let mut statement = conn.prepare(
+            "SELECT name, sql FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+        )?;
+        let tables = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut columns = conn.prepare("SELECT name, type FROM pragma_table_info(?1)")?;
+        let mut value_bytes = BTreeMap::new();
+        for (name, sql) in tables {
+            if is_virtual(sql.as_deref()) {
+                continue;
+            }
+            let lengths: Vec<String> = columns
+                .query_map([&name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, declared)| {
+                    let declared = declared.to_ascii_uppercase();
+                    declared.is_empty()
+                        || ["TEXT", "CHAR", "CLOB", "BLOB"]
+                            .iter()
+                            .any(|kind| declared.contains(kind))
+                })
+                .map(|(column, _)| format!("COALESCE(OCTET_LENGTH({}), 0)", quote(&column)))
+                .collect();
+            let expr = if lengths.is_empty() {
+                "0".to_owned()
+            } else {
+                lengths.join(" + ")
+            };
+            value_bytes.insert(name, expr);
+        }
+        let mut take = |table: &str| value_bytes.remove(table).unwrap_or_else(|| "0".into());
+        let events = format!(
+            "SELECT kind, subkind, run_id, OCTET_LENGTH(payload), {} FROM events",
+            take("events")
+        );
+        let run_contexts = format!(
+            "SELECT run_id, messages_len, OCTET_LENGTH(messages_json),
+                    typeof(messages_json) = 'blob', checkpoints_len,
+                    OCTET_LENGTH(checkpoints_json), typeof(checkpoints_json) = 'blob',
+                    OCTET_LENGTH(config_json), OCTET_LENGTH(host_inputs_json), {}
+             FROM run_contexts",
+            take("run_contexts")
+        );
+        let index = format!(
+            "SELECT run_id, state, charged_bytes, text_bytes, block_count, {}
+             FROM thread_index_runs",
+            take("thread_index_runs")
+        );
+        let others = value_bytes
+            .into_iter()
+            .map(|(table, expr)| {
+                let sql = format!(
+                    "SELECT COUNT(*), COALESCE(SUM({expr}), 0) FROM {}",
+                    quote(&table)
+                );
+                (table, sql)
+            })
+            .collect();
+        Ok(Self {
+            events,
+            run_contexts,
+            index,
+            others,
+        })
+    }
+}
+
 impl Database {
     /// Sizes of the tables, events, run snapshots and conversation index, split by the
     /// thread they belong to. `path` is the file this database was opened from.
@@ -61,6 +192,37 @@ impl Database {
         let transaction = self.conn.unchecked_transaction()?;
         let conn: &Connection = &transaction;
         let sizes = crate::db::file_sizes(path)?;
+        let queries = Queries::new(conn)?;
+        let mut tables = Vec::new();
+        for (table, sql) in &queries.others {
+            let (rows, value_bytes): (i64, i64) =
+                conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            tables.push((value_bytes, table.clone(), rows));
+        }
+
+        let events = scan_events(conn, &queries.events)?;
+        let contexts = scan_run_contexts(conn, &queries.run_contexts)?;
+        let index = scan_index(conn, &queries.index)?;
+        tables.push((events.value_bytes, "events".into(), events.rows));
+        tables.push((
+            contexts.value_bytes,
+            "run_contexts".into(),
+            contexts.sums.rows,
+        ));
+        tables.push((index.value_bytes, "thread_index_runs".into(), index.runs));
+        tables.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut attribution = Attribution::load(conn)?;
+        let events_buckets = attribution.attribute(&events.by_run, |acc, tally| {
+            acc.events.merge(tally);
+        })?;
+        let contexts_buckets = attribution.attribute(&contexts.by_run, |acc, tally| {
+            acc.contexts.merge(tally);
+        })?;
+        let index_buckets = attribution.attribute(&index.by_run, |acc, tally| {
+            acc.index_bytes += tally.bytes;
+        })?;
+
         let mut summary = Map::new();
         summary.insert(
             "files".into(),
@@ -71,22 +233,32 @@ impl Database {
                 "total_bytes": sizes.total(),
             }),
         );
-        summary.insert("tables".into(), tables(conn)?);
-        summary.insert("events".into(), events(conn)?);
-        summary.insert("run_contexts".into(), run_contexts(conn)?);
-        summary.insert("conversation_index".into(), conversation_index(conn)?);
-        summary.insert("threads".into(), threads(conn)?);
+        summary.insert(
+            "tables".into(),
+            Value::Array(
+                tables
+                    .into_iter()
+                    .map(|(value_bytes, table, rows)| {
+                        json!({ "table": table, "rows": rows, "value_bytes": value_bytes })
+                    })
+                    .collect(),
+            ),
+        );
+        summary.insert("events".into(), events.json());
+        summary.insert("run_contexts".into(), contexts.sums.json());
+        summary.insert("conversation_index".into(), index.json());
+        summary.insert("threads".into(), attribution.counts());
         summary.insert(
             "attribution".into(),
             json!({
-                "events": attribution(conn, "events", "OCTET_LENGTH(s.payload)")?,
-                "run_contexts": attribution(conn, "run_contexts", RUN_CONTEXT_BYTES)?,
-                "conversation_index": attribution(conn, "thread_index_runs", "s.charged_bytes")?,
+                "events": buckets_json(events_buckets),
+                "run_contexts": buckets_json(contexts_buckets),
+                "conversation_index": buckets_json(index_buckets),
             }),
         );
         summary.insert(
             "top_threads".into(),
-            top_threads(conn, options.top.clamp(1, MAX_TOP_THREADS))?,
+            attribution.top(options.top.clamp(1, MAX_TOP_THREADS)),
         );
         if options.physical {
             summary.insert("physical".into(), physical(conn)?);
@@ -107,256 +279,351 @@ fn is_virtual(sql: Option<&str>) -> bool {
     })
 }
 
-/// Row count and the stored length of every text-like column, per ordinary table.
-/// Virtual tables are skipped: their content lives in shadow tables listed on their own.
-fn tables(conn: &Connection) -> Result<Value, StorageError> {
-    let mut statement = conn.prepare(
-        "SELECT name, sql FROM sqlite_master
-         WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
-    )?;
-    let names: Vec<String> = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?
-        .filter_map(|row| match row {
-            Ok((name, sql)) => (!is_virtual(sql.as_deref())).then_some(Ok(name)),
-            Err(error) => Some(Err(error)),
+fn text<'a>(row: &'a rusqlite::Row<'_>, index: usize) -> Result<Option<&'a str>, StorageError> {
+    Ok(row
+        .get_ref(index)?
+        .as_str_or_null()
+        .map_err(rusqlite::Error::from)?)
+}
+
+struct EventScan {
+    rows: i64,
+    payload_bytes: i64,
+    value_bytes: i64,
+    unbackfilled: i64,
+    by_kind: Vec<(String, Option<String>, Tally)>,
+    by_run: ByRun,
+}
+
+impl EventScan {
+    fn json(mut self) -> Value {
+        self.by_kind.sort_by(|a, b| {
+            b.2.bytes
+                .cmp(&a.2.bytes)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        json!({
+            "rows": self.rows,
+            "payload_bytes": self.payload_bytes,
+            "unbackfilled_rows": self.unbackfilled,
+            "by_kind": self.by_kind
+                .into_iter()
+                .map(|(kind, subkind, tally)| json!({
+                    "kind": kind,
+                    "subkind": subkind.unwrap_or_else(|| UNBACKFILLED.to_owned()),
+                    "rows": tally.rows,
+                    "payload_bytes": tally.bytes,
+                }))
+                .collect::<Vec<_>>(),
         })
-        .collect::<Result<_, _>>()?;
-    let mut columns = conn.prepare("SELECT name, type FROM pragma_table_info(?1)")?;
-    let mut listed = Vec::new();
-    for name in names {
-        let lengths: Vec<String> = columns
-            .query_map([&name], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|(_, declared)| {
-                let declared = declared.to_ascii_uppercase();
-                declared.is_empty()
-                    || ["TEXT", "CHAR", "CLOB", "BLOB"]
-                        .iter()
-                        .any(|kind| declared.contains(kind))
+    }
+}
+
+fn scan_events(conn: &Connection, sql: &str) -> Result<EventScan, StorageError> {
+    let mut scan = EventScan {
+        rows: 0,
+        payload_bytes: 0,
+        value_bytes: 0,
+        unbackfilled: 0,
+        by_kind: Vec::new(),
+        by_run: ByRun::default(),
+    };
+    let mut position = HashMap::<String, usize>::new();
+    let mut key = String::new();
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let kind = text(row, 0)?.unwrap_or_default();
+        let subkind = text(row, 1)?;
+        let (payload, value): (i64, i64) = (row.get(3)?, row.get(4)?);
+        scan.rows += 1;
+        scan.payload_bytes += payload;
+        scan.value_bytes += value;
+        scan.unbackfilled += i64::from(subkind.is_none());
+        scan.by_run.add(text(row, 2)?, payload);
+
+        key.clear();
+        key.push_str(kind);
+        key.push('\0');
+        key.push(if subkind.is_some() { 's' } else { 'u' });
+        key.push_str(subkind.unwrap_or_default());
+        match position.get(key.as_str()) {
+            Some(&at) => scan.by_kind[at].2.add(1, payload),
+            None => {
+                position.insert(key.clone(), scan.by_kind.len());
+                scan.by_kind.push((
+                    kind.to_owned(),
+                    subkind.map(str::to_owned),
+                    Tally {
+                        rows: 1,
+                        bytes: payload,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(scan)
+}
+
+#[derive(Default)]
+struct ContextSums {
+    rows: i64,
+    messages_plain: i64,
+    messages_stored: i64,
+    messages_compressed: i64,
+    checkpoints_plain: i64,
+    checkpoints_stored: i64,
+    checkpoints_compressed: i64,
+    config: i64,
+    host_inputs: i64,
+}
+
+impl ContextSums {
+    fn json(&self) -> Value {
+        json!({
+            "rows": self.rows,
+            "messages": {
+                "plain_bytes": self.messages_plain,
+                "stored_bytes": self.messages_stored,
+                "compressed_rows": self.messages_compressed,
+            },
+            "checkpoints": {
+                "plain_bytes": self.checkpoints_plain,
+                "stored_bytes": self.checkpoints_stored,
+                "compressed_rows": self.checkpoints_compressed,
+            },
+            "config_bytes": self.config,
+            "host_inputs_bytes": self.host_inputs,
+        })
+    }
+}
+
+struct ContextScan {
+    sums: ContextSums,
+    value_bytes: i64,
+    by_run: ByRun,
+}
+
+/// `*_len` is the plain byte length kept by every write; `OCTET_LENGTH` is what the
+/// possibly zstd-compressed column occupies.
+fn scan_run_contexts(conn: &Connection, sql: &str) -> Result<ContextScan, StorageError> {
+    let mut scan = ContextScan {
+        sums: ContextSums::default(),
+        value_bytes: 0,
+        by_run: ByRun::default(),
+    };
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let sums = &mut scan.sums;
+        sums.rows += 1;
+        sums.messages_plain += row.get::<_, i64>(1)?;
+        let messages_stored: i64 = row.get(2)?;
+        sums.messages_stored += messages_stored;
+        sums.messages_compressed += row.get::<_, i64>(3)?;
+        sums.checkpoints_plain += row.get::<_, i64>(4)?;
+        let checkpoints_stored: i64 = row.get(5)?;
+        sums.checkpoints_stored += checkpoints_stored;
+        sums.checkpoints_compressed += row.get::<_, i64>(6)?;
+        let (config, host_inputs): (i64, i64) = (row.get(7)?, row.get(8)?);
+        sums.config += config;
+        sums.host_inputs += host_inputs;
+        scan.value_bytes += row.get::<_, i64>(9)?;
+        scan.by_run.add(
+            text(row, 0)?,
+            messages_stored + checkpoints_stored + config + host_inputs,
+        );
+    }
+    Ok(scan)
+}
+
+struct IndexScan {
+    runs: i64,
+    charged: i64,
+    value_bytes: i64,
+    /// `(runs, charged_bytes, text_bytes, blocks)` per state.
+    by_state: BTreeMap<String, (i64, i64, i64, i64)>,
+    by_run: ByRun,
+}
+
+impl IndexScan {
+    fn json(&self) -> Value {
+        let by_state: Map<String, Value> = self
+            .by_state
+            .iter()
+            .map(|(state, (runs, charged, text, blocks))| {
+                (
+                    state.clone(),
+                    json!({
+                        "runs": runs,
+                        "charged_bytes": charged,
+                        "text_bytes": text,
+                        "blocks": blocks,
+                    }),
+                )
             })
-            .map(|(column, _)| format!("COALESCE(OCTET_LENGTH({}), 0)", quote(&column)))
             .collect();
-        let bytes = if lengths.is_empty() {
-            "0".to_owned()
-        } else {
-            lengths.join(" + ")
-        };
-        let (rows, value_bytes): (i64, i64) = conn.query_row(
-            &format!(
-                "SELECT COUNT(*), COALESCE(SUM({bytes}), 0) FROM {}",
-                quote(&name)
-            ),
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        listed.push((value_bytes, name, rows));
+        json!({ "runs": self.runs, "charged_bytes": self.charged, "by_state": by_state })
     }
-    listed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(Value::Array(
-        listed
-            .into_iter()
-            .map(|(value_bytes, table, rows)| {
-                json!({ "table": table, "rows": rows, "value_bytes": value_bytes })
-            })
-            .collect(),
-    ))
 }
 
-fn events(conn: &Connection) -> Result<Value, StorageError> {
-    let mut statement = conn.prepare(
-        "SELECT kind, subkind, COUNT(*), COALESCE(SUM(OCTET_LENGTH(payload)), 0)
-         FROM events GROUP BY kind, subkind",
-    )?;
-    let mut by_kind = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    by_kind.sort_by(|a, b| {
-        b.3.cmp(&a.3)
-            .then_with(|| a.0.cmp(&b.0))
-            .then_with(|| a.1.cmp(&b.1))
-    });
-    let rows: i64 = by_kind.iter().map(|entry| entry.2).sum();
-    let payload_bytes: i64 = by_kind.iter().map(|entry| entry.3).sum();
-    let unbackfilled: i64 = by_kind
-        .iter()
-        .filter(|entry| entry.1.is_none())
-        .map(|entry| entry.2)
-        .sum();
-    Ok(json!({
-        "rows": rows,
-        "payload_bytes": payload_bytes,
-        "unbackfilled_rows": unbackfilled,
-        "by_kind": by_kind
-            .into_iter()
-            .map(|(kind, subkind, rows, payload_bytes)| json!({
-                "kind": kind,
-                "subkind": subkind.unwrap_or_else(|| UNBACKFILLED.to_owned()),
-                "rows": rows,
-                "payload_bytes": payload_bytes,
-            }))
-            .collect::<Vec<_>>(),
-    }))
-}
-
-fn run_contexts(conn: &Connection) -> Result<Value, StorageError> {
-    // `*_len` is the plain byte length kept by every write; `OCTET_LENGTH` is what the
-    // (possibly zstd-compressed) column occupies.
-    Ok(conn.query_row(
-        "SELECT COUNT(*),
-                COALESCE(SUM(messages_len), 0), COALESCE(SUM(OCTET_LENGTH(messages_json)), 0),
-                COALESCE(SUM(typeof(messages_json) = 'blob'), 0),
-                COALESCE(SUM(checkpoints_len), 0), COALESCE(SUM(OCTET_LENGTH(checkpoints_json)), 0),
-                COALESCE(SUM(typeof(checkpoints_json) = 'blob'), 0),
-                COALESCE(SUM(OCTET_LENGTH(config_json)), 0),
-                COALESCE(SUM(OCTET_LENGTH(host_inputs_json)), 0)
-         FROM run_contexts",
-        [],
-        |row| {
-            Ok(json!({
-                "rows": row.get::<_, i64>(0)?,
-                "messages": {
-                    "plain_bytes": row.get::<_, i64>(1)?,
-                    "stored_bytes": row.get::<_, i64>(2)?,
-                    "compressed_rows": row.get::<_, i64>(3)?,
-                },
-                "checkpoints": {
-                    "plain_bytes": row.get::<_, i64>(4)?,
-                    "stored_bytes": row.get::<_, i64>(5)?,
-                    "compressed_rows": row.get::<_, i64>(6)?,
-                },
-                "config_bytes": row.get::<_, i64>(7)?,
-                "host_inputs_bytes": row.get::<_, i64>(8)?,
-            }))
-        },
-    )?)
-}
-
-fn conversation_index(conn: &Connection) -> Result<Value, StorageError> {
-    let mut statement = conn.prepare(
-        "SELECT state, COUNT(*), SUM(charged_bytes), SUM(text_bytes), SUM(block_count)
-         FROM thread_index_runs GROUP BY state ORDER BY state",
-    )?;
-    let mut by_state = Map::new();
-    let (mut runs, mut charged) = (0_i64, 0_i64);
+fn scan_index(conn: &Connection, sql: &str) -> Result<IndexScan, StorageError> {
+    let mut scan = IndexScan {
+        runs: 0,
+        charged: 0,
+        value_bytes: 0,
+        by_state: BTreeMap::new(),
+        by_run: ByRun::default(),
+    };
+    let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        let (count, charged_bytes): (i64, i64) = (row.get(1)?, row.get(2)?);
-        runs += count;
-        charged += charged_bytes;
-        by_state.insert(
-            row.get::<_, String>(0)?,
-            json!({
-                "runs": count,
-                "charged_bytes": charged_bytes,
-                "text_bytes": row.get::<_, i64>(3)?,
-                "blocks": row.get::<_, i64>(4)?,
-            }),
-        );
+        let state = text(row, 1)?.unwrap_or_default().to_owned();
+        let (charged, text_bytes, blocks): (i64, i64, i64) =
+            (row.get(2)?, row.get(3)?, row.get(4)?);
+        scan.runs += 1;
+        scan.charged += charged;
+        scan.value_bytes += row.get::<_, i64>(5)?;
+        let entry = scan.by_state.entry(state).or_default();
+        entry.0 += 1;
+        entry.1 += charged;
+        entry.2 += text_bytes;
+        entry.3 += blocks;
+        scan.by_run.add(text(row, 0)?, charged);
     }
-    Ok(json!({ "runs": runs, "charged_bytes": charged, "by_state": by_state }))
+    Ok(scan)
 }
 
-fn threads(conn: &Connection) -> Result<Value, StorageError> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(archived = 0), 0), COALESCE(SUM(archived = 1), 0),
-                COALESCE(SUM(superseded), 0)
-         FROM threads",
-        [],
-        |row| {
-            Ok(json!({
-                "total": row.get::<_, i64>(0)?,
-                "active": row.get::<_, i64>(1)?,
-                "archived": row.get::<_, i64>(2)?,
-                "superseded": row.get::<_, i64>(3)?,
-            }))
-        },
-    )?)
+#[derive(Default)]
+struct ThreadTotals {
+    events: Tally,
+    contexts: Tally,
+    index_bytes: i64,
 }
 
-/// Rows and bytes of `table` (which has a `run_id` column) by the kind of thread its
-/// run belongs to. `unattributed` rows carry no run id; `orphan` rows name a run that
-/// no thread claims.
-fn attribution(conn: &Connection, table: &str, bytes: &str) -> Result<Value, StorageError> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT CASE WHEN s.run_id IS NULL THEN 'unattributed'
-                     WHEN th.thread_id IS NULL THEN 'orphan'
-                     WHEN th.archived = 1 THEN 'archived' ELSE 'active' END,
-                COUNT(*), COALESCE(SUM({bytes}), 0)
-         FROM {table} s
-         LEFT JOIN thread_runs tr ON tr.run_id = s.run_id
-         LEFT JOIN threads th ON th.thread_id = tr.thread_id
-         GROUP BY 1"
-    ))?;
-    let mut found = BTreeMap::new();
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        found.insert(
-            row.get::<_, String>(0)?,
-            (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
-        );
+impl ThreadTotals {
+    fn total(&self) -> i64 {
+        self.events.bytes + self.contexts.bytes + self.index_bytes
     }
+}
+
+/// Attributes runs to threads with the rules the thread views use (bindings, the
+/// `chat:` run name, a thread's recorded root, and parent links through saved
+/// contexts and the usage ledger). A run resolving to a thread with no `threads` row
+/// is an orphan, as is one that resolves to none.
+struct Attribution<'a> {
+    conn: &'a Connection,
+    archived: HashMap<String, bool>,
+    superseded: i64,
+    totals: HashMap<String, ThreadTotals>,
+    resolved: HashMap<String, Option<String>>,
+}
+
+impl<'a> Attribution<'a> {
+    fn load(conn: &'a Connection) -> Result<Self, StorageError> {
+        let mut statement = conn.prepare("SELECT thread_id, archived, superseded FROM threads")?;
+        let mut archived = HashMap::new();
+        let mut superseded = 0;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            archived.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)? == 1);
+            superseded += row.get::<_, i64>(2)?;
+        }
+        let totals = archived
+            .keys()
+            .map(|thread| (thread.clone(), ThreadTotals::default()))
+            .collect();
+        Ok(Self {
+            conn,
+            archived,
+            superseded,
+            totals,
+            resolved: HashMap::new(),
+        })
+    }
+
+    fn counts(&self) -> Value {
+        let archived = self.archived.values().filter(|archived| **archived).count();
+        json!({
+            "total": self.archived.len(),
+            "active": self.archived.len() - archived,
+            "archived": archived,
+            "superseded": self.superseded,
+        })
+    }
+
+    fn thread_of(&mut self, run: &str) -> Result<Option<&str>, StorageError> {
+        if !self.resolved.contains_key(run) {
+            let thread = crate::repo::threads::resolve_thread_id(self.conn, run)?
+                .filter(|thread| self.archived.contains_key(thread));
+            self.resolved.insert(run.to_owned(), thread);
+        }
+        Ok(self.resolved.get(run).and_then(Option::as_deref))
+    }
+
+    /// Splits `by_run` into the four buckets and hands each thread its share.
+    fn attribute(
+        &mut self,
+        by_run: &ByRun,
+        add: impl Fn(&mut ThreadTotals, Tally),
+    ) -> Result<[Tally; 4], StorageError> {
+        let mut buckets = [Tally::default(); 4];
+        buckets[UNATTRIBUTED].merge(by_run.no_run);
+        for (run, tally) in &by_run.runs {
+            let Some(thread) = self.thread_of(run)?.map(str::to_owned) else {
+                buckets[ORPHAN].merge(*tally);
+                continue;
+            };
+            let bucket = if self.archived[&thread] {
+                ARCHIVED
+            } else {
+                ACTIVE
+            };
+            buckets[bucket].merge(*tally);
+            if let Some(totals) = self.totals.get_mut(&thread) {
+                add(totals, *tally);
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// The `limit` threads holding the most bytes across events, run snapshots and the
+    /// conversation index. Only identifiers and sizes are listed, never titles.
+    fn top(&self, limit: usize) -> Value {
+        let mut threads: Vec<_> = self.totals.iter().collect();
+        threads.sort_by(|a, b| b.1.total().cmp(&a.1.total()).then_with(|| a.0.cmp(b.0)));
+        Value::Array(
+            threads
+                .into_iter()
+                .take(limit)
+                .map(|(thread, totals)| {
+                    json!({
+                        "thread_id": thread,
+                        "archived": self.archived[thread],
+                        "events": {
+                            "rows": totals.events.rows,
+                            "payload_bytes": totals.events.bytes,
+                        },
+                        "run_contexts": {
+                            "rows": totals.contexts.rows,
+                            "stored_bytes": totals.contexts.bytes,
+                        },
+                        "conversation_index_charged_bytes": totals.index_bytes,
+                        "total_bytes": totals.total(),
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
+fn buckets_json(buckets: [Tally; 4]) -> Value {
     let mut out = Map::new();
-    for bucket in BUCKETS {
-        let (rows, bytes) = found.get(bucket).copied().unwrap_or_default();
-        out.insert(bucket.into(), json!({ "rows": rows, "bytes": bytes }));
+    for (name, tally) in BUCKETS.into_iter().zip(buckets) {
+        out.insert(name.into(), tally.json());
     }
-    Ok(Value::Object(out))
-}
-
-/// The `limit` threads holding the most bytes across events, run snapshots and the
-/// conversation index. Only identifiers and sizes are listed, never titles.
-fn top_threads(conn: &Connection, limit: usize) -> Result<Value, StorageError> {
-    let mut statement = conn.prepare(&format!(
-        "WITH ev AS (
-             SELECT tr.thread_id AS thread_id, COUNT(*) AS n,
-                    COALESCE(SUM(OCTET_LENGTH(s.payload)), 0) AS bytes
-             FROM events s JOIN thread_runs tr ON tr.run_id = s.run_id GROUP BY tr.thread_id),
-         rc AS (
-             SELECT tr.thread_id AS thread_id, COUNT(*) AS n,
-                    COALESCE(SUM({RUN_CONTEXT_BYTES}), 0) AS bytes
-             FROM run_contexts s JOIN thread_runs tr ON tr.run_id = s.run_id GROUP BY tr.thread_id),
-         ix AS (
-             SELECT tr.thread_id AS thread_id, COALESCE(SUM(s.charged_bytes), 0) AS bytes
-             FROM thread_index_runs s JOIN thread_runs tr ON tr.run_id = s.run_id
-             GROUP BY tr.thread_id),
-         ids AS (SELECT thread_id FROM threads UNION SELECT thread_id FROM thread_runs)
-         SELECT ids.thread_id, th.archived,
-                COALESCE(ev.n, 0), COALESCE(ev.bytes, 0),
-                COALESCE(rc.n, 0), COALESCE(rc.bytes, 0), COALESCE(ix.bytes, 0),
-                COALESCE(ev.bytes, 0) + COALESCE(rc.bytes, 0) + COALESCE(ix.bytes, 0) AS total
-         FROM ids
-         LEFT JOIN threads th ON th.thread_id = ids.thread_id
-         LEFT JOIN ev ON ev.thread_id = ids.thread_id
-         LEFT JOIN rc ON rc.thread_id = ids.thread_id
-         LEFT JOIN ix ON ix.thread_id = ids.thread_id
-         ORDER BY total DESC, ids.thread_id LIMIT ?1"
-    ))?;
-    let limit = i64::try_from(limit).map_err(|_| StorageError::OutOfRange("top thread count"))?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok(json!({
-                "thread_id": row.get::<_, String>(0)?,
-                "archived": row.get::<_, Option<i64>>(1)?.map(|flag| flag == 1),
-                "events": { "rows": row.get::<_, i64>(2)?, "payload_bytes": row.get::<_, i64>(3)? },
-                "run_contexts": { "rows": row.get::<_, i64>(4)?, "stored_bytes": row.get::<_, i64>(5)? },
-                "conversation_index_charged_bytes": row.get::<_, i64>(6)?,
-                "total_bytes": row.get::<_, i64>(7)?,
-            }))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Value::Array(rows))
+    Value::Object(out)
 }
 
 #[derive(Default)]

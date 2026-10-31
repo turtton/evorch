@@ -165,7 +165,7 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
     if !path.is_file() {
         return Err(format!("database not found: {}", path.display()));
     }
-    let db = Database::open_read_only(&path).map_err(|error| error.to_string())?;
+    let db = Database::open_for_inspection(&path).map_err(|error| error.to_string())?;
     let result = match args.command {
         InspectCommand::Candidates {
             project,

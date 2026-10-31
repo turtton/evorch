@@ -62,6 +62,66 @@ impl Database {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        Self::checked(conn)
+    }
+
+    /// Like [`Database::open_read_only`], but never creates, resizes or writes the
+    /// database, its `-wal` or its `-shm`, which a plain read-only open of a WAL
+    /// database can do, and still reads what the WAL holds.
+    ///
+    /// The sidecars pick the mode. With a `-wal` and its `-shm` (a running evorch, or
+    /// what a crash left) SQLite is told the index is read-only, so it reads the WAL
+    /// without touching the index. With no WAL content nothing needs reading, and the
+    /// database is opened immutable so no sidecar is created.
+    ///
+    /// # Errors
+    /// Fails like [`Database::open_read_only`]. A WAL holding data without its `-shm`
+    /// is refused rather than read: reading it would create the index file.
+    pub fn open_for_inspection(path: &Path) -> Result<Self, StorageError> {
+        let absolute = path
+            .canonicalize()
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+        let len = |suffix: &str| -> Result<Option<u64>, StorageError> {
+            match std::fs::metadata(crate::db::suffixed_path(&absolute, suffix)) {
+                Ok(metadata) => Ok(Some(metadata.len())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(StorageError::Io(error.to_string())),
+            }
+        };
+        let options = match (len("-wal")?, len("-shm")?) {
+            (Some(_), Some(_)) => "mode=ro&readonly_shm=1",
+            (Some(bytes), None) if bytes > 0 => {
+                return Err(StorageError::Serialization(
+                    "the write-ahead log holds data but its -shm index is missing; reading it \
+                     would create the index, so start evorch once and exit cleanly to checkpoint"
+                        .into(),
+                ));
+            }
+            _ => "mode=ro&immutable=1",
+        };
+        let text = absolute
+            .to_str()
+            .ok_or_else(|| StorageError::Io("database path must be UTF-8".into()))?;
+        let mut uri = String::from("file:");
+        for byte in text.bytes() {
+            if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+                uri.push(char::from(byte));
+            } else {
+                uri.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        uri.push('?');
+        uri.push_str(options);
+        let conn = Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Self::checked(conn)
+    }
+
+    fn checked(conn: Connection) -> Result<Self, StorageError> {
         conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
         let supported = u32::try_from(crate::migrations::MIGRATIONS.len())

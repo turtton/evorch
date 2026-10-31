@@ -204,6 +204,19 @@ pub(crate) fn thread_of_run(
     }
 }
 
+/// The thread `run_id` resolves to under the same rules as [`thread_of_run`], without
+/// opening a transaction, so a caller reading a snapshot can use it. A run that names
+/// no thread, or whose parent chain is broken, resolves to none.
+pub(crate) fn resolve_thread_id(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<String>, StorageError> {
+    Ok(match walk(conn, run_id)? {
+        Walk::Thread(row) => Some(row.thread_id),
+        Walk::Top { .. } | Walk::Broken => None,
+    })
+}
+
 pub(crate) fn runs_of_thread(
     conn: &Connection,
     thread_id: &str,

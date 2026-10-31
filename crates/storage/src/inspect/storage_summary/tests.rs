@@ -27,13 +27,24 @@ fn event(db: &Database, kind: &str, subkind: Option<&str>, run: Option<&str>, by
 }
 
 fn context(db: &Database, run: &str, messages: rusqlite::types::Value, plain_len: i64) {
+    context_named(db, run, run, None, messages, plain_len);
+}
+
+fn context_named(
+    db: &Database,
+    run: &str,
+    name: &str,
+    parent: Option<&str>,
+    messages: rusqlite::types::Value,
+    plain_len: i64,
+) {
     db.conn
         .execute(
             "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json,
                  messages_len, checkpoints_len)
-             VALUES (?1, 'worker', ?1, NULL, '{}', ?2, '[]', 'Done', 0, 0, '[]', ?3, 2)",
-            rusqlite::params![run, messages, plain_len],
+             VALUES (?1, 'worker', ?2, ?3, '{}', ?4, '[]', 'Done', 0, 0, '[]', ?5, 2)",
+            rusqlite::params![run, name, parent, messages, plain_len],
         )
         .unwrap();
 }
@@ -88,7 +99,7 @@ fn seed(db: &Database) {
 }
 
 fn summary(path: &std::path::Path, options: StorageSummaryOptions) -> Value {
-    Database::open_read_only(path)
+    Database::open_for_inspection(path)
         .unwrap()
         .storage_summary(path, options)
         .unwrap()
@@ -349,4 +360,270 @@ fn empty_store_reports_zeroes() {
         summary["attribution"]["events"]["unattributed"],
         json!({ "rows": 0, "bytes": 0 })
     );
+}
+
+fn thread(db: &Database, thread: &str, archived: i64, root_run: Option<&str>) {
+    db.conn
+        .execute(
+            "INSERT INTO threads(thread_id, archived, root_run_id, created_at_ns, updated_at_ns, source)
+             VALUES (?1, ?2, ?3, 0, 0, 'runtime')",
+            rusqlite::params![thread, archived, root_run],
+        )
+        .unwrap();
+}
+
+fn ledger_child(db: &Database, run: &str, parent: &str) {
+    db.conn
+        .execute(
+            "INSERT INTO usage_requests(request_id, at_ns, provider, model, run_id, parent_run_id, status)
+             VALUES (?1, 0, 'p', 'm', ?2, ?3, 'ok')",
+            rusqlite::params![format!("req-{run}"), run, parent],
+        )
+        .unwrap();
+}
+
+fn text(value: &str) -> rusqlite::types::Value {
+    value.to_owned().into()
+}
+
+#[test]
+fn runs_are_attributed_by_the_thread_resolution_rules_without_double_counting() {
+    let dir = TempDir::new().unwrap();
+    let (path, db) = create(&dir);
+    thread(&db, "t-root", 0, Some("r-root"));
+    thread(&db, "t-chat", 1, None);
+    thread(&db, "t-bound", 0, None);
+    db.conn
+        .execute(
+            "INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('r-bound', 't-bound', 'r-bound', 0)",
+            [],
+        )
+        .unwrap();
+    // r-root: the thread records it as root. r-kid: a saved child of it. r-led: known only
+    // to the usage ledger. r-chat: named for its thread. r-bound-kid: child of a bound run.
+    context_named(&db, "r-root", "root", None, text(&"a".repeat(10)), 10);
+    context_named(
+        &db,
+        "r-kid",
+        "kid",
+        Some("r-root"),
+        text(&"b".repeat(20)),
+        20,
+    );
+    context_named(
+        &db,
+        "r-chat",
+        "chat:Orchestrator:t-chat",
+        None,
+        text("[]"),
+        2,
+    );
+    context_named(&db, "r-bound-kid", "kid", Some("r-bound"), text("[]"), 2);
+    context_named(&db, "r-lone", "lone", None, text("[]"), 2);
+    ledger_child(&db, "r-led", "r-root");
+    for (run, count, bytes) in [
+        (Some("r-root"), 2, 40),
+        (Some("r-led"), 1, 25),
+        (Some("r-kid"), 1, 5),
+        (Some("r-chat"), 1, 10),
+        (Some("r-bound-kid"), 1, 7),
+        (Some("r-bound"), 1, 100),
+        (Some("r-lone"), 1, 3),
+        (None, 1, 1),
+    ] {
+        for _ in 0..count {
+            event(&db, "Lifecycle", Some("Started"), run, bytes);
+        }
+    }
+    index_run(&db, "r-led", "indexed", 30, 1, 1);
+    index_run(&db, "r-chat", "indexed", 11, 1, 1);
+    index_run(&db, "r-lone", "indexed", 5, 1, 1);
+    drop(db);
+
+    let summary = summary(&path, StorageSummaryOptions::default());
+
+    assert_eq!(
+        summary["attribution"],
+        json!({
+            "events": {
+                "active": { "rows": 6, "bytes": 217 },
+                "archived": { "rows": 1, "bytes": 10 },
+                "orphan": { "rows": 1, "bytes": 3 },
+                "unattributed": { "rows": 1, "bytes": 1 },
+            },
+            "run_contexts": {
+                "active": { "rows": 3, "bytes": 50 },
+                "archived": { "rows": 1, "bytes": 8 },
+                "orphan": { "rows": 1, "bytes": 8 },
+                "unattributed": { "rows": 0, "bytes": 0 },
+            },
+            "conversation_index": {
+                "active": { "rows": 1, "bytes": 30 },
+                "archived": { "rows": 1, "bytes": 11 },
+                "orphan": { "rows": 1, "bytes": 5 },
+                "unattributed": { "rows": 0, "bytes": 0 },
+            },
+        })
+    );
+    let top = summary["top_threads"].as_array().unwrap();
+    let totals: Vec<_> = top
+        .iter()
+        .map(|t| {
+            (
+                t["thread_id"].as_str().unwrap(),
+                t["total_bytes"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(totals, [("t-root", 182), ("t-bound", 115), ("t-chat", 29)]);
+    // Every attributed byte is counted in exactly one thread.
+    let attributed: i64 = ["events", "run_contexts", "conversation_index"]
+        .iter()
+        .flat_map(|table| {
+            ["active", "archived"].map(|bucket| &summary["attribution"][*table][bucket])
+        })
+        .map(|tally| tally["bytes"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        totals.iter().map(|(_, bytes)| bytes).sum::<i64>(),
+        attributed
+    );
+    assert_eq!(summary["events"]["rows"], 9);
+}
+
+fn uses_temporary_structure(conn: &rusqlite::Connection, sql: &str) -> bool {
+    let mut program = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
+    let opcodes: Vec<String> = program
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let details: Vec<String> = plan
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    opcodes.iter().any(|op| {
+        matches!(
+            op.as_str(),
+            "SorterOpen" | "SorterInsert" | "OpenEphemeral" | "OpenAutoindex"
+        )
+    }) || details.iter().any(|detail| detail.contains("TEMP B-TREE"))
+}
+
+#[test]
+fn scans_of_large_columns_never_sort_or_build_temporary_trees() {
+    let dir = TempDir::new().unwrap();
+    let (path, db) = create(&dir);
+    seed(&db);
+    drop(db);
+    let db = Database::open_for_inspection(&path).unwrap();
+
+    // Grouping an aggregate over a text column makes SQLite carry that column through a
+    // sorter; the detector must see that, or the checks below prove nothing.
+    for grouped in [
+        "SELECT run_id, SUM(OCTET_LENGTH(payload)) FROM events GROUP BY run_id",
+        "SELECT terminal_phase, SUM(OCTET_LENGTH(messages_json)) FROM run_contexts GROUP BY terminal_phase",
+    ] {
+        assert!(uses_temporary_structure(&db.conn, grouped), "{grouped}");
+    }
+
+    let queries = Queries::new(&db.conn).unwrap();
+    let scans = [&queries.events, &queries.run_contexts, &queries.index]
+        .into_iter()
+        .chain(queries.others.iter().map(|(_, sql)| sql));
+    let mut checked = 0;
+    for sql in scans {
+        assert!(!uses_temporary_structure(&db.conn, sql), "{sql}");
+        checked += 1;
+    }
+    assert!(checked > 10, "every ordinary table is covered");
+}
+
+fn sidecars(path: &std::path::Path) -> [Option<Vec<u8>>; 3] {
+    ["", "-wal", "-shm"].map(|suffix| {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        std::fs::read(file).ok()
+    })
+}
+
+#[test]
+fn a_live_wal_is_read_without_touching_database_or_wal() {
+    let dir = TempDir::new().unwrap();
+    let (path, db) = create(&dir);
+    seed(&db);
+    let before = sidecars(&path);
+    assert!(
+        before[1].as_ref().is_some_and(|wal| !wal.is_empty()) && before[2].is_some(),
+        "the writer's data must sit in the WAL"
+    );
+
+    let summary = summary(&path, StorageSummaryOptions::default());
+
+    assert_eq!(summary["events"]["rows"], 7);
+    let after = sidecars(&path);
+    // The writer lives in this process and shares its mapped index with the reader, so
+    // only the database and WAL can be compared here; the CLI e2e test covers the -shm
+    // with a reader in its own process.
+    for (index, name) in ["database", "wal"].into_iter().enumerate() {
+        assert!(after[index] == before[index], "{name} changed");
+    }
+    drop(db);
+}
+
+#[test]
+fn a_checkpointed_store_gets_no_sidecars_from_inspection() {
+    let dir = TempDir::new().unwrap();
+    let (path, db) = create(&dir);
+    seed(&db);
+    drop(db);
+    let before = sidecars(&path);
+    assert_eq!((&before[1], &before[2]), (&None, &None));
+
+    assert_eq!(
+        summary(&path, StorageSummaryOptions::default())["events"]["rows"],
+        7
+    );
+    assert_eq!(sidecars(&path), before);
+
+    // An empty WAL with no index holds nothing to read.
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::write(&wal, b"").unwrap();
+    assert_eq!(
+        summary(&path, StorageSummaryOptions::default())["events"]["rows"],
+        7
+    );
+    let after = sidecars(&path);
+    assert_eq!(
+        (after[0].as_ref(), after[1].as_deref(), &after[2]),
+        (before[0].as_ref(), Some(&b""[..]), &None)
+    );
+}
+
+#[test]
+fn a_wal_with_data_but_no_index_is_refused_not_repaired() {
+    let dir = TempDir::new().unwrap();
+    let (path, db) = create(&dir);
+    seed(&db);
+    let copy = TempDir::new().unwrap();
+    let copied = copy.path().join("storage.db");
+    std::fs::copy(&path, &copied).unwrap();
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let mut copied_wal = copied.as_os_str().to_owned();
+    copied_wal.push("-wal");
+    std::fs::copy(&wal, &copied_wal).unwrap();
+    let before = sidecars(&copied);
+
+    let error = Database::open_for_inspection(&copied)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("-shm"), "{error}");
+    assert_eq!(sidecars(&copied), before);
+    assert!(before[2].is_none());
+    drop(db);
 }
