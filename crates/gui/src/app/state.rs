@@ -32,7 +32,6 @@ pub enum ConversationFocus {
 pub struct WorkbenchState<S> {
     pub(super) auto_title_jobs: Vec<super::auto_title::Job>,
     pub(super) title_generator: Option<Arc<super::auto_title::TitleGenerator>>,
-    pub(super) manually_titled: std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) attention_acks: BTreeMap<(PanelId, String), super::attention::ack::AttentionAck>,
     pub(super) notifications: NotificationsModel,
     pub(super) system_notifications: super::system_notifications::SystemNotifications,
@@ -178,7 +177,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut state = Self {
             auto_title_jobs: Vec::new(),
             title_generator: None,
-            manually_titled: std::collections::BTreeSet::new(),
             attention_acks: BTreeMap::new(),
             notifications: NotificationsModel::default(),
             system_notifications: super::system_notifications::SystemNotifications::default(),

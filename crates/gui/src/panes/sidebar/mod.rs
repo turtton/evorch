@@ -20,7 +20,8 @@ pub enum SidebarAction {
     OpenAddProject,
     OpenThreadSearch,
     OpenProjectSettings(ProjectId),
-    CreateThread(String),
+    /// Start an untitled thread in the selected project and make it active.
+    CreateThread,
     /// Start a thread in the given project and make it the active one.
     CreateThreadIn(ProjectId),
     /// Fork a child thread from a completed turn (transcript entry id).

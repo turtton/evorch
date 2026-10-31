@@ -420,7 +420,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 "new" => {
                     let command = std::mem::take(&mut self.composer.input);
-                    if let Err(error) = self.create_thread("New thread") {
+                    if let Err(error) = self.create_untitled_thread() {
                         self.composer.input = command;
                         self.push_notice(format!("failed to create thread: {error}"));
                     }

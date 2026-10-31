@@ -118,7 +118,7 @@ title-route = [{{ profile = "local", model = "fast" }}]
                     ))),
                 );
         state.add_project(root.path()).unwrap();
-        state.create_thread("New thread").unwrap();
+        state.create_untitled_thread().unwrap();
         state.set_thread_model_preference(Some(workspace_ui::ModelPreference {
             profile: "local".into(),
             model: Some("chosen".into()),

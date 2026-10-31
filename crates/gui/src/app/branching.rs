@@ -223,9 +223,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             LineageKind::Rewind => {
                 // A version replaces its source in place, including its sidebar position.
                 record.created_at = original.created_at;
-                if self.manually_titled.contains(source) {
-                    self.manually_titled.insert(id.clone());
-                }
+                record.title_is_placeholder = original.title_is_placeholder;
             }
         }
         self.sidebar.threads.push(record);

@@ -132,8 +132,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn title_candidate(&self, chat: &ChatSubmission) -> bool {
         self.sidebar.threads.iter().any(|thread| {
             thread.id.to_string() == chat.thread_id
-                && !self.manually_titled.contains(&thread.id)
-                && (thread.title == "New thread" || thread.title == thread.id.to_string())
+                && thread.title_is_placeholder
                 && thread.run_ids.is_empty()
         }) && !self.history.iter().any(|message| {
             // A refused message never started the conversation.
@@ -199,7 +198,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .find(|thread| thread.id == id)
             .ok_or(workspace_ui::ThreadError::UnknownThread)?;
         thread.title = title;
-        self.manually_titled.insert(id.clone());
+        thread.title_is_placeholder = false;
         self.auto_title_jobs.retain(|job| job.thread != id);
         self.save_sidebar();
         Ok(())
@@ -218,9 +217,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .threads
                 .iter_mut()
                 .find(|thread| thread.id == job.thread)
+                && thread.title_is_placeholder
                 && thread.title == job.original
             {
                 thread.title = title;
+                thread.title_is_placeholder = false;
                 changed = true;
             }
             false

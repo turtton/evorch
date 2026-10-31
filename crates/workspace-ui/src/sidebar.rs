@@ -130,6 +130,13 @@ impl SidebarState {
             .remove_allowed_directory(path)
     }
 
+    /// The placeholder title given to a thread created without a user-chosen title.
+    /// Single source for every creation path; `ThreadRecord::title_is_placeholder`
+    /// marks the thread so the title is never recognised by its text.
+    pub fn next_placeholder_title(&self) -> String {
+        format!("thread-{}", self.threads.len() + 1)
+    }
+
     pub fn create_thread(
         &mut self,
         id: ThreadId,
