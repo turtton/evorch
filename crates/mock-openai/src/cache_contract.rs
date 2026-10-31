@@ -242,6 +242,7 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
                 }
                 return Ok(());
             }
+            Some("additional_tools") => return validate_additional_tools(item),
             Some("compaction") => return required_string(item, "encrypted_content"),
             Some("reasoning") => return validate_reasoning(item),
             Some("message") => {}
@@ -274,6 +275,24 @@ fn validate_item(protocol: CacheProtocol, item: &Value) -> Result<(), String> {
         return Ok(());
     }
     Err("message requires string/block content or assistant tool calls".to_owned())
+}
+
+/// Responses Lite carries its tool definitions as a developer-role input item whose ID
+/// is derived from the tools, so the same tools keep the same item across requests.
+fn validate_additional_tools(item: &Value) -> Result<(), String> {
+    if !item["id"].as_str().is_some_and(|id| id.starts_with("at_")) {
+        return Err("additional_tools id must start with at_".to_owned());
+    }
+    if item["role"] != "developer" {
+        return Err("additional_tools must use the developer role".to_owned());
+    }
+    if !item["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty() && tools.iter().all(Value::is_object))
+    {
+        return Err("additional_tools must contain a nonempty array of tool objects".to_owned());
+    }
+    Ok(())
 }
 
 /// A replayed Responses reasoning item must be the complete confirmed output item:
@@ -923,5 +942,57 @@ mod codex_developer_tests {
             assert_compaction_transition(CacheProtocol::Codex, &previous, &dropped, "ckpt-1")
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod additional_tools_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lite_request(tools_item: Value, extra: &[Value]) -> Value {
+        let mut input = vec![
+            tools_item,
+            json!({"type": "message", "role": "developer",
+                "content": [{"type": "input_text", "text": "fixed"}]}),
+        ];
+        input.extend_from_slice(extra);
+        json!({"model": "lite", "parallel_tool_calls": false, "input": input})
+    }
+    fn tools_item(id: &str) -> Value {
+        json!({"type": "additional_tools", "id": id, "role": "developer",
+            "tools": [{"type": "namespace", "name": "functions", "description": "", "tools": []}]})
+    }
+    fn user(text: &str) -> Value {
+        json!({"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]})
+    }
+
+    // Given: a Responses Lite request that carries its tools as an additional_tools item
+    // When: later requests append history
+    // Then: the item is an ordinary part of the append-only prefix
+    #[test]
+    fn lite_tools_item_is_part_of_the_append_only_prefix() {
+        let first = lite_request(tools_item("at_1"), &[user("go")]);
+        let second = lite_request(tools_item("at_1"), &[user("go"), user("next")]);
+        assert_append_only(CacheProtocol::Codex, &first, &second).unwrap();
+    }
+
+    // Given: a Lite request whose tools item changes id, or is malformed
+    // When: it is checked against the previous request or on its own
+    // Then: both are rejected
+    #[test]
+    fn changed_or_malformed_lite_tools_item_is_rejected() {
+        let first = lite_request(tools_item("at_1"), &[user("go")]);
+        let changed = lite_request(tools_item("at_2"), &[user("go")]);
+        assert!(assert_append_only(CacheProtocol::Codex, &first, &changed).is_err());
+        for bad in [
+            json!({"type": "additional_tools", "id": "x_1", "role": "developer", "tools": [{}]}),
+            json!({"type": "additional_tools", "id": "at_1", "role": "user", "tools": [{}]}),
+            json!({"type": "additional_tools", "id": "at_1", "role": "developer", "tools": []}),
+        ] {
+            let request = lite_request(bad, &[user("go")]);
+            assert!(assert_append_only(CacheProtocol::Codex, &request, &request).is_err());
+        }
     }
 }

@@ -124,6 +124,7 @@ fn assert_responses_text_format(bodies: &[Value]) {
 #[tokio::test]
 async fn codex_send_and_stream_send_text_format_only_when_configured() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
         .respond_with(support::sse_response(&support::fixture(
@@ -164,10 +165,8 @@ async fn send_with_and_without_schema(client: &dyn ProviderClient, streaming: bo
 }
 
 async fn request_bodies(server: &MockServer) -> Vec<Value> {
-    server
-        .received_requests()
+    codex_support::response_requests(server)
         .await
-        .unwrap()
         .iter()
         .map(|request| serde_json::from_slice(&request.body).unwrap())
         .collect()

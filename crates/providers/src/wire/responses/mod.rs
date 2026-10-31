@@ -23,6 +23,7 @@ use serde::Serialize;
 use crate::message::{
     ChatRequest, ContentBlock, Message, Role, ServiceTier, ToolResultContent, ToolSpec,
 };
+use crate::models::CodexModelCapabilities;
 
 pub use sse::ResponsesStreamInterpreter;
 
@@ -39,6 +40,10 @@ pub struct ResponsesRequestOptions {
     pub dialect: ResponsesDialect,
     /// prompt cache の affinity key。run 内の要求を同じ cache へ寄せるため run ID を渡す。
     pub prompt_cache_key: Option<String>,
+    /// Codex catalog が広告する、この要求のモデルの能力。`None` と
+    /// [`CodexModelCapabilities::default`] は能力不明で、Lite でない従来の形状になる。
+    /// Codex 以外の dialect では使われない。
+    pub codex_model: Option<CodexModelCapabilities>,
 }
 
 /// Responses API に送信するリクエスト本文。
@@ -68,12 +73,19 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<TextFormat>,
+    text: Option<TextControls>,
+    /// Responses Lite 形状で組み立てた要求か。HTTP header の選択に使い、本文には載せない。
+    #[serde(skip)]
+    responses_lite: bool,
 }
 
+/// `text` 制御。verbosity はモデルが対応する場合だけ、format は出力 schema 指定時だけ。
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct TextFormat {
-    format: JsonSchemaFormat,
+struct TextControls {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verbosity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<JsonSchemaFormat>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -97,6 +109,12 @@ enum InputItem {
         id: Option<String>,
         role: InputRole,
         content: Vec<InputContent>,
+    },
+    /// Responses Lite が tools の代わりに input へ置く tool 定義。
+    AdditionalTools {
+        id: String,
+        role: InputRole,
+        tools: Vec<NamespaceTools>,
     },
     Compaction {
         encrypted_content: String,
@@ -171,6 +189,27 @@ enum Tool {
     Custom(CustomTool),
 }
 
+/// Lite の tool 定義を包む `functions` namespace。Codex は全 function/freeform tool を
+/// この 1 つの namespace にまとめ、description は空文字にする。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct NamespaceTools {
+    r#type: &'static str,
+    name: &'static str,
+    description: &'static str,
+    tools: Vec<Tool>,
+}
+
+impl NamespaceTools {
+    fn functions(tools: Vec<Tool>) -> Self {
+        Self {
+            r#type: "namespace",
+            name: "functions",
+            description: "",
+            tools,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct CustomTool {
     name: &'static str,
@@ -203,7 +242,17 @@ enum ToolChoice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct Reasoning {
     effort: String,
-    summary: ReasoningSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<ReasoningSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ReasoningContext>,
+}
+
+/// Lite は過去 turn の reasoning も文脈に含める。非 Lite は省略して既定に任せる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReasoningContext {
+    AllTurns,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -228,6 +277,29 @@ fn developer_id_namespace() -> uuid::Uuid {
         &uuid::Uuid::NAMESPACE_OID,
         b"evorch.codex.developer_instructions",
     )
+}
+
+/// additional_tools の安定 ID 用 namespace。ID は直列化した tool 定義だけから決まるため、
+/// 同じ tools は再送・復元・compaction 後も同じ ID になります。
+fn additional_tools_id_namespace() -> uuid::Uuid {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"evorch.codex.additional_tools")
+}
+
+/// Responses Lite の tool 定義項目。ID は Codex 同様に `at_<uuid5(直列化した tools)>` です。
+fn additional_tools(tools: Vec<Tool>) -> InputItem {
+    let tools = vec![NamespaceTools::functions(tools)];
+    let id = format!(
+        "at_{}",
+        uuid::Uuid::new_v5(
+            &additional_tools_id_namespace(),
+            &serde_json::to_vec(&tools).unwrap_or_default(),
+        )
+    );
+    InputItem::AdditionalTools {
+        id,
+        role: InputRole::Developer,
+        tools,
+    }
 }
 
 /// 指示文を developer message にします。ID は Codex 同様に `msg_<uuid5(本文)>` です。
@@ -259,16 +331,30 @@ impl ResponsesDialect {
     }
 
     /// reasoning 設定。Codex は常に要求し、公式 API は effort 指定時だけ要求します。
-    /// summary の扱いを変える場合もここだけを変更します。
-    fn reasoning(self, effort: Option<&str>) -> Option<Reasoning> {
-        let effort = match self {
-            Self::Codex => Some(effort.unwrap_or(CODEX_DEFAULT_REASONING_EFFORT)),
-            Self::OpenAi => effort,
-        }?;
-        Some(Reasoning {
-            effort: effort.to_owned(),
-            summary: ReasoningSummary::Auto,
-        })
+    ///
+    /// Codex の effort は「明示値 → モデルの既定値 → `medium`」の順で決めます。summary は
+    /// モデルが `reasoning.summary` に対応する場合だけ `auto` を送り (モデルの
+    /// `default_reasoning_summary` は見ません)、Lite は `context: all_turns` を付けます。
+    fn reasoning(self, effort: Option<&str>, model: &CodexModelCapabilities) -> Option<Reasoning> {
+        match self {
+            Self::Codex => Some(Reasoning {
+                effort: effort
+                    .or(model.default_reasoning_level.as_deref())
+                    .unwrap_or(CODEX_DEFAULT_REASONING_EFFORT)
+                    .to_owned(),
+                summary: model
+                    .supports_reasoning_summary_parameter
+                    .then_some(ReasoningSummary::Auto),
+                context: model
+                    .use_responses_lite
+                    .then_some(ReasoningContext::AllTurns),
+            }),
+            Self::OpenAi => effort.map(|effort| Reasoning {
+                effort: effort.to_owned(),
+                summary: Some(ReasoningSummary::Auto),
+                context: None,
+            }),
+        }
     }
 
     /// Codex backend での契約が未確定なため、Codex は canonical `max_tokens` を送りません。
@@ -289,8 +375,9 @@ impl ResponsesDialect {
 
     /// tool 配列。Codex は移行前の wire と byte 同一に保つため空配列も送り、公式 API では
     /// tool が無い要求に空の `tools` を付けません。
-    fn tools(self, tools: Vec<Tool>) -> Option<Vec<Tool>> {
+    fn tools(self, tools: Vec<Tool>, lite: bool) -> Option<Vec<Tool>> {
         match self {
+            Self::Codex if lite => None,
             Self::Codex => Some(tools),
             Self::OpenAi => (!tools.is_empty()).then_some(tools),
         }
@@ -298,11 +385,38 @@ impl ResponsesDialect {
 
     /// tool 選択設定 (`tool_choice`, `parallel_tool_calls`)。公式 API では tool が無い
     /// 要求に選択設定を付けません。
-    fn tool_selection(self, has_tools: bool) -> (Option<ToolChoice>, Option<bool>) {
+    fn tool_selection(self, has_tools: bool, lite: bool) -> (Option<ToolChoice>, Option<bool>) {
         match self {
-            Self::Codex => (Some(ToolChoice::Auto), Some(true)),
+            Self::Codex => (Some(ToolChoice::Auto), Some(!lite)),
             Self::OpenAi if has_tools => (Some(ToolChoice::Auto), Some(true)),
             Self::OpenAi => (None, None),
+        }
+    }
+
+    /// 送信する `service_tier`。Codex は catalog が tier を広告していて priority を含まない
+    /// モデルには送りません。広告が無い (catalog なし・能力不明) 場合は指定どおり送ります。
+    fn service_tier(
+        self,
+        tier: Option<ServiceTier>,
+        model: &CodexModelCapabilities,
+    ) -> Option<ServiceTier> {
+        match (self, tier) {
+            (Self::Codex, Some(tier)) if model.priority_tier == Some(false) => {
+                tracing::warn!(
+                    ?tier,
+                    "このモデルは priority tier を広告していないため service_tier を省略します"
+                );
+                None
+            }
+            _ => tier,
+        }
+    }
+
+    /// `text.verbosity`。対応モデルだけ、モデルの既定値に従います。
+    fn verbosity(self, model: &CodexModelCapabilities) -> Option<String> {
+        match self {
+            Self::Codex if model.support_verbosity => model.default_verbosity.clone(),
+            Self::Codex | Self::OpenAi => None,
         }
     }
 
@@ -333,6 +447,12 @@ impl ResponsesRequest {
             .map(|reasoning| reasoning.effort.as_str())
     }
 
+    /// Responses Lite 形状の要求か。送信時に Lite 用 header を付けるかの判断に使います。
+    #[must_use]
+    pub fn is_responses_lite(&self) -> bool {
+        self.responses_lite
+    }
+
     /// 公式 compaction を要求するトリガーを入力末尾に追加します。
     pub(crate) fn with_compaction_trigger(mut self) -> Self {
         self.include.clear();
@@ -358,8 +478,19 @@ pub fn to_wire_request_with_scope(
     options: &ResponsesRequestOptions,
     scope: &ResolvedResponsesScope,
 ) -> Result<ResponsesRequest, crate::ProviderError> {
+    check_scope(request, options.dialect, scope)?;
+    Ok(convert_request(request, options, Some(scope)))
+}
+
+/// The scope guard of [`to_wire_request_with_scope`], for callers that must refuse a
+/// mismatched scope before any network access.
+pub fn check_scope(
+    request: &ChatRequest,
+    dialect: ResponsesDialect,
+    scope: &ResolvedResponsesScope,
+) -> Result<(), crate::ProviderError> {
     validate_request_scope(request, scope)?;
-    if scope.dialect != options.dialect
+    if scope.dialect != dialect
         || scope.wire_model != request.model
         || scope.service_tier != request.service_tier
     {
@@ -367,7 +498,7 @@ pub fn to_wire_request_with_scope(
             actual: Box::new(scope.clone()),
         });
     }
-    Ok(convert_request(request, options, Some(scope)))
+    Ok(())
 }
 
 fn convert_request(
@@ -376,13 +507,16 @@ fn convert_request(
     scope: Option<&ResolvedResponsesScope>,
 ) -> ResponsesRequest {
     let dialect = options.dialect;
+    let default_model = CodexModelCapabilities::default();
+    let model = options.codex_model.as_ref().unwrap_or(&default_model);
+    let lite = dialect == ResponsesDialect::Codex && model.use_responses_lite;
     let mut sorted_tools: Vec<_> = request.tools.iter().collect();
     sorted_tools.sort_by(|left, right| left.name.cmp(&right.name));
     let tools: Vec<_> = sorted_tools
         .into_iter()
         .map(|tool| to_wire_tool(tool, dialect))
         .collect();
-    let (tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty());
+    let (tool_choice, parallel_tool_calls) = dialect.tool_selection(!tools.is_empty(), lite);
     // 現在の tools でなく履歴全体から判定し、不正な call も output と同じ種別に保つ。
     let custom_call_ids: BTreeSet<_> = request
         .messages
@@ -402,8 +536,18 @@ fn convert_request(
         InstructionPlacement::TopLevel => (Some(joined), None),
         InstructionPlacement::DeveloperInput => (None, Some(developer_message(joined))),
     };
-    let input = developer
+    // Lite は tools を top-level に置かず、非空なら input 先頭の additional_tools にする。
+    let (tools, lite_tools) = if lite {
+        (
+            Vec::new(),
+            (!tools.is_empty()).then(|| additional_tools(tools)),
+        )
+    } else {
+        (tools, None)
+    };
+    let input = lite_tools
         .into_iter()
+        .chain(developer)
         .chain(
             request
                 .messages
@@ -426,27 +570,34 @@ fn convert_request(
     ResponsesRequest {
         model: request.model.clone(),
         stream: true,
-        service_tier: request.service_tier,
+        service_tier: dialect.service_tier(request.service_tier, model),
         instructions: top_level_instructions,
         input,
-        tools: dialect.tools(tools),
+        tools: dialect.tools(tools, lite),
         tool_choice,
         parallel_tool_calls,
-        reasoning: dialect.reasoning(request.reasoning_effort.as_deref()),
+        reasoning: dialect.reasoning(request.reasoning_effort.as_deref(), model),
         max_output_tokens: dialect.max_output_tokens(request.max_tokens),
         temperature: dialect.temperature(request.temperature),
         store: false,
         include: dialect.include(),
         prompt_cache_key: options.prompt_cache_key.clone(),
-        text: request.output_schema.as_ref().map(|schema| TextFormat {
-            format: JsonSchemaFormat {
-                r#type: "json_schema",
-                name: schema.name.clone(),
-                strict: true,
-                schema: schema.schema.clone(),
-            },
-        }),
+        text: text_controls(dialect.verbosity(model), request),
+        responses_lite: lite,
     }
+}
+
+fn text_controls(verbosity: Option<String>, request: &ChatRequest) -> Option<TextControls> {
+    let format = request
+        .output_schema
+        .as_ref()
+        .map(|schema| JsonSchemaFormat {
+            r#type: "json_schema",
+            name: schema.name.clone(),
+            strict: true,
+            schema: schema.schema.clone(),
+        });
+    (verbosity.is_some() || format.is_some()).then_some(TextControls { verbosity, format })
 }
 
 /// system message のテキストを instructions として連結します。
@@ -621,3 +772,6 @@ fn flush_message(items: &mut Vec<InputItem>, content: &mut Vec<InputContent>, ro
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lite_tests;

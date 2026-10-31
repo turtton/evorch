@@ -19,6 +19,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
 #[tokio::test]
 async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
         .and(header("authorization", "Bearer access-tok-1"))
@@ -50,7 +51,7 @@ async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
             reasoning_tokens: None,
         }
     );
-    let received = server.received_requests().await.unwrap();
+    let received = codex_support::response_requests(&server).await;
     let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
     assert_eq!(
         body,

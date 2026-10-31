@@ -240,8 +240,51 @@ fn harness_with_model(
     threshold: f64,
     configure: impl FnOnce(&mut Config),
 ) -> Harness {
+    harness_with_catalog(
+        wire,
+        model,
+        None,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+    )
+}
+
+/// The catalog capabilities that mark [`MODEL`] as a Responses Lite model.
+fn lite_capabilities() -> Value {
+    json!({
+        "use_responses_lite": true,
+        "default_reasoning_level": "low",
+        "support_verbosity": true,
+        "default_verbosity": "low"
+    })
+}
+
+/// Like [`harness_with_model`], merging `catalog_capabilities` into the Codex catalog entry
+/// of `model` (Codex wire only).
+#[allow(clippy::too_many_arguments)]
+fn harness_with_catalog(
+    wire: Wire,
+    model: &str,
+    catalog_capabilities: Option<Value>,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
+    let mock = match catalog_capabilities {
+        Some(capabilities) => mock.with_codex_model_capabilities(model, capabilities),
+        None => mock,
+    };
     let (base_url, credential) = match wire {
         Wire::Codex => (
             mock.codex_base_url(),
@@ -2258,12 +2301,22 @@ async fn compaction_restarts_cache_on(wire: Wire, reason: CompactionReason) {
 }
 
 async fn compaction_restarts_cache_on_harness(wire: Wire, reason: CompactionReason) -> Harness {
+    compaction_restarts_cache_with_catalog(wire, None, reason).await
+}
+
+async fn compaction_restarts_cache_with_catalog(
+    wire: Wire,
+    catalog_capabilities: Option<Value>,
+    reason: CompactionReason,
+) -> Harness {
     let review_storage = support::ReviewStorage::new();
     let automatic = reason == CompactionReason::Automatic;
     let old_reply =
         "old analysis that can be summarized ".repeat(if automatic { 6000 } else { 100 });
-    let mut harness = harness_with_wire(
+    let mut harness = harness_with_catalog(
         wire,
+        MODEL,
+        catalog_capabilities,
         vec![
             read_response(0),
             text_response(&old_reply),
@@ -5477,3 +5530,99 @@ async fn forked_threads_append_allowed_instructions_again_on_the_next_touch() {
 
 #[path = "cache_preservation/host_receipts.rs"]
 mod host_receipts;
+
+/// The Lite shape is the same on every request, the official-compaction call included:
+/// tools only in the leading `additional_tools` item (never top-level), then the developer
+/// message, parallel tool calls off and the all-turns reasoning context.
+fn assert_codex_lite_prefix(harness: &Harness) {
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == harness.wire.path())
+        .map(|request| request.body)
+        .collect();
+    assert!(
+        requests
+            .iter()
+            .filter(|body| !is_compaction_trigger_request(body))
+            .count()
+            >= 3
+    );
+    let (tools, developer) = (&requests[0]["input"][0], &requests[0]["input"][1]);
+    assert_eq!(tools["type"], "additional_tools");
+    assert_eq!(tools["role"], "developer");
+    assert!(tools["id"].as_str().unwrap().starts_with("at_"));
+    assert_eq!(tools["tools"][0]["type"], "namespace");
+    assert_eq!(tools["tools"][0]["name"], "functions");
+    assert!(!tools["tools"][0]["tools"].as_array().unwrap().is_empty());
+    assert_eq!(developer["role"], "developer");
+    assert!(developer["id"].as_str().unwrap().starts_with("msg_"));
+    for (index, request) in requests.iter().enumerate() {
+        assert!(request.get("tools").is_none(), "request {index}");
+        assert!(request.get("instructions").is_none(), "request {index}");
+        assert_eq!(request["parallel_tool_calls"], false, "request {index}");
+        assert_eq!(
+            request["reasoning"]["context"], "all_turns",
+            "request {index}"
+        );
+        assert_eq!(&request["input"][0], tools, "request {index}");
+        assert_eq!(&request["input"][1], developer, "request {index}");
+        let leading = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "additional_tools" || item["role"] == "developer")
+            .count();
+        assert_eq!(leading, 2, "request {index}");
+    }
+}
+
+// Given: a real `type = "openai-codex"` profile whose catalog marks the model Responses Lite
+// When: a worker runs twelve tool round trips and then answers
+// Then: every request keeps the previous input as a prefix (additional_tools and the
+// developer message included), the mock reports it as cached, and the Lite shape never changes
+#[tokio::test]
+async fn codex_lite_tools_and_instructions_are_a_stable_input_prefix_across_tool_turns() {
+    let script = (0..12)
+        .map(read_response)
+        .chain([text_response("done")])
+        .collect();
+    let mut harness = harness_with_catalog(
+        Wire::Codex,
+        MODEL,
+        Some(lite_capabilities()),
+        script,
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
+    );
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Read twelve results".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    assert_codex_lite_prefix(&harness);
+}
+
+// Given: a Responses Lite profile / When: history is compacted (manual, then automatic)
+// Then: additional_tools and the developer message are unchanged across the official
+// compaction boundary and later turns reuse the new prefix
+#[tokio::test]
+async fn codex_lite_shape_survives_compaction_boundaries() {
+    for reason in [CompactionReason::Manual, CompactionReason::Automatic] {
+        let harness =
+            compaction_restarts_cache_with_catalog(Wire::Codex, Some(lite_capabilities()), reason)
+                .await;
+        assert_codex_lite_prefix(&harness);
+    }
+}

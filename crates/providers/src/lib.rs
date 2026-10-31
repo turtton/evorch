@@ -37,7 +37,8 @@ pub use message::{
     RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
 pub use models::{
-    CODEX_CLIENT_VERSION, CodexModelInfo, list_codex_models, list_models, verify_connectivity,
+    CODEX_CLIENT_VERSION, CodexModelCapabilities, CodexModelInfo, list_codex_models, list_models,
+    verify_connectivity,
 };
 pub use responses_replay::{
     ResolvedResponsesScope, ResponsesAccount, ResponsesDialect, ResponsesOutputPosition,

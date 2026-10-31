@@ -15,6 +15,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=cache_regression_contract)
       | binary(=codex_cache_regression)
       | binary(=codex_unauthorized_recovery)
+      | binary(=codex_responses_lite)
       | binary(=claude_contract)
       | binary(=claude_transport)
       | binary(=claude_attempt_metadata)

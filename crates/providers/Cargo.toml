@@ -28,7 +28,7 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "time", "process", "io-util"] }
+tokio = { workspace = true, features = ["macros", "time", "process", "io-util", "sync"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5"] }
 webpki-root-certs = "1"

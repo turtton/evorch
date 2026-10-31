@@ -176,6 +176,7 @@ fn options(dialect: ResponsesDialect, prompt_cache_key: Option<&str>) -> Respons
     ResponsesRequestOptions {
         dialect,
         prompt_cache_key: prompt_cache_key.map(str::to_owned),
+        codex_model: None,
     }
 }
 

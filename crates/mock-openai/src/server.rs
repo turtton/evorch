@@ -97,6 +97,8 @@ pub struct StreamingMockOpenAi {
     scripts: Arc<Mutex<VecDeque<ScriptedResponse>>>,
     oauth_token: Arc<Mutex<Option<Value>>>,
     unauthorized: Arc<Mutex<UnauthorizedPlan>>,
+    /// Entries of the Codex catalog (`GET {codex base}/models`), by model slug.
+    codex_models: Arc<Mutex<Vec<Value>>>,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -187,7 +189,7 @@ impl StreamingMockOpenAi {
             .collect();
         let (models, codex_models): (Vec<_>, Vec<_>) = models.into_iter().unzip();
         let models = json!({"object": "list", "data": models});
-        let codex_models = json!({"models": codex_models});
+        let codex_models = Arc::new(Mutex::new(codex_models));
         let listener = TcpListener::bind("127.0.0.1:0")
             .unwrap_or_else(|error| panic!("mock_openai bind failed: {error}"));
         let address = listener
@@ -203,6 +205,7 @@ impl StreamingMockOpenAi {
         let token = Arc::clone(&oauth_token);
         let rejecting = Arc::clone(&unauthorized);
         let stopping = Arc::clone(&shutdown);
+        let served_codex_models = Arc::clone(&codex_models);
         let accept_thread = thread::spawn(move || {
             let mut connections = Vec::new();
             while !stopping.load(Ordering::SeqCst) {
@@ -222,7 +225,7 @@ impl StreamingMockOpenAi {
                 let token = Arc::clone(&token);
                 let rejecting = Arc::clone(&rejecting);
                 let models = models.clone();
-                let codex_models = codex_models.clone();
+                let codex_models = Arc::clone(&served_codex_models);
                 let mode = mode.clone();
                 let prompt_cache = prompt_cache.clone();
                 connections.push(thread::spawn(move || {
@@ -255,7 +258,8 @@ impl StreamingMockOpenAi {
                         return write_json(&mut stream, "200 OK", &models);
                     }
                     if listing_codex_models {
-                        return write_json(&mut stream, "200 OK", &codex_models);
+                        let models = codex_models.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        return write_json(&mut stream, "200 OK", &json!({"models": models}));
                     }
                     if refreshing_token {
                         let token = token.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -337,9 +341,34 @@ impl StreamingMockOpenAi {
             scripts,
             oauth_token,
             unauthorized,
+            codex_models,
             shutdown,
             accept_thread: Some(accept_thread),
         }
+    }
+
+    /// Merges `capabilities` (the catalog's `ModelInfo` capability fields, such as
+    /// `use_responses_lite` or `default_reasoning_level`) into the Codex catalog entry of
+    /// `slug`, adding the entry when the model is not listed yet. Call before the client
+    /// first reads the catalog.
+    #[must_use]
+    pub fn with_codex_model_capabilities(self, slug: &str, capabilities: Value) -> Self {
+        {
+            let mut models = self.codex_models.lock().unwrap_or_else(|e| e.into_inner());
+            let index = models
+                .iter()
+                .position(|entry| entry["slug"] == slug)
+                .unwrap_or_else(|| {
+                    models.push(json!({"slug": slug}));
+                    models.len() - 1
+                });
+            if let (Some(entry), Some(fields)) =
+                (models[index].as_object_mut(), capabilities.as_object())
+            {
+                entry.extend(fields.clone());
+            }
+        }
+        self
     }
 
     /// Returns the API base URL, including `/v1`.

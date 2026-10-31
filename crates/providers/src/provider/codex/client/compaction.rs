@@ -16,7 +16,8 @@ impl Compactor for CodexClient {
         let token = self.session.current().await?;
         let scope = self.responses_scope(request, &token);
         let wire = self
-            .scoped_wire_request(request, &scope)?
+            .scoped_wire_request(request, &scope)
+            .await?
             .with_compaction_trigger();
         let mut observer = self.observer(request, true);
         let result = async {

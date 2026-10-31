@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::{FutureExt, future::poll_fn};
 use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::{CompactionResult, Compactor, ProviderError};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -78,22 +78,44 @@ impl Exchange {
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let (received, request_received) = oneshot::channel();
         let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            socket.set_nodelay(true).unwrap();
-            let mut reader = BufReader::new(socket);
-            let mut content_length = None;
-            loop {
-                let mut line = String::new();
-                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
-                if line == "\r\n" {
-                    break;
+            // The client reads the model catalog once before its first request; answer it
+            // on its own connection and keep the next one for the compaction request.
+            let (mut reader, content_length) = loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                socket.set_nodelay(true).unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut content_length = None;
+                let mut first_line = None;
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    first_line.get_or_insert_with(|| line.clone());
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = Some(value.trim().parse::<usize>().unwrap());
+                    }
                 }
-                if let Some((name, value)) = line.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                if first_line.is_some_and(|line| line.starts_with("GET ")) {
+                    let body = r#"{"models":[]}"#;
+                    reader
+                        .get_mut()
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
                 }
-            }
+                break (reader, content_length);
+            };
             let mut body = vec![0; content_length.expect("JSON request has content-length")];
             reader.read_exact(&mut body).await.unwrap();
             received.send(reader.into_inner()).unwrap();
