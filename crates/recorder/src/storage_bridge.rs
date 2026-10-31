@@ -203,6 +203,12 @@ impl StorageBridge {
                 self.monitor.persisted();
                 self.halt.resumed();
             }
+            // The run or thread was deleted by retention: refusing is the
+            // expected answer, not a failure, and retrying cannot succeed.
+            Err(StorageError::Tombstoned { .. }) => {
+                self.monitor.skipped_tombstoned();
+                return Ok(());
+            }
             Err(error) => {
                 self.monitor.failed();
                 self.halt.failed(error);

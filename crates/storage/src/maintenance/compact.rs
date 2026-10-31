@@ -456,7 +456,7 @@ fn checkpoint(conn: &Connection) -> Result<(), StorageError> {
 /// events' triggers maintain the day/session indexes, but sessions' cached
 /// total is application-owned. Update it in the SAME transaction as each
 /// committed rewrite, not only in the final reconciliation.
-fn adjust_session_bytes(
+pub(crate) fn adjust_session_bytes(
     conn: &Connection,
     session: Option<&str>,
     before: u64,

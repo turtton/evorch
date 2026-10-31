@@ -585,6 +585,30 @@ pub(super) fn run_writer_with_index(
             Ok(Command::Statistics(reply)) => {
                 let _ = reply.send(Ok(state.statistics.clone()));
             }
+            Ok(Command::ReclaimStep(budget, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "retention reclaim suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::thread_retention::reclaim::reclaim_step(&state.conn, budget)
+                };
+                // Deleted rows invalidate the cached event totals.
+                state.accounting = event::EventAccounting::default();
+                let _ = reply.send(result);
+            }
+            Ok(Command::ReclaimMarkFiles(family, outcome, reply)) => {
+                let _ = reply.send(crate::repo::thread_retention::reclaim::mark_files(
+                    &state.conn,
+                    &family,
+                    outcome,
+                ));
+            }
+            Ok(Command::RetentionBackfillStep(rows, reply)) => {
+                let result = crate::migrations::backfill::backfill_step(&state.conn, rows);
+                state.accounting = event::EventAccounting::default();
+                let _ = reply.send(result);
+            }
             Ok(Command::DiagnosticCleanupStatus(scope, reply)) => {
                 let _ = reply.send(diagnostic::status(&state, scope));
             }
@@ -907,9 +931,19 @@ fn append_event_to_conn(
 }
 
 fn record_event_failure(state: &mut WriterState, result: &Result<(), StorageError>) {
-    if result.is_err() {
-        state.statistics.event_write_failures =
-            state.statistics.event_write_failures.saturating_add(1);
+    match result {
+        Ok(()) => {}
+        // A deleted run's late event is refused on purpose; it is not a write failure.
+        Err(StorageError::Tombstoned { .. }) => {
+            state.statistics.events_rejected_tombstoned = state
+                .statistics
+                .events_rejected_tombstoned
+                .saturating_add(1);
+        }
+        Err(_) => {
+            state.statistics.event_write_failures =
+                state.statistics.event_write_failures.saturating_add(1);
+        }
     }
 }
 

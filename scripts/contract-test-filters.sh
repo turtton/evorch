@@ -46,7 +46,7 @@ CACHE_CONTRACT_FILTER='
   | (package(=gui) & binary(=artifact_pages_cache))
 '
 IO_CONTRACT_FILTER='
-  (package(=storage) & binary(=io_contracts))
+  (package(=storage) & (binary(=io_contracts) | binary(=retention_io_contracts)))
   | (package(=runtime) & kind(lib) & test(ownership::tests))
   | (package(=gui) & (
       (kind(lib) & test(storage_bridge))

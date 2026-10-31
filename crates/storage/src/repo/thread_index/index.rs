@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use rusqlite::{Connection, params};
 
 use super::*;
+use crate::thread_index::{PurgeProgress, PurgeTarget};
 
 /// Failures of one source revision before it becomes `blocked`.
 pub(crate) const MAX_ATTEMPTS: u32 = 5;
@@ -26,6 +27,7 @@ fn eviction_name(reason: IndexEvictionReason) -> &'static str {
         IndexEvictionReason::LogicalBudget => "logical_budget",
         IndexEvictionReason::Oversized => "oversized",
         IndexEvictionReason::PhysicalReclaim => "physical_reclaim",
+        IndexEvictionReason::Archived => "archived",
     }
 }
 
@@ -670,4 +672,117 @@ impl ThreadIndexRepository for SqliteThreadIndex<'_> {
             Ok(())
         })
     }
+}
+
+/// Removes up to `limit_rows` blocks (and at least one) of `run_id`'s index, stopping
+/// once `limit_text_bytes` of text are taken. The FTS rows follow through the
+/// blocks' delete trigger. The step only runs when the run's state allows
+/// `target`; otherwise it does nothing. When the last block is gone the row
+/// reaches its end state in the same transaction: `deleted` for a tombstoned
+/// run, charges cleared (state kept) for an archived eviction.
+///
+/// It does not depend on the index job being enabled or leased: the caller is
+/// the writer thread, which owns every write.
+pub(crate) fn purge_index_rows(
+    conn: &Connection,
+    run_id: &str,
+    target: PurgeTarget,
+    limit_rows: usize,
+    limit_text_bytes: u64,
+) -> Result<PurgeProgress, StorageError> {
+    let idle = PurgeProgress {
+        rows: 0,
+        text_bytes: 0,
+        remaining: false,
+    };
+    atomic(conn, || {
+        let allowed: bool = match target {
+            PurgeTarget::Tombstoned => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1) \
+                 AND EXISTS(SELECT 1 FROM thread_index_runs WHERE run_id = ?1)",
+                [run_id],
+                |row| row.get(0),
+            )?,
+            PurgeTarget::Archived => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_index_runs WHERE run_id = ?1 \
+                 AND state = 'evicted' AND evicted_reason = 'archived')",
+                [run_id],
+                |row| row.get(0),
+            )?,
+        };
+        if !allowed {
+            return Ok(idle);
+        }
+        let limit = i64::try_from(limit_rows.max(1)).unwrap_or(i64::MAX);
+        let mut ids = Vec::new();
+        let mut text_bytes = 0_u64;
+        {
+            let mut statement = conn.prepare_cached(
+                "SELECT id, length(CAST(text AS BLOB)) FROM conversation_blocks \
+                 WHERE run_id = ?1 ORDER BY id LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![run_id, limit])?;
+            while let Some(row) = rows.next()? {
+                let bytes = row.get::<_, u64>(1)?;
+                if !ids.is_empty() && text_bytes.saturating_add(bytes) > limit_text_bytes {
+                    break;
+                }
+                ids.push(row.get::<_, i64>(0)?);
+                text_bytes = text_bytes.saturating_add(bytes);
+            }
+        }
+        if !ids.is_empty() {
+            let listed = serde_json::to_string(&ids)
+                .map_err(|error| StorageError::Serialization(error.to_string()))?;
+            conn.execute(
+                "DELETE FROM conversation_blocks WHERE id IN (SELECT value FROM json_each(?1))",
+                [listed],
+            )?;
+            // A tombstoned run's row may only be terminalised (see the fence on
+            // `thread_index_runs`), so its charge stays until the last block is
+            // gone; an archived eviction is free to shrink step by step.
+            if target == PurgeTarget::Archived {
+                conn.execute(
+                    "UPDATE thread_index_runs SET text_bytes = max(0, text_bytes - ?2), \
+                     charged_bytes = max(0, charged_bytes - ?2) WHERE run_id = ?1",
+                    params![run_id, text_bytes],
+                )?;
+            }
+        }
+        let remaining: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_blocks WHERE run_id = ?1)",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if !remaining {
+            match target {
+                PurgeTarget::Tombstoned => {
+                    SqliteThreadIndex::new(conn).drop_index(
+                        run_id,
+                        "state = 'deleted', source_present = 0, evicted_reason = NULL",
+                    )?;
+                    conn.execute(
+                        "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
+                         WHERE run_id = ?1 AND state = 'pending'",
+                        params![run_id, to_json(&RequestGapReason::Deleted)?],
+                    )?;
+                }
+                PurgeTarget::Archived => {
+                    conn.execute(
+                        "UPDATE thread_index_runs SET text_bytes = 0, attribute_bytes = 0, \
+                         block_count = 0, charged_bytes = 0, indexed_revision = NULL, \
+                         indexed_extractor_version = NULL, indexed_accounting_version = NULL, \
+                         indexed_at_ns = NULL, work_generation = work_generation + 1 \
+                         WHERE run_id = ?1",
+                        [run_id],
+                    )?;
+                }
+            }
+        }
+        Ok(PurgeProgress {
+            rows: ids.len(),
+            text_bytes,
+            remaining,
+        })
+    })
 }

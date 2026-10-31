@@ -162,6 +162,8 @@ fn thread_upsert(thread: &ThreadRecord, project_root: Option<String>) -> Option<
         // Older records without a creation time send 0, which keeps the stored one.
         created_at_ns: thread.created_at.saturating_mul(NANOS_PER_SECOND),
         updated_at_ns: thread.last_activity().saturating_mul(NANOS_PER_SECOND),
+        // The sidebar does not record archive times, pins or revisions yet.
+        ..ThreadUpsert::default()
     })
 }
 

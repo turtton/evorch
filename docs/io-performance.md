@@ -99,6 +99,20 @@ monitor が件数を数える。
   GUI の履歴復元と eval の reader が `MessagePartAssembler` で再構成する。
   `total` 個の連続した部分がそろわない応答は完了済みメッセージにしない。
 
+### アーカイブ済みスレッドの回収（storage 基盤）
+
+`StorageHandle::reclaim_step` は、確定済み family の行を 1 transaction ずつ有界に削除する
+（詳細は [storage-maintenance.md](storage-maintenance.md#スレッドの期限削除storage-基盤)）。
+
+- 1 transaction の上限: events は 500 行かつ格納 4 MiB、小さな表は 500 行、ledger と
+  ThreadTodoUpdated は走査 2,000 行（一致 0 件でも cursor は進む）、索引は 200 行かつ 2 MiB、
+  `run_contexts` は 1 行。大きい行は `reclaim_oversized` に回し、起動時の排他枠で削除する。
+- 対象が無い step は DB に書かない。
+- 履歴復元に必要な events の帰属補完（`Orchestrator` の `TaskProgressed` /
+  `TaskCheckpoint` / `ThreadGoalUpdated` の `run_id`）は backfill の第 2 対象で、
+  `StorageHandle::retention_backfill_step` が `id` 順に最大 N 行を読み、`run_id` だけを更新する。
+- 決定的な契約は `crates/storage/tests/retention_io_contracts.rs`（WAL フレーム数と VM 命令数）。
+
 ### ライブの retention（#427）
 
 writer の保守 tick（`maintenance::retention_events`）が、1 transaction で次を削除する。

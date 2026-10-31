@@ -136,6 +136,26 @@ pub enum IndexEvictionReason {
     LogicalBudget,
     Oversized,
     PhysicalReclaim,
+    /// The run's thread was archived: blocks are purged, the run stays known.
+    Archived,
+}
+
+/// Which kind of removal `purge_index_rows` may carry out for a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeTarget {
+    /// The run was tombstoned by a confirmed deletion; the row ends `deleted`.
+    Tombstoned,
+    /// The run was evicted with reason `archived`; the row stays `evicted`.
+    Archived,
+}
+
+/// One bounded purge step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeProgress {
+    pub rows: usize,
+    pub text_bytes: u64,
+    /// More blocks (or the final state change) are left for a later step.
+    pub remaining: bool,
 }
 
 /// W1 SQL boundary called only by W2's single writer. Replacement diffs,
