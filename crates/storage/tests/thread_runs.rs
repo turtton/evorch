@@ -33,6 +33,7 @@ fn context(run_id: &str, parent_run_id: Option<&str>) -> RunContextRecord {
 
 fn request(id: &str, run_id: &str, parent_run_id: Option<&str>) -> UsageRequestRecord {
     UsageRequestRecord {
+        usage_reported: true,
         request_id: id.into(),
         at_ns: 1,
         provider: "openai".into(),

@@ -161,6 +161,7 @@ impl StreamAccumulator {
                 content,
             },
             usage,
+            usage_reported: true,
             finish_reason,
         }
     }
@@ -210,6 +211,7 @@ mod tests {
     fn completed(finish_reason: FinishReason) -> StreamEvent {
         StreamEvent::Completed {
             response: ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: Role::Assistant,
                     content: Vec::new(),

@@ -89,10 +89,53 @@ catalog again. `list_models` reports the stored outcome, failure included.
 | --- | --- |
 | `response.output_text.delta`, `response.output_item.added/done`, function-call argument events | Handled by the shared Responses interpreter |
 | `response.reasoning_summary_text.delta` | Handled as a single reasoning delta (no `summary_index`) |
-| `response.completed` | Usage is required (Codex treats it as optional) |
-| `response.incomplete`, `response.failed`, top-level `error` | Flattened to evorch's error classes; Codex distinguishes more kinds and a nested `error` frame (difference) |
+| `response.completed` | `usage` is optional, as in Codex (`null` or an absent key); `response.id` is read for logs only (Codex requires it). See "Missing usage" below |
+| `response.incomplete` | Mapped to a finish reason, not an error; `usage` is optional. See "`response.incomplete`" below |
+| `response.failed`, top-level `error` | Flattened to evorch's error classes; Codex distinguishes more kinds and a nested `error` frame (difference) |
 | Unknown events | Ignored; matches |
 | Malformed JSON | An error (stricter than Codex) |
+
+#### Missing usage
+
+When the terminal event carries no usage, evorch finishes the response normally
+and does not invent a zero: no usage event is recorded, no cache-reuse
+observation is made, and one `ProviderUsageMissing` diagnostic (warning) is
+emitted per response; the response id is logged. The response carries
+`usage_reported = false` (`ChatResponse`, `CompactionResult`), and the
+request-completed event carries the same flag with zero token counts as
+placeholders. Downstream, those zeros are never treated as measurements:
+
+- the usage ledger stores the flag (`usage_requests.usage_reported`, and
+  `usage_daily.unreported_count` after rollup) and no cost for the request (a
+  reported zero keeps `$0`); the Usage tab, in both recorded and current price
+  modes, marks a total that contains such requests as a lower bound (`*`), and
+  the evaluation report lists the models as "no reported usage" and treats the
+  cost as incomplete, for ledger records and events alike;
+- the GUI never prices the request as `$0`: the run's live cost is marked partial,
+  the request is not shown as the latest context size, and the previous one is
+  cleared;
+- OTel spans omit `gen_ai.usage.*`;
+- the runtime leaves `last_usage` empty, so context sizing uses the serialized
+  byte estimate, and charges an estimate (the request as actually sent, with its
+  instructions and tool definitions, plus the response) to the run budget, the
+  goal usage, summary and official-compaction calls and the rules injection
+  budget instead of zero;
+- the next request's cache baseline is the last reported request.
+
+The compaction request follows the same rule: its encrypted state is returned and
+only the usage record is skipped (the budget is charged an estimate).
+
+#### `response.incomplete`
+
+| `incomplete_details.reason` | Codex 0.166.0 | evorch |
+| --- | --- | --- |
+| `max_output_tokens` | `ResponseIncomplete` error | Finish reason `Length`; partial output and tool calls kept (difference) |
+| `content_filter` | `ContentFilter` error (retried) | Finish reason `ContentFilter`; partial output and tool calls kept, no retry (difference) |
+| `interrupted` | Completed with `end_turn = false`, so the turn continues | Finish reason `Other("incomplete: interrupted")`; tool calls dropped, the run ends in an error, no continuation (difference) |
+| other or missing | `ResponseIncomplete` error | Finish reason `Other("incomplete: <reason>")` (`Other("incomplete")` when missing); tool calls dropped, the run ends in an error |
+
+Adding continuation for `interrupted` and a retry for `content_filter` is
+deliberately out of scope for now.
 
 ### Transport and other surfaces
 

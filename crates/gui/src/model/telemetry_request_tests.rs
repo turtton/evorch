@@ -21,6 +21,7 @@ fn observed(run: &str, input: u64, cached: u64, output: u64, ttft: u64) -> [Even
             run_id: Some(run.into()),
         }),
         Event::new(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: format!("request-{run}"),
             provider: "provider".into(),
             profile: None,
@@ -634,4 +635,69 @@ fn image_success_and_failure_preserve_conversation_metrics_between_turns() {
         assert_eq!(row.rated_output_tokens, 100);
         assert_eq!(row.cache_reuse.completed_requests, 2);
     }
+}
+
+fn with_usage_reported(mut events: [Event; 2], reported: bool) -> [Event; 2] {
+    let EventKind::Provider(ProviderEvent::RequestCompleted { usage_reported, .. }) =
+        &mut events[1].kind
+    else {
+        unreachable!("observed() ends with RequestCompleted")
+    };
+    *usage_reported = reported;
+    events
+}
+
+// Given: a request with known usage, then one whose provider reported none (placeholder zeros),
+// then one that explicitly reported zero tokens
+// When: each completes / Then: the unreported one is never priced and keeps the run's cost
+// partial, adds no usage counters, and clears the stale context size; a reported zero is billed
+#[test]
+fn unreported_usage_is_not_billed_or_shown_as_a_known_zero_context() {
+    let mut telemetry = TelemetryOverlay::new();
+    for event in with_usage_reported(observed("run", 1_000, 500, 40, 100), true) {
+        telemetry.apply_event(&event);
+    }
+    let flags = |telemetry: &TelemetryOverlay| {
+        telemetry.billed["run"]
+            .iter()
+            .map(|request| request.usage_reported)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(flags(&telemetry), [true]);
+    assert_eq!(
+        telemetry.rows["run"]
+            .latest_request_usage()
+            .map(|u| u.input),
+        Some(1_000)
+    );
+
+    for event in with_usage_reported(observed("run", 0, 0, 0, 100), false) {
+        telemetry.apply_event(&event);
+    }
+    let row = &telemetry.rows["run"];
+    assert_eq!(
+        flags(&telemetry),
+        [true, false],
+        "kept so the cost is marked partial"
+    );
+    assert_eq!(row.usage.input, 1_000);
+    assert_eq!(row.conversation_usage.input, 1_000);
+    assert!(row.latest_request_usage().is_none());
+    assert!(row.context_used_tokens().is_none());
+    assert_eq!(row.context_pressure(), None);
+    assert!(
+        row.last_finish_reason.is_some(),
+        "the request still completed"
+    );
+
+    for event in with_usage_reported(observed("run", 0, 0, 0, 100), true) {
+        telemetry.apply_event(&event);
+    }
+    assert_eq!(flags(&telemetry), [true, false, true]);
+    assert_eq!(
+        telemetry.rows["run"]
+            .latest_request_usage()
+            .map(|u| (u.input, u.output)),
+        Some((0, 0))
+    );
 }

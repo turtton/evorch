@@ -75,6 +75,7 @@ async fn client_stream_text_yields_text_deltas_then_completed() {
             },
             StreamEvent::Completed {
                 response: ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: Role::Assistant,
                         content: vec![ContentBlock::Text {
@@ -137,6 +138,7 @@ async fn client_stream_tool_call_yields_tool_call_deltas_and_tool_use_block() {
             },
             StreamEvent::Completed {
                 response: ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: Role::Assistant,
                         content: vec![ContentBlock::ToolUse {

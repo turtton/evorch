@@ -125,6 +125,7 @@ fn usage_event() -> Event {
 
 fn completed_event() -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "req-1".to_owned(),
         provider: "openai".to_owned(),
         profile: Some("primary".to_owned()),

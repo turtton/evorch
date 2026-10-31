@@ -476,6 +476,7 @@ models = [{ id = "base", enabled = true, input_price = 1.0, output_price = 2.0 }
             role: "worker".into(),
         }),
         Event::new(event_bus::ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: "request-1".into(),
             provider: "local".into(),
             profile: None,

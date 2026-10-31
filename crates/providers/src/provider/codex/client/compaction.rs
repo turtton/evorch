@@ -58,8 +58,12 @@ impl Compactor for CodexClient {
         .await;
         match &result {
             Ok(result) => {
-                UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL)
-                    .emit_usage(&request.model, &result.usage);
+                if result.usage_reported {
+                    UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL)
+                        .emit_usage(&request.model, &result.usage);
+                } else {
+                    observer.mark_usage_missing();
+                }
                 observer.emit_completed(&result.usage, FinishReason::Stop);
             }
             Err(error) => observer.emit_failed(error),
@@ -100,22 +104,35 @@ impl CompactionStream {
                 self.encrypted_content = Some(blob.to_owned());
             }
             "response.completed" => {
-                let usage: ResponseUsage =
-                    serde_json::from_value(value["response"]["usage"].clone())
-                        .map_err(|_| invalid("Codex compaction usage が不正です"))?;
+                // Codex は compaction の usage を任意とする。null / キー欠落は未報告。
+                let usage = match &value["response"]["usage"] {
+                    serde_json::Value::Null => None,
+                    usage => Some(
+                        serde_json::from_value::<ResponseUsage>(usage.clone())
+                            .map_err(|_| invalid("Codex compaction usage が不正です"))?,
+                    ),
+                };
+                if usage.is_none() {
+                    tracing::warn!(
+                        response_id = value["response"]["id"].as_str(),
+                        "Codex compaction response に usage がありません。使用量は未報告として扱います"
+                    );
+                }
+                let usage_reported = usage.is_some();
                 return Ok(Some(CompactionResult {
                     encrypted_content: self
                         .encrypted_content
                         .take()
                         .ok_or_else(|| invalid("Codex response に compaction item がありません"))?,
-                    usage: Usage {
+                    usage: usage.map_or_else(Usage::default, |usage| Usage {
                         context_tokens: None,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                         cache_read_tokens: usage.input_tokens_details.cached_tokens,
                         cache_write_tokens: 0,
                         reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
-                    },
+                    }),
+                    usage_reported,
                 }));
             }
             "response.failed" | "response.incomplete" | "error" => {

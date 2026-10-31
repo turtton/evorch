@@ -23,9 +23,9 @@ pub fn insert_requests(
             "INSERT OR IGNORE INTO usage_requests (request_id, at_ns, provider, profile, model, \
              run_id, parent_run_id, role, purpose, status, failure, finish_reason, input_tokens, \
              output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, ttft_ms, \
-             duration_ms, cost_usd, service_tier) \
+             duration_ms, cost_usd, service_tier, usage_reported) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-             ?18, ?19, ?20, ?21)",
+             ?18, ?19, ?20, ?21, ?22)",
         )?;
         for record in records {
             statement.execute(params![
@@ -56,6 +56,7 @@ pub fn insert_requests(
                 to_i64(record.duration_ms, "duration")?,
                 record.cost_usd.filter(|cost| cost.is_finite()),
                 record.service_tier,
+                record.usage_reported,
             ])?;
         }
     }
@@ -103,7 +104,7 @@ pub fn roll_up_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, Storag
              request_count, failed_count, input_tokens, output_tokens, cache_read_tokens, \
              cache_write_tokens, reasoning_tokens, cost_usd, unpriced_input_tokens, \
              unpriced_output_tokens, unpriced_cache_read_tokens, unpriced_cache_write_tokens, \
-             ttft_sum_ms, ttft_count, duration_sum_ms) \
+             unreported_count, ttft_sum_ms, ttft_count, duration_sum_ms) \
              SELECT date(r.at_ns / 1000000000, 'unixepoch', 'localtime'), r.provider, \
              COALESCE(r.profile, ''), r.model, COALESCE(t.project_id, ''), COALESCE(r.role, ''), \
              COALESCE(r.purpose, ''), COUNT(*), SUM(r.status = 'failed'), SUM(r.input_tokens), \
@@ -113,7 +114,7 @@ pub fn roll_up_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, Storag
              SUM(CASE WHEN r.cost_usd IS NULL THEN r.output_tokens ELSE 0 END), \
              SUM(CASE WHEN r.cost_usd IS NULL THEN r.cache_read_tokens ELSE 0 END), \
              SUM(CASE WHEN r.cost_usd IS NULL THEN r.cache_write_tokens ELSE 0 END), \
-             COALESCE(SUM(r.ttft_ms), 0), COUNT(r.ttft_ms), SUM(r.duration_ms) \
+             SUM(r.usage_reported = 0), COALESCE(SUM(r.ttft_ms), 0), COUNT(r.ttft_ms), SUM(r.duration_ms) \
              FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id \
              WHERE r.rowid IN ({BATCH}) \
              GROUP BY 1, 2, 3, 4, 5, 6, 7 \
@@ -132,6 +133,7 @@ pub fn roll_up_before(conn: &Connection, cutoff_ns: i64) -> Result<usize, Storag
              unpriced_cache_read_tokens + excluded.unpriced_cache_read_tokens, \
              unpriced_cache_write_tokens = \
              unpriced_cache_write_tokens + excluded.unpriced_cache_write_tokens, \
+             unreported_count = unreported_count + excluded.unreported_count, \
              ttft_sum_ms = ttft_sum_ms + excluded.ttft_sum_ms, \
              ttft_count = ttft_count + excluded.ttft_count, \
              duration_sum_ms = duration_sum_ms + excluded.duration_sum_ms"
@@ -152,7 +154,7 @@ const REQUEST_COLUMNS: &str = "SELECT r.request_id, r.at_ns, r.provider, r.profi
      r.reasoning_tokens, r.ttft_ms, r.duration_ms, r.cost_usd, r.service_tier, t.thread_id, \
      t.project_id, \
      date(r.at_ns / 1000000000, 'unixepoch', 'localtime'), \
-     time(r.at_ns / 1000000000, 'unixepoch', 'localtime') \
+     time(r.at_ns / 1000000000, 'unixepoch', 'localtime'), r.usage_reported \
      FROM usage_requests r LEFT JOIN usage_run_threads t ON t.run_id = r.run_id";
 
 /// Requests in `[from_ns, to_ns)` ordered by time, joined with their owner.
@@ -258,7 +260,7 @@ pub fn list_daily(
          failed_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, \
          reasoning_tokens, cost_usd, unpriced_input_tokens, unpriced_output_tokens, \
          unpriced_cache_read_tokens, unpriced_cache_write_tokens, ttft_sum_ms, ttft_count, \
-         duration_sum_ms FROM usage_daily WHERE day >= ?1 AND day <= ?2 \
+         duration_sum_ms, unreported_count FROM usage_daily WHERE day >= ?1 AND day <= ?2 \
          ORDER BY day, provider, profile, model, project_id, role, purpose",
     )?;
     let mut rows = statement.query(params![from_day, to_day])?;
@@ -290,6 +292,7 @@ pub fn list_daily(
             ttft_sum_ms: count(19, "ttft sum")?,
             ttft_count: count(20, "ttft count")?,
             duration_sum_ms: count(21, "duration sum")?,
+            unreported_count: count(22, "unreported count")?,
         });
     }
     Ok(result)
@@ -323,6 +326,7 @@ fn request_record(row: &Row<'_>) -> Result<UsageRequestRecord, StorageError> {
         duration_ms: from_i64(row.get(18)?, "duration")?,
         cost_usd: row.get(19)?,
         service_tier: row.get(20)?,
+        usage_reported: row.get(25)?,
     })
 }
 

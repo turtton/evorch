@@ -54,6 +54,7 @@ fn reasoning_reaches_gui_transcripts_and_renders_when_agent_loop_streams() {
     let executor = Arc::new(ToolExecutor::new(bus.clone()));
     let model = Arc::new(ScriptedModel {
         response: Mutex::new(Some(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: MessageRole::Assistant,
                 content: vec![
@@ -196,6 +197,7 @@ fn responses_native_state_never_reaches_transcripts_panes_or_recorded_events() {
     let executor = Arc::new(ToolExecutor::new(bus.clone()));
     let model = Arc::new(ScriptedModel {
         response: Mutex::new(Some(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: MessageRole::Assistant,
                 content: vec![

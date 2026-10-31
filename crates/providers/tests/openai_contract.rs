@@ -273,6 +273,7 @@ async fn stream_text_emits_deltas_and_completed_response() {
         events[4..],
         [StreamEvent::Completed {
             response: providers::ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: Role::Assistant,
                     content: expected_text_content(),

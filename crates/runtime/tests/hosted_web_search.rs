@@ -120,6 +120,7 @@ impl AgentModel for SearchModel {
             self.release.notified().await;
         }
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: if first {

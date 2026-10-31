@@ -18,13 +18,15 @@ impl SpanMapper {
                 input_tokens,
                 output_tokens,
                 finish_reason,
+                usage_reported,
                 ..
             } => {
                 let mut terminal = Vec::with_capacity(3);
-                if let Ok(value) = i64::try_from(*input_tokens) {
+                // Placeholder zeros are not usage: leave the attributes off when unreported.
+                if *usage_reported && let Ok(value) = i64::try_from(*input_tokens) {
                     terminal.push(SpanAttribute::new("gen_ai.usage.input_tokens", value));
                 }
-                if let Ok(value) = i64::try_from(*output_tokens) {
+                if *usage_reported && let Ok(value) = i64::try_from(*output_tokens) {
                     terminal.push(SpanAttribute::new("gen_ai.usage.output_tokens", value));
                 }
                 terminal.push(SpanAttribute::new(

@@ -334,6 +334,7 @@ impl AgentModel for DemoScriptModel {
             _ => {}
         }
         self.bus.emit(Event::new(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id,
             provider: "demo".to_string(),
             profile: None,
@@ -431,6 +432,7 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> ChatResponse
 
 fn response(content: Vec<ContentBlock>, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: MessageRole::Assistant,
             content,

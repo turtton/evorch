@@ -95,6 +95,7 @@ impl Fixture {
         let events = bus.subscribe();
         let responses = (1..=3)
             .map(|index| ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {

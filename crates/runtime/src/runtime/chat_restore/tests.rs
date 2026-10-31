@@ -28,6 +28,7 @@ impl AgentModel for CompletingModel {
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text {

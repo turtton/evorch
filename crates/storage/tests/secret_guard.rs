@@ -199,6 +199,7 @@ fn rejected_event_preserves_events_rows_and_session_bytes() {
         ),
         event(
             ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "req-1".into(),
                 provider: "p".into(),
                 profile: None,

@@ -44,6 +44,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v31.sql"),
     include_str!("migrations/v32.sql"),
     include_str!("migrations/v33.sql"),
+    include_str!("migrations/v34.sql"),
 ];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {

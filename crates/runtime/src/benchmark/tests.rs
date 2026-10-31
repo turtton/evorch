@@ -39,6 +39,7 @@ fn settings(model: &str) -> BenchmarkModelSettings {
 
 fn response(content: ContentBlock, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: providers::Role::Assistant,
             content: vec![content],

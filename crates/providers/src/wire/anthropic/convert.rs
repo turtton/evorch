@@ -116,6 +116,7 @@ fn wire_input_schema(schema: &serde_json::Value) -> serde_json::Value {
 /// 応答中に tool result が現れた場合も wire role を保ったまま忠実に変換する。
 pub fn from_wire_response(response: WireMessagesResponse) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: match response.role {
                 WireRole::User => Role::User,

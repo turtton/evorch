@@ -25,7 +25,7 @@ impl AgentModel for QueueModel {
                 matches!(block, ContentBlock::ToolResult { tool_call_id, .. } if tool_call_id == "inspect-source")
             })
         {
-            return Ok(ChatResponse {
+            return Ok(ChatResponse { usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![ContentBlock::ToolUse {
@@ -65,6 +65,7 @@ impl AgentModel for QueueModel {
             assert_eq!(inspected["total"], 1);
         }
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::Text {

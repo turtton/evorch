@@ -47,6 +47,7 @@ impl AgentModel for ScriptedModel {
         let step = self.steps.lock().unwrap().pop_front().unwrap();
         match step {
             Step::Tool(name, input) => Ok(providers::ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![ContentBlock::ToolUse {

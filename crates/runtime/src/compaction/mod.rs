@@ -6,6 +6,17 @@ pub(crate) mod summary;
 #[cfg(test)]
 mod window_tests;
 
+/// Estimated tokens of a provider-side compaction request: instructions, the compacted
+/// history and the tool definitions it carries.
+pub(crate) fn official_request_tokens(
+    instructions: &[Message],
+    compacted: &[Message],
+    tools: &[providers::ToolSpec],
+) -> u64 {
+    let history: Vec<_> = instructions.iter().chain(compacted).cloned().collect();
+    estimator::estimate_request(&history, tools, None, None)
+}
+
 use std::sync::atomic::Ordering;
 
 use event_bus::event::diagnostic_codes;
@@ -289,7 +300,19 @@ pub(crate) async fn compact_candidate(
     let (summary_result, summary_usage) = if let Some(result) = &official {
         (
             Ok("[provider-side API compaction]".to_owned()),
-            Some(result.usage),
+            Some(if result.usage_reported {
+                result.usage
+            } else {
+                // Unreported: charge the request that was sent (instructions, history and
+                // tool definitions) instead of a free call. The reply is an opaque blob.
+                estimator::estimated_usage(
+                    official_request_tokens(&instructions, &compacted, &state.tool_specs),
+                    &providers::Message {
+                        role: providers::Role::Assistant,
+                        content: Vec::new(),
+                    },
+                )
+            }),
         )
     } else {
         match context.text_compaction_view() {

@@ -43,6 +43,7 @@ pub(super) async fn execute(
     let mut responses = VecDeque::new();
     for (index, (name, input)) in calls.iter().enumerate() {
         responses.push_back(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
@@ -56,6 +57,7 @@ pub(super) async fn execute(
         });
     }
     responses.push_back(ChatResponse {
+        usage_reported: true,
         message: Message {
             role: providers::Role::Assistant,
             content: vec![ContentBlock::Text {

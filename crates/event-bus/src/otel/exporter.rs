@@ -322,6 +322,7 @@ mod tests {
 
     fn completed_event(model: &str, profile: &str) -> Event {
         Event::new(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: "req-1".to_owned(),
             provider: "openai".to_owned(),
             profile: Some(profile.to_owned()),

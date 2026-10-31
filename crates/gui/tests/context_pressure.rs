@@ -25,6 +25,7 @@ fn settings(window: Option<u64>) -> ProviderSettingsModel {
 
 fn completed(input: u64) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: format!("request-{input}"),
         provider: "vendor".into(),
         profile: Some("local".into()),

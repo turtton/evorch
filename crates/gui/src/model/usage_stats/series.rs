@@ -326,6 +326,7 @@ mod tests {
 
     fn fact(day: &str, model: &str, project: &str, cost: f64, ttft: Option<u64>) -> UsageFact {
         UsageFact {
+            unreported_requests: 0,
             day: LocalDay::parse(day).unwrap(),
             at_ns: Some(0),
             provider: "openai".into(),

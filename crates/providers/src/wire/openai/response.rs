@@ -63,6 +63,7 @@ pub fn from_wire_response(wire: &WireChatResponse) -> Result<ChatResponse, Provi
             .collect::<Result<Vec<_>, ProviderError>>()?,
     );
     Ok(ChatResponse {
+        usage_reported: true,
         message: Message {
             role: Role::Assistant,
             content,

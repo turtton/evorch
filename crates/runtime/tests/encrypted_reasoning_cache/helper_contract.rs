@@ -25,6 +25,7 @@ fn started(id: &str) -> Event {
 
 fn completed(id: &str, input_tokens: u64, cache_read_tokens: u64) -> Event {
     Event::new(EventKind::Provider(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: id.into(),
         provider: "openai-codex".into(),
         profile: Some("work".into()),

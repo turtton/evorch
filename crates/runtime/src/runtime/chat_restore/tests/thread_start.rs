@@ -20,6 +20,7 @@ impl AgentModel for EditingModel {
         std::fs::write(self.project.join("agent-edit.txt"), "edited").unwrap();
         std::fs::write(self.project.join("tracked.txt"), "edited\n").unwrap();
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text {

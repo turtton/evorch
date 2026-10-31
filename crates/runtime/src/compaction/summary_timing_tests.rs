@@ -48,6 +48,7 @@ impl AgentModel for SlowStream {
             }));
         }
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::Text {
@@ -146,4 +147,100 @@ async fn summary_exposes_reported_usage_for_run_budget_accounting() {
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.output_tokens, 40);
     assert_eq!(usage.cache_read_tokens, 1000);
+}
+
+/// Records what the summarizer actually sent and answers without reporting usage.
+struct Capturing {
+    sent: std::sync::Mutex<Vec<Message>>,
+    usage_reported: bool,
+}
+
+#[async_trait]
+impl AgentModel for Capturing {
+    async fn complete(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        _: &[Message],
+        _: &[ToolSpec],
+    ) -> Result<ChatResponse, RuntimeError> {
+        panic!("summary must use streaming")
+    }
+
+    async fn complete_streaming(
+        &self,
+        _: &AgentInvocationContext,
+        _: Role,
+        messages: &[Message],
+        _: &[ToolSpec],
+        _: &EventBus,
+    ) -> Result<ChatResponse, RuntimeError> {
+        *self.sent.lock().unwrap() = messages.to_vec();
+        Ok(ChatResponse {
+            usage_reported: self.usage_reported,
+            message: Message {
+                role: providers::Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "continuation summary".into(),
+                }],
+            },
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+        })
+    }
+
+    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+        "capturing".into()
+    }
+}
+
+async fn summarize_with(usage_reported: bool, goal: &str) -> (Usage, Vec<Message>) {
+    let model = Arc::new(Capturing {
+        sent: std::sync::Mutex::new(Vec::new()),
+        usage_reported,
+    });
+    let summarizer = ModelSummarizer {
+        model: model.clone(),
+        ..summarizer(1, 0)
+    };
+    let history = [Message {
+        role: providers::Role::User,
+        content: vec![ContentBlock::Text {
+            text: "history ".repeat(500),
+        }],
+    }];
+    let (summary, usage) = summarizer
+        .summarize_with_usage(&SummaryInput {
+            goal: Some(goal),
+            compacted: &history,
+        })
+        .await;
+    summary.unwrap();
+    let sent = model.sent.lock().unwrap().clone();
+    (usage.unwrap(), sent)
+}
+
+// Given: a summary model that reports no usage and a very long session goal
+// When: the summary runs / Then: the budget is charged for the request as actually assembled
+// (system prompt, converted history and the goal-bearing final prompt) plus the reply, not zero
+#[tokio::test(start_paused = true)]
+async fn unreported_summary_usage_is_estimated_from_the_assembled_request() {
+    let goal = "long goal ".repeat(5_000);
+    let (usage, sent) = summarize_with(false, &goal).await;
+    let sent_tokens = super::super::estimator::estimate_tokens(&sent);
+    assert!(
+        sent_tokens > u64::try_from(goal.len()).unwrap() / 4,
+        "the goal is in the request"
+    );
+    assert_eq!(usage.input_tokens, sent_tokens);
+    assert!(usage.output_tokens > 0);
+    assert_eq!(usage.cache_read_tokens, 0);
+}
+
+// Given: the same summary with a reported (measured) zero usage / When: it runs
+// Then: the measurement is kept as is
+#[tokio::test(start_paused = true)]
+async fn reported_zero_summary_usage_is_not_replaced_by_an_estimate() {
+    let (usage, _) = summarize_with(true, &"long goal ".repeat(5_000)).await;
+    assert_eq!(usage, Usage::default());
 }

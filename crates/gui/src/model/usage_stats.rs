@@ -172,6 +172,9 @@ pub struct UsageFact {
     pub recorded_cost: f64,
     /// Tokens of requests recorded without a price.
     pub unpriced: TokenUsage,
+    /// Requests whose provider reported no usage. Their zero token counts are placeholders,
+    /// so their cost is unknown in every price mode.
+    pub unreported_requests: u64,
     pub ttft_sum_ms: u64,
     pub ttft_count: u64,
     pub duration_sum_ms: u64,
@@ -225,6 +228,7 @@ impl UsageFact {
             } else {
                 tokens
             },
+            unreported_requests: u64::from(!record.usage_reported),
             ttft_sum_ms: record.ttft_ms.unwrap_or_default(),
             ttft_count: u64::from(record.ttft_ms.is_some()),
             duration_sum_ms: record.duration_ms,
@@ -274,6 +278,7 @@ impl UsageFact {
                 cache_read: row.unpriced_cache_read_tokens,
                 cache_write: row.unpriced_cache_write_tokens,
             },
+            unreported_requests: row.unreported_count,
             ttft_sum_ms: row.ttft_sum_ms,
             ttft_count: row.ttft_count,
             duration_sum_ms: row.duration_sum_ms,
@@ -388,8 +393,11 @@ pub struct UsageTotals {
     pub tokens: TokenUsage,
     pub reasoning: u64,
     pub cost: f64,
-    /// Some tokens had no known price, so `cost` is a lower bound.
+    /// Some tokens had no known price, or some requests reported no usage at all, so
+    /// `cost` is a lower bound.
     pub unpriced: bool,
+    /// Requests that reported no usage; included in `requests`, absent from `tokens`.
+    pub unreported_requests: u64,
     pub ttft_sum_ms: u64,
     pub ttft_count: u64,
     pub duration_sum_ms: u64,
@@ -406,6 +414,7 @@ impl UsageTotals {
         self.reasoning += fact.reasoning;
         self.cost += cost.usd;
         self.unpriced |= cost.unpriced;
+        self.unreported_requests += fact.unreported_requests;
         self.ttft_sum_ms += fact.ttft_sum_ms;
         self.ttft_count += fact.ttft_count;
         self.duration_sum_ms += fact.duration_sum_ms;
@@ -421,6 +430,7 @@ impl UsageTotals {
         self.reasoning += other.reasoning;
         self.cost += other.cost;
         self.unpriced |= other.unpriced;
+        self.unreported_requests += other.unreported_requests;
         self.ttft_sum_ms += other.ttft_sum_ms;
         self.ttft_count += other.ttft_count;
         self.duration_sum_ms += other.duration_sum_ms;
@@ -488,6 +498,13 @@ impl<'a> CostCalculator<'a> {
     }
 
     fn cost(&mut self, fact: &UsageFact) -> FactCost {
+        let mut cost = self.priced(fact);
+        // A request without reported usage costs an unknown amount in either mode, not $0.
+        cost.unpriced |= fact.unreported_requests > 0;
+        cost
+    }
+
+    fn priced(&mut self, fact: &UsageFact) -> FactCost {
         let (base, tokens) = match self.mode {
             CostMode::Recorded => (fact.recorded_cost, fact.unpriced),
             CostMode::Current => (0.0, fact.tokens),

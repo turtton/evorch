@@ -233,6 +233,7 @@ mod tests {
             _: &[providers::ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![ContentBlock::Text {

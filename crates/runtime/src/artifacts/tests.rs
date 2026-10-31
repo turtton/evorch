@@ -212,6 +212,7 @@ impl AgentModel for Model {
                 .collect()
         };
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content,

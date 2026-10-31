@@ -35,6 +35,7 @@ impl AgentModel for CaptureModel {
         }
         if self.succeeds {
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![providers::ContentBlock::Text {

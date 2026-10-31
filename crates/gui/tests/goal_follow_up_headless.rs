@@ -47,6 +47,7 @@ impl runtime::AgentModel for ToolThenAnswer {
                 .unwrap()
                 .push(messages.to_vec());
             return Ok(providers::ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![providers::ContentBlock::ToolUse {

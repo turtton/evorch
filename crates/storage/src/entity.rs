@@ -467,6 +467,7 @@ mod tests {
             (
                 "RequestCompleted.finish_reason",
                 ProviderEvent::RequestCompleted {
+                    usage_reported: true,
                     request_id: "q".into(),
                     provider: "p".into(),
                     profile: None,

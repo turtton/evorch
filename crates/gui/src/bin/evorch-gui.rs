@@ -1702,6 +1702,7 @@ mod effective_project_tests {
                 )
             };
             Ok(providers::ChatResponse {
+                usage_reported: true,
                 message: providers::Message {
                     role: providers::Role::Assistant,
                     content: vec![content],

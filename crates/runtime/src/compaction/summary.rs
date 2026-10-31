@@ -117,7 +117,16 @@ impl ModelSummarizer {
         text_tool_history: bool,
     ) -> (Result<String, SummarizeError>, Option<Usage>) {
         match self.complete_summary(input, text_tool_history).await {
-            Ok(response) => (summary_text(&response), Some(response.usage)),
+            Ok((response, request_tokens)) => {
+                let usage = if response.usage_reported {
+                    response.usage
+                } else {
+                    // Not a measurement: charge the request as it was actually sent (system
+                    // prompt, converted history, goal-bearing final prompt) plus the response.
+                    super::estimator::estimated_usage(request_tokens, &response.message)
+                };
+                (summary_text(&response), Some(usage))
+            }
             Err(error) => (Err(error), None),
         }
     }
@@ -126,7 +135,7 @@ impl ModelSummarizer {
         &self,
         input: &SummaryInput<'_>,
         text_tool_history: bool,
-    ) -> Result<ChatResponse, SummarizeError> {
+    ) -> Result<(ChatResponse, u64), SummarizeError> {
         let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
         messages.push(Message {
             role: MessageRole::System,
@@ -170,6 +179,7 @@ impl ModelSummarizer {
             role: MessageRole::User,
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
+        let request_tokens = super::estimator::estimate_tokens(&messages);
         let invocation = AgentInvocationContext {
             attempts: None,
             turn: self.turn.clone(),
@@ -204,7 +214,7 @@ impl ModelSummarizer {
                 }
             }
         };
-        Ok(response)
+        Ok((response, request_tokens))
     }
 }
 
@@ -768,6 +778,7 @@ mod tests {
                 "ordinary compaction keeps the historical summary input byte-identical"
             );
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -834,6 +845,7 @@ mod tests {
     async fn model_summary_forwards_context_without_tools() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![
@@ -911,6 +923,7 @@ mod tests {
     async fn model_summary_request_contains_goal() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -998,6 +1011,7 @@ mod tests {
     async fn model_summary_rejects_length_finish() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -1041,6 +1055,7 @@ mod tests {
     async fn model_summary_rejects_content_filter_finish() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -1084,6 +1099,7 @@ mod tests {
     async fn model_summary_rejects_empty_text_output() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![
@@ -1143,6 +1159,7 @@ mod tests {
         for (finish_reason, expected_reason) in cases {
             let model = Arc::new(StubModel {
                 response: Ok(ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: MessageRole::Assistant,
                         content: vec![ContentBlock::Text {
@@ -1279,6 +1296,7 @@ mod responses_tests {
         ) -> Result<ChatResponse, RuntimeError> {
             self.0.lock().unwrap().push(messages.to_vec());
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {

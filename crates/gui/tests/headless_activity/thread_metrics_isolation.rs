@@ -54,6 +54,7 @@ fn started(run: &str, agent: &str, parent: Option<&str>) -> Event {
 
 fn billed(run: &str, tokens: u64) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: format!("request-{run}"),
         provider: "local".into(),
         profile: None,

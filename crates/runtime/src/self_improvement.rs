@@ -147,6 +147,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         PROVIDER_MODEL_ROUTE => TransientOrExternal,
         // Catalog/version lookups depend on external availability; evidence only.
         PROVIDER_CATALOG_FETCH => TransientOrExternal,
+        // providers/stream: the backend omitted terminal usage (Codex allows it); provider dependent.
+        PROVIDER_USAGE_MISSING => TransientOrExternal,
         // budget_tracker: user-configured execution limits, not harness defects.
         BUDGET_WARNING | BUDGET_EXHAUSTED => TransientOrExternal,
         // providers/cache: unchanged wire prefix but reduced provider cache retention.

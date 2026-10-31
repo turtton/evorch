@@ -396,6 +396,7 @@ fn restored_after_retention(retention_days: u32) -> (Vec<String>, Vec<String>) {
         run_id: run_id(),
     };
     let completed = |id: &str| ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: id.into(),
         provider: "p".into(),
         profile: None,

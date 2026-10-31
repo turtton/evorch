@@ -100,6 +100,7 @@ impl UsageRecorder {
             duration_ms: 0,
             cost_usd: None,
             service_tier: None,
+            usage_reported: true,
         };
         match &event.kind {
             EventKind::Provider(ProviderEvent::RequestCompleted {
@@ -111,6 +112,7 @@ impl UsageRecorder {
                 finish_reason,
                 reasoning_tokens,
                 service_tier,
+                usage_reported,
                 ..
             }) => {
                 record.duration_ms = *duration_ms;
@@ -126,13 +128,20 @@ impl UsageRecorder {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pricing(provider, profile.as_deref(), model);
-                record.cost_usd = TokenUsage {
-                    input: *input_tokens,
-                    output: *output_tokens,
-                    cache_read: *cache_read_tokens,
-                    cache_write: *cache_write_tokens,
-                }
-                .request_cost(schedule.as_ref(), speed(*service_tier));
+                // Unreported usage arrives as placeholder zeros: pricing them would book a
+                // known $0.00 for a request whose cost is unknown. Reported zeros stay $0.
+                record.usage_reported = *usage_reported;
+                record.cost_usd = usage_reported
+                    .then(|| {
+                        TokenUsage {
+                            input: *input_tokens,
+                            output: *output_tokens,
+                            cache_read: *cache_read_tokens,
+                            cache_write: *cache_write_tokens,
+                        }
+                        .request_cost(schedule.as_ref(), speed(*service_tier))
+                    })
+                    .flatten();
             }
             EventKind::Provider(ProviderEvent::RequestFailed {
                 duration_ms,

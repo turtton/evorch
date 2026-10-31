@@ -41,6 +41,17 @@ fn image_data(messages: &[Message]) -> (u64, u64) {
     })
 }
 
+/// Usage to charge for a response whose provider reported none: the request-side
+/// estimate plus the serialized response. Never a measurement, only a stand-in that
+/// keeps budgets and the rules injection budget from treating the call as free.
+pub(crate) fn estimated_usage(request_tokens: u64, response: &Message) -> Usage {
+    Usage {
+        input_tokens: request_tokens,
+        output_tokens: estimate_tokens(std::slice::from_ref(response)),
+        ..Usage::default()
+    }
+}
+
 /// Include tool definitions in the serialized estimate. Provider input usage already
 /// includes them, so compare the two totals instead of adding schemas to usage.
 pub(crate) fn estimate_request(
@@ -129,6 +140,55 @@ mod tests {
             super::estimate_projected(&messages[..1], None, None),
             baseline
         );
+    }
+
+    // Given: a provider that reported no usage (zero placeholder) / When: projecting
+    // / Then: the serialized byte estimate is the floor, not zero
+    #[test]
+    fn unreported_zero_usage_falls_back_to_the_serialized_estimate() {
+        let messages = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "長い入力".repeat(100),
+            }],
+        )];
+        let estimate = estimate_tokens(&messages);
+        assert!(estimate > 0);
+        assert_eq!(
+            super::estimate_projected(&messages, Some(&Usage::default()), Some(estimate)),
+            estimate
+        );
+        assert_eq!(
+            estimate_visible(&messages, Some(&Usage::default())),
+            estimate
+        );
+    }
+
+    // Given: a provider-side compaction request with very long instructions and tool definitions
+    // When: its unreported usage is estimated / Then: they are counted along with the history
+    #[test]
+    fn official_compaction_estimate_counts_instructions_and_tools() {
+        let history = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "short".into(),
+            }],
+        )];
+        let instructions = [message(
+            Role::System,
+            vec![ContentBlock::Text {
+                text: "rule ".repeat(8_000),
+            }],
+        )];
+        let tools = [providers::ToolSpec {
+            name: "big".into(),
+            description: "d".repeat(20_000),
+            input_schema: json!({"type": "object"}),
+        }];
+        let bare = super::super::official_request_tokens(&[], &history, &[]);
+        let full = super::super::official_request_tokens(&instructions, &history, &tools);
+        assert_eq!(bare, estimate_tokens(&history));
+        assert!(full >= bare + 10_000 + 5_000, "{bare} -> {full}");
     }
 
     #[test]

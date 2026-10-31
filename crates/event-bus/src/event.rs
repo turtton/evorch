@@ -357,6 +357,9 @@ pub mod diagnostic_codes {
     pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
     /// Catalog lookup evidence. Failures are warnings; successful fetches are info (not persisted under the default warnings policy).
     pub const PROVIDER_CATALOG_FETCH: &str = "ProviderCatalogFetch";
+    /// A provider completed a response without reporting token usage. No usage was
+    /// recorded for it; context size falls back to the serialized estimate.
+    pub const PROVIDER_USAGE_MISSING: &str = "ProviderUsageMissing";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
@@ -420,6 +423,7 @@ pub mod diagnostic_codes {
         PROVIDER_UNAVAILABLE,
         PROVIDER_MODEL_ROUTE,
         PROVIDER_CATALOG_FETCH,
+        PROVIDER_USAGE_MISSING,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,
@@ -1184,6 +1188,16 @@ impl ServiceTier {
 /// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
 pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
 
+const fn usage_reported_default() -> bool {
+    true
+}
+
+// serde の `skip_serializing_if` は参照を受け取る。
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_usage_reported(reported: &bool) -> bool {
+    *reported
+}
+
 /// [`ProviderEvent::RequestFailed`] の `detail` に載せる最大バイト数。
 pub const REQUEST_FAILED_DETAIL_MAX_BYTES: usize = 1024;
 
@@ -1362,6 +1376,14 @@ pub enum ProviderEvent {
         /// wire 上で要求したサービス階層。標準処理と旧形式ペイロードでは `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         service_tier: Option<ServiceTier>,
+        /// provider が終端で usage を報告したか。`false` のとき上の token counts は
+        /// 未報告を表す代替のゼロで、実測ゼロではない。課金・文脈量の確定に使ってはならない。
+        /// 旧形式ペイロードでは報告済みとして読む。
+        #[serde(
+            default = "usage_reported_default",
+            skip_serializing_if = "is_usage_reported"
+        )]
+        usage_reported: bool,
     },
     /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
     ///
@@ -2588,6 +2610,7 @@ mod tests {
             (
                 "RequestCompleted",
                 ProviderEvent::RequestCompleted {
+                    usage_reported: true,
                     request_id: "req-1700000000000-3".into(),
                     provider: "openai-compatible".into(),
                     profile: Some("secondary".into()),
@@ -2676,6 +2699,47 @@ mod tests {
                 "inner tag mismatch"
             );
         }
+    }
+
+    // Given: usage 未報告の RequestCompleted と、usage_reported を持たない旧形式ペイロード。
+    // When: JSON 往復する / Then: 未報告は保存され、旧形式は報告済みとして読まれる。
+    #[test]
+    fn request_completed_round_trips_unreported_usage_and_defaults_old_payloads_to_reported() {
+        let completed = |usage_reported| ProviderEvent::RequestCompleted {
+            usage_reported,
+            request_id: "req-1".into(),
+            provider: "openai-codex".into(),
+            profile: None,
+            protocol: "openai-codex-responses".into(),
+            model: "gpt-test".into(),
+            streaming: true,
+            duration_ms: 5,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
+        };
+        let gap = Event::new(completed(false));
+        let json = serde_json::to_value(&gap).expect("serialize");
+        assert_eq!(json["kind"]["payload"]["payload"]["usage_reported"], false);
+        assert_eq!(
+            serde_json::from_value::<Event>(json).expect("deserialize"),
+            gap
+        );
+
+        let mut old = serde_json::to_value(Event::new(completed(true))).expect("serialize");
+        let payload = old["kind"]["payload"]["payload"].as_object_mut().unwrap();
+        assert!(
+            !payload.contains_key("usage_reported"),
+            "reported is the default shape"
+        );
+        let restored: Event = serde_json::from_value(old).expect("legacy payload");
+        assert_eq!(restored.kind, EventKind::Provider(completed(true)));
     }
 
     // Given: 失敗分類の全 ProviderFailureKind バリアント。
@@ -3047,6 +3111,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Provider(ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "req-1700000000000-3".into(),
                 provider: "openai-compatible".into(),
                 profile: Some("secondary".into()),

@@ -16,6 +16,7 @@ fn request_started(run_id: Option<&str>) -> Event {
 
 fn request_completed(run_id: Option<&str>, input: u64, output: u64) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "request-1".into(),
         provider: "provider-a".into(),
         profile: None,

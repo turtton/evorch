@@ -421,6 +421,7 @@ mod tests {
         use event_bus::{ProviderEvent, ProviderFailureKind};
         let events = [
             ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "request-1".into(),
                 provider: "demo".into(),
                 profile: None,

@@ -55,6 +55,7 @@ impl AgentModel for EscalatingModel {
             )
         };
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![content],

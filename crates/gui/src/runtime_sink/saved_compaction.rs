@@ -114,6 +114,7 @@ mod tests {
         ) -> Result<providers::ChatResponse, runtime::RuntimeError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(providers::ChatResponse {
+                usage_reported: true,
                 message: providers::Message {
                     role: providers::Role::Assistant,
                     content: vec![providers::ContentBlock::Text {

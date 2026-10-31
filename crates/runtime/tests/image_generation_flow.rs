@@ -86,6 +86,7 @@ impl AgentModel for Model {
         let finished = call.is_none();
         *step += 1;
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: call.map_or_else(

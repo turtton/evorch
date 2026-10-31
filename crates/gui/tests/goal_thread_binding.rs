@@ -135,6 +135,7 @@ fn goal_root_and_children_belong_to_submitting_thread_when_another_is_active() {
             run_id: Some(run.clone()),
         }));
         bus.emit(Event::new(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: format!("request-{run}"),
             provider: "local".into(),
             profile: None,

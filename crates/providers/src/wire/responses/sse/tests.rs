@@ -1,5 +1,6 @@
 mod custom;
 mod failure;
+mod usage;
 
 use super::ResponsesStreamInterpreter;
 use crate::error::ProviderError;

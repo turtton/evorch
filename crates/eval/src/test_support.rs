@@ -68,6 +68,7 @@ impl ScriptedModel {
     fn report(&self, invocation: &AgentInvocationContext) {
         if let Some(bus) = self.bus.lock().unwrap().as_ref() {
             bus.emit(Event::new(ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: format!("request-{}", self.requests.lock().unwrap().len()),
                 provider: "scripted".into(),
                 profile: None,
@@ -130,6 +131,7 @@ impl AgentModel for ScriptedModel {
         };
         self.report(invocation);
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content,
@@ -193,6 +195,7 @@ pub(crate) fn usage(
     input_tokens: u64,
 ) -> storage::usage::UsageRequestRecord {
     storage::usage::UsageRequestRecord {
+        usage_reported: true,
         request_id: id.into(),
         at_ns: 1,
         provider: profile.into(),

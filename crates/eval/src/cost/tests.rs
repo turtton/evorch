@@ -5,6 +5,7 @@ use crate::test_support::catalog;
 
 fn request(profile: &str, model: &str, input: u64, output: u64) -> RequestUsage {
     RequestUsage {
+        usage_reported: true,
         provider: profile.into(),
         profile: Some(profile.into()),
         model: model.into(),
@@ -123,4 +124,123 @@ fn evaluation_requests_are_overhead_and_tokens_split_cached_input() {
     );
     assert_eq!(tokens.input(), 1_000);
     assert!(close(tokens.cache_hit_rate(), 60.0));
+}
+
+fn unreported(profile: &str, model: &str) -> RequestUsage {
+    RequestUsage {
+        usage_reported: false,
+        ..request(profile, model, 0, 0)
+    }
+}
+
+// Given: a priced model with one request that reported no usage and one that reported zero
+// When: repriced from the table / Then: the gap makes the cost incomplete and is named, while a
+// reported zero (and a failed request) stay a known $0 that does not
+#[tokio::test]
+async fn unreported_requests_make_the_cost_incomplete_but_reported_zeros_do_not() {
+    let table = table().await;
+
+    let gap = table.cost(&[unreported("api", "gpt-9")]);
+    assert_eq!(gap.usd, 0.0);
+    assert!(!gap.is_complete());
+    assert!(gap.unpriced.is_empty(), "the model has a price");
+    assert_eq!(gap.unreported.len(), 1);
+    assert_eq!(
+        (gap.unreported[0].model.as_str(), gap.unreported[0].requests),
+        ("gpt-9", 1)
+    );
+
+    let mut failed = request("api", "gpt-9", 0, 0);
+    failed.failed = true;
+    let zero = table.cost(&[request("api", "gpt-9", 0, 0), failed]);
+    assert!(zero.is_complete(), "{zero:?}");
+
+    let mut merged = table.cost(&[request("api", "gpt-9", 100_000, 0)]);
+    assert!(merged.is_complete() && close(merged.usd, 0.1));
+    merged.add(&gap);
+    merged.add(&table.cost(&[unreported("api", "gpt-9")]));
+    assert!(!merged.is_complete());
+    assert!(close(merged.usd, 0.1), "unknown cost adds nothing");
+    assert_eq!(merged.unreported[0].requests, 2);
+}
+
+// Given: the same unreported completion as a provider event and as a ledger record
+// When: both inputs are normalized / Then: both carry the gap, and both reported-zero forms do not
+#[test]
+fn event_and_record_inputs_both_keep_the_unreported_flag() {
+    let completed = |usage_reported| {
+        EventKind::Provider(ProviderEvent::RequestCompleted {
+            usage_reported,
+            request_id: "r".into(),
+            provider: "openai".into(),
+            profile: Some("api".into()),
+            protocol: "fixture".into(),
+            model: "gpt-9".into(),
+            streaming: true,
+            duration_ms: 1,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            reasoning_tokens: None,
+            purpose: None,
+        })
+    };
+    assert!(
+        !RequestUsage::from_event(&completed(false))
+            .unwrap()
+            .usage_reported
+    );
+    assert!(
+        RequestUsage::from_event(&completed(true))
+            .unwrap()
+            .usage_reported
+    );
+
+    let record = |usage_reported| UsageRequestRecord {
+        usage_reported,
+        request_id: "r".into(),
+        at_ns: 0,
+        provider: "openai".into(),
+        profile: Some("api".into()),
+        model: "gpt-9".into(),
+        run_id: None,
+        parent_run_id: None,
+        role: None,
+        purpose: None,
+        status: UsageStatus::Ok,
+        failure: None,
+        finish_reason: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: None,
+        ttft_ms: None,
+        duration_ms: 1,
+        cost_usd: None,
+        service_tier: None,
+    };
+    assert!(!RequestUsage::from_record(&record(false)).usage_reported);
+    assert!(RequestUsage::from_record(&record(true)).usage_reported);
+}
+
+// Given: a request serialized by an older version (no usage_reported key) and an unreported one
+// When: round-tripped through JSON / Then: the old one reads as reported and the gap survives
+#[test]
+fn request_usage_serde_keeps_the_gap_and_defaults_old_data_to_reported() {
+    let gap = unreported("api", "gpt-9");
+    let json = serde_json::to_value(&gap).unwrap();
+    assert_eq!(json["usage_reported"], false);
+    assert_eq!(serde_json::from_value::<RequestUsage>(json).unwrap(), gap);
+    let reported = serde_json::to_value(request("api", "gpt-9", 1, 1)).unwrap();
+    assert!(reported.get("usage_reported").is_none());
+    assert!(
+        serde_json::from_value::<RequestUsage>(reported)
+            .unwrap()
+            .usage_reported
+    );
 }

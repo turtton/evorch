@@ -29,6 +29,8 @@ pub struct ResponsesStreamInterpreter {
     custom_tools: BTreeMap<String, CustomToolState>,
     saw_tool_call: bool,
     discard_tool_calls: bool,
+    /// 終端 response が usage を持っていたか。欠落時は呼び出し側が使用量を発行しない。
+    usage_reported: bool,
     done: bool,
 }
 
@@ -60,6 +62,7 @@ impl ResponsesStreamInterpreter {
             custom_tools: BTreeMap::new(),
             saw_tool_call: false,
             discard_tool_calls: false,
+            usage_reported: true,
             done: false,
         }
     }
@@ -97,6 +100,30 @@ impl ResponsesStreamInterpreter {
             .to_owned();
         accumulated.push_str(&suffix);
         Ok(suffix)
+    }
+
+    /// 終端 response の usage を canonical へ写す。
+    ///
+    /// Codex backend は usage を省略しうる (null / キー欠落)。欠落を黙ってゼロと
+    /// 報告せず、`usage_reported` を落として呼び出し側に使用量の未報告を伝える。
+    /// 返す `Usage::default()` は実測値ではなく、未報告時の代替値に過ぎない。
+    fn terminal_usage(
+        &mut self,
+        event: &str,
+        response_id: Option<&str>,
+        reason: Option<&str>,
+        usage: Option<ResponseUsage>,
+    ) -> Usage {
+        self.usage_reported = usage.is_some();
+        if usage.is_none() {
+            tracing::warn!(
+                event,
+                response_id,
+                reason,
+                "Responses terminal event に usage がありません。使用量は未報告として扱います"
+            );
+        }
+        usage.map(Usage::from).unwrap_or_default()
     }
 
     /// tool 呼び出しの有無で自然終了の理由を決めます。
@@ -274,9 +301,15 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 }
                 let event: ResponseCompleted = parse(value)?;
                 self.done = true;
+                let usage = self.terminal_usage(
+                    "response.completed",
+                    event.response.id.as_deref(),
+                    None,
+                    event.response.usage,
+                );
                 Ok(FrameInterpretation {
                     events: Vec::new(),
-                    completion: Some((event.response.usage.into(), self.natural_finish_reason())),
+                    completion: Some((usage, self.natural_finish_reason())),
                 })
             }
             "response.incomplete" => {
@@ -286,6 +319,12 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                     .response
                     .incomplete_details
                     .and_then(|details| details.reason);
+                let usage = self.terminal_usage(
+                    "response.incomplete",
+                    event.response.id.as_deref(),
+                    Some(reason.as_deref().unwrap_or("(missing)")),
+                    event.response.usage,
+                );
                 // 未知・欠落の理由も打ち切りであり、正常終了 (Stop/ToolUse) として
                 // runtime に採用させない。部分出力と usage は Other でも保持する。
                 self.discard_tool_calls = !matches!(
@@ -300,10 +339,7 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 };
                 Ok(FrameInterpretation {
                     events: Vec::new(),
-                    completion: Some((
-                        event.response.usage.map(Usage::from).unwrap_or_default(),
-                        finish_reason,
-                    )),
+                    completion: Some((usage, finish_reason)),
                 })
             }
             "response.failed" => {
@@ -322,6 +358,10 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
 
     fn finish(&mut self) -> Result<FrameInterpretation, ProviderError> {
         Ok(FrameInterpretation::default())
+    }
+
+    fn usage_reported(&self) -> bool {
+        self.usage_reported
     }
 
     fn finalize_message(&mut self, message: &mut Message) {
@@ -416,7 +456,12 @@ struct ResponseCompleted {
 
 #[derive(Deserialize)]
 struct CompletedResponse {
-    usage: ResponseUsage,
+    /// Codex backend は必須とするが、evorch は欠落しても応答を捨てない (ログ相関用)。
+    #[serde(default)]
+    id: Option<String>,
+    /// Codex と同じく任意。`null` もキー欠落も未報告として扱う。
+    #[serde(default)]
+    usage: Option<ResponseUsage>,
 }
 
 #[derive(Deserialize)]
@@ -462,6 +507,8 @@ struct ResponseIncomplete {
 /// 打ち切り時は内訳が欠けても、受信済みの部分応答を失わないよう寛容に解釈する。
 #[derive(Deserialize)]
 struct IncompleteResponse {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     incomplete_details: Option<IncompleteDetails>,
     #[serde(default)]

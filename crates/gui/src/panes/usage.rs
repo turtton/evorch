@@ -728,8 +728,9 @@ fn totals_row(
         row.col(|ui| {
             let response = ui.label(text(column.format(totals)));
             if column == SortColumn::Cost && totals.unpriced {
-                response
-                    .on_hover_text("Some models have no known price; the cost is a lower bound.");
+                response.on_hover_text(
+                    "Some requests have no known price or reported no usage; the cost is a lower bound.",
+                );
             }
         });
     }

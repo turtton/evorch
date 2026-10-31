@@ -499,6 +499,7 @@ fn evaluation_report() -> Report {
             label: "candidate".into(),
             runs: 1,
             cost: Cost {
+                unreported: Vec::new(),
                 usd: 1.5,
                 api_equivalent_usd: 1.5,
                 unpriced: Vec::new(),

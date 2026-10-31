@@ -56,8 +56,12 @@ pub struct UsageRequestRecord {
     pub reasoning_tokens: Option<u64>,
     pub ttft_ms: Option<u64>,
     pub duration_ms: u64,
-    /// Price at record time. `None` when the model had no known price.
+    /// Price at record time. `None` when the model had no known price, or when the
+    /// provider reported no usage (`usage_reported == false`).
     pub cost_usd: Option<f64>,
+    /// `false` when the provider finished the request without reporting usage. The token
+    /// counts are then placeholder zeros, not a measurement: the request's cost is unknown.
+    pub usage_reported: bool,
     /// [`event_bus::ServiceTier`] label, `None` for standard processing.
     pub service_tier: Option<String>,
 }
@@ -118,6 +122,8 @@ pub struct UsageDailyRow {
     pub unpriced_output_tokens: u64,
     pub unpriced_cache_read_tokens: u64,
     pub unpriced_cache_write_tokens: u64,
+    /// Requests that reported no usage. Their placeholder zeros are in the token sums.
+    pub unreported_count: u64,
     pub ttft_sum_ms: u64,
     pub ttft_count: u64,
     pub duration_sum_ms: u64,

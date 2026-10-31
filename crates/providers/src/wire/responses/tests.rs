@@ -686,6 +686,7 @@ fn b3_review_m1_canonical_debug_redacts_reasoning_without_changing_serde() {
         assert!(debug.contains("redacted"));
     }
     let response = ChatResponse {
+        usage_reported: true,
         message: Message {
             role: Role::Assistant,
             content: vec![block],

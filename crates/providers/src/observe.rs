@@ -6,8 +6,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use event_bus::{
-    Event, EventBus, ProviderEvent, ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES,
-    ServiceTier,
+    DiagnosticEvent, DiagnosticSeverity, Event, EventBus, ProviderEvent, ProviderFailureKind,
+    REQUEST_FAILED_DETAIL_MAX_BYTES, ServiceTier,
 };
 
 use crate::error::ProviderError;
@@ -52,6 +52,8 @@ pub(crate) struct AttemptObserver {
     started_emitted: bool,
     first_token_emitted: bool,
     terminal_emitted: bool,
+    /// provider が終端で usage を報告しなかった。ゼロを実測として cache 観測へ流さない。
+    usage_missing: bool,
     cache: Option<cache::CacheObservation>,
     /// 失敗詳細から伏せる、この attempt の credential。
     known_secret: Option<String>,
@@ -84,6 +86,7 @@ impl AttemptObserver {
             started_emitted: false,
             first_token_emitted: false,
             terminal_emitted: false,
+            usage_missing: false,
             cache: None,
             known_secret: None,
         }
@@ -180,7 +183,11 @@ impl AttemptObserver {
         if self.terminal_emitted {
             return;
         }
-        self.record_cache(usage);
+        if self.usage_missing {
+            self.emit_usage_missing();
+        } else {
+            self.record_cache(usage);
+        }
         let finish_reason = match finish_reason {
             FinishReason::Stop => "stop".to_string(),
             FinishReason::Length => "length".to_string(),
@@ -206,6 +213,7 @@ impl AttemptObserver {
             reasoning_tokens: usage.reasoning_tokens,
             purpose: self.observation_purpose(),
             service_tier: self.service_tier,
+            usage_reported: !self.usage_missing,
         });
         self.terminal_emitted = true;
         if let Some(log) = self.attempt_log() {
@@ -216,6 +224,37 @@ impl AttemptObserver {
                 },
             );
         }
+    }
+
+    /// 次の [`Self::emit_completed`] の usage は provider 未報告の代替値であると記録する。
+    ///
+    /// 完了時に cache 観測 (`CacheReuseObserved`) を抑止し、診断を 1 件発行する。
+    pub(crate) fn mark_usage_missing(&mut self) {
+        self.usage_missing = true;
+    }
+
+    fn emit_usage_missing(&self) {
+        tracing::warn!(
+            request_id = %self.request_id,
+            provider = %self.provider,
+            model = %self.model,
+            "provider did not report usage; usage and cache observation skipped"
+        );
+        let Some(bus) = self.bus.as_ref() else {
+            return;
+        };
+        bus.emit(Event::new(DiagnosticEvent {
+            source: "providers.usage".into(),
+            severity: DiagnosticSeverity::Warning,
+            code: event_bus::event::diagnostic_codes::PROVIDER_USAGE_MISSING.into(),
+            detail: format!(
+                "provider={} profile={:?} protocol={} model={} streaming={}: the terminal response carried no usage; token usage was not recorded and context size falls back to the serialized estimate",
+                self.provider, self.profile, self.protocol, self.model, self.streaming,
+            ),
+            run_id: self.observation_run_id(),
+            thread_id: None,
+            call_id: Some(self.request_id.clone()),
+        }));
     }
 
     /// attempt 異常終了を発行する。
@@ -246,6 +285,7 @@ impl AttemptObserver {
         self.started_emitted = false;
         self.first_token_emitted = false;
         self.terminal_emitted = false;
+        self.usage_missing = false;
     }
 
     fn emit_failed_kind(&mut self, failure: ProviderFailureKind, detail: Option<String>) {

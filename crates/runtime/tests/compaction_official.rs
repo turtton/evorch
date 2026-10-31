@@ -201,6 +201,7 @@ async fn scenario(
 async fn official_compaction_checkpoint_preserves_blob_without_byte_limit() {
     scenario(
         Ok(Some(CompactionResult {
+            usage_reported: true,
             encrypted_content: BLOB.into(),
             usage: Usage {
                 input_tokens: 42,
@@ -229,4 +230,87 @@ async fn failed_compaction_falls_back_to_model_summary() {
         SummarizerKind::Model,
     )
     .await;
+}
+
+/// Runs one manual official compaction whose result carries `usage_reported`, under a
+/// 1 000-token run budget, and returns the number of `BudgetExhausted` diagnostics.
+async fn budget_exhaustions_after_official_compaction(usage_reported: bool) -> usize {
+    let review_storage = support::ReviewStorage::new();
+    let chat = ScriptedModel::new([]);
+    chat.add_keyed(
+        "goal",
+        [
+            Ok(text_response(
+                &"old answer ".repeat(100),
+                FinishReason::Stop,
+            )),
+            Ok(text_response("done", FinishReason::Stop)),
+        ],
+    )
+    .await;
+    let model = Arc::new(OfficialModel {
+        chat,
+        result: Ok(Some(CompactionResult {
+            usage_reported,
+            encrypted_content: BLOB.into(),
+            usage: Usage::default(),
+        })),
+        compacted: Mutex::new(Vec::new()),
+    });
+    let bus = Arc::new(EventBus::new(256));
+    let mut receiver = bus.subscribe();
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    ));
+    let runtime = AgentRuntime::new(bus, executor, model).with_compaction(CompactionConfig {
+        context_window_tokens: 1_000_000,
+        keep_recent_tokens: 1,
+        max_summary_bytes: 0,
+        ..CompactionConfig::default()
+    });
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "goal".into(),
+        RunConfig {
+            interactive: true,
+            budget: runtime::budget_tracker::BudgetSettings {
+                max_tokens: Some(1_000),
+                ..Default::default()
+            },
+            ..RunConfig::default()
+        },
+    );
+    timeout(Duration::from_secs(5), async {
+        while runtime.inspect_agent(run).unwrap().phase != AgentRunPhase::Waiting {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.compact(run).unwrap();
+    review_storage.attach(&runtime);
+    runtime.send_message(run, "resume".into()).unwrap();
+    let _ = timeout(Duration::from_secs(5), runtime.wait(run))
+        .await
+        .unwrap();
+    let mut exhausted = 0;
+    while let Some(event) = futures_util::FutureExt::now_or_never(receiver.recv()) {
+        if let EventKind::Diagnostic(diagnostic) = event.unwrap().kind
+            && diagnostic.code == event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
+        {
+            exhausted += 1;
+        }
+    }
+    exhausted
+}
+
+// Given: an official compaction that reported zero tokens vs. one that reported none, under a
+// small run budget, with the standard tool definitions attached to the compaction request
+// When: the compaction completes / Then: a measured zero costs nothing, while the unreported one
+// is charged for the request it sent (instructions, history, tool definitions) and exhausts it
+#[tokio::test]
+async fn unreported_official_compaction_is_charged_the_whole_request() {
+    assert_eq!(budget_exhaustions_after_official_compaction(true).await, 0);
+    assert_eq!(budget_exhaustions_after_official_compaction(false).await, 1);
 }

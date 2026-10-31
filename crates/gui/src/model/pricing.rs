@@ -93,6 +93,11 @@ fn priced_total<'a>(
     let mut total = None;
     let mut partial = false;
     for request in requests {
+        // Placeholder zeros are not a price of $0: the request's cost is unknown.
+        if !request.usage_reported {
+            partial = true;
+            continue;
+        }
         match request
             .usage
             .request_cost(schedule(&request.key), request.speed)
@@ -111,12 +116,15 @@ pub(super) struct BilledRequest {
     pub key: ModelKey,
     pub speed: ModelSpeed,
     pub usage: TokenUsage,
+    /// `false` when the provider reported no usage, so `usage` is placeholder zeros.
+    pub usage_reported: bool,
 }
 
 /// Hover text for a cost carrying [`partial_marker`].
-pub const PARTIAL_COST_HINT: &str = "Some requests have no known price; the cost is a lower bound.";
+pub const PARTIAL_COST_HINT: &str =
+    "Some requests have no known price or reported no usage; the cost is a lower bound.";
 
-/// `*` after a cost that leaves out requests without a known price.
+/// `*` after a cost that leaves out requests without a known price or reported usage.
 pub fn partial_marker(partial: bool) -> &'static str {
     if partial { "*" } else { "" }
 }

@@ -43,6 +43,7 @@ impl AgentModel for GatedModel {
             self.release[index].notified().await;
         }
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: if index == 0 {

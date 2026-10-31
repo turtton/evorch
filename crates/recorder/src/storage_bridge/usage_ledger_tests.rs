@@ -34,6 +34,7 @@ fn priced() -> crate::pricing::SharedUsagePricing {
 
 fn completed(request_id: &str, model: &str) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: request_id.into(),
         provider: "openai".into(),
         profile: Some("main".into()),
@@ -131,6 +132,60 @@ fn unpriced_and_failed_attempts_are_recorded_without_cost() {
 }
 
 #[test]
+fn unreported_usage_is_not_booked_as_a_known_zero_cost() {
+    // Given: a priced model, one request that reported zero tokens and one whose
+    // provider reported no usage at all (placeholder zeros).
+    let (_dir, storage, db) = fixture();
+    let mut bridge = StorageBridge::new(storage.handle(), "session").with_usage_ledger(priced());
+    let zero = |request_id: &str, usage_reported| {
+        Event::new(ProviderEvent::RequestCompleted {
+            usage_reported,
+            request_id: request_id.into(),
+            provider: "openai".into(),
+            profile: Some("main".into()),
+            protocol: "openai-chat-completions".into(),
+            model: "model".into(),
+            streaming: true,
+            duration_ms: 10,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            reasoning_tokens: None,
+            purpose: None,
+        })
+    };
+
+    // When: both complete.
+    bridge.handle_event(&zero("reported", true)).unwrap();
+    bridge.handle_event(&zero("unreported", false)).unwrap();
+
+    // Then: the reported zero is a known $0, the unreported one has no cost at all.
+    let rows = db.usage_requests_between(0, i64::MAX).unwrap();
+    let cost = |id: &str| {
+        rows.iter()
+            .find(|row| row.record.request_id == id)
+            .unwrap()
+            .record
+            .cost_usd
+    };
+    assert_eq!(cost("reported"), Some(0.0));
+    assert_eq!(cost("unreported"), None);
+    let flag = |id: &str| {
+        rows.iter()
+            .find(|row| row.record.request_id == id)
+            .unwrap()
+            .record
+            .usage_reported
+    };
+    assert!(flag("reported"));
+    assert!(!flag("unreported"), "the ledger must remember the gap");
+}
+
+#[test]
 fn disabled_metrics_record_no_ledger_rows() {
     // Given: metrics collection turned off.
     let (_dir, storage, db) = fixture();
@@ -174,6 +229,7 @@ fn fast_and_large_requests_are_recorded_at_their_configured_rates() {
     let mut bridge = StorageBridge::new(storage.handle(), "session").with_usage_ledger(pricing);
     let request = |request_id: &str, input_tokens: u64, service_tier| {
         Event::new(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: request_id.into(),
             provider: "openai".into(),
             profile: Some("main".into()),

@@ -56,6 +56,7 @@ struct Script {
 
 fn response(block: ContentBlock, reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: MessageRole::Assistant,
             content: vec![block],

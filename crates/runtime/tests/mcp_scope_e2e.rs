@@ -40,6 +40,7 @@ impl AgentModel for Model {
     ) -> Result<ChatResponse, RuntimeError> {
         let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![if first {

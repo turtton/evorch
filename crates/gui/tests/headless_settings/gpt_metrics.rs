@@ -41,6 +41,7 @@ async fn settings(provider_type: ProviderTypeConfig) -> ProviderSettingsModel {
 
 fn completed(provider: &str, profile: Option<&str>) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "request".into(),
         provider: provider.into(),
         profile: profile.map(str::to_owned),

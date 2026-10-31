@@ -14,6 +14,7 @@ impl AgentModel for CompletingModel {
     ) -> Result<providers::ChatResponse, RuntimeError> {
         self.0.lock().unwrap().push(invocation.clone());
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text {

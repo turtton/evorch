@@ -769,6 +769,7 @@ fn retention_preview_matches_apply_and_disabled_retention_preserves_observations
             run_id: Some("a".into()),
         }),
         provider(ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: "req".into(),
             provider: "mock".into(),
             profile: None,

@@ -164,6 +164,7 @@ pub struct ScriptedResponse {
     prompt_tokens: u64,
     completion_tokens: u32,
     cached_tokens: Option<u64>,
+    usage_omitted: bool,
 }
 
 impl ScriptedResponse {
@@ -216,6 +217,7 @@ impl ScriptedResponse {
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: None,
+            usage_omitted: false,
         }
     }
 
@@ -306,6 +308,16 @@ impl ScriptedResponse {
     pub const fn with_usage(mut self, prompt_tokens: u32, completion_tokens: u32) -> Self {
         self.prompt_tokens = prompt_tokens as u64;
         self.completion_tokens = completion_tokens;
+        self
+    }
+
+    /// Omits `usage` from the Responses `response.completed` event, as the Codex
+    /// backend may. The prompt-cache fixture still observes the request, so later
+    /// requests' cached tokens stay derived from their input. Chat Completions
+    /// rendering is unchanged.
+    #[must_use]
+    pub const fn without_usage(mut self) -> Self {
+        self.usage_omitted = true;
         self
     }
 
@@ -472,11 +484,14 @@ impl ScriptedResponse {
         if let Some(cached_tokens) = self.cached_tokens {
             usage["input_tokens_details"] = json!({"cached_tokens": cached_tokens});
         }
-        frames.push(frame(json!({
-            "type": "response.completed",
-            "response": {"id": self.id, "object": "response", "status": "completed",
-                "model": self.model, "usage": usage},
-        })));
+        let mut response = json!({"id": self.id, "object": "response", "status": "completed",
+            "model": self.model});
+        if !self.usage_omitted {
+            response["usage"] = usage;
+        }
+        frames.push(frame(
+            json!({"type": "response.completed", "response": response}),
+        ));
         frames
     }
 

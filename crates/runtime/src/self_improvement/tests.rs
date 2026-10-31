@@ -102,6 +102,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ProviderUnavailable", TransientOrExternal),
         ("ProviderModelRoute", TransientOrExternal),
         ("ProviderCatalogFetch", TransientOrExternal),
+        ("ProviderUsageMissing", TransientOrExternal),
         ("CacheRegression", TransientOrExternal),
         ("ToolArgumentsMalformed", TransientOrExternal),
         ("OwnershipRegistryWait", TransientOrExternal),
