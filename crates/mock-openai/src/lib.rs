@@ -7,4 +7,4 @@ pub mod scenario;
 pub mod server;
 
 pub use scenario::{ReasoningItem, ScriptedResponse};
-pub use server::{RecordedRequest, ResponseGate, StreamingMockOpenAi, WriteMode};
+pub use server::{CodexIds, RecordedRequest, ResponseGate, StreamingMockOpenAi, WriteMode};

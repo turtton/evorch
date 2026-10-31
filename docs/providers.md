@@ -254,6 +254,14 @@ to the same profile, endpoint, route model (including the `+fast` suffix), wire
 model, speed and effective service tier. Returning to an earlier model or forking
 a run must not reactivate older items.
 
+The Codex official-compaction request keeps the ordinary `include`
+(`reasoning.encrypted_content`), as the Codex CLI does; only its history differs.
+For `openai-codex`, `session-id`, `thread-id`, `x-client-request-id` and the body's
+`prompt_cache_key` are one value per run (a UUIDv5 of the run ID) in every request of
+the run, so the provider cache affinity key never changes inside a run. The legacy
+`OpenAI-Beta: responses=experimental` header is no longer sent. See
+[Codex compatibility](codex-compatibility.md).
+
 Codex identifies the account using the non-secret ChatGPT account identity from
 the same authentication lease used for the HTTP request. Refreshing tokens for
 the same account does not create a replay boundary. API-key providers cannot

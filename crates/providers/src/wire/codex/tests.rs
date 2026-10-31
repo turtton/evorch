@@ -237,7 +237,6 @@ fn compaction_blob_round_trip_preserves_bytes_and_message_order() {
 fn compaction_trigger_is_the_only_change_and_is_last() {
     let request = request();
     let mut expected = serde_json::to_value(to_wire_request(&request)).unwrap();
-    expected["include"] = json!([]);
     expected["input"]
         .as_array_mut()
         .unwrap()

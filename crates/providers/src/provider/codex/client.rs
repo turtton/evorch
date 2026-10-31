@@ -40,6 +40,20 @@ const ORIGINATOR: &str = "codex_cli_rs";
 /// Responses Lite の要求に付ける header (Codex CLI 0.166.0)。
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
+/// The run an observed request belongs to; an empty ID names no run.
+fn run_id_of(observation: Option<&crate::message::ObservationContext>) -> Option<&str> {
+    observation
+        .map(|context| context.run_id.as_str())
+        .filter(|run_id| !run_id.is_empty())
+}
+
+/// The identifier Codex calls the session/thread ID, derived from the run. Run IDs are
+/// ULIDs, not UUIDs, so the UUID is a v5 over the run ID text: the same run always gets
+/// the same value, in every request, resend and compaction, with no stored state.
+fn run_derived_id(run_id: &str) -> String {
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, run_id.as_bytes()).to_string()
+}
+
 /// A request that only names the model, for scopes of capabilities without a chat request.
 fn scope_probe(model: &str) -> ChatRequest {
     ChatRequest {
@@ -336,7 +350,9 @@ impl CodexClient {
             request,
             &crate::wire::responses::ResponsesRequestOptions {
                 dialect: crate::ResponsesDialect::Codex,
-                prompt_cache_key: None,
+                // Codex's default (session-derived) cache key: one stable affinity key
+                // per run, so every request of the run shares a cache namespace.
+                prompt_cache_key: run_id_of(request.observation.as_ref()).map(run_derived_id),
                 codex_model,
             },
             scope,
@@ -456,21 +472,14 @@ impl CodexClient {
     /// Status interpretation belongs to the caller (hosted search sanitizes errors).
     async fn post_response(
         &self,
-        model: &str,
+        scope_request: &ChatRequest,
         wire_request: &impl serde::Serialize,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let token = self.session.current().await?;
-        self.post_response_with_token(
-            &scope_probe(model),
-            wire_request,
-            false,
-            &token,
-            mode,
-            observer,
-        )
-        .await
+        self.post_response_with_token(scope_request, wire_request, false, &token, mode, observer)
+            .await
     }
 
     /// Sends once; a 401 triggers one recovery and a resend of the same wire body.
@@ -486,8 +495,9 @@ impl CodexClient {
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
+        let run_id = run_id_of(scope_request.observation.as_ref());
         let response = self
-            .post_response_once(wire_request, responses_lite, token, mode, observer)
+            .post_response_once(wire_request, responses_lite, token, run_id, mode, observer)
             .await?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(response);
@@ -497,7 +507,7 @@ impl CodexClient {
             .recover_unauthorized(scope_request, token, observer)
             .await?;
         let response = self
-            .post_response_once(wire_request, responses_lite, &fresh, mode, observer)
+            .post_response_once(wire_request, responses_lite, &fresh, run_id, mode, observer)
             .await?;
         reject_second_unauthorized(response, observer)
     }
@@ -535,6 +545,7 @@ impl CodexClient {
         wire_request: &impl serde::Serialize,
         responses_lite: bool,
         token: &AuthorizedCodexToken,
+        run_id: Option<&str>,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
@@ -543,7 +554,7 @@ impl CodexClient {
             ResponseMode::Streaming | ResponseMode::NonStreaming => &self.http_client,
         };
         let mut builder = self
-            .authenticated_request_with_token(http_client, &self.endpoint, token)
+            .authenticated_request_with_token(http_client, &self.endpoint, token, run_id)
             .await
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&wire_request);
@@ -564,26 +575,36 @@ impl CodexClient {
     }
 
     /// Responses replay must use the exact lease already checked against its scope.
+    ///
+    /// `session-id`, `thread-id` and `x-client-request-id` carry the run-derived ID when
+    /// the request belongs to a run, so they never change within it. Without a run they
+    /// fall back to the client's session ID and a fresh ID per HTTP request.
     async fn authenticated_request_with_token(
         &self,
         http: &reqwest::Client,
         endpoint: &str,
         token: &AuthorizedCodexToken,
+        run_id: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let turn_id = Uuid::new_v4().to_string();
+        let (session_id, thread_id) = match run_id {
+            Some(run_id) => {
+                let id = run_derived_id(run_id);
+                (id.clone(), id)
+            }
+            None => (self.session_id.clone(), Uuid::new_v4().to_string()),
+        };
         http.post(endpoint)
             .bearer_auth(&token.access_token)
             .header("chatgpt-account-id", &token.chatgpt_account_id)
             .header("originator", ORIGINATOR)
-            .header("OpenAI-Beta", "responses=experimental")
             .header("version", CODEX_CLIENT_VERSION)
             .header(
                 reqwest::header::USER_AGENT,
                 format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
             )
-            .header("session-id", &self.session_id)
-            .header("thread-id", &turn_id)
-            .header("x-client-request-id", &turn_id)
+            .header("session-id", session_id)
+            .header("thread-id", &thread_id)
+            .header("x-client-request-id", &thread_id)
     }
 }
 

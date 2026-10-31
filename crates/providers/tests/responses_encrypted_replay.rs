@@ -182,7 +182,7 @@ async fn b3_both_providers_send_stream_replay_and_compaction_share_scope_guards(
 }
 
 #[tokio::test]
-async fn b3_compaction_keeps_eligible_reasoning_but_preserves_its_old_include_contract() {
+async fn b3_compaction_keeps_eligible_reasoning_and_the_ordinary_include() {
     let server = MockServer::start().await;
     codex_support::mount_empty_catalog(&server).await;
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw(
@@ -211,7 +211,7 @@ async fn b3_compaction_keeps_eligible_reasoning_but_preserves_its_old_include_co
     assert_eq!(result.encrypted_content, "checkpoint");
     let requests = codex_support::response_requests(&server).await;
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["include"], json!([]));
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["input"][1], reasoning());
     assert_eq!(body["input"][2]["type"], "compaction_trigger");
 }

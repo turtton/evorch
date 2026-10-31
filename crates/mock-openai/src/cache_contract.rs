@@ -850,7 +850,7 @@ mod reasoning_tests {
 
     // Given: an ordinary turn after a request that asked for encrypted reasoning
     // When: the next request drops or changes `include`
-    // Then: the wire contract rejects it, although the mock cache ignores include
+    // Then: the wire contract rejects it (the mock cache also counts include as a setting)
     #[test]
     fn include_must_stay_fixed_between_ordinary_turns() {
         let (first, second) = turns();

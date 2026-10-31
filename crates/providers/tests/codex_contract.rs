@@ -82,6 +82,68 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
     for [_, thread, request] in triples {
         assert_eq!(thread, request);
     }
+    // Without a run there is nothing to derive a cache key from.
+    for request in &requests {
+        assert!(!request.headers.contains_key("openai-beta"));
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+}
+
+// Given: a request that belongs to a run / When: two turns are sent
+// Then: the legacy `OpenAI-Beta` header is gone, and session-id, thread-id and
+//       x-client-request-id all carry the UUIDv5 of the run ID in both turns, as
+//       does the body's `prompt_cache_key`; another run gets another value
+#[tokio::test]
+async fn run_scoped_ids_are_the_run_uuid_in_every_turn() {
+    let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .and(CodexIdMatcher)
+        .respond_with(sse_response(&fixture("codex", "responses_success.sse")))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = client(&server, seeded_store());
+    let in_run = |run_id: &str| {
+        let mut request = request();
+        // Run IDs are ULIDs, not UUIDs.
+        request.observation = Some(providers::ObservationContext {
+            run_id: run_id.to_owned(),
+            ..Default::default()
+        });
+        request
+    };
+    for run_id in ["01JZ0RUN000000000000000001", "01JZ0RUN000000000000000001"] {
+        client
+            .send(&ProviderAuth::new(""), &in_run(run_id))
+            .await
+            .expect("send succeeds");
+    }
+    client
+        .send(
+            &ProviderAuth::new(""),
+            &in_run("01JZ0RUN000000000000000002"),
+        )
+        .await
+        .expect("send succeeds");
+
+    let requests = codex_support::response_requests(&server).await;
+    let expected = |run_id: &str| {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, run_id.as_bytes()).to_string()
+    };
+    let first = expected("01JZ0RUN000000000000000001");
+    let second = expected("01JZ0RUN000000000000000002");
+    assert_ne!(first, second);
+    for (request, want) in requests.iter().zip([&first, &first, &second]) {
+        assert!(!request.headers.contains_key("openai-beta"));
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(request.headers[name], want.as_str(), "{name}");
+        }
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["prompt_cache_key"], want.as_str());
+    }
 }
 
 // Given: a request with a system prompt / When: it is sent to the Codex backend

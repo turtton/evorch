@@ -337,14 +337,13 @@ fn assert_compaction_shares_instructions(ordinary: &Value, compaction: &Value) {
     assert_eq!(compaction["tools"], ordinary["tools"]);
 }
 
-/// Every root setting except `input` and `include` (cleared by the compaction request)
-/// equals the ordinary request's, so only the history differs.
+/// Every root setting except `input` (`include` and `prompt_cache_key` included) equals
+/// the ordinary request's, so only the history differs.
 fn assert_compaction_settings(ordinary: &Value, compaction: &Value) {
     let strip = |body: &Value| {
         let mut body = body.clone();
         let root = body.as_object_mut().unwrap();
         root.remove("input");
-        root.remove("include");
         body
     };
     assert_eq!(
@@ -366,8 +365,8 @@ fn assert_compaction_settings(ordinary: &Value, compaction: &Value) {
 /// mock cache must report at least the previous request's whole input as cached,
 /// except at a verified compaction boundary, which must actually replace history
 /// (less cached than the previous input). Official compaction requests are their own
-/// contract (`include: []`, the same developer instructions and tools) and are not prefix steps; a declared
-/// failed attempt must extend the previous request.
+/// contract (the ordinary `include`, the same developer instructions and tools) and are
+/// not prefix steps; a declared failed attempt must extend the previous request.
 fn assert_cache_chain(exchanges: &[Exchange], boundaries: &[usize]) {
     let mut previous: Option<&Exchange> = None;
     let mut ordinary = 0;
@@ -379,7 +378,7 @@ fn assert_cache_chain(exchanges: &[Exchange], boundaries: &[usize]) {
                     input(&exchange.body).last(),
                     Some(&json!({"type": "compaction_trigger"}))
                 );
-                assert_eq!(exchange.body["include"], json!([]));
+                assert_include(&exchange.body);
                 if let Some(before) = previous {
                     assert_compaction_shares_instructions(&before.body, &exchange.body);
                 }

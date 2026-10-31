@@ -471,7 +471,6 @@ impl ResponsesRequest {
 
     /// 公式 compaction を要求するトリガーを入力末尾に追加します。
     pub(crate) fn with_compaction_trigger(mut self) -> Self {
-        self.include.clear();
         self.input.push(InputItem::CompactionTrigger);
         self
     }
