@@ -75,6 +75,7 @@ pub fn attachment_acceptances(
         "SELECT {columns} FROM host_input_receipts AS receipt \
          JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
          WHERE evidence.target_run_id IN (SELECT value FROM json_each(?1)) \
+           AND evidence.root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND evidence.target_run_id NOT IN (SELECT run_id FROM run_tombstones) \
            AND evidence.attachments_json <> '[]' \
          ORDER BY receipt.acceptance_seq"
     ))?;
@@ -88,7 +89,8 @@ fn list(
     value: &str,
 ) -> Result<Vec<ReviewEvidenceRow>, StorageError> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM review_evidence WHERE {predicate} ORDER BY created_at_ns, id"
+        "SELECT {COLUMNS} FROM review_evidence WHERE ({predicate}) \
+         AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND target_run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY created_at_ns, id"
     ))?;
     let rows = statement.query_map([value], from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)

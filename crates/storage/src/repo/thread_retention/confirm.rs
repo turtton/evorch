@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use super::candidates::family_blocked;
 use super::closure::{
-    Neighbor, add_member, frontier_empty, run_neighbors, staged_sets, thread_neighbors,
+    Expansion, Neighbor, NodeKind, Position, add_member, expand_node, frontier_empty, staged_sets,
 };
 use crate::StorageError;
 use crate::migrations::backfill::backfill_pending;
@@ -47,40 +47,51 @@ pub(crate) fn finalize(
     let (threads, runs) = staged_sets(&tx, family_key)?;
     let members = (threads.len() + runs.len()) as u64;
 
-    // Fixed point: no relation of any member leads outside the staged set.
+    // Fixed point: no relation of any member leads outside the staged set. The
+    // check reads the same edges the exploration did, within the caller's budget,
+    // and stops as soon as the budget is spent.
     let mut edges = 0_u64;
     let mut outside: BTreeSet<(&'static str, String)> = BTreeSet::new();
-    let mut neighbors = Vec::new();
-    for thread in &threads {
-        neighbors.extend(thread_neighbors(&tx, thread, &mut edges)?);
-        if edges > budget.max_edges {
+    let mut unresolved: Option<String> = None;
+    let nodes = threads
+        .iter()
+        .map(|id| (NodeKind::Thread, id))
+        .chain(runs.iter().map(|id| (NodeKind::Run, id)));
+    for (kind, id) in nodes {
+        let expansion = expand_node(
+            &tx,
+            kind,
+            id,
+            Position::default(),
+            &mut edges,
+            budget.max_edges,
+            &mut |neighbor| {
+                match neighbor {
+                    Neighbor::Gone(gone) => {
+                        unresolved = Some(gone);
+                        return Ok(false);
+                    }
+                    Neighbor::Thread(other) if !threads.contains(&other) => {
+                        outside.insert(("thread", other));
+                    }
+                    Neighbor::Run(other) if !runs.contains(&other) => {
+                        outside.insert(("run", other));
+                    }
+                    Neighbor::Thread(_) | Neighbor::Run(_) => {}
+                }
+                Ok(true)
+            },
+        )?;
+        if let Some(gone) = unresolved {
+            return Ok(FinalizeOutcome::Blocked(BlockReason::FamilyUnresolved(
+                gone,
+            )));
+        }
+        if let Expansion::Budget(_) = expansion {
             return Ok(FinalizeOutcome::OverBudget {
                 members,
                 edges_read: edges,
             });
-        }
-    }
-    for run in &runs {
-        neighbors.extend(run_neighbors(&tx, run, &mut edges)?);
-        if edges > budget.max_edges {
-            return Ok(FinalizeOutcome::OverBudget {
-                members,
-                edges_read: edges,
-            });
-        }
-    }
-    for neighbor in neighbors {
-        match neighbor {
-            Neighbor::Gone(id) => {
-                return Ok(FinalizeOutcome::Blocked(BlockReason::FamilyUnresolved(id)));
-            }
-            Neighbor::Thread(id) if !threads.contains(&id) => {
-                outside.insert(("thread", id));
-            }
-            Neighbor::Run(id) if !runs.contains(&id) => {
-                outside.insert(("run", id));
-            }
-            Neighbor::Thread(_) | Neighbor::Run(_) => {}
         }
     }
     if !outside.is_empty() {

@@ -14,6 +14,9 @@ use storage::thread_retention::{
 use storage::{Database, Storage, StorageConfig};
 
 static VM_STEPS: AtomicU64 = AtomicU64::new(0);
+static FULL_SCANS: AtomicU64 = AtomicU64::new(0);
+static SORTS: AtomicU64 = AtomicU64::new(0);
+static AUTO_INDEXES: AtomicU64 = AtomicU64::new(0);
 
 // SQLite invokes PROFILE while the statement pointer is valid; the callback only
 // touches a static atomic and never unwinds or re-enters SQLite.
@@ -29,6 +32,17 @@ unsafe extern "C" fn profile(
             ffi::sqlite3_stmt_status(statement.cast(), ffi::SQLITE_STMTSTATUS_VM_STEP, 1)
         };
         VM_STEPS.fetch_add(steps as u64, Ordering::Relaxed);
+        // SAFETY: as above; each counter is read and reset once per statement.
+        let (full_scans, sorts, auto_indexes) = unsafe {
+            (
+                ffi::sqlite3_stmt_status(statement.cast(), ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP, 1),
+                ffi::sqlite3_stmt_status(statement.cast(), ffi::SQLITE_STMTSTATUS_SORT, 1),
+                ffi::sqlite3_stmt_status(statement.cast(), ffi::SQLITE_STMTSTATUS_AUTOINDEX, 1),
+            )
+        };
+        FULL_SCANS.fetch_add(full_scans as u64, Ordering::Relaxed);
+        SORTS.fetch_add(sorts as u64, Ordering::Relaxed);
+        AUTO_INDEXES.fetch_add(auto_indexes as u64, Ordering::Relaxed);
     }
     0
 }
@@ -153,6 +167,20 @@ fn steps_of(action: impl FnOnce()) -> u64 {
     VM_STEPS.load(Ordering::Relaxed)
 }
 
+/// VM steps, full-table-scan steps, sorts and automatic indexes of `action`.
+fn scans_of(action: impl FnOnce()) -> (u64, u64, u64, u64) {
+    for counter in [&VM_STEPS, &FULL_SCANS, &SORTS, &AUTO_INDEXES] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    action();
+    (
+        VM_STEPS.load(Ordering::Relaxed),
+        FULL_SCANS.load(Ordering::Relaxed),
+        SORTS.load(Ordering::Relaxed),
+        AUTO_INDEXES.load(Ordering::Relaxed),
+    )
+}
+
 fn explore_all(database: &Database, budget: u64) -> u64 {
     let policy = ThreadRetentionPolicy::default();
     let mut total = 0;
@@ -186,7 +214,9 @@ fn confirm(db: &Db) {
                 ownership_root: "/r".into(),
                 sidebar_path: "/s".into(),
             },
-            FinalizeBudget::proportional(100_000),
+            FinalizeBudget {
+                max_edges: 1_000_000,
+            },
         )
         .unwrap();
     assert!(
@@ -223,6 +253,27 @@ fn one_step(db: &Db, storage: &Storage) -> (u64, u64, storage::thread_retention:
         steps,
         progress.unwrap(),
     )
+}
+
+/// Like [`one_step`], reporting scan counters instead of a single step count.
+fn one_step_scans(
+    storage: &Storage,
+) -> (
+    (u64, u64, u64, u64),
+    storage::thread_retention::ReclaimProgress,
+) {
+    let mut progress = None;
+    let counters = scans_of(|| {
+        progress = Some(
+            storage
+                .handle()
+                .reclaim_step(ReclaimBudget {
+                    max_transactions: 1,
+                })
+                .unwrap(),
+        );
+    });
+    (counters, progress.unwrap())
 }
 
 fn set_cursor(db: &Db, cursor: &str) {
@@ -332,7 +383,9 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
                     &policy,
                     &none,
                     &binding,
-                    FinalizeBudget::proportional(22),
+                    FinalizeBudget {
+                        max_edges: 1_000_000,
+                    },
                 )
                 .unwrap();
             assert!(
@@ -381,8 +434,9 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
     );
     storage.close();
 
-    // Todo snapshots of other threads are scanned a bounded number of rows per step,
-    // however long the history is, and the cursor advances although nothing matches.
+    // Todo snapshots and queue ledger rows are scanned a bounded number of rows per
+    // step, however long the history is; the cursor advances although nothing matches,
+    // and no scan, sort or automatic index grows with the history.
     let todo_step = |rows: i64| {
         let db = Db::new();
         db.family(1);
@@ -397,7 +451,7 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         confirm(&db);
         set_cursor(&db, r#"{"phase":"events_thread"}"#);
         let storage = Storage::open(config(&db.path)).unwrap();
-        let (_, steps, progress) = one_step(&db, &storage);
+        let (counters, progress) = one_step_scans(&storage);
         storage.close();
         assert_eq!(progress.rows, 0);
         let cursor: String = db
@@ -409,18 +463,123 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
             !cursor.contains("\"scan_after\":0"),
             "the cursor must advance: {cursor}"
         );
-        steps
+        counters
     };
     let short = todo_step(3_000);
     let long = todo_step(12_000);
     assert!(
-        long <= short + short / 10,
-        "todo scan: {short} steps over 3k rows, {long} over 12k"
+        long.0 <= short.0 + short.0 / 10,
+        "todo scan: {short:?} over 3k rows, {long:?} over 12k"
     );
     assert!(
-        short <= 2_000 * 100,
-        "todo scan takes {short} steps for 2000 rows"
+        short.0 <= 2_000 * 100,
+        "todo scan takes {} steps for 2000 rows",
+        short.0
     );
+    assert!(
+        long.1 <= short.1,
+        "full scans grew with the history: {short:?} -> {long:?}"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+
+    let ledger_step = |rows: i64| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {rows})
+             INSERT INTO task_queue_ledger(operation, payload)
+             SELECT 'enqueue', json_object('id', 'other-' || x) FROM n;"
+        ));
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"tasks"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (counters, progress) = one_step_scans(&storage);
+        storage.close();
+        assert_eq!(progress.rows, 0);
+        let cursor: String = db
+            .conn
+            .query_row("SELECT cursor_json FROM reclaim_jobs", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            !cursor.contains("\"scan_after\":0"),
+            "the cursor must advance: {cursor}"
+        );
+        counters
+    };
+    let short = ledger_step(3_000);
+    let long = ledger_step(12_000);
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "ledger scan: {short:?} over 3k rows, {long:?} over 12k"
+    );
+    assert!(
+        long.1 <= short.1,
+        "full scans grew with the ledger: {short:?} -> {long:?}"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+
+    // Rows at the step budget are deleted in one transaction; one byte above, they wait.
+    for (event_bytes, expect_deleted) in [(4_194_304_u64, true), (4_194_305, false)] {
+        let db = Db::new();
+        db.family(1);
+        db.sql("INSERT INTO sessions(id, status, created_at_ns, updated_at_ns) VALUES ('s', 'running', 0, 0);");
+        db.sql(&format!(
+            "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind, run_id)
+             VALUES ('s', 1, 1, 1, 'Message', printf('%0{event_bytes}d', 1), 'MessageCompleted', 'ra');"
+        ));
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"events_run","run":"ra"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (frames, _, progress) = one_step(&db, &storage);
+        storage.close();
+        let page = db.page_size();
+        if expect_deleted {
+            assert_eq!(progress.rows, 1);
+            assert!(
+                frames <= 2 * pages(event_bytes, page) + 4 + 64,
+                "{frames} frames for {event_bytes} bytes"
+            );
+        } else {
+            assert_eq!(
+                progress.rows, 0,
+                "a row above the budget is not deleted by a bounded step"
+            );
+            assert!(
+                frames <= 64,
+                "registering a large row costs {frames} frames"
+            );
+            assert_eq!(
+                db.int("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'events'"),
+                1
+            );
+        }
+    }
+    for (stored_bytes, expect_deleted) in [(4_194_304_u64, true), (4_194_305, false)] {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "UPDATE run_contexts SET messages_json = zeroblob({}) WHERE run_id = 'ra'",
+            stored_bytes - 2
+        ));
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"run_contexts","run":"ra"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (_, _, progress) = one_step(&db, &storage);
+        storage.close();
+        assert_eq!(progress.rows, u64::from(expect_deleted), "{stored_bytes}");
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_contexts'"),
+            i64::from(!expect_deleted)
+        );
+    }
 
     // One run context is one transaction, bounded by its stored size.
     let db = Db::new();

@@ -17,6 +17,9 @@ const NOW_NS: i64 = 100 * 86_400 * 1_000_000_000;
 const BIG: ExploreBudget = ExploreBudget {
     max_edges: 1_000_000,
 };
+const BIG_FINALIZE: FinalizeBudget = FinalizeBudget {
+    max_edges: 1_000_000,
+};
 
 struct Fixture {
     _dir: TempDir,
@@ -149,8 +152,8 @@ impl Fixture {
         .unwrap();
         c.execute(
             "INSERT INTO user_questions(id, run_id, root_run_id, root_name, payload) \
-             VALUES (?1, ?2, ?2, 'root', '{}')",
-            params![format!("q-{id}"), id],
+             VALUES (?1, ?2, ?2, 'root', ?3)",
+            params![format!("q-{id}"), id, serde_json::json!({"id": format!("q-{id}"), "run_id": id, "root_run_id": id, "root_name": "root", "recipient_run_ids": [], "title": "t", "options": [], "blocking": false, "answer": null}).to_string()],
         )
         .unwrap();
         c.execute(
@@ -347,7 +350,7 @@ fn finalize(database: &Database, key: &str, input: &RetentionInput) -> FinalizeO
             &policy(),
             &BTreeMap::new(),
             &binding(),
-            FinalizeBudget::proportional(1_000),
+            BIG_FINALIZE,
         )
         .unwrap()
 }
@@ -681,14 +684,7 @@ fn protections_keep_a_family_from_being_confirmed() {
             .first()
             .map_or_else(|| "A".to_owned(), |(key, _)| key.clone());
         let outcome = database
-            .retention_finalize(
-                &key,
-                &input,
-                &policy,
-                &owners,
-                &binding(),
-                FinalizeBudget::proportional(10),
-            )
+            .retention_finalize(&key, &input, &policy, &owners, &binding(), BIG_FINALIZE)
             .unwrap();
 
         // Then: it is blocked and nothing was written.
@@ -710,14 +706,7 @@ fn owners_disabled_policy_and_unfinished_backfill_block_confirmation() {
     // An owner holds the thread.
     let owners = BTreeMap::from([("A".to_owned(), "running".to_owned())]);
     let outcome = database
-        .retention_finalize(
-            "A",
-            &input,
-            &policy(),
-            &owners,
-            &binding(),
-            FinalizeBudget::proportional(10),
-        )
+        .retention_finalize("A", &input, &policy(), &owners, &binding(), BIG_FINALIZE)
         .unwrap();
     assert_eq!(
         outcome,
@@ -737,7 +726,7 @@ fn owners_disabled_policy_and_unfinished_backfill_block_confirmation() {
                 &disabled,
                 &BTreeMap::new(),
                 &binding(),
-                FinalizeBudget::proportional(10)
+                BIG_FINALIZE
             )
             .unwrap(),
         FinalizeOutcome::Disabled
@@ -864,7 +853,7 @@ fn a_large_family_needs_the_size_proportional_budget_and_a_failed_try_changes_no
                 &policy(),
                 &BTreeMap::new(),
                 &binding(),
-                FinalizeBudget::proportional(302)
+                BIG_FINALIZE
             )
             .unwrap(),
         FinalizeOutcome::Confirmed(_)
@@ -1214,7 +1203,10 @@ fn oversized_rows_wait_for_the_exclusive_step_which_deletes_at_least_one() {
 
     // Then: the small row is gone, the large one is registered, the job waits.
     assert_eq!(progress.oversized_pending, 1);
-    assert_eq!(progress.jobs_db_pending, 1);
+    assert_eq!(
+        (progress.jobs_db_pending, progress.jobs_waiting_exclusive),
+        (0, 1)
+    );
     assert_eq!(f.count("SELECT COUNT(*) FROM run_contexts"), 1);
     assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 1);
 
@@ -1489,4 +1481,664 @@ fn a_late_usage_attribution_of_a_deleted_run_does_not_lose_the_rest_of_its_batch
         1
     );
     storage.close();
+}
+
+// ---- review round: readers, closure rules, budgets, atomic staging, large rows ----
+
+/// Rows of the tables a deletion must leave alone, as comparable text.
+const KEPT_TABLES: &[&str] = &[
+    "usage_requests",
+    "usage_daily",
+    "usage_run_threads",
+    "learning_claims",
+    "learning_claim_roots",
+    "improvement_candidates",
+    "memory_ledger",
+    "memory_entries",
+    "thread_index_requests",
+    "thread_index_request_targets",
+];
+
+fn seed_kept(f: &Fixture) {
+    f.sql(
+        "INSERT INTO usage_daily(day, provider, profile, model, project_id, role, purpose, request_count)
+         VALUES ('2026-01-01', 'p', '', 'm', 'proj', 'worker', 'agent', 3);
+         INSERT INTO learning_claims(task_id, is_goal, utc_day) VALUES ('task-1', 0, 20000);
+         INSERT INTO learning_claim_roots(task_id, run_id) VALUES ('task-1', 'rp');
+         INSERT INTO improvement_candidates(candidate_id, project, created_at_ns, source, code, severity,
+             title, evidence, dedup_key, run_id)
+         VALUES ('cand-1', 'proj', 5, 'lesson', 'Code', 'info', 't', 'e', 'k', 'rp');
+         INSERT INTO memory_ledger(entry_id, project, task_id, content, evidence, status)
+         VALUES ('mem-1', 'proj', 'task-1', 'remember', 'ev', 'validated');
+         INSERT INTO memory_entries(id, project, task_id, content, evidence, status, ledger_seq)
+         VALUES ('mem-1', 'proj', 'task-1', 'remember', 'ev', 'validated', 1);
+         INSERT INTO thread_index_requests(request_id, include_evicted, state, created_at_ns, finished_at_ns)
+         VALUES ('req-a', 0, 'completed', 1, 2);
+         INSERT INTO thread_index_request_targets(request_id, run_id, source_revision, extractor_version,
+             accounting_version, work_generation, state) VALUES ('req-a', 'rp', 1, 1, 0, 0, 'succeeded');",
+    );
+}
+
+fn dump(f: &Fixture, table: &str) -> Vec<String> {
+    let mut statement = f.conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+    let columns = statement.column_count();
+    let mut rows: Vec<String> = statement
+        .query_map([], |row| {
+            Ok((0..columns)
+                .map(|index| format!("{:?}", row.get_ref(index).unwrap()))
+                .collect::<Vec<_>>()
+                .join("|"))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    rows.sort();
+    rows
+}
+
+fn kept_values(f: &Fixture) -> Vec<(String, Vec<String>)> {
+    KEPT_TABLES
+        .iter()
+        .map(|table| ((*table).to_owned(), dump(f, table)))
+        .collect()
+}
+
+#[test]
+fn usage_and_learning_rows_are_byte_for_byte_unchanged_by_confirmation_and_reclaim() {
+    // Given: non-empty usage and learning tables that mention the family's runs.
+    let f = Fixture::new();
+    build_family(&f);
+    seed_kept(&f);
+    let before = kept_values(&f);
+    assert!(
+        before.iter().all(|(_, rows)| !rows.is_empty()),
+        "{table:?}",
+        table = before.iter().find(|(_, rows)| rows.is_empty())
+    );
+
+    // When: the family is confirmed and fully reclaimed.
+    drop(confirm_family(&f));
+    let storage = Storage::open(config(&f.path)).unwrap();
+    for _ in 0..10_000 {
+        if storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap()
+            .jobs_db_pending
+            == 0
+        {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: every kept value is identical, and the family is gone.
+    assert_eq!(kept_values(&f), before);
+    assert_eq!(family_residue(&f), vec![]);
+}
+
+#[test]
+fn a_confirmed_family_is_invisible_to_every_reader_before_any_reclaim_ran() {
+    // Given: a confirmed family whose rows are all still stored.
+    let f = Fixture::new();
+    build_family(&f);
+    let database = confirm_family(&f);
+    assert!(family_rows(&f) > 40, "nothing was reclaimed");
+
+    // Then: no reader returns the family's content, live neighbours stay visible.
+    assert!(
+        database
+            .review_evidence_for_target("rp")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.review_evidence_for_root("rp").unwrap().is_empty());
+    assert!(
+        database
+            .review_evidence_for_lineage(&["rp".into(), "rx".into()])
+            .unwrap()
+            .iter()
+            .all(|row| row.target_run_id == "rx")
+    );
+    assert!(
+        database
+            .review_attachment_acceptances_for_lineage(&["rp".into()])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.review_lineage_edges("rp").unwrap().is_empty());
+    assert!(database.review_lineage_ancestors("rp").unwrap().is_empty());
+    assert!(database.assistant_reference("ref-rp").unwrap().is_none());
+    assert!(database.user_question("q-rp").unwrap().is_none());
+    assert!(database.user_questions_for_run("rp").unwrap().is_empty());
+    assert!(
+        database
+            .user_question_recipients("q-rp")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .pending_user_questions()
+            .unwrap()
+            .iter()
+            .all(|question| question.run_id == "rx")
+    );
+    assert!(database.thread_start_state("P").unwrap().is_none());
+    assert!(
+        database
+            .thread_start_states_since(0)
+            .unwrap()
+            .iter()
+            .all(|summary| summary.thread_id == "X")
+    );
+    assert!(
+        !database
+            .review_evidence_for_target("rx")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.assistant_reference("ref-rx").unwrap().is_some());
+    assert!(database.user_question("q-rx").unwrap().is_some());
+    assert!(database.thread_start_state("X").unwrap().is_some());
+}
+
+#[test]
+fn a_question_of_a_deleted_run_cannot_be_handed_to_a_live_run() {
+    // Given: a confirmed family and a writer, with the deleted run's question unreclaimed.
+    let f = Fixture::new();
+    build_family(&f);
+    drop(confirm_family(&f));
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let links_before = f.count("SELECT COUNT(*) FROM user_question_links");
+
+    // When: the question is inherited by a live run, through the API and in SQL.
+    let through_api = storage
+        .handle()
+        .bind_user_questions("rp", "rx", &["q-rp".to_owned()]);
+    let in_sql = f.conn.execute(
+        "INSERT INTO user_question_links(question_id, run_id) VALUES ('q-rp', 'rx')",
+        [],
+    );
+    storage.close();
+
+    // Then: both are refused with a clear reason and no link appears.
+    assert!(
+        matches!(through_api, Err(StorageError::Tombstoned { run_id: Some(ref run), .. }) if run == "rp"),
+        "{through_api:?}"
+    );
+    assert!(in_sql.unwrap_err().to_string().contains("tombstoned"));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM user_question_links"),
+        links_before
+    );
+}
+
+#[test]
+fn live_task_operations_continue_while_a_deleted_family_still_has_pending_tasks() {
+    // Given: a confirmed family whose pending tasks are still stored, and a live task.
+    let f = Fixture::new();
+    build_family(&f);
+    drop(confirm_family(&f));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM tasks WHERE id IN ('task-1', 'task-2')"),
+        2
+    );
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+
+    // When/Then: the live task starts and finishes, and a new one queues, without ABORT.
+    handle.start_task("task-x").unwrap();
+    handle.finish_task("task-x", true).unwrap();
+    f.task("task-y", "rx");
+    handle.start_task("task-y").unwrap();
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM tasks WHERE id = 'task-y' AND status = 'running'"),
+        1
+    );
+    // The deleted family's tasks are left exactly as they were.
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM tasks WHERE id IN ('task-1', 'task-2') AND status = 'pending'"
+        ),
+        2
+    );
+    storage.close();
+}
+
+#[test]
+fn the_runtime_cannot_create_anything_under_a_deleted_thread_or_run() {
+    let f = Fixture::new();
+    build_family(&f);
+    drop(confirm_family(&f));
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+    let child = |id: &str| storage::threads::ThreadUpsert {
+        thread_id: id.to_owned(),
+        created_at_ns: 1,
+        updated_at_ns: 2,
+        ..Default::default()
+    };
+
+    // A new child thread of a deleted parent, a lineage from a deleted run, and
+    // an update of a deleted thread are refused with an explicit error.
+    let mut fork = child("fork-of-deleted");
+    fork.parent_thread_id = Some("P".into());
+    let mut escalation = child("escalation-of-deleted");
+    escalation.escalation_source_run_id = Some("rp".into());
+    for (upsert, run, thread) in [
+        (fork, None, Some("P")),
+        (escalation, Some("rp"), None),
+        (child("C"), None, Some("C")),
+    ] {
+        let refused = handle.upsert_thread_runtime(&upsert);
+        assert_eq!(
+            refused,
+            Err(StorageError::Tombstoned {
+                run_id: run.map(str::to_owned),
+                thread_id: thread.map(str::to_owned)
+            })
+        );
+    }
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM threads WHERE thread_id LIKE '%of-deleted'"),
+        0
+    );
+    // A thread unrelated to the deleted family is still recorded.
+    handle.upsert_thread_runtime(&child("independent")).unwrap();
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM threads WHERE thread_id = 'independent'"),
+        1
+    );
+    storage.close();
+}
+
+fn explore_all(
+    database: &Database,
+    input: &RetentionInput,
+    max_edges: u64,
+) -> (u64, Vec<(String, FamilyState)>) {
+    let mut calls = 0;
+    let mut previous: u64 = 0;
+    loop {
+        calls += 1;
+        assert!(calls < 100_000, "exploration did not settle");
+        let states = database
+            .retention_explore(input, &policy(), ExploreBudget { max_edges })
+            .unwrap();
+        match states.as_slice() {
+            [(_, FamilyState::Exploring { explored_edges })] => {
+                assert!(
+                    *explored_edges <= previous + max_edges + 65,
+                    "a call read {} rows with a budget of {max_edges}",
+                    explored_edges - previous
+                );
+                previous = *explored_edges;
+            }
+            _ => return (calls, states),
+        }
+    }
+}
+
+#[test]
+fn a_huge_single_family_is_explored_and_confirmed_within_budgets_that_never_overrun() {
+    // Given: one thread with 1,500 delegated runs.
+    let f = Fixture::new();
+    f.thread("A", None, Some("root"), None);
+    f.run("root", None, Some("A"), "chat:Worker:A");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1500)
+         INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+             checkpoints_json, terminal_phase, restorable, updated_at_ns)
+         SELECT printf('child-%05d', x), 'Worker', 'child', 'root', '{}', '[]', '[]', 'Done', 1, 1 FROM n;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+
+    // When: the search runs with a tiny budget per call.
+    let (calls, states) = explore_all(&database, &input, 100);
+
+    // Then: it needed many calls, each within its budget, and found the whole family.
+    assert!(calls > 15, "{calls}");
+    assert!(matches!(&states[0].1, FamilyState::Explored { runs, .. } if runs.len() == 1501));
+    // And: the budget derived from the exploration is enough for the check.
+    let budget = database.retention_finalize_budget("A").unwrap().unwrap();
+    let outcome = database
+        .retention_finalize("A", &input, &policy(), &BTreeMap::new(), &binding(), budget)
+        .unwrap();
+    assert!(
+        matches!(outcome, FinalizeOutcome::Confirmed(_)),
+        "{outcome:?} with {budget:?}"
+    );
+}
+
+#[test]
+fn a_high_fan_out_node_is_read_in_pages_and_a_doubling_retry_always_converges() {
+    // Given: a root run that 3,000 usage rows name as parent of distinct runs.
+    let f = Fixture::new();
+    f.thread("A", None, Some("root"), None);
+    f.run("root", None, Some("A"), "chat:Worker:A");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 3000)
+         INSERT INTO usage_requests(request_id, at_ns, provider, model, run_id, parent_run_id, status)
+         SELECT printf('req-%05d', x), 1, 'p', 'm', printf('leaf-%05d', x), 'root', 'ok' FROM n;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    let (_, states) = explore_all(&database, &input, 50);
+    assert!(matches!(&states[0].1, FamilyState::Explored { runs, .. } if runs.len() == 3001));
+
+    // When: the check starts from a budget far too small.
+    let mut budget = FinalizeBudget { max_edges: 50 };
+    let mut attempts = 0;
+    let outcome = loop {
+        attempts += 1;
+        let outcome = database
+            .retention_finalize("A", &input, &policy(), &BTreeMap::new(), &binding(), budget)
+            .unwrap();
+        match outcome {
+            FinalizeOutcome::OverBudget { edges_read, .. } => {
+                // It stops at the budget (a canonical-thread walk is the one indivisible step).
+                assert!(
+                    edges_read <= budget.max_edges + 65,
+                    "{edges_read} rows for {budget:?}"
+                );
+                assert_eq!(f.tombstones(), 0, "an overrun changes nothing");
+                budget = budget.doubled();
+            }
+            other => break other,
+        }
+    };
+
+    // Then: doubling reaches a budget that confirms.
+    assert!(
+        matches!(outcome, FinalizeOutcome::Confirmed(_)),
+        "{outcome:?}"
+    );
+    assert!(attempts > 2 && attempts < 20, "{attempts}");
+}
+
+#[test]
+fn a_run_named_for_a_live_thread_pulls_that_thread_into_the_family() {
+    // Given: archived A escalated from a run that only its name ties to live thread B.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), Some("rb"));
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.thread("B", None, None, None);
+    f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'B'");
+    f.run("rb", None, None, "chat:Worker:B");
+    let database = f.database();
+    let input = sidebar(&["A"], &["B"]);
+
+    // When: the family is explored.
+    let states = settle(&database, &input, &policy(), BIG);
+
+    // Then: B joins it, so its protection (not archived) holds the deletion back.
+    assert_eq!(
+        states,
+        [(
+            "A".to_owned(),
+            FamilyState::Blocked(BlockReason::FamilyMemberNotDue("B".into()))
+        )]
+    );
+    assert_eq!(f.tombstones(), 0);
+}
+
+#[test]
+fn a_run_with_a_cyclic_or_too_deep_ancestry_is_unresolved_not_ignored() {
+    // Given: archived thread A escalated from a run in a parent cycle.
+    let cyclic = Fixture::new();
+    cyclic.thread("A", None, Some("ra"), Some("x"));
+    cyclic.run("ra", None, Some("A"), "chat:Worker:A");
+    cyclic.run("x", Some("y"), None, "x");
+    cyclic.run("y", Some("x"), None, "y");
+    let database = cyclic.database();
+    let states = settle(&database, &sidebar(&["A"], &[]), &policy(), BIG);
+    assert!(
+        matches!(states.as_slice(), [(key, FamilyState::Blocked(BlockReason::FamilyUnresolved(_)))] if key == "A"),
+        "{states:?}"
+    );
+    assert_eq!(
+        cyclic.count("SELECT COUNT(*) FROM retention_staging_state"),
+        0
+    );
+
+    // And: an ancestry longer than the link limit is treated the same way.
+    let deep = Fixture::new();
+    deep.thread("A", None, Some("ra"), Some("n00"));
+    deep.run("ra", None, Some("A"), "chat:Worker:A");
+    for index in 0..70 {
+        let parent = (index < 69).then(|| format!("n{:02}", index + 1));
+        deep.run(&format!("n{index:02}"), parent.as_deref(), None, "link");
+    }
+    let database = deep.database();
+    let states = settle(&database, &sidebar(&["A"], &[]), &policy(), BIG);
+    assert!(
+        matches!(
+            states.as_slice(),
+            [(_, FamilyState::Blocked(BlockReason::FamilyUnresolved(_)))]
+        ),
+        "{states:?}"
+    );
+}
+
+#[test]
+fn an_interrupted_exploration_leaves_the_previous_resumable_state_and_resumes_cleanly() {
+    // Given: two archived threads of one family, and a fault when a run is first staged.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.thread("B", Some("A"), Some("rb"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run("rb", None, Some("B"), "chat:Worker:B");
+    f.sql(
+        "CREATE TRIGGER inject BEFORE INSERT ON retention_staging
+         WHEN NEW.kind = 'run' AND NEW.id = 'rb' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A", "B"], &[]);
+    let reference = {
+        let clean = Fixture::new();
+        clean.thread("A", None, Some("ra"), None);
+        clean.thread("B", Some("A"), Some("rb"), None);
+        clean.run("ra", None, Some("A"), "chat:Worker:A");
+        clean.run("rb", None, Some("B"), "chat:Worker:B");
+        settle(&clean.database(), &input, &policy(), BIG)
+    };
+
+    // When: exploration is interrupted at different points by the fault.
+    let mut failures = 0;
+    for budget in [1_u64, 3, 8, 1_000] {
+        let result =
+            database.retention_explore(&input, &policy(), ExploreBudget { max_edges: budget });
+        if let Err(error) = result {
+            failures += 1;
+            assert!(error.to_string().contains("injected"), "{error}");
+            // Then: no half-written seed or member remains.
+            assert_eq!(
+                f.count("SELECT COUNT(*) FROM retention_staging_state s WHERE NOT EXISTS (SELECT 1 FROM retention_staging m WHERE m.family_key = s.family_key AND m.kind = 'thread')"),
+                0,
+                "a state without members"
+            );
+        }
+    }
+    assert!(failures > 0, "the fault was never reached");
+
+    // And: after the fault is gone the search completes with the uninterrupted result.
+    f.sql("DROP TRIGGER inject;");
+    assert_eq!(settle(&database, &input, &policy(), BIG), reference);
+}
+
+fn untracked_capture(f: &Fixture, thread: &str, root: &str, big: bool) {
+    f.start_state(thread, root);
+    if big {
+        f.sql(&format!(
+            "INSERT INTO thread_start_untracked(thread_id, path, kind, executable, content)
+             VALUES ('{thread}', 'big.bin', 'file', 0, zeroblob(5242880));"
+        ));
+    }
+}
+
+#[test]
+fn single_rows_above_the_step_budget_wait_for_the_exclusive_phase_whatever_their_table() {
+    // Given: a family with a 5 MiB event, a 5 MiB captured file and a 3 MiB index block,
+    // each next to small rows.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run_payload("ra", "session-1");
+    f.event(
+        "session-1",
+        Some("ra"),
+        "Message",
+        "MessageCompleted",
+        5 * 1024 * 1024,
+    );
+    untracked_capture(&f, "A", "ra", true);
+    f.sql(
+        "INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, role, kind,
+             truncated, hash, text)
+         VALUES ('ra', 'message', '9:0', 9, 0, 'user', 'text', 0, 'h', printf('%03145728d', 1));",
+    );
+    f.sql("UPDATE thread_index_runs SET text_bytes = text_bytes + 3145728, charged_bytes = charged_bytes + 3145728 WHERE run_id = 'ra'");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: none of the three large rows was deleted by a bounded step.
+    let last = last.unwrap();
+    assert_eq!((last.jobs_db_pending, last.jobs_waiting_exclusive), (0, 1));
+    assert_eq!(last.oversized_pending, 3);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM events WHERE OCTET_LENGTH(payload) > 4194304"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_start_untracked WHERE LENGTH(content) > 4194304"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM conversation_blocks WHERE OCTET_LENGTH(text) > 2097152"),
+        1
+    );
+    // The rows around them were reclaimed.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM events WHERE OCTET_LENGTH(payload) <= 4194304"),
+        0
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_contexts"), 0);
+
+    // And: the exclusive phase removes them, with consistent accounting.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 10);
+    }
+    assert_eq!(family_residue(&f), vec![]);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_done'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_runs WHERE state = 'deleted'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COALESCE(SUM(charged_bytes), 0) FROM thread_index_runs"),
+        0
+    );
+    assert_eq!(
+        f.count("SELECT total_event_bytes FROM sessions WHERE id = 'session-1'"),
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = 'session-1'")
+    );
+    assert_eq!(
+        f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes"),
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events")
+    );
+}
+
+#[test]
+fn a_job_waiting_for_the_exclusive_phase_never_starves_the_jobs_behind_it() {
+    // Given: family A (sorts first) with an oversized run context, and a normal family Z.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'ra'");
+    f.thread("Z", None, Some("rz"), None);
+    f.run("rz", None, Some("Z"), "chat:Worker:Z");
+    f.run_payload("rz", "session-z");
+    let database = f.database();
+    let input = sidebar(&["A", "Z"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    assert!(matches!(
+        finalize(&database, "Z", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+
+    // When: the writer takes one transaction per step.
+    let mut finished = false;
+    for _ in 0..2_000 {
+        let progress = handle
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 1,
+            })
+            .unwrap();
+        if progress.jobs_db_pending == 0 {
+            finished = true;
+            // Then: A only waits; no transaction is spent on it any more.
+            assert_eq!(progress.jobs_waiting_exclusive, 1);
+            let idle = handle
+                .reclaim_step(ReclaimBudget {
+                    max_transactions: 8,
+                })
+                .unwrap();
+            assert_eq!(idle.transactions, 0);
+            break;
+        }
+    }
+    storage.close();
+    assert!(finished, "Z must be reclaimed behind a waiting A");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_jobs WHERE family_key = 'Z' AND state = 'db_done'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM events WHERE run_id = 'rz'"),
+        0
+    );
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM reclaim_jobs WHERE family_key = 'A' AND state = 'db_pending'"
+        ),
+        1
+    );
 }

@@ -1,31 +1,140 @@
 //! Family closure: the threads and runs that must be deleted together.
 //!
 //! A family is the connected set of threads and runs under every relation
-//! that ties their rows together (lineage, bindings, delegation, usage
-//! parents, escalation). The search is a worklist kept in `retention_staging`
-//! so it can stop and resume across startups; each step reads only indexed
-//! rows and counts them against a budget.
+//! that ties their rows together (lineage, bindings, the canonical run→thread
+//! rule, delegation, usage parents, escalation). The search is a worklist kept
+//! in `retention_staging` so it can stop and resume across startups, **inside** a
+//! node: each node's relations are a fixed list of edge queries paged by rowid,
+//! and the position reached (query, last rowid) is stored on the worklist item.
+//! Every statement costs the rows it returns (at least one) and is limited to the
+//! budget that is left, so a call never reads more than its budget (a run's
+//! canonical-thread walk, at most `MAX_RUN_LINKS` + 1 links, is the one
+//! indivisible step).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use super::candidates::family_blocked;
 use crate::StorageError;
 use crate::migrations::backfill::backfill_pending;
+use crate::repo::threads::{CanonicalThread, canonical_thread};
 use crate::thread_retention::{
     BlockReason, ExploreBudget, FamilyState, RetentionInput, SidebarThread, ThreadRetentionPolicy,
 };
 
-/// A member reached from another member, or a deleted identity in the way.
+/// Rows one edge query returns at most, whatever the budget.
+const PAGE_ROWS: u64 = 512;
+
+/// A member reached from another member, or a deleted/unresolvable identity in the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Neighbor {
     Thread(String),
     Run(String),
-    /// Already tombstoned: the family overlaps a confirmed deletion.
+    /// Already tombstoned, or not resolvable (cycle, too deep): the family
+    /// cannot be confirmed.
     Gone(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeKind {
+    Thread,
+    Run,
+}
+
+/// Where an interrupted expansion resumes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Position {
+    pub step: u32,
+    pub after: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Expansion {
+    Done,
+    /// The budget ran out; resume here.
+    Budget(Position),
+    /// The sink asked to stop (an unresolvable neighbor).
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+enum Yields {
+    Thread,
+    Run,
+}
+
+enum Step {
+    /// The thread's own row: parent thread, root run and escalation source run.
+    ThreadOwn,
+    /// The canonical run→thread rule.
+    Walk,
+    /// `sql` takes (key, after, limit) and returns (rowid, value).
+    Paged(&'static str, Yields),
+}
+
+const THREAD_STEPS: &[Step] = &[
+    Step::ThreadOwn,
+    Step::Paged(
+        "SELECT rowid, thread_id FROM threads WHERE parent_thread_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
+    ),
+    Step::Paged(
+        "SELECT rowid, run_id FROM thread_runs WHERE thread_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+    // Conversation roots named for the thread, the same predicate as `runs_of_thread`.
+    Step::Paged(
+        "SELECT rowid, run_id FROM run_contexts \
+         WHERE parent_run_id IS NULL AND substr(name, 1, 5) = 'chat:' \
+         AND instr(substr(name, 6), ':') > 1 \
+         AND substr(name, 6 + instr(substr(name, 6), ':')) = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+];
+
+const RUN_STEPS: &[Step] = &[
+    Step::Walk,
+    Step::Paged(
+        "SELECT rowid, thread_id FROM thread_runs WHERE run_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
+    ),
+    Step::Paged(
+        "SELECT rowid, thread_id FROM threads WHERE escalation_source_run_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
+    ),
+    Step::Paged(
+        "SELECT rowid, thread_id FROM threads WHERE root_run_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
+    ),
+    Step::Paged(
+        "SELECT rowid, parent_run_id FROM run_contexts \
+         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+    Step::Paged(
+        "SELECT rowid, run_id FROM run_contexts WHERE parent_run_id = ?1 AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+    Step::Paged(
+        "SELECT rowid, run_id FROM usage_requests \
+         WHERE parent_run_id = ?1 AND run_id IS NOT NULL AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+    Step::Paged(
+        "SELECT rowid, parent_run_id FROM usage_requests \
+         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+        Yields::Run,
+    ),
+];
 
 fn thread_neighbor(conn: &Connection, thread_id: String) -> Result<Neighbor, StorageError> {
     let gone: bool = conn.query_row(
@@ -53,144 +162,115 @@ fn run_neighbor(conn: &Connection, run_id: String) -> Result<Neighbor, StorageEr
     })
 }
 
-/// Run `sql` with one parameter and map each single-column row through `map`.
-/// Counts the statement and every row it returns as edges.
-fn column(
-    conn: &Connection,
-    sql: &str,
-    key: &str,
-    edges: &mut u64,
-    mut visit: impl FnMut(String) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    *edges += 1;
-    let mut statement = conn.prepare_cached(sql)?;
-    let mut rows = statement.query([key])?;
-    while let Some(row) = rows.next()? {
-        *edges += 1;
-        if let Some(value) = row.get::<_, Option<String>>(0)? {
-            visit(value)?;
-        }
-    }
-    Ok(())
-}
+type Sink<'a> = dyn FnMut(Neighbor) -> Result<bool, StorageError> + 'a;
 
-/// Every thread and run one hop from `thread_id`.
-pub(super) fn thread_neighbors(
+/// Walks the relations of one node from `start`, feeding every neighbor to
+/// `sink`, until the node is done, the budget (`max_edges` in total, `edges` already
+/// used) is spent, or the sink stops it.
+pub(super) fn expand_node(
     conn: &Connection,
-    thread_id: &str,
+    kind: NodeKind,
+    id: &str,
+    start: Position,
     edges: &mut u64,
-) -> Result<Vec<Neighbor>, StorageError> {
-    let mut out = Vec::new();
-    // Its own row: parent thread, recorded root run, escalation source run.
-    *edges += 1;
-    let own = conn
-        .query_row(
-            "SELECT parent_thread_id, root_run_id, escalation_source_run_id \
-             FROM threads WHERE thread_id = ?1",
-            [thread_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
+    max_edges: u64,
+    sink: &mut Sink<'_>,
+) -> Result<Expansion, StorageError> {
+    let steps = match kind {
+        NodeKind::Thread => THREAD_STEPS,
+        NodeKind::Run => RUN_STEPS,
+    };
+    let mut after = start.after;
+    for (index, step) in steps.iter().enumerate().skip(start.step as usize) {
+        let here = |after| Position {
+            step: u32::try_from(index).unwrap_or(u32::MAX),
+            after,
+        };
+        match step {
+            Step::ThreadOwn => {
+                if *edges >= max_edges {
+                    return Ok(Expansion::Budget(here(0)));
+                }
+                *edges += 1;
+                let own = conn
+                    .query_row(
+                        "SELECT parent_thread_id, root_run_id, escalation_source_run_id \
+                         FROM threads WHERE thread_id = ?1",
+                        [id],
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some((parent, root, source)) = own {
+                    if let Some(parent) = parent
+                        && !sink(thread_neighbor(conn, parent)?)?
+                    {
+                        return Ok(Expansion::Stopped);
+                    }
+                    for run in [root, source].into_iter().flatten() {
+                        if !sink(run_neighbor(conn, run)?)? {
+                            return Ok(Expansion::Stopped);
+                        }
+                    }
+                }
+            }
+            Step::Walk => {
+                if *edges >= max_edges {
+                    return Ok(Expansion::Budget(here(0)));
+                }
+                let mut links = 0;
+                let resolved = canonical_thread(conn, id, &mut links)?;
+                *edges += links.max(1);
+                let neighbor = match resolved {
+                    CanonicalThread::Thread(thread) => Some(thread_neighbor(conn, thread)?),
+                    CanonicalThread::None => None,
+                    CanonicalThread::Broken => Some(Neighbor::Gone(id.to_owned())),
+                };
+                if let Some(neighbor) = neighbor
+                    && !sink(neighbor)?
+                {
+                    return Ok(Expansion::Stopped);
+                }
+            }
+            Step::Paged(sql, yields) => loop {
+                if *edges >= max_edges {
+                    return Ok(Expansion::Budget(here(after)));
+                }
+                let limit = (max_edges - *edges).min(PAGE_ROWS);
+                let mut statement = conn.prepare_cached(sql)?;
+                let rows: Vec<(i64, Option<String>)> = statement
+                    .query_map(
+                        params![id, after, i64::try_from(limit).unwrap_or(i64::MAX)],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?
+                    .collect::<Result<_, _>>()?;
+                drop(statement);
+                let count = rows.len() as u64;
+                *edges += count.max(1);
+                for (rowid, value) in rows {
+                    after = rowid;
+                    let Some(value) = value else { continue };
+                    let neighbor = match yields {
+                        Yields::Thread => thread_neighbor(conn, value)?,
+                        Yields::Run => run_neighbor(conn, value)?,
+                    };
+                    if !sink(neighbor)? {
+                        return Ok(Expansion::Stopped);
+                    }
+                }
+                if count < limit {
+                    break;
+                }
             },
-        )
-        .optional()?;
-    if let Some((parent, root, source)) = own {
-        if let Some(parent) = parent {
-            out.push(thread_neighbor(conn, parent)?);
         }
-        for run in [root, source].into_iter().flatten() {
-            out.push(run_neighbor(conn, run)?);
-        }
+        after = 0;
     }
-    let mut found = Vec::new();
-    column(
-        conn,
-        "SELECT thread_id FROM threads WHERE parent_thread_id = ?1",
-        thread_id,
-        edges,
-        |child| {
-            found.push(Neighbor::Thread(child));
-            Ok(())
-        },
-    )?;
-    let mut runs = Vec::new();
-    column(
-        conn,
-        "SELECT run_id FROM thread_runs WHERE thread_id = ?1",
-        thread_id,
-        edges,
-        |run| {
-            runs.push(run);
-            Ok(())
-        },
-    )?;
-    // Conversation roots named for the thread, the same predicate as `runs_of_thread`.
-    column(
-        conn,
-        "SELECT run_id FROM run_contexts \
-         WHERE parent_run_id IS NULL AND substr(name, 1, 5) = 'chat:' \
-         AND instr(substr(name, 6), ':') > 1 \
-         AND substr(name, 6 + instr(substr(name, 6), ':')) = ?1",
-        thread_id,
-        edges,
-        |run| {
-            runs.push(run);
-            Ok(())
-        },
-    )?;
-    for neighbor in found {
-        if let Neighbor::Thread(id) = neighbor {
-            out.push(thread_neighbor(conn, id)?);
-        }
-    }
-    for run in runs {
-        out.push(run_neighbor(conn, run)?);
-    }
-    Ok(out)
-}
-
-/// Every thread and run one hop from `run_id`.
-pub(super) fn run_neighbors(
-    conn: &Connection,
-    run_id: &str,
-    edges: &mut u64,
-) -> Result<Vec<Neighbor>, StorageError> {
-    let mut threads = Vec::new();
-    let mut runs = Vec::new();
-    for sql in [
-        "SELECT thread_id FROM thread_runs WHERE run_id = ?1",
-        "SELECT thread_id FROM threads WHERE escalation_source_run_id = ?1",
-        "SELECT thread_id FROM threads WHERE root_run_id = ?1",
-    ] {
-        column(conn, sql, run_id, edges, |thread| {
-            threads.push(thread);
-            Ok(())
-        })?;
-    }
-    for sql in [
-        "SELECT parent_run_id FROM run_contexts WHERE run_id = ?1",
-        "SELECT run_id FROM run_contexts WHERE parent_run_id = ?1",
-        "SELECT DISTINCT run_id FROM usage_requests \
-         WHERE parent_run_id = ?1 AND run_id IS NOT NULL",
-        "SELECT DISTINCT parent_run_id FROM usage_requests \
-         WHERE run_id = ?1 AND parent_run_id IS NOT NULL",
-    ] {
-        column(conn, sql, run_id, edges, |run| {
-            runs.push(run);
-            Ok(())
-        })?;
-    }
-    let mut out = Vec::new();
-    for thread in threads {
-        out.push(thread_neighbor(conn, thread)?);
-    }
-    for run in runs {
-        out.push(run_neighbor(conn, run)?);
-    }
-    Ok(out)
+    Ok(Expansion::Done)
 }
 
 /// Adds a member to a family's staging and its worklist. When the member already
@@ -285,7 +365,7 @@ pub(super) fn frontier_empty(conn: &Connection, family_key: &str) -> Result<bool
     )?)
 }
 
-enum Expansion {
+pub(super) enum FamilyOutcome {
     Finished,
     OutOfBudget,
     Merged,
@@ -297,61 +377,110 @@ fn expand_family(
     family_key: &str,
     edges: &mut u64,
     max_edges: u64,
-) -> Result<Expansion, StorageError> {
+) -> Result<FamilyOutcome, StorageError> {
     let mut key = family_key.to_owned();
     loop {
         if *edges >= max_edges {
-            return Ok(Expansion::OutOfBudget);
+            return Ok(FamilyOutcome::OutOfBudget);
         }
-        let item: Option<(String, String)> = conn
+        let item: Option<(String, String, i64, i64)> = conn
             .query_row(
-                "SELECT kind, id FROM retention_staging \
+                "SELECT kind, id, edge_step, edge_after FROM retention_staging \
                  WHERE family_key = ?1 AND kind IN ('frontier_thread', 'frontier_run') \
                  ORDER BY kind, id LIMIT 1",
                 [&key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((kind, id)) = item else {
-            return Ok(Expansion::Finished);
+        let Some((kind, id, step, after)) = item else {
+            return Ok(FamilyOutcome::Finished);
+        };
+        let node = if kind == "frontier_thread" {
+            NodeKind::Thread
+        } else {
+            NodeKind::Run
         };
         let before = *edges;
-        let neighbors = if kind == "frontier_thread" {
-            thread_neighbors(conn, &id, edges)?
-        } else {
-            run_neighbors(conn, &id, edges)?
-        };
-        conn.execute(
-            "DELETE FROM retention_staging WHERE family_key = ?1 AND kind = ?2 AND id = ?3",
-            params![key, kind, id],
+        let mut merged = false;
+        let mut unresolved = None;
+        let outcome = expand_node(
+            conn,
+            node,
+            &id,
+            Position {
+                step: u32::try_from(step).unwrap_or(0),
+                after,
+            },
+            edges,
+            max_edges,
+            &mut |neighbor| {
+                let (member_kind, member) = match neighbor {
+                    Neighbor::Thread(id) => ("thread", id),
+                    Neighbor::Run(id) => ("run", id),
+                    Neighbor::Gone(id) => {
+                        unresolved = Some(id);
+                        return Ok(false);
+                    }
+                };
+                let (surviving, _) = add_member(conn, &key, member_kind, &member)?;
+                if surviving != key {
+                    merged = true;
+                    key = surviving;
+                }
+                Ok(true)
+            },
         )?;
+        if let Some(id) = unresolved {
+            return Ok(FamilyOutcome::Unresolved(id));
+        }
         conn.execute(
             "UPDATE retention_staging_state SET explored_edges = explored_edges + ?2 \
              WHERE family_key = ?1",
             params![key, i64::try_from(*edges - before).unwrap_or(i64::MAX)],
         )?;
-        let mut merged = false;
-        for neighbor in neighbors {
-            let (member_kind, member) = match neighbor {
-                Neighbor::Thread(id) => ("thread", id),
-                Neighbor::Run(id) => ("run", id),
-                Neighbor::Gone(id) => return Ok(Expansion::Unresolved(id)),
-            };
-            let (surviving, _) = add_member(conn, &key, member_kind, &member)?;
-            if surviving != key {
-                merged = true;
-                key = surviving;
+        match outcome {
+            Expansion::Done => {
+                conn.execute(
+                    "DELETE FROM retention_staging WHERE family_key = ?1 AND kind = ?2 AND id = ?3",
+                    params![key, kind, id],
+                )?;
             }
+            Expansion::Budget(position) => {
+                conn.execute(
+                    "UPDATE retention_staging SET edge_step = ?4, edge_after = ?5 \
+                     WHERE family_key = ?1 AND kind = ?2 AND id = ?3",
+                    params![key, kind, id, position.step, position.after],
+                )?;
+                return Ok(if merged {
+                    FamilyOutcome::Merged
+                } else {
+                    FamilyOutcome::OutOfBudget
+                });
+            }
+            Expansion::Stopped => {}
         }
         if merged {
-            return Ok(Expansion::Merged);
+            return Ok(FamilyOutcome::Merged);
         }
     }
 }
 
 /// Advances the closure search of every archived, unpinned thread's family by
-/// at most `budget.max_edges` rows and reports each family's state.
+/// at most `budget.max_edges` rows and reports each family's state. The whole call
+/// is one transaction: a failure leaves the previous resumable state untouched.
 pub(crate) fn explore(
+    conn: &Connection,
+    input: &RetentionInput,
+    policy: &ThreadRetentionPolicy,
+    budget: ExploreBudget,
+) -> Result<Vec<(String, FamilyState)>, StorageError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let states = explore_in(&tx, input, policy, budget)?;
+    tx.commit()?;
+    Ok(states)
+}
+
+fn explore_in(
     conn: &Connection,
     input: &RetentionInput,
     policy: &ThreadRetentionPolicy,
@@ -417,10 +546,10 @@ pub(crate) fn explore(
                 continue;
             }
             match expand_family(conn, &key, &mut edges, budget.max_edges)? {
-                Expansion::Finished => {}
-                Expansion::OutOfBudget => break,
-                Expansion::Merged => restart = true,
-                Expansion::Unresolved(id) => {
+                FamilyOutcome::Finished => {}
+                FamilyOutcome::OutOfBudget => break,
+                FamilyOutcome::Merged => restart = true,
+                FamilyOutcome::Unresolved(id) => {
                     conn.execute(
                         "DELETE FROM retention_staging_state WHERE family_key = ?1",
                         [&key],

@@ -130,11 +130,19 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   （fork / rewind / escalation の木と、その thread・run・task）の
   `thread_tombstones` / `run_tombstones` / `task_tombstones`、`reclaim_jobs`、
   `threads` / `thread_runs` の削除を 1 transaction で commit する。commit 後の
-  abort は存在しない。family は分割しない。閉包探索（`retention_explore`）は
-  `retention_staging` に作業リストを保存して起動をまたいで進み、確定直前に
-  不動点確認を再実行する。family が探索後に増えていれば `Stale`（増分を staging へ
-  積む）、読む行が予算を超えれば `OverBudget`（何も変えない。呼び手は
-  `FinalizeBudget::proportional` で再試行する）。
+  abort は存在しない。family は分割しない。閉包は thread と run の関係（系譜、束縛、
+  `chat:<Role>:<thread>` 名を含む正規の run→thread 規則、委譲、usage の親、escalation）を
+  すべてたどり、循環・`MAX_RUN_LINKS` 超過・tombstone 済みへの到達は `FamilyUnresolved`
+  で確定しない。探索（`retention_explore`）は `retention_staging` に作業リストを保存して
+  起動をまたいで進む。各ノードの関係は rowid で区切った辺クエリの列で、止まった位置
+  （クエリ番号と最後の rowid）を作業項目に保存するため、1 ノードの途中でも予算で止まり、
+  1 回の呼び出しは予算（run の正規 thread 解決の最大 65 リンクを除く）を超えて読まない。
+  呼び出し全体が 1 transaction で、失敗すると直前の再開可能な状態が残る。確定直前の
+  不動点確認は同じ辺を予算内で読み直す。family が探索後に増えていれば `Stale`（増分を
+  staging へ積む）、予算を使い切れば `OverBudget`（何も変えない）。未変更の family が
+  必要とする行数は探索が読んだ行数と同じなので、`retention_finalize_budget` がそれに
+  余裕を足した予算を返す。増えた family は `FinalizeBudget::doubled` で倍にして再試行すれば
+  有限回で完遂する。
 - **判定入力は sidebar。** `RetentionInput` は呼び手が排他ロック取得後に読んだ
   sidebar を渡す。DB の `threads` の `archived` / `pinned` と revision 列は mirror で、
   検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
@@ -148,7 +156,9 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   探索も確定も `Exploring` で止まる。
 - **確定後の見え方。** 読み手（`thread`、`threads_in_project`、`thread_children`、
   `thread_of_run`、`runs_of_thread`、`run_context*`、`events_for_runs`、イベント走査、
-  ledger、host input receipt、索引の参照解決）は tombstone 済みの行を返さない。
+  ledger、host input receipt、review evidence・lineage、assistant reference、user question、
+  thread start・評価サンプル、索引の参照解決）は、回収の前でも tombstone 済みの行を返さない。
+  削除済みの run の質問を生きている run へ bind することも拒否する。
   書き手は `StorageError::Tombstoned`（events、recorder は `skipped_tombstoned` に数えて
   再試行しない）または fence トリガの ABORT で拒否される。fence は INSERT と
   「生存へ戻す」UPDATE だけを止め、DELETE は常に許す。events の Orchestrator
@@ -157,9 +167,11 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   ごとに有界な量（events 500 行／4 MiB、小さな表 500 行、ledger と todo は走査 2,000 行、
   索引 200 行／2 MiB）を削除する。削除と cursor・カウンタの更新は同じ transaction で、
   中断しても再実行で残りだけを処理する。pending が無ければ何も書かない。
-  4 MiB を超える `run_contexts` と `thread_start_states.diff` は `reclaim_oversized` に
-  登録し、起動時の排他枠で `Database::reclaim_oversized_step` が 1 行ずつ（予算が小さくても
-  最低 1 行）削除する。失敗した行は登録が残る。`reclaim_mark_files` はファイル削除の結果を
+  通常 step の予算を超える単一の行（4 MiB を超える `run_contexts`、`thread_start_states.diff`
+  や撮影済みファイル、event、2 MiB を超える索引 block）は暗黙に通さず `reclaim_oversized`
+  に登録し、起動時の排他枠で `Database::reclaim_oversized_step` が 1 行ずつ（予算が小さくても
+  最低 1 行）削除する。失敗した行は登録が残る。通常 step の残りが無く排他回収だけを待つ job
+  （`jobs_waiting_exclusive`）は transaction を消費せず、後ろの job を止めない。`reclaim_mark_files` はファイル削除の結果を
   `db_done → files_pending → done | files_failed` に記録する。
 - **残すもの。** usage（`usage_requests` / `usage_daily` / `usage_run_threads`）、学習系
   （claims、improvement、memory）、索引の要求履歴、`sessions` と集計、`eval_samples`。

@@ -25,24 +25,32 @@ const THREAD_LIVE: &str = "thread_id NOT IN (SELECT thread_id FROM thread_tombst
 /// revision. Parameters are numbered so that a series is applied only when the
 /// host supplied its flag.
 ///
-/// - Revision not initialised (NULL): adopt the supplied series as it is. The
-///   time is never invented: it stays NULL unless supplied.
+/// - Revision not initialised (NULL): adopt the supplied series as it is, with a
+///   missing revision counted as generation 0 (so the series is initialised from
+///   then on). The time is never invented: it stays NULL unless supplied.
 /// - Newer revision: replace. Older: ignore. Equal: keep the protective side
 ///   (archived / pinned wins) so concurrent edits never lose protection.
+/// - An unnumbered sender (the host before it numbers its edits) replaces a
+///   generation-0 series, so its sequential edits keep working; it can never
+///   override a numbered one.
 fn series_sql(flag: &str, time: Option<&str>, revision: &str, p: &str, rev: &str) -> Vec<String> {
     let adopt = format!(
-        "({p} IS NOT NULL AND (threads.{revision} IS NULL OR COALESCE({rev}, 0) > threads.{revision}))"
+        "({p} IS NOT NULL AND (threads.{revision} IS NULL \
+         OR COALESCE({rev}, 0) > threads.{revision} \
+         OR ({rev} IS NULL AND threads.{revision} = 0)))"
     );
     let tie = format!(
-        "({p} IS NOT NULL AND threads.{revision} IS NOT NULL \
-         AND COALESCE({rev}, 0) = threads.{revision})"
+        "({p} IS NOT NULL AND threads.{revision} IS NOT NULL AND {rev} IS NOT NULL \
+         AND {rev} = threads.{revision})"
     );
     let mut updates = vec![
         format!(
             "{flag} = CASE WHEN {adopt} THEN {p} WHEN {tie} THEN max(threads.{flag}, {p}) \
              ELSE threads.{flag} END"
         ),
-        format!("{revision} = CASE WHEN {adopt} THEN {rev} ELSE threads.{revision} END"),
+        format!(
+            "{revision} = CASE WHEN {adopt} THEN COALESCE({rev}, 0) ELSE threads.{revision} END"
+        ),
     ];
     if let Some(time) = time {
         updates.push(format!(
@@ -104,26 +112,27 @@ fn upsert_sql(writer: ThreadWriter) -> String {
             updates.extend(series_sql("pinned", None, "pin_revision", "?17", "?19"));
             updates.push(flag.replace("{c}", "superseded").replace("{p}", "?13"));
         }
+        // The runtime never writes the archive and pin series, `archived` included.
         ThreadWriter::Runtime => {
-            for (column, parameter) in [("archived", "?12"), ("superseded", "?13")] {
-                updates.push(flag.replace("{c}", column).replace("{p}", parameter));
-            }
+            updates.push(flag.replace("{c}", "superseded").replace("{p}", "?13"));
         }
     }
     updates.push(format!("created_at_ns = {created_at}"));
     updates.push("updated_at_ns = max(threads.updated_at_ns, excluded.updated_at_ns)".into());
     updates.push(format!("source = {source}"));
-    let (inserted_source, series) = match writer {
+    let (inserted_source, archived, series) = match writer {
         ThreadWriter::Host => (
             ThreadSource::Host,
-            "CASE WHEN COALESCE(?12, 0) = 1 THEN ?16 END, COALESCE(?17, 0), ?18, ?19",
+            "COALESCE(?12, 0)",
+            "CASE WHEN COALESCE(?12, 0) = 1 THEN ?16 END, COALESCE(?17, 0), \
+             CASE WHEN ?12 IS NOT NULL THEN COALESCE(?18, 0) END, \
+             CASE WHEN ?17 IS NOT NULL THEN COALESCE(?19, 0) END",
         ),
-        // The runtime never writes the archive and pin series.
-        ThreadWriter::Runtime => (ThreadSource::Runtime, "NULL, 0, NULL, NULL"),
+        ThreadWriter::Runtime => (ThreadSource::Runtime, "0", "NULL, 0, NULL, NULL"),
     };
     format!(
         "INSERT INTO threads ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
-         COALESCE(?12, 0), COALESCE(?13, 0), ?14, ?15, '{}', {series}) \
+         {archived}, COALESCE(?13, 0), ?14, ?15, '{}', {series}) \
          ON CONFLICT(thread_id) DO UPDATE SET {}",
         inserted_source.as_str(),
         updates.join(", ")
@@ -132,9 +141,12 @@ fn upsert_sql(writer: ThreadWriter) -> String {
 
 /// Write a batch atomically; one invalid definition rejects the whole batch.
 ///
-/// A definition whose thread, parent thread, root run or escalation source was
-/// tombstoned is left out before the statement runs, so a deleted thread's late
-/// mirror cannot abort the rest of the batch. Returns how many were left out.
+/// A host definition whose thread, parent thread, root run or escalation source
+/// was tombstoned is left out before the statement runs, so a deleted thread's
+/// late mirror cannot abort the rest of the batch; the count of those is
+/// returned. A runtime definition of such an identity (a new child thread, a
+/// lineage record) is refused with `StorageError::Tombstoned` instead: the
+/// caller is creating something new and must not be told it worked.
 pub(crate) fn upsert(
     conn: &Connection,
     writer: ThreadWriter,
@@ -150,9 +162,14 @@ pub(crate) fn upsert(
     {
         let mut statement = transaction.prepare(&upsert_sql(writer))?;
         for thread in threads {
-            if is_tombstoned(&transaction, thread)? {
-                skipped += 1;
-                continue;
+            if let Some(error) = tombstoned_identity(&transaction, thread)? {
+                match writer {
+                    ThreadWriter::Host => {
+                        skipped += 1;
+                        continue;
+                    }
+                    ThreadWriter::Runtime => return Err(error),
+                }
             }
             let title = thread
                 .title
@@ -202,8 +219,11 @@ fn revision_param(revision: u64) -> Result<i64, StorageError> {
     i64::try_from(revision).map_err(|_| StorageError::OutOfRange("thread revision"))
 }
 
-/// Whether a definition touches an identity that a confirmed deletion removed.
-fn is_tombstoned(conn: &Connection, thread: &ThreadUpsert) -> Result<bool, StorageError> {
+/// The tombstoned identity a definition touches, if any.
+fn tombstoned_identity(
+    conn: &Connection,
+    thread: &ThreadUpsert,
+) -> Result<Option<StorageError>, StorageError> {
     let thread_ids = [Some(&thread.thread_id), thread.parent_thread_id.as_ref()];
     for thread_id in thread_ids.into_iter().flatten() {
         let hit: bool = conn.query_row(
@@ -212,7 +232,10 @@ fn is_tombstoned(conn: &Connection, thread: &ThreadUpsert) -> Result<bool, Stora
             |row| row.get(0),
         )?;
         if hit {
-            return Ok(true);
+            return Ok(Some(StorageError::Tombstoned {
+                run_id: None,
+                thread_id: Some(thread_id.clone()),
+            }));
         }
     }
     for run_id in [&thread.root_run_id, &thread.escalation_source_run_id]
@@ -225,10 +248,13 @@ fn is_tombstoned(conn: &Connection, thread: &ThreadUpsert) -> Result<bool, Stora
             |row| row.get(0),
         )?;
         if hit {
-            return Ok(true);
+            return Ok(Some(StorageError::Tombstoned {
+                run_id: Some(run_id.clone()),
+                thread_id: None,
+            }));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub(crate) fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRow>, StorageError> {
@@ -560,9 +586,37 @@ enum Walk {
 /// if it has no parent, its `chat:<Role>:<thread>` name, then a thread recording
 /// it as root; otherwise its parent.
 fn walk(conn: &Connection, run_id: &str) -> Result<Walk, StorageError> {
+    walk_counted(conn, run_id, &mut 0)
+}
+
+/// What the canonical run→thread rule makes of a run, for the retention closure.
+pub(crate) enum CanonicalThread {
+    Thread(String),
+    /// The ancestry names no thread.
+    None,
+    /// A parent cycle, or more than [`MAX_RUN_LINKS`] links.
+    Broken,
+}
+
+/// The thread [`thread_of_run`] would answer, without hiding tombstoned ones, and how
+/// many links were followed (`steps`).
+pub(crate) fn canonical_thread(
+    conn: &Connection,
+    run_id: &str,
+    steps: &mut u64,
+) -> Result<CanonicalThread, StorageError> {
+    Ok(match walk_counted(conn, run_id, steps)? {
+        Walk::Thread(row) => CanonicalThread::Thread(row.thread_id),
+        Walk::Top { .. } => CanonicalThread::None,
+        Walk::Broken => CanonicalThread::Broken,
+    })
+}
+
+fn walk_counted(conn: &Connection, run_id: &str, steps: &mut u64) -> Result<Walk, StorageError> {
     let mut current = run_id.to_owned();
     let mut seen = HashSet::new();
     for hops in 0..=MAX_RUN_LINKS {
+        *steps += 1;
         if !seen.insert(current.clone()) {
             return Ok(Walk::Broken);
         }

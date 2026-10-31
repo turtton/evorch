@@ -449,7 +449,8 @@ mod retention_series {
             ThreadWriter::Host,
             archive("t", true, None, None),
         );
-        assert_eq!(archived_state(&row(&database, "t")), (true, None, None));
+        // A missing revision is generation 0, which initialises the series.
+        assert_eq!(archived_state(&row(&database, "t")), (true, None, Some(0)));
 
         // When: the sidebar later supplies a time and a revision.
         write(
@@ -532,8 +533,11 @@ mod retention_series {
         write(&database, ThreadWriter::Host, pin("t", true, None));
         assert_eq!(
             (row(&database, "t").pinned, row(&database, "t").pin_revision),
-            (true, None)
+            (true, Some(0))
         );
+        // The same generation, now numbered, cannot undo the initial pin.
+        write(&database, ThreadWriter::Host, pin("t", false, Some(0)));
+        assert!(row(&database, "t").pinned);
         write(&database, ThreadWriter::Host, pin("t", false, Some(1)));
         assert_eq!(
             (row(&database, "t").pinned, row(&database, "t").pin_revision),
@@ -599,6 +603,86 @@ mod retention_series {
             archived_state(&row(&database, "fresh")),
             (true, Some(8), Some(1))
         );
+    }
+
+    #[test]
+    fn an_unnumbered_initial_archive_is_generation_zero_and_cannot_be_undone_by_it() {
+        let database = Database::open_in_memory().unwrap();
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, None, None),
+        );
+        // Equal generation, different value: the protective side stays.
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, Some(0)),
+        );
+        assert_eq!(archived_state(&row(&database, "t")), (true, None, Some(0)));
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, Some(1)),
+        );
+        assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(1)));
+    }
+
+    #[test]
+    fn an_unnumbered_host_keeps_editing_its_own_generation_zero_series() {
+        let database = Database::open_in_memory().unwrap();
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, None, None),
+        );
+        // Sequential edits without revisions replace each other...
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, None),
+        );
+        assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(0)));
+        write(&database, ThreadWriter::Host, pin("t", true, None));
+        write(&database, ThreadWriter::Host, pin("t", false, None));
+        assert!(!row(&database, "t").pinned);
+        // ...but never override a numbered series.
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, Some(0), Some(2)),
+        );
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, None),
+        );
+        assert_eq!(
+            archived_state(&row(&database, "t")),
+            (true, Some(0), Some(2))
+        );
+    }
+
+    #[test]
+    fn the_runtime_never_changes_the_archive_flag() {
+        let database = Database::open_in_memory().unwrap();
+        // A thread the runtime created, then described as archived by the runtime.
+        let mut created = host("t");
+        created.archived = Some(true);
+        write(&database, ThreadWriter::Runtime, created.clone());
+        assert!(!row(&database, "t").archived);
+        write(&database, ThreadWriter::Runtime, created);
+        assert!(!row(&database, "t").archived);
+        // A backfilled or runtime-owned row follows the host only.
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, None, None),
+        );
+        let mut unarchive = host("t");
+        unarchive.archived = Some(false);
+        write(&database, ThreadWriter::Runtime, unarchive);
+        assert!(row(&database, "t").archived);
     }
 
     #[test]

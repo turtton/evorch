@@ -29,7 +29,7 @@ pub fn save(conn: &Connection, sample: &EvalSample) -> Result<(), StorageError> 
 
 /// Returns whether a sample was deleted.
 pub fn delete(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
-    Ok(conn.execute("DELETE FROM eval_samples WHERE thread_id = ?1", [thread_id])? == 1)
+    Ok(conn.execute("DELETE FROM eval_samples WHERE thread_id = ?1 AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones)", [thread_id])? == 1)
 }
 
 pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<EvalSample>, StorageError> {
@@ -48,7 +48,7 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<EvalSample>, Sto
 pub fn list(conn: &Connection) -> Result<Vec<EvalSample>, StorageError> {
     let mut statement = conn.prepare(
         "SELECT thread_id, problem, focus_roles, created_at_ns, updated_at_ns \
-         FROM eval_samples ORDER BY updated_at_ns DESC, thread_id",
+         FROM eval_samples WHERE thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY updated_at_ns DESC, thread_id",
     )?;
     let rows = statement.query_map([], raw)?;
     rows.map(|row| decode(row?)).collect()

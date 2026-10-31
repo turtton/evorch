@@ -148,7 +148,7 @@ pub(crate) fn apply(conn: &Connection, mutation: &Mutation) -> Result<(), Storag
 }
 
 pub(crate) fn resolve(conn: &Connection) -> Result<(), StorageError> {
-    conn.execute("UPDATE tasks SET status=CASE WHEN EXISTS(SELECT 1 FROM task_links JOIN tasks blocker ON blocker.id=task_links.blocker_id WHERE blocked_id=tasks.id AND blocker.status <> 'completed') THEN 'blocked' ELSE 'pending' END WHERE status IN ('pending','blocked')", [])?;
+    conn.execute("UPDATE tasks SET status=CASE WHEN EXISTS(SELECT 1 FROM task_links JOIN tasks blocker ON blocker.id=task_links.blocker_id WHERE blocked_id=tasks.id AND blocker.status <> 'completed') THEN 'blocked' ELSE 'pending' END WHERE status IN ('pending','blocked') AND id NOT IN (SELECT task_id FROM task_tombstones)", [])?;
     Ok(())
 }
 

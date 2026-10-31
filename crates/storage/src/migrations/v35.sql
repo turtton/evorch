@@ -61,6 +61,9 @@ CREATE TABLE retention_staging (
     family_key TEXT NOT NULL REFERENCES retention_staging_state(family_key) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('thread', 'run', 'frontier_thread', 'frontier_run')),
     id TEXT NOT NULL,
+    -- Where a frontier item's expansion stopped: the edge query and its last rowid.
+    edge_step INTEGER NOT NULL DEFAULT 0,
+    edge_after INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (family_key, kind, id)
 ) WITHOUT ROWID;
 
@@ -225,9 +228,15 @@ WHEN NEW.run_id IN (SELECT run_id FROM run_tombstones) OR NEW.root_run_id IN (SE
 BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
 CREATE TRIGGER fence_user_question_links_insert BEFORE INSERT ON user_question_links
 WHEN NEW.run_id IN (SELECT run_id FROM run_tombstones)
+    OR EXISTS (SELECT 1 FROM user_questions q WHERE q.id = NEW.question_id
+        AND (q.run_id IN (SELECT run_id FROM run_tombstones)
+            OR q.root_run_id IN (SELECT run_id FROM run_tombstones)))
 BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
 CREATE TRIGGER fence_user_question_links_update BEFORE UPDATE ON user_question_links
 WHEN NEW.run_id IN (SELECT run_id FROM run_tombstones)
+    OR EXISTS (SELECT 1 FROM user_questions q WHERE q.id = NEW.question_id
+        AND (q.run_id IN (SELECT run_id FROM run_tombstones)
+            OR q.root_run_id IN (SELECT run_id FROM run_tombstones)))
 BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
 CREATE TRIGGER fence_conversation_blocks_insert BEFORE INSERT ON conversation_blocks
 WHEN NEW.run_id IN (SELECT run_id FROM run_tombstones)
