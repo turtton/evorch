@@ -189,6 +189,17 @@ impl Database {
         path: &Path,
         options: StorageSummaryOptions,
     ) -> Result<Value, StorageError> {
+        self.storage_summary_with(path, options, &mut |_| Ok(()))
+    }
+
+    /// [`Database::storage_summary`], calling `between` with the name of each phase once
+    /// it is done, so a test can act between phases and know where the reader stands.
+    pub(crate) fn storage_summary_with(
+        &self,
+        path: &Path,
+        options: StorageSummaryOptions,
+        between: &mut dyn FnMut(&str) -> Result<(), StorageError>,
+    ) -> Result<Value, StorageError> {
         let transaction = self.conn.unchecked_transaction()?;
         let conn: &Connection = &transaction;
         let sizes = crate::db::file_sizes(path)?;
@@ -201,8 +212,11 @@ impl Database {
         }
 
         let events = scan_events(conn, &queries.events)?;
+        between("events")?;
         let contexts = scan_run_contexts(conn, &queries.run_contexts)?;
+        between("run_contexts")?;
         let index = scan_index(conn, &queries.index)?;
+        between("index")?;
         tables.push((events.value_bytes, "events".into(), events.rows));
         tables.push((
             contexts.value_bytes,

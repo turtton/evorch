@@ -81,7 +81,13 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 
 ## 容量の確認（`evorch inspect storage`）
 
-縮小の前後や肥大化の調査には、読み取り専用の `evorch inspect [--db <path>] storage [--physical] [--top <n>]` を使う。稼働中の DB にも使え、DB・`-wal`・`-shm` の作成や書き込みと migration は行わない（`-wal` と `-shm` があれば `-shm` を読み取り専用で開いて WAL 内の最新データも読み、どちらも無ければ immutable で開く。データを含む `-wal` があるのに `-shm` が無い DB は、`-shm` の作成が必要になるため読まずに拒否する）。出力は他の `inspect` と同じ JSON で、件数とバイト数だけを返し、会話本文・スレッド題名は含まない。
+縮小の前後や肥大化の調査には、読み取り専用の `evorch inspect [--db <path>] storage [--physical] [--top <n>]` を使う。DB・`-wal`・`-shm` の作成や書き込みと migration は行わない（作ることがあるのは、空の保守リース `<db>.maintenance-lock` だけ）。
+
+開き方は DB の状態で決まり、判定はファイルを一度見るだけでなく、DB 全体への共有 `fcntl` ロック（最後に閉じる writer が checkpoint して `-wal`/`-shm` を消すのを防ぐ）と保守リースを取った状態で行う。
+
+- `-wal` と `-shm` がある（GUI などが稼働中、または異常終了の残り）: `-shm` を読み取り専用で開き（`readonly_shm`）、WAL 内の最新データも読む。リースは共有で持つ。読み取り中に writer が commit・checkpoint・終了しても、読み取りは開始時点の 1 つの commit 済みスナップショットで、結果は整合する。
+- WAL に読むデータがない: DB 本体だけを immutable で開く。immutable は書き込みがない間だけ安全なので、リースを排他で取る。その間、現行の evorch は起動時に `database is under offline maintenance` で即座に失敗する（待たない）。`--physical` は長くかかり得るため、GUI の起動を待たせたくないときは実行中を避ける。リースを使わない書き込み側が現れて DB・WAL・SHM の状態が変わった場合は、終了時に検出してエラーにし、JSON は出さない。
+- 次の状態は何も変更せずに拒否する: データを含む `-wal` があるのに `-shm` が無い（読むには `-shm` の作成が必要。evorch を一度起動して正常終了させ checkpoint する）、オフライン保守がリースまたは DB を排他で保持している、sidecar が無いのに別の evorch がリースを保持している（起動中または終了中。少し待って再実行する）。
 
 - 既定（論理集計）は大きな DB でも数秒で終わる。`files`（DB/WAL/SHM のバイト数）、`tables`（表ごとの行数と文字列・BLOB 列の長さ合計）、`events`（kind/subkind 別の行数と payload バイト数。`subkind` 未補完の行は `(unbackfilled)`）、`run_contexts`（`messages`/`checkpoints` の平文バイト数と格納バイト数、圧縮済み行数）、`conversation_index`（状態別の `charged_bytes`）、`threads`（active/archived 数）を返す。
 - `attribution` は events・run_contexts・会話索引を `active` / `archived` / `orphan`（run がどのスレッドにも解決されない、または解決先の `threads` 行が無い）/ `unattributed`（`run_id` なし）に分ける。run の帰属は GUI のスレッド表示と同じ規則（`thread_runs` の束縛、`chat:<Role>:<thread>` の run 名、スレッドが記録する root run、保存済み context と usage ledger の親リンクをたどる）で解決し、各行はちょうど 1 つのスレッドに数える。`top_threads` は events・run_contexts・索引の合計バイト数が大きい上位 `--top` 件（既定 10）のスレッドを `thread_id` で示す。

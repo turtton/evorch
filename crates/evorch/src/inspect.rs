@@ -217,6 +217,7 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
             .storage_summary(&path, StorageSummaryOptions { top, physical })
             .map_err(|error| error.to_string())?,
     };
+    db.finish().map_err(|error| error.to_string())?;
     Ok(json!({ "db": path.display().to_string(), "result": result }))
 }
 

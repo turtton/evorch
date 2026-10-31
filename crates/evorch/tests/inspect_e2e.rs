@@ -295,6 +295,31 @@ fn inspecting_a_checkpointed_store_creates_no_sidecars() {
 }
 
 #[test]
+fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let mut lease = db.as_os_str().to_owned();
+    lease.push(".maintenance-lock");
+    let maintenance = std::fs::OpenOptions::new().write(true).open(lease).unwrap();
+    maintenance.try_lock().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+        .arg("inspect")
+        .arg("--db")
+        .arg(&db)
+        .arg("storage")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("retry shortly"), "{error}");
+    drop(maintenance);
+    assert!(inspect(&db, &["storage"]).is_ok());
+}
+
+#[test]
 fn malformed_arguments_print_usage() {
     let dir = tempfile::tempdir().unwrap();
     let (db, _) = fixture(dir.path());
