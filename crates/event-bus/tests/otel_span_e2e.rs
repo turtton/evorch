@@ -179,6 +179,7 @@ fn event_sequence() -> Vec<Event> {
         event(
             3,
             ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "req-1".to_owned(),
                 provider: "anthropic".to_owned(),
                 profile: Some("primary".to_owned()),

@@ -532,6 +532,7 @@ document.getElementById("info").addEventListener("mouseover", () => {
                     .collect()
             };
             Ok(providers::ChatResponse {
+                usage_reported: true,
                 message: providers::Message {
                     role: providers::Role::Assistant,
                     content,
