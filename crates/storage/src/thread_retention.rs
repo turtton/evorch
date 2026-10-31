@@ -218,7 +218,8 @@ impl Default for ReclaimBudget {
     }
 }
 
-/// What a reclaim step did.
+/// What a reclaim step did. The `jobs_*` and `oversized_pending` counts saturate at
+/// 1,000, so reading them costs the same however many jobs or registrations exist.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReclaimProgress {
     pub transactions: u32,
@@ -240,6 +241,7 @@ pub struct ReclaimProgress {
 pub struct OversizedProgress {
     pub rows: u64,
     pub stored_bytes: u64,
+    /// Registrations left, saturating at 1,000 (zero means none).
     pub remaining: u64,
     /// The failure that stopped the step; the row stays registered.
     pub last_error: Option<String>,

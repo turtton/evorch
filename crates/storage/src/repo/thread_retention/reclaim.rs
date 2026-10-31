@@ -767,8 +767,20 @@ fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageErro
     Ok((work, finished))
 }
 
-fn count(conn: &Connection, sql: &str) -> Result<u64, StorageError> {
-    Ok(conn.query_row(sql, [], |row| row.get::<_, u64>(0))?)
+/// Registrations one `reclaim_oversized_step` call looks at, whatever its budget.
+const MAX_OVERSIZED_PER_CALL: u32 = 256;
+
+/// Reported counts stop here, so reading one never follows how many jobs or
+/// registrations there are.
+const COUNT_CAP: u64 = 1_000;
+
+/// `COUNT(*)` of `FROM <source>`, saturating at [`COUNT_CAP`].
+fn count(conn: &Connection, source: &str) -> Result<u64, StorageError> {
+    Ok(conn.query_row(
+        &format!("SELECT COUNT(*) FROM (SELECT 1 {source} LIMIT {COUNT_CAP})"),
+        [],
+        |row| row.get::<_, u64>(0),
+    )?)
 }
 
 /// Runs up to `budget.max_transactions` reclaim transactions over the pending
@@ -779,13 +791,17 @@ pub(crate) fn reclaim_step(
 ) -> Result<ReclaimProgress, StorageError> {
     let mut progress = ReclaimProgress::default();
     let families: Vec<String> = {
+        // Every job takes at least one transaction, so the budget bounds the list.
         let mut statement = conn.prepare_cached(
-            "SELECT family_key FROM reclaim_jobs WHERE state = 'db_pending' \
+            "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_pending \
+             WHERE state = 'db_pending' \
              AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished' \
-             ORDER BY family_key",
+             ORDER BY family_key LIMIT ?1",
         )?;
         statement
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map([i64::from(budget.max_transactions)], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<Result<_, _>>()?
     };
     'jobs: for family in &families {
@@ -812,19 +828,19 @@ pub(crate) fn reclaim_step(
     // phase is not runnable: it takes no transaction and blocks no other job.
     progress.jobs_db_pending = count(
         conn,
-        "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending' \
+        "FROM reclaim_jobs WHERE state = 'db_pending' \
          AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished'",
     )?;
     progress.jobs_waiting_exclusive = count(
         conn,
-        "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending' \
+        "FROM reclaim_jobs WHERE state = 'db_pending' \
          AND COALESCE(json_extract(cursor_json, '$.phase'), '') = 'finished'",
     )?;
     progress.jobs_done = count(
         conn,
-        "SELECT COUNT(*) FROM reclaim_jobs WHERE state IN ('db_done', 'files_pending', 'done', 'files_failed')",
+        "FROM reclaim_jobs WHERE state IN ('db_done', 'files_pending', 'done', 'files_failed')",
     )?;
-    progress.oversized_pending = count(conn, "SELECT COUNT(*) FROM reclaim_oversized")?;
+    progress.oversized_pending = count(conn, "FROM reclaim_oversized")?;
     Ok(progress)
 }
 
@@ -841,7 +857,9 @@ pub(crate) fn reclaim_oversized_step(
     budget_bytes: u64,
 ) -> Result<OversizedProgress, StorageError> {
     let mut progress = OversizedProgress::default();
-    loop {
+    // Registrations whose rows are already gone delete nothing; the cap keeps a call
+    // from walking through any number of them.
+    for _ in 0..MAX_OVERSIZED_PER_CALL {
         let next: Option<(String, String, String, u64)> = conn
             .query_row(
                 "SELECT family_key, tbl, key, stored_bytes FROM reclaim_oversized \
@@ -867,7 +885,7 @@ pub(crate) fn reclaim_oversized_step(
             }
         }
     }
-    progress.remaining = count(conn, "SELECT COUNT(*) FROM reclaim_oversized")?;
+    progress.remaining = count(conn, "FROM reclaim_oversized")?;
     Ok(progress)
 }
 

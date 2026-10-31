@@ -158,6 +158,7 @@ pub(crate) fn for_ids(
         "SELECT {} FROM json_each(?1) AS requested \
          JOIN host_input_receipts ON host_input_receipts.prompt_id = requested.value \
          WHERE host_input_receipts.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+           AND host_input_receipts.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
         COLUMNS
             .split(", ")
@@ -177,6 +178,7 @@ pub(crate) fn for_run(
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM host_input_receipts WHERE run_id = ?1 \
          AND run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY accepted_at_ns, prompt_id"
     ))?;
     let rows = statement.query_map([run_id], from_row)?;
@@ -233,7 +235,10 @@ pub(crate) fn origins(
          FROM json_each(?1) AS requested \
          JOIN host_input_receipts AS receipt ON receipt.prompt_id = requested.value \
          LEFT JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
+             AND evidence.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
+             AND evidence.target_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          WHERE receipt.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+           AND receipt.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
     )?;
     let rows = statement.query_map([ids], |row| {

@@ -33,7 +33,8 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
         return Err(invalid("question limit reached (32 per run)"));
     }
     let pending: i64 = conn.query_row(
-        "SELECT count(*) FROM user_questions WHERE answered=0",
+        "SELECT count(*) FROM user_questions WHERE answered=0 \
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
         [],
         |row| row.get(0),
     )?;

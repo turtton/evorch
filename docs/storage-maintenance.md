@@ -164,6 +164,7 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   ledger、host input receipt、review evidence・lineage、assistant reference、user question、
   thread start・評価サンプル、索引の参照解決、`evorch inspect` の events・run、agent message、task、会話検索の候補、学習用の context 読み出し）は、回収の前でも tombstone 済みの行を返さない。
   返し続けるのは意図して残すもの（usage、学習記録、`storage` の物理集計、legacy の `messages` / `agent_runs`、予約済み ID を返す `persisted_run_ids`）だけ。
+  owner と root の両方を持つ表（質問、host input receipt、review evidence、thread start）は、どちらかが削除済みなら返さない。
   削除済みの run の質問を生きている run へ bind することも拒否する。
   書き手は `StorageError::Tombstoned`（events、recorder は `skipped_tombstoned` に数えて
   再試行しない）または fence トリガの ABORT で拒否される。fence は INSERT と
@@ -179,7 +180,11 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   `Database::reclaim_oversized_step` が有界な 1 batch（索引 200 行／2 MiB、captured file 500 行／4 MiB、
   または超過した 1 行だけ）ずつ削除する。残りがある登録は消えず、次の呼び出しが続ける。予算が小さくても
   最低 1 batch。`rows` / `stored_bytes` と job の `reclaimed_*` は実際に消した分だけを数える。
-  失敗した行は登録が残る。tasks・links は tombstone を task id 順の cursor でたどり、ledger と todo の走査は
+  失敗した行は登録が残る。索引の終端（run の保留中 request target を gap にする更新）も同じ batch の行数予算に含め、
+  終わるまで run の索引行は `deleted` にならない。次の登録は `stored_bytes` 順の索引から選び、
+  1 回の呼び出しが見る登録は 256 件まで。`reclaim_step` / `reclaim_oversized_step` が返す件数
+  （`jobs_*`、`oversized_pending`、`remaining`）は 1,000 で頭打ちになり、job や登録の数に比例して読まない。
+  tasks・links は tombstone を task id 順の cursor でたどり、ledger と todo の走査は
   行ごとに tombstone を点引きするため、family の大きさで 1 step の読み取りは増えない。通常 step の残りが無く排他回収だけを待つ job
   （`jobs_waiting_exclusive`）は transaction を消費せず、後ろの job を止めない。`reclaim_mark_files` はファイル削除の結果を
   `db_done → files_pending → done | files_failed` に記録する。

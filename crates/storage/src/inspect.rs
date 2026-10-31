@@ -161,27 +161,36 @@ impl Database {
                 }
             }
             EventScope::Window { from_ns, to_ns } => {
+                // Hidden events are dropped after the statement, so it is paged by id
+                // until `limit` visible events and one more are found or the window ends.
+                let page = i64::try_from(limit + 1).unwrap_or(i64::MAX);
+                let mut before = i64::MAX;
                 let mut statement = self.conn.prepare(
                     "SELECT id, session_id, wall_clock_ns, kind, payload, run_id FROM events
-                     WHERE wall_clock_ns BETWEEN ?1 AND ?2
+                     WHERE wall_clock_ns BETWEEN ?1 AND ?2 AND id < ?4
                      AND (run_id IS NULL OR run_id NOT IN (SELECT run_id FROM run_tombstones))
                      ORDER BY id DESC LIMIT ?3",
                 )?;
-                let mut rows = statement.query(rusqlite::params![
-                    from_ns,
-                    to_ns,
-                    i64::try_from(limit + 1).unwrap_or(i64::MAX)
-                ])?;
-                while let Some(row) = rows.next()? {
-                    let event = event_row(row)?;
-                    if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
-                        continue;
+                'pages: loop {
+                    let mut rows =
+                        statement.query(rusqlite::params![from_ns, to_ns, page, before])?;
+                    let mut read = 0_i64;
+                    while let Some(row) = rows.next()? {
+                        read += 1;
+                        let event = event_row(row)?;
+                        before = event.id;
+                        if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
+                            continue;
+                        }
+                        if events.len() == limit {
+                            truncated = true;
+                            break 'pages;
+                        }
+                        events.push(event);
                     }
-                    if events.len() == limit {
-                        truncated = true;
+                    if read < page {
                         break;
                     }
-                    events.push(event);
                 }
             }
         }
@@ -258,6 +267,7 @@ impl Database {
                 "SELECT * FROM user_questions WHERE (run_id = ?1
                  OR id IN (SELECT question_id FROM user_question_links WHERE run_id = ?1))
                  AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+                 AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)
                  AND ?1 NOT IN (SELECT run_id FROM run_tombstones)",
                 &[run_id],
             )?,
