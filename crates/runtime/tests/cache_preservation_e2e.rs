@@ -20,7 +20,7 @@ use std::sync::Arc;
 use config::{Config, LoadOptions};
 use event_bus::{
     AgentRunPhase, CompactionEvent, CompactionReason, Event, EventBus, EventKind, EventReceiver,
-    LifecycleEvent, ProviderEvent, UsageAggregator,
+    LifecycleEvent, ProviderEvent, RequestPurpose, UsageAggregator,
 };
 use mock_openai::cache_contract::{
     CacheProtocol, assert_append_only, assert_compaction_transition,
@@ -457,9 +457,18 @@ fn verify_trace(harness: &Harness, run: RunId, events: &[Event], compactions: us
         .into_iter()
         .filter(|request| request.path == harness.wire.path())
         .map(|request| request.body)
+        // The Codex official-compaction call is not a generation request (see below).
+        .filter(|body| !is_compaction_trigger_request(body))
         .collect::<Vec<_>>();
     assert_eq!(harness.mock.remaining_scripts(), 0);
     verify_trace_of(harness, run, events, compactions, &requests);
+}
+
+fn is_compaction_trigger_request(body: &Value) -> bool {
+    body["input"]
+        .as_array()
+        .and_then(|input| input.last())
+        .is_some_and(|item| item["type"] == "compaction_trigger")
 }
 
 /// [`verify_trace`] for a run whose wire requests are exactly `requests`, so a
@@ -487,11 +496,15 @@ fn verify_trace_of(
                 assert!(pending_checkpoint.replace(checkpoint_id.clone()).is_none());
                 checkpoint_count += 1;
             }
+            // The Codex official-compaction call (`compaction_trigger`) is a separate request
+            // purpose. This mock answers it without a compaction item, so the runtime falls
+            // back to its re-summary; the next generation request is the verified boundary.
             EventKind::Provider(ProviderEvent::RequestStarted {
                 request_id,
                 run_id: Some(id),
+                purpose,
                 ..
-            }) if id == &run.to_string() => {
+            }) if id == &run.to_string() && *purpose != Some(RequestPurpose::Compaction) => {
                 starts.push((request_id.clone(), pending_checkpoint.take()));
             }
             EventKind::Provider(ProviderEvent::RequestCompleted {
@@ -2241,6 +2254,10 @@ async fn compaction_restarts_cache(reason: CompactionReason) {
 }
 
 async fn compaction_restarts_cache_on(wire: Wire, reason: CompactionReason) {
+    compaction_restarts_cache_on_harness(wire, reason).await;
+}
+
+async fn compaction_restarts_cache_on_harness(wire: Wire, reason: CompactionReason) -> Harness {
     let review_storage = support::ReviewStorage::new();
     let automatic = reason == CompactionReason::Automatic;
     let old_reply =
@@ -2286,6 +2303,7 @@ async fn compaction_restarts_cache_on(wire: Wire, reason: CompactionReason) {
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::Compaction(CompactionEvent::Compacted {reason: actual, ..}) if *actual == reason)));
     verify_trace(&harness, run, &events, 1);
+    harness
 }
 
 #[tokio::test]
@@ -2509,6 +2527,94 @@ async fn openai_responses_manual_compaction_replaces_history_then_warms_a_new_pr
 #[tokio::test]
 async fn openai_responses_automatic_compaction_replaces_history_then_warms_a_new_prefix() {
     compaction_restarts_cache_on(Wire::Responses, CompactionReason::Automatic).await;
+}
+
+/// Every recorded Codex request (generation and official compaction) carries its instructions only as the developer
+/// message at `input[0]` (Codex CLI 0.166.0 shape): no top-level `instructions`, one developer
+/// item per request, and the item (id included) is byte-identical across the whole run,
+/// compaction boundaries included.
+fn assert_codex_developer_prefix(harness: &Harness) {
+    let all: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == harness.wire.path())
+        .map(|request| request.body)
+        .collect();
+    assert!(
+        all.iter()
+            .all(|request| request.get("instructions").is_none())
+    );
+    // The official-compaction call (`compaction_trigger`) carries the same developer message
+    // as the generation requests; only generation requests count towards the minimum.
+    let requests: Vec<_> = all.iter().collect();
+    assert!(
+        requests
+            .iter()
+            .filter(|body| !is_compaction_trigger_request(body))
+            .count()
+            >= 3
+    );
+    let first = &requests[0]["input"][0];
+    assert_eq!(first["type"], "message");
+    assert_eq!(first["role"], "developer");
+    assert!(first["id"].as_str().unwrap().starts_with("msg_"));
+    assert!(!first["content"][0]["text"].as_str().unwrap().is_empty());
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(&request["input"][0], first, "request {index}");
+        let developers = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["role"] == "developer")
+            .count();
+        assert_eq!(developers, 1, "request {index}");
+    }
+}
+
+// Given: a real `type = "openai-codex"` profile pointed at the input-derived Responses cache mock
+// When: a worker runs twelve tool round trips and then answers
+// Then: every request keeps the previous input as a prefix (the developer message included),
+// the mock reports that whole previous input as cached, and no request has `instructions`
+#[tokio::test]
+async fn codex_developer_instructions_are_a_stable_input_prefix_across_tool_turns() {
+    let script = (0..12)
+        .map(read_response)
+        .chain([text_response("done")])
+        .collect();
+    let mut harness = harness_with_wire(
+        Wire::Codex,
+        script,
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
+    );
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Read twelve results".into(),
+        RunConfig::default(),
+    );
+    let events = through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await;
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    verify_trace(&harness, run, &events, 0);
+    assert_codex_developer_prefix(&harness);
+}
+
+// Given: a real `type = "openai-codex"` profile / When: history is compacted (manual, then
+// automatic) / Then: the developer message is unchanged across the boundary and later turns
+// reuse the new prefix
+#[tokio::test]
+async fn codex_developer_instructions_survive_compaction_boundaries() {
+    for reason in [CompactionReason::Manual, CompactionReason::Automatic] {
+        let harness = compaction_restarts_cache_on_harness(Wire::Codex, reason).await;
+        assert_codex_developer_prefix(&harness);
+    }
 }
 
 fn note_response(id: &str, body: &str) -> ScriptedResponse {

@@ -136,13 +136,13 @@ async fn b3_a_b_a_official_compaction_keeps_only_new_r2_and_real_compactor_scope
         .map(|(_, m)| m)
         .collect();
     model
-        .compact_context(&invocation("model-a"), Role::Worker, &compacted, &[])
+        .compact_context(&invocation("model-a"), Role::Worker, &compacted, &[], &[])
         .await
         .unwrap();
     assert_eq!(ids(&client.requests.lock().unwrap()[0]), ["R2"]);
     let fast_invocation = invocation("model-a+fast");
     model
-        .compact_context(&fast_invocation, Role::Worker, &compacted, &[])
+        .compact_context(&fast_invocation, Role::Worker, &compacted, &[], &[])
         .await
         .unwrap();
     let recorded = client.requests.lock().unwrap();

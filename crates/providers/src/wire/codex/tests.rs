@@ -103,7 +103,7 @@ fn wire_request_forces_store_false_stream_true() {
     assert_eq!(value["reasoning"]["effort"], "medium");
     assert_eq!(value["reasoning"]["summary"], "auto");
     assert_eq!(value["include"], json!(["reasoning.encrypted_content"]));
-    assert!(value["instructions"].is_string());
+    assert!(value.get("instructions").is_none());
     assert!(value["input"].is_array());
 }
 
@@ -126,14 +126,22 @@ fn wire_request_maps_tools_and_messages() {
     let input = value["input"].as_array().unwrap();
     let tools = value["tools"].as_array().unwrap();
 
-    assert_eq!(value["instructions"], "Follow the repository rules.");
+    assert!(value.get("instructions").is_none());
     assert_eq!(input[0]["type"], "message");
-    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[0]["role"], "developer");
+    assert!(input[0]["id"].as_str().unwrap().starts_with("msg_"));
     assert_eq!(input[0]["content"][0]["type"], "input_text");
-    assert_eq!(input[0]["content"][0]["text"], "Inspect the workspace.");
-    assert_eq!(input[1]["role"], "assistant");
-    assert_eq!(input[1]["content"][0]["type"], "output_text");
-    assert_eq!(input[1]["content"][0]["text"], "I will inspect it.");
+    assert_eq!(
+        input[0]["content"][0]["text"],
+        "Follow the repository rules."
+    );
+    assert_eq!(input[1]["type"], "message");
+    assert_eq!(input[1]["role"], "user");
+    assert_eq!(input[1]["content"][0]["type"], "input_text");
+    assert_eq!(input[1]["content"][0]["text"], "Inspect the workspace.");
+    assert_eq!(input[2]["role"], "assistant");
+    assert_eq!(input[2]["content"][0]["type"], "output_text");
+    assert_eq!(input[2]["content"][0]["text"], "I will inspect it.");
     assert_eq!(tools[0]["type"], "function");
     assert_eq!(tools[0]["name"], "read_file");
     assert_eq!(tools[0]["description"], "Read a workspace file");
@@ -171,16 +179,16 @@ fn wire_request_replays_tool_round_trip() {
     let value = serde_json::to_value(to_wire_request(&canonical)).unwrap();
     let input = value["input"].as_array().unwrap();
 
-    assert_eq!(input.len(), 5);
-    assert_eq!(input[2]["type"], "message");
-    assert_eq!(input[2]["role"], "assistant");
-    assert_eq!(input[2]["content"][0]["text"], "Reading the file.");
-    let call = &input[3];
+    assert_eq!(input.len(), 6);
+    assert_eq!(input[3]["type"], "message");
+    assert_eq!(input[3]["role"], "assistant");
+    assert_eq!(input[3]["content"][0]["text"], "Reading the file.");
+    let call = &input[4];
     assert_eq!(call["type"], "function_call");
     assert_eq!(call["call_id"], "call_123");
     assert_eq!(call["name"], "read_file");
     assert_eq!(call["arguments"], json!({"path": "AGENTS.md"}).to_string());
-    let output = &input[4];
+    let output = &input[5];
     assert_eq!(output["type"], "function_call_output");
     assert_eq!(output["call_id"], "call_123");
     assert_eq!(output["output"], "file body");
@@ -212,12 +220,13 @@ fn compaction_blob_round_trip_preserves_bytes_and_message_order() {
         serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
     assert_eq!(restored, request);
     let wire = serde_json::to_value(to_wire_request(&restored)).unwrap();
-    assert_eq!(wire["input"][0]["content"][0]["text"], "before");
+    assert_eq!(wire["input"][0]["role"], "developer");
+    assert_eq!(wire["input"][1]["content"][0]["text"], "before");
     assert_eq!(
-        wire["input"][1],
+        wire["input"][2],
         json!({"type":"compaction", "encrypted_content":blob})
     );
-    assert_eq!(wire["input"][2]["content"][0]["text"], "after");
+    assert_eq!(wire["input"][3]["content"][0]["text"], "after");
     assert_eq!(
         serde_json::to_value(to_wire_request(&request)).unwrap(),
         wire

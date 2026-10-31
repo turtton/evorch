@@ -209,7 +209,19 @@ pub(crate) async fn compact_candidate(
         // the new summarizer input, rather than silently dropping that evidence.
         plan.start = plan.start.min(summary_index);
     }
-    let compacted = &compaction_messages[plan.start..plan.end];
+    // The official compaction request carries the same system messages as an ordinary
+    // generation request (all of the window's System messages, in order); the compacted
+    // history is the rest of the slice.
+    let instructions: Vec<_> = compaction_messages
+        .iter()
+        .filter(|message| message.role == Role::System)
+        .cloned()
+        .collect();
+    let compacted: Vec<_> = compaction_messages[plan.start..plan.end]
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .cloned()
+        .collect();
     let mapped_start = indexed[plan.start].0;
     let mapped_end = indexed
         .get(plan.end)
@@ -253,7 +265,13 @@ pub(crate) async fn compact_candidate(
     let official = state
         .shared
         .model
-        .compact_context(&invocation, state.run_role(), compacted, &state.tool_specs)
+        .compact_context(
+            &invocation,
+            state.run_role(),
+            &compacted,
+            &instructions,
+            &state.tool_specs,
+        )
         .await;
     let official = match official {
         Ok(result) => result,

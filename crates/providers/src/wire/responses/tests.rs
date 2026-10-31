@@ -183,22 +183,248 @@ fn wire(request: &ChatRequest, dialect: ResponsesDialect, key: Option<&str>) -> 
     serde_json::to_value(to_wire_request(request, &options(dialect, key))).unwrap()
 }
 
-// Given: the canonical requests captured before the Responses wire was shared
+// Given: the canonical requests used for the Codex CLI 0.166.0 wire fixture
 // When: serialized with the Codex dialect
-// Then: the bytes are identical to the pre-migration Codex wire (cache prefix contract)
+// Then: the bytes (field order included) equal the checked-in fixture; this is the cache
+// prefix contract for the Codex wire
 #[test]
-fn codex_dialect_wire_bytes_match_the_pre_migration_shape() {
-    let golden = include_str!("../../../tests/fixtures/codex/wire_request_golden.json");
+fn codex_dialect_wire_bytes_match_the_0166_fixture() {
+    let golden = include_str!("../../../tests/fixtures/codex/wire_request_0166.json");
     let codex = options(ResponsesDialect::Codex, None);
 
     let rich = serde_json::to_string(&to_wire_request(&rich_request(), &codex)).unwrap();
     let minimal = serde_json::to_string(&to_wire_request(&minimal_request(), &codex)).unwrap();
 
     assert_eq!(rich, golden.trim_end());
+    // 空の system からは developer message を作らず、`instructions` も送らない。
     assert_eq!(
         minimal,
-        r#"{"model":"m","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[],"store":false,"stream":true,"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}"#
+        r#"{"model":"m","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"medium","summary":"auto"},"store":false,"include":["reasoning.encrypted_content"]}"#
     );
+}
+
+// Given: the pre-0.166 Codex golden (top-level `instructions`) and the 0.166.0 fixture
+// When: they are compared as JSON values
+// Then: the only differences are `instructions` leaving the top level and a developer
+// message (id/role/text) being prepended to `input`; everything else is identical
+#[test]
+fn codex_0166_differs_from_the_previous_golden_only_by_the_developer_move() {
+    let old: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/codex/wire_request_pre_0166.json"
+    ))
+    .unwrap();
+    let new: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/codex/wire_request_0166.json"
+    ))
+    .unwrap();
+    let mut old = old.as_object().unwrap().clone();
+    let mut new = new.as_object().unwrap().clone();
+
+    let instructions = old.remove("instructions").unwrap();
+    assert!(!new.contains_key("instructions"));
+    let old_input = old.remove("input").unwrap();
+    let new_input = new.remove("input").unwrap();
+    let new_input = new_input.as_array().unwrap();
+    let developer = &new_input[0];
+    assert_eq!(developer["type"], "message");
+    assert_eq!(developer["role"], "developer");
+    assert_eq!(developer["content"].as_array().unwrap().len(), 1);
+    assert_eq!(developer["content"][0]["type"], "input_text");
+    assert_eq!(developer["content"][0]["text"], instructions);
+    assert_eq!(
+        developer["id"],
+        format!("msg_{}", developer_uuid(instructions.as_str().unwrap()))
+    );
+    assert_eq!(Value::Array(new_input[1..].to_vec()), old_input);
+    assert_eq!(old, new, "other keys must be identical");
+}
+
+// The expected ID, built independently of `developer_message`.
+fn developer_uuid(text: &str) -> uuid::Uuid {
+    let namespace = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        b"evorch.codex.developer_instructions",
+    );
+    uuid::Uuid::new_v5(&namespace, text.as_bytes())
+}
+
+// Given: the Codex dialect / When: keys are listed in serialization order
+// Then: they follow Codex CLI 0.166.0's `ResponsesApiRequest` field order
+#[test]
+fn codex_dialect_serializes_fields_in_codex_order() {
+    let mut request = rich_request();
+    request.reasoning_effort = Some("high".into());
+    let json = serde_json::to_string(&to_wire_request(
+        &request,
+        &options(ResponsesDialect::Codex, Some("run-1")),
+    ))
+    .unwrap();
+    let keys = [
+        "model",
+        "stream",
+        "service_tier",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "include",
+        "prompt_cache_key",
+        "text",
+    ];
+    assert_eq!(root_keys(&json), keys, "{json}");
+}
+
+/// Top-level object keys in serialization order (`Value` would sort them).
+fn root_keys(json: &str) -> Vec<String> {
+    use serde::Deserializer as _;
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+
+    struct Keys;
+    impl<'de> Visitor<'de> for Keys {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut keys = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<IgnoredAny>()?;
+                keys.push(key);
+            }
+            Ok(keys)
+        }
+    }
+    serde_json::Deserializer::from_str(json)
+        .deserialize_map(Keys)
+        .unwrap()
+}
+
+// Given: system messages / When: serialized with the Codex dialect
+// Then: they are joined by a blank line into one developer message at input[0], with no
+// top-level `instructions`; a message without any system text gets no developer message
+#[test]
+fn codex_places_joined_system_text_in_a_single_developer_message() {
+    let mut request = minimal_request();
+    request.messages.insert(
+        0,
+        serde_json::from_value(json!({"role": "system", "content": [
+            {"type": "text", "text": "Follow the rules."},
+            {"type": "text", "text": "Be brief."}
+        ]}))
+        .unwrap(),
+    );
+    request.messages.insert(
+        1,
+        serde_json::from_value(json!({"role": "system", "content": [
+            {"type": "text", "text": "Third."}
+        ]}))
+        .unwrap(),
+    );
+
+    let value = wire(&request, ResponsesDialect::Codex, None);
+
+    let text = "Follow the rules.\n\nBe brief.\n\nThird.";
+    assert!(value.get("instructions").is_none());
+    assert_eq!(
+        value["input"][0],
+        json!({
+            "type": "message",
+            "id": format!("msg_{}", developer_uuid(text)),
+            "role": "developer",
+            "content": [{"type": "input_text", "text": text}]
+        })
+    );
+    assert_eq!(value["input"].as_array().unwrap().len(), 2);
+    assert_eq!(value["input"][1]["role"], "user");
+
+    let mut empty = minimal_request();
+    empty.messages.insert(
+        0,
+        serde_json::from_value(json!({"role": "system", "content": []})).unwrap(),
+    );
+    let value = wire(&empty, ResponsesDialect::Codex, None);
+    assert!(value.get("instructions").is_none());
+    assert_eq!(value["input"].as_array().unwrap().len(), 1);
+    assert_eq!(value["input"][0]["role"], "user");
+}
+
+// Given: the same instructions in different requests / When: serialized
+// Then: the developer ID is a pure function of the text (stable across requests, history
+// growth and compaction), and different text gives a different ID
+#[test]
+fn developer_message_id_depends_only_on_the_instruction_text() {
+    let first = wire(&rich_request(), ResponsesDialect::Codex, None);
+    let mut grown = rich_request();
+    grown.messages.push(minimal_request().messages.remove(0));
+    let second = wire(&grown, ResponsesDialect::Codex, None);
+    assert_eq!(first["input"][0], second["input"][0]);
+
+    let mut changed = rich_request();
+    changed.messages[0].content = serde_json::from_value(json!([
+        {"type": "text", "text": "Different rules."}
+    ]))
+    .unwrap();
+    let third = wire(&changed, ResponsesDialect::Codex, None);
+    assert_ne!(first["input"][0]["id"], third["input"][0]["id"]);
+    assert_eq!(third["input"][0]["content"][0]["text"], "Different rules.");
+}
+
+// Given: system messages / When: serialized with the OpenAI dialect
+// Then: `instructions` stays at the top level and no developer message is added
+#[test]
+fn openai_dialect_keeps_top_level_instructions_without_a_developer_message() {
+    let value = wire(&rich_request(), ResponsesDialect::OpenAi, None);
+
+    assert_eq!(value["instructions"], "Follow the rules.\n\nBe brief.");
+    assert!(
+        value["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["role"] != "developer" && item.get("id").is_none())
+    );
+}
+
+// Given: the OpenAI-dialect wire captured before the Codex field-order change
+// When: the same canonical requests are serialized now
+// Then: the bytes differ only in the order of the root fields: parsed JSON is equal, and the
+// large `input` and `tools` values are byte-identical substrings
+#[test]
+fn openai_dialect_differs_from_the_previous_wire_only_in_root_field_order() {
+    let mut rich = rich_request();
+    rich.reasoning_effort = Some("high".into());
+    let cases = [
+        (
+            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_rich.json"),
+            to_wire_request(&rich, &options(ResponsesDialect::OpenAi, Some("run-1"))),
+        ),
+        (
+            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_minimal.json"),
+            to_wire_request(&minimal_request(), &options(ResponsesDialect::OpenAi, None)),
+        ),
+    ];
+    for (old, new) in cases {
+        let old = old.trim_end();
+        let new = serde_json::to_string(&new).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(old).unwrap(),
+            serde_json::from_str::<Value>(&new).unwrap()
+        );
+        // The old order was `... "input", "tools", "store" ...` (tools absent when empty).
+        let input_end = old
+            .find(",\"tools\":")
+            .or_else(|| old.find(",\"store\":"))
+            .unwrap();
+        let input = &old[old.find("\"input\":").unwrap()..input_end];
+        assert!(new.contains(input), "input bytes changed: {new}");
+        if let Some(start) = old.find("\"tools\":") {
+            let tools = &old[start..old.find(",\"store\":").unwrap()];
+            assert!(new.contains(tools), "tools bytes changed: {new}");
+        }
+        assert_eq!(new.len(), old.len(), "no byte may be added or removed");
+    }
 }
 
 // Given: a request with every generation setting and a run cache key
@@ -322,15 +548,16 @@ fn openai_dialect_skips_compaction_but_shares_the_input_shape() {
     let codex = wire(&request, ResponsesDialect::Codex, None);
     let openai = wire(&request, ResponsesDialect::OpenAi, None);
 
+    // Codex は指示文を developer message として input 先頭に置く。OpenAI は top-level。
     let codex_input: Vec<_> = codex["input"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|item| item["type"] != "compaction")
+        .filter(|item| item["type"] != "compaction" && item["role"] != "developer")
         .cloned()
         .collect();
     assert_eq!(
-        codex_input.len() + 1,
+        codex_input.len() + 2,
         codex["input"].as_array().unwrap().len()
     );
     assert_eq!(openai["input"], Value::Array(codex_input));
@@ -349,107 +576,6 @@ fn b3_include_is_stable_for_both_dialects() {
             assert_eq!(value["store"], false);
         }
     }
-}
-
-// Locate root include's value with serde's byte offset; compare the surrounding
-// bytes, not a normalized object that would hide spacing or key/tool reordering.
-fn include_span(bytes: &str) -> Option<std::ops::Range<usize>> {
-    serde_json::from_str::<Value>(bytes).ok()?.as_object()?;
-    let mut depth = 0usize;
-    let mut position = 0;
-    let mut found = None;
-    while position < bytes.len() {
-        match bytes.as_bytes()[position] {
-            b'{' | b'[' => depth += 1,
-            b'}' | b']' => depth = depth.checked_sub(1)?,
-            b'"' => {
-                let mut stream =
-                    serde_json::Deserializer::from_str(&bytes[position..]).into_iter::<String>();
-                let key = stream.next()?.ok()?;
-                position += stream.byte_offset();
-                if depth == 1 && key == "include" && bytes[position..].trim_start().starts_with(':')
-                {
-                    let colon = position + bytes[position..].find(':')?;
-                    let start = colon + 1;
-                    let mut stream =
-                        serde_json::Deserializer::from_str(&bytes[start..]).into_iter::<Value>();
-                    let value = stream.next()?.ok()?;
-                    if found.is_some() || !value.is_array() {
-                        return None;
-                    }
-                    found = Some(start..start + stream.byte_offset());
-                }
-                continue;
-            }
-            _ => {}
-        }
-        position += 1;
-    }
-    found
-}
-fn only_include_changed(old: &str, new: &str) -> bool {
-    let Some(a) = include_span(old) else {
-        return false;
-    };
-    let Some(b) = include_span(new) else {
-        return false;
-    };
-    &old[a.clone()] == "[]"
-        && &new[b.clone()] == "[\"reasoning.encrypted_content\"]"
-        && old[..a.start] == new[..b.start]
-        && old[a.end..] == new[b.end..]
-}
-
-#[test]
-fn b3_golden_allows_only_include_value_bytes_and_rejects_other_changes() {
-    use sha2::{Digest, Sha256};
-    assert_eq!(
-        format!(
-            "{:x}",
-            Sha256::digest(include_bytes!(
-                "../../../tests/fixtures/codex/wire_request_pre_b3.json"
-            ))
-        ),
-        "71901338bd55459a5385ff4d32b398fd79d269afed7c276b0e392c1a87912ae3"
-    );
-    let old = include_str!("../../../tests/fixtures/codex/wire_request_pre_b3.json").trim_end();
-    let new = serde_json::to_string(&to_wire_request(
-        &rich_request(),
-        &options(ResponsesDialect::Codex, None),
-    ))
-    .unwrap();
-    assert!(only_include_changed(old, &new));
-    for changed in [
-        new.replacen("\"model\":", "\"model\": ", 1),
-        new.replacen("gpt-5-codex", "other-model", 1),
-        new.replacen("alpha", "changed_tool", 1),
-        new.replacen("\"store\":false", "\"store\":true", 1),
-        new.replace("reasoning.encrypted_content", "wrong.include"),
-    ] {
-        assert_ne!(new, changed);
-        assert!(!only_include_changed(old, &changed));
-    }
-    let wire = to_wire_request(&rich_request(), &options(ResponsesDialect::Codex, None));
-    let first = serde_json::to_string(&wire.tools.as_ref().unwrap()[0]).unwrap();
-    let second = serde_json::to_string(&wire.tools.as_ref().unwrap()[1]).unwrap();
-    let reordered = new.replace(&format!("{first},{second}"), &format!("{second},{first}"));
-    assert_ne!(new, reordered);
-    assert!(!only_include_changed(old, &reordered));
-    assert_eq!(
-        include_span(r#"{"nested":{"include":[]},"include":[],"tail":{"include":[1]}}"#)
-            .map(|r| &r#"{"nested":{"include":[]},"include":[],"tail":{"include":[1]}}"#[r]),
-        Some("[]")
-    );
-    let mut changed = rich_request();
-    changed.tools[0].description.push_str(" changed");
-    assert!(!only_include_changed(
-        old,
-        &serde_json::to_string(&to_wire_request(
-            &changed,
-            &options(ResponsesDialect::Codex, None)
-        ))
-        .unwrap()
-    ));
 }
 
 fn replay_scope(dialect: ResponsesDialect) -> crate::ResolvedResponsesScope {

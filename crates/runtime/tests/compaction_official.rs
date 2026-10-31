@@ -33,6 +33,7 @@ impl AgentModel for OfficialModel {
         invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
+        _instructions: &[Message],
         tools: &[ToolSpec],
     ) -> Result<Option<CompactionResult>, RuntimeError> {
         self.compacted.lock().await.push((

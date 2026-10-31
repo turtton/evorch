@@ -628,6 +628,7 @@ impl AgentModel for ReplayCompactor {
         _: &AgentInvocationContext,
         _: Role,
         messages: &[Message],
+        _: &[Message],
         _: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, crate::RuntimeError> {
         self.0.lock().unwrap().push(messages.to_vec());
@@ -789,6 +790,7 @@ impl AgentModel for BlockedReplayCompactor {
         &self,
         _: &AgentInvocationContext,
         _: Role,
+        _: &[Message],
         _: &[Message],
         _: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, crate::RuntimeError> {

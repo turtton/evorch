@@ -169,11 +169,16 @@ pub trait AgentModel: Send + Sync {
 
     /// provider が公式 compaction を提供する場合のみ利用する。
     /// 非対応は None、失敗は Err とし、呼び出し元が既存の要約へフォールバックする。
+    ///
+    /// `messages` は圧縮対象の履歴、`instructions` は通常の生成 request と同じ system
+    /// message 列です。圧縮 request も同じ指示文 (Codex では同一の developer message) を
+    /// 先頭に持つよう、provider はこれを `messages` の前に置いて送ります。
     async fn compact_context(
         &self,
         _invocation: &AgentInvocationContext,
         _role: Role,
         _messages: &[Message],
+        _instructions: &[Message],
         _tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
         Ok(None)
@@ -385,6 +390,7 @@ mod tests {
             _: &AgentInvocationContext,
             _: Role,
             _: &[Message],
+            _: &[Message],
             tools: &[ToolSpec],
         ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
             self.0.lock().unwrap().push(tools.to_vec());
@@ -424,7 +430,7 @@ mod tests {
             .await
             .unwrap();
         model
-            .compact_context(&invocation, Role::Worker, &[], &specs)
+            .compact_context(&invocation, Role::Worker, &[], &[], &specs)
             .await
             .unwrap();
         let observed = observer.0.lock().unwrap();

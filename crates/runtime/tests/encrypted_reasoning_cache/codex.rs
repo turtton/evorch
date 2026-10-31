@@ -17,7 +17,8 @@ use serde_json::Value;
 use tools::ToolExecutor;
 
 use super::{
-    Exchange, Route, assert_cache_chain, assert_precedes, assert_sealed, exchanges,
+    Exchange, Route, assert_cache_chain, assert_compaction_settings,
+    assert_compaction_shares_instructions, assert_precedes, assert_sealed, exchanges,
     is_assistant_text, is_call, posted, read_after, reasoning, reasoning_ids, route_config,
     text_after,
 };
@@ -355,6 +356,20 @@ async fn official_compaction_receives_eligible_reasoning_then_reuses_the_new_pre
         assert_sealed(&exchange.body, &[&r1, &r2, &r3, &r4]);
     }
     let compaction = the_compaction(&exchanges);
+    // The compaction request is built from the same instructions, tools and settings as the
+    // ordinary requests; only the history (and the cleared `include`) differs.
+    let requests = ordinary(&exchanges);
+    // Exactly one verified replacement, consumed by the first ordinary request after the
+    // compaction; the requests after it reuse the new prefix (checked by the chain above).
+    assert_eq!(
+        exchanges
+            .iter()
+            .filter(|exchange| exchange.checkpoint.is_some())
+            .count(),
+        1
+    );
+    assert_compaction_shares_instructions(requests[1], compaction);
+    assert_compaction_settings(requests[1], compaction);
     assert_eq!(reasoning_ids(compaction), ["rs_1", "rs_2"]);
     assert_precedes(compaction, &r1, is_call("call-0"));
     assert_precedes(
@@ -362,7 +377,6 @@ async fn official_compaction_receives_eligible_reasoning_then_reuses_the_new_pre
         &r2,
         is_assistant_text("analysis before compaction"),
     );
-    let requests = ordinary(&exchanges);
     assert_eq!(compaction_blob(requests[2]), Some("blob-after-reasoning"));
     assert_precedes(requests[3], &r3, is_call("call-3"));
 }

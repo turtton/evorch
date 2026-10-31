@@ -12,8 +12,8 @@ use serde_json::{Map, Value};
 pub enum CacheProtocol {
     /// Chat Completions (`messages`), used by OpenAI-compatible endpoints.
     OpenAi,
-    /// Responses API (`instructions` + `input`), shared by the Codex backend and
-    /// the official OpenAI provider.
+    /// Responses API (`input` plus optional `instructions`), shared by the Codex
+    /// backend (developer input message) and the official OpenAI provider.
     Codex,
     /// Anthropic Messages.
     Anthropic,
@@ -145,8 +145,14 @@ fn request_parts(
         .ok_or("request must be a JSON object")?
         .clone();
     required_string(request, "model")?;
-    if protocol == CacheProtocol::Codex && !request["instructions"].is_string() {
-        return Err("Codex instructions must be present as a string".to_owned());
+    // Codex CLI 0.166.0 carries instructions as a developer input message and has no
+    // top-level `instructions`; the official OpenAI dialect still sends one.
+    if protocol == CacheProtocol::Codex
+        && request
+            .get("instructions")
+            .is_some_and(|instructions| !instructions.is_string())
+    {
+        return Err("Codex instructions must be a string when present".to_owned());
     }
     if let Some(tools) = request.get("tools")
         && !tools
@@ -848,5 +854,74 @@ mod reasoning_tests {
         let mut next = current.clone();
         next["input"].as_array_mut().unwrap().push(user("after"));
         assert_append_only(CacheProtocol::Codex, &current, &next).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod codex_developer_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(role: &str, text: &str) -> Value {
+        json!({"type": "message", "role": role,
+            "content": [{"type": "input_text", "text": text}]})
+    }
+    fn developer(text: &str) -> Value {
+        let mut item = item("developer", text);
+        item["id"] = json!("msg_fixed");
+        item
+    }
+    /// Codex CLI 0.166.0 shape: no top-level `instructions`, developer at input[0].
+    fn request(input: Vec<Value>) -> Value {
+        json!({"model": "codex", "tools": [], "input": input})
+    }
+
+    #[test]
+    fn developer_request_without_instructions_is_append_only() {
+        let previous = request(vec![developer("rules"), item("user", "one")]);
+        let current = request(vec![
+            developer("rules"),
+            item("user", "one"),
+            item("assistant", "two"),
+        ]);
+        assert_append_only(CacheProtocol::Codex, &previous, &current).unwrap();
+        assert_append_only(CacheProtocol::Codex, &previous, &previous).unwrap();
+    }
+
+    #[test]
+    fn changed_developer_text_or_id_is_rejected() {
+        let previous = request(vec![developer("rules"), item("user", "one")]);
+        let mut changed_text = previous.clone();
+        changed_text["input"][0] = developer("other rules");
+        let mut changed_id = previous.clone();
+        changed_id["input"][0]["id"] = json!("msg_other");
+        for current in [changed_text, changed_id] {
+            assert!(assert_append_only(CacheProtocol::Codex, &previous, &current).is_err());
+        }
+    }
+
+    #[test]
+    fn non_string_instructions_are_rejected() {
+        let mut bad = request(vec![developer("rules")]);
+        bad["instructions"] = json!(null);
+        assert!(assert_append_only(CacheProtocol::Codex, &bad, &bad).is_err());
+    }
+
+    #[test]
+    fn compaction_keeps_the_developer_message_unchanged() {
+        let previous = request(vec![developer("rules"), item("user", "one")]);
+        let checkpoint = item("user", "[COMPACTION CHECKPOINT ckpt-1]\nsummary");
+        let ok = request(vec![developer("rules"), checkpoint.clone()]);
+        assert_compaction_transition(CacheProtocol::Codex, &previous, &ok, "ckpt-1").unwrap();
+        let changed = request(vec![developer("other rules"), checkpoint.clone()]);
+        assert!(
+            assert_compaction_transition(CacheProtocol::Codex, &previous, &changed, "ckpt-1")
+                .is_err()
+        );
+        let dropped = request(vec![checkpoint]);
+        assert!(
+            assert_compaction_transition(CacheProtocol::Codex, &previous, &dropped, "ckpt-1")
+                .is_err()
+        );
     }
 }
