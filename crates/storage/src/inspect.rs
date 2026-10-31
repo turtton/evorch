@@ -20,7 +20,7 @@ use crate::{Database, StorageError};
 
 mod open;
 mod storage_summary;
-pub use open::{InspectedDatabase, InspectionMode};
+pub use open::InspectedDatabase;
 pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
 
 /// Columns holding JSON text that are expanded in inspection output.

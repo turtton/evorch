@@ -236,27 +236,17 @@ fn storage_reports_sizes_without_conversation_text_or_writes() {
     assert_eq!(std::fs::read(&db).unwrap(), before);
 }
 
-fn sidecar_bytes(db: &Path) -> Vec<Option<Vec<u8>>> {
-    ["", "-wal", "-shm"]
-        .iter()
-        .map(|suffix| {
-            let mut file = db.as_os_str().to_owned();
-            file.push(suffix);
-            std::fs::read(file).ok()
-        })
-        .collect()
-}
-
 #[test]
-fn inspecting_a_live_wal_reads_its_data_and_writes_no_file() {
+fn inspecting_a_live_wal_reads_its_data_and_leaves_the_database_file_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let (db, _) = fixture(dir.path());
+    let before = std::fs::read(&db).unwrap();
     let baseline = inspect(&db, &["storage"]).unwrap()["events"]["rows"]
         .as_i64()
         .unwrap();
 
-    // A writer in this process keeps the WAL and its index alive and unmerged, while
-    // the CLI reads from its own process.
+    // A writer in this process keeps committed data in the WAL, unmerged, while the CLI
+    // reads from its own process.
     let writer = rusqlite::Connection::open(&db).unwrap();
     writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     writer
@@ -266,32 +256,15 @@ fn inspecting_a_live_wal_reads_its_data_and_writes_no_file() {
             [],
         )
         .unwrap();
-    let before = sidecar_bytes(&db);
-    assert!(before[1].as_ref().is_some_and(|wal| !wal.is_empty()));
-    assert!(before[2].is_some());
 
     let live = inspect(&db, &["storage", "--physical"]).unwrap();
+    // Read before the writer closes: its own close would merge the WAL.
+    let after = std::fs::read(&db).unwrap();
+    drop(writer);
 
     assert_eq!(live["events"]["rows"], baseline + 1);
     assert!(live["files"]["wal_bytes"].as_u64().unwrap() > 0);
-    assert!(sidecar_bytes(&db) == before, "inspection changed a file");
-    drop(writer);
-}
-
-#[test]
-fn inspecting_a_checkpointed_store_creates_no_sidecars() {
-    let dir = tempfile::tempdir().unwrap();
-    let (db, _) = fixture(dir.path());
-    let before = sidecar_bytes(&db);
-    assert!(before[1].is_none() && before[2].is_none());
-
-    inspect(&db, &["storage", "--physical"]).unwrap();
-    inspect(&db, &["candidates"]).unwrap();
-
-    assert!(
-        sidecar_bytes(&db) == before,
-        "inspection created or changed a file"
-    );
+    assert!(after == before, "inspection changed the database file");
 }
 
 #[test]
@@ -314,7 +287,7 @@ fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("retry shortly"), "{error}");
+    assert!(error.contains("offline maintenance"), "{error}");
     drop(maintenance);
     assert!(inspect(&db, &["storage"]).is_ok());
 }

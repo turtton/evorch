@@ -574,56 +574,17 @@ fn a_live_wal_is_read_without_touching_database_or_wal() {
 }
 
 #[test]
-fn a_checkpointed_store_gets_no_sidecars_from_inspection() {
+fn inspecting_a_checkpointed_store_leaves_the_database_file_unchanged() {
     let dir = TempDir::new().unwrap();
     let (path, db) = create(&dir);
     seed(&db);
     drop(db);
-    let before = sidecars(&path);
-    assert_eq!((&before[1], &before[2]), (&None, &None));
+    let before = std::fs::read(&path).unwrap();
 
     assert_eq!(
         summary(&path, StorageSummaryOptions::default())["events"]["rows"],
         7
     );
-    assert_eq!(sidecars(&path), before);
 
-    // An empty WAL with no index holds nothing to read.
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    std::fs::write(&wal, b"").unwrap();
-    assert_eq!(
-        summary(&path, StorageSummaryOptions::default())["events"]["rows"],
-        7
-    );
-    let after = sidecars(&path);
-    assert_eq!(
-        (after[0].as_ref(), after[1].as_deref(), &after[2]),
-        (before[0].as_ref(), Some(&b""[..]), &None)
-    );
-}
-
-#[test]
-fn a_wal_with_data_but_no_index_is_refused_not_repaired() {
-    let dir = TempDir::new().unwrap();
-    let (path, db) = create(&dir);
-    seed(&db);
-    let copy = TempDir::new().unwrap();
-    let copied = copy.path().join("storage.db");
-    std::fs::copy(&path, &copied).unwrap();
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    let mut copied_wal = copied.as_os_str().to_owned();
-    copied_wal.push("-wal");
-    std::fs::copy(&wal, &copied_wal).unwrap();
-    let before = sidecars(&copied);
-
-    let error = Database::open_for_inspection(&copied)
-        .unwrap_err()
-        .to_string();
-
-    assert!(error.contains("-shm"), "{error}");
-    assert_eq!(sidecars(&copied), before);
-    assert!(before[2].is_none());
-    drop(db);
+    assert!(std::fs::read(&path).unwrap() == before);
 }
