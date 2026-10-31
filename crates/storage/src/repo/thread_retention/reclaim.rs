@@ -190,6 +190,21 @@ fn json_ids<T: Serialize>(ids: &[T]) -> Result<String, StorageError> {
     serde_json::to_string(ids).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
+fn register_oversized(
+    conn: &Connection,
+    family: &str,
+    table: &str,
+    key: &str,
+    bytes: u64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO reclaim_oversized(family_key, tbl, key, stored_bytes) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![family, table, key, bytes],
+    )?;
+    Ok(())
+}
+
 /// One unit of work of the cursor's phase. Returns what it deleted; an empty
 /// result means the cursor only advanced.
 fn do_phase(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work, StorageError> {
@@ -217,6 +232,7 @@ fn events_run(
     let mut ids = Vec::new();
     let mut per_session: Vec<(Option<String>, u64)> = Vec::new();
     let mut bytes = 0_u64;
+    let mut oversized: Option<(i64, u64)> = None;
     {
         let mut statement = tx.prepare_cached(
             "SELECT id, OCTET_LENGTH(payload), session_id FROM events \
@@ -226,6 +242,10 @@ fn events_run(
         let mut rows = statement.query(params![run, cursor.after, limit])?;
         while let Some(row) = rows.next()? {
             let size = row.get::<_, u64>(1)?;
+            if ids.is_empty() && size > RECLAIM_EVENT_BYTES {
+                oversized = Some((row.get::<_, i64>(0)?, size));
+                break;
+            }
             if !ids.is_empty() && bytes.saturating_add(size) > RECLAIM_EVENT_BYTES {
                 break;
             }
@@ -237,6 +257,12 @@ fn events_run(
                 None => per_session.push((session, size)),
             }
         }
+    }
+    if let Some((id, size)) = oversized {
+        // A single row above the step's budget waits for the exclusive phase.
+        register_oversized(tx, family, "events", &id.to_string(), size)?;
+        cursor.after = id;
+        return Ok(Work::default());
     }
     let Some(&last) = ids.last() else {
         advance_run(tx, family, cursor)?;
@@ -373,7 +399,15 @@ fn index(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
         RECLAIM_INDEX_ROWS,
         RECLAIM_INDEX_TEXT_BYTES,
     )?;
-    if !progress.remaining {
+    if progress.oversized {
+        let bytes: u64 = tx.query_row(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(text)), 0) FROM conversation_blocks WHERE run_id = ?1",
+            [&run],
+            |row| row.get(0),
+        )?;
+        register_oversized(tx, family, "conversation_blocks", &run, bytes)?;
+        advance_run(tx, family, cursor)?;
+    } else if !progress.remaining {
         advance_run(tx, family, cursor)?;
     }
     Ok(Work {
@@ -403,11 +437,7 @@ fn run_contexts(
     match stored {
         None => {}
         Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
-            tx.execute(
-                "INSERT OR REPLACE INTO reclaim_oversized(family_key, tbl, key, stored_bytes) \
-                 VALUES (?1, 'run_contexts', ?2, ?3)",
-                params![family, run, bytes],
-            )?;
+            register_oversized(tx, family, "run_contexts", &run, bytes)?;
         }
         Some(bytes) => {
             tx.execute("DELETE FROM run_contexts WHERE run_id = ?1", [&run])?;
@@ -520,6 +550,40 @@ fn thread_tables(
     };
     let mut work = Work::default();
     if cursor.table_idx == 0 {
+        // A captured file above the step's budget cannot be deleted by a bounded
+        // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
+        // whole capture is registered once and deleted by the exclusive phase.
+        let (largest, total): (Option<u64>, Option<u64>) = tx.query_row(
+            "SELECT MAX(LENGTH(content)), SUM(LENGTH(content)) FROM thread_start_untracked \
+             WHERE thread_id = ?1",
+            [&thread],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if largest.is_some_and(|largest| largest > RECLAIM_ROW_BUDGET) {
+            let diff: u64 = tx
+                .query_row(
+                    "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
+                    [&thread],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            register_oversized(
+                tx,
+                family,
+                "thread_start_states",
+                &thread,
+                total.unwrap_or(0).saturating_add(diff),
+            )?;
+            match next_thread(tx, family, &thread)? {
+                Some(next) => {
+                    cursor.thread = Some(next);
+                    cursor.table_idx = 0;
+                }
+                None => enter(tx, family, cursor, Phase::Finished)?,
+            }
+            return Ok(Work::default());
+        }
         let mut rowids = Vec::new();
         let mut bytes = 0_u64;
         {
@@ -561,11 +625,7 @@ fn thread_tables(
         match stored {
             None => {}
             Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
-                tx.execute(
-                    "INSERT OR REPLACE INTO reclaim_oversized(family_key, tbl, key, stored_bytes) \
-                     VALUES (?1, 'thread_start_states', ?2, ?3)",
-                    params![family, thread, bytes],
-                )?;
+                register_oversized(tx, family, "thread_start_states", &thread, bytes)?;
             }
             Some(bytes) => {
                 tx.execute(
@@ -667,7 +727,9 @@ pub(crate) fn reclaim_step(
     let mut progress = ReclaimProgress::default();
     let families: Vec<String> = {
         let mut statement = conn.prepare_cached(
-            "SELECT family_key FROM reclaim_jobs WHERE state = 'db_pending' ORDER BY family_key",
+            "SELECT family_key FROM reclaim_jobs WHERE state = 'db_pending' \
+             AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished' \
+             ORDER BY family_key",
         )?;
         statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -693,9 +755,17 @@ pub(crate) fn reclaim_step(
             }
         }
     }
+    // A job whose bounded walk is over and which only waits for the exclusive
+    // phase is not runnable: it takes no transaction and blocks no other job.
     progress.jobs_db_pending = count(
         conn,
-        "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
+        "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending' \
+         AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished'",
+    )?;
+    progress.jobs_waiting_exclusive = count(
+        conn,
+        "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending' \
+         AND COALESCE(json_extract(cursor_json, '$.phase'), '') = 'finished'",
     )?;
     progress.jobs_done = count(
         conn,
@@ -752,6 +822,27 @@ fn delete_oversized(
 ) -> Result<(), StorageError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     match table {
+        "events" => {
+            let id: i64 = key.parse().map_err(|_| {
+                StorageError::Serialization(format!("bad oversized event id {key}"))
+            })?;
+            let row: Option<(Option<String>, u64)> = tx
+                .query_row(
+                    "SELECT session_id, OCTET_LENGTH(payload) FROM events WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((session, size)) = row {
+                tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
+                crate::maintenance::adjust_session_bytes(&tx, session.as_deref(), size, 0)?;
+            }
+            0
+        }
+        "conversation_blocks" => {
+            purge_index_rows(&tx, key, PurgeTarget::Tombstoned, usize::MAX, u64::MAX)?;
+            0
+        }
         "run_contexts" => tx.execute("DELETE FROM run_contexts WHERE run_id = ?1", [key])?,
         "thread_start_states" => tx.execute(
             "DELETE FROM thread_start_states WHERE thread_id = ?1",

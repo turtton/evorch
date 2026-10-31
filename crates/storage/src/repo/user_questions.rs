@@ -52,7 +52,7 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
 pub fn get(conn: &Connection, id: &str) -> Result<Option<UserQuestion>, StorageError> {
     let json: Option<String> = conn
         .query_row(
-            "SELECT payload FROM user_questions WHERE id=?1",
+            "SELECT payload FROM user_questions WHERE id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)",
             [id],
             |row| row.get(0),
         )
@@ -119,7 +119,7 @@ pub fn answer(
 pub fn for_run(conn: &Connection, run_id: &str) -> Result<Vec<UserQuestion>, StorageError> {
     let questions = list(
         conn,
-        "SELECT q.payload FROM user_questions q WHERE q.run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1) ORDER BY q.rowid LIMIT 33",
+        "SELECT q.payload FROM user_questions q WHERE ?1 NOT IN (SELECT run_id FROM run_tombstones) AND q.run_id NOT IN (SELECT run_id FROM run_tombstones) AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND (q.run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)) ORDER BY q.rowid LIMIT 33",
         run_id,
     )?;
     if questions.len() > 32 {
@@ -145,6 +145,20 @@ pub fn bind(
         || ids.len() > 32
     {
         return Err(invalid("invalid question inheritance"));
+    }
+    // Nothing may be inherited from, or handed to, a run a retention deleted.
+    for run_id in [source, target] {
+        let deleted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if deleted {
+            return Err(StorageError::Tombstoned {
+                run_id: Some(run_id.to_owned()),
+                thread_id: None,
+            });
+        }
     }
     let source_questions = for_run(conn, source)?;
     if ids
@@ -175,7 +189,11 @@ pub fn bind(
 }
 
 pub fn recipients(conn: &Connection, id: &str) -> Result<Vec<String>, StorageError> {
-    let mut statement = conn.prepare("SELECT run_id FROM user_questions WHERE id=?1 UNION SELECT run_id FROM user_question_links WHERE question_id=?1")?;
+    let mut statement = conn.prepare(
+        "SELECT run_id FROM user_questions WHERE id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         UNION SELECT l.run_id FROM user_question_links l WHERE l.question_id=?1 AND l.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         AND EXISTS (SELECT 1 FROM user_questions q WHERE q.id=l.question_id AND q.run_id NOT IN (SELECT run_id FROM run_tombstones) AND q.root_run_id NOT IN (SELECT run_id FROM run_tombstones))",
+    )?;
     let rows = statement.query_map([id], |row| row.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -183,7 +201,7 @@ pub fn recipients(conn: &Connection, id: &str) -> Result<Vec<String>, StorageErr
 pub fn pending(conn: &Connection) -> Result<Vec<UserQuestion>, StorageError> {
     list(
         conn,
-        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' ORDER BY rowid DESC LIMIT 1024",
+        "SELECT payload FROM user_questions WHERE answered=0 AND ?1='' AND run_id NOT IN (SELECT run_id FROM run_tombstones) AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY rowid DESC LIMIT 1024",
         "",
     )
 }
@@ -199,8 +217,9 @@ fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageErro
         serde_json::from_str(payload).map_err(|e| invalid(&e.to_string()))?;
     // Links, not a stale event/payload projection, are canonical consumer routing.
     // Insertion order retains the continuation path, including across restarts.
-    let mut statement =
-        conn.prepare("SELECT run_id FROM user_question_links WHERE question_id=?1 ORDER BY rowid")?;
+    let mut statement = conn.prepare(
+        "SELECT run_id FROM user_question_links WHERE question_id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY rowid",
+    )?;
     question.recipient_run_ids = statement
         .query_map([&question.id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;

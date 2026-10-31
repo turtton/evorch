@@ -1003,12 +1003,13 @@ impl StorageHandle {
     ///
     /// # Errors
     /// Rejects an empty thread ID, suspended writes, SQLite failure or a closed writer.
-    /// Returns how many definitions were left out because the thread was deleted
-    /// by a confirmed retention (0 or 1).
+    /// A thread, parent thread, root run or escalation source deleted by a
+    /// confirmed retention is refused with `StorageError::Tombstoned`: nothing may
+    /// be created under it any more.
     pub fn upsert_thread_runtime(
         &self,
         thread: &crate::threads::ThreadUpsert,
-    ) -> Result<usize, StorageError> {
+    ) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::UpsertThreads(
                 crate::threads::ThreadWriter::Runtime,
@@ -1016,6 +1017,7 @@ impl StorageHandle {
                 Some(reply),
             )
         })
+        .map(|_| ())
     }
 
     /// Mirror `sidebar.json` thread definitions and wait for the commit. Every

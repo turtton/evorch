@@ -114,7 +114,8 @@ pub enum BlockReason {
     OverBudget,
 }
 
-/// Rows read by one `retention_explore` call.
+/// Rows read by one `retention_explore` call. A call never reads more: an
+/// interrupted node resumes from the position it reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExploreBudget {
     pub max_edges: u64,
@@ -134,18 +135,23 @@ pub enum FamilyState {
 }
 
 /// Rows read by the fixed-point check of `retention_finalize`.
+///
+/// The check re-reads the relations the exploration read, so a family that has
+/// not changed needs what the exploration used: [`Database::retention_finalize_budget`]
+/// returns exactly that (plus slack). A family that grew may need more; then
+/// `FinalizeOutcome::OverBudget` reports the rows read, and a retry with
+/// [`FinalizeBudget::doubled`] converges because the family is finite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalizeBudget {
     pub max_edges: u64,
 }
 
 impl FinalizeBudget {
-    /// A budget proportional to the size of the family, for the caller's retry
-    /// after `FinalizeOutcome::OverBudget`.
+    /// Twice this budget, for the retry after `FinalizeOutcome::OverBudget`.
     #[must_use]
-    pub fn proportional(members: u64) -> Self {
+    pub fn doubled(self) -> Self {
         Self {
-            max_edges: members.saturating_mul(8).saturating_add(1024),
+            max_edges: self.max_edges.saturating_mul(2).max(1024),
         }
     }
 }
@@ -214,7 +220,10 @@ pub struct ReclaimProgress {
     pub rows: u64,
     /// Stored bytes of the deleted rows (events, run contexts, index text, ...).
     pub stored_bytes: u64,
+    /// Jobs a further step can advance.
     pub jobs_db_pending: u64,
+    /// Jobs whose bounded walk is over and that wait for `reclaim_oversized_step`.
+    pub jobs_waiting_exclusive: u64,
     pub jobs_done: u64,
     /// Rows above [`RECLAIM_ROW_BUDGET`] waiting for `reclaim_oversized_step`.
     pub oversized_pending: u64,
@@ -376,6 +385,19 @@ impl Database {
             binding,
             budget,
         )
+    }
+
+    /// The budget that lets the fixed-point check of an unchanged explored family
+    /// finish: the rows its exploration read, with a quarter and 1,024 rows of slack.
+    /// `None` when the family is not staged.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn retention_finalize_budget(
+        &self,
+        family_key: &str,
+    ) -> Result<Option<FinalizeBudget>, StorageError> {
+        crate::repo::thread_retention::finalize_budget(&self.conn, family_key)
     }
 
     /// Delete rows too large for a bounded step, smallest first, at least one per

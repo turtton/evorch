@@ -22,6 +22,27 @@ pub(crate) use candidates::schedule;
 pub(crate) use closure::explore;
 pub(crate) use confirm::finalize;
 
+/// The rows the exploration of `family_key` read, with slack: what the fixed-point
+/// check of the same, unchanged family needs.
+pub(crate) fn finalize_budget(
+    conn: &Connection,
+    family_key: &str,
+) -> Result<Option<crate::thread_retention::FinalizeBudget>, StorageError> {
+    let explored: Option<i64> = conn
+        .query_row(
+            "SELECT explored_edges FROM retention_staging_state WHERE family_key = ?1",
+            [family_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(explored.map(|explored| {
+        let explored = u64::try_from(explored).unwrap_or(0);
+        crate::thread_retention::FinalizeBudget {
+            max_edges: explored.saturating_add(explored / 4).saturating_add(1024),
+        }
+    }))
+}
+
 pub(crate) fn binding(conn: &Connection) -> Result<Option<RetentionBinding>, StorageError> {
     Ok(conn
         .query_row(

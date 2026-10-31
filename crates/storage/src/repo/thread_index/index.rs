@@ -694,6 +694,7 @@ pub(crate) fn purge_index_rows(
         rows: 0,
         text_bytes: 0,
         remaining: false,
+        oversized: false,
     };
     atomic(conn, || {
         let allowed: bool = match target {
@@ -716,6 +717,7 @@ pub(crate) fn purge_index_rows(
         let limit = i64::try_from(limit_rows.max(1)).unwrap_or(i64::MAX);
         let mut ids = Vec::new();
         let mut text_bytes = 0_u64;
+        let mut oversized = false;
         {
             let mut statement = conn.prepare_cached(
                 "SELECT id, length(CAST(text AS BLOB)) FROM conversation_blocks \
@@ -724,6 +726,11 @@ pub(crate) fn purge_index_rows(
             let mut rows = statement.query(params![run_id, limit])?;
             while let Some(row) = rows.next()? {
                 let bytes = row.get::<_, u64>(1)?;
+                if ids.is_empty() && bytes > limit_text_bytes {
+                    // Never smuggle a block past the step's byte budget.
+                    oversized = true;
+                    break;
+                }
                 if !ids.is_empty() && text_bytes.saturating_add(bytes) > limit_text_bytes {
                     break;
                 }
@@ -754,7 +761,7 @@ pub(crate) fn purge_index_rows(
             [run_id],
             |row| row.get(0),
         )?;
-        if !remaining {
+        if !remaining && !oversized {
             match target {
                 PurgeTarget::Tombstoned => {
                     SqliteThreadIndex::new(conn).drop_index(
@@ -782,7 +789,8 @@ pub(crate) fn purge_index_rows(
         Ok(PurgeProgress {
             rows: ids.len(),
             text_bytes,
-            remaining,
+            remaining: remaining || oversized,
+            oversized,
         })
     })
 }
