@@ -2528,7 +2528,7 @@ async fn openai_responses_automatic_compaction_replaces_history_then_warms_a_new
     compaction_restarts_cache_on(Wire::Responses, CompactionReason::Automatic).await;
 }
 
-/// Every recorded Codex generation request carries its instructions only as the developer
+/// Every recorded Codex request (generation and official compaction) carries its instructions only as the developer
 /// message at `input[0]` (Codex CLI 0.166.0 shape): no top-level `instructions`, one developer
 /// item per request, and the item (id included) is byte-identical across the whole run,
 /// compaction boundaries included.
@@ -2544,13 +2544,16 @@ fn assert_codex_developer_prefix(harness: &Harness) {
         all.iter()
             .all(|request| request.get("instructions").is_none())
     );
-    // The official-compaction call replays history without system messages (as before the
-    // move to developer input), so it has no developer message and is not part of the prefix.
-    let requests: Vec<_> = all
-        .iter()
-        .filter(|body| !is_compaction_trigger_request(body))
-        .collect();
-    assert!(requests.len() >= 3);
+    // The official-compaction call (`compaction_trigger`) carries the same developer message
+    // as the generation requests; only generation requests count towards the minimum.
+    let requests: Vec<_> = all.iter().collect();
+    assert!(
+        requests
+            .iter()
+            .filter(|body| !is_compaction_trigger_request(body))
+            .count()
+            >= 3
+    );
     let first = &requests[0]["input"][0];
     assert_eq!(first["type"], "message");
     assert_eq!(first["role"], "developer");

@@ -1,0 +1,1 @@
+{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"store":false,"stream":true,"include":["reasoning.encrypted_content"]}

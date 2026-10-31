@@ -387,6 +387,46 @@ fn openai_dialect_keeps_top_level_instructions_without_a_developer_message() {
     );
 }
 
+// Given: the OpenAI-dialect wire captured before the Codex field-order change
+// When: the same canonical requests are serialized now
+// Then: the bytes differ only in the order of the root fields: parsed JSON is equal, and the
+// large `input` and `tools` values are byte-identical substrings
+#[test]
+fn openai_dialect_differs_from_the_previous_wire_only_in_root_field_order() {
+    let mut rich = rich_request();
+    rich.reasoning_effort = Some("high".into());
+    let cases = [
+        (
+            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_rich.json"),
+            to_wire_request(&rich, &options(ResponsesDialect::OpenAi, Some("run-1"))),
+        ),
+        (
+            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_minimal.json"),
+            to_wire_request(&minimal_request(), &options(ResponsesDialect::OpenAi, None)),
+        ),
+    ];
+    for (old, new) in cases {
+        let old = old.trim_end();
+        let new = serde_json::to_string(&new).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(old).unwrap(),
+            serde_json::from_str::<Value>(&new).unwrap()
+        );
+        // The old order was `... "input", "tools", "store" ...` (tools absent when empty).
+        let input_end = old
+            .find(",\"tools\":")
+            .or_else(|| old.find(",\"store\":"))
+            .unwrap();
+        let input = &old[old.find("\"input\":").unwrap()..input_end];
+        assert!(new.contains(input), "input bytes changed: {new}");
+        if let Some(start) = old.find("\"tools\":") {
+            let tools = &old[start..old.find(",\"store\":").unwrap()];
+            assert!(new.contains(tools), "tools bytes changed: {new}");
+        }
+        assert_eq!(new.len(), old.len(), "no byte may be added or removed");
+    }
+}
+
 // Given: a request with every generation setting and a run cache key
 // When: serialized with the OpenAI dialect
 // Then: the official Responses settings carry them and tools are explicitly non-strict

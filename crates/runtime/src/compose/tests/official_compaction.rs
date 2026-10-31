@@ -76,7 +76,7 @@ async fn compaction_preserves_routing_generation_tools_and_observation() {
         ..Default::default()
     };
     let result = model
-        .compact_context(&invocation, Role::Worker, &messages, &tools)
+        .compact_context(&invocation, Role::Worker, &messages, &[], &tools)
         .await
         .unwrap()
         .unwrap();
@@ -126,7 +126,7 @@ async fn compaction_respects_explicit_preference_and_propagates_failure_without_
     };
     assert!(
         model
-            .compact_context(&invocation, Role::Worker, &[], &[])
+            .compact_context(&invocation, Role::Worker, &[], &[], &[])
             .await
             .is_err()
     );
@@ -142,7 +142,13 @@ async fn unsupported_provider_returns_none_without_sending() {
     let (model, requests) = routed_model(Ok(response()), "default", None);
     assert_eq!(
         model
-            .compact_context(&AgentInvocationContext::default(), Role::Worker, &[], &[])
+            .compact_context(
+                &AgentInvocationContext::default(),
+                Role::Worker,
+                &[],
+                &[],
+                &[]
+            )
             .await
             .unwrap(),
         None
@@ -158,7 +164,13 @@ async fn official_compaction_uses_catalog_output_limit() {
         fail: false,
     });
     model
-        .compact_context(&AgentInvocationContext::default(), Role::Worker, &[], &[])
+        .compact_context(
+            &AgentInvocationContext::default(),
+            Role::Worker,
+            &[],
+            &[],
+            &[],
+        )
         .await
         .unwrap()
         .unwrap();

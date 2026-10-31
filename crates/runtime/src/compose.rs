@@ -1168,6 +1168,7 @@ impl AgentModel for RoutedModel {
         invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
+        instructions: &[Message],
         tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
         // 解決は一度だけ。provider の失敗を別 route で再試行せず Summarizer へ返す。
@@ -1225,24 +1226,29 @@ impl AgentModel for RoutedModel {
             .map_err(provider_error)?;
         // The incoming history already obeys the raw-index floor; independently
         // resolved compactor routes may only narrow eligibility, never revive it.
-        request.messages = crate::ResponsesReplayState::default()
+        let mut body = crate::ResponsesReplayState::default()
             .filter(
-                request.messages.into_iter().enumerate().collect(),
+                std::mem::take(&mut request.messages)
+                    .into_iter()
+                    .enumerate()
+                    .collect(),
                 scope.as_ref(),
             )
             .into_iter()
             .map(|(_, m)| m)
-            .collect();
+            .collect::<Vec<_>>();
         request.responses_replay.as_mut().unwrap().expected_scope = scope;
         for _ in 0..16 {
+            // The window's system messages lead exactly as in an ordinary generation
+            // request, so the wire carries the same instructions (and, for Codex, the same
+            // developer message) in front of the compacted history. They are added after
+            // the replay filter, which works on history indices.
+            request.messages = instructions.iter().chain(&body).cloned().collect();
             match compactor.compact(&request).await {
                 Ok(result) => return Ok(Some(result)),
                 Err(providers::ProviderError::ResponsesScopeChanged { actual }) => {
-                    request.messages = crate::ResponsesReplayState::default()
-                        .filter(
-                            request.messages.into_iter().enumerate().collect(),
-                            Some(&actual),
-                        )
+                    body = crate::ResponsesReplayState::default()
+                        .filter(body.into_iter().enumerate().collect(), Some(&actual))
                         .into_iter()
                         .map(|(_, m)| m)
                         .collect();

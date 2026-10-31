@@ -90,9 +90,16 @@ which is the same behavior as any other instruction change.
 The cache contract (`mock_openai::cache_contract`) accepts a Codex request with or
 without a top-level `instructions` string. It compares the developer message like
 every other `input` item: unchanged across ordinary turns, and unchanged across a
-verified compaction boundary. The official-compaction call replays history without
-system messages and therefore has no developer message; it is not part of the
-generation prefix.
+verified compaction boundary.
+
+The official-compaction call (`compaction_trigger`) is built like Codex's
+(`compact_remote_v2_attempt.rs` sets the base instructions on the prompt and
+`client.rs` puts them at the head of `input`): evorch passes the window's system
+messages, the same ones an ordinary generation request carries, separately from the
+history being compacted. The compaction request therefore has no `instructions` and
+begins with the identical developer message (ID and text) followed by the compacted
+history, with the same tools and settings. Only `include` differs (cleared, a known
+difference above), and the history is replaced at the one verified boundary.
 
 ## Intentional differences
 

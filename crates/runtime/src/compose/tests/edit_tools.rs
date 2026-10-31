@@ -522,6 +522,7 @@ async fn fast_model_entry_override_is_used_for_official_compaction() {
             &AgentInvocationContext::default(),
             Role::Worker,
             &[],
+            &[],
             &edit_specs(),
         )
         .await
@@ -553,6 +554,7 @@ async fn compaction_also_narrows_edit_tools() {
             .compact_context(
                 &AgentInvocationContext::default(),
                 Role::Worker,
+                &[],
                 &[],
                 &edit_specs(),
             )
@@ -612,6 +614,7 @@ async fn unsupported_capability_still_sends_no_tools() {
                 ..Default::default()
             },
             Role::Worker,
+            &[],
             &[],
             &edit_specs(),
         )

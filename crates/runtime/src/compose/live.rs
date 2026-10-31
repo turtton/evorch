@@ -155,12 +155,13 @@ impl AgentModel for SwitchableModel {
         invocation: &AgentInvocationContext,
         role: Role,
         messages: &[Message],
+        instructions: &[Message],
         tools: &[ToolSpec],
     ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
         let current = self.current();
         let tools = crate::edit_tools::for_model(current.as_ref(), tools);
         current
-            .compact_context(invocation, role, messages, &tools)
+            .compact_context(invocation, role, messages, instructions, &tools)
             .await
     }
 

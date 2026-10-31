@@ -318,6 +318,43 @@ fn root_diff(previous: &Value, current: &Value) -> String {
         .join("; ")
 }
 
+/// An official compaction request carries the same instructions as ordinary requests:
+/// no top-level `instructions`, the very same developer message (id and text) at
+/// `input[0]`, and the same tool definitions (stable settings are checked by
+/// [`assert_compaction_settings`]).
+fn assert_compaction_shares_instructions(ordinary: &Value, compaction: &Value) {
+    assert!(compaction.get("instructions").is_none(), "{compaction}");
+    let developer = &input(ordinary)[0];
+    assert_eq!(developer["role"], "developer", "{ordinary}");
+    assert_eq!(&input(compaction)[0], developer);
+    assert_eq!(
+        input(compaction)
+            .iter()
+            .filter(|item| item["role"] == "developer")
+            .count(),
+        1
+    );
+    assert_eq!(compaction["tools"], ordinary["tools"]);
+}
+
+/// Every root setting except `input` and `include` (cleared by the compaction request)
+/// equals the ordinary request's, so only the history differs.
+fn assert_compaction_settings(ordinary: &Value, compaction: &Value) {
+    let strip = |body: &Value| {
+        let mut body = body.clone();
+        let root = body.as_object_mut().unwrap();
+        root.remove("input");
+        root.remove("include");
+        body
+    };
+    assert_eq!(
+        strip(compaction),
+        strip(ordinary),
+        "{}",
+        root_diff(ordinary, compaction)
+    );
+}
+
 /// The cache contract over consecutive requests, with both observations.
 ///
 /// `boundaries` lists ordinary-request positions (0-based, official compaction
@@ -329,7 +366,7 @@ fn root_diff(previous: &Value, current: &Value) -> String {
 /// mock cache must report at least the previous request's whole input as cached,
 /// except at a verified compaction boundary, which must actually replace history
 /// (less cached than the previous input). Official compaction requests are their own
-/// contract (`include: []`, own instructions) and are not prefix steps; a declared
+/// contract (`include: []`, the same developer instructions and tools) and are not prefix steps; a declared
 /// failed attempt must extend the previous request.
 fn assert_cache_chain(exchanges: &[Exchange], boundaries: &[usize]) {
     let mut previous: Option<&Exchange> = None;
@@ -343,6 +380,9 @@ fn assert_cache_chain(exchanges: &[Exchange], boundaries: &[usize]) {
                     Some(&json!({"type": "compaction_trigger"}))
                 );
                 assert_eq!(exchange.body["include"], json!([]));
+                if let Some(before) = previous {
+                    assert_compaction_shares_instructions(&before.body, &exchange.body);
+                }
             } else {
                 // Text summaries use the regular Responses API, but their own
                 // system prompt/history and are not ordinary prefix steps.
