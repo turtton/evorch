@@ -12,7 +12,7 @@ use crate::http::{UsageEmitter, map_request_error};
 use crate::observe::AttemptObserver;
 use crate::sse::SseParser;
 use crate::{
-    FinishReason, HostedWebSearch, HostedWebSearchError, HostedWebSearchRequest,
+    ChatRequest, FinishReason, HostedWebSearch, HostedWebSearchError, HostedWebSearchRequest,
     HostedWebSearchResponse, ProviderAuth,
 };
 use errors::{http_error, invalid, sanitize};
@@ -43,7 +43,10 @@ impl HostedWebSearch for CodexClient {
         let result = async {
             let response = self
                 .post_response(
-                    &request.model,
+                    &ChatRequest {
+                        observation: request.observation.clone(),
+                        ..super::scope_probe(&request.model)
+                    },
                     &wire_request(request),
                     ResponseMode::NonStreaming,
                     &mut observer,

@@ -65,12 +65,11 @@ async fn ac2_codex_images_share_refresh_account_and_session_headers() {
         .filter(|r| r.url.path().contains("/images/"))
         .collect::<Vec<_>>();
     assert_eq!(images.len(), 2);
-    assert_eq!(
-        images[0].headers["session-id"],
-        images[1].headers["session-id"]
-    );
-    assert_ne!(
-        images[0].headers["thread-id"],
-        images[1].headers["thread-id"]
-    );
+    // Both calls belong to the "image-run" run: every identifier is that run's UUIDv5.
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"image-run").to_string();
+    for image in images {
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(image.headers[name], run_id.as_str(), "{name}");
+        }
+    }
 }

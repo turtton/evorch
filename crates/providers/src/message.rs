@@ -278,7 +278,7 @@ pub enum FinishReason {
 /// リクエスト attempt の観測イベント ([`RequestStarted`] / `FirstTokenObserved`
 /// / `RequestCompleted` / `RequestFailed` — `event_bus` crate 参照) へ
 /// `run_id` を相関させるためのもの。
-/// OpenAI wire では run ID を `prompt_cache_key` にも使用する。
+/// OpenAI wire では run ID を、Codex wire ではその UUIDv5 を `prompt_cache_key` にも使用する。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ObservationContext {
     /// 相関先の agent run ID。

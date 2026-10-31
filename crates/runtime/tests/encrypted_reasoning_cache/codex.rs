@@ -357,7 +357,7 @@ async fn official_compaction_receives_eligible_reasoning_then_reuses_the_new_pre
     }
     let compaction = the_compaction(&exchanges);
     // The compaction request is built from the same instructions, tools and settings as the
-    // ordinary requests; only the history (and the cleared `include`) differs.
+    // ordinary requests; only the history differs.
     let requests = ordinary(&exchanges);
     // Exactly one verified replacement, consumed by the first ordinary request after the
     // compaction; the requests after it reuse the new prefix (checked by the chain above).

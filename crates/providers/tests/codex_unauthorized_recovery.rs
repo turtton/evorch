@@ -188,6 +188,58 @@ fn assert_resent_with_new_token(sent: &[Request]) {
     );
 }
 
+fn run_request() -> ChatRequest {
+    let mut request = request();
+    request.observation = Some(providers::ObservationContext {
+        run_id: "01JZ0RUN000000000000000001".into(),
+        ..Default::default()
+    });
+    request
+}
+
+/// The resend carries the same run-derived identity as the rejected attempt.
+fn assert_run_identity_survives_resend(sent: &[Request]) {
+    let run_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"01JZ0RUN000000000000000001").to_string();
+    assert_eq!(sent.len(), 2);
+    for request in sent {
+        assert!(!request.headers.contains_key("openai-beta"));
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(request.headers[name], run_id.as_str(), "{name}");
+        }
+        let body: Value = request.body_json().unwrap();
+        assert_eq!(body["prompt_cache_key"], run_id.as_str());
+    }
+}
+
+// Given: a run's request rejected with 401 / When: chat and compaction recover
+// Then: the resend keeps the run's session/thread/request IDs and prompt_cache_key
+#[tokio::test]
+async fn unauthorized_resend_keeps_the_run_identity_for_chat_and_compaction() {
+    for compaction in [false, true] {
+        let server = MockServer::start().await;
+        mount_refresh(&server, refreshed_response("acc-123"), 1).await;
+        mount_status(&server, RESPONSES_PATH, "access-old", unauthorized()).await;
+        let ok = if compaction { COMPACTION_SSE } else { CHAT_SSE };
+        mount_status(&server, RESPONSES_PATH, "access-new", sse(ok)).await;
+        let client = client(&server, seeded_store(), None);
+        if compaction {
+            client
+                .compactor()
+                .expect("codex compacts")
+                .compact(&run_request())
+                .await
+                .expect("compaction recovers");
+        } else {
+            client
+                .send(&ProviderAuth::new(""), &run_request())
+                .await
+                .expect("chat recovers");
+        }
+        assert_run_identity_survives_resend(&requests_to(&server, RESPONSES_PATH).await);
+    }
+}
+
 // Given: access token を 401 で拒否される / When: send / Then: unauthorized_recovery で 1 回 refresh し、
 // 同一 body を新しい Bearer で再送して成功し、bundle を保存する
 #[tokio::test]

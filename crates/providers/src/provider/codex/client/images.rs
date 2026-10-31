@@ -23,6 +23,7 @@ impl ImageGeneration for CodexClient {
     ) -> Result<ImageGenerationResponse, ImageGenerationError> {
         let body = image_generation::wire_request(request, true)?;
         let endpoint = image_generation::endpoint(&self.endpoint, request);
+        let run_id = super::run_id_of(request.observation.as_ref());
         let mut observer = image_generation::observer(
             self.event_bus.clone(),
             PROVIDER_LABEL,
@@ -38,7 +39,9 @@ impl ImageGeneration for CodexClient {
             async |observer| {
                 // The compaction client already permits five minutes without response bytes.
                 let token = self.session.current().await?;
-                let response = self.send_image_request(&endpoint, &body, &token).await?;
+                let response = self
+                    .send_image_request(&endpoint, &body, &token, run_id)
+                    .await?;
                 if response.status() != reqwest::StatusCode::UNAUTHORIZED {
                     return Ok(response);
                 }
@@ -47,7 +50,9 @@ impl ImageGeneration for CodexClient {
                     .recover_unauthorized(&scope_probe(&request.model), &token, observer)
                     .await?;
                 observer.emit_started();
-                let response = self.send_image_request(&endpoint, &body, &fresh).await?;
+                let response = self
+                    .send_image_request(&endpoint, &body, &fresh, run_id)
+                    .await?;
                 reject_second_unauthorized(response, observer)
             },
         )
@@ -61,8 +66,9 @@ impl CodexClient {
         endpoint: &str,
         body: &impl serde::Serialize,
         token: &AuthorizedCodexToken,
+        run_id: Option<&str>,
     ) -> Result<reqwest::Response, ProviderError> {
-        self.authenticated_request_with_token(&self.compaction_http_client, endpoint, token)
+        self.authenticated_request_with_token(&self.compaction_http_client, endpoint, token, run_id)
             .await
             .header(reqwest::header::ACCEPT, "application/json")
             .timeout(IMAGE_TIMEOUT)

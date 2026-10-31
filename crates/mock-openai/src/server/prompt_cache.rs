@@ -54,20 +54,18 @@ impl PromptCache {
     }
 }
 
-/// Canonical settings (Responses `instructions` and `tools` included) followed by one
-/// line per Chat Completions `messages` or Responses `input` item.
+/// Canonical settings (Responses `instructions`, `tools`, `include` and
+/// `prompt_cache_key` included) followed by one line per Chat Completions `messages`
+/// or Responses `input` item.
 ///
-/// Like `stream`/`stream_options`, Responses `include` only selects which output
-/// fields come back (`reasoning.encrypted_content`); it is not prompt content, and
-/// provider prompt caching keys on the prompt prefix. Ordinary requests send it while
-/// Codex official compaction keeps `include: []`, so excluding it here keeps the
-/// compaction request on the cached conversation prefix. Whether the real backend
-/// reuses the cache across that difference is unverified. Turn-to-turn stability of
-/// `include` is still enforced by [`crate::cache_contract::assert_append_only`].
+/// `include` is counted as a setting, unlike `stream`/`stream_options`: whether the real
+/// backend keys its cache on it is unverified, so the oracle assumes a change breaks
+/// the cached prefix. Codex official compaction sends the ordinary `include`, so it
+/// stays on the cached conversation prefix; a request that drops or changes it does not.
 fn prompt_bytes(request: &Value) -> Vec<u8> {
     let mut settings = request.clone();
     if let Some(object) = settings.as_object_mut() {
-        for field in ["messages", "input", "stream", "stream_options", "include"] {
+        for field in ["messages", "input", "stream", "stream_options"] {
             object.remove(field);
         }
     }
@@ -182,15 +180,21 @@ mod tests {
     }
 
     #[test]
-    fn output_include_is_not_prompt_content() {
+    fn compaction_with_the_ordinary_include_reuses_the_cached_prefix() {
         let ordinary = json!({"model": "m", "include": ["reasoning.encrypted_content"],
             "input": [{"type": "message", "role": "user", "content": "go"}]});
         let mut compaction = ordinary.clone();
-        compaction["include"] = json!([]);
-        assert_eq!(prompt_bytes(&ordinary), prompt_bytes(&compaction));
+        compaction["input"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "compaction_trigger"}));
         let mut cache = PromptCache::default();
         let (input, _) = cache.observe(&ordinary);
-        assert_eq!(cache.observe(&compaction), (input, input));
+        assert_eq!(cache.observe(&compaction).1, input);
+        // A dropped `include` is a setting change: the oracle reports less cached.
+        let mut dropped = ordinary.clone();
+        dropped["include"] = json!([]);
+        assert!(cache.observe(&dropped).1 < input);
         let mut changed = ordinary.clone();
         changed["instructions"] = json!("changed");
         assert!(cache.observe(&changed).1 < input);

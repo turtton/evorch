@@ -31,8 +31,9 @@ every dialect-specific rule lives in `impl ResponsesDialect`.
 | `originator` | Always `codex_cli_rs`; Codex TUI sends `codex-tui` (intentional, harmless) |
 | `User-Agent` | `codex_cli_rs/<version>` only; Codex adds OS, architecture, and terminal (intentional) |
 | `x-openai-internal-codex-responses-lite` | `true` on a Responses Lite request, including a 401 resend and the compaction call; absent otherwise; matches |
-| `version`, `session-id`, `thread-id`, `x-client-request-id` | Present; `thread-id` / request ID are per HTTP request rather than per conversation (difference) |
-| `OpenAI-Beta` | `responses=experimental` is still sent on HTTP; Codex does not send it (difference) |
+| `version` | The advertised client version; matches |
+| `session-id`, `thread-id`, `x-client-request-id` | For a request that belongs to a run, all three are one value for the whole run: the UUIDv5 of the run ID in the OID namespace (`Uuid::new_v5(&Uuid::NAMESPACE_OID, run_id)`; run IDs are ULIDs, not UUIDs). It is identical in every ordinary turn, the compaction call, a 401 resend, hosted web search and image generation of that run. Codex sends its thread ID in `thread-id` / `x-client-request-id` and a session-derived value in `session-id`; a run is evorch's thread and session, so they coincide. A request without a run (no observation) keeps the older behavior: the client's own session UUID in `session-id` and a fresh UUID per HTTP request in the other two |
+| `OpenAI-Beta` | Not sent on HTTP, on any path (responses, compaction, hosted web search, image generation); matches Codex. Only Codex's WebSocket handshake sends a beta value, and evorch has no WebSocket |
 | `Accept`, `Content-Type` | `text/event-stream`, `application/json`; matches |
 | `x-codex-*` routing, window, turn-state, and metadata headers | Not sent (difference) |
 | `Content-Encoding` | Bodies are not compressed; Codex uses zstd (difference) |
@@ -54,8 +55,8 @@ evorch does not emit `stream_options` or `client_metadata`.
 | `tool_choice`, `store`, `stream` | `"auto"`, `false`, `true`; matches |
 | `parallel_tool_calls` | `true`; `false` for Responses Lite models, as Codex |
 | `reasoning` | `effort` is the explicit setting, else the model's `default_reasoning_level`, else `medium`. `summary: "auto"` is sent whenever the model accepts the parameter (`supports_reasoning_summary_parameter`, true when the catalog is silent). The catalog's `default_reasoning_summary` (`none` for the Lite models) is ignored on purpose, so evorch keeps requesting summaries (difference). `context: "all_turns"` for Lite models, omitted otherwise |
-| `include` | `["reasoning.encrypted_content"]`; cleared on the compaction request (difference) |
-| `prompt_cache_key` | Omitted for Codex (Codex permits omitting it) |
+| `include` | `["reasoning.encrypted_content"]`, on the compaction request too; matches |
+| `prompt_cache_key` | For a request that belongs to a run, the same run-derived UUIDv5 as `session-id` (Codex's default session-derived policy); unchanged within the run, so it is not a cache boundary. Omitted when there is no run. The key scopes the provider cache to a run: a delegated, forked or rewound run has its own run ID and therefore its own key, so it does not reuse its parent's cache (difference: Codex derives the key from the session, which a fork can inherit) |
 | `text` | `verbosity` is the model's `default_verbosity` when the catalog says the model supports verbosity; `format` only for structured output, with evorch's schema name and strict flag (difference). No per-request verbosity setting exists yet |
 | `service_tier` | Sent when requested (priority). When the model's catalog entry was fetched, it is sent only if the entry's `service_tiers` contains `priority`; a missing or empty list, other tiers, and a bare `additional_speed_tiers: ["fast"]` (the UI's fast support, not a wire advertisement) all omit it with a warning, as Codex checks the advertised tiers. With no fetched entry (no catalog, failed read, model not listed) it is sent as requested. The attempt observation records the tier actually sent |
 | `max_output_tokens`, `temperature` | Never sent for Codex; matches |
@@ -171,14 +172,15 @@ The official-compaction call (`compaction_trigger`) is built like Codex's
 messages, the same ones an ordinary generation request carries, separately from the
 history being compacted. The compaction request therefore has no `instructions` and
 begins with the identical developer message (ID and text) followed by the compacted
-history, with the same tools and settings. Only `include` differs (cleared, a known
-difference above), and the history is replaced at the one verified boundary.
+history, with the same tools and settings, `include` and `prompt_cache_key` included.
+Only the history is replaced, at the one verified boundary.
 
 ## Intentional differences
 
 - Client identification (`originator`, `User-Agent`) is evorch's own.
 - Equal developer instruction text gets the same message ID in every thread.
-- `prompt_cache_key` is omitted.
+- `prompt_cache_key` and the identifier headers are derived per run, not per Codex
+  session, so a fork or rewind starts a new key.
 - Malformed SSE JSON is an error rather than being skipped.
 
 - Reasoning summaries are requested for every model that accepts the parameter, even

@@ -8,7 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::support::*;
 
 #[tokio::test]
-async fn search_shares_chat_session_headers_endpoint_and_refresh() {
+async fn search_shares_chat_run_headers_endpoint_and_refresh() {
     let server = MockServer::start().await;
     let store = store("expired-access", "selected-account", 0);
     Mock::given(method("POST"))
@@ -26,7 +26,6 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
         .and(header("authorization", "Bearer refreshed-access"))
         .and(header("chatgpt-account-id", "selected-account"))
         .and(header("originator", "codex_cli_rs"))
-        .and(header("OpenAI-Beta", "responses=experimental"))
         .and(header("accept", "text/event-stream"))
         .and(header("version", providers::CODEX_CLIENT_VERSION))
         .and(header(
@@ -48,7 +47,9 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
     let client = client(&server, store.clone(), None);
     let auth = ProviderAuth::new("must-not-be-used");
     let search_request = request();
-    let ordinary = chat_request();
+    // The ordinary chat belongs to the same run as the search.
+    let mut ordinary = chat_request();
+    ordinary.observation = search_request.observation.clone();
     let (search, chat) = tokio::join!(
         client
             .hosted_web_search()
@@ -69,19 +70,12 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
         .filter(|r| r.url.path().ends_with("/responses"))
         .collect();
     assert_eq!(responses.len(), 2);
-    assert_eq!(
-        responses[0].headers["session-id"],
-        responses[1].headers["session-id"]
-    );
-    assert_ne!(
-        responses[0].headers["thread-id"],
-        responses[1].headers["thread-id"]
-    );
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"search-run").to_string();
     for response in responses {
-        assert_eq!(
-            response.headers["thread-id"],
-            response.headers["x-client-request-id"]
-        );
+        assert!(!response.headers.contains_key("openai-beta"));
+        for name in ["session-id", "thread-id", "x-client-request-id"] {
+            assert_eq!(response.headers[name], run_id.as_str(), "{name}");
+        }
         let body: Value = response.body_json().unwrap();
         if body["tools"][0]["type"] == "web_search" {
             assert_eq!(
@@ -99,10 +93,10 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
             assert!(body.get("usage_sink").is_none());
         } else {
             assert_eq!(body["tool_choice"], "auto");
-            assert_eq!(
-                body,
-                serde_json::to_value(providers::wire::codex::to_wire_request(&ordinary)).unwrap()
-            );
+            let mut expected =
+                serde_json::to_value(providers::wire::codex::to_wire_request(&ordinary)).unwrap();
+            expected["prompt_cache_key"] = json!(run_id);
+            assert_eq!(body, expected);
         }
     }
 }

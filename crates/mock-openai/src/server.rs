@@ -28,8 +28,20 @@ pub struct RecordedRequest {
     pub chatgpt_account_id: Option<String>,
     /// Whether the request carried `x-openai-internal-codex-responses-lite: true`.
     pub codex_responses_lite: bool,
+    /// The Codex `session-id`, `thread-id` and `x-client-request-id` headers.
+    pub codex_ids: CodexIds,
+    /// The legacy `OpenAI-Beta` header value, which Codex CLI 0.166.0 does not send.
+    pub openai_beta: Option<String>,
     pub body: Value,
     pub stream: bool,
+}
+
+/// The identifier headers a Codex request carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexIds {
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub client_request_id: Option<String>,
 }
 
 /// Holds a scripted response until the test explicitly releases it.
@@ -449,6 +461,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
     let mut authorization = None;
     let mut chatgpt_account_id = None;
     let mut codex_responses_lite = false;
+    let mut codex_ids = CodexIds::default();
+    let mut openai_beta = None;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -471,6 +485,14 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
             chatgpt_account_id = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite") {
             codex_responses_lite = value.trim() == "true";
+        } else if name.eq_ignore_ascii_case("session-id") {
+            codex_ids.session_id = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("thread-id") {
+            codex_ids.thread_id = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("x-client-request-id") {
+            codex_ids.client_request_id = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("openai-beta") {
+            openai_beta = Some(value.trim().to_owned());
         }
     }
     let mut bytes = vec![0; content_length];
@@ -487,6 +509,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
         authorization,
         chatgpt_account_id,
         codex_responses_lite,
+        codex_ids,
+        openai_beta,
         stream: body["stream"] == true,
         body,
     })

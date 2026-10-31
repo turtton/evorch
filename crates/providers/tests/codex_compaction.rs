@@ -25,7 +25,6 @@ async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
         .and(header("authorization", "Bearer access-tok-1"))
         .and(header("chatgpt-account-id", "acc-123"))
         .and(header("originator", "codex_cli_rs"))
-        .and(header("OpenAI-Beta", "responses=experimental"))
         .and(header("accept", "text/event-stream"))
         .and(CodexBodyMatcher)
         .and(CodexIdMatcher)
@@ -52,11 +51,14 @@ async fn compact_uses_responses_auth_and_returns_opaque_state_and_usage() {
         }
     );
     let received = codex_support::response_requests(&server).await;
+    assert!(!received[0].headers.contains_key("openai-beta"));
     let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
     assert_eq!(
         body,
         serde_json::to_value(providers::wire::codex::to_wire_compaction_request(&request)).unwrap()
     );
+    // Compaction keeps the ordinary request's `include` (Codex CLI 0.166.0).
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(
         body["input"][1],
         json!({"type":"compaction", "encrypted_content":"previous"})

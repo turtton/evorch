@@ -89,8 +89,7 @@ async fn requests(codex: bool) {
                 .and(header(
                     "user-agent",
                     format!("codex_cli_rs/{}", providers::CODEX_CLIENT_VERSION),
-                ))
-                .and(header("OpenAI-Beta", "responses=experimental"));
+                ));
         }
         mock.respond_with(
             ResponseTemplate::new(200)
@@ -151,6 +150,7 @@ async fn requests(codex: bool) {
         assert_eq!((usage_events, terminals, starts), (1, 1, 1));
         let requests = server.received_requests().await.unwrap();
         if codex {
+            assert!(!requests[0].headers.contains_key("openai-beta"));
             assert!(!requests[0].headers["session-id"].is_empty());
             assert_eq!(
                 requests[0].headers["thread-id"],
