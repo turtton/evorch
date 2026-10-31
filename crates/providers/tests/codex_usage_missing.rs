@@ -83,7 +83,12 @@ async fn observe_until_completed(receiver: &mut EventReceiver) -> Observed {
             EventKind::Provider(ProviderEvent::CacheReuseObserved { .. }) => {
                 observed.cache_reuse += 1;
             }
-            EventKind::Diagnostic(diagnostic) => observed.diagnostics.push(diagnostic),
+            // The unmocked model catalog read is unrelated evidence (always a 404 here).
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.code != diagnostic_codes::PROVIDER_CATALOG_FETCH =>
+            {
+                observed.diagnostics.push(diagnostic);
+            }
             EventKind::Provider(ProviderEvent::RequestCompleted { usage_reported, .. }) => {
                 observed.completed += 1;
                 observed.completed_reports_usage = Some(usage_reported);
