@@ -100,16 +100,22 @@ impl CodexSessionManager {
                 self.store.save(&refreshed)?;
                 self.adopt(&mut cache, refreshed)
             }
-            Err(ProviderError::Http { status, .. }) if (400..500).contains(&status) => {
-                match self.store.load()? {
-                    Some(stored) if stored != bundle => self.adopt(&mut cache, stored),
-                    _ => Err(ProviderError::Http {
-                        status: 401,
-                        body: "codex refresh token was rejected; re-authenticate the Codex subscription"
+            Err(ProviderError::Http { status, .. }) if refresh_token_rejected(status) => match self
+                .store
+                .load()?
+            {
+                Some(stored) if stored != bundle => self.adopt(&mut cache, stored),
+                _ => Err(ProviderError::Http {
+                    status: 401,
+                    body:
+                        "codex refresh token was rejected; re-authenticate the Codex subscription"
                             .to_string(),
-                    }),
-                }
-            }
+                }),
+            },
+            Err(ProviderError::Http { status, .. }) => Err(ProviderError::Http {
+                status,
+                body: "codex token refresh failed".to_string(),
+            }),
             Err(error) => Err(error),
         }
     }
@@ -132,6 +138,14 @@ impl CodexSessionManager {
         *cache = Some(bundle);
         Ok(token)
     }
+}
+
+/// refresh endpoint の 4xx が refresh token の拒否 (invalid_grant など) を意味するか。
+///
+/// タイムアウトや再試行で解消しうる 408 / 425 は一時障害であり、
+/// 再認証を要求せずそのまま返す。
+const fn refresh_token_rejected(status: u16) -> bool {
+    matches!(status, 400..=499) && !matches!(status, 408 | 425)
 }
 
 /// bundle の account id と、事前 refresh が必要かを返す。

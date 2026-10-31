@@ -3,20 +3,27 @@
 //! 再送は同一 wire body で行う (prompt cache の prefix を変えない)。
 
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use event_bus::{EventBus, EventKind, ProviderEvent, ProviderFailureKind};
+use futures_util::FutureExt;
 use providers::provider::codex::oauth::CODEX_CLIENT_ID;
 use providers::provider::codex::tokens::{CodexTokenStore, InMemoryTokenStore, TokenBundle};
 use providers::provider::codex::{CodexClient, CodexConfig};
 use providers::{
-    ChatRequest, ContentBlock, HostedWebSearchError, ImageGenerationRequest, Message, ProviderAuth,
-    ProviderClient, ProviderError, Role,
+    ChatRequest, ContentBlock, HostedWebSearchError, ImageGenerationError, ImageGenerationRequest,
+    Message, ProviderAuth, ProviderClient, ProviderError, Role,
 };
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Barrier;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -66,10 +73,18 @@ fn client(
     store: Arc<InMemoryTokenStore>,
     bus: Option<Arc<EventBus>>,
 ) -> CodexClient {
+    client_at(&server.uri(), store, bus)
+}
+
+fn client_at(
+    uri: &str,
+    store: Arc<dyn CodexTokenStore>,
+    bus: Option<Arc<EventBus>>,
+) -> CodexClient {
     CodexClient::with_config(
         CodexConfig {
-            base_url: server.uri(),
-            auth_base_url: server.uri(),
+            base_url: uri.to_owned(),
+            auth_base_url: uri.to_owned(),
             event_bus: bus,
             ..CodexConfig::default()
         },
@@ -194,24 +209,147 @@ async fn chat_recovers_from_unauthorized_with_identical_body() {
     assert_eq!(saved.refresh_token, "refresh-new");
 }
 
-// Given: 同じ古い token を使う 2 リクエスト / When: 同時に 401 を受ける / Then: refresh は 1 回で両方成功する
-#[tokio::test(flavor = "multi_thread")]
-async fn concurrent_unauthorized_responses_refresh_once() {
-    let server = MockServer::start().await;
-    mount_refresh(&server, refreshed_response("acc-123"), 1).await;
-    mount_status(&server, RESPONSES_PATH, "access-old", unauthorized()).await;
-    mount_status(&server, RESPONSES_PATH, "access-new", sse(CHAT_SSE)).await;
-    let client = client(&server, seeded_store(), None);
-    let auth = ProviderAuth::new("");
-    let (first_request, second_request) = (request(), request());
+/// 旧 token の 401 を、両リクエストが届くまで返さない最小の HTTP サーバー。
+///
+/// wiremock の応答は同期で、保留すると単一スレッドのサーバーごと止まるため使えない。
+struct GatedBackend {
+    uri: String,
+    refreshes: Arc<AtomicUsize>,
+}
 
-    let (first, second) = tokio::join!(
-        client.send(&auth, &first_request),
-        client.send(&auth, &second_request)
+async fn spawn_gated_backend() -> GatedBackend {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let uri = format!("http://{}", listener.local_addr().expect("local address"));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let both_arrived = Arc::new(Barrier::new(2));
+    let counter = refreshes.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept");
+            tokio::spawn(serve(stream, both_arrived.clone(), counter.clone()));
+        }
+    });
+    GatedBackend { uri, refreshes }
+}
+
+async fn serve(mut stream: TcpStream, both_arrived: Arc<Barrier>, refreshes: Arc<AtomicUsize>) {
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let (head_len, content_length) = loop {
+        let read = stream.read(&mut chunk).await.expect("read request");
+        assert!(read > 0, "connection closed before the request completed");
+        received.extend_from_slice(&chunk[..read]);
+        if let Some(end) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&received[..end]).to_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .map_or(0, |value| value.trim().parse::<usize>().expect("length"));
+            break (end + 4, length);
+        }
+    };
+    while received.len() < head_len + content_length {
+        let read = stream.read(&mut chunk).await.expect("read body");
+        assert!(read > 0, "connection closed before the body completed");
+        received.extend_from_slice(&chunk[..read]);
+    }
+    let head = String::from_utf8_lossy(&received[..head_len]).to_lowercase();
+    let (status, content_type, body) = if head.starts_with("post /oauth/token") {
+        refreshes.fetch_add(1, Ordering::SeqCst);
+        let body = json!({
+            "access_token": "access-new",
+            "refresh_token": "refresh-new",
+            "id_token": jwt(now_unix() + 7_200, "acc-123")
+        });
+        ("200 OK", "application/json", body.to_string())
+    } else if head.contains("authorization: bearer access-old") {
+        both_arrived.wait().await;
+        ("401 Unauthorized", "text/plain", "token expired".to_owned())
+    } else {
+        ("200 OK", "text/event-stream", CHAT_SSE.to_owned())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("respond");
+    stream.shutdown().await.expect("shutdown");
+}
 
-    assert!(first.is_ok(), "{first:?}");
-    assert!(second.is_ok(), "{second:?}");
+/// 最初の `save` を、テストが解放するまで保留する store。
+///
+/// `save` は refresh 中 (session のロックを保持している間) に呼ばれるため、
+/// 保留中は refresh が進行中でロックが取られたままであることを保証できる。
+struct ParkedSaveStore {
+    inner: InMemoryTokenStore,
+    parked: UnboundedSender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl CodexTokenStore for ParkedSaveStore {
+    fn load(&self) -> Result<Option<TokenBundle>, ProviderError> {
+        self.inner.load()
+    }
+
+    fn save(&self, bundle: &TokenBundle) -> Result<(), ProviderError> {
+        self.parked.send(()).expect("test is waiting for the park");
+        self.release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("test releases the save");
+        self.inner.save(bundle)
+    }
+}
+
+// Given: 旧 token を持つ 2 リクエストが両方 401 を受け、refresh が保存で保留されている
+// When: その間に別の current() を走らせ、保留を解放する
+// Then: 別の current() は保留中は完了せず解放後に完了し、refresh は 1 回で両方の再送が成功する
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_unauthorized_responses_refresh_once() {
+    let backend = spawn_gated_backend().await;
+    let (parked, mut parked_signal) = unbounded_channel();
+    let (release, release_signal) = std::sync::mpsc::channel();
+    let store = Arc::new(ParkedSaveStore {
+        inner: Arc::try_unwrap(seeded_store()).ok().expect("sole owner"),
+        parked,
+        release: Mutex::new(release_signal),
+    });
+    let client = Arc::new(client_at(&backend.uri, store, None));
+    let auth = ProviderAuth::new("");
+    let preload = request();
+    client
+        .resolve_responses_scope(&auth, &preload)
+        .await
+        .expect("both requests start from the cached old token");
+    let sends: Vec<_> = (0..2)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move { client.send(&ProviderAuth::new(""), &request()).await })
+        })
+        .collect();
+
+    parked_signal
+        .recv()
+        .await
+        .expect("a refresh reached the store");
+    let mut concurrent_current = Box::pin(client.resolve_responses_scope(&auth, &preload));
+    assert!(
+        (&mut concurrent_current).now_or_never().is_none(),
+        "current() must wait for the refresh holding the session lock"
+    );
+    release.send(()).expect("release the parked save");
+
+    let scope = concurrent_current.await.expect("current() completes");
+    assert!(scope.is_some());
+    for send in sends {
+        let result = send.await.expect("send task");
+        assert!(result.is_ok(), "{result:?}");
+    }
+    assert_eq!(backend.refreshes.load(Ordering::SeqCst), 1);
 }
 
 // Given: store が先に rotate 済み / When: 古い token が 401 / Then: refresh せず store の token で再送する
@@ -406,6 +544,14 @@ async fn hosted_search_second_unauthorized_is_sanitized_and_final() {
     assert_eq!(requests_to(&server, RESPONSES_PATH).await.len(), 2);
 }
 
+fn image_request() -> ImageGenerationRequest {
+    ImageGenerationRequest {
+        model: "gpt-image-2".into(),
+        prompt: "draw a tree".into(),
+        ..Default::default()
+    }
+}
+
 fn image_response() -> ResponseTemplate {
     let mut png = Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(2, 3)
@@ -433,14 +579,7 @@ async fn image_generation_recovers_from_unauthorized() {
     let result = client
         .image_generation()
         .expect("codex generates images")
-        .generate(
-            &ProviderAuth::new(""),
-            &ImageGenerationRequest {
-                model: "gpt-image-2".into(),
-                prompt: "draw a tree".into(),
-                ..Default::default()
-            },
-        )
+        .generate(&ProviderAuth::new(""), &image_request())
         .await;
 
     assert!(result.is_ok(), "{result:?}");
@@ -490,4 +629,141 @@ async fn unauthorized_attempt_is_recorded_before_a_new_attempt() {
     assert_eq!(timeline[0].1, timeline[1].1);
     assert_eq!(timeline[2].1, timeline[3].1);
     assert_ne!(timeline[0].1, timeline[2].1);
+}
+
+// Given: 回復で account が変わる hosted search / When: search / Then: 再送せず ResponsesScopeChanged を返す
+#[tokio::test]
+async fn hosted_search_account_change_is_not_resent() {
+    let server = MockServer::start().await;
+    mount_refresh(&server, refreshed_response("acc-other"), 1).await;
+    mount_status(&server, RESPONSES_PATH, "access-old", unauthorized()).await;
+
+    let error = client(&server, seeded_store(), None)
+        .hosted_web_search()
+        .expect("codex searches")
+        .search(&ProviderAuth::new(""), &web_search_support::request())
+        .await
+        .expect_err("account change must not be replayed");
+
+    assert!(
+        matches!(
+            error,
+            HostedWebSearchError::Provider(ProviderError::ResponsesScopeChanged { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(requests_to(&server, RESPONSES_PATH).await.len(), 1);
+}
+
+// Given: 回復で account が変わる image generation / When: generate / Then: 再送せず ResponsesScopeChanged を返す
+#[tokio::test]
+async fn image_generation_account_change_is_not_resent() {
+    let server = MockServer::start().await;
+    let endpoint = "/backend-api/codex/images/generations";
+    mount_refresh(&server, refreshed_response("acc-other"), 1).await;
+    mount_status(&server, endpoint, "access-old", unauthorized()).await;
+
+    let error = client(&server, seeded_store(), None)
+        .image_generation()
+        .expect("codex generates images")
+        .generate(&ProviderAuth::new(""), &image_request())
+        .await
+        .expect_err("account change must not be replayed");
+
+    assert!(
+        matches!(
+            error,
+            ImageGenerationError::Provider(ProviderError::ResponsesScopeChanged { .. })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(requests_to(&server, endpoint).await.len(), 1);
+}
+
+const REMOTE_SECRET: &str = "sk-remote-secret-marker-9f31";
+
+/// 2 回目の 401 本文 (`REMOTE_SECRET`) が、返却エラーと観測イベントのどちらにも出ないこと。
+async fn assert_second_unauthorized_hides_remote_body(compaction: bool) {
+    let server = MockServer::start().await;
+    mount_refresh(&server, refreshed_response("acc-123"), 1).await;
+    mount_status(&server, RESPONSES_PATH, "access-old", unauthorized()).await;
+    mount_status(
+        &server,
+        RESPONSES_PATH,
+        "access-new",
+        ResponseTemplate::new(401).set_body_string(format!("invalid token {REMOTE_SECRET}")),
+    )
+    .await;
+    let bus = Arc::new(EventBus::new(32));
+    let mut events = bus.subscribe();
+    let client = client(&server, seeded_store(), Some(bus));
+
+    let error = if compaction {
+        client
+            .compactor()
+            .expect("codex compacts")
+            .compact(&request())
+            .await
+            .expect_err("second 401 is final")
+    } else {
+        client
+            .send(&ProviderAuth::new(""), &request())
+            .await
+            .expect_err("second 401 is final")
+    };
+
+    assert!(
+        matches!(error, ProviderError::Http { status: 401, .. }),
+        "{error:?}"
+    );
+    assert!(!format!("{error:?} {error}").contains(REMOTE_SECRET));
+    let mut failures = 0;
+    while failures < 2 {
+        let event = events.recv().await.expect("event bus stays open");
+        if matches!(
+            event.kind,
+            EventKind::Provider(ProviderEvent::RequestFailed { .. })
+        ) {
+            failures += 1;
+        }
+        let json = serde_json::to_string(&event).expect("events serialize");
+        assert!(!json.contains(REMOTE_SECRET), "{json}");
+    }
+}
+
+// Given: 回復後の再送も秘密を含む 401 / When: send / Then: 返却エラーと観測に遠隔の本文が出ない
+#[tokio::test]
+async fn second_unauthorized_hides_the_remote_body_for_chat() {
+    assert_second_unauthorized_hides_remote_body(false).await;
+}
+
+// Given: 回復後の再送も秘密を含む 401 / When: compact / Then: 返却エラーと観測に遠隔の本文が出ない
+#[tokio::test]
+async fn second_unauthorized_hides_the_remote_body_for_compaction() {
+    assert_second_unauthorized_hides_remote_body(true).await;
+}
+
+// Given: refresh が 408 (一時障害) / When: send / Then: 再認証を要求する 401 にせず、状態を保ち再送もしない
+#[tokio::test]
+async fn transient_refresh_failure_is_not_reported_as_reauthentication() {
+    let server = MockServer::start().await;
+    mount_refresh(
+        &server,
+        ResponseTemplate::new(408).set_body_string(REMOTE_SECRET),
+        1,
+    )
+    .await;
+    mount_status(&server, RESPONSES_PATH, "access-old", unauthorized()).await;
+
+    let error = client(&server, seeded_store(), None)
+        .send(&ProviderAuth::new(""), &request())
+        .await
+        .expect_err("a transient refresh failure surfaces");
+
+    assert!(
+        matches!(&error, ProviderError::Http { status: 408, body } if !body.contains("re-authenticate")),
+        "{error:?}"
+    );
+    assert!(!format!("{error:?}").contains(REMOTE_SECRET));
+    assert_eq!(requests_to(&server, RESPONSES_PATH).await.len(), 1);
 }

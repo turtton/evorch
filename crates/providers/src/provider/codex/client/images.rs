@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use super::{AuthorizedCodexToken, CodexClient, PROVIDER_LABEL};
+use super::{
+    AuthorizedCodexToken, CodexClient, PROVIDER_LABEL, reject_second_unauthorized, scope_probe,
+};
 use crate::http::map_request_error;
 use crate::image_generation::{self, IMAGE_TIMEOUT};
 use crate::{
@@ -41,9 +43,12 @@ impl ImageGeneration for CodexClient {
                     return Ok(response);
                 }
                 drop(response);
-                let fresh = self.recover_unauthorized(&token, observer).await?;
+                let fresh = self
+                    .recover_unauthorized(&scope_probe(&request.model), &token, observer)
+                    .await?;
                 observer.emit_started();
-                self.send_image_request(&endpoint, &body, &fresh).await
+                let response = self.send_image_request(&endpoint, &body, &fresh).await?;
+                reject_second_unauthorized(response, observer)
             },
         )
         .await
