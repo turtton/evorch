@@ -1811,6 +1811,111 @@ fn inspection_messages_tasks_and_search_do_not_return_a_confirmed_family_before_
 }
 
 #[test]
+fn rows_of_a_live_owner_whose_root_was_deleted_are_hidden_by_every_reader() {
+    // Given: a family, and rows of live runs and threads that name its root run `rp`
+    // as their root (a question, a delivery receipt, a thread start state).
+    let f = Fixture::new();
+    build_family(&f);
+    let payload = serde_json::json!({"id": "q-cross", "run_id": "rx", "root_run_id": "rp",
+        "root_name": "root", "recipient_run_ids": [], "title": "t", "options": [],
+        "blocking": false, "answer": null})
+    .to_string();
+    f.conn
+        .execute(
+            "INSERT INTO user_questions(id, run_id, root_run_id, root_name, payload) \
+             VALUES ('q-cross', 'rx', 'rp', 'root', ?1)",
+            [payload],
+        )
+        .unwrap();
+    f.sql("INSERT INTO user_question_links(question_id, run_id) VALUES ('q-cross', 'rx');");
+    f.sql(
+        "INSERT INTO host_input_receipts(prompt_id, run_id, root_run_id, text, status, accepted_at_ns,
+             status_at_ns, acceptance_seq)
+         VALUES ('prompt-cross', 'rx', 'rp', 'secret', 'accepted', 1, 1,
+             (SELECT COALESCE(MAX(acceptance_seq), 0) + 1 FROM host_input_receipts));
+         INSERT INTO review_evidence(id, root_run_id, target_run_id, kind, text, created_at_ns)
+         VALUES ('evidence-cross', 'rp', 'rx', 'k', 'secret', 1);
+         UPDATE host_input_receipts SET evidence_id = 'evidence-cross' WHERE prompt_id = 'prompt-cross';",
+    );
+    f.thread("Y", None, None, None);
+    f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'Y'");
+    f.start_state("Y", "rp");
+    let database = confirm_family(&f);
+    assert!(family_rows(&f) > 40, "nothing was reclaimed");
+
+    // Then: no reader returns them, though the owning run is alive.
+    assert!(database.user_question("q-cross").unwrap().is_none());
+    assert!(
+        database
+            .user_questions_for_run("rx")
+            .unwrap()
+            .iter()
+            .all(|question| question.id != "q-cross")
+    );
+    assert!(
+        database
+            .pending_user_questions()
+            .unwrap()
+            .iter()
+            .all(|question| question.id != "q-cross")
+    );
+    assert!(
+        database
+            .user_question_recipients("q-cross")
+            .unwrap()
+            .is_empty()
+    );
+    let inspected = database.inspect_run("rx", true).unwrap();
+    assert!(
+        inspected["user_questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|question| question["id"] != "q-cross"),
+        "{inspected}"
+    );
+    let prompts = ["prompt-cross".to_owned(), "prompt-rx".to_owned()];
+    let receipts: Vec<_> = database
+        .host_input_receipts(&prompts)
+        .unwrap()
+        .into_iter()
+        .map(|receipt| receipt.prompt_id)
+        .collect();
+    assert_eq!(receipts, ["prompt-rx"]);
+    let origins: Vec<_> = database
+        .host_input_origins(&prompts)
+        .unwrap()
+        .into_iter()
+        .map(|origin| origin.prompt_id)
+        .collect();
+    assert_eq!(origins, ["prompt-rx"]);
+    let for_run: Vec<_> = database
+        .host_input_receipts_for_run("rx")
+        .unwrap()
+        .into_iter()
+        .map(|receipt| receipt.prompt_id)
+        .collect();
+    assert_eq!(for_run, ["prompt-rx"]);
+    assert!(
+        database
+            .review_evidence_for_target("rx")
+            .unwrap()
+            .iter()
+            .all(|row| row.id != "evidence-cross")
+    );
+    assert!(database.thread_start_state("Y").unwrap().is_none());
+    assert!(
+        database
+            .thread_start_states_since(0)
+            .unwrap()
+            .iter()
+            .all(|summary| summary.thread_id != "Y")
+    );
+    // And: the rows of the live run itself stay visible.
+    assert!(database.user_question("q-rx").unwrap().is_some());
+}
+
+#[test]
 fn a_question_of_a_deleted_run_cannot_be_handed_to_a_live_run() {
     // Given: a confirmed family and a writer, with the deleted run's question unreclaimed.
     let f = Fixture::new();
@@ -2166,6 +2271,162 @@ fn a_thread_lineage_cycle_or_a_self_parent_is_unresolved_and_confirms_nothing() 
         matches!(states.as_slice(), [(_, FamilyState::Explored { threads, .. })] if threads.len() == 40),
         "{states:?}"
     );
+}
+
+#[test]
+fn a_run_bound_to_a_thread_with_a_cyclic_ancestry_is_unresolved_too() {
+    // Given: threads whose bound runs loop back through their parents.
+    type Chain<'a> = Vec<(&'a str, &'a str)>;
+    let cases: [(&str, Chain<'_>); 3] = [
+        ("self parent", vec![("ra", "ra")]),
+        ("two bound runs", vec![("ra", "rb"), ("rb", "ra")]),
+        (
+            "a tail into a loop",
+            vec![("ra", "rb"), ("rb", "rc"), ("rc", "rb")],
+        ),
+    ];
+    for (label, runs) in cases {
+        let f = Fixture::new();
+        f.thread("A", None, Some("ra"), None);
+        for (run, parent) in &runs {
+            f.run(run, Some(parent), Some("A"), "chat:Worker:A");
+        }
+        let database = f.database();
+        let input = sidebar(&["A"], &[]);
+
+        // When: it is explored.
+        let states = settle(&database, &input, &policy(), BIG);
+
+        // Then: the family is unresolved, nothing is staged or tombstoned.
+        assert!(
+            matches!(
+                states.as_slice(),
+                [(_, FamilyState::Blocked(BlockReason::FamilyUnresolved(_)))]
+            ),
+            "{label}: {states:?}"
+        );
+        assert!(
+            !matches!(
+                finalize(&database, "A", &input),
+                FinalizeOutcome::Confirmed(_)
+            ),
+            "{label}"
+        );
+        assert_eq!(f.tombstones(), 0, "{label}");
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM retention_staging_state"),
+            0,
+            "{label}"
+        );
+    }
+
+    // And: an acyclic bound chain still resolves.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run("rb", Some("ra"), Some("A"), "child");
+    f.run("rc", Some("rb"), Some("A"), "child");
+    let database = f.database();
+    let states = settle(&database, &sidebar(&["A"], &[]), &policy(), BIG);
+    assert!(
+        matches!(states.as_slice(), [(_, FamilyState::Explored { .. })]),
+        "{states:?}"
+    );
+}
+
+#[test]
+fn an_inspected_window_counts_only_visible_events_against_its_limit() {
+    // Given: one live event followed by newer todo snapshots of a deleted thread.
+    let f = Fixture::new();
+    build_family(&f);
+    f.sql("DELETE FROM events");
+    f.event("session-1", Some("rx"), "Message", "MessageCompleted", 40);
+    f.todo_event("session-1", "P");
+    f.todo_event("session-1", "P");
+    f.todo_event("session-1", "C");
+    let database = confirm_family(&f);
+
+    // When: the newest one event is asked for.
+    let (events, truncated) = database
+        .inspect_events(
+            EventScope::Window {
+                from_ns: 0,
+                to_ns: i64::MAX,
+            },
+            1,
+        )
+        .unwrap();
+
+    // Then: the live event is found, and nothing else is left to report.
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(!truncated);
+    let (events, truncated) = database
+        .inspect_events(
+            EventScope::Window {
+                from_ns: 0,
+                to_ns: i64::MAX,
+            },
+            10,
+        )
+        .unwrap();
+    assert_eq!((events.len(), truncated), (1, false));
+}
+
+#[test]
+fn a_deleted_run_with_thousands_of_pending_index_requests_closes_them_all_in_bounded_steps() {
+    // Given: a confirmed run whose index row has 1000 pending request targets.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run_payload("ra", "session-1");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000)
+         INSERT INTO thread_index_request_targets(request_id, run_id, source_revision,
+             extractor_version, accounting_version, work_generation, state)
+         SELECT 'req-' || x, 'ra', 1, 1, 0, 0, 'pending' FROM n;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: reclaim runs one transaction at a time.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut most = 0;
+    for _ in 0..1_000 {
+        let before =
+            f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 1,
+            })
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let after =
+            f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
+        most = most.max(before - after);
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: no transaction closed more than a batch, and every target is a gap.
+    assert!(most > 0 && most <= 200, "{most}");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'gap'"),
+        1000
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_runs WHERE state = 'deleted'"),
+        1
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM conversation_blocks"), 0);
 }
 
 #[test]

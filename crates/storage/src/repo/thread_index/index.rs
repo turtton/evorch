@@ -801,18 +801,40 @@ pub(crate) fn purge_index_rows_with(
             [run_id],
             |row| row.get(0),
         )?;
-        if !remaining && !oversized {
+        let mut gapped = 0_usize;
+        let mut finished = !remaining && !oversized;
+        if finished {
             match target {
                 PurgeTarget::Tombstoned => {
-                    SqliteThreadIndex::new(conn).drop_index(
-                        run_id,
-                        "state = 'deleted', source_present = 0, evicted_reason = NULL",
-                    )?;
-                    conn.execute(
+                    // Pending request targets of the run close as gaps, in batches
+                    // that share the step's row budget with the blocks it deleted,
+                    // so a run with many requests cannot make one step unbounded.
+                    let room = limit_rows.max(1).saturating_sub(ids.len());
+                    gapped = conn.execute(
                         "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
-                         WHERE run_id = ?1 AND state = 'pending'",
-                        params![run_id, to_json(&RequestGapReason::Deleted)?],
+                         WHERE run_id = ?1 AND state = 'pending' AND request_id IN (\
+                             SELECT request_id FROM thread_index_request_targets \
+                             WHERE run_id = ?1 AND state = 'pending' LIMIT ?3)",
+                        params![
+                            run_id,
+                            to_json(&RequestGapReason::Deleted)?,
+                            i64::try_from(room).unwrap_or(i64::MAX)
+                        ],
                     )?;
+                    let pending: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM thread_index_request_targets \
+                         WHERE run_id = ?1 AND state = 'pending')",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    if pending {
+                        finished = false;
+                    } else {
+                        SqliteThreadIndex::new(conn).drop_index(
+                            run_id,
+                            "state = 'deleted', source_present = 0, evicted_reason = NULL",
+                        )?;
+                    }
                 }
                 PurgeTarget::Archived => {
                     conn.execute(
@@ -827,9 +849,9 @@ pub(crate) fn purge_index_rows_with(
             }
         }
         Ok(PurgeProgress {
-            rows: ids.len(),
+            rows: ids.len() + gapped,
             text_bytes,
-            remaining: remaining || oversized,
+            remaining: !finished,
             oversized,
             oversized_bytes,
         })

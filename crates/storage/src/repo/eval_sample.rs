@@ -35,7 +35,8 @@ pub fn delete(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> 
 pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<EvalSample>, StorageError> {
     conn.query_row(
         "SELECT thread_id, problem, focus_roles, created_at_ns, updated_at_ns \
-         FROM eval_samples WHERE thread_id = ?1",
+         FROM eval_samples WHERE thread_id = ?1 \
+         AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones)",
         [thread_id],
         raw,
     )

@@ -612,7 +612,7 @@ enum Walk {
 /// if it has no parent, its `chat:<Role>:<thread>` name, then a thread recording
 /// it as root; otherwise its parent.
 fn walk(conn: &Connection, run_id: &str) -> Result<Walk, StorageError> {
-    walk_counted(conn, run_id, &mut 0)
+    walk_counted(conn, run_id, &mut 0, false)
 }
 
 /// What the canonical run→thread rule makes of a run, for the retention closure.
@@ -625,44 +625,62 @@ pub(crate) enum CanonicalThread {
 }
 
 /// The thread [`thread_of_run`] would answer, without hiding tombstoned ones, and how
-/// many links were followed (`steps`).
+/// many links were followed (`steps`). Unlike the reader, a binding found on the way
+/// does not end the walk: the whole ancestry up to its top must be acyclic and
+/// within [`MAX_RUN_LINKS`], so a bound run with a self parent or a loop is `Broken`.
 pub(crate) fn canonical_thread(
     conn: &Connection,
     run_id: &str,
     steps: &mut u64,
 ) -> Result<CanonicalThread, StorageError> {
-    Ok(match walk_counted(conn, run_id, steps)? {
+    Ok(match walk_counted(conn, run_id, steps, true)? {
         Walk::Thread(row) => CanonicalThread::Thread(row.thread_id),
         Walk::Top { .. } => CanonicalThread::None,
         Walk::Broken => CanonicalThread::Broken,
     })
 }
 
-fn walk_counted(conn: &Connection, run_id: &str, steps: &mut u64) -> Result<Walk, StorageError> {
+fn walk_counted(
+    conn: &Connection,
+    run_id: &str,
+    steps: &mut u64,
+    validate_ancestry: bool,
+) -> Result<Walk, StorageError> {
     let mut current = run_id.to_owned();
     let mut seen = HashSet::new();
+    // The first binding wins; with `validate_ancestry` the walk goes on to the top.
+    let mut found: Option<ThreadRunRow> = None;
     for hops in 0..=MAX_RUN_LINKS {
         *steps += 1;
         if !seen.insert(current.clone()) {
             return Ok(Walk::Broken);
         }
-        let bound = conn
-            .query_row(
-                "SELECT thread_id, root_run_id, depth FROM thread_runs WHERE run_id = ?1",
-                [&current],
-                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?)),
-            )
-            .optional()?;
-        if let Some((thread_id, root_run_id, depth)) = bound {
-            return Ok(Walk::Thread(ThreadRunRow {
-                run_id: run_id.to_owned(),
-                thread_id,
-                root_run_id,
-                depth: depth.saturating_add(hops),
-            }));
+        if found.is_none() {
+            let bound = conn
+                .query_row(
+                    "SELECT thread_id, root_run_id, depth FROM thread_runs WHERE run_id = ?1",
+                    [&current],
+                    |row| Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?)),
+                )
+                .optional()?;
+            if let Some((thread_id, root_run_id, depth)) = bound {
+                let row = ThreadRunRow {
+                    run_id: run_id.to_owned(),
+                    thread_id,
+                    root_run_id,
+                    depth: depth.saturating_add(hops),
+                };
+                if !validate_ancestry {
+                    return Ok(Walk::Thread(row));
+                }
+                found = Some(row);
+            }
         }
         let (name, parent) = identity(conn, &current)?;
         let Some(parent) = parent else {
+            if let Some(row) = found {
+                return Ok(Walk::Thread(row));
+            }
             let named = name
                 .as_deref()
                 .and_then(parse_chat_run_name)

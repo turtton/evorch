@@ -95,6 +95,11 @@ CREATE TABLE reclaim_oversized (
     stored_bytes INTEGER NOT NULL,
     PRIMARY KEY (family_key, tbl, key)
 ) WITHOUT ROWID;
+-- The exclusive phase takes the smallest registration first.
+CREATE INDEX idx_reclaim_oversized_order ON reclaim_oversized(stored_bytes, family_key, tbl, key);
+-- Runnable jobs in key order, and job counts by state, without reading every job.
+CREATE INDEX idx_reclaim_jobs_pending ON reclaim_jobs(family_key) WHERE state = 'db_pending';
+CREATE INDEX idx_reclaim_jobs_state ON reclaim_jobs(state);
 
 -- Append-only ledgers may only lose rows a reclaim step granted in the same
 -- transaction.

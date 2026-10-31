@@ -791,6 +791,86 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
     assert!(short_exclusive > 0 && long_exclusive <= short_exclusive + short_exclusive / 10);
     // The next exclusive call deletes a bounded batch of the empty files.
 
+    // The terminal step of an index purge closes the run's pending request targets in
+    // batches: a run with thousands of them costs one bounded transaction at a time.
+    let gap_work = |targets: i64| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision,
+                 source_context_sha256, extractor_version, accounting_version, source_updated_at_ns,
+                 retention_at_ns)
+             VALUES ('ra', 'indexed', 1, 1, 'x', 1, 0, 1, 1);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {targets})
+             INSERT INTO thread_index_request_targets(request_id, run_id, source_revision,
+                 extractor_version, accounting_version, work_generation, state)
+             SELECT 'req-' || x, 'ra', 1, 1, 0, 0, 'pending' FROM n;"
+        ));
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"index","run":"ra"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (frames, _, _) = one_step(&db, &storage);
+        let (counters, progress) = one_step_scans(&storage);
+        storage.close();
+        let pending =
+            db.int("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
+        assert_eq!(pending, targets - 400, "two steps close 200 targets each");
+        assert_eq!(progress.rows, 200, "{progress:?}");
+        (frames, counters)
+    };
+    let (short_frames, short) = gap_work(500);
+    let (long_frames, long) = gap_work(8_000);
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "closing targets: {short:?} over 500 targets, {long:?} over 8000"
+    );
+    assert!(
+        long_frames <= short_frames + short_frames / 10 + 8,
+        "closing targets: {short_frames} frames over 500 targets, {long_frames} over 8000"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+
+    // Picking the next registration of the exclusive phase does not follow how many
+    // registrations wait, and the counts it reports saturate.
+    let pick_work = |registered: i64| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
+             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+                 terminal_phase, restorable, updated_at_ns)
+             SELECT printf('big-%06d', x), 'Worker', 'big', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
+             INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
+             SELECT 'A', 'run_contexts', printf('big-%06d', x), 10000000 + x FROM n;"
+        ));
+        confirm(&db);
+        let database = Database::open(&config(&db.path)).unwrap();
+        let mut progress = None;
+        let counters = scans_of(|| progress = Some(database.reclaim_oversized_step(0).unwrap()));
+        (counters, progress.unwrap())
+    };
+    let (short, short_progress) = pick_work(2_000);
+    let (long, long_progress) = pick_work(6_000);
+    assert_eq!((short_progress.rows, long_progress.rows), (1, 1));
+    assert_eq!(
+        (short_progress.remaining, long_progress.remaining),
+        (1_000, 1_000)
+    );
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "picking a registration: {short:?} over 2000, {long:?} over 6000"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+
     // The attribution backfill rewrites whole rows, so its frames follow the bytes it touches.
     for payload in [200_usize, 20_000] {
         let db = Db::new();
