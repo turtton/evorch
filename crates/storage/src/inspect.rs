@@ -18,6 +18,11 @@ use crate::repo::event::select::{
 };
 use crate::{Database, StorageError};
 
+mod open;
+mod storage_summary;
+pub use open::InspectedDatabase;
+pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
+
 /// Columns holding JSON text that are expanded in inspection output.
 const JSON_COLUMNS: [&str; 6] = [
     "payload",
@@ -59,6 +64,10 @@ impl Database {
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        Self::checked(conn)
+    }
+
+    fn checked(conn: Connection) -> Result<Self, StorageError> {
         conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
         let supported = u32::try_from(crate::migrations::MIGRATIONS.len())

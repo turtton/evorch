@@ -106,6 +106,20 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 
 復元する場合もすべての接続を停止し、現在の DB と WAL/SHM を別の安全な場所へ退避してから、検証済みバックアップを DB 本体パスへコピーする。元ファイルや最初のバックアップを上書きで失わないこと。所有者・アクセス権を確認し、正常性と履歴を確認してから通常運用に戻す。稼働中の DB 本体だけをコピーして「バックアップ」と見なしてはいけない。
 
+## 容量の確認（`evorch inspect storage`）
+
+縮小の前後や肥大化の調査には、読み取り専用の `evorch inspect [--db <path>] storage [--physical] [--top <n>]` を使う。稼働中の DB にも使える。
+
+- **DB 本体は変更しない。** 読み取り専用で開き、接続を閉じるときの checkpoint も無効にしてあるため、非空の WAL が残っていても DB 本体へ書き戻さない。migration もしない。
+- **作成され得るファイル。** `-wal` / `-shm` は、他の読み取り側（GUI など）と同様に SQLite が作成・使用する。保守リース `<db>.maintenance-lock`（空）も、まだ無ければ作る。
+- **整合性。** 集計全体を 1 つの読み取りトランザクションで行うため、集計中に writer が commit・checkpoint しても、結果は開始時点の 1 つの commit 済みスナップショットになる。
+- **GUI の起動を妨げない。** リースは共有で取るので、稼働中の evorch とも、これから起動する evorch とも共存する。
+- **オフライン保守とは共存しない。** 保守がリースを排他で持っていると、`database is under offline maintenance` で何も読まずに拒否する。逆に、検査の実行中は保守を開始できない（保守側が「使用中」で失敗する）。
+
+- 既定（論理集計）は大きな DB でも数秒で終わる。`files`（DB/WAL/SHM のバイト数）、`tables`（表ごとの行数と文字列・BLOB 列の長さ合計）、`events`（kind/subkind 別の行数と payload バイト数。`subkind` 未補完の行は `(unbackfilled)`）、`run_contexts`（`messages`/`checkpoints` の平文バイト数と格納バイト数、圧縮済み行数）、`conversation_index`（状態別の `charged_bytes`）、`threads`（active/archived 数）を返す。
+- `attribution` は events・run_contexts・会話索引を `active` / `archived` / `orphan`（run がどのスレッドにも解決されない、または解決先の `threads` 行が無い）/ `unattributed`（`run_id` なし）に分ける。run の帰属は GUI のスレッド表示と同じ規則（`thread_runs` の束縛、`chat:<Role>:<thread>` の run 名、スレッドが記録する root run、保存済み context と usage ledger の親リンクをたどる）で解決し、各行はちょうど 1 つのスレッドに数える。`top_threads` は events・run_contexts・索引の合計バイト数が大きい上位 `--top` 件（既定 10）のスレッドを `thread_id` で示す。
+- `--physical` は opt-in で遅い。`dbstat` による表・索引別のページサイズ（FTS の shadow 表は仮想表に集約）、`page_size`、`page_count`、`freelist_count`/`freelist_bytes`、`auto_vacuum`、`user_version` を加える。`freelist_bytes` と `unused_bytes` は縮小で回収できる余地の目安。
+
 ## 既知の制約
 
 - 縮小は停止中の DB が前提。`compact-events` は preview でも稼働中の store を拒否し、`backfill-events` だけが稼働中に使える。リース（`.maintenance-lock`）を迂回する手段はない。

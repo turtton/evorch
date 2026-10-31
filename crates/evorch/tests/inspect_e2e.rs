@@ -206,6 +206,93 @@ fn inspection_never_creates_or_migrates_a_store() {
 }
 
 #[test]
+fn storage_reports_sizes_without_conversation_text_or_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let before = std::fs::read(&db).unwrap();
+
+    let logical = inspect(&db, &["storage"]).unwrap();
+    assert_eq!(logical["run_contexts"]["rows"], 2);
+    assert!(logical["events"]["rows"].as_i64().unwrap() >= 3);
+    assert_eq!(logical["files"]["db_bytes"], before.len());
+    assert!(logical.get("physical").is_none());
+    assert!(logical["top_threads"].as_array().unwrap().len() <= 10);
+
+    let physical = inspect(&db, &["storage", "--physical", "--top", "1"]).unwrap();
+    assert_eq!(physical["physical"]["auto_vacuum"]["mode"], "incremental");
+    assert!(physical["physical"]["page_size"].as_i64().unwrap() > 0);
+    assert!(
+        physical["physical"]["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|table| table["table"] == "events")
+    );
+
+    // run-7's snapshot holds "stuck"; sizes may be reported, text never.
+    for output in [&logical, &physical] {
+        assert!(!output.to_string().contains("stuck"));
+    }
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+}
+
+#[test]
+fn inspecting_a_live_wal_reads_its_data_and_leaves_the_database_file_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let before = std::fs::read(&db).unwrap();
+    let baseline = inspect(&db, &["storage"]).unwrap()["events"]["rows"]
+        .as_i64()
+        .unwrap();
+
+    // A writer in this process keeps committed data in the WAL, unmerged, while the CLI
+    // reads from its own process.
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute(
+            "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload)
+             VALUES ('s', 1, 0, 0, 'Raw', '{}')",
+            [],
+        )
+        .unwrap();
+
+    let live = inspect(&db, &["storage", "--physical"]).unwrap();
+    // Read before the writer closes: its own close would merge the WAL.
+    let after = std::fs::read(&db).unwrap();
+    drop(writer);
+
+    assert_eq!(live["events"]["rows"], baseline + 1);
+    assert!(live["files"]["wal_bytes"].as_u64().unwrap() > 0);
+    assert!(after == before, "inspection changed the database file");
+}
+
+#[test]
+fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let mut lease = db.as_os_str().to_owned();
+    lease.push(".maintenance-lock");
+    let maintenance = std::fs::OpenOptions::new().write(true).open(lease).unwrap();
+    maintenance.try_lock().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+        .arg("inspect")
+        .arg("--db")
+        .arg(&db)
+        .arg("storage")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("offline maintenance"), "{error}");
+    drop(maintenance);
+    assert!(inspect(&db, &["storage"]).is_ok());
+}
+
+#[test]
 fn malformed_arguments_print_usage() {
     let dir = tempfile::tempdir().unwrap();
     let (db, _) = fixture(dir.path());
@@ -215,6 +302,10 @@ fn malformed_arguments_print_usage() {
         &["candidate"],
         &["candidates", "--status", "open"],
         &["run", "run-7", "--bogus", "x"],
+        &["storage", "--top", "0"],
+        &["storage", "--top"],
+        &["storage", "--full"],
+        &["candidates", "--physical"],
     ] {
         assert!(
             inspect(&db, args)

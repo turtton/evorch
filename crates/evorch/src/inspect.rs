@@ -8,13 +8,14 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use storage::Database;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
-use storage::inspect::{EventScope, event_json};
+use storage::inspect::{DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json};
 
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   candidates [--project <slug>] [--status new|reviewed|dismissed] [--limit <n>]
   candidate <candidate-id>
   run <run-id> [--full]
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
+  storage [--physical] [--top <n>]
 The default database is <user-config-dir>/evorch-events.db, the GUI's store.";
 
 const DEFAULT_WINDOW_MS: i64 = 5_000;
@@ -35,6 +36,11 @@ pub enum InspectCommand {
     Events {
         scope: Scope,
         limit: usize,
+    },
+    /// Where the database's bytes go; `physical` adds the slow page-level walk.
+    Storage {
+        physical: bool,
+        top: usize,
     },
 }
 
@@ -65,9 +71,12 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
     let mut positional = Vec::new();
     let mut flags = std::collections::BTreeMap::new();
     let mut full = false;
+    let mut physical = false;
     while let Some(arg) = argv.next() {
         if arg == "--full" {
             full = true;
+        } else if arg == "--physical" {
+            physical = true;
         } else if arg.starts_with("--") {
             let value = argv.next().ok_or(USAGE)?;
             if flags.insert(arg, value).is_some() {
@@ -87,6 +96,9 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
                 .ok_or_else(|| format!("--limit must be a positive integer\n{USAGE}"))
         })
     };
+    if physical && command != "storage" {
+        return Err(USAGE.into());
+    }
     let command = match (command.as_str(), positional.as_slice(), full) {
         ("candidates", [], false) => InspectCommand::Candidates {
             project: take("--project"),
@@ -124,6 +136,16 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
                 limit: limit(take("--limit"))?,
             }
         }
+        ("storage", [], false) => InspectCommand::Storage {
+            physical,
+            top: take("--top").map_or(Ok(DEFAULT_TOP_THREADS), |value| {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|top| *top > 0)
+                    .ok_or_else(|| format!("--top must be a positive integer\n{USAGE}"))
+            })?,
+        },
         _ => return Err(USAGE.into()),
     };
     if !flags.is_empty() {
@@ -143,7 +165,7 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
     if !path.is_file() {
         return Err(format!("database not found: {}", path.display()));
     }
-    let db = Database::open_read_only(&path).map_err(|error| error.to_string())?;
+    let db = Database::open_for_inspection(&path).map_err(|error| error.to_string())?;
     let result = match args.command {
         InspectCommand::Candidates {
             project,
@@ -191,6 +213,9 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
                 "events": events.iter().map(event_json).collect::<Vec<_>>(),
             })
         }
+        InspectCommand::Storage { physical, top } => db
+            .storage_summary(&path, StorageSummaryOptions { top, physical })
+            .map_err(|error| error.to_string())?,
     };
     Ok(json!({ "db": path.display().to_string(), "result": result }))
 }
