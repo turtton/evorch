@@ -371,7 +371,8 @@ pub fn with_descendants(
          UNION SELECT c.run_id FROM run_contexts c JOIN tree t ON c.parent_run_id = t.run_id \
          UNION SELECT u.run_id FROM usage_requests u JOIN tree t ON u.parent_run_id = t.run_id \
          WHERE u.run_id IS NOT NULL) \
-         SELECT run_id FROM tree ORDER BY run_id",
+         SELECT run_id FROM tree WHERE run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         ORDER BY run_id",
     )?;
     let rows = statement.query_map(params![ids], |row| row.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)

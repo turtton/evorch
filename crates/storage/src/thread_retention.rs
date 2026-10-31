@@ -114,8 +114,13 @@ pub enum BlockReason {
     OverBudget,
 }
 
-/// Rows read by one `retention_explore` call. A call never reads more: an
-/// interrupted node resumes from the position it reached.
+/// Rows read by one `retention_explore` call. Every edge query is limited to the
+/// budget that is left and an interrupted node resumes from the position it
+/// reached. Two walks are indivisible and are charged in full once started: a
+/// run's canonical-thread walk (at most 65 links) and a thread's lineage check
+/// (at most 65 parent rows). A walk starts only while budget is left, so a call
+/// reads at most 65 rows more than `max_edges`; the next call resumes from the
+/// stored position, so repeated calls always finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExploreBudget {
     pub max_edges: u64,
@@ -363,7 +368,8 @@ impl Database {
     /// Re-check the family's closure and protections and confirm its deletion in
     /// one transaction. `owner_blocks` maps thread IDs held by an owner to the
     /// reason. Same exclusivity requirement as [`Self::retention_explore`]; use
-    /// [`FinalizeBudget::proportional`] to retry after `OverBudget`.
+    /// [`Self::retention_finalize_budget`] for the first budget and
+    /// [`FinalizeBudget::doubled`] to retry after `OverBudget`.
     ///
     /// # Errors
     /// Returns an error if SQLite access fails; nothing is confirmed then.

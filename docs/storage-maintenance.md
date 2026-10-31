@@ -148,6 +148,11 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
   sidebar から初期同期し、その際 archive 時刻を新しくしない。同じ revision で値が
   割れたら保護側（archived / pinned）を採る。Runtime writer はこれらの列を変えない。
+  revision を送らない（未採番）host は世代 0 として扱う。系列ごとに「最後の書き手が
+  未採番か」を `archive_unnumbered` / `pin_unnumbered` に記録し、未採番どうしは置換
+  （採番前の GUI が連続して編集できる）、未採番と採番済み（`Some(0)` を含む）は同世代
+  として保護側を採り、採番を一度でも受けた系列は未採番では上書きできない。host が採番
+  するようになったら、この未採番の経路と 2 列を廃止する（PR-4 の申し送り）。
 - **除外。** pinned、評価サンプル（`eval_samples`）、owner が保持する thread
   （`owner_blocks`）、family に非 due・未アーカイブ・sidebar 未知のメンバーがいる場合は
   確定しない。`archived_delete_after_days = 0` は新規確定を行わない（staging は破棄、
@@ -157,7 +162,8 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 - **確定後の見え方。** 読み手（`thread`、`threads_in_project`、`thread_children`、
   `thread_of_run`、`runs_of_thread`、`run_context*`、`events_for_runs`、イベント走査、
   ledger、host input receipt、review evidence・lineage、assistant reference、user question、
-  thread start・評価サンプル、索引の参照解決）は、回収の前でも tombstone 済みの行を返さない。
+  thread start・評価サンプル、索引の参照解決、`evorch inspect` の events・run、agent message、task、会話検索の候補、学習用の context 読み出し）は、回収の前でも tombstone 済みの行を返さない。
+  返し続けるのは意図して残すもの（usage、学習記録、`storage` の物理集計、legacy の `messages` / `agent_runs`、予約済み ID を返す `persisted_run_ids`）だけ。
   削除済みの run の質問を生きている run へ bind することも拒否する。
   書き手は `StorageError::Tombstoned`（events、recorder は `skipped_tombstoned` に数えて
   再試行しない）または fence トリガの ABORT で拒否される。fence は INSERT と
@@ -169,8 +175,12 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   中断しても再実行で残りだけを処理する。pending が無ければ何も書かない。
   通常 step の予算を超える単一の行（4 MiB を超える `run_contexts`、`thread_start_states.diff`
   や撮影済みファイル、event、2 MiB を超える索引 block）は暗黙に通さず `reclaim_oversized`
-  に登録し、起動時の排他枠で `Database::reclaim_oversized_step` が 1 行ずつ（予算が小さくても
-  最低 1 行）削除する。失敗した行は登録が残る。通常 step の残りが無く排他回収だけを待つ job
+  に登録（大きさはその 1 行のもの。同じ run・capture の他の行は読まない）し、起動時の排他枠で
+  `Database::reclaim_oversized_step` が有界な 1 batch（索引 200 行／2 MiB、captured file 500 行／4 MiB、
+  または超過した 1 行だけ）ずつ削除する。残りがある登録は消えず、次の呼び出しが続ける。予算が小さくても
+  最低 1 batch。`rows` / `stored_bytes` と job の `reclaimed_*` は実際に消した分だけを数える。
+  失敗した行は登録が残る。tasks・links は tombstone を task id 順の cursor でたどり、ledger と todo の走査は
+  行ごとに tombstone を点引きするため、family の大きさで 1 step の読み取りは増えない。通常 step の残りが無く排他回収だけを待つ job
   （`jobs_waiting_exclusive`）は transaction を消費せず、後ろの job を止めない。`reclaim_mark_files` はファイル削除の結果を
   `db_done → files_pending → done | files_failed` に記録する。
 - **残すもの。** usage（`usage_requests` / `usage_daily` / `usage_run_threads`）、学習系

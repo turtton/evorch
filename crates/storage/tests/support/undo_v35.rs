@@ -56,7 +56,9 @@ pub fn undo_v35(connection: &Connection) {
                  ALTER TABLE threads DROP COLUMN archived_at_ns;
                  ALTER TABLE threads DROP COLUMN pinned;
                  ALTER TABLE threads DROP COLUMN archive_revision;
-                 ALTER TABLE threads DROP COLUMN pin_revision;",
+                 ALTER TABLE threads DROP COLUMN pin_revision;
+                 ALTER TABLE threads DROP COLUMN archive_unnumbered;
+                 ALTER TABLE threads DROP COLUMN pin_unnumbered;",
             )
             .unwrap();
     }

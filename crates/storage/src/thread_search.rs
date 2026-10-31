@@ -469,6 +469,7 @@ fn keyset_sql(
                  CROSS JOIN conversation_blocks b INDEXED BY idx_conversation_blocks_kind \
                      ON b.run_id = r.run_id \
                  WHERE r.run_id = ?{run_parameter} AND ({current}) \
+                   AND r.run_id NOT IN (SELECT run_id FROM run_tombstones) \
                    AND b.kind = '{kind}'{after} AND ({filter})",
                 kind = kind_text(*kind),
                 current = current_index_sql(),

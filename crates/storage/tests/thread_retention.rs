@@ -3,13 +3,19 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use event_bus::{Event, OrchestratorEvent, ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus};
+use event_bus::{
+    AgentMessage, AgentMessageEvent, AgentMessageKind, DeliveryDisposition, Event, EventKind,
+    OrchestratorEvent, ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus,
+};
 use rusqlite::{Connection, params};
+use storage::inspect::EventScope;
+use storage::thread_index::IndexBlockKind;
 use storage::thread_retention::{
     BindingInput, BlockReason, ExploreBudget, FamilyState, FilesOutcome, FinalizeBudget,
     FinalizeOutcome, LegacyArchivedPolicy, ReclaimBudget, RetentionInput, RetentionStatus,
     SidebarThread, ThreadRetentionPolicy,
 };
+use storage::thread_search::{ConversationFilter, ConversationQuery, ConversationScan, ScanLimits};
 use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
@@ -1643,6 +1649,167 @@ fn a_confirmed_family_is_invisible_to_every_reader_before_any_reclaim_ran() {
     assert!(database.thread_start_state("X").unwrap().is_some());
 }
 
+/// A delivered agent message addressed to `recipient`, with its run column filled
+/// in or, for a row the attribution backfill has not reached, left empty.
+fn agent_message(f: &Fixture, session: &str, recipient: &str, attributed: bool) {
+    let payload = serde_json::to_string(&EventKind::AgentMessage(AgentMessageEvent::Delivered {
+        message: AgentMessage {
+            message_id: format!("m-{recipient}-{attributed}"),
+            sender_run_id: "someone".into(),
+            recipient_run_id: recipient.into(),
+            kind: AgentMessageKind::Send,
+            content: "secret".into(),
+            reply_to: None,
+        },
+        disposition: DeliveryDisposition::Wake,
+    }))
+    .unwrap();
+    f.conn
+        .execute(
+            "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+             payload, subkind, run_id) VALUES (?1, 1, 1, ?2, 'AgentMessage', ?3, 'Delivered', ?4)",
+            params![session, NOW_NS, payload, attributed.then_some(recipient)],
+        )
+        .unwrap();
+}
+
+#[test]
+fn inspection_messages_tasks_and_search_do_not_return_a_confirmed_family_before_reclaim() {
+    // Given: a family and a live neighbour, each with agent messages (attributed or
+    // not), tasks in a session, and indexed conversation blocks.
+    let f = Fixture::new();
+    build_family(&f);
+    for (run, attributed) in [("rp", true), ("rp", false), ("rx", true), ("rx", false)] {
+        agent_message(&f, "session-1", run, attributed);
+    }
+    f.sql("UPDATE tasks SET session_id = 'session-1'");
+    f.sql("UPDATE thread_index_runs SET indexed_revision = 1, indexed_extractor_version = 1");
+    let database = confirm_family(&f);
+    assert!(family_rows(&f) > 40, "nothing was reclaimed");
+
+    // Then: inspection of the deleted run shows none of its stored content, and the
+    // usage ledger (kept on purpose) still shows.
+    let (events, _) = database
+        .inspect_events(EventScope::Run("rp"), 1_000)
+        .unwrap();
+    assert!(events.is_empty(), "{events:?}");
+    let run = database.inspect_run("rp", true).unwrap();
+    assert!(run["context"].is_null(), "{run}");
+    for key in ["children", "ledger", "user_questions", "diagnostics"] {
+        assert_eq!(run[key].as_array().map(Vec::len), Some(0), "{key}: {run}");
+    }
+    assert_eq!(
+        run["event_kinds"].as_object().map(|kinds| kinds.len()),
+        Some(0)
+    );
+    assert_eq!(run["usage_requests"].as_array().map(Vec::len), Some(1));
+    let live = database.inspect_run("rx", true).unwrap();
+    assert!(!live["context"].is_null());
+    assert!(!live["ledger"].as_array().unwrap().is_empty());
+    assert!(!live["user_questions"].as_array().unwrap().is_empty());
+
+    // And: a time window lists live events only, including todo snapshots by thread.
+    let (window, _) = database
+        .inspect_events(
+            EventScope::Window {
+                from_ns: 0,
+                to_ns: i64::MAX,
+            },
+            10_000,
+        )
+        .unwrap();
+    assert!(!window.is_empty());
+    for event in &window {
+        let text = event.payload.to_string();
+        assert!(!text.contains("\"thread_id\":\"P\"") && !text.contains("\"thread_id\":\"C\""));
+        assert!(!text.contains("\"recipient_run_id\":\"rp\""), "{text}");
+    }
+    assert!(window.iter().any(|event| event.kind == "AgentMessage"));
+    let messages = database.agent_messages_by_session("session-1").unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages
+            .iter()
+            .all(|stored| stored.message.recipient_run_id == "rx")
+    );
+
+    // And: tasks of the family are gone from every task reader, the neighbour stays.
+    assert!(database.task("task-1").unwrap().is_none());
+    assert!(database.task("task-x").unwrap().is_some());
+    let session_tasks: Vec<_> = database
+        .tasks_by_session("session-1")
+        .unwrap()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    assert_eq!(session_tasks, ["task-x"]);
+    for listed in [
+        database.durable_tasks().unwrap(),
+        database.queued_tasks().unwrap(),
+    ] {
+        let ids: Vec<_> = listed.into_iter().map(|task| task.id).collect();
+        assert_eq!(ids, ["task-x"]);
+    }
+    let links = database.task_dependencies("task-1").unwrap();
+    assert!(links.blocks.is_empty() && links.blocked_by.is_empty());
+    let links = database.task_dependencies("task-2").unwrap();
+    assert!(links.blocks.is_empty() && links.blocked_by.is_empty());
+
+    // And: run lookups, learning source reads and descendants skip the family.
+    assert!(
+        database
+            .latest_terminal_run_context("chat:Worker:P")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        database
+            .latest_terminal_run_context("chat:Worker:X")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(database.run_context_parent("rp2").unwrap(), None);
+    assert_eq!(database.run_context_parent("rx").unwrap(), Some(None));
+    assert!(database.learning_source_contexts("rp").unwrap().is_empty());
+    assert_eq!(database.learning_source_contexts("rx").unwrap().len(), 1);
+    assert_eq!(
+        database
+            .runs_with_descendants(&["rp".into(), "rx".into()])
+            .unwrap(),
+        ["rx"]
+    );
+
+    // And: search candidates and scan chunks return blocks of live runs only.
+    let runs = vec!["rp".to_owned(), "rx".to_owned()];
+    let kinds = [IndexBlockKind::Text];
+    let chunk = database
+        .conversation_scan_chunk(
+            &ConversationScan {
+                runs: &runs,
+                kinds: &kinds,
+                after: None,
+            },
+            ScanLimits {
+                max_blocks: 100,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+    assert_eq!(chunk.blocks.len(), 2);
+    assert!(chunk.blocks.iter().all(|block| block.run_id == "rx"));
+    let candidates = database
+        .conversation_candidates(&ConversationQuery {
+            runs: &runs,
+            kinds: &kinds,
+            filter: &ConversationFilter::All,
+            after: None,
+            limit: 100,
+        })
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().all(|block| block.run_id == "rx"));
+}
+
 #[test]
 fn a_question_of_a_deleted_run_cannot_be_handed_to_a_live_run() {
     // Given: a confirmed family and a writer, with the deleted run's question unreclaimed.
@@ -1923,6 +2090,85 @@ fn a_run_with_a_cyclic_or_too_deep_ancestry_is_unresolved_not_ignored() {
 }
 
 #[test]
+fn a_thread_lineage_cycle_or_a_self_parent_is_unresolved_and_confirms_nothing() {
+    // Given: lineages that loop back, point at themselves, run into a loop from a
+    // tail, or are longer than the link limit.
+    type Lineage<'a> = Vec<(&'a str, Option<&'a str>)>;
+    let cases: [(&str, Lineage<'_>); 4] = [
+        ("two threads", vec![("A", Some("B")), ("B", Some("A"))]),
+        ("self parent", vec![("A", Some("A"))]),
+        (
+            "a tail into a loop",
+            vec![("A", Some("B")), ("B", Some("C")), ("C", Some("B"))],
+        ),
+        ("a long loop", {
+            let ring = ["A", "B", "C", "D", "E", "F"];
+            (0..ring.len())
+                .map(|i| (ring[i], Some(ring[(i + 1) % ring.len()])))
+                .collect()
+        }),
+    ];
+    for (label, threads) in cases {
+        let f = Fixture::new();
+        for (id, parent) in &threads {
+            f.thread(id, *parent, None, None);
+        }
+        let ids: Vec<&str> = threads.iter().map(|(id, _)| *id).collect();
+        let database = f.database();
+        let input = sidebar(&ids, &[]);
+
+        // When: the family is explored and a confirmation is attempted.
+        let states = settle(&database, &input, &policy(), BIG);
+
+        // Then: every family is blocked as unresolved, nothing is staged or tombstoned.
+        assert!(!states.is_empty(), "{label}");
+        for (key, state) in &states {
+            assert!(
+                matches!(
+                    state,
+                    FamilyState::Blocked(BlockReason::FamilyUnresolved(_))
+                ),
+                "{label}: {key} {state:?}"
+            );
+            assert!(
+                !matches!(
+                    finalize(&database, key, &input),
+                    FinalizeOutcome::Confirmed(_)
+                ),
+                "{label}"
+            );
+        }
+        assert_eq!(f.tombstones(), 0, "{label}");
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM retention_staging_state"),
+            0,
+            "{label}"
+        );
+    }
+
+    // And: a chain below the link limit still resolves and confirms.
+    let f = Fixture::new();
+    f.thread("T00", None, None, None);
+    for index in 1..40 {
+        f.thread(
+            &format!("T{index:02}"),
+            Some(&format!("T{:02}", index - 1)),
+            None,
+            None,
+        );
+    }
+    let ids: Vec<String> = (0..40).map(|index| format!("T{index:02}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let database = f.database();
+    let input = sidebar(&ids, &[]);
+    let states = settle(&database, &input, &policy(), BIG);
+    assert!(
+        matches!(states.as_slice(), [(_, FamilyState::Explored { threads, .. })] if threads.len() == 40),
+        "{states:?}"
+    );
+}
+
+#[test]
 fn an_interrupted_exploration_leaves_the_previous_resumable_state_and_resumes_cleanly() {
     // Given: two archived threads of one family, and a fault when a run is first staged.
     let f = Fixture::new();
@@ -2076,6 +2322,210 @@ fn single_rows_above_the_step_budget_wait_for_the_exclusive_phase_whatever_their
     assert_eq!(
         f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes"),
         f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events")
+    );
+}
+
+#[test]
+fn the_exclusive_phase_works_off_many_rows_in_bounded_batches_and_counts_what_it_deleted() {
+    // Given: a family with one huge index block and a huge captured file, each next
+    // to hundreds of small or empty rows.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run_payload("ra", "session-1");
+    untracked_capture(&f, "A", "ra", true);
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1200)
+         INSERT INTO thread_start_untracked(thread_id, path, kind, executable, content)
+         SELECT 'A', printf('empty-%05d', x), 'file', 0, zeroblob(0) FROM n;",
+    );
+    f.sql(
+        "INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, role,
+             kind, truncated, hash, text)
+         VALUES ('ra', 'message', '9:0', 9, 0, 'user', 'text', 0, 'h', printf('%03145728d', 1));
+         WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 450)
+         INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, role,
+             kind, truncated, hash, text)
+         SELECT 'ra', 'message', (100 + x) || ':0', 100 + x, 0, 'user', 'text', 0, 'h', 'small' FROM n;",
+    );
+    f.sql("UPDATE thread_index_runs SET text_bytes = text_bytes + 3145728, charged_bytes = charged_bytes + 3145728 WHERE run_id = 'ra'");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: the bounded steps run, then the exclusive phase with a zero budget.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let (mut rows, mut bytes) = (0, 0);
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        rows += progress.rows;
+        bytes += progress.stored_bytes;
+        if progress.jobs_db_pending == 0 {
+            assert_eq!(progress.oversized_pending, 2, "{progress:?}");
+            break;
+        }
+    }
+    storage.close();
+    let database = f.database();
+    let mut calls = 0;
+    loop {
+        let progress = database.reclaim_oversized_step(0).unwrap();
+        assert_eq!(progress.last_error, None);
+        // Then: a call deletes one bounded batch or one oversized row, never a run's
+        // or capture's whole set.
+        assert!(
+            progress.rows <= 500,
+            "one call deleted {} rows",
+            progress.rows
+        );
+        rows += progress.rows;
+        bytes += progress.stored_bytes;
+        calls += 1;
+        assert!(calls < 200);
+        if progress.remaining == 0 {
+            break;
+        }
+    }
+    assert!(calls >= 4, "{calls} calls: the sets were not batched");
+
+    // And: nothing is left, and the job counted exactly the rows and bytes deleted.
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_start_untracked"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_start_states"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM conversation_blocks"), 0);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_index_runs WHERE state = 'deleted'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_done'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT reclaimed_rows FROM reclaim_jobs"),
+        i64::try_from(rows).unwrap()
+    );
+    assert_eq!(
+        f.count("SELECT reclaimed_stored_bytes FROM reclaim_jobs"),
+        i64::try_from(bytes).unwrap()
+    );
+}
+
+#[test]
+fn an_oversized_registration_whose_row_is_already_gone_counts_nothing() {
+    // Given: a job with a registered 5 MiB run context that was deleted meanwhile.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'ra'");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+    let storage = Storage::open(config(&f.path)).unwrap();
+    storage
+        .handle()
+        .reclaim_step(ReclaimBudget::default())
+        .unwrap();
+    storage.close();
+    assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 1);
+    f.sql("DELETE FROM run_contexts WHERE run_id = 'ra'");
+    let before = f.count("SELECT reclaimed_rows FROM reclaim_jobs");
+
+    // When: the exclusive phase reaches the registration.
+    let progress = f.database().reclaim_oversized_step(0).unwrap();
+
+    // Then: the registration is dropped and no deletion is claimed.
+    assert_eq!(
+        (progress.rows, progress.stored_bytes, progress.remaining),
+        (0, 0, 0)
+    );
+    assert_eq!(f.count("SELECT reclaimed_rows FROM reclaim_jobs"), before);
+    assert_eq!(
+        f.count("SELECT reclaimed_stored_bytes FROM reclaim_jobs"),
+        0
+    );
+}
+
+#[test]
+fn thousands_of_tasks_and_links_are_reclaimed_task_by_task_through_a_cursor() {
+    // Given: a confirmed family with 1300 chained tasks and queue ledger rows, next to
+    // a live thread's task.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.thread("X", None, Some("rx"), None);
+    f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'X'");
+    f.run("rx", None, Some("X"), "chat:Worker:X");
+    f.task("task-x", "rx");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1300)
+         INSERT INTO tasks(id, status, created_at_ns, updated_at_ns, parent_run_id)
+         SELECT printf('task-%05d', x), 'pending', 1, 1, 'ra' FROM n;
+         WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1299)
+         INSERT INTO task_links(blocker_id, blocked_id)
+         SELECT printf('task-%05d', x), printf('task-%05d', x + 1) FROM n;
+         INSERT INTO task_links(blocker_id, blocked_id) VALUES ('task-00001', 'task-x');
+         WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1300)
+         INSERT INTO task_queue_ledger(operation, payload)
+         SELECT 'enqueue', json_object('id', printf('task-%05d', x)) FROM n;",
+    );
+    let database = f.database();
+    let input = sidebar(&["A"], &["X"]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: reclaim runs to completion, a few transactions at a time.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut rounds = 0;
+    loop {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 4,
+            })
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        rounds += 1;
+        assert!(rounds < 500);
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: the family's tasks, links and ledger rows are gone; the neighbour's stay.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM tasks WHERE id LIKE 'task-0%'"),
+        0
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM task_links"), 0);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') LIKE 'task-0%'"),
+        0
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM tasks WHERE id = 'task-x'"), 1);
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') = 'task-x'"
+        ),
+        1
     );
 }
 

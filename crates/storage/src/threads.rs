@@ -128,9 +128,14 @@ pub struct ThreadUpsert {
     /// Whether the thread is pinned (kept from retention). Host only.
     pub pinned: Option<bool>,
     /// Monotonic revision of the `archived` series (`archived`,
-    /// `archived_at_ns`). `None` counts as 0. Host only.
+    /// `archived_at_ns`). `None` counts as generation 0 and is only for a host
+    /// that does not number its edits yet: an unnumbered write replaces a series
+    /// whose last writer was unnumbered too, ties with one a numbered writer has
+    /// touched (the protective side wins) and never overrides a higher
+    /// revision. Remove this path once the host numbers every edit. Host only.
     pub archive_revision: Option<u64>,
-    /// Monotonic revision of the `pinned` series. `None` counts as 0. Host only.
+    /// Monotonic revision of the `pinned` series; `None` as for
+    /// [`Self::archive_revision`]. Host only.
     pub pin_revision: Option<u64>,
     /// Unix nanoseconds. The host's positive value replaces the stored one;
     /// the runtime's is used only when none is stored.

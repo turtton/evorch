@@ -35,8 +35,9 @@ impl Database {
     /// Background execution projections share the table but are not work items.
     pub fn durable_tasks(&self) -> Result<Vec<TaskRecord>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT id FROM tasks WHERE progress_json IS NOT NULL
-             OR id IN (SELECT json_extract(payload, '$.id') FROM task_queue_ledger WHERE operation = 'enqueue')
+            "SELECT id FROM tasks WHERE (progress_json IS NOT NULL
+             OR id IN (SELECT json_extract(payload, '$.id') FROM task_queue_ledger WHERE operation = 'enqueue'))
+             AND id NOT IN (SELECT task_id FROM task_tombstones)
              ORDER BY created_at_ns, id",
         )?;
         let ids = statement
@@ -50,9 +51,10 @@ impl Database {
     }
 
     pub fn queued_tasks(&self) -> Result<Vec<TaskRecord>, StorageError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT id FROM tasks ORDER BY created_at_ns, id LIMIT 100")?;
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM tasks WHERE id NOT IN (SELECT task_id FROM task_tombstones) \
+                 ORDER BY created_at_ns, id LIMIT 100",
+        )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -64,12 +66,16 @@ impl Database {
     }
 
     pub fn task_dependencies(&self, id: &str) -> Result<TaskDependencies, StorageError> {
-        let mut blocks = self
-            .conn
-            .prepare("SELECT blocked_id FROM task_links WHERE blocker_id=?1 ORDER BY blocked_id")?;
-        let mut blocked_by = self
-            .conn
-            .prepare("SELECT blocker_id FROM task_links WHERE blocked_id=?1 ORDER BY blocker_id")?;
+        let mut blocks = self.conn.prepare(
+            "SELECT blocked_id FROM task_links WHERE blocker_id=?1 \
+                 AND ?1 NOT IN (SELECT task_id FROM task_tombstones) \
+                 AND blocked_id NOT IN (SELECT task_id FROM task_tombstones) ORDER BY blocked_id",
+        )?;
+        let mut blocked_by = self.conn.prepare(
+            "SELECT blocker_id FROM task_links WHERE blocked_id=?1 \
+                 AND ?1 NOT IN (SELECT task_id FROM task_tombstones) \
+                 AND blocker_id NOT IN (SELECT task_id FROM task_tombstones) ORDER BY blocker_id",
+        )?;
         Ok(TaskDependencies {
             blocks: blocks
                 .query_map([id], |row| row.get(0))?

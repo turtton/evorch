@@ -65,6 +65,7 @@ impl Database {
         use rusqlite::OptionalExtension;
         let id: Option<String> = self.conn.query_row(
             "SELECT run_id FROM run_contexts WHERE name = ?1 AND terminal_phase IN ('Done', 'Error', 'Checkpoint', 'Stopped') \
+             AND run_id NOT IN (SELECT run_id FROM run_tombstones) \
              ORDER BY updated_at_ns DESC, CAST(substr(run_id, 5) AS INTEGER) DESC LIMIT 1",
             [name], |row| row.get(0),
         ).optional()?;
@@ -82,7 +83,8 @@ impl Database {
         Ok(self
             .conn
             .query_row(
-                "SELECT parent_run_id FROM run_contexts WHERE run_id = ?1",
+                "SELECT parent_run_id FROM run_contexts WHERE run_id = ?1 \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
                 [run_id],
                 |row| row.get(0),
             )
@@ -322,7 +324,9 @@ impl Database {
         let ids = {
             let mut statement = transaction.prepare(
                 "WITH RECURSIVE tree(run_id) AS (SELECT run_id FROM run_contexts WHERE run_id IN (SELECT value FROM json_each(?1)) \
-                 UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id) \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones) \
+                 UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id \
+                 WHERE child.run_id NOT IN (SELECT run_id FROM run_tombstones)) \
                  SELECT context.run_id, (context.messages_len + context.checkpoints_len + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
                  ORDER BY CAST(substr(context.run_id, 5) AS INTEGER) LIMIT ?2",
             )?;
@@ -442,8 +446,11 @@ impl Database {
     ) -> Result<Vec<StoredAgentMessage>, StorageError> {
         let mut statement = self.conn.prepare(
             "SELECT id, kind, payload FROM events \
-             WHERE session_id = ?1 AND kind = 'AgentMessage' ORDER BY id ASC",
+             WHERE session_id = ?1 AND kind = 'AgentMessage' \
+             AND (run_id IS NULL OR run_id NOT IN (SELECT run_id FROM run_tombstones)) \
+             ORDER BY id ASC",
         )?;
+        let tombstones = crate::thread_retention::TombstoneSet::load(&self.conn)?;
         let mut rows = statement.query(rusqlite::params![session_id])?;
         let mut messages = Vec::new();
 
@@ -454,6 +461,11 @@ impl Database {
             let event_kind = serde_json::from_str::<EventKind>(&payload).map_err(|error| {
                 StorageError::Serialization(format!("event id {id} kind {kind}: {error}"))
             })?;
+
+            // An agent message names runs in its payload, which the column may not.
+            if tombstones.rejects(&event_kind).is_some() {
+                continue;
+            }
 
             match event_kind {
                 EventKind::AgentMessage(AgentMessageEvent::Delivered {

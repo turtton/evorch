@@ -21,27 +21,39 @@ const COLUMNS: &str = "thread_id, project_id, project_root, title, root_run_id, 
 const THREAD_LIVE: &str = "thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
 
 /// How the host's archive and pin series merge into a stored row. `{r}` is the
-/// stored revision column, `{p}` the supplied value, `{rev}` the supplied
-/// revision. Parameters are numbered so that a series is applied only when the
-/// host supplied its flag.
+/// stored revision column, `{u}` its "last writer sent no revision" marker, `{p}`
+/// the supplied value and `{rev}` the supplied revision. Parameters are numbered
+/// so that a series is applied only when the host supplied its flag.
 ///
 /// - Revision not initialised (NULL): adopt the supplied series as it is, with a
-///   missing revision counted as generation 0 (so the series is initialised from
-///   then on). The time is never invented: it stays NULL unless supplied.
+///   missing revision counted as generation 0 and remembered as unnumbered. The
+///   time is never invented: it stays NULL unless supplied.
 /// - Newer revision: replace. Older: ignore. Equal: keep the protective side
 ///   (archived / pinned wins) so concurrent edits never lose protection.
-/// - An unnumbered sender (the host before it numbers its edits) replaces a
-///   generation-0 series, so its sequential edits keep working; it can never
-///   override a numbered one.
-fn series_sql(flag: &str, time: Option<&str>, revision: &str, p: &str, rev: &str) -> Vec<String> {
+/// - Unnumbered sender (the host before it numbers its edits; retire this path
+///   when it does): a missing revision is generation 0. It replaces a series whose
+///   last writer was also unnumbered, so sequential edits keep working. Against a
+///   series a numbered writer has touched (`Some(0)` included) it is an equal
+///   generation, so the protective side wins; it can never override a higher one.
+///   A numbered write that adopts or ties clears the marker, so the series stays
+///   protected from then on.
+fn series_sql(
+    flag: &str,
+    time: Option<&str>,
+    revision: &str,
+    unnumbered: &str,
+    p: &str,
+    rev: &str,
+) -> Vec<String> {
     let adopt = format!(
         "({p} IS NOT NULL AND (threads.{revision} IS NULL \
          OR COALESCE({rev}, 0) > threads.{revision} \
-         OR ({rev} IS NULL AND threads.{revision} = 0)))"
+         OR ({rev} IS NULL AND threads.{revision} = 0 AND threads.{unnumbered} = 1)))"
     );
     let tie = format!(
-        "({p} IS NOT NULL AND threads.{revision} IS NOT NULL AND {rev} IS NOT NULL \
-         AND {rev} = threads.{revision})"
+        "({p} IS NOT NULL AND threads.{revision} IS NOT NULL \
+         AND COALESCE({rev}, 0) = threads.{revision} \
+         AND ({rev} IS NOT NULL OR threads.{unnumbered} = 0))"
     );
     let mut updates = vec![
         format!(
@@ -50,6 +62,10 @@ fn series_sql(flag: &str, time: Option<&str>, revision: &str, p: &str, rev: &str
         ),
         format!(
             "{revision} = CASE WHEN {adopt} THEN COALESCE({rev}, 0) ELSE threads.{revision} END"
+        ),
+        format!(
+            "{unnumbered} = CASE WHEN {adopt} THEN ({rev} IS NULL) WHEN {tie} THEN 0 \
+             ELSE threads.{unnumbered} END"
         ),
     ];
     if let Some(time) = time {
@@ -106,10 +122,18 @@ fn upsert_sql(writer: ThreadWriter) -> String {
                 "archived",
                 Some("archived_at_ns"),
                 "archive_revision",
+                "archive_unnumbered",
                 "?12",
                 "?18",
             ));
-            updates.extend(series_sql("pinned", None, "pin_revision", "?17", "?19"));
+            updates.extend(series_sql(
+                "pinned",
+                None,
+                "pin_revision",
+                "pin_unnumbered",
+                "?17",
+                "?19",
+            ));
             updates.push(flag.replace("{c}", "superseded").replace("{p}", "?13"));
         }
         // The runtime never writes the archive and pin series, `archived` included.
@@ -126,12 +150,14 @@ fn upsert_sql(writer: ThreadWriter) -> String {
             "COALESCE(?12, 0)",
             "CASE WHEN COALESCE(?12, 0) = 1 THEN ?16 END, COALESCE(?17, 0), \
              CASE WHEN ?12 IS NOT NULL THEN COALESCE(?18, 0) END, \
-             CASE WHEN ?17 IS NOT NULL THEN COALESCE(?19, 0) END",
+             CASE WHEN ?17 IS NOT NULL THEN COALESCE(?19, 0) END, \
+             CASE WHEN ?12 IS NOT NULL AND ?18 IS NULL THEN 1 ELSE 0 END, \
+             CASE WHEN ?17 IS NOT NULL AND ?19 IS NULL THEN 1 ELSE 0 END",
         ),
-        ThreadWriter::Runtime => (ThreadSource::Runtime, "0", "NULL, 0, NULL, NULL"),
+        ThreadWriter::Runtime => (ThreadSource::Runtime, "0", "NULL, 0, NULL, NULL, 0, 0"),
     };
     format!(
-        "INSERT INTO threads ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+        "INSERT INTO threads ({COLUMNS}, archive_unnumbered, pin_unnumbered) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
          {archived}, COALESCE(?13, 0), ?14, ?15, '{}', {series}) \
          ON CONFLICT(thread_id) DO UPDATE SET {}",
         inserted_source.as_str(),

@@ -28,7 +28,8 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
         "threads",
         ConfirmDelete,
-        "removed when the family is confirmed",
+        "removed when the family is confirmed; includes the archive/pin mirror columns \
+         and their unnumbered-writer markers",
     ),
     (
         "thread_runs",

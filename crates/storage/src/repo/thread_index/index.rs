@@ -690,11 +690,42 @@ pub(crate) fn purge_index_rows(
     limit_rows: usize,
     limit_text_bytes: u64,
 ) -> Result<PurgeProgress, StorageError> {
+    purge_index_rows_with(
+        conn,
+        run_id,
+        target,
+        limit_rows,
+        limit_text_bytes,
+        OversizedBlock::Report,
+    )
+}
+
+/// What a purge step does with a first block larger than its byte limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OversizedBlock {
+    /// Leave it and report its size, so the caller can route it elsewhere.
+    Report,
+    /// Delete it alone: the exclusive phase, where one large row is the unit.
+    TakeAlone,
+}
+
+/// [`purge_index_rows`] with a choice for a block above the byte limit. Either
+/// way a step reads at most `limit_rows` blocks and deletes at most those that
+/// fit the limit (or the one oversized block alone).
+pub(crate) fn purge_index_rows_with(
+    conn: &Connection,
+    run_id: &str,
+    target: PurgeTarget,
+    limit_rows: usize,
+    limit_text_bytes: u64,
+    oversized_block: OversizedBlock,
+) -> Result<PurgeProgress, StorageError> {
     let idle = PurgeProgress {
         rows: 0,
         text_bytes: 0,
         remaining: false,
         oversized: false,
+        oversized_bytes: 0,
     };
     atomic(conn, || {
         let allowed: bool = match target {
@@ -718,17 +749,26 @@ pub(crate) fn purge_index_rows(
         let mut ids = Vec::new();
         let mut text_bytes = 0_u64;
         let mut oversized = false;
+        let mut oversized_bytes = 0_u64;
         {
             let mut statement = conn.prepare_cached(
+                // The order is the unique key's, so the statement stops after `limit`
+                // rows; ordering by id would sort every block of the run first.
                 "SELECT id, length(CAST(text AS BLOB)) FROM conversation_blocks \
-                 WHERE run_id = ?1 ORDER BY id LIMIT ?2",
+                 WHERE run_id = ?1 ORDER BY source_kind, source_key LIMIT ?2",
             )?;
             let mut rows = statement.query(params![run_id, limit])?;
             while let Some(row) = rows.next()? {
                 let bytes = row.get::<_, u64>(1)?;
                 if ids.is_empty() && bytes > limit_text_bytes {
+                    if oversized_block == OversizedBlock::TakeAlone {
+                        ids.push(row.get::<_, i64>(0)?);
+                        text_bytes = bytes;
+                        break;
+                    }
                     // Never smuggle a block past the step's byte budget.
                     oversized = true;
+                    oversized_bytes = bytes;
                     break;
                 }
                 if !ids.is_empty() && text_bytes.saturating_add(bytes) > limit_text_bytes {
@@ -791,6 +831,7 @@ pub(crate) fn purge_index_rows(
             text_bytes,
             remaining: remaining || oversized,
             oversized,
+            oversized_bytes,
         })
     })
 }
