@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, types::FromSql};
@@ -15,6 +16,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 /// SQLite の `PRAGMA auto_vacuum` で incremental モードを示す値です。
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// legacy DB の警告をプロセスあたり 1 回に抑えるためのフラグです
+/// （writer / reader の接続ごとに `open` が呼ばれます）。
+static LEGACY_AUTO_VACUUM_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// 初期化済み SQLite 接続を所有します。
 #[derive(Debug)]
@@ -83,7 +88,8 @@ fn pragma_init(conn: &Connection) -> Result<(), StorageError> {
 /// - 既存 DB の `auto_vacuum=FULL`(1): pointer-map 構造が既に存在するため、
 ///   INCREMENTAL への変更は full VACUUM なしで安全に適用できます（移行します）。
 /// - 既存 DB の `auto_vacuum` 未設定(0): 反映に DB 全体の再書き込み（full VACUUM）
-///   が必要になるため変更せず、診断ログで非アクティブであることを通知します
+///   が必要になるため変更せず、プロセスあたり 1 回だけ警告ログを出して
+///   `evorch maintenance vacuum` を案内します
 ///   （起動時に既存接続を長時間 block する破壊的移行は行わない方針）。
 fn init_auto_vacuum(conn: &Connection) -> Result<(), StorageError> {
     const AUTO_VACUUM_NONE: i64 = 0;
@@ -102,9 +108,12 @@ fn init_auto_vacuum(conn: &Connection) -> Result<(), StorageError> {
     if page_count == 0 {
         conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     } else {
-        tracing::info!(
-            "existing database keeps auto_vacuum=NONE; incremental vacuum stays inactive until manual VACUUM"
-        );
+        if !LEGACY_AUTO_VACUUM_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "existing database has auto_vacuum=NONE, so deleted rows cannot be returned to the filesystem while running; \
+                 stop all evorch processes and run `evorch maintenance vacuum --apply` once (add --db <path> for a non-default database)"
+            );
+        }
     }
     Ok(())
 }

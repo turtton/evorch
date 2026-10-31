@@ -1,7 +1,7 @@
 # ストレージ保守手順
 
 イベント DB（`evorch-events.db`）を縮小・整備する `evorch maintenance` の
-`compact-events` と `backfill-events` の手順書。コマンド一覧は
+`compact-events`、`backfill-events`、`vacuum` の手順書。コマンド一覧は
 `evorch maintenance` の USAGE（`crates/evorch/src/maintenance.rs`）が正本。
 永続化されるイベントの種別と保持方針は
 [io-performance.md](io-performance.md#イベントの永続化と保持) を、タスク進捗の
@@ -11,7 +11,8 @@
 
 - `evorch maintenance backfill-events` は、既存イベントの `subkind` / `run_id` 列だけを埋める軽量コマンド。GUI/runtime の稼働中にも使用できる。DB の物理サイズ縮小や delta の集約は行わない。
 - `evorch maintenance compact-events` は、既定で読み取り専用 preview。実際の変換には `--apply` が必要。preview と apply の両方で、対象 DB を使うすべての GUI/runtime/reader を停止する。
-- どちらも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない。compact は schema 31 以上、backfill は schema 30 以上が必要。古い DB は、まず停止中のバックアップを別途取得し、現行 evorch の通常起動による migration 後に正常終了してから保守する。
+- `evorch maintenance vacuum` は、旧 DB の `auto_vacuum` を INCREMENTAL に一度だけ切り替える軽量コマンド（[auto_vacuum の一回限りの移行](#auto_vacuum-の一回限りの移行)）。イベントの変換は行わない。
+- いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない。compact は schema 31 以上、backfill は schema 30 以上が必要。古い DB は、まず停止中のバックアップを別途取得し、現行 evorch の通常起動による migration 後に正常終了してから保守する。
 
 以下の `$DB` は対象を確認した DB の絶対パスに置き換える。既定パスはユーザー設定ディレクトリ内の `evorch-events.db`。
 
@@ -46,7 +47,33 @@ JSON の `converted` / `undecodable` / `batches` / `remaining` を確認する�
    ```
 
    `--backup` を省くと DB パスに `.before-compact-events-<timestamp>.db` を付加した新規ファイルを使う。既存ファイルの上書きは拒否する。バックアップ無効化オプションはない。ソース変換前に `VACUUM INTO`、`integrity_check`、fsync を完了し、検証済みパスを stderr に出力する。Unix で新規バックアップの mode は 0600。バックアップには元の会話・ツール出力等が含まれるため、安全な場所で保管する。
-5. 成功 JSON の `integrity_check: "ok"`、`vacuum: true`、`checkpoint_truncated: true`、`after.unbackfilled_rows: 0` を確認する。種別別件数・ファイルサイズ・`elapsed_seconds` を記録し、GUI の履歴表示を確認してからバックアップの保存方針を決める。
+5. 成功 JSON の `integrity_check: "ok"`、`vacuum: true`、`checkpoint_truncated: true`、`after.unbackfilled_rows: 0`、`auto_vacuum_after: 2` を確認する。種別別件数・ファイルサイズ・`elapsed_seconds` を記録し、GUI の履歴表示を確認してからバックアップの保存方針を決める。
+
+## auto_vacuum の一回限りの移行
+
+新規 DB は `auto_vacuum=INCREMENTAL`（2）で作られ、稼働中の writer が削除後の空きページを少しずつファイルシステムへ返す。それ以前に作られた DB は `auto_vacuum=NONE`（0）のままで、行を削除してもページは DB 内で再利用されるだけでファイルは縮まない。SQLite はモードの変更を full VACUUM でしか反映できないため、起動時には自動で行わない。通常起動は、NONE の DB を開くと警告ログを 1 プロセスにつき 1 回出し、この手順を案内する。
+
+`compact-events --apply` は VACUUM の直前に INCREMENTAL を設定するため、実行すれば移行も完了する（JSON の `auto_vacuum_before` / `auto_vacuum_after`）。すでに compact 済みの DB など、イベント変換が不要な場合は `vacuum` を使う。
+
+1. すべての evorch GUI/runtime と reader を停止する。前提は compact-events と同じ（既存の `.maintenance-lock`、WAL が空であること、schema が現行以下）。
+2. preview（既定、読み取り専用）で現在のモードと必要な空き容量を確認する。
+
+   ```sh
+   evorch maintenance vacuum --db "$DB"
+   ```
+
+   `auto_vacuum_before` が 0（または 1）なら移行できる。2 なら `already_incremental: true` で、何も行わない。
+3. DB とバックアップ先に `required_free_space_bytes`（compact-events と同じ、元 DB・論理ページ・sidecar の最大値の 4 倍）の空きを用意する。SQLite の VACUUM は一時ファイルを SQLite の temp ディレクトリ（`TMPDIR` など）にも作るため、DB と別 volume の temp が小さい場合は `TMPDIR` を空きのある場所に向ける。
+4. apply する。
+
+   ```sh
+   evorch maintenance vacuum --db "$DB" --backup "/secure/path/evorch-before-vacuum.db" --apply
+   ```
+
+   compact-events と同じく検証済みバックアップ（`VACUUM INTO` + integrity_check + fsync、`--backup` 省略時は `<DB>.before-vacuum-<timestamp>.db`、バックアップ無効化なし）を作成してから、INCREMENTAL を設定して full VACUUM、WAL TRUNCATE、integrity_check を行う。VACUUM は DB サイズとディスク速度に応じて分〜それ以上かかる。
+5. 成功 JSON の `auto_vacuum_after: 2`、`integrity_check: "ok"`、`vacuum: true`、`checkpoint_truncated: true` を確認する。`file_bytes_before` / `file_bytes_after` でサイズ変化を確認し、起動後に警告ログが消えていることを確認する。
+
+失敗や中断で DB の mode が 2 にならなかった場合は、データは未変更（VACUUM は原子的）で、バックアップが残る。同じコマンドを再実行できる。mode が 2 の DB に再実行しても、バックアップや VACUUM は行われない。
 
 ## 変換内容と保持契約
 
@@ -59,7 +86,7 @@ apply の順序は固定：
 5. Provider の RequestCompleted / FirstTokenObserved / CacheReuseObserved の期限切れ行だけを削除する。
 6. 既存 codec と writer と共通の判定で Tool / Message / Compaction payload と run_contexts の平文列を圧縮する。2 KiB 未満、圧縮で縮まない値、AgentMessage、承認等の payload 帰属 Tool は平文のまま。
 7. セッション・日次の event bytes と `sessions.total_event_bytes` を再計算する。
-8. VACUUM、WAL TRUNCATE、integrity_check を行う。
+8. `PRAGMA auto_vacuum=INCREMENTAL` を設定して VACUUM し、`auto_vacuum` が 2 になったことを検証する。続けて WAL TRUNCATE と integrity_check を行う。
 
 既定は表示内容を維持する。MessageDelta は一律削除しない。現行 GUI reader が最初の delta の位置を完了本文の表示位置として使うため、同じ MessageDelta 形式のまま本文を連結し、先頭 ID / metadata を残す。完了済み応答・未完了応答とも同形式で扱い、reasoning や tool の境界を越えて表示順序を動かさない。MessageCompleted / MessagePart の内容は変更しない。
 

@@ -705,3 +705,160 @@ fn retention_and_stripping_ignore_compressed_payloads_of_other_kinds() {
         .unwrap();
     assert_eq!(remaining, 1);
 }
+
+/// A migrated schema in auto_vacuum=NONE, as every database created before
+/// INCREMENTAL was enabled, with a checkpointed WAL and an existing lease.
+fn legacy_none_database(path: &std::path::Path) {
+    drop(
+        Database::open(&StorageConfig {
+            db_path: path.into(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "auto_vacuum", 0).unwrap();
+    conn.execute_batch("VACUUM; CREATE TABLE ballast(x BLOB); INSERT INTO ballast VALUES (x'01');")
+        .unwrap();
+    assert_eq!(auto_vacuum(&conn), 0);
+    drop(conn);
+    drop(offline::writer_lease(path).unwrap());
+}
+
+fn auto_vacuum(conn: &Connection) -> i64 {
+    conn.pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+        .unwrap()
+}
+
+fn file_names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn vacuum_switches_none_to_incremental_after_read_only_preview_and_verified_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let bytes = fs::read(&path).unwrap();
+    let names = file_names(dir.path());
+
+    let preview = vacuum_database(&path, &VacuumOptions::default()).unwrap();
+    assert!(preview.preview && !preview.already_incremental && !preview.vacuum);
+    assert_eq!(
+        (preview.auto_vacuum_before, preview.auto_vacuum_after),
+        (0, 0)
+    );
+    assert!(preview.backup.is_none() && preview.required_free_space_bytes > 0);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(file_names(dir.path()), names);
+
+    let applied = vacuum_database(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: None,
+        },
+    )
+    .unwrap();
+    assert!(applied.vacuum && applied.checkpoint_truncated);
+    assert_eq!(
+        (applied.auto_vacuum_before, applied.auto_vacuum_after),
+        (0, 2)
+    );
+    assert_eq!(applied.integrity_check.as_deref(), Some("ok"));
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&conn), 2);
+    let check: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ballast", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    // The backup is the verified pre-migration copy: still NONE, same data.
+    let backup = Connection::open_with_flags(
+        applied.backup.as_ref().unwrap(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(auto_vacuum(&backup), 0);
+
+    // The point of the migration: freed pages now return to the filesystem.
+    conn.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<64)
+         INSERT INTO ballast SELECT zeroblob(8192) FROM n; DELETE FROM ballast WHERE length(x) > 1;",
+    )
+    .unwrap();
+    let free: i64 = conn
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .unwrap();
+    assert!(free >= 64);
+    // Each step of incremental_vacuum releases one free page.
+    let mut vacuum = conn.prepare("PRAGMA incremental_vacuum").unwrap();
+    let mut steps = vacuum.query([]).unwrap();
+    while steps.next().unwrap().is_some() {}
+    drop(steps);
+    drop(vacuum);
+    let free: i64 = conn
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .unwrap();
+    assert_eq!(free, 0);
+}
+
+#[test]
+fn vacuum_on_an_incremental_database_is_a_noop_without_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let options = VacuumOptions {
+        apply: true,
+        backup: None,
+    };
+    vacuum_database(&path, &options).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let names = file_names(dir.path());
+
+    for apply in [false, true] {
+        let again = vacuum_database(
+            &path,
+            &VacuumOptions {
+                apply,
+                backup: None,
+            },
+        )
+        .unwrap();
+        assert!(again.already_incremental && !again.vacuum && again.backup.is_none());
+        assert_eq!((again.auto_vacuum_before, again.auto_vacuum_after), (2, 2));
+        assert!(again.integrity_check.is_none());
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(file_names(dir.path()), names);
+}
+
+#[test]
+fn vacuum_refuses_an_existing_backup_path_before_changing_the_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let backup = dir.path().join("taken.db");
+    fs::write(&backup, b"keep").unwrap();
+
+    let result = vacuum_database(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: Some(backup.clone()),
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(fs::read(&backup).unwrap(), b"keep");
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&conn), 0);
+}

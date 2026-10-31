@@ -4,17 +4,21 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use storage::EventBackfillOptions;
 use storage::maintenance::{
-    CompactOptions, DeltaMode, StripOptions, backfill_events, compact_events,
-    preview_task_progress_retention, strip_task_progress_cursor,
+    CompactOptions, DeltaMode, StripOptions, VacuumOptions, backfill_events, compact_events,
+    preview_task_progress_retention, strip_task_progress_cursor, vacuum_database,
 };
 
 pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   compact-events [--apply] [--backup <new-path>] [--batch-rows <1..100000>]
                  [--provider-retention-days <N>] [--delta-mode <preserve|delete>] [--sidebar <path>]
   backfill-events [--batch-rows <1..100000>] [--max-rows <N>]
+  vacuum [--apply] [--backup <new-path>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
 backfill-events: safe next to live writers; converts legacy subkind/run_id columns only.
+vacuum: one-time switch of a legacy auto_vacuum=NONE database to INCREMENTAL (compact-events --apply does it too).
+  Default is a read-only preview. --apply takes a verified backup, runs one full VACUUM and checks integrity.
+  A database that is already INCREMENTAL is left untouched.
 Use --max-rows for bounded work. Long-lived readers can pin the WAL and let it grow.
 Other commands: default read-only preview. Stop ALL evorch GUI/runtime processes for preview AND apply.
 Preview requires an existing maintenance lease and a checkpointed DB (no nonempty WAL).
@@ -35,6 +39,7 @@ pub struct MaintenanceArgs {
     pub strip: StripOptions,
     pub compact: Option<CompactOptions>,
     pub backfill: Option<EventBackfillOptions>,
+    pub vacuum: Option<VacuumOptions>,
 }
 
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs, String> {
@@ -44,7 +49,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     }
     let command = argv.next().ok_or(USAGE)?;
     let retention_preview = match command.as_str() {
-        "strip-task-progress-cursor" | "compact-events" | "backfill-events" => false,
+        "strip-task-progress-cursor" | "compact-events" | "backfill-events" | "vacuum" => false,
         "preview-task-progress-retention" => true,
         _ => return Err(USAGE.into()),
     };
@@ -54,6 +59,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         strip: StripOptions::default(),
         compact: (command == "compact-events").then(CompactOptions::default),
         backfill: (command == "backfill-events").then(EventBackfillOptions::default),
+        vacuum: (command == "vacuum").then(VacuumOptions::default),
     };
     let mut seen = std::collections::BTreeSet::new();
     while let Some(arg) = argv.next() {
@@ -65,6 +71,10 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
             "--apply" if args.compact.is_some() => args.compact.as_mut().unwrap().apply = true,
             "--backup" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--apply" if args.vacuum.is_some() => args.vacuum.as_mut().unwrap().apply = true,
+            "--backup" if args.vacuum.is_some() => {
+                args.vacuum.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
             }
             "--sidebar" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().sidebar = Some(argv.next().ok_or(USAGE)?.into());
@@ -135,6 +145,16 @@ pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
         return backfill_events(&path, &options)
             .map(|summary| json!(summary))
             .map_err(|error| error.to_string());
+    }
+    if let Some(options) = args.vacuum {
+        if options.apply {
+            eprintln!(
+                "Offline vacuum: stop ALL evorch processes. Mandatory verified backup; reserve four times the database size. Full VACUUM may take minutes or longer."
+            );
+        }
+        let summary = vacuum_database(&path, &options).map_err(|error| error.to_string())?;
+        eprintln!("{}", summary.message);
+        return Ok(json!(summary));
     }
     if let Some(mut options) = args.compact {
         if options.sidebar.is_none() {

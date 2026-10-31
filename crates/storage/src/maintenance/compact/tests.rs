@@ -1013,3 +1013,38 @@ fn accounting_days_and_invalid_wall_clocks_are_independent_delta_boundaries() {
         crate::repo::event::list_all_ordered(&db.conn).unwrap()
     );
 }
+
+#[test]
+fn compact_apply_switches_a_legacy_database_to_incremental_auto_vacuum() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = seed(&path);
+    db.conn.pragma_update(None, "auto_vacuum", 0).unwrap();
+    db.conn.execute_batch("VACUUM;").unwrap();
+    drop(db);
+
+    let preview = compact_events(&path, &options()).unwrap();
+    assert_eq!(
+        (preview.auto_vacuum_before, preview.auto_vacuum_after),
+        (0, 0)
+    );
+
+    let applied = compact_events(
+        &path,
+        &CompactOptions {
+            apply: true,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (applied.auto_vacuum_before, applied.auto_vacuum_after),
+        (0, 2)
+    );
+    assert_eq!(applied.integrity_check.as_deref(), Some("ok"));
+    let conn = Connection::open(&path).unwrap();
+    let mode: i64 = conn
+        .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 2);
+}

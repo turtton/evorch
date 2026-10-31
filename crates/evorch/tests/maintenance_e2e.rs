@@ -110,6 +110,27 @@ fn compact_and_online_backfill_have_separate_safety_options() {
 }
 
 #[test]
+fn vacuum_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
+    let options = parse(&["maintenance", "vacuum"]).unwrap().vacuum.unwrap();
+    assert!(!options.apply && options.backup.is_none());
+    let options = parse(&["maintenance", "vacuum", "--apply", "--backup", "saved.db"])
+        .unwrap()
+        .vacuum
+        .unwrap();
+    assert!(options.apply);
+    assert_eq!(options.backup, Some("saved.db".into()));
+    for args in [
+        vec!["vacuum", "--no-backup"],
+        vec!["vacuum", "--batch-rows", "1"],
+        vec!["vacuum", "--apply", "--apply"],
+        vec!["compact-events", "--vacuum"],
+    ] {
+        let full = [vec!["maintenance"], args].concat();
+        assert!(parse(&full).is_err(), "{full:?}");
+    }
+}
+
+#[test]
 fn backfill_cli_outputs_progress_without_starting_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("events.db");
