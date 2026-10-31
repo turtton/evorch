@@ -87,7 +87,10 @@ impl ProviderHealth {
         duration: Option<Duration>,
         now: Instant,
     ) -> Cooldown {
-        let deadline = duration.map(|duration| now + duration);
+        // 期限に加算できない遅延 (Retry-After が極端に大きい場合) は、panic させず
+        // 再構成まで続くクールダウンとして扱う。
+        let deadline = duration.and_then(|duration| now.checked_add(duration));
+        let duration = duration.filter(|_| deadline.is_some());
         let mut until = self
             .until
             .lock()
@@ -131,6 +134,26 @@ mod tests {
             quota_secs: 600,
             rate_limit_secs: 30,
         })
+    }
+
+    // Given: Instant に加算できない Retry-After (u64::MAX 秒) の rate limit と quota
+    // When: 失敗を記録して判定する / Then: panic せず、再構成まで続くクールダウンになる
+    #[test]
+    fn unrepresentable_retry_after_becomes_an_indefinite_cooldown() {
+        let health = health();
+        let now = Instant::now();
+        let huge = Some(Duration::from_secs(u64::MAX));
+
+        let limited = health.record_failure("codex", "gpt", FailureKind::RateLimited, huge, now);
+        let quota = health.record_failure("kimi", "k3", FailureKind::Quota, huge, now);
+
+        for (cooldown, model) in [(limited, Some("gpt".to_owned())), (quota, None)] {
+            let cooldown = cooldown.expect("cooldown recorded");
+            assert_eq!(cooldown.model, model);
+            assert_eq!(cooldown.duration, None);
+        }
+        assert!(health.is_cooling_down("codex", "gpt", now + Duration::from_secs(86_400 * 365)));
+        assert!(health.is_cooling_down("kimi", "any", now + Duration::from_secs(86_400 * 365)));
     }
 
     // Given: quota で失敗したプロファイル / When: 期限前後で同プロファイルの別モデルを判定する

@@ -80,6 +80,19 @@ impl ProviderError {
         }
     }
 
+    /// 入力がモデルの文脈窓を超えたことを示すエラーか。
+    ///
+    /// Responses API の `context_length_exceeded` を、JSON 本文と SSE 失敗イベントが
+    /// 平坦化した `code: message` 形式の HTTP 400 の両方から判定します。
+    /// 圧縮などの回復動作は呼び出し側が決めます。
+    pub fn is_context_window_exceeded(&self) -> bool {
+        match self {
+            Self::Http { status: 400, body } => body_error_code_is(body, "context_length_exceeded"),
+            Self::RetriesExhausted { last, .. } => last.is_context_window_exceeded(),
+            _ => false,
+        }
+    }
+
     /// HTTP ステータスが対応するエラーではそのコード、それ以外では `None` を返す。
     ///
     /// [`ProviderError::RateLimited`] は常に `Some(429)`。
@@ -96,6 +109,16 @@ impl ProviderError {
             | Self::RetriesExhausted { .. } => None,
         }
     }
+}
+
+/// エラー本文の code が `code` か。JSON (`error.code` またはトップレベル `code`) と、
+/// SSE 失敗イベントが平坦化した `code: message` の先頭を同じ規則で見る。
+pub(crate) fn body_error_code_is(body: &str, code: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let error = value.get("error").unwrap_or(&value);
+        return error.get("code").and_then(serde_json::Value::as_str) == Some(code);
+    }
+    body.trim().split(':').next() == Some(code)
 }
 
 #[cfg(test)]
@@ -224,6 +247,33 @@ mod tests {
             .status(),
             None
         );
+    }
+
+    // Given: 平坦化・JSON・他 code・他ステータス・retry 済みの 400 / When: 文脈窓超過を判定
+    // Then: HTTP 400 の context_length_exceeded だけが真になる
+    #[test]
+    fn context_window_exceeded_is_detected_from_flattened_and_json_bodies() {
+        let http = |status, body: &str| ProviderError::Http {
+            status,
+            body: body.into(),
+        };
+
+        for body in [
+            "context_length_exceeded: Your input exceeds the context window.",
+            r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#,
+        ] {
+            assert!(http(400, body).is_context_window_exceeded(), "{body}");
+            assert!(
+                ProviderError::RetriesExhausted {
+                    attempts: 2,
+                    last: Box::new(http(400, body)),
+                }
+                .is_context_window_exceeded()
+            );
+        }
+        assert!(!http(400, "invalid_prompt: context_length_exceeded").is_context_window_exceeded());
+        assert!(!http(500, "context_length_exceeded: x").is_context_window_exceeded());
+        assert!(!ProviderError::Timeout.is_context_window_exceeded());
     }
 
     // Given: ProviderError / When: trait 境界で確認 / Then: std::error::Error を実装する

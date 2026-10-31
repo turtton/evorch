@@ -1,0 +1,5 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp-nested","status":"in_progress"}}
+
+event: error
+data: {"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model `gpt-9` does not exist","headers":{"retry-after":"3"}}}
