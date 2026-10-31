@@ -1,6 +1,7 @@
 // allow: SIZE_OK — SSE pump の既存契約と指定された観測失敗経路表を同一テストモジュールに集約する。
 use super::*;
 mod truncated_tail;
+mod usage_missing;
 use crate::message::{ChatResponse, ContentBlock, Message, Role};
 use crate::observe::AttemptObserver;
 use event_bus::{EventBus, EventKind, ProviderEvent, ProviderFailureKind, UsageEvent};

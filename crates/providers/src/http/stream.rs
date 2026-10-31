@@ -72,6 +72,16 @@ pub(crate) trait WireStreamInterpreter: Send {
     /// Apply wire-specific terminal policy after canonical/native message assembly.
     /// This must not infer a shared tool-execution policy from the finish reason.
     fn finalize_message(&mut self, _message: &mut Message) {}
+
+    /// 直近に返した完了の usage が wire 上で報告されていたか。
+    ///
+    /// 完了を返した後にポンプが 1 回照会する。`false` のとき完了に載せた
+    /// [`Usage`] は実測値ではなく代替値であり、ポンプは usage 発行と cache
+    /// 観測を行わず、診断で未報告を記録する。usage を必ず報告する wire は
+    /// 既定の `true` のままでよい。
+    fn usage_reported(&self) -> bool {
+        true
+    }
 }
 
 /// SSE バイト列を canonical イベント列へ変換するポンプ。
@@ -234,7 +244,12 @@ impl<I: WireStreamInterpreter> SsePump<I> {
                 response.message = message;
             }
             self.interpreter.finalize_message(&mut response.message);
-            self.usage.emit_usage(&self.model, &response.usage);
+            if self.interpreter.usage_reported() {
+                self.usage.emit_usage(&self.model, &response.usage);
+            } else {
+                // 未報告をゼロ使用量として発行・観測すると、予算や cache 比率を黙って歪める。
+                self.observer.mark_usage_missing();
+            }
             self.observer
                 .emit_completed(&response.usage, response.finish_reason.clone());
             self.pending

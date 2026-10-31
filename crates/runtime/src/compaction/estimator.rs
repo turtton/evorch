@@ -131,6 +131,28 @@ mod tests {
         );
     }
 
+    // Given: a provider that reported no usage (zero placeholder) / When: projecting
+    // / Then: the serialized byte estimate is the floor, not zero
+    #[test]
+    fn unreported_zero_usage_falls_back_to_the_serialized_estimate() {
+        let messages = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "長い入力".repeat(100),
+            }],
+        )];
+        let estimate = estimate_tokens(&messages);
+        assert!(estimate > 0);
+        assert_eq!(
+            super::estimate_projected(&messages, Some(&Usage::default()), Some(estimate)),
+            estimate
+        );
+        assert_eq!(
+            estimate_visible(&messages, Some(&Usage::default())),
+            estimate
+        );
+    }
+
     #[test]
     fn schemas_count_once_when_combining_usage_and_serialized_estimates() {
         let messages = [message(

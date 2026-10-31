@@ -357,6 +357,9 @@ pub mod diagnostic_codes {
     pub const PROVIDER_MODEL_ROUTE: &str = "ProviderModelRoute";
     /// Catalog lookup evidence. Failures are warnings; successful fetches are info (not persisted under the default warnings policy).
     pub const PROVIDER_CATALOG_FETCH: &str = "ProviderCatalogFetch";
+    /// A provider completed a response without reporting token usage. No usage was
+    /// recorded for it; context size falls back to the serialized estimate.
+    pub const PROVIDER_USAGE_MISSING: &str = "ProviderUsageMissing";
     /// Unchanged wire prefix but reduced provider cache retention.
     pub const CACHE_REGRESSION: &str = "CacheRegression";
     /// A streamed tool call's arguments were not valid JSON; the call was not run.
@@ -420,6 +423,7 @@ pub mod diagnostic_codes {
         PROVIDER_UNAVAILABLE,
         PROVIDER_MODEL_ROUTE,
         PROVIDER_CATALOG_FETCH,
+        PROVIDER_USAGE_MISSING,
         CACHE_REGRESSION,
         TOOL_ARGUMENTS_MALFORMED,
         OWNERSHIP_REGISTRY_WAIT,

@@ -89,10 +89,34 @@ catalog again. `list_models` reports the stored outcome, failure included.
 | --- | --- |
 | `response.output_text.delta`, `response.output_item.added/done`, function-call argument events | Handled by the shared Responses interpreter |
 | `response.reasoning_summary_text.delta` | Handled as a single reasoning delta (no `summary_index`) |
-| `response.completed` | Usage is required (Codex treats it as optional) |
-| `response.incomplete`, `response.failed`, top-level `error` | Flattened to evorch's error classes; Codex distinguishes more kinds and a nested `error` frame (difference) |
+| `response.completed` | `usage` is optional, as in Codex (`null` or an absent key); `response.id` is read for logs only (Codex requires it). See "Missing usage" below |
+| `response.incomplete` | Mapped to a finish reason, not an error; `usage` is optional. See "`response.incomplete`" below |
+| `response.failed`, top-level `error` | Flattened to evorch's error classes; Codex distinguishes more kinds and a nested `error` frame (difference) |
 | Unknown events | Ignored; matches |
 | Malformed JSON | An error (stricter than Codex) |
+
+#### Missing usage
+
+When the terminal event carries no usage, evorch finishes the response normally
+and does not invent a zero: no usage event is recorded, no cache-reuse
+observation is made, and one `ProviderUsageMissing` diagnostic (warning) is
+emitted per response; the response id is logged. The request-completed event
+still fires, with zero token counts as placeholders. Context-size estimation
+then falls back to the serialized byte estimate, which is already its floor.
+The compaction request follows the same rule: its encrypted state is returned and
+only the usage record is skipped.
+
+#### `response.incomplete`
+
+| `incomplete_details.reason` | Codex 0.166.0 | evorch |
+| --- | --- | --- |
+| `max_output_tokens` | `ResponseIncomplete` error | Finish reason `Length`; partial output and tool calls kept (difference) |
+| `content_filter` | `ContentFilter` error (retried) | Finish reason `ContentFilter`; partial output and tool calls kept, no retry (difference) |
+| `interrupted` | Completed with `end_turn = false`, so the turn continues | Finish reason `Other("incomplete: interrupted")`; tool calls dropped, the run ends in an error, no continuation (difference) |
+| other or missing | `ResponseIncomplete` error | Finish reason `Other("incomplete: <reason>")` (`Other("incomplete")` when missing); tool calls dropped, the run ends in an error |
+
+Adding continuation for `interrupted` and a retry for `content_filter` is
+deliberately out of scope for now.
 
 ### Transport and other surfaces
 

@@ -108,6 +108,26 @@ a continuation. Partial text, reasoning, and usage are retained. Known reasons
 `max_output_tokens` (Length) and `content_filter` (ContentFilter) retain their
 existing behavior, including tool execution when tool calls are present.
 
+How each reason ends, next to Codex CLI 0.166.0 (the Responses wire is shared by
+`openai` and Codex):
+
+| Reason | evorch | Codex CLI 0.166.0 |
+|---|---|---|
+| `max_output_tokens` | `Length`; tool calls kept | `ResponseIncomplete` error |
+| `content_filter` | `ContentFilter`; tool calls kept, not retried | `ContentFilter` error (retried) |
+| `interrupted` | `Other("incomplete: interrupted")`; tool calls dropped, no continuation | completes with `end_turn = false`; the turn continues |
+| unknown or missing | `Other("incomplete: <reason>")` / `Other("incomplete")`; tool calls dropped | `ResponseIncomplete` error |
+
+Continuation after `interrupted` and a retry after `content_filter` are not
+implemented.
+
+The `usage` of a terminal `response.completed` / `response.incomplete` is
+optional (Codex may omit it). A missing `usage` is not reported as zero: no
+usage event or cache-reuse observation is recorded for that response, a
+`ProviderUsageMissing` diagnostic is emitted once, and context-size estimation
+uses the serialized byte estimate. Official compaction responses follow the same
+rule.
+
 ## Configuration
 
 Only credential references are written to TOML; OAuth token families and Cursor

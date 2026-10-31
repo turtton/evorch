@@ -34,7 +34,9 @@ fn captures_blob_usage_and_ignores_other_output() {
         );
     }
     assert_eq!(stream.interpret(item(json!("opaque+/="))).unwrap(), None);
-    let result = stream.interpret(completed()).unwrap().unwrap();
+    let completed = stream.interpret(completed()).unwrap().unwrap();
+    assert!(completed.usage_reported);
+    let result = completed.result;
     assert_eq!(result.encrypted_content, "opaque+/=");
     assert_eq!(
         result.usage,
@@ -53,8 +55,31 @@ fn captures_blob_usage_and_ignores_other_output() {
 fn cached_tokens_are_optional() {
     let mut stream = CompactionStream::default();
     stream.interpret(item(json!("opaque"))).unwrap();
-    let result = stream.interpret(frame(json!({"type":"response.completed", "response":{"usage":{"input_tokens":2,"output_tokens":1}}}))).unwrap().unwrap();
+    let result = stream.interpret(frame(json!({"type":"response.completed", "response":{"usage":{"input_tokens":2,"output_tokens":1}}}))).unwrap().unwrap().result;
     assert_eq!(result.usage.cache_read_tokens, 0);
+}
+
+// Given: a compaction whose response.completed has no usage (null or absent key)
+// When: interpreted / Then: the blob is still returned, but usage is marked unreported
+#[test]
+fn missing_usage_still_completes_but_is_marked_unreported() {
+    for response in [
+        json!({"id":"resp_1","usage":null}),
+        json!({"id":"resp_1"}),
+        json!({}),
+    ] {
+        let mut stream = CompactionStream::default();
+        stream.interpret(item(json!("opaque"))).unwrap();
+        let completed = stream
+            .interpret(frame(
+                json!({"type":"response.completed","response":response}),
+            ))
+            .unwrap()
+            .expect("completion");
+        assert!(!completed.usage_reported, "{response}");
+        assert_eq!(completed.result.encrypted_content, "opaque");
+        assert_eq!(completed.result.usage, Usage::default());
+    }
 }
 
 #[test]
@@ -66,9 +91,12 @@ fn rejects_missing_empty_duplicate_blob_and_invalid_usage() {
     let mut stream = CompactionStream::default();
     stream.interpret(item(json!("opaque"))).unwrap();
     assert!(stream.interpret(item(json!("second"))).is_err());
+    // usage 自体は任意だが、あれば形が正しくなければならない。
     assert!(
         stream
-            .interpret(frame(json!({"type":"response.completed", "response":{}})))
+            .interpret(frame(
+                json!({"type":"response.completed", "response":{"usage":{"input_tokens":"x"}}})
+            ))
             .is_err()
     );
 }
