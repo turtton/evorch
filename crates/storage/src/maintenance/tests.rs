@@ -705,3 +705,392 @@ fn retention_and_stripping_ignore_compressed_payloads_of_other_kinds() {
         .unwrap();
     assert_eq!(remaining, 1);
 }
+
+/// Rebuild an existing database as auto_vacuum=NONE, as every database created
+/// before INCREMENTAL was enabled, leaving a checkpointed WAL and a lease.
+fn make_none(path: &std::path::Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "auto_vacuum", 0).unwrap();
+    conn.execute_batch(
+        "VACUUM; CREATE TABLE IF NOT EXISTS ballast(x BLOB); INSERT INTO ballast VALUES (x'01');",
+    )
+    .unwrap();
+    assert_eq!(auto_vacuum(&conn), 0);
+    drop(conn);
+    drop(offline::writer_lease(path).unwrap());
+}
+
+fn legacy_none_database(path: &std::path::Path) {
+    drop(
+        Database::open(&StorageConfig {
+            db_path: path.into(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    make_none(path);
+}
+
+fn auto_vacuum(conn: &Connection) -> i64 {
+    conn.pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+        .unwrap()
+}
+
+fn file_names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn vacuum_switches_none_to_incremental_after_read_only_preview_and_verified_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let bytes = fs::read(&path).unwrap();
+    let names = file_names(dir.path());
+
+    let preview = vacuum_database(&path, &VacuumOptions::default()).unwrap();
+    assert!(preview.preview && !preview.already_incremental && !preview.vacuum);
+    assert_eq!(
+        (preview.auto_vacuum_before, preview.auto_vacuum_after),
+        (0, 0)
+    );
+    assert!(preview.backup.is_none() && preview.required_free_space_bytes > 0);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(file_names(dir.path()), names);
+
+    let applied = vacuum_database(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: None,
+        },
+    )
+    .unwrap();
+    assert!(applied.vacuum && applied.checkpoint_truncated);
+    assert_eq!(
+        (applied.auto_vacuum_before, applied.auto_vacuum_after),
+        (0, 2)
+    );
+    assert_eq!(applied.integrity_check.as_deref(), Some("ok"));
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&conn), 2);
+    let check: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ballast", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    // The backup is the verified pre-migration copy: still NONE, same data.
+    let backup = Connection::open_with_flags(
+        applied.backup.as_ref().unwrap(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(auto_vacuum(&backup), 0);
+
+    // The point of the migration: freed pages now return to the filesystem.
+    conn.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<64)
+         INSERT INTO ballast SELECT zeroblob(8192) FROM n; DELETE FROM ballast WHERE length(x) > 1;",
+    )
+    .unwrap();
+    let free: i64 = conn
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .unwrap();
+    assert!(free >= 64);
+    // Each step of incremental_vacuum releases one free page.
+    let mut vacuum = conn.prepare("PRAGMA incremental_vacuum").unwrap();
+    let mut steps = vacuum.query([]).unwrap();
+    while steps.next().unwrap().is_some() {}
+    drop(steps);
+    drop(vacuum);
+    let free: i64 = conn
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .unwrap();
+    assert_eq!(free, 0);
+}
+
+#[test]
+fn vacuum_on_an_incremental_database_is_a_noop_without_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let options = VacuumOptions {
+        apply: true,
+        backup: None,
+    };
+    vacuum_database(&path, &options).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let names = file_names(dir.path());
+
+    for apply in [false, true] {
+        let again = vacuum_database(
+            &path,
+            &VacuumOptions {
+                apply,
+                backup: None,
+            },
+        )
+        .unwrap();
+        assert!(again.already_incremental && !again.vacuum && again.backup.is_none());
+        assert_eq!((again.auto_vacuum_before, again.auto_vacuum_after), (2, 2));
+        assert!(again.integrity_check.is_none());
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(file_names(dir.path()), names);
+}
+
+#[test]
+fn vacuum_refuses_an_existing_backup_path_before_changing_the_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    legacy_none_database(&path);
+    let backup = dir.path().join("taken.db");
+    fs::write(&backup, b"keep").unwrap();
+
+    let result = vacuum_database(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: Some(backup.clone()),
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(fs::read(&backup).unwrap(), b"keep");
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&conn), 0);
+}
+
+/// Records every inotify event in one directory. The kernel queues events
+/// synchronously inside each syscall, so draining after a call returns observes
+/// even a sidecar that was created and deleted again within that call.
+#[cfg(target_os = "linux")]
+struct DirectoryWatch(std::os::fd::OwnedFd);
+
+#[cfg(target_os = "linux")]
+impl DirectoryWatch {
+    fn new(dir: &std::path::Path) -> Self {
+        use rustix::fs::inotify;
+        let fd = inotify::init(inotify::CreateFlags::NONBLOCK).unwrap();
+        inotify::add_watch(&fd, dir, inotify::WatchFlags::ALL_EVENTS).unwrap();
+        Self(fd)
+    }
+
+    /// Events on anything but the database and its lease, or any event on the
+    /// database that creates, changes, renames or deletes it.
+    fn violations(&self) -> Vec<String> {
+        use rustix::fs::inotify::{self, ReadFlags};
+        let mutating = ReadFlags::MODIFY
+            | ReadFlags::ATTRIB
+            | ReadFlags::CLOSE_WRITE
+            | ReadFlags::CREATE
+            | ReadFlags::DELETE
+            | ReadFlags::MOVED_FROM
+            | ReadFlags::MOVED_TO;
+        let mut buffer = [std::mem::MaybeUninit::uninit(); 4096];
+        let mut reader = inotify::Reader::new(&self.0, &mut buffer);
+        let mut found = Vec::new();
+        loop {
+            let event = match reader.next() {
+                Err(rustix::io::Errno::WOULDBLOCK) => break,
+                other => other.unwrap(),
+            };
+            let name = event
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let allowed = name == "events.db.maintenance-lock"
+                || name == "events.db" && !event.events().intersects(mutating);
+            if !allowed {
+                found.push(format!("{name}: {:?}", event.events()));
+            }
+        }
+        found
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn assert_untouched(watch: &DirectoryWatch) {
+    let violations = watch.violations();
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[cfg(not(target_os = "linux"))]
+struct DirectoryWatch;
+
+#[cfg(not(target_os = "linux"))]
+impl DirectoryWatch {
+    fn new(_: &std::path::Path) -> Self {
+        Self
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_untouched(_: &DirectoryWatch) {}
+
+#[test]
+fn vacuum_that_changes_nothing_never_touches_the_database_or_its_sidecars() {
+    // (legacy NONE database?, apply?, stale empty sidecars?)
+    for (none, apply, sidecars) in [
+        (false, false, false),
+        (false, true, false),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        seed(&path, &[event(Some("Title"), "completed", None)]);
+        if none {
+            make_none(&path);
+        }
+        if sidecars {
+            fs::write(crate::db::suffixed_path(&path, "-wal"), b"").unwrap();
+            fs::write(crate::db::suffixed_path(&path, "-shm"), b"").unwrap();
+        }
+        let before = directory_contents(dir.path());
+        let watch = DirectoryWatch::new(dir.path());
+
+        let summary = vacuum_database(
+            &path,
+            &VacuumOptions {
+                apply,
+                backup: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.already_incremental, !none);
+        assert!(!summary.vacuum && summary.backup.is_none());
+        assert_untouched(&watch);
+        assert_eq!(directory_contents(dir.path()), before);
+    }
+}
+
+#[test]
+fn vacuum_refuses_a_nonempty_wal_without_touching_anything() {
+    for (none, apply, keep_shm) in [
+        (false, false, true),
+        (false, true, true),
+        (false, true, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        seed(&path, &[event(Some("Title"), "completed", None)]);
+        if none {
+            make_none(&path);
+        }
+        let mut child = wal_fixture(&path);
+        assert!(child.wait().unwrap().success());
+        if !keep_shm {
+            fs::remove_file(crate::db::suffixed_path(&path, "-shm")).unwrap();
+        }
+        let before = directory_contents(dir.path());
+        assert!(!before[std::ffi::OsStr::new("events.db-wal")].is_empty());
+        let watch = DirectoryWatch::new(dir.path());
+
+        let error = vacuum_database(
+            &path,
+            &VacuumOptions {
+                apply,
+                backup: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("nonempty WAL"), "{error}");
+        assert_untouched(&watch);
+        assert_eq!(directory_contents(dir.path()), before);
+    }
+}
+
+fn logical_content(conn: &Connection) -> (Vec<Vec<u8>>, i64, String) {
+    let mut ballast = conn
+        .prepare("SELECT x FROM ballast ORDER BY rowid")
+        .unwrap();
+    let rows = ballast
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let events = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    let integrity = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    (rows, events, integrity)
+}
+
+#[test]
+fn vacuum_interrupted_after_the_backup_keeps_the_source_and_a_retry_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    seed(&path, &[event(Some("Title"), "completed", None)]);
+    make_none(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<300)
+         INSERT INTO ballast SELECT randomblob(2048) FROM n;",
+    )
+    .unwrap();
+    let expected = logical_content(&conn);
+    drop(conn);
+    drop(offline::writer_lease(&path).unwrap());
+
+    // Interrupt inside the VACUUM itself: the pragma and mode reads run far
+    // fewer VM steps than the interval, the table copy runs many more.
+    let error = vacuum::vacuum_with(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: None,
+        },
+        |conn| conn.progress_handler(50, Some(|| true)).unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().to_lowercase().contains("interrupt"),
+        "{error}"
+    );
+
+    let source = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&source), 0);
+    assert_eq!(logical_content(&source), expected);
+    drop(source);
+    let backups: Vec<_> = file_names(dir.path())
+        .into_iter()
+        .filter(|name| name.to_string_lossy().contains(".before-vacuum-"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    let backup = Connection::open_with_flags(
+        dir.path().join(&backups[0]),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(auto_vacuum(&backup), 0);
+    assert_eq!(logical_content(&backup), expected);
+
+    let retry = vacuum_database(
+        &path,
+        &VacuumOptions {
+            apply: true,
+            backup: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(retry.auto_vacuum_after, 2);
+    let migrated = Connection::open(&path).unwrap();
+    assert_eq!(auto_vacuum(&migrated), 2);
+    assert_eq!(logical_content(&migrated), expected);
+}

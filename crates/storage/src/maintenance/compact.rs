@@ -8,7 +8,7 @@ use std::{
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::{invalid, offline};
+use super::{invalid, offline, vacuum};
 use crate::{Database, EventBackfillOptions, EventBackfillSummary, StorageError};
 
 mod deltas;
@@ -70,6 +70,11 @@ pub struct CompactSummary {
     pub backup: Option<PathBuf>,
     pub required_free_space_bytes: u64,
     pub vacuum: bool,
+    /// `PRAGMA auto_vacuum` as found (0 NONE, 1 FULL, 2 INCREMENTAL).
+    pub auto_vacuum_before: i64,
+    /// Like `after`, actual state: equal to `auto_vacuum_before` in preview;
+    /// apply sets INCREMENTAL before VACUUM and verifies it reads back as 2.
+    pub auto_vacuum_after: i64,
     pub checkpoint_truncated: bool,
     pub integrity_check: Option<String>,
     pub elapsed_seconds: f64,
@@ -103,7 +108,7 @@ fn validate_batch(rows: usize) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn check_schema(conn: &Connection, minimum: u32) -> Result<(), StorageError> {
+pub(super) fn check_schema(conn: &Connection, minimum: u32) -> Result<(), StorageError> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < minimum || version as usize > crate::migrations::MIGRATIONS.len() {
         return Err(invalid(
@@ -161,6 +166,7 @@ pub fn compact_events(
         * db.conn
             .pragma_query_value(None, "page_size", |row| row.get::<_, u64>(0))?;
     let basis = logical.max(before.file_bytes.total());
+    let auto_vacuum = vacuum::auto_vacuum_mode(&db.conn)?;
     let sidebar_path = options
         .sidebar
         .clone()
@@ -196,6 +202,8 @@ pub fn compact_events(
         backup: None,
         required_free_space_bytes: basis.saturating_mul(4),
         vacuum: false,
+        auto_vacuum_before: auto_vacuum,
+        auto_vacuum_after: auto_vacuum,
         checkpoint_truncated: false,
         integrity_check: None,
         elapsed_seconds: 0.0,
@@ -208,20 +216,13 @@ pub fn compact_events(
     if options.apply {
         let parent = parent(path);
         offline::require_space(parent, basis.saturating_mul(4))?;
-        let backup = options.backup.clone().unwrap_or_else(|| {
-            let ns = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let mut name = path.as_os_str().to_os_string();
-            name.push(format!(".before-compact-events-{ns}.db"));
-            name.into()
-        });
-        offline::require_space(self::parent(&backup), basis.saturating_mul(4))?;
-        backup_database(&db.conn, &backup)?;
-        // Emit the path before the first source mutation, including interrupted runs.
-        eprintln!("Verified maintenance backup: {}", backup.display());
-        summary.backup = Some(backup);
+        summary.backup = Some(create_backup(
+            &db.conn,
+            path,
+            options.backup.as_deref(),
+            "before-compact-events",
+            basis,
+        )?);
         summary.backfill = db.backfill_event_columns(&EventBackfillOptions {
             batch_rows: options.batch_rows,
             max_rows: None,
@@ -263,7 +264,9 @@ pub fn compact_events(
     if options.apply {
         recalculate_accounting(&db.conn)?;
         offline::require_space(parent(path), basis.saturating_mul(2))?;
-        db.conn.execute_batch("VACUUM;")?;
+        // Existing databases stay auto_vacuum=NONE unless the rebuild also
+        // switches the mode; this is the only place that is safe to do so.
+        summary.auto_vacuum_after = vacuum::rebuild_incremental(&db.conn)?;
         summary.vacuum = true;
         let busy: i64 = db
             .conn
@@ -301,10 +304,35 @@ pub fn compact_events(
     Ok(summary)
 }
 
-fn parent(path: &Path) -> &Path {
+pub(super) fn parent(path: &Path) -> &Path {
     path.parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
+}
+
+/// Verified `VACUUM INTO` backup shared by the offline maintenance commands.
+/// The default name is `<db>.<label>-<unix-ns>.db`; an explicit one must be new.
+pub(super) fn create_backup(
+    conn: &Connection,
+    path: &Path,
+    requested: Option<&Path>,
+    label: &str,
+    basis: u64,
+) -> Result<PathBuf, StorageError> {
+    let backup = requested.map(Path::to_path_buf).unwrap_or_else(|| {
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".{label}-{ns}.db"));
+        name.into()
+    });
+    offline::require_space(parent(&backup), basis.saturating_mul(4))?;
+    backup_database(conn, &backup)?;
+    // Emit the path before the first source mutation, including interrupted runs.
+    eprintln!("Verified maintenance backup: {}", backup.display());
+    Ok(backup)
 }
 
 fn backup_database(conn: &Connection, path: &Path) -> Result<(), StorageError> {
@@ -334,7 +362,7 @@ fn backup_database(conn: &Connection, path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
+pub(super) fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
     let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if result != "ok" {
         return Err(invalid(format!("integrity_check failed: {result}")));

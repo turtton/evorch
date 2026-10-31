@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, types::FromSql};
@@ -15,6 +16,10 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 /// SQLite の `PRAGMA auto_vacuum` で incremental モードを示す値です。
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// legacy DB の警告をプロセスあたり 1 回に抑えるためのフラグです
+/// （writer / reader の接続ごとに `open` が呼ばれます）。
+static LEGACY_AUTO_VACUUM_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// 初期化済み SQLite 接続を所有します。
 #[derive(Debug)]
@@ -83,9 +88,14 @@ fn pragma_init(conn: &Connection) -> Result<(), StorageError> {
 /// - 既存 DB の `auto_vacuum=FULL`(1): pointer-map 構造が既に存在するため、
 ///   INCREMENTAL への変更は full VACUUM なしで安全に適用できます（移行します）。
 /// - 既存 DB の `auto_vacuum` 未設定(0): 反映に DB 全体の再書き込み（full VACUUM）
-///   が必要になるため変更せず、診断ログで非アクティブであることを通知します
+///   が必要になるため変更せず、プロセスあたり 1 回だけ警告ログを出して
+///   `evorch maintenance vacuum` を案内します
 ///   （起動時に既存接続を長時間 block する破壊的移行は行わない方針）。
 fn init_auto_vacuum(conn: &Connection) -> Result<(), StorageError> {
+    init_auto_vacuum_with(conn, &LEGACY_AUTO_VACUUM_WARNED)
+}
+
+fn init_auto_vacuum_with(conn: &Connection, warned: &AtomicBool) -> Result<(), StorageError> {
     const AUTO_VACUUM_NONE: i64 = 0;
     const AUTO_VACUUM_FULL: i64 = 1;
     let mode: i64 = conn.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
@@ -102,9 +112,12 @@ fn init_auto_vacuum(conn: &Connection) -> Result<(), StorageError> {
     if page_count == 0 {
         conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     } else {
-        tracing::info!(
-            "existing database keeps auto_vacuum=NONE; incremental vacuum stays inactive until manual VACUUM"
-        );
+        if !warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "existing database has auto_vacuum=NONE, so deleted rows cannot be returned to the filesystem while running; \
+                 stop all evorch processes and run `evorch maintenance vacuum --apply` once (add --db <path> for a non-default database)"
+            );
+        }
     }
     Ok(())
 }
@@ -295,6 +308,103 @@ mod tests {
             .pragma_i64("auto_vacuum")
             .expect("pragma must read");
         assert_eq!(mode, 0, "existing database must not be force-migrated");
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8(logs.0.lock().expect("log buffer").clone()).expect("utf8");
+        (value, text)
+    }
+
+    #[test]
+    fn legacy_database_warns_once_per_flag_without_changing_the_mode_or_file() {
+        // Given: a legacy auto_vacuum=NONE database and a fresh once-flag
+        let temp_dir = tempfile::tempdir().expect("temporary directory must be created");
+        let db_path = temp_dir.path().join("legacy.db");
+        {
+            let raw = Connection::open(&db_path).expect("legacy database must open");
+            raw.execute_batch("CREATE TABLE t (x BLOB); INSERT INTO t VALUES (zeroblob(8192));")
+                .expect("legacy schema must be created");
+        }
+        let bytes = std::fs::read(&db_path).expect("db file must be readable");
+        let warned = AtomicBool::new(false);
+
+        // When: several connections initialize it, as writer and readers do
+        let (modes, logs) = captured(|| {
+            (0..3)
+                .map(|_| {
+                    let conn = Connection::open(&db_path).expect("database must open");
+                    init_auto_vacuum_with(&conn, &warned).expect("init must succeed");
+                    conn.pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))
+                        .expect("pragma must read")
+                })
+                .collect::<Vec<_>>()
+        });
+
+        // Then: one warning names the command, the mode and file stay untouched
+        assert_eq!(
+            logs.matches("evorch maintenance vacuum").count(),
+            1,
+            "{logs}"
+        );
+        assert!(logs.contains("WARN"), "{logs}");
+        assert_eq!(modes, [0, 0, 0]);
+        assert_eq!(
+            std::fs::read(&db_path).expect("db file must be readable"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn incremental_database_does_not_warn_and_keeps_its_mode() {
+        // Given: a database that already is INCREMENTAL
+        let temp_dir = tempfile::tempdir().expect("temporary directory must be created");
+        let config = StorageConfig {
+            db_path: temp_dir.path().join("fresh.db"),
+            ..Default::default()
+        };
+        drop(Database::open(&config).expect("fresh database must open"));
+        let warned = AtomicBool::new(false);
+
+        // When: it is initialized again
+        let (mode, logs) = captured(|| {
+            let conn = Connection::open(&config.db_path).expect("database must open");
+            init_auto_vacuum_with(&conn, &warned).expect("init must succeed");
+            conn.pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))
+                .expect("pragma must read")
+        });
+
+        // Then: no warning and the mode is unchanged
+        assert_eq!(mode, 2);
+        assert!(logs.is_empty(), "{logs}");
+        assert!(!warned.load(Ordering::Relaxed));
     }
 
     #[test]
