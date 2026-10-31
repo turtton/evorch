@@ -2397,6 +2397,7 @@ fn a_deleted_run_with_thousands_of_pending_index_requests_closes_them_all_in_bou
     // When: reclaim runs one transaction at a time.
     let storage = Storage::open(config(&f.path)).unwrap();
     let mut most = 0;
+    let mut reported = 0;
     for _ in 0..1_000 {
         let before =
             f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
@@ -2410,6 +2411,7 @@ fn a_deleted_run_with_thousands_of_pending_index_requests_closes_them_all_in_bou
         let after =
             f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
         most = most.max(before - after);
+        reported += progress.rows;
         if progress.jobs_db_pending == 0 {
             break;
         }
@@ -2418,6 +2420,15 @@ fn a_deleted_run_with_thousands_of_pending_index_requests_closes_them_all_in_bou
 
     // Then: no transaction closed more than a batch, and every target is a gap.
     assert!(most > 0 && most <= 200, "{most}");
+    // And: closing targets is an update, not a deletion, so it is not counted as one.
+    assert!(
+        reported < 100,
+        "{reported} rows reported for a family of about twenty"
+    );
+    assert_eq!(
+        f.count("SELECT reclaimed_rows FROM reclaim_jobs"),
+        i64::try_from(reported).unwrap()
+    );
     assert_eq!(
         f.count("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'gap'"),
         1000
@@ -2788,6 +2799,54 @@ fn thousands_of_tasks_and_links_are_reclaimed_task_by_task_through_a_cursor() {
         ),
         1
     );
+}
+
+#[test]
+fn stale_registrations_do_not_stop_the_exclusive_phase_from_reaching_a_real_one() {
+    // Given: 300 registrations whose rows are gone, sorting before one real 5 MiB row.
+    let f = Fixture::new();
+    f.run("big-real", None, None, "big");
+    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'big-real'");
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 300)
+         INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
+         SELECT 'A', 'run_contexts', printf('gone-%04d', x), x FROM n;
+         INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
+         VALUES ('A', 'run_contexts', 'big-real', 5242880);",
+    );
+    let database = f.database();
+
+    // When: the exclusive phase is called with a zero budget.
+    let first = database.reclaim_oversized_step(0).unwrap();
+
+    // Then: the first call only gets through the stale ones, without an error,
+    // and repeating until nothing remains reaches the real row.
+    assert_eq!((first.rows, first.last_error), (0, None));
+    assert!(first.remaining > 0);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_contexts WHERE run_id = 'big-real'"),
+        1
+    );
+    let mut calls = 1;
+    let mut deleted = first.rows;
+    while database
+        .reclaim_oversized_step(0)
+        .map(|progress| {
+            deleted += progress.rows;
+            progress.remaining
+        })
+        .unwrap()
+        > 0
+    {
+        calls += 1;
+        assert!(calls < 20);
+    }
+    assert_eq!(deleted, 1);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_contexts WHERE run_id = 'big-real'"),
+        0
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 0);
 }
 
 #[test]

@@ -815,7 +815,11 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         let pending =
             db.int("SELECT COUNT(*) FROM thread_index_request_targets WHERE state = 'pending'");
         assert_eq!(pending, targets - 400, "two steps close 200 targets each");
-        assert_eq!(progress.rows, 200, "{progress:?}");
+        assert_eq!(
+            progress.rows, 0,
+            "closed targets are updated, not deleted: {progress:?}"
+        );
+        assert_eq!(db.int("SELECT reclaimed_rows FROM reclaim_jobs"), 0);
         (frames, counters)
     };
     let (short_frames, short) = gap_work(500);
@@ -869,6 +873,164 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         (short.2, short.3, long.2, long.3),
         (0, 0, 0, 0),
         "no sort or automatic index"
+    );
+
+    // Choosing and counting jobs reads the same whatever mix of runnable and
+    // exclusive-waiting jobs exists: each kind has its own index, so neither skips
+    // over the other. Counts stop at 1,000, so the sizes compared are both above it.
+    let job_work = |waiting: i64, runnable: i64, runnable_sorts_last: bool| {
+        let db = Db::new();
+        let (waiting_prefix, runnable_prefix) = if runnable_sorts_last {
+            ("a", "z")
+        } else {
+            ("z", "a")
+        };
+        for (count, prefix, cursor, waits) in [
+            (waiting, waiting_prefix, r#"{"phase":"finished"}"#, 1),
+            (runnable, runnable_prefix, "{}", 0),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            db.sql(&format!(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {count})
+                 INSERT INTO reclaim_jobs(family_key, state, cursor_json, waiting_exclusive, created_at_ns,
+                     updated_at_ns)
+                 SELECT printf('{prefix}-%06d', x), 'db_pending', '{cursor}', {waits}, 1, 1 FROM n;"
+            ));
+        }
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (counters, progress) = one_step_scans(&storage);
+        storage.close();
+        (counters, progress)
+    };
+    // All exclusive-waiting: nothing runs and the count saturates.
+    let (short, short_progress) = job_work(1_500, 0, true);
+    let (long, long_progress) = job_work(6_000, 0, true);
+    assert_eq!(
+        (short_progress.transactions, long_progress.transactions),
+        (0, 0)
+    );
+    assert_eq!(
+        (
+            short_progress.jobs_waiting_exclusive,
+            long_progress.jobs_waiting_exclusive
+        ),
+        (1_000, 1_000)
+    );
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "all waiting: {short:?} / {long:?}"
+    );
+    // All runnable.
+    let (short, short_progress) = job_work(0, 1_500, true);
+    let (long, long_progress) = job_work(0, 6_000, true);
+    assert_eq!(
+        (short_progress.transactions, long_progress.transactions),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            short_progress.jobs_db_pending,
+            long_progress.jobs_db_pending
+        ),
+        (1_000, 1_000)
+    );
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "all runnable: {short:?} / {long:?}"
+    );
+    // One runnable job behind a great many waiting ones in key order.
+    let (short, short_progress) = job_work(1_500, 1, true);
+    let (long, long_progress) = job_work(6_000, 1, true);
+    assert_eq!(
+        (short_progress.transactions, long_progress.transactions),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            short_progress.jobs_waiting_exclusive,
+            long_progress.jobs_waiting_exclusive
+        ),
+        (1_000, 1_000)
+    );
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "runnable last: {short:?} / {long:?}"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+
+    // Merging a family into one with a smaller key rewrites its staging: that cost
+    // follows the staging kept from earlier calls, not the edge budget (documented
+    // on `ExploreBudget`), and it is linear in it.
+    let merge_work = |children: i64| {
+        let db = Db::new();
+        db.sql(&format!(
+            "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns, updated_at_ns, source)
+             VALUES ('Z', '/p', 'rz', 1, 1, 1, 'host'), ('A', '/p', NULL, 1, 1, 1, 'host');
+             UPDATE threads SET escalation_source_run_id = 'c-000001' WHERE thread_id = 'A';
+             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+                 terminal_phase, restorable, updated_at_ns)
+             VALUES ('rz', 'Worker', 'chat:Worker:Z', '{{}}', '[]', '[]', 'Done', 1, 1);
+             INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('rz', 'Z', 'rz', 0);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {children})
+             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+                 checkpoints_json, terminal_phase, restorable, updated_at_ns)
+             SELECT printf('c-%06d', x), 'Worker', 'child', 'rz', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+        ));
+        let thread = |id: &str| SidebarThread {
+            thread_id: id.into(),
+            archived: true,
+            archived_at_s: None,
+            pinned: false,
+            updated_at_s: 1,
+            created_at_s: 1,
+            archive_revision: None,
+            pin_revision: None,
+        };
+        let sidebar = |ids: &[&str]| RetentionInput {
+            threads: ids.iter().map(|id| thread(id)).collect(),
+            sidebar_path: "/s".into(),
+            ownership_root: "/r".into(),
+            now_ns: NOW_NS,
+        };
+        let database = Database::open(&config(&db.path)).unwrap();
+        let policy = ThreadRetentionPolicy::default();
+        // Z alone is explored completely first.
+        database
+            .retention_explore(
+                &sidebar(&["Z"]),
+                &policy,
+                ExploreBudget {
+                    max_edges: 1_000_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM retention_staging WHERE kind = 'run'"),
+            children + 1
+        );
+        // Then A joins, and its first small-budget call finds Z's runs.
+        steps_of(|| {
+            database
+                .retention_explore(
+                    &sidebar(&["A", "Z"]),
+                    &policy,
+                    ExploreBudget { max_edges: 10 },
+                )
+                .unwrap();
+        })
+    };
+    let small = merge_work(1_000);
+    let large = merge_work(4_000);
+    assert!(small > 1_000, "merging moves the staged rows: {small}");
+    assert!(
+        large <= small * 5,
+        "merge cost is not linear in the staging: {small} steps for 1k runs, {large} for 4k"
     );
 
     // The attribution backfill rewrites whole rows, so its frames follow the bytes it touches.

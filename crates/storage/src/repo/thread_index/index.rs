@@ -722,6 +722,7 @@ pub(crate) fn purge_index_rows_with(
 ) -> Result<PurgeProgress, StorageError> {
     let idle = PurgeProgress {
         rows: 0,
+        gapped: 0,
         text_bytes: 0,
         remaining: false,
         oversized: false,
@@ -849,7 +850,8 @@ pub(crate) fn purge_index_rows_with(
             }
         }
         Ok(PurgeProgress {
-            rows: ids.len() + gapped,
+            rows: ids.len(),
+            gapped,
             text_bytes,
             remaining: !finished,
             oversized,

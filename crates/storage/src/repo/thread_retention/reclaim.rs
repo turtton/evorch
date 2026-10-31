@@ -61,8 +61,13 @@ struct Cursor {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Work {
+    /// Rows deleted.
     rows: u64,
+    /// Stored bytes of the deleted rows.
     bytes: u64,
+    /// Rows changed without being deleted (request targets closed as gaps). They
+    /// use the step's row budget and end the transaction, but are not reclaimed rows.
+    updated: u64,
 }
 
 /// Run tables in deletion order: (table, predicate on `?1`). Ledger rows need a grant.
@@ -280,6 +285,7 @@ fn events_run(
     Ok(Work {
         rows: ids.len() as u64,
         bytes,
+        ..Work::default()
     })
 }
 
@@ -339,6 +345,7 @@ fn events_thread(
     Ok(Work {
         rows: ids.len() as u64,
         bytes,
+        ..Work::default()
     })
 }
 
@@ -381,6 +388,7 @@ fn run_tables(
     Ok(Work {
         rows: deleted as u64,
         bytes: 0,
+        ..Work::default()
     })
 }
 
@@ -413,6 +421,7 @@ fn index(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
     Ok(Work {
         rows: progress.rows as u64,
         bytes: progress.text_bytes,
+        updated: progress.gapped as u64,
     })
 }
 
@@ -441,7 +450,11 @@ fn run_contexts(
         }
         Some(bytes) => {
             tx.execute("DELETE FROM run_contexts WHERE run_id = ?1", [&run])?;
-            work = Work { rows: 1, bytes };
+            work = Work {
+                rows: 1,
+                bytes,
+                ..Work::default()
+            };
         }
     }
     advance_run(tx, family, cursor)?;
@@ -514,6 +527,7 @@ fn tasks(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
             Ok(Work {
                 rows: seqs.len() as u64,
                 bytes: 0,
+                ..Work::default()
             })
         }
         1 => {
@@ -543,6 +557,7 @@ fn tasks(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
             Ok(Work {
                 rows: deleted as u64,
                 bytes: 0,
+                ..Work::default()
             })
         }
         2 => {
@@ -571,6 +586,7 @@ fn tasks(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
             Ok(Work {
                 rows: deleted as u64,
                 bytes: 0,
+                ..Work::default()
             })
         }
         _ => {
@@ -635,6 +651,7 @@ fn take_untracked(
     Ok(Untracked::Taken(Work {
         rows: rowids.len() as u64,
         bytes,
+        ..Work::default()
     }))
 }
 
@@ -686,7 +703,11 @@ fn thread_tables(
                     "DELETE FROM thread_start_states WHERE thread_id = ?1",
                     [&thread],
                 )?;
-                work = Work { rows: 1, bytes };
+                work = Work {
+                    rows: 1,
+                    bytes,
+                    ..Work::default()
+                };
             }
         }
         match next_thread(tx, family, &thread)? {
@@ -728,7 +749,7 @@ fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageErro
         let step = do_phase(&tx, family, &mut cursor)?;
         work.rows += step.rows;
         work.bytes += step.bytes;
-        if scanning || step.rows > 0 || step.bytes > 0 {
+        if scanning || step.rows > 0 || step.bytes > 0 || step.updated > 0 {
             break;
         }
         empty += 1;
@@ -751,8 +772,8 @@ fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageErro
     }
     tx.execute(
         "UPDATE reclaim_jobs SET state = ?2, cursor_json = ?3, updated_at_ns = ?4, \
-         reclaimed_rows = reclaimed_rows + ?5, reclaimed_stored_bytes = reclaimed_stored_bytes + ?6 \
-         WHERE family_key = ?1",
+         reclaimed_rows = reclaimed_rows + ?5, reclaimed_stored_bytes = reclaimed_stored_bytes + ?6, \
+         waiting_exclusive = ?7 WHERE family_key = ?1",
         params![
             family,
             new_state,
@@ -761,6 +782,8 @@ fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageErro
             now_ns(),
             i64::try_from(work.rows).unwrap_or(i64::MAX),
             i64::try_from(work.bytes).unwrap_or(i64::MAX),
+            // Only the exclusive phase can move a job on from here.
+            i64::from(finished && new_state == "db_pending"),
         ],
     )?;
     tx.commit()?;
@@ -793,9 +816,8 @@ pub(crate) fn reclaim_step(
     let families: Vec<String> = {
         // Every job takes at least one transaction, so the budget bounds the list.
         let mut statement = conn.prepare_cached(
-            "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_pending \
-             WHERE state = 'db_pending' \
-             AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished' \
+            "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_runnable \
+             WHERE state = 'db_pending' AND waiting_exclusive = 0 \
              ORDER BY family_key LIMIT ?1",
         )?;
         statement
@@ -828,13 +850,13 @@ pub(crate) fn reclaim_step(
     // phase is not runnable: it takes no transaction and blocks no other job.
     progress.jobs_db_pending = count(
         conn,
-        "FROM reclaim_jobs WHERE state = 'db_pending' \
-         AND COALESCE(json_extract(cursor_json, '$.phase'), '') <> 'finished'",
+        "FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_runnable \
+         WHERE state = 'db_pending' AND waiting_exclusive = 0",
     )?;
     progress.jobs_waiting_exclusive = count(
         conn,
-        "FROM reclaim_jobs WHERE state = 'db_pending' \
-         AND COALESCE(json_extract(cursor_json, '$.phase'), '') = 'finished'",
+        "FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_waiting \
+         WHERE state = 'db_pending' AND waiting_exclusive = 1",
     )?;
     progress.jobs_done = count(
         conn,
@@ -851,12 +873,16 @@ pub(crate) fn reclaim_step(
 /// call or loop pass continues it, so no transaction deletes more than one batch
 /// or one oversized row. A failure leaves the registration and stops the step.
 ///
-/// `rows` and `stored_bytes` count what was actually deleted.
+/// `rows` and `stored_bytes` count what was actually deleted. A call looks at no more
+/// than [`MAX_OVERSIZED_PER_CALL`] registrations, so when its first ones are already
+/// gone it can return `rows == 0` with `remaining > 0` and no error: callers must
+/// repeat until `remaining == 0`, never until `rows == 0`.
 pub(crate) fn reclaim_oversized_step(
     conn: &Connection,
     budget_bytes: u64,
 ) -> Result<OversizedProgress, StorageError> {
     let mut progress = OversizedProgress::default();
+    let mut worked = false;
     // Registrations whose rows are already gone delete nothing; the cap keeps a call
     // from walking through any number of them.
     for _ in 0..MAX_OVERSIZED_PER_CALL {
@@ -871,11 +897,12 @@ pub(crate) fn reclaim_oversized_step(
         let Some((family, table, key, bytes)) = next else {
             break;
         };
-        if progress.rows > 0 && progress.stored_bytes.saturating_add(bytes) > budget_bytes {
+        if worked && progress.stored_bytes.saturating_add(bytes) > budget_bytes {
             break;
         }
         match delete_oversized(conn, &family, &table, &key) {
             Ok(work) => {
+                worked |= work.rows > 0 || work.updated > 0;
                 progress.rows += work.rows;
                 progress.stored_bytes = progress.stored_bytes.saturating_add(work.bytes);
             }
@@ -917,6 +944,7 @@ fn delete_oversized(
                 work = Work {
                     rows: 1,
                     bytes: size,
+                    ..Work::default()
                 };
             }
             (work, true)
@@ -934,6 +962,7 @@ fn delete_oversized(
                 Work {
                     rows: progress.rows as u64,
                     bytes: progress.text_bytes,
+                    ..Work::default()
                 },
                 !progress.remaining,
             )
@@ -952,6 +981,7 @@ fn delete_oversized(
                 Work {
                     rows: deleted as u64,
                     bytes: size.unwrap_or(0),
+                    ..Work::default()
                 },
                 true,
             )
@@ -975,6 +1005,7 @@ fn delete_oversized(
                     Work {
                         rows: deleted as u64,
                         bytes: size.unwrap_or(0),
+                        ..Work::default()
                     },
                     true,
                 )
@@ -1005,8 +1036,8 @@ fn delete_oversized(
     )?;
     // The job's bounded walk is over and its last oversized row is gone.
     tx.execute(
-        "UPDATE reclaim_jobs SET state = 'db_done' WHERE family_key = ?1 AND state = 'db_pending' \
-         AND json_extract(cursor_json, '$.phase') = 'finished' \
+        "UPDATE reclaim_jobs SET state = 'db_done', waiting_exclusive = 0 \
+         WHERE family_key = ?1 AND state = 'db_pending' AND waiting_exclusive = 1 \
          AND NOT EXISTS (SELECT 1 FROM reclaim_oversized WHERE family_key = ?1)",
         [family],
     )?;

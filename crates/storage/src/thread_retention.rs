@@ -121,6 +121,14 @@ pub enum BlockReason {
 /// (at most 65 parent rows). A walk starts only while budget is left, so a call
 /// reads at most 65 rows more than `max_edges`; the next call resumes from the
 /// stored position, so repeated calls always finish.
+///
+/// The budget limits only the **new edges** a call explores. It is not a bound on
+/// the total work of a call. Three kinds of work follow the amount of staging kept
+/// from earlier calls instead: merging two families rewrites the staging rows of the
+/// one with the larger key, discarding a family (unresolved, or the feature turned
+/// off) deletes its staging rows, and reporting a fully explored family lists its
+/// members. Callers run `retention_explore` only in the exclusive startup phase and
+/// must not read `max_edges` as a limit on I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExploreBudget {
     pub max_edges: u64,
@@ -408,9 +416,12 @@ impl Database {
         crate::repo::thread_retention::finalize_budget(&self.conn, family_key)
     }
 
-    /// Delete rows too large for a bounded step, smallest first, at least one per
-    /// call while any is waiting, until about `budget_bytes` are gone. Same
-    /// exclusivity requirement as [`Self::retention_explore`].
+    /// Delete rows too large for a bounded step, smallest first, until about
+    /// `budget_bytes` are gone. Each call works off at least one batch of an existing
+    /// registration, except that it looks at no more than 256 registrations: when its
+    /// first ones are already gone it returns `rows == 0` with `remaining > 0`.
+    /// Repeat until `remaining == 0` (never until `rows == 0`). Same exclusivity
+    /// requirement as [`Self::retention_explore`].
     ///
     /// # Errors
     /// Returns an error if SQLite access fails.

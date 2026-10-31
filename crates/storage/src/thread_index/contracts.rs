@@ -152,7 +152,10 @@ pub enum PurgeTarget {
 /// One bounded purge step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PurgeProgress {
+    /// Blocks deleted.
     pub rows: usize,
+    /// Request targets closed as gaps; they share the step's row budget.
+    pub gapped: usize,
     pub text_bytes: u64,
     /// More blocks (or the final state change) are left for a later step.
     pub remaining: bool,

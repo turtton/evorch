@@ -80,13 +80,14 @@ const EXPECTED_TABLES: [&str; 64] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 65] = [
+const EXPECTED_INDICES: [&str; 66] = [
     "idx_artifact_refs_sha",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
     "idx_retention_staging_member",
     "idx_run_contexts_chat_thread",
-    "idx_reclaim_jobs_pending",
+    "idx_reclaim_jobs_runnable",
+    "idx_reclaim_jobs_waiting",
     "idx_reclaim_jobs_state",
     "idx_reclaim_oversized_order",
     "idx_run_tombstones_family",

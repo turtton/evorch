@@ -82,6 +82,8 @@ CREATE TABLE reclaim_jobs (
     state TEXT NOT NULL CHECK (state IN
         ('db_pending', 'db_done', 'files_pending', 'done', 'files_failed')),
     cursor_json TEXT NOT NULL DEFAULT '{}',
+    -- 1 once the bounded walk is over and only the exclusive phase can finish the job.
+    waiting_exclusive INTEGER NOT NULL DEFAULT 0 CHECK (waiting_exclusive IN (0, 1)),
     created_at_ns INTEGER NOT NULL,
     updated_at_ns INTEGER NOT NULL,
     estimate_bytes INTEGER NOT NULL DEFAULT 0,
@@ -97,8 +99,12 @@ CREATE TABLE reclaim_oversized (
 ) WITHOUT ROWID;
 -- The exclusive phase takes the smallest registration first.
 CREATE INDEX idx_reclaim_oversized_order ON reclaim_oversized(stored_bytes, family_key, tbl, key);
--- Runnable jobs in key order, and job counts by state, without reading every job.
-CREATE INDEX idx_reclaim_jobs_pending ON reclaim_jobs(family_key) WHERE state = 'db_pending';
+-- Runnable and exclusive-waiting jobs in key order, and counts by state, each read
+-- straight from its own index.
+CREATE INDEX idx_reclaim_jobs_runnable ON reclaim_jobs(family_key)
+    WHERE state = 'db_pending' AND waiting_exclusive = 0;
+CREATE INDEX idx_reclaim_jobs_waiting ON reclaim_jobs(family_key)
+    WHERE state = 'db_pending' AND waiting_exclusive = 1;
 CREATE INDEX idx_reclaim_jobs_state ON reclaim_jobs(state);
 
 -- Append-only ledgers may only lose rows a reclaim step granted in the same

@@ -153,6 +153,10 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   （採番前の GUI が連続して編集できる）、未採番と採番済み（`Some(0)` を含む）は同世代
   として保護側を採り、採番を一度でも受けた系列は未採番では上書きできない。host が採番
   するようになったら、この未採番の経路と 2 列を廃止する（PR-4 の申し送り）。
+- **予算の意味。** `ExploreBudget` / `FinalizeBudget` が制限するのは新しく読む辺の数だけで、1 回の呼び出しの総 I/O ではない。
+  2 つの family を併合するときの staging 行の付け替え、family 破棄（unresolved・機能の無効化）での staging 削除、
+  探索済み family のメンバー一覧の読み出しは、以前に溜めた staging の量に比例する。起動時の排他フェーズで
+  だけ呼ぶこと（通常回収の固定サイズ transaction とは別枠）。
 - **除外。** pinned、評価サンプル（`eval_samples`）、owner が保持する thread
   （`owner_blocks`）、family に非 due・未アーカイブ・sidebar 未知のメンバーがいる場合は
   確定しない。`archived_delete_after_days = 0` は新規確定を行わない（staging は破棄、
@@ -182,8 +186,10 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   最低 1 batch。`rows` / `stored_bytes` と job の `reclaimed_*` は実際に消した分だけを数える。
   失敗した行は登録が残る。索引の終端（run の保留中 request target を gap にする更新）も同じ batch の行数予算に含め、
   終わるまで run の索引行は `deleted` にならない。次の登録は `stored_bytes` 順の索引から選び、
-  1 回の呼び出しが見る登録は 256 件まで。`reclaim_step` / `reclaim_oversized_step` が返す件数
-  （`jobs_*`、`oversized_pending`、`remaining`）は 1,000 で頭打ちになり、job や登録の数に比例して読まない。
+  1 回の呼び出しが見る登録は 256 件までで、先頭の登録がすべて削除済みなら `rows == 0` のまま
+  `remaining > 0` で返る。終了条件は常に `remaining == 0`。`reclaim_step` / `reclaim_oversized_step` が返す件数
+  （`jobs_*`、`oversized_pending`、`remaining`）は 1,000 で頭打ちになり、job や登録の数に比例して読まない。実行可能な job と排他待ちの job は `waiting_exclusive` 列と専用の部分索引で
+  別々に引く。gap にした request target は「更新した行」で、`rows` / `reclaimed_rows` には数えない。
   tasks・links は tombstone を task id 順の cursor でたどり、ledger と todo の走査は
   行ごとに tombstone を点引きするため、family の大きさで 1 step の読み取りは増えない。通常 step の残りが無く排他回収だけを待つ job
   （`jobs_waiting_exclusive`）は transaction を消費せず、後ろの job を止めない。`reclaim_mark_files` はファイル削除の結果を
