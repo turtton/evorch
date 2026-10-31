@@ -126,7 +126,7 @@ async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup()
     let server = MockServer::start().await;
     let version = providers::CODEX_CLIENT_VERSION;
     Mock::given(method("GET"))
-        .and(path("/models"))
+        .and(path("/backend-api/codex/models"))
         .and(wiremock::matchers::query_param("client_version", version))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"models": [{"slug": "gpt-4o"}]})),

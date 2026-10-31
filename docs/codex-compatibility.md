@@ -57,7 +57,7 @@ evorch does not emit `stream_options` or `client_metadata`.
 | `include` | `["reasoning.encrypted_content"]`; cleared on the compaction request (difference) |
 | `prompt_cache_key` | Omitted for Codex (Codex permits omitting it) |
 | `text` | `verbosity` is the model's `default_verbosity` when the catalog says the model supports verbosity; `format` only for structured output, with evorch's schema name and strict flag (difference). No per-request verbosity setting exists yet |
-| `service_tier` | Sent when requested (priority). Omitted, with a warning, when the catalog lists service tiers for the model but not `priority` (Codex checks the advertised tiers too). With no catalog entry or no tier list it is sent as requested |
+| `service_tier` | Sent when requested (priority). When the model's catalog entry was fetched, it is sent only if the entry's `service_tiers` contains `priority`; a missing or empty list, other tiers, and a bare `additional_speed_tiers: ["fast"]` (the UI's fast support, not a wire advertisement) all omit it with a warning, as Codex checks the advertised tiers. With no fetched entry (no catalog, failed read, model not listed) it is sent as requested. The attempt observation records the tier actually sent |
 | `max_output_tokens`, `temperature` | Never sent for Codex; matches |
 
 ### Model catalog and request shape
@@ -67,8 +67,11 @@ The model catalog (`GET {base}/models?client_version=0.166.0`, with the same
 keeps what the shape needs: `use_responses_lite`, `default_reasoning_level`,
 `supported_reasoning_levels`, `supports_reasoning_summary_parameter`,
 `support_verbosity`, `default_verbosity`, and whether `priority` is advertised. Every
-capability field is optional and malformed values fall back to their defaults, so an
-unfamiliar catalog never blocks requests. The usable context window is `context_window`
+capability field is optional and malformed values (including malformed
+`service_tiers` / `additional_speed_tiers` lists, which then advertise nothing) fall back
+to their defaults, so an unfamiliar catalog never blocks requests. The catalog is read
+from the same normalized base URL as `/responses` (`https://chatgpt.com/backend-api/codex`
+for a bare host or a base ending in `/responses`). The usable context window is `context_window`
 or, when that is missing or zero, `max_context_window`.
 
 A `CodexClient` reads the catalog **once for its lifetime**, on first use by a

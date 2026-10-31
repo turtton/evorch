@@ -231,15 +231,22 @@ async fn catalog_capabilities_follow_the_0166_models_json() {
     );
 }
 
+/// What a fetched entry with no capability fields describes: the legacy defaults, and no
+/// advertised `priority` tier.
+fn fetched_default() -> providers::CodexModelCapabilities {
+    providers::CodexModelCapabilities {
+        priority_tier: Some(false),
+        ..providers::CodexModelCapabilities::default()
+    }
+}
+
 #[tokio::test]
-async fn catalog_without_capability_fields_describes_an_unknown_model() {
+async fn catalog_without_capability_fields_keeps_the_legacy_shape_except_for_tiers() {
     // Given: an older catalog entry that lists only the slug
-    // When / Then: its capabilities equal the default, which keeps the legacy request shape
+    // When / Then: its capabilities equal the default except that the fetched entry does not
+    // advertise priority (the wire stops sending it); the rest keeps the legacy request shape
     let models = fetch(serde_json::json!({"models": [{"slug": "plain"}]})).await;
-    assert_eq!(
-        models[0].capabilities,
-        providers::CodexModelCapabilities::default()
-    );
+    assert_eq!(models[0].capabilities, fetched_default());
     assert!(models[0].capabilities.supports_reasoning_summary_parameter);
 }
 
@@ -262,10 +269,7 @@ async fn catalog_tolerates_malformed_capability_fields() {
     // Then: the catalog is accepted and the odd fields fall back to their defaults
     assert_eq!(models.len(), 2);
     assert_eq!(models[0].context_window, Some(100));
-    assert_eq!(
-        models[0].capabilities,
-        providers::CodexModelCapabilities::default()
-    );
+    assert_eq!(models[0].capabilities, fetched_default());
     // A mixed list is malformed as a whole and falls back as a whole.
     assert!(models[1].capabilities.supported_reasoning_levels.is_empty());
 }
@@ -281,7 +285,8 @@ async fn catalog_context_window_falls_back_to_max_and_priority_follows_advertise
         {"slug": "empty-tiers", "service_tiers": []},
         {"slug": "other-tier", "service_tiers": [{"id": "flex"}]},
         {"slug": "priority", "service_tiers": [{"id": "priority"}]},
-        {"slug": "legacy-fast", "additional_speed_tiers": ["fast"]}
+        {"slug": "legacy-fast", "additional_speed_tiers": ["fast"]},
+        {"slug": "empty-and-fast", "service_tiers": [], "additional_speed_tiers": ["fast"]}
     ]}))
     .await;
     // Then
@@ -291,8 +296,53 @@ async fn catalog_context_window_falls_back_to_max_and_priority_follows_advertise
         .iter()
         .map(|model| model.capabilities.priority_tier)
         .collect();
+    // Only `service_tiers` advertises a wire tier; `fast` alone is the UI's fast support.
     assert_eq!(
         tiers[3..],
-        [None, Some(false), Some(false), Some(true), Some(true)]
+        [
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(false)
+        ]
     );
+    let fast: Vec<_> = models.iter().map(|model| model.supports_fast).collect();
+    assert_eq!(fast[3..], [false, false, false, true, true, true]);
+}
+
+#[tokio::test]
+async fn malformed_tier_lists_advertise_nothing_without_rejecting_the_catalog() {
+    // Given: models with malformed tier lists next to a healthy Lite model
+    let models = fetch(serde_json::json!({"models": [
+        {"slug": "empty-object", "service_tiers": [{}]},
+        {"slug": "wrong-ids", "service_tiers": [{"id": 5}, "priority", null],
+            "additional_speed_tiers": [1, {"fast": true}]},
+        {"slug": "not-lists", "service_tiers": "priority", "additional_speed_tiers": 7},
+        {"slug": "mixed", "service_tiers": [{}, {"id": "priority"}],
+            "additional_speed_tiers": [3, "fast"]},
+        {"slug": "gpt-6-astra", "use_responses_lite": true, "default_reasoning_level": "low",
+            "service_tiers": [{"id": "priority"}]}
+    ]}))
+    .await;
+    // Then: the catalog is accepted, bad lists advertise nothing, good entries survive
+    assert_eq!(models.len(), 5);
+    let view: Vec<_> = models
+        .iter()
+        .map(|model| (model.capabilities.priority_tier, model.supports_fast))
+        .collect();
+    assert_eq!(
+        view,
+        [
+            (Some(false), false),
+            (Some(false), false),
+            (Some(false), false),
+            (Some(true), true),
+            (Some(true), true)
+        ]
+    );
+    let astra = &models[4].capabilities;
+    assert!(astra.use_responses_lite);
+    assert_eq!(astra.default_reasoning_level.as_deref(), Some("low"));
 }

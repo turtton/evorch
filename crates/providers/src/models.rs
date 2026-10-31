@@ -65,10 +65,12 @@ struct CodexModel {
     context_window: Option<u64>,
     #[serde(default, deserialize_with = "lenient")]
     max_context_window: Option<u64>,
-    #[serde(default)]
-    service_tiers: Option<Vec<CodexServiceTierEntry>>,
-    #[serde(default)]
-    additional_speed_tiers: Option<Vec<String>>,
+    /// Entries are read one by one: anything that is not an object with a string `id` is
+    /// not an advertisement, and a malformed list advertises nothing.
+    #[serde(default, deserialize_with = "lenient")]
+    service_tiers: Vec<serde_json::Value>,
+    #[serde(default, deserialize_with = "lenient")]
+    additional_speed_tiers: Vec<serde_json::Value>,
     #[serde(default, deserialize_with = "lenient")]
     use_responses_lite: bool,
     #[serde(default, deserialize_with = "lenient")]
@@ -88,11 +90,6 @@ fn lenient_true<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<boo
     Ok(value.as_bool().unwrap_or(true))
 }
 
-#[derive(Deserialize)]
-struct CodexServiceTierEntry {
-    id: String,
-}
-
 /// Codex catalog が広告するモデルごとの能力。要求形状の決定に使い、wire 変換は
 /// これを参照して Responses Lite・reasoning・verbosity・service tier を切り替える。
 /// [`Default`] は能力不明のモデルで、従来の（Lite でない）要求形状になる。
@@ -110,8 +107,21 @@ pub struct CodexModelCapabilities {
     pub support_verbosity: bool,
     /// `support_verbosity` が真のモデルの既定 verbosity。
     pub default_verbosity: Option<String>,
-    /// priority tier の広告。`None` は catalog が tier を広告していない（検証しない）。
+    /// catalog entry が `priority` service tier を広告しているか。取得済みの entry では
+    /// 常に `Some` で、`service_tiers` に `priority` がある場合だけ `Some(true)`
+    /// （`additional_speed_tiers` の `fast` は UI 向けの fast 対応で、wire の広告ではない）。
+    /// `None` は entry を取得していない（catalog なし・失敗・未掲載）ことを表し、
+    /// 従来どおり要求された tier をそのまま送る。
     pub priority_tier: Option<bool>,
+}
+
+impl CodexModelCapabilities {
+    /// `priority` tier を送ってよいか。取得済み entry が広告している場合と、entry を
+    /// 取得していない場合 ([`Self::priority_tier`] が `None`) に真。
+    #[must_use]
+    pub fn accepts_service_tier(&self) -> bool {
+        self.priority_tier != Some(false)
+    }
 }
 
 impl Default for CodexModelCapabilities {
@@ -172,16 +182,15 @@ pub async fn list_codex_models(
 }
 
 fn codex_model_info(model: CodexModel) -> CodexModelInfo {
-    let supports_fast = model
+    let advertises_priority = model
         .service_tiers
         .iter()
-        .flatten()
-        .any(|tier| tier.id == "priority")
+        .any(|tier| tier.get("id").and_then(serde_json::Value::as_str) == Some("priority"));
+    let supports_fast = advertises_priority
         || model
             .additional_speed_tiers
             .iter()
-            .flatten()
-            .any(|tier| tier == "fast");
+            .any(|tier| tier.as_str() == Some("fast"));
     let capabilities = CodexModelCapabilities {
         use_responses_lite: model.use_responses_lite,
         default_reasoning_level: model
@@ -199,11 +208,7 @@ fn codex_model_info(model: CodexModel) -> CodexModelInfo {
         supports_reasoning_summary_parameter: model.supports_reasoning_summary_parameter,
         support_verbosity: model.support_verbosity,
         default_verbosity: model.default_verbosity.filter(|level| !level.is_empty()),
-        priority_tier: if supports_fast {
-            Some(true)
-        } else {
-            model.service_tiers.is_some().then_some(false)
-        },
+        priority_tier: Some(advertises_priority),
     };
     CodexModelInfo {
         slug: model.slug,

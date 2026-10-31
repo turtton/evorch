@@ -11,11 +11,11 @@ mod contract_support;
 
 use std::sync::Arc;
 
-use event_bus::{DiagnosticEvent, EventBus, EventKind};
+use event_bus::{DiagnosticEvent, EventBus, EventKind, ProviderEvent};
 use futures_util::StreamExt;
 use providers::provider::codex::tokens::CodexTokenStore;
 use providers::provider::codex::{CodexClient, CodexConfig};
-use providers::{CODEX_CLIENT_VERSION, ChatRequest, ProviderAuth, ProviderClient};
+use providers::{CODEX_CLIENT_VERSION, ChatRequest, ProviderAuth, ProviderClient, ServiceTier};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -46,9 +46,18 @@ fn client(
     store: Arc<dyn CodexTokenStore>,
     bus: Option<Arc<EventBus>>,
 ) -> CodexClient {
+    client_at(&server.uri(), server, store, bus)
+}
+
+fn client_at(
+    base_url: &str,
+    server: &MockServer,
+    store: Arc<dyn CodexTokenStore>,
+    bus: Option<Arc<EventBus>>,
+) -> CodexClient {
     CodexClient::with_config(
         CodexConfig {
-            base_url: server.uri(),
+            base_url: base_url.to_owned(),
             auth_base_url: server.uri(),
             event_bus: bus,
             ..CodexConfig::default()
@@ -309,4 +318,111 @@ async fn unauthorized_resend_keeps_the_lite_header_and_body() {
     }
     assert_eq!(sent[0].body, sent[1].body);
     assert_eq!(catalog_reads(&server).await.len(), 1);
+}
+
+async fn priority_exchange(catalog: ResponseTemplate, model: &str) -> (Option<Value>, Value) {
+    let server = MockServer::start().await;
+    mount_catalog(&server, catalog).await;
+    mount_responses(&server).await;
+    let bus = Arc::new(EventBus::new(64));
+    let mut receiver = bus.subscribe();
+    let mut request = chat(model, "hi");
+    request.service_tier = Some(ServiceTier::Priority);
+
+    client(&server, seeded_store(), Some(bus))
+        .send(&ProviderAuth::new(""), &request)
+        .await
+        .expect("send succeeds");
+
+    let sent = body(&codex_support::response_requests(&server).await[0]);
+    let observed = receiver
+        .drain_pending_snapshot()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted { service_tier, .. }) => {
+                Some(json!(service_tier))
+            }
+            _ => None,
+        })
+        .expect("the request completed");
+    (sent.get("service_tier").cloned(), observed)
+}
+
+// Given: priority requested for a model whose catalog entry was fetched
+// When: the entry's service_tiers are missing, empty, other, fast-only, malformed or advertise
+// priority (next to a healthy Lite model in the same catalog)
+// Then: priority reaches the wire only for an advertised one, and the observation records
+// the tier that was actually sent
+#[tokio::test]
+async fn priority_is_sent_only_when_the_fetched_entry_advertises_it() {
+    for (entry, advertised) in [
+        (json!({}), false),
+        (json!({"service_tiers": []}), false),
+        (json!({"service_tiers": [{"id": "flex"}]}), false),
+        (json!({"additional_speed_tiers": ["fast"]}), false),
+        (
+            json!({"service_tiers": [], "additional_speed_tiers": ["fast"]}),
+            false,
+        ),
+        (json!({"service_tiers": [{}]}), false),
+        (json!({"service_tiers": [{"id": "priority"}]}), true),
+    ] {
+        let mut entry = entry;
+        entry["slug"] = json!("m");
+        let catalog = json!({"models": [
+            entry,
+            {"slug": "gpt-6-astra", "use_responses_lite": true,
+                "service_tiers": [{"id": "priority"}]}
+        ]});
+        let (sent, observed) =
+            priority_exchange(ResponseTemplate::new(200).set_body_json(catalog), "m").await;
+        let expected = advertised.then(|| json!("priority"));
+        assert_eq!(sent, expected, "{entry}");
+        assert_eq!(observed, expected.unwrap_or(Value::Null), "{entry}");
+    }
+}
+
+// Given: no usable catalog entry (model not listed, or the catalog failed)
+// When: priority is requested / Then: it is sent as requested, as before the catalog existed
+#[tokio::test]
+async fn priority_is_sent_when_no_entry_was_fetched() {
+    let listed_elsewhere = ResponseTemplate::new(200)
+        .set_body_json(json!({"models": [{"slug": "other", "service_tiers": []}]}));
+    for catalog in [listed_elsewhere, ResponseTemplate::new(500)] {
+        let (sent, observed) = priority_exchange(catalog, "m").await;
+        assert_eq!(sent, Some(json!("priority")));
+        assert_eq!(observed, json!("priority"));
+    }
+}
+
+// Given: a base URL configured with the `/responses` suffix
+// When: a Lite model is requested / Then: the catalog is read from the same normalized base
+// as the responses endpoint, so Lite is applied
+#[tokio::test]
+async fn catalog_and_responses_share_the_normalized_base_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/codex/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(CATALOG, "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(SUCCESS_SSE.to_owned(), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let base = format!("{}/backend-api/codex/responses", server.uri());
+
+    client_at(&base, &server, seeded_store(), None)
+        .send(&ProviderAuth::new(""), &chat("gpt-6-astra", "hi"))
+        .await
+        .expect("send succeeds");
+
+    let sent = codex_support::response_requests(&server).await;
+    assert_eq!(sent[0].headers[LITE_HEADER], "true");
+    server.verify().await;
 }

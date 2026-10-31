@@ -269,10 +269,11 @@ fn verbosity_follows_the_model_default_only_when_supported() {
     );
 }
 
-// Given: a priority request / When: the catalog does or does not advertise priority
-// Then: it is omitted only when tiers are advertised without priority
+// Given: a priority request / When: the model's catalog entry was fetched and advertises
+// priority, does not, or no entry was fetched (`None`: no catalog, failure, unlisted)
+// Then: it is omitted exactly for a fetched entry that does not advertise priority
 #[test]
-fn service_tier_is_omitted_only_when_the_catalog_denies_priority() {
+fn service_tier_is_sent_only_for_an_advertised_priority_or_an_unfetched_entry() {
     for (advertised, expected) in [
         (Some(true), Some("priority")),
         (None, Some("priority")),

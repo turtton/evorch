@@ -127,6 +127,15 @@ fn resolve_endpoint(base_url: &str) -> String {
     }
 }
 
+/// The base URL a normalized responses endpoint hangs off, so the catalog and the
+/// responses path agree for every accepted base URL shape (including `…/responses`).
+fn catalog_base_url(endpoint: &str) -> String {
+    endpoint
+        .strip_suffix("/responses")
+        .unwrap_or(endpoint)
+        .to_owned()
+}
+
 /// Codex subscription backend client の設定。
 #[derive(Clone)]
 pub struct CodexConfig {
@@ -157,7 +166,8 @@ pub struct CodexClient {
     /// Compaction は通常生成より長い無応答期限と、本文受信までの全体期限を使う。
     compaction_http_client: reqwest::Client,
     endpoint: String,
-    /// Catalog discovery appends `/models` to the configured base URL as given.
+    /// The base URL shared with `endpoint` (normalized by [`resolve_endpoint`]); catalog
+    /// discovery appends `/models` to it.
     catalog_base_url: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
@@ -183,7 +193,7 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
-            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
+            catalog_base_url: catalog_base_url(&resolve_endpoint(&config.base_url)),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
@@ -214,7 +224,7 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
-            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
+            catalog_base_url: catalog_base_url(&resolve_endpoint(&config.base_url)),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
@@ -240,7 +250,13 @@ impl CodexClient {
             streaming,
             request.observation.clone(),
         )
-        .with_service_tier(request.service_tier)
+        .with_service_tier(crate::wire::responses::codex_wire_service_tier(
+            request.service_tier,
+            self.catalog
+                .get()
+                .and_then(|outcome| outcome.capabilities(&request.model))
+                .as_ref(),
+        ))
     }
 
     async fn execute(

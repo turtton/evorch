@@ -5535,13 +5535,17 @@ mod host_receipts;
 /// tools only in the leading `additional_tools` item (never top-level), then the developer
 /// message, parallel tool calls off and the all-turns reasoning context.
 fn assert_codex_lite_prefix(harness: &Harness) {
-    let requests: Vec<_> = harness
+    let recorded: Vec<_> = harness
         .mock
         .recorded_requests()
         .into_iter()
         .filter(|request| request.path == harness.wire.path())
-        .map(|request| request.body)
         .collect();
+    assert!(
+        recorded.iter().all(|request| request.codex_responses_lite),
+        "every Lite request, the compaction call included, carries the Lite header"
+    );
+    let requests: Vec<_> = recorded.into_iter().map(|request| request.body).collect();
     assert!(
         requests
             .iter()
@@ -5614,15 +5618,195 @@ async fn codex_lite_tools_and_instructions_are_a_stable_input_prefix_across_tool
     assert_codex_lite_prefix(&harness);
 }
 
-// Given: a Responses Lite profile / When: history is compacted (manual, then automatic)
-// Then: additional_tools and the developer message are unchanged across the official
-// compaction boundary and later turns reuse the new prefix
+// Given: a Responses Lite profile whose official compaction call fails (the mock has no
+// compaction item scripted), so the runtime falls back to its re-summary
+// When: history is compacted (manual, then automatic)
+// Then: additional_tools and the developer message are unchanged across that boundary and
+// later turns reuse the new prefix (the successful official path is covered below)
 #[tokio::test]
-async fn codex_lite_shape_survives_compaction_boundaries() {
+async fn codex_lite_shape_survives_fallback_compaction_boundaries() {
     for reason in [CompactionReason::Manual, CompactionReason::Automatic] {
         let harness =
             compaction_restarts_cache_with_catalog(Wire::Codex, Some(lite_capabilities()), reason)
                 .await;
         assert_codex_lite_prefix(&harness);
+    }
+}
+
+// Given: a Responses Lite profile whose official compaction succeeds (the backend returns a
+// compaction item), after a tool round and a long answer
+// When: the history is compacted manually and the worker then runs two more tool rounds
+// Then: the compaction call carries the Lite shape and header; exactly one verified request
+// replaces the history (and carries the new blob); every later request reuses the new prefix
+// with the identical additional_tools and developer items, and the mock reports it as cached
+#[tokio::test]
+async fn codex_lite_official_compaction_replaces_history_once_then_reuses_the_new_prefix() {
+    let review_storage = support::ReviewStorage::new();
+    let old_reply = "old analysis that can be summarized ".repeat(100);
+    let mut harness = harness_with_catalog(
+        Wire::Codex,
+        MODEL,
+        Some(lite_capabilities()),
+        vec![
+            read_response(0),
+            text_response(&old_reply),
+            ScriptedResponse::compaction("compaction", MODEL, "lite-blob"),
+            read_response(1),
+            read_response(2),
+            text_response("done"),
+        ],
+        1_000_000,
+        Arc::new(BulkRead),
+        Vec::new(),
+        None,
+        0.5,
+        |_| {},
+    );
+    let run = harness.runtime.delegate_background(
+        Role::Worker,
+        "Preserve this original goal".into(),
+        RunConfig {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+    let mut events = through_phase(&mut harness.receiver, run, AgentRunPhase::Waiting).await;
+    harness.runtime.compact(run).unwrap();
+    review_storage.attach(&harness.runtime);
+    harness
+        .runtime
+        .send_message(run, "Continue after this boundary".into())
+        .unwrap();
+    events.extend(through_phase(&mut harness.receiver, run, AgentRunPhase::Done).await);
+    assert_eq!(
+        harness.runtime.wait(run).await.unwrap(),
+        AgentRunPhase::Done
+    );
+
+    // The runtime took the official result, not the structural fallback.
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::Compaction(CompactionEvent::Compacted {reason, ..})
+            if *reason == CompactionReason::Manual)));
+    assert_codex_lite_prefix(&harness);
+    verify_official_compaction_trace(&harness, run, &events);
+
+    let all: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == harness.wire.path())
+        .map(|request| request.body)
+        .collect();
+    let trigger = all
+        .iter()
+        .position(is_compaction_trigger_request)
+        .expect("the official compaction call was made");
+    let blob =
+        |request: &Value| {
+            request["input"].as_array().unwrap().iter().any(|item| {
+                item["type"] == "compaction" && item["encrypted_content"] == "lite-blob"
+            })
+        };
+    // Before and during the compaction call the blob does not exist yet; from the first
+    // request after it, every request starts from the replaced history.
+    assert!(all[..=trigger].iter().all(|request| !blob(request)));
+    assert!(all[trigger + 1..].iter().all(blob));
+    assert_eq!(all.len() - trigger - 1, 3, "two tool rounds and the answer");
+    // The replacement is one verified step: the first request after the boundary is shorter
+    // than the pre-compaction history and later requests only append to it.
+    let item_count = |request: &Value| request["input"].as_array().unwrap().len();
+    assert!(item_count(&all[trigger + 1]) < item_count(&all[trigger]));
+    for pair in all[trigger + 1..].windows(2) {
+        assert!(item_count(&pair[1]) > item_count(&pair[0]));
+    }
+}
+
+/// Wire-prefix and mock-cache checks for a run with one successful official compaction.
+/// ([`verify_trace`] models the fallback re-summary, where the compaction call fails and so
+/// never completes; here it completes and reports usage like a generation request.)
+fn verify_official_compaction_trace(harness: &Harness, run: RunId, events: &[Event]) {
+    let run = run.to_string();
+    let mut generation = Vec::new();
+    let mut completed = std::collections::HashMap::new();
+    let mut pending = None;
+    let mut boundaries = Vec::new();
+    for event in events {
+        match &event.kind {
+            EventKind::Compaction(CompactionEvent::Compacted {
+                run_id,
+                checkpoint_id,
+                ..
+            }) if run_id == &run => {
+                assert!(pending.replace(checkpoint_id.clone()).is_none());
+            }
+            EventKind::Provider(ProviderEvent::RequestStarted {
+                request_id,
+                run_id: Some(id),
+                purpose,
+                ..
+            }) if id == &run && *purpose != Some(RequestPurpose::Compaction) => {
+                if let Some(checkpoint) = pending.take() {
+                    boundaries.push((generation.len(), checkpoint));
+                }
+                generation.push(request_id.clone());
+            }
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                request_id,
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => {
+                completed.insert(request_id.clone(), (*input_tokens, *cache_read_tokens));
+            }
+            EventKind::Diagnostic(diagnostic) => {
+                assert_ne!(diagnostic.code, "CacheRegression", "{diagnostic:?}");
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        pending.is_none(),
+        "compaction must be followed by a request"
+    );
+    assert_eq!(boundaries.len(), 1, "exactly one history replacement");
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == harness.wire.path())
+        .map(|request| request.body)
+        .filter(|body| !is_compaction_trigger_request(body))
+        .collect();
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    assert_eq!(requests.len(), generation.len());
+    let (boundary, checkpoint) = &boundaries[0];
+    for index in 1..requests.len() {
+        let (input, cached) = completed[&generation[index]];
+        let previous_input = completed[&generation[index - 1]].0;
+        assert!(input > 0 && cached <= input);
+        if index == *boundary {
+            assert_compaction_transition(
+                harness.wire.protocol(),
+                &requests[index - 1],
+                &requests[index],
+                checkpoint,
+            )
+            .unwrap();
+            assert!(
+                cached < previous_input,
+                "the official replacement must actually invalidate part of the old prefix"
+            );
+        } else {
+            assert_append_only(
+                harness.wire.protocol(),
+                &requests[index - 1],
+                &requests[index],
+            )
+            .unwrap_or_else(|error| panic!("request {index} destroyed cached input: {error}"));
+            assert!(
+                cached >= previous_input,
+                "request {index}: cached={cached}, previous input={previous_input}"
+            );
+        }
     }
 }

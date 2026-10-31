@@ -393,15 +393,16 @@ impl ResponsesDialect {
         }
     }
 
-    /// 送信する `service_tier`。Codex は catalog が tier を広告していて priority を含まない
-    /// モデルには送りません。広告が無い (catalog なし・能力不明) 場合は指定どおり送ります。
+    /// 送信する `service_tier`。Codex は catalog entry を取得済みで `priority` を広告して
+    /// いないモデルには送りません (tier の欠落・空配列・`fast` のみも未広告)。entry を
+    /// 取得していない (catalog なし・失敗・未掲載) 場合は指定どおり送ります。
     fn service_tier(
         self,
         tier: Option<ServiceTier>,
         model: &CodexModelCapabilities,
     ) -> Option<ServiceTier> {
         match (self, tier) {
-            (Self::Codex, Some(tier)) if model.priority_tier == Some(false) => {
+            (Self::Codex, Some(tier)) if !model.accepts_service_tier() => {
                 tracing::warn!(
                     ?tier,
                     "このモデルは priority tier を広告していないため service_tier を省略します"
@@ -438,7 +439,22 @@ impl ResponsesDialect {
     }
 }
 
+/// Codex dialect で wire に送る `service_tier`。観測が送信した tier を記録するために、
+/// 変換と同じ判定を (警告なしで) 公開します。`model` は取得済みの catalog entry です。
+pub(crate) fn codex_wire_service_tier(
+    tier: Option<ServiceTier>,
+    model: Option<&CodexModelCapabilities>,
+) -> Option<ServiceTier> {
+    tier.filter(|_| model.is_none_or(CodexModelCapabilities::accepts_service_tier))
+}
+
 impl ResponsesRequest {
+    /// wire に載せる `service_tier`。
+    #[must_use]
+    pub fn service_tier(&self) -> Option<ServiceTier> {
+        self.service_tier
+    }
+
     /// wire に載せる reasoning effort。reasoning を送らない場合は `None`。
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<&str> {

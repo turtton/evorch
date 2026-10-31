@@ -262,7 +262,7 @@ async fn serve(mut stream: TcpStream, both_arrived: Arc<Barrier>, refreshes: Arc
             "id_token": jwt(now_unix() + 7_200, "acc-123")
         });
         ("200 OK", "application/json", body.to_string())
-    } else if head.starts_with("get /models") {
+    } else if head.starts_with("get /backend-api/codex/models") {
         // The client reads the model catalog once before its first generation.
         ("200 OK", "application/json", r#"{"models":[]}"#.to_owned())
     } else if head.contains("authorization: bearer access-old") {

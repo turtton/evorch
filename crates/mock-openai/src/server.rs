@@ -26,6 +26,8 @@ pub struct RecordedRequest {
     pub authorization: Option<String>,
     /// The Codex `chatgpt-account-id` header, identifying the account the request used.
     pub chatgpt_account_id: Option<String>,
+    /// Whether the request carried `x-openai-internal-codex-responses-lite: true`.
+    pub codex_responses_lite: bool,
     pub body: Value,
     pub stream: bool,
 }
@@ -446,6 +448,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
     let mut content_length = 0;
     let mut authorization = None;
     let mut chatgpt_account_id = None;
+    let mut codex_responses_lite = false;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -466,6 +469,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
             authorization = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("chatgpt-account-id") {
             chatgpt_account_id = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("x-openai-internal-codex-responses-lite") {
+            codex_responses_lite = value.trim() == "true";
         }
     }
     let mut bytes = vec![0; content_length];
@@ -481,6 +486,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<RecordedRequest> {
         path,
         authorization,
         chatgpt_account_id,
+        codex_responses_lite,
         stream: body["stream"] == true,
         body,
     })
