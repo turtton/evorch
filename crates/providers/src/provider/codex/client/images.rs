@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
-use super::{CodexClient, PROVIDER_LABEL};
+use super::{AuthorizedCodexToken, CodexClient, PROVIDER_LABEL};
 use crate::http::map_request_error;
 use crate::image_generation::{self, IMAGE_TIMEOUT};
 use crate::{
     ImageGeneration, ImageGenerationError, ImageGenerationRequest, ImageGenerationResponse,
-    ProviderAuth,
+    ProviderAuth, ProviderError,
 };
 
 #[async_trait]
@@ -33,18 +33,37 @@ impl ImageGeneration for CodexClient {
             self.event_bus.clone(),
             PROVIDER_LABEL,
             &mut observer,
-            async {
+            async |observer| {
                 // The compaction client already permits five minutes without response bytes.
-                self.authenticated_request(&self.compaction_http_client, &endpoint)
-                    .await?
-                    .header(reqwest::header::ACCEPT, "application/json")
-                    .timeout(IMAGE_TIMEOUT)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(map_request_error)
+                let token = self.session.current().await?;
+                let response = self.send_image_request(&endpoint, &body, &token).await?;
+                if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+                    return Ok(response);
+                }
+                drop(response);
+                let fresh = self.recover_unauthorized(&token, observer).await?;
+                observer.emit_started();
+                self.send_image_request(&endpoint, &body, &fresh).await
             },
         )
         .await
+    }
+}
+
+impl CodexClient {
+    async fn send_image_request(
+        &self,
+        endpoint: &str,
+        body: &impl serde::Serialize,
+        token: &AuthorizedCodexToken,
+    ) -> Result<reqwest::Response, ProviderError> {
+        self.authenticated_request_with_token(&self.compaction_http_client, endpoint, token)
+            .await
+            .header(reqwest::header::ACCEPT, "application/json")
+            .timeout(IMAGE_TIMEOUT)
+            .json(body)
+            .send()
+            .await
+            .map_err(map_request_error)
     }
 }

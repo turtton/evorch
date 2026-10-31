@@ -169,10 +169,10 @@ pub(crate) async fn execute(
     bus: Option<Arc<EventBus>>,
     provider: &str,
     observer: &mut AttemptObserver,
-    send: impl Future<Output = Result<reqwest::Response, ProviderError>>,
+    send: impl AsyncFnOnce(&mut AttemptObserver) -> Result<reqwest::Response, ProviderError>,
 ) -> Result<ImageGenerationResponse, ImageGenerationError> {
     let result = tokio::time::timeout(IMAGE_TIMEOUT, async {
-        let response = send.await.map_err(response::sanitize)?;
+        let response = send(&mut *observer).await.map_err(response::sanitize)?;
         response::decode(response).await
     })
     .await

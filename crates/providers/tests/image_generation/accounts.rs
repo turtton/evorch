@@ -20,7 +20,7 @@ async fn ac2_codex_images_share_refresh_account_and_session_headers() {
         })
         .unwrap();
     Mock::given(method("POST")).and(path("/oauth/token"))
-        .and(body_json(json!({"client_id":CODEX_CLIENT_ID,"grant_type":"refresh_token","refresh_token":"secret-refresh"})))
+        .and(body_json(json!({"client_id":CODEX_CLIENT_ID,"grant_type":"refresh_token","refresh_token":"secret-refresh","refresh_reason":"proactive_expiry"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"refreshed-access","refresh_token":"new-refresh","id_token":jwt(u64::MAX)}))).expect(1).mount(&server).await;
     for edit in [false, true] {
         Mock::given(method("POST"))

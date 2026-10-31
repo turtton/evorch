@@ -21,6 +21,8 @@ pub use device::{
     DEVICE_REDIRECT_URI, DEVICE_VERIFICATION_URL, DeviceAuthClient, PollOptions, UserCodeResponse,
 };
 
+pub(crate) use device::{REFRESH_REASON_PROACTIVE, REFRESH_REASON_UNAUTHORIZED};
+
 /// PKCE の challenge メソッド。
 pub const PKCE_CHALLENGE_METHOD: &str = "S256";
 

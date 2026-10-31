@@ -89,7 +89,8 @@ async fn mount_refresh(server: &MockServer, response: ResponseTemplate, expected
         .and(body_json(json!({
             "client_id": CODEX_CLIENT_ID,
             "grant_type": "refresh_token",
-            "refresh_token": "refresh-old"
+            "refresh_token": "refresh-old",
+            "refresh_reason": "proactive_expiry"
         })))
         .respond_with(response)
         .expect(expected)

@@ -223,7 +223,8 @@ async fn refresh_rotates_tokens() {
         .and(body_json(json!({
             "client_id": CODEX_CLIENT_ID,
             "grant_type": "refresh_token",
-            "refresh_token": "old-refresh"
+            "refresh_token": "old-refresh",
+            "refresh_reason": "forced"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "access-new",

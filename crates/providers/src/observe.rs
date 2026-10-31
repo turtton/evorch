@@ -227,6 +227,27 @@ impl AttemptObserver {
         self.emit_failed_kind(failure_kind(error), detail);
     }
 
+    /// 401 で拒否された attempt を `Auth` 失敗として閉じる。
+    pub(crate) fn emit_failed_auth(&mut self, error: &ProviderError) {
+        if self.terminal_emitted {
+            return;
+        }
+        let detail = failure_detail(error, self.known_secret.as_deref());
+        self.emit_failed_kind(ProviderFailureKind::Auth, detail);
+    }
+
+    /// 閉じた attempt の後に同じ呼び出しの再送 attempt を始める。
+    ///
+    /// 新しい request_id を採番し、計測時計と終端・開始状態を初期化する。
+    /// 呼び出し元は再送の直前に [`Self::emit_started`] を呼ぶこと。
+    pub(crate) fn restart_attempt(&mut self) {
+        self.request_id = next_request_id();
+        self.started_at = tokio::time::Instant::now();
+        self.started_emitted = false;
+        self.first_token_emitted = false;
+        self.terminal_emitted = false;
+    }
+
     fn emit_failed_kind(&mut self, failure: ProviderFailureKind, detail: Option<String>) {
         self.emit(ProviderEvent::RequestFailed {
             request_id: self.request_id.clone(),

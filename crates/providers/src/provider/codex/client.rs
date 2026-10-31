@@ -211,6 +211,7 @@ impl CodexClient {
             .with_cache_observation(&wire_request);
         let response = self
             .send_response(
+                request,
                 &wire_request,
                 &token,
                 if streaming {
@@ -264,15 +265,28 @@ impl CodexClient {
     }
 
     /// 通常生成と公式 compaction の HTTP エラー処理。
+    ///
+    /// 401 は 1 回だけ token を回復して同一 body で再送する。回復で
+    /// ChatGPT account が変わった場合は、別 account の scope で送らず
+    /// [`ProviderError::ResponsesScopeChanged`] を返す。
     async fn send_response(
         &self,
+        request: &ChatRequest,
         wire_request: &CodexResponsesRequest,
         token: &AuthorizedCodexToken,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
+        let check_account = |fresh: &AuthorizedCodexToken| {
+            if fresh.chatgpt_account_id == token.chatgpt_account_id {
+                return Ok(());
+            }
+            Err(ProviderError::ResponsesScopeChanged {
+                actual: Box::new(self.responses_scope(request, fresh)),
+            })
+        };
         let response = self
-            .post_response_with_token(wire_request, token, mode, observer)
+            .post_response_with_token(wire_request, token, mode, observer, check_account)
             .await?;
         if !response.status().is_success() {
             let error = map_response_error(response).await;
@@ -291,11 +305,56 @@ impl CodexClient {
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let token = self.session.current().await?;
-        self.post_response_with_token(wire_request, &token, mode, observer)
+        self.post_response_with_token(wire_request, &token, mode, observer, |_| Ok(()))
             .await
     }
 
+    /// Sends once; a 401 triggers one recovery and a resend of the same wire body.
+    /// `accept_recovered` vets the recovered credentials before anything is resent.
+    /// A second 401 is returned to the caller like any other status.
     async fn post_response_with_token(
+        &self,
+        wire_request: &impl serde::Serialize,
+        token: &AuthorizedCodexToken,
+        mode: ResponseMode,
+        observer: &mut AttemptObserver,
+        accept_recovered: impl FnOnce(&AuthorizedCodexToken) -> Result<(), ProviderError>,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let response = self
+            .post_response_once(wire_request, token, mode, observer)
+            .await?;
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        drop(response);
+        let fresh = self.recover_unauthorized(token, observer).await?;
+        accept_recovered(&fresh)?;
+        self.post_response_once(wire_request, &fresh, mode, observer)
+            .await
+    }
+
+    /// Closes the rejected attempt as an auth failure, recovers credentials and
+    /// opens the next attempt. Recovery errors are returned without a second event.
+    async fn recover_unauthorized(
+        &self,
+        rejected_token: &AuthorizedCodexToken,
+        observer: &mut AttemptObserver,
+    ) -> Result<AuthorizedCodexToken, ProviderError> {
+        // The rejected body is never read: dedicated capabilities sanitize their
+        // errors, and the observation must not carry what they hide.
+        observer.emit_failed_auth(&ProviderError::Http {
+            status: 401,
+            body: "unauthorized; recovering credentials".into(),
+        });
+        let fresh = self
+            .session
+            .refresh_after_unauthorized(rejected_token)
+            .await?;
+        observer.restart_attempt();
+        Ok(fresh)
+    }
+
+    async fn post_response_once(
         &self,
         wire_request: &impl serde::Serialize,
         token: &AuthorizedCodexToken,
@@ -322,18 +381,6 @@ impl CodexClient {
             .map_err(map_request_error)
             .inspect_err(|error| observer.emit_failed(error))?;
         Ok(response)
-    }
-
-    /// Share refreshed credentials and Codex session headers across endpoint families.
-    async fn authenticated_request(
-        &self,
-        http: &reqwest::Client,
-        endpoint: &str,
-    ) -> Result<reqwest::RequestBuilder, ProviderError> {
-        let token = self.session.current().await?;
-        Ok(self
-            .authenticated_request_with_token(http, endpoint, &token)
-            .await)
     }
 
     /// Responses replay must use the exact lease already checked against its scope.
