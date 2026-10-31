@@ -62,13 +62,27 @@ pub(super) fn rebuild_incremental(conn: &Connection) -> Result<i64, StorageError
     Ok(mode)
 }
 
-/// Preview is read-only and refuses a live store or nonempty WAL. Apply holds
-/// the exclusive lease and SQLite locking mode, takes a verified backup like
-/// `compact-events`, then VACUUMs with INCREMENTAL requested. A database that
-/// is already INCREMENTAL is left untouched.
+/// The mode is judged through the read-only preview connection, which never
+/// creates, modifies or deletes the database or its sidecars, so preview and an
+/// already-INCREMENTAL apply are side-effect free. A nonempty WAL is refused
+/// rather than ignored: only SQLite recovery could tell whether it changes the
+/// answer, and recovery would write the database before any backup exists.
+/// Only a database that needs the migration gets a writable connection (under
+/// the exclusive lease and SQLite locking mode), a verified backup like
+/// `compact-events`, then a VACUUM with INCREMENTAL requested.
 pub fn vacuum_database(
     path: &Path,
     options: &VacuumOptions,
+) -> Result<VacuumSummary, StorageError> {
+    vacuum_with(path, options, |_| {})
+}
+
+/// `before_rebuild` is a test seam run on the writable connection after the
+/// backup is verified and before the VACUUM; production passes a no-op.
+pub(super) fn vacuum_with(
+    path: &Path,
+    options: &VacuumOptions,
+    before_rebuild: impl FnOnce(&Connection),
 ) -> Result<VacuumSummary, StorageError> {
     let start = Instant::now();
     if !path.is_file() {
@@ -85,21 +99,8 @@ pub fn vacuum_database(
     } else {
         offline::preview_lease(path)?
     };
-    let (conn, files) = if options.apply {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        conn.busy_timeout(Duration::ZERO)?;
-        conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
-        conn.execute_batch("BEGIN EXCLUSIVE; COMMIT;")
-            .map_err(|error| {
-                invalid(format!(
-                    "exclusive SQLite lock refused; stop all readers: {error}"
-                ))
-            })?;
-        (conn, None)
-    } else {
-        let (conn, files) = offline::read_only_preview_connection(path)?;
-        (conn, Some(files))
-    };
+    refuse_nonempty_wal(path)?;
+    let (conn, files) = offline::read_only_preview_connection(path)?;
     check_schema(&conn, 1)?;
     let mode = auto_vacuum_mode(&conn)?;
     let sizes = crate::db::file_sizes(path)?;
@@ -122,19 +123,31 @@ pub fn vacuum_database(
         elapsed_seconds: 0.0,
         message: String::new(),
     };
-    if already_incremental {
-        summary.message = "auto_vacuum is already INCREMENTAL; nothing to do".into();
-    } else if !options.apply {
-        summary.message =
-            "auto_vacuum is not INCREMENTAL; rerun with --apply to switch it with one full VACUUM"
-                .into();
-    }
+    files.verify()?;
     if already_incremental || !options.apply {
-        if let Some(files) = files {
-            files.verify()?;
+        summary.message = if already_incremental {
+            "auto_vacuum is already INCREMENTAL; nothing to do"
+        } else {
+            "auto_vacuum is not INCREMENTAL; rerun with --apply to switch it with one full VACUUM"
         }
+        .into();
         summary.elapsed_seconds = start.elapsed().as_secs_f64();
         return Ok(summary);
+    }
+    drop(conn);
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    conn.busy_timeout(Duration::ZERO)?;
+    conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    conn.execute_batch("BEGIN EXCLUSIVE; COMMIT;")
+        .map_err(|error| {
+            invalid(format!(
+                "exclusive SQLite lock refused; stop all readers: {error}"
+            ))
+        })?;
+    if auto_vacuum_mode(&conn)? != mode {
+        return Err(invalid(
+            "auto_vacuum changed while preparing maintenance; rerun",
+        ));
     }
     offline::require_space(parent(path), basis.saturating_mul(4))?;
     summary.backup = Some(create_backup(
@@ -145,6 +158,7 @@ pub fn vacuum_database(
         basis,
     )?);
     offline::require_space(parent(path), basis.saturating_mul(2))?;
+    before_rebuild(&conn);
     summary.auto_vacuum_after = rebuild_incremental(&conn)?;
     summary.vacuum = true;
     let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
@@ -160,4 +174,18 @@ pub fn vacuum_database(
     summary.message = "auto_vacuum switched to INCREMENTAL".into();
     summary.elapsed_seconds = start.elapsed().as_secs_f64();
     Ok(summary)
+}
+
+fn refuse_nonempty_wal(path: &Path) -> Result<(), StorageError> {
+    let absolute = path
+        .canonicalize()
+        .map_err(|error| StorageError::Io(error.to_string()))?;
+    match std::fs::metadata(crate::db::suffixed_path(&absolute, "-wal")) {
+        Ok(meta) if meta.len() != 0 => Err(invalid(
+            "database has a nonempty WAL; vacuum will not guess its auto_vacuum mode or let SQLite recovery write the database before a backup exists. Start evorch once and exit cleanly to checkpoint, then retry",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StorageError::Io(error.to_string())),
+    }
 }

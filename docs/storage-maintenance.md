@@ -55,14 +55,14 @@ JSON の `converted` / `undecodable` / `batches` / `remaining` を確認する�
 
 `compact-events --apply` は VACUUM の直前に INCREMENTAL を設定するため、実行すれば移行も完了する（JSON の `auto_vacuum_before` / `auto_vacuum_after`）。すでに compact 済みの DB など、イベント変換が不要な場合は `vacuum` を使う。
 
-1. すべての evorch GUI/runtime と reader を停止する。前提は compact-events と同じ（既存の `.maintenance-lock`、WAL が空であること、schema が現行以下）。
+1. すべての evorch GUI/runtime と reader を停止する。前提は compact-events と同じ（既存の `.maintenance-lock`、schema が現行以下）。さらに、非空の `-wal` が残っている DB は preview でも apply でも拒否する（異常終了後など）。WAL の内容次第で判定が変わりうる一方、SQLite の復旧はバックアップ前に DB 本体を書き換えるため。evorch を一度起動して正常終了し、WAL を checkpoint してから再実行する。
 2. preview（既定、読み取り専用）で現在のモードと必要な空き容量を確認する。
 
    ```sh
    evorch maintenance vacuum --db "$DB"
    ```
 
-   `auto_vacuum_before` が 0（または 1）なら移行できる。2 なら `already_incremental: true` で、何も行わない。
+   `auto_vacuum_before` が 0（または 1）なら移行できる。2 なら `already_incremental: true` で、何も行わない。モードの判定は読み取り専用接続だけで行い、preview と、mode=2 に対する `--apply` は DB 本体・`-wal`・`-shm` を作成・変更・削除しない（writable 接続とバックアップは、移行が必要な場合だけ）。
 3. DB とバックアップ先に `required_free_space_bytes`（compact-events と同じ、元 DB・論理ページ・sidecar の最大値の 4 倍）の空きを用意する。SQLite の VACUUM は一時ファイルを SQLite の temp ディレクトリ（`TMPDIR` など）にも作るため、DB と別 volume の temp が小さい場合は `TMPDIR` を空きのある場所に向ける。
 4. apply する。
 
