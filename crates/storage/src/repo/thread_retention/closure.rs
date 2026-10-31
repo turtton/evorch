@@ -7,9 +7,11 @@
 //! node: each node's relations are a fixed list of edge queries paged by rowid,
 //! and the position reached (query, last rowid) is stored on the worklist item.
 //! Every statement costs the rows it returns (at least one) and is limited to the
-//! budget that is left, so a call never reads more than its budget (a run's
-//! canonical-thread walk, at most `MAX_RUN_LINKS` + 1 links, is the one
-//! indivisible step).
+//! budget that is left. Two walks are indivisible and may overshoot a call's
+//! budget by their length: a run's canonical-thread walk (at most
+//! `MAX_RUN_LINKS` + 1 links) and a thread's lineage check (at most
+//! `MAX_RUN_LINKS` + 1 parent rows). Each is charged in full, so the overshoot is
+//! bounded by 65 rows per call (a walk starts only while budget is left).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,6 +25,7 @@ use crate::repo::threads::{CanonicalThread, canonical_thread};
 use crate::thread_retention::{
     BlockReason, ExploreBudget, FamilyState, RetentionInput, SidebarThread, ThreadRetentionPolicy,
 };
+use crate::threads::MAX_RUN_LINKS;
 
 /// Rows one edge query returns at most, whatever the budget.
 const PAGE_ROWS: u64 = 512;
@@ -162,6 +165,37 @@ fn run_neighbor(conn: &Connection, run_id: String) -> Result<Neighbor, StorageEr
     })
 }
 
+/// Whether following `parent_thread_id` upward from `start` (whose parent is
+/// `first`) ends at a root without revisiting a thread within [`MAX_RUN_LINKS`]
+/// links. `links` counts the rows read after the one the caller already has.
+fn lineage_is_acyclic(
+    conn: &Connection,
+    start: &str,
+    first: &str,
+    links: &mut u64,
+) -> Result<bool, StorageError> {
+    let mut seen = BTreeSet::from([start.to_owned()]);
+    let mut current = first.to_owned();
+    for _ in 0..=MAX_RUN_LINKS {
+        if !seen.insert(current.clone()) {
+            return Ok(false);
+        }
+        *links += 1;
+        let next: Option<Option<String>> = conn
+            .query_row(
+                "SELECT parent_thread_id FROM threads WHERE thread_id = ?1",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match next.flatten() {
+            Some(parent) => current = parent,
+            None => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
 type Sink<'a> = dyn FnMut(Neighbor) -> Result<bool, StorageError> + 'a;
 
 /// Walks the relations of one node from `start`, feeding every neighbor to
@@ -207,10 +241,20 @@ pub(super) fn expand_node(
                     )
                     .optional()?;
                 if let Some((parent, root, source)) = own {
-                    if let Some(parent) = parent
-                        && !sink(thread_neighbor(conn, parent)?)?
-                    {
-                        return Ok(Expansion::Stopped);
+                    if let Some(parent) = parent {
+                        // The lineage is followed upward from this thread; a cycle
+                        // (a self-parent included) or a chain too long to follow
+                        // leaves the family unresolvable. Every link read is charged.
+                        let mut links = 0;
+                        let acyclic = lineage_is_acyclic(conn, id, &parent, &mut links)?;
+                        *edges += links;
+                        if !acyclic {
+                            if !sink(Neighbor::Gone(id.to_owned()))? {
+                                return Ok(Expansion::Stopped);
+                            }
+                        } else if !sink(thread_neighbor(conn, parent)?)? {
+                            return Ok(Expansion::Stopped);
+                        }
                     }
                     for run in [root, source].into_iter().flatten() {
                         if !sink(run_neighbor(conn, run)?)? {

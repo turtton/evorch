@@ -10,6 +10,13 @@ ALTER TABLE threads ADD COLUMN archived_at_ns INTEGER;
 ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1));
 ALTER TABLE threads ADD COLUMN archive_revision INTEGER;
 ALTER TABLE threads ADD COLUMN pin_revision INTEGER;
+-- 1 when the last writer of the series sent no revision (the host before it numbers
+-- its edits). It lets such a sender keep replacing its own generation-0 series while
+-- it can never replace a numbered one. Retire together with the unnumbered path.
+ALTER TABLE threads ADD COLUMN archive_unnumbered INTEGER NOT NULL DEFAULT 0
+    CHECK (archive_unnumbered IN (0, 1));
+ALTER TABLE threads ADD COLUMN pin_unnumbered INTEGER NOT NULL DEFAULT 0
+    CHECK (pin_unnumbered IN (0, 1));
 CREATE INDEX idx_threads_archived ON threads(archived) WHERE archived = 1;
 -- Closure probes: threads by recorded root run / escalation source run, tasks by
 -- owning run, references by source run, and chat roots by the thread they name

@@ -629,7 +629,7 @@ mod retention_series {
     }
 
     #[test]
-    fn an_unnumbered_host_keeps_editing_its_own_generation_zero_series() {
+    fn an_unnumbered_host_keeps_editing_its_own_unnumbered_series() {
         let database = Database::open_in_memory().unwrap();
         write(
             &database,
@@ -660,6 +660,69 @@ mod retention_series {
         assert_eq!(
             archived_state(&row(&database, "t")),
             (true, Some(0), Some(2))
+        );
+    }
+
+    #[test]
+    fn an_unnumbered_sender_never_releases_a_generation_zero_series_a_numbered_writer_made() {
+        let database = Database::open_in_memory().unwrap();
+        // A pin and an archive written with an explicit generation 0.
+        write(&database, ThreadWriter::Host, pin("t", true, Some(0)));
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, Some(10), Some(0)),
+        );
+        // An unnumbered release is an equal generation: the protective side wins.
+        write(&database, ThreadWriter::Host, pin("t", false, None));
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, None),
+        );
+        assert!(row(&database, "t").pinned);
+        assert_eq!(
+            archived_state(&row(&database, "t")),
+            (true, Some(10), Some(0))
+        );
+        // The same holds however often it repeats, and a numbered release works.
+        write(&database, ThreadWriter::Host, pin("t", false, None));
+        assert!(row(&database, "t").pinned);
+        write(&database, ThreadWriter::Host, pin("t", false, Some(1)));
+        assert!(!row(&database, "t").pinned);
+    }
+
+    #[test]
+    fn a_numbered_tie_with_an_unnumbered_series_protects_it_for_good() {
+        let database = Database::open_in_memory().unwrap();
+        write(&database, ThreadWriter::Host, pin("t", false, None));
+        // Some(0) against an unnumbered generation 0 is an equal generation.
+        write(&database, ThreadWriter::Host, pin("t", true, Some(0)));
+        assert!(row(&database, "t").pinned);
+        // The series now counts as numbered: an unnumbered release is ignored.
+        write(&database, ThreadWriter::Host, pin("t", false, None));
+        assert!(row(&database, "t").pinned);
+        // A numbered write of the same generation keeps the protective side too.
+        write(&database, ThreadWriter::Host, pin("t", false, Some(0)));
+        assert!(row(&database, "t").pinned);
+    }
+
+    #[test]
+    fn a_row_inserted_with_an_explicit_generation_zero_is_numbered_from_the_start() {
+        let database = Database::open_in_memory().unwrap();
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", true, Some(5), Some(0)),
+        );
+        write(
+            &database,
+            ThreadWriter::Host,
+            archive("t", false, None, None),
+        );
+        assert_eq!(
+            archived_state(&row(&database, "t")),
+            (true, Some(5), Some(0))
         );
     }
 

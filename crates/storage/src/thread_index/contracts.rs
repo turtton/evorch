@@ -159,6 +159,8 @@ pub struct PurgeProgress {
     /// The next block alone is larger than `limit_text_bytes`: it is not taken
     /// and the caller must route it to an unbounded (exclusive) purge.
     pub oversized: bool,
+    /// Stored size of that block; 0 when `oversized` is false.
+    pub oversized_bytes: u64,
 }
 
 /// W1 SQL boundary called only by W2's single writer. Replacement diffs,

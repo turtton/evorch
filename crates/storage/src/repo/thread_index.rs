@@ -27,7 +27,8 @@ use crate::{RunContextReceipt, RunContextRecord, RunLedgerEntry, StorageError};
 pub(crate) use dependencies::LegacyDependencies;
 #[allow(unused_imports)]
 pub(crate) use index::{
-    DiscoveryBatch, MAX_ATTEMPTS, SqliteThreadIndex, purge_index_rows, retry_delay_ns,
+    DiscoveryBatch, MAX_ATTEMPTS, OversizedBlock, SqliteThreadIndex, purge_index_rows,
+    purge_index_rows_with, retry_delay_ns,
 };
 
 /// What one R2 cell does. `Keep` also preserves attempts, retry time and reasons.

@@ -526,6 +526,50 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         "no sort or automatic index"
     );
 
+    // The scan steps probe the family's tombstones row by row: a family with many
+    // threads or tasks costs the same per step as a small one.
+    let scan_with_tombstones = |tombstones: i64, phase: &str| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 2000)
+             INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind)
+             SELECT 1, 1, 1, 'Orchestrator',
+                    json_object('kind', 'Orchestrator', 'payload', json_object('kind', 'ThreadTodoUpdated',
+                      'payload', json_object('snapshot', json_object('thread_id', 'other')))),
+                    'ThreadTodoUpdated' FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 2000)
+             INSERT INTO task_queue_ledger(operation, payload)
+             SELECT 'enqueue', json_object('id', 'other-' || x) FROM n;",
+        );
+        confirm(&db);
+        db.sql(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {tombstones})
+             INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns)
+             SELECT 'dead-' || x, 'A', 1 FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {tombstones})
+             INSERT INTO task_tombstones(task_id, family_key) SELECT 'dead-task-' || x, 'A' FROM n;"
+        ));
+        set_cursor(&db, &format!(r#"{{"phase":"{phase}"}}"#));
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (counters, _) = one_step_scans(&storage);
+        storage.close();
+        counters
+    };
+    for phase in ["events_thread", "tasks"] {
+        let few = scan_with_tombstones(10, phase);
+        let many = scan_with_tombstones(20_000, phase);
+        assert!(
+            many.0 <= few.0 + few.0 / 10,
+            "{phase}: {few:?} with 10 tombstones, {many:?} with 20000"
+        );
+        assert_eq!(
+            (few.2, few.3, many.2, many.3),
+            (0, 0, 0, 0),
+            "{phase}: sort or automatic index"
+        );
+    }
+
     // Rows at the step budget are deleted in one transaction; one byte above, they wait.
     for (event_bytes, expect_deleted) in [(4_194_304_u64, true), (4_194_305, false)] {
         let db = Db::new();
@@ -622,6 +666,130 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         "index purge: {frames} frames for {} rows (bound {bound})",
         progress.rows
     );
+
+    // A large index block is registered by its own size: the work does not follow how
+    // many small blocks the run has, in the bounded phase or the exclusive one.
+    let index_work = |small_blocks: i64| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision,
+                 source_context_sha256, extractor_version, accounting_version, source_updated_at_ns,
+                 retention_at_ns)
+             VALUES ('ra', 'indexed', 1, 1, 'x', 1, 0, 1, 1);
+             INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, role,
+                 kind, truncated, hash, text)
+             VALUES ('ra', 'message', '0:0', 0, 0, 'user', 'text', 0, 'h', printf('%03145728d', 1));
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {small_blocks})
+             INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, role,
+                 kind, truncated, hash, text)
+             SELECT 'ra', 'message', x || ':0', x, 0, 'user', 'text', 0, 'h', 'small' FROM n;"
+        ));
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"index","run":"ra"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (bounded, _) = one_step_scans(&storage);
+        storage.close();
+        // The huge block comes first, so the step registers it and deletes no block.
+        assert_eq!(db.int("SELECT COUNT(*) FROM reclaim_oversized"), 1);
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM conversation_blocks WHERE run_id = 'ra'"),
+            small_blocks + 1
+        );
+        assert!(db.int("SELECT stored_bytes FROM reclaim_oversized") >= 3_145_728);
+        let database = Database::open(&config(&db.path)).unwrap();
+        // The first exclusive call takes the huge block alone; the next takes a batch.
+        let alone = database.reclaim_oversized_step(0).unwrap();
+        assert_eq!(alone.rows, 1, "{alone:?}");
+        let mut batch = None;
+        let exclusive = steps_of(|| batch = Some(database.reclaim_oversized_step(0).unwrap()));
+        let batch = batch.unwrap();
+        assert_eq!(batch.rows, 200, "{batch:?}");
+        (bounded, exclusive)
+    };
+    let (short, short_exclusive) = index_work(400);
+    let (long, long_exclusive) = index_work(6_000);
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "registering a large block: {short:?} over 400 small blocks, {long:?} over 6000"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+    assert!(
+        long_exclusive <= short_exclusive + short_exclusive / 10,
+        "exclusive index batch: {short_exclusive} steps over 400 small blocks, {long_exclusive} over 6000"
+    );
+
+    // A capture with a large file and thousands of empty ones: one step reads and deletes at
+    // most a row-count batch, and the large file is registered without reading the others.
+    let capture_work = |empty_files: i64, huge: bool| {
+        let db = Db::new();
+        db.family(1);
+        db.sql(&format!(
+            "INSERT INTO thread_start_states(thread_id, root_run_id, project_root, repo_prefix, head_commit,
+                 diff, captured_at_ns, replayable, reason)
+             VALUES ('A', 'ra', '/p', '', 'abc', zeroblob(64), 1, 1, NULL);
+             WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {empty_files})
+             INSERT INTO thread_start_untracked(thread_id, path, kind, executable, content)
+             SELECT 'A', printf('z-%06d', x), 'file', 0, zeroblob(0) FROM n;"
+        ));
+        if huge {
+            db.sql(
+                "INSERT INTO thread_start_untracked(thread_id, path, kind, executable, content)
+                 VALUES ('A', 'a-huge', 'file', 0, zeroblob(5242880));",
+            );
+        }
+        confirm(&db);
+        set_cursor(&db, r#"{"phase":"thread_tables","thread":"A"}"#);
+        let storage = Storage::open(config(&db.path)).unwrap();
+        let (bounded, progress) = one_step_scans(&storage);
+        storage.close();
+        let database = Database::open(&config(&db.path)).unwrap();
+        let mut exclusive = None;
+        let exclusive_steps =
+            steps_of(|| exclusive = Some(database.reclaim_oversized_step(0).unwrap()));
+        (
+            bounded,
+            progress,
+            exclusive_steps,
+            exclusive.unwrap(),
+            db.int("SELECT COUNT(*) FROM reclaim_oversized"),
+        )
+    };
+    let (short, short_progress, _, _, registered) = capture_work(1_000, false);
+    let (long, long_progress, _, _, _) = capture_work(9_000, false);
+    assert_eq!((short_progress.rows, long_progress.rows), (500, 500));
+    assert_eq!(registered, 0);
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "capture step: {short:?} over 1k files, {long:?} over 9k"
+    );
+    assert_eq!(
+        (short.2, short.3, long.2, long.3),
+        (0, 0, 0, 0),
+        "no sort or automatic index"
+    );
+    let (short, short_progress, short_exclusive, short_batch, registered) =
+        capture_work(1_000, true);
+    let (long, long_progress, long_exclusive, long_batch, _) = capture_work(9_000, true);
+    assert_eq!(
+        (short_progress.rows, long_progress.rows, registered),
+        (0, 0, 1)
+    );
+    assert!(
+        long.0 <= short.0 + short.0 / 10,
+        "registering a large file: {short:?} over 1k files, {long:?} over 9k"
+    );
+    assert_eq!(
+        (short_batch.rows, long_batch.rows),
+        (1, 1),
+        "the large file goes alone"
+    );
+    assert!(short_exclusive > 0 && long_exclusive <= short_exclusive + short_exclusive / 10);
+    // The next exclusive call deletes a bounded batch of the empty files.
 
     // The attribution backfill rewrites whole rows, so its frames follow the bytes it touches.
     for payload in [200_usize, 20_000] {
