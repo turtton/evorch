@@ -222,6 +222,7 @@ impl Run {
                     FinishReason::ToolUse
                 };
                 let response = ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: Role::Assistant,
                         content: std::mem::take(&mut self.content),

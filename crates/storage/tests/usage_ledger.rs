@@ -30,6 +30,7 @@ fn event(kind: impl Into<event_bus::EventKind>, seconds: u64) -> Event {
 
 fn completed(request_id: &str, run_id: Option<&str>) -> ProviderEvent {
     ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: request_id.into(),
         provider: "openai".into(),
         profile: Some("main".into()),

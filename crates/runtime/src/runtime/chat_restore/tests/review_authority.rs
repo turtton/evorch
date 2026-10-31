@@ -33,7 +33,7 @@ impl AgentModel for RecordingReviewer {
             panic!("expected review JSON");
         };
         *self.payload.lock().unwrap() = Some(serde_json::from_str(text).unwrap());
-        Ok(ChatResponse {
+        Ok(ChatResponse { usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::Text {

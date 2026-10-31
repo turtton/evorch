@@ -244,7 +244,8 @@ impl<I: WireStreamInterpreter> SsePump<I> {
                 response.message = message;
             }
             self.interpreter.finalize_message(&mut response.message);
-            if self.interpreter.usage_reported() {
+            response.usage_reported = self.interpreter.usage_reported();
+            if response.usage_reported {
                 self.usage.emit_usage(&self.model, &response.usage);
             } else {
                 // 未報告をゼロ使用量として発行・観測すると、予算や cache 比率を黙って歪める。

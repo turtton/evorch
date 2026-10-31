@@ -186,6 +186,7 @@ mod tests {
     impl StubModel {
         fn responding_with_text(text: &str) -> Self {
             Self::responding(Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -199,6 +200,7 @@ mod tests {
 
         fn responding_with_tool_use() -> Self {
             Self::responding(Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::ToolUse {

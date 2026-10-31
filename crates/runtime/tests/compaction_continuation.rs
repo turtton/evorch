@@ -213,6 +213,7 @@ fn expected_tool_result(assistant: &Message) -> Message {
 
 fn scripted_response(message: Message, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message,
         usage: Usage::default(),
         finish_reason,

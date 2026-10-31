@@ -39,6 +39,7 @@ struct Counts {
     usage: usize,
     cache_reuse: usize,
     completed: usize,
+    completed_reports_usage: Option<bool>,
     diagnostics: Vec<String>,
 }
 
@@ -75,7 +76,10 @@ fn run(reported: bool) -> (Counts, Vec<Result<StreamEvent, ProviderError>>) {
             EventKind::Provider(ProviderEvent::CacheReuseObserved { .. }) => {
                 counts.cache_reuse += 1
             }
-            EventKind::Provider(ProviderEvent::RequestCompleted { .. }) => counts.completed += 1,
+            EventKind::Provider(ProviderEvent::RequestCompleted { usage_reported, .. }) => {
+                counts.completed += 1;
+                counts.completed_reports_usage = Some(usage_reported);
+            }
             EventKind::Diagnostic(diagnostic) => {
                 assert_eq!(diagnostic.run_id.as_deref(), Some("run-1"));
                 counts.diagnostics.push(diagnostic.code);
@@ -95,11 +99,13 @@ fn missing_usage_skips_usage_and_cache_observation_but_still_completes() {
     assert_eq!(counts.usage, 0);
     assert_eq!(counts.cache_reuse, 0);
     assert_eq!(counts.completed, 1);
+    assert_eq!(counts.completed_reports_usage, Some(false));
     assert_eq!(counts.diagnostics, ["ProviderUsageMissing"]);
     let [Ok(StreamEvent::Completed { response })] = events.as_slice() else {
         panic!("{events:?}");
     };
     assert_eq!(response.usage, Usage::default());
+    assert!(!response.usage_reported);
     assert_eq!(response.finish_reason, FinishReason::Stop);
 }
 
@@ -112,5 +118,6 @@ fn reported_usage_emits_usage_and_cache_observation_without_diagnostic() {
     assert_eq!(counts.usage, 1);
     assert_eq!(counts.cache_reuse, 1);
     assert_eq!(counts.completed, 1);
+    assert_eq!(counts.completed_reports_usage, Some(true));
     assert!(counts.diagnostics.is_empty(), "{:?}", counts.diagnostics);
 }

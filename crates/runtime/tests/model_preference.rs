@@ -32,6 +32,7 @@ impl AgentModel for RecordingModel {
             .unwrap();
         self.proceed.acquire().await.unwrap().forget();
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![],

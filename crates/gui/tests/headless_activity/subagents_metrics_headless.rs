@@ -64,6 +64,7 @@ fn request(
         run_id: Some(run.into()),
     }));
     telemetry.apply_event(&Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: format!("{run}-{ttft_ms}"),
         provider: "local".into(),
         profile: None,

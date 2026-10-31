@@ -39,6 +39,7 @@ impl AgentModel for QuestionHandoffModel {
             3 => ("finish", serde_json::json!({"result":"premature"})),
             4 => {
                 return Ok(ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: providers::Role::Assistant,
                         content: vec![ContentBlock::Text {
@@ -53,6 +54,7 @@ impl AgentModel for QuestionHandoffModel {
             count => panic!("unexpected request {count}"),
         };
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::ToolUse {

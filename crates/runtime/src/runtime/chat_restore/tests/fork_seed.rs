@@ -31,6 +31,7 @@ impl AgentModel for EchoModel {
         self.requests.lock().unwrap().push(messages.to_vec());
         let last = user_texts(messages).pop().unwrap_or_default();
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text {

@@ -633,6 +633,7 @@ impl AgentModel for ReplayCompactor {
     ) -> Result<Option<providers::CompactionResult>, crate::RuntimeError> {
         self.0.lock().unwrap().push(messages.to_vec());
         Ok(Some(providers::CompactionResult {
+            usage_reported: true,
             encrypted_content: "official".into(),
             usage: Default::default(),
         }))
@@ -1069,6 +1070,7 @@ impl AgentModel for NativeCheckpointRecoveryModel {
             .collect::<Vec<_>>()
             .join(" ");
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: MessageRole::Assistant,
                 content: vec![ContentBlock::Text {

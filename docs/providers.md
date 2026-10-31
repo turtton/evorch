@@ -124,9 +124,11 @@ implemented.
 The `usage` of a terminal `response.completed` / `response.incomplete` is
 optional (Codex may omit it). A missing `usage` is not reported as zero: no
 usage event or cache-reuse observation is recorded for that response, a
-`ProviderUsageMissing` diagnostic is emitted once, and context-size estimation
-uses the serialized byte estimate. Official compaction responses follow the same
-rule.
+`ProviderUsageMissing` diagnostic is emitted once, and `ChatResponse` and
+`RequestCompleted` carry `usage_reported = false` so the ledger (no cost), the GUI
+(no billing, no latest-context size) and the runtime (estimate for context size,
+budgets and the rules injection budget) never read the placeholder zeros as
+measurements. Official compaction responses follow the same rule.
 
 ## Configuration
 

@@ -81,6 +81,7 @@ mod rework_tests {
         finish_reason: providers::FinishReason,
     ) -> providers::ChatResponse {
         providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text { text: text.into() }],

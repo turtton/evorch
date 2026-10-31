@@ -57,28 +57,19 @@ impl Compactor for CodexClient {
         }
         .await;
         match &result {
-            Ok(completed) => {
-                if completed.usage_reported {
+            Ok(result) => {
+                if result.usage_reported {
                     UsageEmitter::new(self.event_bus.clone(), PROVIDER_LABEL)
-                        .emit_usage(&request.model, &completed.result.usage);
+                        .emit_usage(&request.model, &result.usage);
                 } else {
                     observer.mark_usage_missing();
                 }
-                observer.emit_completed(&completed.result.usage, FinishReason::Stop);
+                observer.emit_completed(&result.usage, FinishReason::Stop);
             }
             Err(error) => observer.emit_failed(error),
         }
-        result.map(|completed| completed.result)
+        result
     }
-}
-
-/// 完了した compaction と、その usage が wire 上で報告されていたか。
-///
-/// 未報告のとき `result.usage` は実測値ではなく `Usage::default()` の代替値。
-#[derive(Debug, PartialEq, Eq)]
-struct CompletedCompaction {
-    result: CompactionResult,
-    usage_reported: bool,
 }
 
 #[derive(Default)]
@@ -87,7 +78,7 @@ struct CompactionStream {
 }
 
 impl CompactionStream {
-    fn interpret(&mut self, frame: SseFrame) -> Result<Option<CompletedCompaction>, ProviderError> {
+    fn interpret(&mut self, frame: SseFrame) -> Result<Option<CompactionResult>, ProviderError> {
         if frame.data.trim() == "[DONE]" {
             return Err(invalid(
                 "Codex compaction response ended without completion",
@@ -128,20 +119,19 @@ impl CompactionStream {
                     );
                 }
                 let usage_reported = usage.is_some();
-                return Ok(Some(CompletedCompaction {
-                    result: CompactionResult {
-                        encrypted_content: self.encrypted_content.take().ok_or_else(|| {
-                            invalid("Codex response に compaction item がありません")
-                        })?,
-                        usage: usage.map_or_else(Usage::default, |usage| Usage {
-                            context_tokens: None,
-                            input_tokens: usage.input_tokens,
-                            output_tokens: usage.output_tokens,
-                            cache_read_tokens: usage.input_tokens_details.cached_tokens,
-                            cache_write_tokens: 0,
-                            reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
-                        }),
-                    },
+                return Ok(Some(CompactionResult {
+                    encrypted_content: self
+                        .encrypted_content
+                        .take()
+                        .ok_or_else(|| invalid("Codex response に compaction item がありません"))?,
+                    usage: usage.map_or_else(Usage::default, |usage| Usage {
+                        context_tokens: None,
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_read_tokens: usage.input_tokens_details.cached_tokens,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: usage.output_tokens_details.reasoning_tokens,
+                    }),
                     usage_reported,
                 }));
             }

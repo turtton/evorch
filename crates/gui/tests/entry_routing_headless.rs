@@ -35,7 +35,7 @@ impl AgentModel for HeldModel {
                 matches!(block, providers::ContentBlock::Text { text } if text == "Investigate the issue")
             })
         }) {
-            return Ok(ChatResponse {
+            return Ok(ChatResponse { usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content: vec![providers::ContentBlock::Text {

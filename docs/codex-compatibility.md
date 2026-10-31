@@ -100,11 +100,22 @@ catalog again. `list_models` reports the stored outcome, failure included.
 When the terminal event carries no usage, evorch finishes the response normally
 and does not invent a zero: no usage event is recorded, no cache-reuse
 observation is made, and one `ProviderUsageMissing` diagnostic (warning) is
-emitted per response; the response id is logged. The request-completed event
-still fires, with zero token counts as placeholders. Context-size estimation
-then falls back to the serialized byte estimate, which is already its floor.
+emitted per response; the response id is logged. The response carries
+`usage_reported = false` (`ChatResponse`, `CompactionResult`), and the
+request-completed event carries the same flag with zero token counts as
+placeholders. Downstream, those zeros are never treated as measurements:
+
+- the usage ledger stores no cost for the request (a reported zero keeps `$0`);
+- the GUI neither bills the request nor shows it as the latest context size, and
+  clears the previous one;
+- OTel spans omit `gen_ai.usage.*`;
+- the runtime leaves `last_usage` empty, so context sizing uses the serialized
+  byte estimate, and charges an estimate (serialized request plus response) to the
+  run budget, the goal usage and the rules injection budget instead of zero;
+- the next request's cache baseline is the last reported request.
+
 The compaction request follows the same rule: its encrypted state is returned and
-only the usage record is skipped.
+only the usage record is skipped (the budget is charged an estimate).
 
 #### `response.incomplete`
 

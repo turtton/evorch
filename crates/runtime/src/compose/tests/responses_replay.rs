@@ -28,6 +28,7 @@ impl Compactor for ReplayClient {
     async fn compact(&self, request: &ChatRequest) -> Result<CompactionResult, ProviderError> {
         self.requests.lock().unwrap().push(request.clone());
         Ok(CompactionResult {
+            usage_reported: true,
             encrypted_content: "compacted".into(),
             usage: Usage::default(),
         })

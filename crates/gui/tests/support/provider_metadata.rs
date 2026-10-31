@@ -65,6 +65,7 @@ pub async fn settings(
 
 pub fn completed(provider: &str, profile: &str, model: &str) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "request".into(),
         provider: provider.into(),
         profile: Some(profile.into()),
@@ -118,6 +119,7 @@ pub async fn profile_slug_fixture() -> (ProviderSettingsModel, Event) {
             .unwrap(),
     ));
     let event = Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "profile-slug".into(),
         provider: "openai-compatible".into(),
         profile: Some("neuralwatt".into()),

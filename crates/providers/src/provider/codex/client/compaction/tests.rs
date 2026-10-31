@@ -34,9 +34,8 @@ fn captures_blob_usage_and_ignores_other_output() {
         );
     }
     assert_eq!(stream.interpret(item(json!("opaque+/="))).unwrap(), None);
-    let completed = stream.interpret(completed()).unwrap().unwrap();
-    assert!(completed.usage_reported);
-    let result = completed.result;
+    let result = stream.interpret(completed()).unwrap().unwrap();
+    assert!(result.usage_reported);
     assert_eq!(result.encrypted_content, "opaque+/=");
     assert_eq!(
         result.usage,
@@ -55,7 +54,7 @@ fn captures_blob_usage_and_ignores_other_output() {
 fn cached_tokens_are_optional() {
     let mut stream = CompactionStream::default();
     stream.interpret(item(json!("opaque"))).unwrap();
-    let result = stream.interpret(frame(json!({"type":"response.completed", "response":{"usage":{"input_tokens":2,"output_tokens":1}}}))).unwrap().unwrap().result;
+    let result = stream.interpret(frame(json!({"type":"response.completed", "response":{"usage":{"input_tokens":2,"output_tokens":1}}}))).unwrap().unwrap();
     assert_eq!(result.usage.cache_read_tokens, 0);
 }
 
@@ -77,8 +76,8 @@ fn missing_usage_still_completes_but_is_marked_unreported() {
             .unwrap()
             .expect("completion");
         assert!(!completed.usage_reported, "{response}");
-        assert_eq!(completed.result.encrypted_content, "opaque");
-        assert_eq!(completed.result.usage, Usage::default());
+        assert_eq!(completed.encrypted_content, "opaque");
+        assert_eq!(completed.usage, Usage::default());
     }
 }
 

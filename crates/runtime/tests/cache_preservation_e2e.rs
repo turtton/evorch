@@ -13,6 +13,8 @@ mod read_alias_cache;
 mod run_js_cache;
 mod support;
 mod unauthorized_recovery_cache;
+#[path = "usage_missing_cache/mod.rs"]
+mod usage_missing_cache;
 #[path = "web_tools_cache/mod.rs"]
 mod web_tools_cache;
 use std::sync::Arc;

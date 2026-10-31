@@ -8,7 +8,11 @@ use crate::{ChatRequest, ProviderError, Usage};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
     pub encrypted_content: String,
+    /// 生成に使用したトークン数。`usage_reported` が `false` のときは実測値ではなく、
+    /// 未報告を表す `Usage::default()` の代替値。
     pub usage: Usage,
+    /// provider が usage を報告したか。未報告のゼロを実測ゼロとして集計してはならない。
+    pub usage_reported: bool,
 }
 
 #[async_trait]

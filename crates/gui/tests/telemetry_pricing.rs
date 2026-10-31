@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 fn completed(model: &str) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: model.into(),
         provider: "vendor".into(),
         profile: Some("local".into()),
@@ -44,6 +45,7 @@ fn run_cost_survives_when_another_priced_model_has_zero_usage() {
     let mut overlay = TelemetryOverlay::new();
     overlay.apply_event(&completed("model"));
     overlay.apply_event(&Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "zero".into(),
         provider: "vendor".into(),
         profile: Some("local".into()),
@@ -343,6 +345,7 @@ fn capture_telemetry_cost_png() {
 
 fn request(input_tokens: u64, service_tier: Option<event_bus::ServiceTier>) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: format!("req-{input_tokens}-{service_tier:?}"),
         provider: "vendor".into(),
         profile: Some("local".into()),

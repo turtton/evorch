@@ -219,6 +219,7 @@ fn wire_response_converts_to_canonical_response() {
     assert_eq!(
         response,
         ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: Role::Assistant,
                 content: vec![

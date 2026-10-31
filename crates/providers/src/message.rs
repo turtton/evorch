@@ -459,10 +459,28 @@ pub struct ChatRequest {
 pub struct ChatResponse {
     /// アシスタントの応答メッセージ。
     pub message: Message,
-    /// トークン使用量。
+    /// トークン使用量。[`Self::usage_reported`] が `false` のときは実測値ではなく、
+    /// 未報告を表す `Usage::default()` の代替値。
     pub usage: Usage,
+    /// provider が `usage` を報告したか。未報告 (Codex は終端 usage を省略しうる) の
+    /// ゼロを、報告された実測ゼロと取り違えて課金・予算・文脈量へ流してはならない。
+    #[serde(
+        default = "usage_reported_default",
+        skip_serializing_if = "usage_is_reported"
+    )]
+    pub usage_reported: bool,
     /// 終了理由。
     pub finish_reason: FinishReason,
+}
+
+const fn usage_reported_default() -> bool {
+    true
+}
+
+// serde の `skip_serializing_if` は参照を受け取る。
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn usage_is_reported(reported: &bool) -> bool {
+    *reported
 }
 
 /// プロバイダが対応する機能フラグ。
@@ -624,6 +642,7 @@ mod tests {
     #[test]
     fn chat_response_round_trip_preserves_fields() {
         let response = ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {

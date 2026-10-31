@@ -32,6 +32,7 @@ impl QueueClient {
 impl Compactor for QueueClient {
     async fn compact(&self, _request: &ChatRequest) -> Result<CompactionResult, ProviderError> {
         Ok(CompactionResult {
+            usage_reported: true,
             encrypted_content: "opaque".into(),
             usage: Usage::default(),
         })

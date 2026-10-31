@@ -1188,6 +1188,16 @@ impl ServiceTier {
 /// 壊れたとみなす (`CacheRegression` 診断と GUI の警告表示で共有する)。
 pub const CACHE_RETENTION_WARNING_THRESHOLD: f64 = 0.5;
 
+const fn usage_reported_default() -> bool {
+    true
+}
+
+// serde の `skip_serializing_if` は参照を受け取る。
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_usage_reported(reported: &bool) -> bool {
+    *reported
+}
+
 /// [`ProviderEvent::RequestFailed`] の `detail` に載せる最大バイト数。
 pub const REQUEST_FAILED_DETAIL_MAX_BYTES: usize = 1024;
 
@@ -1366,6 +1376,14 @@ pub enum ProviderEvent {
         /// wire 上で要求したサービス階層。標準処理と旧形式ペイロードでは `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         service_tier: Option<ServiceTier>,
+        /// provider が終端で usage を報告したか。`false` のとき上の token counts は
+        /// 未報告を表す代替のゼロで、実測ゼロではない。課金・文脈量の確定に使ってはならない。
+        /// 旧形式ペイロードでは報告済みとして読む。
+        #[serde(
+            default = "usage_reported_default",
+            skip_serializing_if = "is_usage_reported"
+        )]
+        usage_reported: bool,
     },
     /// 完了した attempt の prompt cache 再利用を直近 attempt と比較した。
     ///
@@ -2592,6 +2610,7 @@ mod tests {
             (
                 "RequestCompleted",
                 ProviderEvent::RequestCompleted {
+                    usage_reported: true,
                     request_id: "req-1700000000000-3".into(),
                     provider: "openai-compatible".into(),
                     profile: Some("secondary".into()),
@@ -3051,6 +3070,7 @@ mod tests {
         assert_eq!(
             restored.kind,
             EventKind::Provider(ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "req-1700000000000-3".into(),
                 provider: "openai-compatible".into(),
                 profile: Some("secondary".into()),

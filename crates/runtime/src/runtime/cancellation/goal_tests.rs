@@ -71,6 +71,7 @@ impl AgentModel for Model {
             std::future::pending::<()>().await;
         }
         Ok(providers::ChatResponse {
+            usage_reported: true,
             message: providers::Message {
                 role: providers::Role::Assistant,
                 content: vec![providers::ContentBlock::Text {

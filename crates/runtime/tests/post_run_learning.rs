@@ -30,6 +30,7 @@ struct Model {
 
 fn text_response(text: &str) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: providers::Role::Assistant,
             content: vec![ContentBlock::Text { text: text.into() }],
@@ -41,6 +42,7 @@ fn text_response(text: &str) -> ChatResponse {
 
 fn tool_response(id: &str, name: &str, input: Value) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: providers::Role::Assistant,
             content: vec![ContentBlock::ToolUse {

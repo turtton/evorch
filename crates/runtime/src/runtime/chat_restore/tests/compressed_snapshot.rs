@@ -57,6 +57,7 @@ impl AgentModel for BigModel {
             big_text("answer")
         };
         Ok(ChatResponse {
+            usage_reported: true,
             message: text_message(providers::Role::Assistant, reply),
             finish_reason: providers::FinishReason::Stop,
             usage: providers::Usage::default(),

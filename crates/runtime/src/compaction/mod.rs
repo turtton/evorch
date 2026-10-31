@@ -289,7 +289,18 @@ pub(crate) async fn compact_candidate(
     let (summary_result, summary_usage) = if let Some(result) = &official {
         (
             Ok("[provider-side API compaction]".to_owned()),
-            Some(result.usage),
+            Some(if result.usage_reported {
+                result.usage
+            } else {
+                // Unreported: charge the estimated request instead of a free call.
+                estimator::estimated_usage(
+                    estimator::estimate_tokens(&compacted),
+                    &providers::Message {
+                        role: providers::Role::Assistant,
+                        content: Vec::new(),
+                    },
+                )
+            }),
         )
     } else {
         match context.text_compaction_view() {

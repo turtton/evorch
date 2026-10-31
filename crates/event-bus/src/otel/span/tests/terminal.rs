@@ -25,6 +25,7 @@ fn request_success_ends_with_usage_and_finish_reason_attributes() {
     // When: the request completes.
     let actions = mapper.ingest(&event(
         ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: "request-1".to_owned(),
             provider: "anthropic".to_owned(),
             profile: None,
@@ -59,6 +60,63 @@ fn request_success_ends_with_usage_and_finish_reason_attributes() {
             i64_attr("gen_ai.usage.output_tokens", 12),
             strings_attr("gen_ai.response.finish_reasons", &["tool_use"])
         ]
+    );
+}
+
+#[test]
+fn unreported_usage_leaves_the_usage_attributes_off_the_span() {
+    // Given: an open request span whose completion carries placeholder zero counts.
+    let mut mapper = SpanMapper::new();
+    mapper.ingest(&start_run("run-1", None, 1));
+    mapper.ingest(&event(
+        ProviderEvent::RequestStarted {
+            request_id: "request-1".to_owned(),
+            provider: "openai-codex".to_owned(),
+            profile: None,
+            protocol: "openai-codex-responses".to_owned(),
+            model: "gpt-test".to_owned(),
+            streaming: true,
+            run_id: Some("run-1".to_owned()),
+            reasoning_effort: None,
+            purpose: None,
+        },
+        2,
+    ));
+    // When: the provider reported no usage.
+    let actions = mapper.ingest(&event(
+        ProviderEvent::RequestCompleted {
+            usage_reported: false,
+            request_id: "request-1".to_owned(),
+            provider: "openai-codex".to_owned(),
+            profile: None,
+            protocol: "openai-codex-responses".to_owned(),
+            model: "gpt-test".to_owned(),
+            streaming: true,
+            duration_ms: 10,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".to_owned(),
+            service_tier: None,
+            run_id: Some("run-1".to_owned()),
+            purpose: None,
+            reasoning_tokens: None,
+        },
+        3,
+    ));
+    // Then: a zero is not exported as a measured usage.
+    let attributes = action_attributes(&actions[0]);
+    assert!(
+        attributes
+            .iter()
+            .all(|attribute| !attribute.key.starts_with("gen_ai.usage.")),
+        "{attributes:?}"
+    );
+    assert!(
+        attributes
+            .iter()
+            .any(|attribute| attribute.key == "gen_ai.response.finish_reasons")
     );
 }
 

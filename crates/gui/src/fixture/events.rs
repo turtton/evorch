@@ -120,6 +120,7 @@ fn request_started(run_id: &str, provider: &str, model: &str) -> Event {
 
 fn request_completed(run_id: &str, input_tokens: u64, output_tokens: u64) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: format!("request-{run_id}"),
         provider: "anthropic".into(),
         profile: None,

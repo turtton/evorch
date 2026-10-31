@@ -337,45 +337,56 @@ impl TelemetryOverlay {
                 reasoning_tokens,
                 service_tier,
                 purpose,
+                usage_reported,
                 ..
             }) => {
-                self.billed
-                    .entry(run_id.clone())
-                    .or_default()
-                    .push(pricing::BilledRequest {
-                        key: pricing::ModelKey {
-                            provider: provider.clone(),
-                            profile: profile.clone(),
-                            model: model.clone(),
-                        },
-                        speed: recorder::pricing::speed(*service_tier),
-                        usage: TokenUsage {
-                            input: *input_tokens,
-                            output: *output_tokens,
-                            cache_read: *cache_read_tokens,
-                            cache_write: *cache_write_tokens,
-                        },
-                    });
-                self.stale_costs.insert(run_id.clone());
+                // Unreported usage arrives as placeholder zeros. They are neither billed
+                // (that would book a known $0.00) nor shown as the latest context size.
+                if *usage_reported {
+                    self.billed
+                        .entry(run_id.clone())
+                        .or_default()
+                        .push(pricing::BilledRequest {
+                            key: pricing::ModelKey {
+                                provider: provider.clone(),
+                                profile: profile.clone(),
+                                model: model.clone(),
+                            },
+                            speed: recorder::pricing::speed(*service_tier),
+                            usage: TokenUsage {
+                                input: *input_tokens,
+                                output: *output_tokens,
+                                cache_read: *cache_read_tokens,
+                                cache_write: *cache_write_tokens,
+                            },
+                        });
+                    self.stale_costs.insert(run_id.clone());
+                }
                 let row = self.rows.entry(run_id.clone()).or_default();
-                row.usage.input = row.usage.input.saturating_add(*input_tokens);
-                row.usage.output = row.usage.output.saturating_add(*output_tokens);
-                row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
-                row.usage.cache_write = row.usage.cache_write.saturating_add(*cache_write_tokens);
+                if *usage_reported {
+                    row.usage.input = row.usage.input.saturating_add(*input_tokens);
+                    row.usage.output = row.usage.output.saturating_add(*output_tokens);
+                    row.usage.cache_read = row.usage.cache_read.saturating_add(*cache_read_tokens);
+                    row.usage.cache_write =
+                        row.usage.cache_write.saturating_add(*cache_write_tokens);
+                }
                 if self.side_requests.remove(request_id) || is_side_request(*purpose) {
                     return;
                 }
-                row.conversation_usage.input =
-                    row.conversation_usage.input.saturating_add(*input_tokens);
-                row.conversation_usage.cache_read = row
-                    .conversation_usage
-                    .cache_read
-                    .saturating_add(*cache_read_tokens);
+                if *usage_reported {
+                    row.conversation_usage.input =
+                        row.conversation_usage.input.saturating_add(*input_tokens);
+                    row.conversation_usage.cache_read = row
+                        .conversation_usage
+                        .cache_read
+                        .saturating_add(*cache_read_tokens);
+                }
                 let reuse = row.pending_reuse.take().unwrap_or(RequestReuse::Unobserved);
                 row.cache_reuse.complete(reuse);
                 self.context_order = self.context_order.saturating_add(1);
                 row.context_order = self.context_order;
-                row.latest_context = Some(context_pressure::RequestContext {
+                // The previous request's size is stale and this one's is unknown.
+                row.latest_context = usage_reported.then(|| context_pressure::RequestContext {
                     key: pricing::ModelKey {
                         provider: provider.clone(),
                         profile: profile.clone(),
@@ -392,7 +403,9 @@ impl TelemetryOverlay {
                 self.stale_context.insert(run_id.clone());
                 row.in_flight = false;
                 row.last_finish_reason = Some(finish_reason.clone());
-                row.output_tokens = *output_tokens;
+                if *usage_reported {
+                    row.output_tokens = *output_tokens;
+                }
                 let duration = Duration::from_millis(*duration_ms);
                 row.request_duration = Some(duration);
                 let reasoning = reasoning_tokens.unwrap_or_default();

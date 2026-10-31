@@ -69,6 +69,8 @@ struct Observed {
     usage_events: usize,
     cache_reuse: usize,
     completed: usize,
+    /// `usage_reported` carried by the RequestCompleted event.
+    completed_reports_usage: Option<bool>,
     diagnostics: Vec<DiagnosticEvent>,
 }
 
@@ -82,8 +84,9 @@ async fn observe_until_completed(receiver: &mut EventReceiver) -> Observed {
                 observed.cache_reuse += 1;
             }
             EventKind::Diagnostic(diagnostic) => observed.diagnostics.push(diagnostic),
-            EventKind::Provider(ProviderEvent::RequestCompleted { .. }) => {
+            EventKind::Provider(ProviderEvent::RequestCompleted { usage_reported, .. }) => {
                 observed.completed += 1;
+                observed.completed_reports_usage = Some(usage_reported);
                 return observed;
             }
             _ => {}
@@ -98,6 +101,11 @@ fn assert_usage_missing_only(observed: &Observed) {
         "no cache observation without usage"
     );
     assert_eq!(observed.completed, 1);
+    assert_eq!(
+        observed.completed_reports_usage,
+        Some(false),
+        "RequestCompleted must say its zero counts are placeholders"
+    );
     assert_eq!(observed.diagnostics.len(), 1, "{:?}", observed.diagnostics);
     assert_eq!(
         observed.diagnostics[0].code,
@@ -127,6 +135,7 @@ async fn send_completes_with_stop_when_the_terminal_response_has_no_usage() {
 
         assert_eq!(response.finish_reason, FinishReason::Stop);
         assert_eq!(response.usage, Usage::default());
+        assert!(!response.usage_reported);
         assert_eq!(
             response.message.content,
             vec![ContentBlock::Text { text: "hi".into() }]
@@ -152,8 +161,10 @@ async fn reported_usage_still_emits_usage_and_no_missing_diagnostic() {
         .unwrap();
 
     assert_eq!(response.usage.input_tokens, 3);
+    assert!(response.usage_reported);
     let observed = observe_until_completed(&mut receiver).await;
     assert_eq!(observed.usage_events, 1);
+    assert_eq!(observed.completed_reports_usage, Some(true));
     assert!(
         observed.diagnostics.is_empty(),
         "{:?}",
@@ -182,5 +193,6 @@ async fn compaction_without_usage_returns_the_blob_and_records_only_a_diagnostic
 
     assert_eq!(result.encrypted_content, "opaque");
     assert_eq!(result.usage, Usage::default());
+    assert!(!result.usage_reported);
     assert_usage_missing_only(&observe_until_completed(&mut receiver).await);
 }

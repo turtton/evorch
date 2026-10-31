@@ -66,6 +66,7 @@ impl AgentModel for Model {
                 }]
             };
             return Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: providers::Role::Assistant,
                     content,
@@ -155,6 +156,7 @@ impl AgentModel for Model {
             ),
         };
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content,

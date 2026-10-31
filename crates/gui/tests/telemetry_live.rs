@@ -71,6 +71,7 @@ fn first_token() -> Event {
 
 fn completed(duration_ms: u64, output_tokens: u64) -> Event {
     Event::new(ProviderEvent::RequestCompleted {
+        usage_reported: true,
         request_id: "request-1".into(),
         provider: "fixture".into(),
         profile: None,

@@ -99,6 +99,7 @@ fn request_started_custom(
 fn request_completed(request_id: &str, seconds: u64) -> Event {
     event(
         ProviderEvent::RequestCompleted {
+            usage_reported: true,
             request_id: request_id.to_owned(),
             provider: "anthropic".to_owned(),
             profile: None,

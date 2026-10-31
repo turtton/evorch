@@ -213,6 +213,7 @@ impl AttemptObserver {
             reasoning_tokens: usage.reasoning_tokens,
             purpose: self.observation_purpose(),
             service_tier: self.service_tier,
+            usage_reported: !self.usage_missing,
         });
         self.terminal_emitted = true;
         if let Some(log) = self.attempt_log() {

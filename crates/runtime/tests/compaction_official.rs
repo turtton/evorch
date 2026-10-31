@@ -201,6 +201,7 @@ async fn scenario(
 async fn official_compaction_checkpoint_preserves_blob_without_byte_limit() {
     scenario(
         Ok(Some(CompactionResult {
+            usage_reported: true,
             encrypted_content: BLOB.into(),
             usage: Usage {
                 input_tokens: 42,

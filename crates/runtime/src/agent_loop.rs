@@ -1218,13 +1218,30 @@ impl LoopState {
                 }
             };
             self.todo_context_deferred = false;
+            // A provider may omit usage (Codex does). The placeholder zero is not a
+            // measurement: it must not reach the rules budget, the context baseline or
+            // the cumulative budgets as "nothing used". Charge an estimate from the
+            // serialized request and response instead, and leave `last_usage` empty so
+            // context sizing falls back to the byte estimate too.
+            let usage = if response.usage_reported {
+                self.last_usage = Some(response.usage);
+                response.usage
+            } else {
+                self.last_usage = None;
+                let request = self.estimated_context_tokens(&self.context.visible_messages());
+                tracing::warn!(
+                    run_id = ?self.task.run_id,
+                    estimated_input_tokens = request,
+                    "provider reported no usage; charging an estimate"
+                );
+                compaction::estimator::estimated_usage(request, &response.message)
+            };
             if let Some(session) = &mut self.rules_session {
-                session.set_last_usage(response.usage);
+                session.set_last_usage(usage);
             }
-            self.last_usage = Some(response.usage);
-            self.budget.usage(response.usage);
+            self.budget.usage(usage);
             if let Some(runtime) = self.runtime() {
-                runtime.goal_usage(self.task.run_id, self.task.config.purpose, response.usage);
+                runtime.goal_usage(self.task.run_id, self.task.config.purpose, usage);
             }
             match self.publish_budget() {
                 crate::budget_tracker::BudgetDecision::Continue => {}

@@ -67,6 +67,7 @@ impl AgentModel for Recording {
 
 fn response(content: Vec<ContentBlock>, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: MessageRole::Assistant,
             content,

@@ -52,6 +52,7 @@ impl AgentModel for ScriptModel {
 
 fn reply(content: Vec<ContentBlock>, finish_reason: FinishReason) -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: MessageRole::Assistant,
             content,

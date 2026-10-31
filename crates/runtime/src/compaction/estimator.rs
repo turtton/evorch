@@ -41,6 +41,17 @@ fn image_data(messages: &[Message]) -> (u64, u64) {
     })
 }
 
+/// Usage to charge for a response whose provider reported none: the request-side
+/// estimate plus the serialized response. Never a measurement, only a stand-in that
+/// keeps budgets and the rules injection budget from treating the call as free.
+pub(crate) fn estimated_usage(request_tokens: u64, response: &Message) -> Usage {
+    Usage {
+        input_tokens: request_tokens,
+        output_tokens: estimate_tokens(std::slice::from_ref(response)),
+        ..Usage::default()
+    }
+}
+
 /// Include tool definitions in the serialized estimate. Provider input usage already
 /// includes them, so compare the two totals instead of adding schemas to usage.
 pub(crate) fn estimate_request(

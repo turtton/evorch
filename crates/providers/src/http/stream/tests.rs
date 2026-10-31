@@ -151,6 +151,7 @@ fn text_delta(text: &str) -> Result<StreamEvent, ProviderError> {
 fn completed_response(text: &str, usage: Usage) -> Result<StreamEvent, ProviderError> {
     Ok(StreamEvent::Completed {
         response: ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {

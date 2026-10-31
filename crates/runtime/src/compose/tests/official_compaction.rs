@@ -14,6 +14,7 @@ impl Compactor for OfficialClient {
             return Err(ProviderError::Request("compaction failed".into()));
         }
         Ok(CompactionResult {
+            usage_reported: true,
             encrypted_content: "opaque".into(),
             usage: Usage {
                 input_tokens: 42,

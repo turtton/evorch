@@ -206,6 +206,7 @@ fn every_mapper_emitted_key_is_whitelisted() {
         request_started("req-1", "run-1", 5),
         event(
             ProviderEvent::RequestCompleted {
+                usage_reported: true,
                 request_id: "req-1".to_owned(),
                 provider: "anthropic".to_owned(),
                 profile: None,

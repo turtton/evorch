@@ -374,6 +374,7 @@ mod tests {
         ) -> Result<ChatResponse, RuntimeError> {
             self.0.lock().unwrap().push(tools.to_vec());
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -502,6 +503,7 @@ mod tests {
             _tools: &[ToolSpec],
         ) -> Result<ChatResponse, RuntimeError> {
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {

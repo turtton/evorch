@@ -494,6 +494,7 @@ mod tests {
 
     fn sample_response() -> ChatResponse {
         ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {

@@ -29,6 +29,7 @@ impl AgentModel for CaptureModel {
             std::future::pending::<()>().await;
         }
         Ok(ChatResponse {
+            usage_reported: true,
             message: Message {
                 role: providers::Role::Assistant,
                 content: vec![ContentBlock::Text {

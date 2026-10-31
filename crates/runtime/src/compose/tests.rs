@@ -87,6 +87,7 @@ impl ProviderClient for StubClient {
 
 fn response() -> ChatResponse {
     ChatResponse {
+        usage_reported: true,
         message: Message {
             role: MessageRole::Assistant,
             content: vec![ContentBlock::Text {

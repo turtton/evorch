@@ -117,7 +117,18 @@ impl ModelSummarizer {
         text_tool_history: bool,
     ) -> (Result<String, SummarizeError>, Option<Usage>) {
         match self.complete_summary(input, text_tool_history).await {
-            Ok(response) => (summary_text(&response), Some(response.usage)),
+            Ok(response) => {
+                let usage = if response.usage_reported {
+                    response.usage
+                } else {
+                    // Not a measurement: charge the serialized request and response.
+                    super::estimator::estimated_usage(
+                        super::estimator::estimate_tokens(input.compacted),
+                        &response.message,
+                    )
+                };
+                (summary_text(&response), Some(usage))
+            }
             Err(error) => (Err(error), None),
         }
     }
@@ -768,6 +779,7 @@ mod tests {
                 "ordinary compaction keeps the historical summary input byte-identical"
             );
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -834,6 +846,7 @@ mod tests {
     async fn model_summary_forwards_context_without_tools() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![
@@ -911,6 +924,7 @@ mod tests {
     async fn model_summary_request_contains_goal() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -998,6 +1012,7 @@ mod tests {
     async fn model_summary_rejects_length_finish() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -1041,6 +1056,7 @@ mod tests {
     async fn model_summary_rejects_content_filter_finish() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
@@ -1084,6 +1100,7 @@ mod tests {
     async fn model_summary_rejects_empty_text_output() {
         let model = Arc::new(StubModel {
             response: Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![
@@ -1143,6 +1160,7 @@ mod tests {
         for (finish_reason, expected_reason) in cases {
             let model = Arc::new(StubModel {
                 response: Ok(ChatResponse {
+                    usage_reported: true,
                     message: Message {
                         role: MessageRole::Assistant,
                         content: vec![ContentBlock::Text {
@@ -1279,6 +1297,7 @@ mod responses_tests {
         ) -> Result<ChatResponse, RuntimeError> {
             self.0.lock().unwrap().push(messages.to_vec());
             Ok(ChatResponse {
+                usage_reported: true,
                 message: Message {
                     role: MessageRole::Assistant,
                     content: vec![ContentBlock::Text {
