@@ -13,7 +13,7 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
     let store = store("expired-access", "selected-account", 0);
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
-        .and(body_json(json!({"client_id":CODEX_CLIENT_ID,"grant_type":"refresh_token","refresh_token":"refresh-old"})))
+        .and(body_json(json!({"client_id":CODEX_CLIENT_ID,"grant_type":"refresh_token","refresh_token":"refresh-old","refresh_reason":"proactive_expiry"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token":"refreshed-access", "refresh_token":"refresh-new",
             "id_token":jwt(u64::MAX,"selected-account")

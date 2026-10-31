@@ -92,6 +92,27 @@ pub fn parse_jwt_claims(id_token: &str) -> Result<CodexJwtClaims, ProviderError>
     })
 }
 
+/// `exp` だけを読む寛容な JWT 解析。署名は検証しない。
+///
+/// access token は不透明な文字列の場合があるため、3 セグメントの JWT でないもの、
+/// および数値の `exp` を持たないものは `Ok(None)` を返す。
+///
+/// # Errors
+/// 3 セグメントだが payload が base64url または JSON として解析できない場合に
+/// [`ProviderError::InvalidJson`] を返す。
+pub fn parse_jwt_exp(token: &str) -> Result<Option<u64>, ProviderError> {
+    let segments: Vec<&str> = token.split('.').collect();
+    let [_, payload, _] = segments.as_slice() else {
+        return Ok(None);
+    };
+    let bytes = decode_payload(payload)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| ProviderError::InvalidJson {
+            detail: format!("JWT payload の解析に失敗しました: {error}"),
+        })?;
+    Ok(value.get("exp").and_then(serde_json::Value::as_u64))
+}
+
 /// payload セグメントを base64url 復号する。
 ///
 /// 末尾の `=` を取り除いてから無パディングエンジンで復号するため、
@@ -255,6 +276,36 @@ mod tests {
                 "actual: {err:?} for {id_token}"
             );
         }
+    }
+
+    // Given: exp を持つ JWT / 不透明文字列 / exp なし JWT / When: parse_jwt_exp / Then: Some / None / None
+    #[test]
+    fn parse_jwt_exp_is_lenient_about_non_jwt_tokens() {
+        assert_eq!(
+            parse_jwt_exp(&jwt_with_payload(r#"{"exp":1893456000}"#)).expect("JWT は解析できる"),
+            Some(1_893_456_000)
+        );
+        assert_eq!(
+            parse_jwt_exp("opaque-access-token").expect("不透明トークンは Ok"),
+            None
+        );
+        assert_eq!(
+            parse_jwt_exp(&jwt_with_payload(r#"{"sub":"x"}"#)).expect("exp なしは Ok"),
+            None
+        );
+        assert_eq!(
+            parse_jwt_exp(&jwt_with_payload(r#"{"exp":"soon"}"#)).expect("非数値 exp は Ok"),
+            None
+        );
+    }
+
+    // Given: 3 セグメントだが payload が壊れた token / When: parse_jwt_exp / Then: InvalidJson
+    #[test]
+    fn parse_jwt_exp_rejects_undecodable_payload() {
+        let error = parse_jwt_exp("a.!!!!.c").expect_err("base64 不正は Err");
+        assert!(matches!(error, ProviderError::InvalidJson { .. }));
+        let error = parse_jwt_exp(&jwt_with_payload("not json")).expect_err("JSON 不正は Err");
+        assert!(matches!(error, ProviderError::InvalidJson { .. }));
     }
 
     // Given: exp との差がちょうど 300 秒 / 301 秒 / 失効済み / When: needs_refresh / Then: true / false / true

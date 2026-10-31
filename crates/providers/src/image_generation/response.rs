@@ -38,7 +38,9 @@ fn invalid(detail: &str) -> ProviderError {
 /// Deliberately discard server text, endpoint URLs and token-store diagnostics.
 pub(super) fn sanitize(error: ProviderError) -> ProviderError {
     match error {
-        ProviderError::Timeout | ProviderError::RateLimited { .. } => error,
+        ProviderError::Timeout
+        | ProviderError::RateLimited { .. }
+        | ProviderError::ResponsesScopeChanged { .. } => error,
         ProviderError::Http { status, .. } => ProviderError::Http {
             status,
             body: "image generation request failed".into(),

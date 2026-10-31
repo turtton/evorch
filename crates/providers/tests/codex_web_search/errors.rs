@@ -28,7 +28,7 @@ async fn only_explicit_tool_unavailability_allows_fallback() {
         (200, sse([json!({"type":"response.failed", "response":{"error":{"code":"invalid_api_key", "message":"web_search is not supported secret-body"}}})]), false),
         (200, sse([json!({"type":"error", "status_code":403,"error":{"code":"unsupported_tool", "message":"Unknown tool: web_search"}})]), false),
     ];
-    for status in [401, 403, 404, 408, 422, 429, 500, 501, 503] {
+    for status in [403, 404, 408, 422, 429, 500, 501, 503] {
         cases.push((status, unsupported.to_string(), false));
     }
     for (status, body, fallback) in cases {

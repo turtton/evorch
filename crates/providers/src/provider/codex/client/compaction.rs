@@ -21,7 +21,13 @@ impl Compactor for CodexClient {
         let mut observer = self.observer(request, true);
         let result = async {
             let response = self
-                .send_response(&wire, &token, ResponseMode::Compaction, &mut observer)
+                .send_response(
+                    request,
+                    &wire,
+                    &token,
+                    ResponseMode::Compaction,
+                    &mut observer,
+                )
                 .await?;
             let mut stream = response.bytes_stream();
             let mut parser = SseParser::new();

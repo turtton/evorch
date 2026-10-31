@@ -38,7 +38,7 @@ wreq = { version = "=0.16.1", default-features = false, features = ["tokio-rt", 
 mock-openai = { path = "../mock-openai" }
 rcgen = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
 tokio-rustls = { workspace = true, features = ["ring"] }
 wiremock = { workspace = true }

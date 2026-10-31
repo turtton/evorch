@@ -43,6 +43,7 @@ impl HostedWebSearch for CodexClient {
         let result = async {
             let response = self
                 .post_response(
+                    &request.model,
                     &wire_request(request),
                     ResponseMode::NonStreaming,
                     &mut observer,

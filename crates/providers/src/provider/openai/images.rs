@@ -33,7 +33,7 @@ impl ImageGeneration for OpenAiClient {
             self.event_bus.clone(),
             OPENAI_PROVIDER_LABEL,
             &mut observer,
-            async {
+            async |_| {
                 self.image_http
                     .post(&endpoint)
                     .bearer_auth(&auth.api_key)

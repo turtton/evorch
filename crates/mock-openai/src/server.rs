@@ -82,6 +82,13 @@ pub enum WriteMode {
     GatedAfterFirst(Arc<Mutex<std::sync::mpsc::Receiver<()>>>),
 }
 
+/// Responses requests to let through, then to reject with `401 Unauthorized`.
+#[derive(Clone, Copy, Default)]
+struct UnauthorizedPlan {
+    skip: usize,
+    reject: usize,
+}
+
 /// A local OpenAI-compatible fixture serving SSE or JSON from the same scripts.
 pub struct StreamingMockOpenAi {
     base_url: String,
@@ -89,6 +96,7 @@ pub struct StreamingMockOpenAi {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     scripts: Arc<Mutex<VecDeque<ScriptedResponse>>>,
     oauth_token: Arc<Mutex<Option<Value>>>,
+    unauthorized: Arc<Mutex<UnauthorizedPlan>>,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -188,10 +196,12 @@ impl StreamingMockOpenAi {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let scripts = Arc::new(Mutex::new(VecDeque::from(responses)));
         let oauth_token = Arc::new(Mutex::new(None));
+        let unauthorized = Arc::new(Mutex::new(UnauthorizedPlan::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let recorded = Arc::clone(&requests);
         let queued = Arc::clone(&scripts);
         let token = Arc::clone(&oauth_token);
+        let rejecting = Arc::clone(&unauthorized);
         let stopping = Arc::clone(&shutdown);
         let accept_thread = thread::spawn(move || {
             let mut connections = Vec::new();
@@ -210,6 +220,7 @@ impl StreamingMockOpenAi {
                 let recorded = Arc::clone(&recorded);
                 let queued = Arc::clone(&queued);
                 let token = Arc::clone(&token);
+                let rejecting = Arc::clone(&rejecting);
                 let models = models.clone();
                 let codex_models = codex_models.clone();
                 let mode = mode.clone();
@@ -256,6 +267,24 @@ impl StreamingMockOpenAi {
                                 &json!({"error": "unscripted token refresh"}),
                             ),
                         };
+                    }
+                    if responses_api && {
+                        let mut plan = rejecting.lock().unwrap_or_else(|e| e.into_inner());
+                        if plan.skip > 0 {
+                            plan.skip -= 1;
+                            false
+                        } else if plan.reject > 0 {
+                            plan.reject -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    } {
+                        return write_json(
+                            &mut stream,
+                            "401 Unauthorized",
+                            &json!({"error": {"message": "scripted rejection", "type": "mock_openai"}}),
+                        );
                     }
                     let response = queued.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
                     let response = response.map(|response| {
@@ -307,6 +336,7 @@ impl StreamingMockOpenAi {
             requests,
             scripts,
             oauth_token,
+            unauthorized,
             shutdown,
             accept_thread: Some(accept_thread),
         }
@@ -337,6 +367,14 @@ impl StreamingMockOpenAi {
     /// Returns the number of scripts not yet consumed.
     pub fn remaining_scripts(&self) -> usize {
         self.scripts.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Lets `skip` more Responses requests through, then answers the next `reject`
+    /// with `401 Unauthorized`. A rejected request is recorded but consumes no
+    /// response script and never reaches the prompt cache.
+    pub fn reject_responses_unauthorized(&self, skip: usize, reject: usize) {
+        *self.unauthorized.lock().unwrap_or_else(|e| e.into_inner()) =
+            UnauthorizedPlan { skip, reject };
     }
 
     /// Answers every following `POST …/oauth/token` (a Codex token refresh against an

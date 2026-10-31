@@ -98,7 +98,17 @@ struct RefreshRequest<'a> {
     client_id: &'a str,
     grant_type: &'a str,
     refresh_token: &'a str,
+    /// Codex が付与する更新契機 (`proactive_expiry` など)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_reason: Option<&'static str>,
 }
+
+/// 事前更新 (access token の期限接近) を示す refresh_reason。
+pub(crate) const REFRESH_REASON_PROACTIVE: &str = "proactive_expiry";
+/// 401 受信後の回復更新を示す refresh_reason。
+pub(crate) const REFRESH_REASON_UNAUTHORIZED: &str = "unauthorized_recovery";
+/// 契機を指定しない更新の既定 refresh_reason。
+const REFRESH_REASON_FORCED: &str = "forced";
 
 #[derive(Deserialize)]
 struct RefreshResponse {
@@ -251,6 +261,19 @@ impl DeviceAuthClient {
     /// # Errors
     /// transport、HTTP status、または JSON 解析失敗を返す。
     pub async fn refresh(&self, current: &TokenBundle) -> Result<TokenBundle, ProviderError> {
+        self.refresh_with_reason(current, REFRESH_REASON_FORCED)
+            .await
+    }
+
+    /// 更新契機 (`refresh_reason`) を明示して token bundle を更新する。
+    ///
+    /// # Errors
+    /// transport、HTTP status、または JSON 解析失敗を返す。
+    pub(crate) async fn refresh_with_reason(
+        &self,
+        current: &TokenBundle,
+        reason: &'static str,
+    ) -> Result<TokenBundle, ProviderError> {
         let response = self
             .http
             .post(format!("{}/oauth/token", self.auth_base_url))
@@ -258,6 +281,7 @@ impl DeviceAuthClient {
                 client_id: CODEX_CLIENT_ID,
                 grant_type: "refresh_token",
                 refresh_token: &current.refresh_token,
+                refresh_reason: Some(reason),
             })
             .send()
             .await
