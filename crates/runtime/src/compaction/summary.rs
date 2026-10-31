@@ -117,15 +117,13 @@ impl ModelSummarizer {
         text_tool_history: bool,
     ) -> (Result<String, SummarizeError>, Option<Usage>) {
         match self.complete_summary(input, text_tool_history).await {
-            Ok(response) => {
+            Ok((response, request_tokens)) => {
                 let usage = if response.usage_reported {
                     response.usage
                 } else {
-                    // Not a measurement: charge the serialized request and response.
-                    super::estimator::estimated_usage(
-                        super::estimator::estimate_tokens(input.compacted),
-                        &response.message,
-                    )
+                    // Not a measurement: charge the request as it was actually sent (system
+                    // prompt, converted history, goal-bearing final prompt) plus the response.
+                    super::estimator::estimated_usage(request_tokens, &response.message)
                 };
                 (summary_text(&response), Some(usage))
             }
@@ -137,7 +135,7 @@ impl ModelSummarizer {
         &self,
         input: &SummaryInput<'_>,
         text_tool_history: bool,
-    ) -> Result<ChatResponse, SummarizeError> {
+    ) -> Result<(ChatResponse, u64), SummarizeError> {
         let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
         messages.push(Message {
             role: MessageRole::System,
@@ -181,6 +179,7 @@ impl ModelSummarizer {
             role: MessageRole::User,
             content: vec![ContentBlock::Text { text: user_prompt }],
         });
+        let request_tokens = super::estimator::estimate_tokens(&messages);
         let invocation = AgentInvocationContext {
             attempts: None,
             turn: self.turn.clone(),
@@ -215,7 +214,7 @@ impl ModelSummarizer {
                 }
             }
         };
-        Ok(response)
+        Ok((response, request_tokens))
     }
 }
 

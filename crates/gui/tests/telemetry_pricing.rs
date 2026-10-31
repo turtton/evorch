@@ -405,3 +405,61 @@ async fn each_request_is_priced_at_its_own_context_tier_and_speed() {
     let cost = overlay.estimated_cost("run-1", &settings).expect("cost");
     assert!((cost - 11.25).abs() < 1e-9, "{cost}");
 }
+
+fn unreported(run_id: &str) -> Event {
+    let mut event = completed_for(run_id, "model");
+    if let event_bus::EventKind::Provider(ProviderEvent::RequestCompleted {
+        usage_reported,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        ..
+    }) = &mut event.kind
+    {
+        *usage_reported = false;
+        *input_tokens = 0;
+        *output_tokens = 0;
+        *cache_read_tokens = 0;
+        *cache_write_tokens = 0;
+    }
+    event
+}
+
+// Given: a priced model whose provider reported no usage for one request
+// When: costs refresh (cached and fresh paths) / Then: the run's cost is unknown or partial, never
+// a known $0; a request that reported zero tokens keeps the cost complete
+#[test]
+fn unreported_usage_marks_the_run_cost_partial_and_is_never_a_known_zero() {
+    let settings = settings();
+    let mut overlay = TelemetryOverlay::new();
+    overlay.apply_event(&unreported("only-unreported"));
+    overlay.refresh_costs(&settings);
+    assert_eq!(overlay.cost("only-unreported"), None);
+    assert!(overlay.cost_is_partial("only-unreported"));
+    assert_eq!(overlay.estimated_cost("only-unreported", &settings), None);
+
+    overlay.apply_event(&completed_for("mixed", "model"));
+    overlay.apply_event(&unreported("mixed"));
+    overlay.refresh_costs(&settings);
+    let known = overlay
+        .cost("mixed")
+        .expect("the reported request is priced");
+    assert!((known - 0.041158).abs() < 1e-10, "{known}");
+    assert!(
+        overlay.cost_is_partial("mixed"),
+        "the gap makes it a lower bound"
+    );
+
+    let mut zero = unreported("reported-zero");
+    if let event_bus::EventKind::Provider(ProviderEvent::RequestCompleted {
+        usage_reported, ..
+    }) = &mut zero.kind
+    {
+        *usage_reported = true;
+    }
+    overlay.apply_event(&zero);
+    overlay.refresh_costs(&settings);
+    assert_eq!(overlay.cost("reported-zero"), Some(0.0));
+    assert!(!overlay.cost_is_partial("reported-zero"));
+}

@@ -339,6 +339,7 @@ mod tests {
 
     fn codex_fact(provider: &str, at: SystemTime, tokens: u64) -> UsageFact {
         UsageFact {
+            unreported_requests: 0,
             day: LocalDay::parse("2026-10-04").unwrap(),
             at_ns: Some(storage::system_time_to_ns(at).unwrap()),
             provider: provider.into(),

@@ -195,6 +195,7 @@ pub(crate) fn usage(
     input_tokens: u64,
 ) -> storage::usage::UsageRequestRecord {
     storage::usage::UsageRequestRecord {
+        usage_reported: true,
         request_id: id.into(),
         at_ns: 1,
         provider: profile.into(),

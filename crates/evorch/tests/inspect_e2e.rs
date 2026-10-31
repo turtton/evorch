@@ -392,6 +392,7 @@ fn review_manifest(run_id: &str) -> ReviewManifest {
 
 fn usage_request(request_id: &str, run_id: &str, at_ns: i64, purpose: &str) -> UsageRequestRecord {
     UsageRequestRecord {
+        usage_reported: true,
         request_id: request_id.into(),
         at_ns,
         provider: "p".into(),

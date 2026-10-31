@@ -31,6 +31,19 @@ pub struct RequestUsage {
     pub cache_write_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// `false` when the provider reported no usage: the token counts above are placeholder
+    /// zeros and the request's cost is unknown, not $0.
+    #[serde(default = "reported", skip_serializing_if = "is_reported")]
+    pub usage_reported: bool,
+}
+
+const fn reported() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_reported(value: &bool) -> bool {
+    *value
 }
 
 impl RequestUsage {
@@ -48,6 +61,7 @@ impl RequestUsage {
             cache_read_tokens: record.cache_read_tokens,
             cache_write_tokens: record.cache_write_tokens,
             service_tier: record.service_tier.clone(),
+            usage_reported: record.usage_reported,
         }
     }
 
@@ -65,6 +79,7 @@ impl RequestUsage {
                 cache_read_tokens,
                 cache_write_tokens,
                 service_tier,
+                usage_reported,
                 ..
             }) => Some(Self {
                 provider: provider.clone(),
@@ -79,6 +94,7 @@ impl RequestUsage {
                 cache_read_tokens: *cache_read_tokens,
                 cache_write_tokens: *cache_write_tokens,
                 service_tier: service_tier.map(|tier| tier.as_str().to_owned()),
+                usage_reported: *usage_reported,
             }),
             EventKind::Provider(ProviderEvent::RequestFailed {
                 provider,
@@ -100,6 +116,7 @@ impl RequestUsage {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 service_tier: None,
+                usage_reported: true,
             }),
             _ => None,
         }
@@ -188,11 +205,15 @@ pub struct Cost {
     pub api_equivalent_usd: f64,
     /// Models whose requests had no price; while any remain the cost is incomplete.
     pub unpriced: Vec<Unpriced>,
+    /// Models whose requests reported no usage; their cost is unknown, so while any remain
+    /// the cost is incomplete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreported: Vec<Unpriced>,
 }
 
 impl Cost {
     pub fn is_complete(&self) -> bool {
-        self.unpriced.is_empty()
+        self.unpriced.is_empty() && self.unreported.is_empty()
     }
 
     pub fn is_api_equivalent(&self) -> bool {
@@ -205,17 +226,28 @@ impl Cost {
         for unpriced in &other.unpriced {
             self.note_unpriced(unpriced);
         }
+        for unreported in &other.unreported {
+            self.note_unreported(unreported);
+        }
     }
 
     fn note_unpriced(&mut self, unpriced: &Unpriced) {
-        match self.unpriced.iter_mut().find(|known| {
+        Self::note(&mut self.unpriced, unpriced);
+    }
+
+    fn note_unreported(&mut self, unreported: &Unpriced) {
+        Self::note(&mut self.unreported, unreported);
+    }
+
+    fn note(list: &mut Vec<Unpriced>, entry: &Unpriced) {
+        match list.iter_mut().find(|known| {
             (&known.provider, &known.profile, &known.model)
-                == (&unpriced.provider, &unpriced.profile, &unpriced.model)
+                == (&entry.provider, &entry.profile, &entry.model)
         }) {
-            Some(known) => known.requests += unpriced.requests,
+            Some(known) => known.requests += entry.requests,
             None => {
-                self.unpriced.push(unpriced.clone());
-                self.unpriced.sort();
+                list.push(entry.clone());
+                list.sort();
             }
         }
     }
@@ -246,6 +278,16 @@ impl PriceTable {
     pub fn cost<'a>(&self, requests: impl IntoIterator<Item = &'a RequestUsage>) -> Cost {
         let mut cost = Cost::default();
         for request in requests {
+            // Placeholder zeros must not read as a free request.
+            if !request.usage_reported {
+                cost.note_unreported(&Unpriced {
+                    provider: request.provider.clone(),
+                    profile: request.profile.clone(),
+                    model: request.model.clone(),
+                    requests: 1,
+                });
+                continue;
+            }
             let tokens = request.tokens();
             if tokens == TokenUsage::default() {
                 continue;

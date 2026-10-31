@@ -445,9 +445,9 @@ async fn report_dir(dir: &Path, context: &mut Context<'_>) -> Result<Report, Eva
         warnings.push(Warning {
             kind: WarningKind::CostIncomplete,
             message: format!(
-                "cost incomplete for {}: no price for {}",
+                "cost incomplete for {}: {}",
                 cost.label,
-                unpriced_list(&cost.cost)
+                incomplete_reason(&cost.cost)
             ),
         });
     }
@@ -508,8 +508,28 @@ async fn report_dir(dir: &Path, context: &mut Context<'_>) -> Result<Report, Eva
     })
 }
 
+/// Why a cost is incomplete: models without a price and models whose requests reported no usage.
+pub(crate) fn incomplete_reason(cost: &Cost) -> String {
+    let mut reasons = Vec::new();
+    if !cost.unpriced.is_empty() {
+        reasons.push(format!("no price for {}", unpriced_list(cost)));
+    }
+    if !cost.unreported.is_empty() {
+        reasons.push(format!("no reported usage for {}", unreported_list(cost)));
+    }
+    reasons.join("; ")
+}
+
 pub(crate) fn unpriced_list(cost: &Cost) -> String {
-    cost.unpriced
+    model_list(&cost.unpriced)
+}
+
+pub(crate) fn unreported_list(cost: &Cost) -> String {
+    model_list(&cost.unreported)
+}
+
+fn model_list(models: &[crate::cost::Unpriced]) -> String {
+    models
         .iter()
         .map(|unpriced| {
             format!(
@@ -790,6 +810,7 @@ pub(crate) fn cost_value(cost: &Cost) -> serde_json::Value {
         "api_equivalent": cost.is_api_equivalent(),
         "complete": cost.is_complete(),
         "unpriced_models": unpriced_list(cost),
+        "unreported_models": unreported_list(cost),
     })
 }
 

@@ -2701,6 +2701,47 @@ mod tests {
         }
     }
 
+    // Given: usage 未報告の RequestCompleted と、usage_reported を持たない旧形式ペイロード。
+    // When: JSON 往復する / Then: 未報告は保存され、旧形式は報告済みとして読まれる。
+    #[test]
+    fn request_completed_round_trips_unreported_usage_and_defaults_old_payloads_to_reported() {
+        let completed = |usage_reported| ProviderEvent::RequestCompleted {
+            usage_reported,
+            request_id: "req-1".into(),
+            provider: "openai-codex".into(),
+            profile: None,
+            protocol: "openai-codex-responses".into(),
+            model: "gpt-test".into(),
+            streaming: true,
+            duration_ms: 5,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            finish_reason: "stop".into(),
+            service_tier: None,
+            run_id: None,
+            purpose: None,
+            reasoning_tokens: None,
+        };
+        let gap = Event::new(completed(false));
+        let json = serde_json::to_value(&gap).expect("serialize");
+        assert_eq!(json["kind"]["payload"]["payload"]["usage_reported"], false);
+        assert_eq!(
+            serde_json::from_value::<Event>(json).expect("deserialize"),
+            gap
+        );
+
+        let mut old = serde_json::to_value(Event::new(completed(true))).expect("serialize");
+        let payload = old["kind"]["payload"]["payload"].as_object_mut().unwrap();
+        assert!(
+            !payload.contains_key("usage_reported"),
+            "reported is the default shape"
+        );
+        let restored: Event = serde_json::from_value(old).expect("legacy payload");
+        assert_eq!(restored.kind, EventKind::Provider(completed(true)));
+    }
+
     // Given: 失敗分類の全 ProviderFailureKind バリアント。
     // When: それぞれ JSON 往復する。
     // Then: 内部タグ形式の一貫した形状が保たれる (Http は status を保持する)。

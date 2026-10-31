@@ -78,7 +78,7 @@ pub(super) fn estimate_value(plan: &[Planned]) -> Value {
 fn usd(cost: &Cost) -> String {
     let mut text = report::usd(cost);
     if !cost.is_complete() {
-        text.push_str(&format!(": no price for {}", report::unpriced_list(cost)));
+        text.push_str(&format!(": {}", report::incomplete_reason(cost)));
     }
     text
 }

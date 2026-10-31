@@ -649,15 +649,21 @@ fn with_usage_reported(mut events: [Event; 2], reported: bool) -> [Event; 2] {
 
 // Given: a request with known usage, then one whose provider reported none (placeholder zeros),
 // then one that explicitly reported zero tokens
-// When: each completes / Then: only reported requests are billed and counted; the unreported one
-// clears the stale context size instead of showing it or a zero, and a reported zero is kept
+// When: each completes / Then: the unreported one is never priced and keeps the run's cost
+// partial, adds no usage counters, and clears the stale context size; a reported zero is billed
 #[test]
 fn unreported_usage_is_not_billed_or_shown_as_a_known_zero_context() {
     let mut telemetry = TelemetryOverlay::new();
     for event in with_usage_reported(observed("run", 1_000, 500, 40, 100), true) {
         telemetry.apply_event(&event);
     }
-    assert_eq!(telemetry.billed["run"].len(), 1);
+    let flags = |telemetry: &TelemetryOverlay| {
+        telemetry.billed["run"]
+            .iter()
+            .map(|request| request.usage_reported)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(flags(&telemetry), [true]);
     assert_eq!(
         telemetry.rows["run"]
             .latest_request_usage()
@@ -669,7 +675,11 @@ fn unreported_usage_is_not_billed_or_shown_as_a_known_zero_context() {
         telemetry.apply_event(&event);
     }
     let row = &telemetry.rows["run"];
-    assert_eq!(telemetry.billed["run"].len(), 1, "no known $0 booked");
+    assert_eq!(
+        flags(&telemetry),
+        [true, false],
+        "kept so the cost is marked partial"
+    );
     assert_eq!(row.usage.input, 1_000);
     assert_eq!(row.conversation_usage.input, 1_000);
     assert!(row.latest_request_usage().is_none());
@@ -683,11 +693,7 @@ fn unreported_usage_is_not_billed_or_shown_as_a_known_zero_context() {
     for event in with_usage_reported(observed("run", 0, 0, 0, 100), true) {
         telemetry.apply_event(&event);
     }
-    assert_eq!(
-        telemetry.billed["run"].len(),
-        2,
-        "a reported zero is billed"
-    );
+    assert_eq!(flags(&telemetry), [true, false, true]);
     assert_eq!(
         telemetry.rows["run"]
             .latest_request_usage()

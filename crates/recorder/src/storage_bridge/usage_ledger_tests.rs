@@ -174,6 +174,15 @@ fn unreported_usage_is_not_booked_as_a_known_zero_cost() {
     };
     assert_eq!(cost("reported"), Some(0.0));
     assert_eq!(cost("unreported"), None);
+    let flag = |id: &str| {
+        rows.iter()
+            .find(|row| row.record.request_id == id)
+            .unwrap()
+            .record
+            .usage_reported
+    };
+    assert!(flag("reported"));
+    assert!(!flag("unreported"), "the ledger must remember the gap");
 }
 
 #[test]

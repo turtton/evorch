@@ -105,13 +105,21 @@ emitted per response; the response id is logged. The response carries
 request-completed event carries the same flag with zero token counts as
 placeholders. Downstream, those zeros are never treated as measurements:
 
-- the usage ledger stores no cost for the request (a reported zero keeps `$0`);
-- the GUI neither bills the request nor shows it as the latest context size, and
-  clears the previous one;
+- the usage ledger stores the flag (`usage_requests.usage_reported`, and
+  `usage_daily.unreported_count` after rollup) and no cost for the request (a
+  reported zero keeps `$0`); the Usage tab, in both recorded and current price
+  modes, marks a total that contains such requests as a lower bound (`*`), and
+  the evaluation report lists the models as "no reported usage" and treats the
+  cost as incomplete, for ledger records and events alike;
+- the GUI never prices the request as `$0`: the run's live cost is marked partial,
+  the request is not shown as the latest context size, and the previous one is
+  cleared;
 - OTel spans omit `gen_ai.usage.*`;
 - the runtime leaves `last_usage` empty, so context sizing uses the serialized
-  byte estimate, and charges an estimate (serialized request plus response) to the
-  run budget, the goal usage and the rules injection budget instead of zero;
+  byte estimate, and charges an estimate (the request as actually sent, with its
+  instructions and tool definitions, plus the response) to the run budget, the
+  goal usage, summary and official-compaction calls and the rules injection
+  budget instead of zero;
 - the next request's cache baseline is the last reported request.
 
 The compaction request follows the same rule: its encrypted state is returned and

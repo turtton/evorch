@@ -52,6 +52,7 @@ fn completed(request_id: &str, run_id: Option<&str>) -> ProviderEvent {
 
 fn record(request_id: &str, at: SystemTime, cost_usd: Option<f64>) -> UsageRequestRecord {
     UsageRequestRecord {
+        usage_reported: true,
         request_id: request_id.into(),
         at_ns: system_time_to_ns(at).unwrap(),
         provider: "openai".into(),
@@ -87,7 +88,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE usage_requests DROP COLUMN usage_reported; ALTER TABLE usage_daily DROP COLUMN unreported_count; ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -326,7 +327,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
+        "ALTER TABLE usage_requests DROP COLUMN usage_reported; ALTER TABLE usage_daily DROP COLUMN unreported_count; ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
          DROP TABLE threads; DROP TABLE thread_runs;
          DROP INDEX idx_run_contexts_parent; DROP INDEX idx_usage_requests_parent;
@@ -359,4 +360,70 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
         .unwrap();
     let records: Vec<_> = rows.into_iter().map(|row| row.record).collect();
     assert_eq!(records, [record("earlier", now, Some(0.25)), fast]);
+}
+
+#[test]
+fn unreported_usage_is_persisted_and_survives_the_daily_rollup() {
+    // Given: an expired request that reported zero tokens, one that reported none at all,
+    // and a recent unreported one.
+    let temp_dir = TempDir::new().unwrap();
+    let config = StorageConfig {
+        usage_retention_days: 30,
+        ..config(&temp_dir)
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let now = SystemTime::now();
+    let expired = now - Duration::from_secs(40 * 86_400);
+    let zeroed = |mut record: UsageRequestRecord, usage_reported| {
+        record.usage_reported = usage_reported;
+        record.input_tokens = 0;
+        record.output_tokens = 0;
+        record.cache_read_tokens = 0;
+        record.cache_write_tokens = 0;
+        record
+    };
+    handle
+        .record_usage_requests(vec![
+            zeroed(record("old-zero", expired, Some(0.0)), true),
+            zeroed(record("old-gap", expired, None), false),
+            zeroed(record("recent-gap", now, None), false),
+        ])
+        .unwrap();
+
+    // When: maintenance rolls up the expired rows.
+    handle.checkpoint_now().unwrap();
+    storage.close();
+
+    // Then: the surviving row keeps its flag, and the bucket counts the unreported request.
+    let database = Database::open(&config).unwrap();
+    let remaining = database.usage_requests_between(0, i64::MAX).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(!remaining[0].record.usage_reported);
+    let daily = database
+        .usage_daily_between("0000-01-01", "9999-12-31")
+        .unwrap();
+    assert_eq!(daily.len(), 1);
+    assert_eq!(daily[0].request_count, 2);
+    assert_eq!(
+        daily[0].unreported_count, 1,
+        "the reported zero is not counted"
+    );
+}
+
+#[test]
+fn reported_requests_read_back_as_reported() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = config(&temp_dir);
+    let storage = Storage::open(config.clone()).unwrap();
+    storage
+        .handle()
+        .record_usage_requests(vec![record("reported", SystemTime::now(), Some(0.1))])
+        .unwrap();
+    storage.close();
+    let rows = Database::open(&config)
+        .unwrap()
+        .usage_requests_between(0, i64::MAX)
+        .unwrap();
+    assert!(rows[0].record.usage_reported);
 }

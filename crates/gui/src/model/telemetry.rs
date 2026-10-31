@@ -340,28 +340,27 @@ impl TelemetryOverlay {
                 usage_reported,
                 ..
             }) => {
-                // Unreported usage arrives as placeholder zeros. They are neither billed
-                // (that would book a known $0.00) nor shown as the latest context size.
-                if *usage_reported {
-                    self.billed
-                        .entry(run_id.clone())
-                        .or_default()
-                        .push(pricing::BilledRequest {
-                            key: pricing::ModelKey {
-                                provider: provider.clone(),
-                                profile: profile.clone(),
-                                model: model.clone(),
-                            },
-                            speed: recorder::pricing::speed(*service_tier),
-                            usage: TokenUsage {
-                                input: *input_tokens,
-                                output: *output_tokens,
-                                cache_read: *cache_read_tokens,
-                                cache_write: *cache_write_tokens,
-                            },
-                        });
-                    self.stale_costs.insert(run_id.clone());
-                }
+                // Unreported usage arrives as placeholder zeros: the request is kept so the
+                // run's cost is marked partial, but it is never priced as $0.
+                self.billed
+                    .entry(run_id.clone())
+                    .or_default()
+                    .push(pricing::BilledRequest {
+                        key: pricing::ModelKey {
+                            provider: provider.clone(),
+                            profile: profile.clone(),
+                            model: model.clone(),
+                        },
+                        speed: recorder::pricing::speed(*service_tier),
+                        usage: TokenUsage {
+                            input: *input_tokens,
+                            output: *output_tokens,
+                            cache_read: *cache_read_tokens,
+                            cache_write: *cache_write_tokens,
+                        },
+                        usage_reported: *usage_reported,
+                    });
+                self.stale_costs.insert(run_id.clone());
                 let row = self.rows.entry(run_id.clone()).or_default();
                 if *usage_reported {
                     row.usage.input = row.usage.input.saturating_add(*input_tokens);

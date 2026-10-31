@@ -662,6 +662,43 @@ mod tests {
         assert_eq!(restored, response);
     }
 
+    // Given: usage 未報告の ChatResponse と、フィールドを持たない旧形式 JSON
+    // When: JSON 化して復元 / Then: 未報告は保存され、旧形式は報告済みとして読まれる
+    #[test]
+    fn chat_response_round_trip_keeps_unreported_usage() {
+        let response = ChatResponse {
+            usage_reported: false,
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "answer".to_string(),
+                }],
+            },
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(json["usage_reported"], false);
+        assert_eq!(
+            serde_json::from_value::<ChatResponse>(json).unwrap(),
+            response
+        );
+        let mut legacy = serde_json::to_value(ChatResponse {
+            usage_reported: true,
+            ..response
+        })
+        .unwrap();
+        assert!(legacy.get("usage_reported").is_none());
+        legacy.as_object_mut().unwrap().remove("usage_reported");
+        assert!(
+            serde_json::from_value::<ChatResponse>(legacy)
+                .unwrap()
+                .usage_reported
+        );
+    }
+
     // Given: 未知の終了理由を含む FinishReason::Other / When: JSON 化して復元 / Then: 文字列がそのまま保存される
     #[test]
     fn finish_reason_other_round_trips_unknown_value() {

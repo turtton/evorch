@@ -100,6 +100,7 @@ impl UsageRecorder {
             duration_ms: 0,
             cost_usd: None,
             service_tier: None,
+            usage_reported: true,
         };
         match &event.kind {
             EventKind::Provider(ProviderEvent::RequestCompleted {
@@ -129,6 +130,7 @@ impl UsageRecorder {
                     .pricing(provider, profile.as_deref(), model);
                 // Unreported usage arrives as placeholder zeros: pricing them would book a
                 // known $0.00 for a request whose cost is unknown. Reported zeros stay $0.
+                record.usage_reported = *usage_reported;
                 record.cost_usd = usage_reported
                     .then(|| {
                         TokenUsage {

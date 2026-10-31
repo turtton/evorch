@@ -8,6 +8,7 @@ use storage::{Database, Storage, StorageConfig, system_time_to_ns};
 
 fn record(request_id: &str, model: &str, cost_usd: f64) -> UsageRequestRecord {
     UsageRequestRecord {
+        usage_reported: true,
         request_id: request_id.into(),
         at_ns: system_time_to_ns(SystemTime::now()).unwrap(),
         provider: "openai".into(),

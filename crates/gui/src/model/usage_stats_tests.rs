@@ -16,6 +16,7 @@ fn pricing() -> UsagePricing {
 fn request(day: &str, model: &str, project: &str, cost: Option<f64>) -> UsageRequestRow {
     UsageRequestRow {
         record: UsageRequestRecord {
+            usage_reported: true,
             request_id: format!("{day}-{model}-{project}"),
             at_ns: 0,
             provider: "openai".into(),
@@ -204,6 +205,7 @@ fn current_mode_prices_requests_by_tier_and_speed_and_daily_totals_at_base_rates
     large.record.input_tokens = 2_000_000;
     large.record.output_tokens = 0;
     let daily = UsageDailyRow {
+        unreported_count: 0,
         day: "2026-10-03".into(),
         provider: "openai".into(),
         profile: Some("main".into()),
@@ -250,4 +252,101 @@ fn current_mode_prices_requests_by_tier_and_speed_and_daily_totals_at_base_rates
         costs,
         [("daily", 2.0), ("fast", 5.0), ("large", 6.0)].into()
     );
+}
+
+/// A request that finished without a reported usage: zero placeholder tokens, no cost.
+fn unreported_request(project: &str) -> UsageRequestRow {
+    let mut row = request("2026-10-04", "cheap", project, None);
+    row.record.usage_reported = false;
+    row.record.input_tokens = 0;
+    row.record.output_tokens = 0;
+    row
+}
+
+fn totals(data: &UsageDataset, mode: CostMode) -> UsageTotals {
+    breakdown(
+        &data.facts,
+        &UsageFilter::default(),
+        UsageDimension::Day,
+        &mut CostCalculator::new(&pricing(), mode),
+    )
+    .1
+}
+
+// Given: a priced model with one request that reported no usage and one that reported zero
+// When: totals are computed in both cost modes
+// Then: the unreported request is $0 but marks the total as a lower bound and is counted; the
+// reported zero stays a known $0 (no marker)
+#[test]
+fn unreported_requests_mark_totals_incomplete_in_both_cost_modes() {
+    let unreported = dataset(&[unreported_request("a")]);
+    let mut reported_zero = request("2026-10-04", "cheap", "b", Some(0.0));
+    reported_zero.record.input_tokens = 0;
+    reported_zero.record.output_tokens = 0;
+    let reported = dataset(&[reported_zero]);
+
+    for mode in [CostMode::Recorded, CostMode::Current] {
+        let total = totals(&unreported, mode);
+        assert_eq!(total.cost, 0.0, "{mode:?}");
+        assert!(
+            total.unpriced,
+            "{mode:?}: unknown cost must not look complete"
+        );
+        assert_eq!(total.unreported_requests, 1);
+        assert_eq!(total.requests, 1);
+
+        let total = totals(&reported, mode);
+        assert_eq!(total.cost, 0.0, "{mode:?}");
+        assert!(!total.unpriced, "{mode:?}: a reported zero is a known zero");
+        assert_eq!(total.unreported_requests, 0);
+    }
+}
+
+// Given: a reported request next to an unreported one, plus a rolled-up day with unreported requests
+// When: grouped by project / merged / priced
+// Then: only the groups containing unreported requests are incomplete, and the rollup keeps its count
+#[test]
+fn unreported_counts_survive_grouping_merging_and_rollups() {
+    let rollup = UsageDailyRow {
+        day: "2026-09-01".into(),
+        provider: "openai".into(),
+        profile: Some("main".into()),
+        model: "cheap".into(),
+        project_id: Some("rolled".into()),
+        request_count: 5,
+        input_tokens: 1_000_000,
+        cost_usd: 1.0,
+        unreported_count: 2,
+        ..UsageDailyRow::default()
+    };
+    let data = UsageDataset::from_rows(
+        LocalDay::parse("2026-10-04").unwrap(),
+        &[
+            request("2026-10-04", "cheap", "ok", Some(3.0)),
+            unreported_request("gap"),
+        ],
+        &[rollup],
+    );
+    for mode in [CostMode::Recorded, CostMode::Current] {
+        let (rows, total) = breakdown(
+            &data.facts,
+            &UsageFilter::default(),
+            UsageDimension::Project,
+            &mut CostCalculator::new(&pricing(), mode),
+        );
+        let by_key: BTreeMap<_, _> = rows
+            .iter()
+            .map(|row| (row.key.as_str(), row.totals))
+            .collect();
+        assert!(!by_key["ok"].unpriced, "{mode:?}");
+        assert!(by_key["gap"].unpriced && by_key["gap"].unreported_requests == 1);
+        assert!(by_key["rolled"].unpriced && by_key["rolled"].unreported_requests == 2);
+        assert_eq!(total.unreported_requests, 3);
+        assert!(total.unpriced);
+        let mut merged = UsageTotals::default();
+        merged.merge(&by_key["ok"]);
+        assert!(!merged.unpriced);
+        merged.merge(&by_key["gap"]);
+        assert!(merged.unpriced && merged.unreported_requests == 1);
+    }
 }

@@ -164,6 +164,33 @@ mod tests {
         );
     }
 
+    // Given: a provider-side compaction request with very long instructions and tool definitions
+    // When: its unreported usage is estimated / Then: they are counted along with the history
+    #[test]
+    fn official_compaction_estimate_counts_instructions_and_tools() {
+        let history = [message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "short".into(),
+            }],
+        )];
+        let instructions = [message(
+            Role::System,
+            vec![ContentBlock::Text {
+                text: "rule ".repeat(8_000),
+            }],
+        )];
+        let tools = [providers::ToolSpec {
+            name: "big".into(),
+            description: "d".repeat(20_000),
+            input_schema: json!({"type": "object"}),
+        }];
+        let bare = super::super::official_request_tokens(&[], &history, &[]);
+        let full = super::super::official_request_tokens(&instructions, &history, &tools);
+        assert_eq!(bare, estimate_tokens(&history));
+        assert!(full >= bare + 10_000 + 5_000, "{bare} -> {full}");
+    }
+
     #[test]
     fn schemas_count_once_when_combining_usage_and_serialized_estimates() {
         let messages = [message(
