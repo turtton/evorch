@@ -2,8 +2,9 @@
 //!
 //! ChatGPT subscription の Codex backend と公式 OpenAI API は同じ Responses 形状を
 //! 共有します。両者の差分は [`ResponsesDialect`] の規則 (`impl ResponsesDialect`) に
-//! 集約し、変換本体は dialect に依存しません。Codex の旧 wire bytes から許可する変更は
-//! root include の値だけです (`tests/fixtures/codex/wire_request_pre_b3.json`)。
+//! 集約し、変換本体は dialect に依存しません。Codex の wire は Codex CLI 0.166.0 の
+//! `build_responses_request` に合わせ、指示文を top-level `instructions` でなく
+//! `input[0]` の developer message に置きます (`tests/fixtures/codex/wire_request_0166.json`)。
 //!
 //! # 拡張点
 //!
@@ -44,13 +45,14 @@ pub struct ResponsesRequestOptions {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResponsesRequest {
     model: String,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<ServiceTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     input: Vec<InputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Tool>>,
-    store: bool,
-    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,11 +63,10 @@ pub struct ResponsesRequest {
     max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    service_tier: Option<ServiceTier>,
+    store: bool,
+    include: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
-    include: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<TextFormat>,
 }
@@ -92,6 +93,8 @@ struct JsonSchemaFormat {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum InputItem {
     Message {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         role: InputRole,
         content: Vec<InputContent>,
     },
@@ -137,13 +140,14 @@ impl std::fmt::Debug for OpaqueReasoningItem {
 enum InputRole {
     User,
     Assistant,
+    Developer,
 }
 
 impl InputRole {
     /// Responses API は user 入力と過去の assistant 出力でテキスト種別を分けます。
     fn text(self, text: String) -> InputContent {
         match self {
-            Self::User => InputContent::InputText { text },
+            Self::User | Self::Developer => InputContent::InputText { text },
             Self::Assistant => InputContent::OutputText { text },
         }
     }
@@ -208,17 +212,49 @@ enum ReasoningSummary {
     Auto,
 }
 
+/// 連結した指示文を wire のどこに置くか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstructionPlacement {
+    /// top-level `instructions` (空なら省略)。
+    TopLevel,
+    /// `input[0]` の developer message (空なら入れない)。
+    DeveloperInput,
+}
+
+/// developer message の安定 ID 用 namespace。evorch 固有の固定値で、指示文の本文だけから
+/// ID を決めるため、同じ指示文は再送・復元・compaction 後も同じ ID になります。
+fn developer_id_namespace() -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        b"evorch.codex.developer_instructions",
+    )
+}
+
+/// 指示文を developer message にします。ID は Codex 同様に `msg_<uuid5(本文)>` です。
+fn developer_message(text: String) -> InputItem {
+    let id = format!(
+        "msg_{}",
+        uuid::Uuid::new_v5(&developer_id_namespace(), text.as_bytes())
+    );
+    InputItem::Message {
+        id: Some(id),
+        role: InputRole::Developer,
+        content: vec![InputRole::Developer.text(text)],
+    }
+}
+
 /// dialect ごとの wire 規則。dialect 差分はこの impl だけに置きます。
 impl ResponsesDialect {
     fn include(self) -> Vec<String> {
         vec!["reasoning.encrypted_content".into()]
     }
 
-    /// Codex backend は instructions を必須文字列として扱うため、空でも送ります。
-    fn instructions(self, joined: String) -> Option<String> {
+    /// 指示文 (system message の連結) を載せる場所。Codex CLI 0.166.0 は top-level
+    /// `instructions` を持たず、非空の指示文を `input[0]` の developer message にします。
+    fn instruction_placement(self) -> InstructionPlacement {
         match self {
-            Self::Codex => Some(joined),
-            Self::OpenAi => (!joined.is_empty()).then_some(joined),
+            Self::Codex => InstructionPlacement::DeveloperInput,
+            Self::OpenAi => InstructionPlacement::TopLevel,
         }
     }
 
@@ -360,38 +396,48 @@ fn convert_request(
             }
         })
         .collect();
-    let input = request
-        .messages
-        .iter()
-        .flat_map(|message| match message.role {
-            Role::System => Vec::new(),
-            Role::User => {
-                to_input_items(message, InputRole::User, dialect, &custom_call_ids, scope)
-            }
-            Role::Assistant => to_input_items(
-                message,
-                InputRole::Assistant,
-                dialect,
-                &custom_call_ids,
-                scope,
-            ),
-        })
+    let joined = instructions(request);
+    let (top_level_instructions, developer) = match dialect.instruction_placement() {
+        _ if joined.is_empty() => (None, None),
+        InstructionPlacement::TopLevel => (Some(joined), None),
+        InstructionPlacement::DeveloperInput => (None, Some(developer_message(joined))),
+    };
+    let input = developer
+        .into_iter()
+        .chain(
+            request
+                .messages
+                .iter()
+                .flat_map(|message| match message.role {
+                    Role::System => Vec::new(),
+                    Role::User => {
+                        to_input_items(message, InputRole::User, dialect, &custom_call_ids, scope)
+                    }
+                    Role::Assistant => to_input_items(
+                        message,
+                        InputRole::Assistant,
+                        dialect,
+                        &custom_call_ids,
+                        scope,
+                    ),
+                }),
+        )
         .collect();
     ResponsesRequest {
         model: request.model.clone(),
-        instructions: dialect.instructions(instructions(request)),
+        stream: true,
+        service_tier: request.service_tier,
+        instructions: top_level_instructions,
         input,
         tools: dialect.tools(tools),
-        store: false,
-        stream: true,
         tool_choice,
         parallel_tool_calls,
         reasoning: dialect.reasoning(request.reasoning_effort.as_deref()),
         max_output_tokens: dialect.max_output_tokens(request.max_tokens),
         temperature: dialect.temperature(request.temperature),
-        service_tier: request.service_tier,
-        prompt_cache_key: options.prompt_cache_key.clone(),
+        store: false,
         include: dialect.include(),
+        prompt_cache_key: options.prompt_cache_key.clone(),
         text: request.output_schema.as_ref().map(|schema| TextFormat {
             format: JsonSchemaFormat {
                 r#type: "json_schema",
@@ -567,6 +613,7 @@ fn flush_message(items: &mut Vec<InputItem>, content: &mut Vec<InputContent>, ro
         return;
     }
     items.push(InputItem::Message {
+        id: None,
         role,
         content: std::mem::take(content),
     });

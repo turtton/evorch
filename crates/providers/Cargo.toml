@@ -29,7 +29,7 @@ xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time", "process", "io-util"] }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4", "v5"] }
 webpki-root-certs = "1"
 wreq = { version = "=0.16.1", default-features = false, features = ["tokio-rt", "webpki-roots", "system-proxy", "json", "query", "stream", "gzip", "brotli", "deflate", "zstd"] }
 

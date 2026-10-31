@@ -86,6 +86,44 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
     }
 }
 
+// Given: a request with a system prompt / When: it is sent to the Codex backend
+// Then: the HTTP body has no top-level `instructions` and input[0] is the developer message
+#[tokio::test]
+async fn system_prompt_reaches_the_backend_as_a_developer_input_message() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        sse_response(&fixture("codex", "responses_success.sse")),
+    )
+    .await;
+    let client = client(&server, seeded_store());
+    let mut with_system = request();
+    with_system.messages.insert(
+        0,
+        providers::Message {
+            role: providers::Role::System,
+            content: vec![ContentBlock::Text {
+                text: "Follow the rules.".to_string(),
+            }],
+        },
+    );
+
+    client
+        .send(&ProviderAuth::new(""), &with_system)
+        .await
+        .expect("send succeeds");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("instructions").is_none());
+    assert_eq!(body["input"][0]["role"], "developer");
+    assert_eq!(body["input"][0]["content"][0]["text"], "Follow the rules.");
+    assert_eq!(body["input"][1]["role"], "user");
+}
+
 #[tokio::test]
 async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup() {
     // Given: only the Codex backend is mocked; any other endpoint would be unmatched.

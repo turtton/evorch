@@ -48,9 +48,25 @@ impl Match for CodexBodyMatcher {
             && body["parallel_tool_calls"] == true
             && body["reasoning"].is_object()
             && body["include"].is_array()
-            && body["instructions"].is_string()
-            && body["input"].is_array()
+            // Codex CLI 0.166.0 has no top-level `instructions`; a system prompt travels as
+            // the developer message at input[0].
+            && body.get("instructions").is_none()
+            && developer_only_first(&body["input"])
     }
+}
+
+/// `input` is an array whose only developer message, if any, is a well-formed first item.
+fn developer_only_first(input: &serde_json::Value) -> bool {
+    let Some(items) = input.as_array() else {
+        return false;
+    };
+    items.iter().enumerate().all(|(index, item)| {
+        item["role"] != "developer"
+            || (index == 0
+                && item["type"] == "message"
+                && item["id"].as_str().is_some_and(|id| id.starts_with("msg_"))
+                && item["content"][0]["type"] == "input_text")
+    })
 }
 
 fn make_dummy_jwt(exp: u64, account_id: &str) -> String {
