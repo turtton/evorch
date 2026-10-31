@@ -68,6 +68,12 @@ pub enum StorageError {
     /// The question was already answered by someone else. Only reported to a caller that
     /// asked to be the first to answer ([`crate::AnswerMode::FirstOnly`]).
     QuestionAlreadyAnswered,
+    /// The run or thread was deleted by a confirmed retention (tombstoned), so
+    /// nothing may be recorded for it any more. Not retryable.
+    Tombstoned {
+        run_id: Option<String>,
+        thread_id: Option<String>,
+    },
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -124,6 +130,12 @@ impl fmt::Display for StorageError {
                 "assistant reference is missing or already consumed"
             ),
             Self::QuestionAlreadyAnswered => write!(formatter, "question already answered"),
+            Self::Tombstoned { run_id, thread_id } => write!(
+                formatter,
+                "run {} / thread {} was deleted by retention",
+                run_id.as_deref().unwrap_or("-"),
+                thread_id.as_deref().unwrap_or("-")
+            ),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -155,6 +167,7 @@ impl std::error::Error for StorageError {
             | Self::AssistantReferenceConflict
             | Self::AssistantReferenceUnavailable
             | Self::QuestionAlreadyAnswered
+            | Self::Tombstoned { .. }
             | Self::SecretDetected { .. } => None,
         }
     }

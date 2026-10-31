@@ -76,6 +76,7 @@ mod run;
 pub mod task_queue;
 pub mod team;
 pub mod thread_index;
+pub mod thread_retention;
 pub mod thread_search;
 pub mod thread_start;
 pub mod threads;
@@ -91,7 +92,7 @@ pub use host_input::{
     HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };
 pub use migrations::backfill::{
-    DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
+    BackfillProgress, DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
 };
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, RunContextMeta, StoredAgentMessage};

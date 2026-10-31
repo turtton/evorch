@@ -93,6 +93,7 @@ fn visit_candidates(
          FROM events WHERE id = ?1",
     )?;
     let mut skipped = 0_usize;
+    let tombstones = crate::thread_retention::TombstoneSet::load(conn)?;
     for candidate in candidates {
         let mut rows = statement.query(params![candidate.id])?;
         // The row may have been deleted since the IDs were collected.
@@ -101,6 +102,8 @@ fn visit_candidates(
             continue;
         }
         match row_to_event(row) {
+            // A deleted family's rows stay on disk until reclaimed; never show them.
+            Ok(stored) if tombstones.rejects(&stored.event.kind).is_some() => {}
             Ok(stored) => {
                 if (!candidate.confirm || accept(&stored)) && visit(stored).is_break() {
                     return Ok(());

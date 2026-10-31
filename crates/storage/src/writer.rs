@@ -44,7 +44,7 @@ enum Command {
     UpsertThreads(
         crate::threads::ThreadWriter,
         Vec<crate::threads::ThreadUpsert>,
-        Option<ReplyTx>,
+        Option<ReplyTx<usize>>,
     ),
     AppendEvent(Option<String>, Event, ReplyTx),
     AppendFencedEvent(Option<String>, Event, event_bus::MutationValidator, ReplyTx),
@@ -140,6 +140,12 @@ enum Command {
     Checkpoint(ReplyTx),
     Index(index::IndexCommand),
     Statistics(ReplyTx<StorageStatistics>),
+    ReclaimStep(
+        crate::thread_retention::ReclaimBudget,
+        ReplyTx<crate::thread_retention::ReclaimProgress>,
+    ),
+    ReclaimMarkFiles(String, crate::thread_retention::FilesOutcome, ReplyTx<bool>),
+    RetentionBackfillStep(usize, ReplyTx<crate::BackfillProgress>),
     DiagnosticCleanupStatus(DiagnosticCleanupScope, ReplyTx<cleanup::CleanupStatus>),
     CleanupDiagnosticBatch(
         DiagnosticCleanupScope,
@@ -160,6 +166,8 @@ pub struct StorageStatistics {
     pub events_written: u64,
     pub event_payload_bytes: u64,
     pub event_write_failures: u64,
+    /// Events refused because their run or thread was deleted by retention.
+    pub events_rejected_tombstoned: u64,
     pub append_total_micros: u64,
     pub max_append_micros: u64,
     pub usage_flushes: u64,
@@ -995,10 +1003,12 @@ impl StorageHandle {
     ///
     /// # Errors
     /// Rejects an empty thread ID, suspended writes, SQLite failure or a closed writer.
+    /// Returns how many definitions were left out because the thread was deleted
+    /// by a confirmed retention (0 or 1).
     pub fn upsert_thread_runtime(
         &self,
         thread: &crate::threads::ThreadUpsert,
-    ) -> Result<(), StorageError> {
+    ) -> Result<usize, StorageError> {
         self.request(|reply| {
             Command::UpsertThreads(
                 crate::threads::ThreadWriter::Runtime,
@@ -1013,13 +1023,14 @@ impl StorageHandle {
     ///
     /// # Errors
     /// Rejects the whole batch for an empty thread ID; also fails for suspended
-    /// writes, SQLite failure or a closed writer.
+    /// writes, SQLite failure or a closed writer. Returns how many definitions
+    /// were left out because their thread was deleted by a confirmed retention.
     pub fn upsert_threads_host(
         &self,
         threads: &[crate::threads::ThreadUpsert],
-    ) -> Result<(), StorageError> {
+    ) -> Result<usize, StorageError> {
         if threads.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         self.request(|reply| {
             Command::UpsertThreads(
@@ -1054,6 +1065,45 @@ impl StorageHandle {
     /// メモリ内の保存統計を返します。SQLiteやイベントへの永続化は行いません。
     pub fn statistics(&self) -> Result<StorageStatistics, StorageError> {
         self.request(Command::Statistics)
+    }
+
+    /// Delete a bounded amount of confirmed families' rows: at most
+    /// `budget.max_transactions` transactions, each bounded in rows and bytes.
+    /// Writes nothing when no job is pending.
+    ///
+    /// # Errors
+    /// Fails for a closed writer; a SQLite failure inside a step is reported in
+    /// `ReclaimProgress::last_error` and the job resumes from its cursor.
+    pub fn reclaim_step(
+        &self,
+        budget: crate::thread_retention::ReclaimBudget,
+    ) -> Result<crate::thread_retention::ReclaimProgress, StorageError> {
+        self.request(|reply| Command::ReclaimStep(budget, reply))
+    }
+
+    /// Record what happened to a reclaimed family's files. Returns whether the
+    /// family's state changed.
+    ///
+    /// # Errors
+    /// Fails for SQLite failure or a closed writer.
+    pub fn reclaim_mark_files(
+        &self,
+        family_key: &str,
+        outcome: crate::thread_retention::FilesOutcome,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::ReclaimMarkFiles(family_key.to_owned(), outcome, reply))
+    }
+
+    /// Convert or attribute up to `rows` events that retention needs attributed to
+    /// a run (see `Database::retention_backfill_startup`).
+    ///
+    /// # Errors
+    /// Fails for SQLite failure or a closed writer.
+    pub fn retention_backfill_step(
+        &self,
+        rows: usize,
+    ) -> Result<crate::BackfillProgress, StorageError> {
+        self.request(|reply| Command::RetentionBackfillStep(rows, reply))
     }
 
     /// 保留中の usage バケットを直ちに永続化します。

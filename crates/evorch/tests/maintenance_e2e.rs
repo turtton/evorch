@@ -165,7 +165,7 @@ fn backfill_cli_outputs_progress_without_starting_runtime() {
     let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(
         summary,
-        serde_json::json!({"converted":1,"undecodable":1,"batches":1,"remaining":0})
+        serde_json::json!({"converted":1,"reattributed":0,"undecodable":1,"batches":1,"remaining":0})
     );
     drop(db);
 }

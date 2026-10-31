@@ -79,7 +79,18 @@ pub fn attribute_runs(
              ON CONFLICT(run_id) DO UPDATE SET thread_id = excluded.thread_id, \
              project_id = excluded.project_id",
         )?;
+        let mut tombstoned = transaction.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1) \
+             OR EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?2)",
+        )?;
         for attribution in attributions {
+            // A deleted run or thread keeps its usage rows but is not attributed again;
+            // the fence would otherwise abort the whole batch.
+            if tombstoned.query_row(params![attribution.run_id, attribution.thread_id], |row| {
+                row.get::<_, bool>(0)
+            })? {
+                continue;
+            }
             statement.execute(params![
                 attribution.run_id,
                 attribution.thread_id,

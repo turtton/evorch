@@ -22,7 +22,7 @@
 evorch maintenance backfill-events --db "$DB" --batch-rows 1000 --max-rows 50000
 ```
 
-JSON の `converted` / `undecodable` / `batches` / `remaining` を確認する。`remaining` が 0 になるまで繰り返せる。`--max-rows` を省くと全未処理行を対象とし、0 を指定すると変換せず残数だけを返す。`--batch-rows` は 1～100,000、既定 5,000。
+JSON の `converted` / `reattributed`（run 帰属のなかった Orchestrator イベントへの `run_id` 補完）/ `undecodable` / `batches` / `remaining` を確認する。`remaining` が 0 になるまで繰り返せる。`--max-rows` を省くと全未処理行を対象とし、0 を指定すると変換せず残数だけを返す。`--batch-rows` は 1～100,000、既定 5,000。
 
 各バッチの commit 後に passive checkpoint を行うが、長時間 reader が古い snapshot を保持すると WAL は増え続けうる。空き容量を監視し、必要なら処理量を小さくする。書き込み競合で失敗した場合も、完了済みバッチは保持され、再実行で残りを処理する。オフライン保守中の DB には共有リースを取得できず実行を拒否する。
 
@@ -119,6 +119,55 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 - 既定（論理集計）は大きな DB でも数秒で終わる。`files`（DB/WAL/SHM のバイト数）、`tables`（表ごとの行数と文字列・BLOB 列の長さ合計）、`events`（kind/subkind 別の行数と payload バイト数。`subkind` 未補完の行は `(unbackfilled)`）、`run_contexts`（`messages`/`checkpoints` の平文バイト数と格納バイト数、圧縮済み行数）、`conversation_index`（状態別の `charged_bytes`）、`threads`（active/archived 数）を返す。
 - `attribution` は events・run_contexts・会話索引を `active` / `archived` / `orphan`（run がどのスレッドにも解決されない、または解決先の `threads` 行が無い）/ `unattributed`（`run_id` なし）に分ける。run の帰属は GUI のスレッド表示と同じ規則（`thread_runs` の束縛、`chat:<Role>:<thread>` の run 名、スレッドが記録する root run、保存済み context と usage ledger の親リンクをたどる）で解決し、各行はちょうど 1 つのスレッドに数える。`top_threads` は events・run_contexts・索引の合計バイト数が大きい上位 `--top` 件（既定 10）のスレッドを `thread_id` で示す。
 - `--physical` は opt-in で遅い。`dbstat` による表・索引別のページサイズ（FTS の shadow 表は仮想表に集約）、`page_size`、`page_count`、`freelist_count`/`freelist_bytes`、`auto_vacuum`、`user_version` を加える。`freelist_bytes` と `unused_bytes` は縮小で回収できる余地の目安。
+
+## スレッドの期限削除（storage 基盤）
+
+アーカイブ済みスレッドを期限後に削除するための storage 側の基盤（schema v35）。
+「いつ確定するか」（起動時の排他フェーズ、ロック、設定、GUI）は別の変更が担い、
+ここでは storage が提供する契約だけを説明する。
+
+- **tombstone が唯一の不可逆境界。** `Database::retention_finalize` が、family
+  （fork / rewind / escalation の木と、その thread・run・task）の
+  `thread_tombstones` / `run_tombstones` / `task_tombstones`、`reclaim_jobs`、
+  `threads` / `thread_runs` の削除を 1 transaction で commit する。commit 後の
+  abort は存在しない。family は分割しない。閉包探索（`retention_explore`）は
+  `retention_staging` に作業リストを保存して起動をまたいで進み、確定直前に
+  不動点確認を再実行する。family が探索後に増えていれば `Stale`（増分を staging へ
+  積む）、読む行が予算を超えれば `OverBudget`（何も変えない。呼び手は
+  `FinalizeBudget::proportional` で再試行する）。
+- **判定入力は sidebar。** `RetentionInput` は呼び手が排他ロック取得後に読んだ
+  sidebar を渡す。DB の `threads` の `archived` / `pinned` と revision 列は mirror で、
+  検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
+  sidebar から初期同期し、その際 archive 時刻を新しくしない。同じ revision で値が
+  割れたら保護側（archived / pinned）を採る。Runtime writer はこれらの列を変えない。
+- **除外。** pinned、評価サンプル（`eval_samples`）、owner が保持する thread
+  （`owner_blocks`）、family に非 due・未アーカイブ・sidebar 未知のメンバーがいる場合は
+  確定しない。`archived_delete_after_days = 0` は新規確定を行わない（staging は破棄、
+  mirror は同期する）。時刻のない legacy アーカイブは `Immediate`（即 due）。
+  `event` の `run_id` / Orchestrator の帰属補完（backfill の第 2 対象）が終わるまで
+  探索も確定も `Exploring` で止まる。
+- **確定後の見え方。** 読み手（`thread`、`threads_in_project`、`thread_children`、
+  `thread_of_run`、`runs_of_thread`、`run_context*`、`events_for_runs`、イベント走査、
+  ledger、host input receipt、索引の参照解決）は tombstone 済みの行を返さない。
+  書き手は `StorageError::Tombstoned`（events、recorder は `skipped_tombstoned` に数えて
+  再試行しない）または fence トリガの ABORT で拒否される。fence は INSERT と
+  「生存へ戻す」UPDATE だけを止め、DELETE は常に許す。events の Orchestrator
+  スナップショット（thread 単位）は SQL ではなく writer が Rust 側で拒否する。
+- **回収。** `StorageHandle::reclaim_step` が `reclaim_jobs` の cursor を進め、1 transaction
+  ごとに有界な量（events 500 行／4 MiB、小さな表 500 行、ledger と todo は走査 2,000 行、
+  索引 200 行／2 MiB）を削除する。削除と cursor・カウンタの更新は同じ transaction で、
+  中断しても再実行で残りだけを処理する。pending が無ければ何も書かない。
+  4 MiB を超える `run_contexts` と `thread_start_states.diff` は `reclaim_oversized` に
+  登録し、起動時の排他枠で `Database::reclaim_oversized_step` が 1 行ずつ（予算が小さくても
+  最低 1 行）削除する。失敗した行は登録が残る。`reclaim_mark_files` はファイル削除の結果を
+  `db_done → files_pending → done | files_failed` に記録する。
+- **残すもの。** usage（`usage_requests` / `usage_daily` / `usage_run_threads`）、学習系
+  （claims、improvement、memory）、索引の要求履歴、`sessions` と集計、`eval_samples`。
+  run に帰属できない events（Ownership、Diagnostic、routing など）も残る。全表の扱いは
+  `repo/thread_retention/catalog.rs` に一覧があり、テストがスキーマと突き合わせる。
+- **会計。** 回収は events の日次・session 集計、`sessions.total_event_bytes`、索引の
+  `charged_bytes` を同じ transaction で更新する。tombstone 済み run の索引行は fence のため
+  最後の block を消すまで課金を減らさず、最後に `deleted` として 0 にする。
 
 ## 既知の制約
 

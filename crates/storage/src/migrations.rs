@@ -45,6 +45,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v32.sql"),
     include_str!("migrations/v33.sql"),
     include_str!("migrations/v34.sql"),
+    include_str!("migrations/v35.sql"),
 ];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
@@ -86,3 +87,66 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
         message: error.to_string(),
     }
 }
+
+/// Reverts migration v35 on a database whose `threads` table is kept, for tests
+/// that rebuild an older schema by hand. `thread_index_runs` is not restored:
+/// the caller drops it, as v35 rebuilds it from scratch.
+#[cfg(test)]
+pub(crate) const UNDO_V35: &str = r#"
+DROP INDEX idx_events_orchestrator_unattributed;
+DROP TRIGGER fence_run_contexts_insert;
+DROP TRIGGER fence_run_contexts_update;
+DROP TRIGGER fence_run_context_provenance_insert;
+DROP TRIGGER fence_run_context_provenance_update;
+DROP TRIGGER fence_run_ledger_insert;
+DROP TRIGGER fence_host_input_receipts_insert;
+DROP TRIGGER fence_host_input_receipts_update;
+DROP TRIGGER fence_review_evidence_insert;
+DROP TRIGGER fence_review_evidence_update;
+DROP TRIGGER fence_review_lineage_edges_insert;
+DROP TRIGGER fence_review_lineage_edges_update;
+DROP TRIGGER fence_assistant_references_insert;
+DROP TRIGGER fence_assistant_references_update;
+DROP TRIGGER fence_user_questions_insert;
+DROP TRIGGER fence_user_questions_update;
+DROP TRIGGER fence_user_question_links_insert;
+DROP TRIGGER fence_user_question_links_update;
+DROP TRIGGER fence_conversation_blocks_insert;
+DROP TRIGGER fence_conversation_blocks_update;
+DROP TRIGGER fence_thread_runs_insert;
+DROP TRIGGER fence_thread_runs_update;
+DROP TRIGGER fence_thread_start_states_insert;
+DROP TRIGGER fence_thread_start_states_update;
+DROP TRIGGER fence_thread_start_untracked_insert;
+DROP TRIGGER fence_thread_start_untracked_update;
+DROP TRIGGER fence_eval_samples_insert;
+DROP TRIGGER fence_eval_samples_update;
+DROP TRIGGER fence_usage_run_threads_insert;
+DROP TRIGGER fence_usage_run_threads_update;
+DROP TRIGGER fence_threads_insert;
+DROP TRIGGER fence_threads_update;
+DROP TRIGGER fence_tasks_insert;
+DROP TRIGGER fence_tasks_update;
+DROP TRIGGER fence_task_links_insert;
+DROP TRIGGER fence_thread_index_runs_insert;
+DROP TRIGGER fence_thread_index_runs_update;
+DROP TRIGGER fence_task_queue_ledger_insert;
+DROP TRIGGER fence_events_insert;
+DROP INDEX idx_tasks_parent_run; DROP INDEX idx_assistant_references_source;
+DROP INDEX idx_run_contexts_chat_thread; DROP INDEX idx_threads_archived;
+DROP INDEX idx_threads_root_run; DROP INDEX idx_threads_escalation_source;
+ALTER TABLE threads DROP COLUMN archived_at_ns; ALTER TABLE threads DROP COLUMN pinned;
+ALTER TABLE threads DROP COLUMN archive_revision; ALTER TABLE threads DROP COLUMN pin_revision;
+DROP TRIGGER run_ledger_no_delete;
+CREATE TRIGGER run_ledger_no_delete BEFORE DELETE ON run_ledger
+BEGIN SELECT RAISE(ABORT, 'run ledger is append-only'); END;
+DROP TRIGGER task_queue_no_delete;
+CREATE TRIGGER task_queue_no_delete BEFORE DELETE ON task_queue_ledger
+BEGIN SELECT RAISE(ABORT, 'task queue ledger is append-only'); END;
+DROP TABLE artifact_refs; DROP TABLE gc_state; DROP TABLE gc_unknown_meta;
+DROP TABLE reclaim_jobs; DROP TABLE reclaim_oversized;
+DROP TABLE retention_binding; DROP TABLE retention_identity;
+DROP TABLE retention_staging; DROP TABLE retention_staging_state;
+DROP TABLE run_ledger_delete_grants; DROP TABLE task_queue_delete_grants;
+DROP TABLE run_tombstones; DROP TABLE task_tombstones; DROP TABLE thread_tombstones;
+"#;
