@@ -68,8 +68,9 @@ impl Event {
     /// diagnostic events, the requesting run of a user question, the session
     /// of a fallback (which names the run), and the recipient of an agent
     /// message. Events with no single owning run — approvals and denials
-    /// (attributed through their call ID), faults, ownership, orchestrator
-    /// and usage events — have none.
+    /// (attributed through their call ID), faults, ownership, thread todo
+    /// snapshots and usage events — have none. Task progress and checkpoints
+    /// belong to the reporting run, and a thread goal to its root run.
     #[must_use]
     pub fn primary_run_id(&self) -> Option<&str> {
         self.kind.primary_run_id()
@@ -226,7 +227,16 @@ impl EventKind {
             Self::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
                 Some(&message.recipient_run_id)
             }
-            Self::Usage(_) | Self::Fault(_) | Self::Orchestrator(_) | Self::Ownership(_) => None,
+            // Task events name the run that reported them, and a goal snapshot
+            // its conversation root. A todo snapshot belongs to the thread
+            // only, so it has no run.
+            Self::Orchestrator(event) => match event {
+                OrchestratorEvent::TaskProgressed { run_id, .. }
+                | OrchestratorEvent::TaskCheckpoint { run_id, .. } => Some(run_id),
+                OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
+                OrchestratorEvent::ThreadTodoUpdated { .. } => None,
+            },
+            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) => None,
         }
     }
 }

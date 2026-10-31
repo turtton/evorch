@@ -2168,11 +2168,12 @@ fn scan_vm_work_is_linear_in_rows_and_arms() {
     }
 }
 
-/// Measured on the bundled SQLite for `vm_fixture` (16 arms): 841 VM steps for
-/// 1 row, 1327 for 10, 2850 for 40 and 8636 for 160, i.e. about 49 steps per
-/// row and 49 per arm. The bounds keep ~10% headroom over that fit.
+/// Measured on the bundled SQLite for `vm_fixture` (16 arms): 985 VM steps for
+/// 1 row, 1471 for 10, 2994 for 40 and 8780 for 160, i.e. about 49 steps per
+/// row and 58 per arm (nine of them the arm's tombstone probe). The bounds keep
+/// ~10% headroom over that fit.
 const VM_PER_ROW: i32 = 60;
-const VM_PER_ARM: i32 = 56;
+const VM_PER_ARM: i32 = 66;
 
 #[test]
 fn scan_vm_work_ignores_invisible_and_noncurrent_blocks() {

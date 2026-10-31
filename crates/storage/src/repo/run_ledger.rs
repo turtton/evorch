@@ -33,16 +33,20 @@ pub(crate) fn append_at(
 }
 
 pub fn latest(conn: &Connection, run_id: &str) -> Result<Option<RunLedgerEntry>, StorageError> {
-    Ok(conn.query_row(
-        "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE run_id = ?1 ORDER BY seq DESC LIMIT 1",
-        [run_id],
-        from_row,
-    ).optional()?)
+    Ok(conn
+        .query_row(
+            "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE run_id = ?1 \
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY seq DESC LIMIT 1",
+            [run_id],
+            from_row,
+        )
+        .optional()?)
 }
 
 pub fn list_by_run(conn: &Connection, run_id: &str) -> Result<Vec<RunLedgerEntry>, StorageError> {
     let mut statement = conn.prepare(
-        "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE run_id = ?1 ORDER BY seq",
+        "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE run_id = ?1 \
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY seq",
     )?;
     Ok(statement
         .query_map([run_id], from_row)?
@@ -50,8 +54,10 @@ pub fn list_by_run(conn: &Connection, run_id: &str) -> Result<Vec<RunLedgerEntry
 }
 
 pub fn list_all(conn: &Connection) -> Result<Vec<RunLedgerEntry>, StorageError> {
-    let mut statement =
-        conn.prepare("SELECT seq, run_id, body, created_at_ns FROM run_ledger ORDER BY seq")?;
+    let mut statement = conn.prepare(
+        "SELECT seq, run_id, body, created_at_ns FROM run_ledger \
+         WHERE run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY seq",
+    )?;
     Ok(statement
         .query_map([], from_row)?
         .collect::<Result<_, _>>()?)

@@ -1,6 +1,7 @@
 //! イベントログの追記と復元を管理します。
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use event_bus::{Event, EventKind};
@@ -39,6 +40,9 @@ pub struct EventAccounting {
     seeded_day_start_ns: Option<i64>,
     data_version: Option<i64>,
     sessions: VecDeque<(String, u64)>,
+    /// Tombstones as of `data_version`; any other connection's commit
+    /// (including a retention confirmation) invalidates it with the rest.
+    tombstones: Option<Arc<crate::thread_retention::TombstoneSet>>,
 }
 
 /// 容量上限を検査してイベントを一件追記します。
@@ -84,6 +88,15 @@ pub fn append_event(
         EventAccounting::default()
     };
     next_accounting.data_version = Some(data_version);
+    let tombstones = match &next_accounting.tombstones {
+        Some(tombstones) => Arc::clone(tombstones),
+        None => Arc::new(crate::thread_retention::TombstoneSet::load(&transaction)?),
+    };
+    // A deleted family accepts nothing new; refuse before any accounting moves.
+    if let Some(error) = tombstones.rejects(&event.kind) {
+        return Err(error);
+    }
+    next_accounting.tombstones = Some(tombstones);
     if next_accounting.seeded_session_id.as_deref() != session_id {
         next_accounting.session_bytes = match session_id {
             Some(id) => match next_accounting.sessions.iter().find(|(key, _)| key == id) {
@@ -228,6 +241,7 @@ pub fn list_after(
          FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
     )?;
     let mut rows = statement.query(params![after_id, limit, exclude_session])?;
+    let tombstones = crate::thread_retention::TombstoneSet::load(conn)?;
     let mut events = Vec::new();
     let mut last_id = after_id;
     let mut scanned = 0;
@@ -238,6 +252,7 @@ pub fn list_after(
             continue;
         }
         match row_to_event(row) {
+            Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
             Ok(event) => events.push(event),
             // 現行の型で復元できない行は読み飛ばし、カーソルだけ進めます。
             Err(StorageError::Serialization(_)) => {}
@@ -318,9 +333,11 @@ fn visit_events<P: rusqlite::Params>(
 ) -> Result<(), StorageError> {
     let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query(params)?;
+    let tombstones = crate::thread_retention::TombstoneSet::load(conn)?;
     let mut skipped = 0_usize;
     while let Some(row) = rows.next()? {
         match row_to_event(row) {
+            Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
             Ok(event) => visit(event),
             // 削除済みの variant など、現行の型で復元できない保存イベントは読み飛ばします。
             Err(StorageError::Serialization(_)) => skipped += 1,

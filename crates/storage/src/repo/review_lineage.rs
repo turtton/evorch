@@ -27,7 +27,8 @@ pub fn insert(conn: &Connection, edges: &[LineageEdge]) -> Result<(), StorageErr
 pub fn for_child(conn: &Connection, run_id: &str) -> Result<Vec<LineageEdge>, StorageError> {
     let mut statement = conn.prepare(
         "SELECT child_run_id, parent_run_id, created_at_ns FROM review_lineage_edges \
-         WHERE child_run_id = ?1 ORDER BY parent_run_id",
+         WHERE child_run_id = ?1 AND child_run_id NOT IN (SELECT run_id FROM run_tombstones) AND parent_run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         ORDER BY parent_run_id",
     )?;
     let rows = statement.query_map([run_id], |row| {
         Ok(LineageEdge {

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use rusqlite::{Connection, params};
 
 use super::*;
+use crate::thread_index::{PurgeProgress, PurgeTarget};
 
 /// Failures of one source revision before it becomes `blocked`.
 pub(crate) const MAX_ATTEMPTS: u32 = 5;
@@ -26,6 +27,7 @@ fn eviction_name(reason: IndexEvictionReason) -> &'static str {
         IndexEvictionReason::LogicalBudget => "logical_budget",
         IndexEvictionReason::Oversized => "oversized",
         IndexEvictionReason::PhysicalReclaim => "physical_reclaim",
+        IndexEvictionReason::Archived => "archived",
     }
 }
 
@@ -670,4 +672,188 @@ impl ThreadIndexRepository for SqliteThreadIndex<'_> {
             Ok(())
         })
     }
+}
+
+/// Removes up to `limit_rows` blocks (and at least one) of `run_id`'s index, stopping
+/// once `limit_text_bytes` of text are taken. The FTS rows follow through the
+/// blocks' delete trigger. The step only runs when the run's state allows
+/// `target`; otherwise it does nothing. When the last block is gone the row
+/// reaches its end state in the same transaction: `deleted` for a tombstoned
+/// run, charges cleared (state kept) for an archived eviction.
+///
+/// It does not depend on the index job being enabled or leased: the caller is
+/// the writer thread, which owns every write.
+pub(crate) fn purge_index_rows(
+    conn: &Connection,
+    run_id: &str,
+    target: PurgeTarget,
+    limit_rows: usize,
+    limit_text_bytes: u64,
+) -> Result<PurgeProgress, StorageError> {
+    purge_index_rows_with(
+        conn,
+        run_id,
+        target,
+        limit_rows,
+        limit_text_bytes,
+        OversizedBlock::Report,
+    )
+}
+
+/// What a purge step does with a first block larger than its byte limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OversizedBlock {
+    /// Leave it and report its size, so the caller can route it elsewhere.
+    Report,
+    /// Delete it alone: the exclusive phase, where one large row is the unit.
+    TakeAlone,
+}
+
+/// [`purge_index_rows`] with a choice for a block above the byte limit. Either
+/// way a step reads at most `limit_rows` blocks and deletes at most those that
+/// fit the limit (or the one oversized block alone).
+pub(crate) fn purge_index_rows_with(
+    conn: &Connection,
+    run_id: &str,
+    target: PurgeTarget,
+    limit_rows: usize,
+    limit_text_bytes: u64,
+    oversized_block: OversizedBlock,
+) -> Result<PurgeProgress, StorageError> {
+    let idle = PurgeProgress {
+        rows: 0,
+        text_bytes: 0,
+        remaining: false,
+        oversized: false,
+        oversized_bytes: 0,
+    };
+    atomic(conn, || {
+        let allowed: bool = match target {
+            PurgeTarget::Tombstoned => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1) \
+                 AND EXISTS(SELECT 1 FROM thread_index_runs WHERE run_id = ?1)",
+                [run_id],
+                |row| row.get(0),
+            )?,
+            PurgeTarget::Archived => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_index_runs WHERE run_id = ?1 \
+                 AND state = 'evicted' AND evicted_reason = 'archived')",
+                [run_id],
+                |row| row.get(0),
+            )?,
+        };
+        if !allowed {
+            return Ok(idle);
+        }
+        let limit = i64::try_from(limit_rows.max(1)).unwrap_or(i64::MAX);
+        let mut ids = Vec::new();
+        let mut text_bytes = 0_u64;
+        let mut oversized = false;
+        let mut oversized_bytes = 0_u64;
+        {
+            let mut statement = conn.prepare_cached(
+                // The order is the unique key's, so the statement stops after `limit`
+                // rows; ordering by id would sort every block of the run first.
+                "SELECT id, length(CAST(text AS BLOB)) FROM conversation_blocks \
+                 WHERE run_id = ?1 ORDER BY source_kind, source_key LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![run_id, limit])?;
+            while let Some(row) = rows.next()? {
+                let bytes = row.get::<_, u64>(1)?;
+                if ids.is_empty() && bytes > limit_text_bytes {
+                    if oversized_block == OversizedBlock::TakeAlone {
+                        ids.push(row.get::<_, i64>(0)?);
+                        text_bytes = bytes;
+                        break;
+                    }
+                    // Never smuggle a block past the step's byte budget.
+                    oversized = true;
+                    oversized_bytes = bytes;
+                    break;
+                }
+                if !ids.is_empty() && text_bytes.saturating_add(bytes) > limit_text_bytes {
+                    break;
+                }
+                ids.push(row.get::<_, i64>(0)?);
+                text_bytes = text_bytes.saturating_add(bytes);
+            }
+        }
+        if !ids.is_empty() {
+            let listed = serde_json::to_string(&ids)
+                .map_err(|error| StorageError::Serialization(error.to_string()))?;
+            conn.execute(
+                "DELETE FROM conversation_blocks WHERE id IN (SELECT value FROM json_each(?1))",
+                [listed],
+            )?;
+            // A tombstoned run's row may only be terminalised (see the fence on
+            // `thread_index_runs`), so its charge stays until the last block is
+            // gone; an archived eviction is free to shrink step by step.
+            if target == PurgeTarget::Archived {
+                conn.execute(
+                    "UPDATE thread_index_runs SET text_bytes = max(0, text_bytes - ?2), \
+                     charged_bytes = max(0, charged_bytes - ?2) WHERE run_id = ?1",
+                    params![run_id, text_bytes],
+                )?;
+            }
+        }
+        let remaining: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_blocks WHERE run_id = ?1)",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let mut gapped = 0_usize;
+        let mut finished = !remaining && !oversized;
+        if finished {
+            match target {
+                PurgeTarget::Tombstoned => {
+                    // Pending request targets of the run close as gaps, in batches
+                    // that share the step's row budget with the blocks it deleted,
+                    // so a run with many requests cannot make one step unbounded.
+                    let room = limit_rows.max(1).saturating_sub(ids.len());
+                    gapped = conn.execute(
+                        "UPDATE thread_index_request_targets SET state = 'gap', gap_reason = ?2 \
+                         WHERE run_id = ?1 AND state = 'pending' AND request_id IN (\
+                             SELECT request_id FROM thread_index_request_targets \
+                             WHERE run_id = ?1 AND state = 'pending' LIMIT ?3)",
+                        params![
+                            run_id,
+                            to_json(&RequestGapReason::Deleted)?,
+                            i64::try_from(room).unwrap_or(i64::MAX)
+                        ],
+                    )?;
+                    let pending: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM thread_index_request_targets \
+                         WHERE run_id = ?1 AND state = 'pending')",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    if pending {
+                        finished = false;
+                    } else {
+                        SqliteThreadIndex::new(conn).drop_index(
+                            run_id,
+                            "state = 'deleted', source_present = 0, evicted_reason = NULL",
+                        )?;
+                    }
+                }
+                PurgeTarget::Archived => {
+                    conn.execute(
+                        "UPDATE thread_index_runs SET text_bytes = 0, attribute_bytes = 0, \
+                         block_count = 0, charged_bytes = 0, indexed_revision = NULL, \
+                         indexed_extractor_version = NULL, indexed_accounting_version = NULL, \
+                         indexed_at_ns = NULL, work_generation = work_generation + 1 \
+                         WHERE run_id = ?1",
+                        [run_id],
+                    )?;
+                }
+            }
+        }
+        Ok(PurgeProgress {
+            rows: ids.len() + gapped,
+            text_bytes,
+            remaining: !finished,
+            oversized,
+            oversized_bytes,
+        })
+    })
 }

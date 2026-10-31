@@ -96,7 +96,11 @@ impl Database {
         let limit = limit.clamp(1, 10_000);
         let mut events = Vec::new();
         let mut truncated = false;
+        // Events of a deleted family stay in the file until reclaimed; they are not
+        // shown meanwhile, by run column or by what the payload says it belongs to.
+        let tombstones = crate::thread_retention::TombstoneSet::load(&self.conn)?;
         match scope {
+            EventScope::Run(run_id) if tombstones.contains_run(run_id) => {}
             EventScope::Run(run_id) => {
                 let transaction = self.conn.unchecked_transaction()?;
                 let mut candidates = Vec::new();
@@ -136,12 +140,16 @@ impl Database {
                     )?;
                 }
                 let mut statement = transaction.prepare(
-                    "SELECT id, session_id, wall_clock_ns, kind, payload FROM events WHERE id = ?1",
+                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id FROM events \
+                     WHERE id = ?1",
                 )?;
                 for candidate in normalize(candidates).iter().rev() {
                     let mut rows = statement.query([candidate.id])?;
                     let Some(row) = rows.next()? else { continue };
                     let event = event_row(row)?;
+                    if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
+                        continue;
+                    }
                     if candidate.confirm && !attributed_to_run(&event.payload, run_id) {
                         continue;
                     }
@@ -153,21 +161,36 @@ impl Database {
                 }
             }
             EventScope::Window { from_ns, to_ns } => {
+                // Hidden events are dropped after the statement, so it is paged by id
+                // until `limit` visible events and one more are found or the window ends.
+                let page = i64::try_from(limit + 1).unwrap_or(i64::MAX);
+                let mut before = i64::MAX;
                 let mut statement = self.conn.prepare(
-                    "SELECT id, session_id, wall_clock_ns, kind, payload FROM events
-                     WHERE wall_clock_ns BETWEEN ?1 AND ?2 ORDER BY id DESC LIMIT ?3",
+                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id FROM events
+                     WHERE wall_clock_ns BETWEEN ?1 AND ?2 AND id < ?4
+                     AND (run_id IS NULL OR run_id NOT IN (SELECT run_id FROM run_tombstones))
+                     ORDER BY id DESC LIMIT ?3",
                 )?;
-                let mut rows = statement.query(rusqlite::params![
-                    from_ns,
-                    to_ns,
-                    i64::try_from(limit + 1).unwrap_or(i64::MAX)
-                ])?;
-                while let Some(row) = rows.next()? {
-                    if events.len() == limit {
-                        truncated = true;
+                'pages: loop {
+                    let mut rows =
+                        statement.query(rusqlite::params![from_ns, to_ns, page, before])?;
+                    let mut read = 0_i64;
+                    while let Some(row) = rows.next()? {
+                        read += 1;
+                        let event = event_row(row)?;
+                        before = event.id;
+                        if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
+                            continue;
+                        }
+                        if events.len() == limit {
+                            truncated = true;
+                            break 'pages;
+                        }
+                        events.push(event);
+                    }
+                    if read < page {
                         break;
                     }
-                    events.push(event_row(row)?);
                 }
             }
         }
@@ -182,11 +205,14 @@ impl Database {
     /// # Errors
     /// Returns an error if SQLite access fails.
     pub fn inspect_run(&self, run_id: &str, full: bool) -> Result<Value, StorageError> {
+        // A confirmed deletion hides the run's rows until they are reclaimed; the
+        // usage ledger and learning records are kept on purpose and still show.
         let mut context = self
             .json_rows(
                 "SELECT run_id, role, name, parent_run_id, config_json, messages_json, \
                  checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, \
-                 host_inputs_json FROM run_contexts WHERE run_id = ?1",
+                 host_inputs_json FROM run_contexts WHERE run_id = ?1 \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
                 &[run_id],
             )?
             .into_iter()
@@ -204,7 +230,8 @@ impl Database {
         let children: Vec<Value> = self
             .json_rows(
                 "SELECT run_id, role, name, terminal_phase, updated_at_ns FROM run_contexts
-                 WHERE parent_run_id = ?1 ORDER BY updated_at_ns",
+                 WHERE parent_run_id = ?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+                 ORDER BY updated_at_ns",
                 &[run_id],
             )?
             .into_iter()
@@ -230,11 +257,18 @@ impl Database {
             "run_id": run_id,
             "context": context,
             "children": children,
-            "ledger": self.json_rows("SELECT * FROM run_ledger WHERE run_id = ?1 ORDER BY seq", &[run_id])?,
+            "ledger": self.json_rows(
+                "SELECT * FROM run_ledger WHERE run_id = ?1 \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY seq",
+                &[run_id],
+            )?,
             "usage_requests": self.json_rows("SELECT * FROM usage_requests WHERE run_id = ?1 ORDER BY at_ns", &[run_id])?,
             "user_questions": self.json_rows(
-                "SELECT * FROM user_questions WHERE run_id = ?1
-                 OR id IN (SELECT question_id FROM user_question_links WHERE run_id = ?1)",
+                "SELECT * FROM user_questions WHERE (run_id = ?1
+                 OR id IN (SELECT question_id FROM user_question_links WHERE run_id = ?1))
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+                 AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+                 AND ?1 NOT IN (SELECT run_id FROM run_tombstones)",
                 &[run_id],
             )?,
             "event_kinds": event_kinds,
@@ -436,6 +470,17 @@ fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {
         kind: row.get(3)?,
         payload: column_json("payload", row.get_ref(4)?),
     })
+}
+
+/// Whether the event belongs to a deleted run or thread.
+fn hidden(
+    tombstones: &crate::thread_retention::TombstoneSet,
+    event: &InspectEvent,
+    run_id: Option<String>,
+) -> bool {
+    run_id.is_some_and(|run| tombstones.contains_run(&run))
+        || serde_json::from_value::<event_bus::EventKind>(event.payload.clone())
+            .is_ok_and(|kind| tombstones.rejects(&kind).is_some())
 }
 
 /// Whether the payload names the run in a `run_id` field, or the event is

@@ -383,7 +383,7 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
             "Orchestrator",
             "ThreadGoalUpdated",
             json!({"snapshot": goal}),
-            None,
+            Some("run-root"),
         ),
         (
             "Orchestrator",
@@ -395,13 +395,13 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
             "Orchestrator",
             "TaskProgressed",
             json!({"task_id": "t", "run_id": "run-a", "progress": {}, "reason": "r"}),
-            None,
+            Some("run-a"),
         ),
         (
             "Orchestrator",
             "TaskCheckpoint",
             json!({"task_id": "t", "run_id": "run-a", "tool_call_count": 1, "cumulative_input_tokens": 1, "cumulative_output_tokens": 1, "elapsed_ms": 1}),
-            None,
+            Some("run-a"),
         ),
         (
             "Ledger",
@@ -836,12 +836,15 @@ impl Scenario {
 
         // A run's own events, agent messages in both directions, approvals by
         // call ID; never another run's event that merely mentions it.
-        assert_eq!(self.for_runs(&["run-1"]), self.pick(&[0, 1, 3, 4, 7, 14]));
+        assert_eq!(
+            self.for_runs(&["run-1"]),
+            self.pick(&[0, 1, 3, 4, 7, 9, 14])
+        );
         assert_eq!(self.for_runs(&["run-2"]), self.pick(&[2, 5, 6, 7, 12]));
         assert_eq!(self.for_runs(&["run-3"]), self.pick(&[6]));
         assert_eq!(
             self.for_runs(&["run-2", "run-1"]),
-            self.pick(&[0, 1, 2, 3, 4, 5, 6, 7, 12, 14])
+            self.pick(&[0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 14])
         );
         assert_eq!(self.for_runs(&["run-404"]), Vec::<i64>::new());
         let (listed, more) = self

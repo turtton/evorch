@@ -6,6 +6,7 @@ pub(crate) mod retention;
 pub(crate) mod retention_events;
 mod vacuum;
 
+pub(crate) use compact::adjust_session_bytes;
 pub use compact::{CompactOptions, CompactSummary, DeltaMode, backfill_events, compact_events};
 pub use offline::{StripOptions, StripSummary, strip_task_progress_cursor};
 pub use retention::{RetentionSummary, preview_task_progress_retention};

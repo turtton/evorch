@@ -6,9 +6,12 @@ use event_bus::{
     Event, EventMeta, LifecycleEvent, ProviderEvent, ProviderFailureKind, RequestPurpose,
 };
 use rusqlite::Connection;
+#[path = "support/undo_v35.rs"]
+mod undo_v35;
 use storage::usage::{RunAttribution, UsageRequestRecord, UsageStatus};
 use storage::{Database, Storage, StorageConfig, system_time_to_ns};
 use tempfile::TempDir;
+use undo_v35::undo_v35;
 
 fn config(temp_dir: &TempDir) -> StorageConfig {
     StorageConfig {
@@ -87,6 +90,7 @@ fn v13_database_with_events(config: &StorageConfig, events: &[Event]) {
     }
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
+    undo_v35(&conn);
     conn.execute_batch(
         "ALTER TABLE usage_requests DROP COLUMN usage_reported; ALTER TABLE usage_daily DROP COLUMN unreported_count; ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
@@ -326,6 +330,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
         .unwrap();
     storage.close();
     let conn = Connection::open(&config.db_path).unwrap();
+    undo_v35(&conn);
     conn.execute_batch(
         "ALTER TABLE usage_requests DROP COLUMN usage_reported; ALTER TABLE usage_daily DROP COLUMN unreported_count; ALTER TABLE review_evidence DROP COLUMN attachments_json; DROP INDEX host_input_receipts_seq; ALTER TABLE host_input_receipts DROP COLUMN acceptance_seq; ALTER TABLE host_input_receipts DROP COLUMN evidence_id; DROP INDEX idx_events_kind_subkind_id; DROP INDEX idx_events_run_id; DROP INDEX idx_events_unbackfilled; DROP INDEX idx_events_blank_subkind; ALTER TABLE events DROP COLUMN subkind; ALTER TABLE events DROP COLUMN run_id; CREATE INDEX idx_events_session_id ON events(session_id, id); DROP TABLE learning_claim_roots; DROP TABLE learning_claims; DROP TABLE run_context_provenance; DROP TABLE thread_index_runs; DROP TABLE conversation_fts; DROP TABLE conversation_blocks; DROP TABLE thread_index_state; DROP TABLE thread_index_lease; DROP TABLE thread_index_requests; DROP TABLE thread_index_request_targets; ALTER TABLE run_contexts DROP COLUMN snapshot_revision;
          DROP TABLE host_input_receipts; ALTER TABLE run_contexts DROP COLUMN messages_len; ALTER TABLE run_contexts DROP COLUMN checkpoints_len; ALTER TABLE run_contexts DROP COLUMN host_inputs_json;
