@@ -148,16 +148,19 @@ fn expands_fast_capable_models_into_base_and_fast_rows() {
             slug: "gpt-a".into(),
             supports_fast: true,
             context_window: Some(272_000),
+            capabilities: providers::CodexModelCapabilities::default(),
         },
         providers::CodexModelInfo {
             slug: "gpt-b".into(),
             supports_fast: false,
             context_window: None,
+            capabilities: providers::CodexModelCapabilities::default(),
         },
         providers::CodexModelInfo {
             slug: "gpt-c".into(),
             supports_fast: true,
             context_window: Some(272_000),
+            capabilities: providers::CodexModelCapabilities::default(),
         },
     ];
     // When

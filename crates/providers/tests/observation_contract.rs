@@ -1,4 +1,7 @@
 // allow: SIZE_OK — 観測イベントの契約表を1つの統合テストバイナリに集約する。
+#[allow(dead_code)]
+#[path = "support/codex.rs"]
+mod codex_support;
 mod support;
 
 use std::sync::Arc;
@@ -913,6 +916,7 @@ async fn openai_send_without_context_emits_none_run_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_send_success_emits_ordered_observation() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         "/backend-api/codex/responses",
@@ -934,6 +938,7 @@ async fn codex_send_success_emits_ordered_observation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_stream_success_emits_first_token_once() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         "/backend-api/codex/responses",
@@ -957,6 +962,7 @@ async fn codex_stream_success_emits_first_token_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_send_http_500_emits_http_failure() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         "/backend-api/codex/responses",
@@ -982,6 +988,7 @@ async fn codex_send_http_500_emits_http_failure() {
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_stream_invalid_sse_emits_failure_zero_usage() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         "/backend-api/codex/responses",

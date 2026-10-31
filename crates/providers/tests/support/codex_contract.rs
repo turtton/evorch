@@ -95,3 +95,13 @@ pub fn seeded_store() -> Arc<InMemoryTokenStore> {
         .expect("token bundle can be seeded");
     store
 }
+
+/// An ID token for `account_id` that stays valid, for a mocked refresh response.
+#[allow(dead_code)]
+pub fn refreshed_id_token(account_id: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after epoch")
+        .as_secs();
+    make_dummy_jwt(now + 7_200, account_id)
+}

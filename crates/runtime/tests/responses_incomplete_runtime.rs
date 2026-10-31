@@ -276,11 +276,15 @@ async fn run_case(
         actual, phase,
         "{backend:?} terminal run phase: {diagnostics:?}"
     );
-    assert_eq!(
-        server.received_requests().await.unwrap().len(),
-        requests,
-        "{backend:?} model requests"
-    );
+    // A Codex client also reads the model catalog (GET) once before its first request.
+    let model_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == wiremock::http::Method::POST)
+        .count();
+    assert_eq!(model_requests, requests, "{backend:?} model requests");
     let responses = model.responses.lock().await;
     responses[0].clone()
 }

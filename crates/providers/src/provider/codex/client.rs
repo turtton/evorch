@@ -24,7 +24,7 @@ use crate::http::{
     map_response_error,
 };
 use crate::message::{ChatRequest, ChatResponse, ProviderCapabilities};
-use crate::models::CODEX_CLIENT_VERSION;
+use crate::models::{CODEX_CLIENT_VERSION, CodexModelCapabilities, CodexModelInfo};
 use crate::observe::AttemptObserver;
 use crate::stream::{DeltaStream, StreamEvent};
 use crate::wire::codex::{CodexResponsesRequest, CodexStreamInterpreter};
@@ -37,6 +37,8 @@ const COMPACTION_READ_TIMEOUT: Duration = Duration::from_secs(300);
 const PROVIDER_LABEL: &str = "openai-codex";
 const PROTOCOL: &str = "openai-codex-responses";
 const ORIGINATOR: &str = "codex_cli_rs";
+/// Responses Lite の要求に付ける header (Codex CLI 0.166.0)。
+const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 /// A request that only names the model, for scopes of capabilities without a chat request.
 fn scope_probe(model: &str) -> ChatRequest {
@@ -85,6 +87,23 @@ fn catalog_failure(error: &ProviderError) -> String {
     .into()
 }
 
+/// client の生存期間に 1 回だけ取得した catalog の結果。途中で要求の形状が変わって
+/// prefix が壊れないよう、成功も失敗も固定する。失敗は能力不明 (従来の形状) として扱う。
+struct CatalogOutcome {
+    models: Result<Vec<CodexModelInfo>, ProviderError>,
+}
+
+impl CatalogOutcome {
+    fn capabilities(&self, model: &str) -> Option<CodexModelCapabilities> {
+        self.models
+            .as_ref()
+            .ok()?
+            .iter()
+            .find(|info| info.slug == model)
+            .map(|info| info.capabilities.clone())
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ResponseMode {
     Streaming,
@@ -106,6 +125,15 @@ fn resolve_endpoint(base_url: &str) -> String {
     } else {
         format!("{normalized}/backend-api/codex/responses")
     }
+}
+
+/// The base URL a normalized responses endpoint hangs off, so the catalog and the
+/// responses path agree for every accepted base URL shape (including `…/responses`).
+fn catalog_base_url(endpoint: &str) -> String {
+    endpoint
+        .strip_suffix("/responses")
+        .unwrap_or(endpoint)
+        .to_owned()
 }
 
 /// Codex subscription backend client の設定。
@@ -138,7 +166,8 @@ pub struct CodexClient {
     /// Compaction は通常生成より長い無応答期限と、本文受信までの全体期限を使う。
     compaction_http_client: reqwest::Client,
     endpoint: String,
-    /// Catalog discovery appends `/models` to the configured base URL as given.
+    /// The base URL shared with `endpoint` (normalized by [`resolve_endpoint`]); catalog
+    /// discovery appends `/models` to it.
     catalog_base_url: String,
     timeout: Duration,
     event_bus: Option<Arc<EventBus>>,
@@ -146,6 +175,8 @@ pub struct CodexClient {
     session: CodexSessionManager,
     /// クライアントの生存期間を通じて維持するセッション識別子。
     session_id: String,
+    /// 生存期間中 1 回だけ取得する model catalog。要求の形状と `list_models` が共有する。
+    catalog: tokio::sync::OnceCell<CatalogOutcome>,
 }
 
 impl CodexClient {
@@ -162,12 +193,13 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
-            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
+            catalog_base_url: catalog_base_url(&resolve_endpoint(&config.base_url)),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
             session,
             session_id: Uuid::new_v4().to_string(),
+            catalog: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -192,12 +224,13 @@ impl CodexClient {
                 COMPACTION_READ_TIMEOUT,
             )?,
             endpoint: resolve_endpoint(&config.base_url),
-            catalog_base_url: config.base_url.trim_end_matches('/').to_owned(),
+            catalog_base_url: catalog_base_url(&resolve_endpoint(&config.base_url)),
             timeout: config.timeout,
             event_bus: config.event_bus,
             profile: None,
             session,
             session_id: Uuid::new_v4().to_string(),
+            catalog: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -217,7 +250,13 @@ impl CodexClient {
             streaming,
             request.observation.clone(),
         )
-        .with_service_tier(request.service_tier)
+        .with_service_tier(crate::wire::responses::codex_wire_service_tier(
+            request.service_tier,
+            self.catalog
+                .get()
+                .and_then(|outcome| outcome.capabilities(&request.model))
+                .as_ref(),
+        ))
     }
 
     async fn execute(
@@ -237,7 +276,7 @@ impl CodexClient {
         }
         let token = self.session.current().await?;
         let scope = self.responses_scope(request, &token);
-        let wire_request = self.scoped_wire_request(request, &scope)?;
+        let wire_request = self.scoped_wire_request(request, &scope).await?;
         let mut observer = self
             .observer(request, streaming)
             .with_reasoning_effort(wire_request.reasoning_effort())
@@ -282,19 +321,104 @@ impl CodexClient {
         )
     }
 
-    fn scoped_wire_request(
+    /// The wire body of one request. The model's catalog capabilities decide its shape
+    /// (Responses Lite, reasoning, verbosity, service tier); the catalog is fetched once
+    /// per client so the shape never changes under an established prompt-cache prefix.
+    async fn scoped_wire_request(
         &self,
         request: &ChatRequest,
         scope: &crate::ResolvedResponsesScope,
     ) -> Result<CodexResponsesRequest, ProviderError> {
+        // A mismatched scope is refused before the catalog is read.
+        crate::wire::responses::check_scope(request, crate::ResponsesDialect::Codex, scope)?;
+        let codex_model = self.ensure_catalog().await?.capabilities(&request.model);
         crate::wire::responses::to_wire_request_with_scope(
             request,
             &crate::wire::responses::ResponsesRequestOptions {
                 dialect: crate::ResponsesDialect::Codex,
                 prompt_cache_key: None,
+                codex_model,
             },
             scope,
         )
+    }
+
+    /// Fetches the catalog on first use and keeps the outcome for the client's lifetime,
+    /// failure included (the requests then keep the legacy shape). Only a missing session
+    /// leaves it unfetched, since that is not an answer from the catalog. The flag tells
+    /// whether this call performed the fetch. A failed fetch always emits one diagnostic;
+    /// a successful one only when `announce_success` (catalog discovery asked for it).
+    async fn catalog_outcome(
+        &self,
+        announce_success: bool,
+    ) -> Result<(&CatalogOutcome, bool), ProviderError> {
+        let fetched = std::sync::atomic::AtomicBool::new(false);
+        let outcome = self
+            .catalog
+            .get_or_try_init(|| async {
+                fetched.store(true, std::sync::atomic::Ordering::Relaxed);
+                let token = self.session.current().await?;
+                Ok(self.fetch_catalog(&token, announce_success).await)
+            })
+            .await?;
+        Ok((outcome, fetched.into_inner()))
+    }
+
+    async fn ensure_catalog(&self) -> Result<&CatalogOutcome, ProviderError> {
+        self.catalog_outcome(false)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    async fn fetch_catalog(
+        &self,
+        token: &AuthorizedCodexToken,
+        announce_success: bool,
+    ) -> CatalogOutcome {
+        let started = std::time::Instant::now();
+        let models = crate::list_codex_models(
+            &self.catalog_base_url,
+            &ProviderAuth::new(token.access_token.clone()),
+            &token.chatgpt_account_id,
+        )
+        .await;
+        let outcome = CatalogOutcome { models };
+        if announce_success || outcome.models.is_err() {
+            self.emit_catalog_diagnostic(&outcome, false, started.elapsed());
+        }
+        outcome
+    }
+
+    fn emit_catalog_diagnostic(
+        &self,
+        outcome: &CatalogOutcome,
+        cache_hit: bool,
+        elapsed: Duration,
+    ) {
+        let Some(bus) = &self.event_bus else {
+            return;
+        };
+        let failure = outcome.models.as_ref().err().map(catalog_failure);
+        let count = outcome.models.as_ref().ok().map(Vec::len);
+        bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+            source: "providers::codex::catalog".into(),
+            severity: if failure.is_some() {
+                event_bus::DiagnosticSeverity::Warning
+            } else {
+                event_bus::DiagnosticSeverity::Info
+            },
+            code: event_bus::event::diagnostic_codes::PROVIDER_CATALOG_FETCH.into(),
+            detail: format!(
+                "profile={} client_version={CODEX_CLIENT_VERSION} catalog_cache_hit={cache_hit} catalog_result={} model_count={} elapsed_ms={}",
+                self.profile.as_deref().unwrap_or("unknown"),
+                failure.as_deref().unwrap_or("ok"),
+                count.map_or_else(|| "unknown".into(), |n| n.to_string()),
+                elapsed.as_millis(),
+            ),
+            run_id: None,
+            thread_id: None,
+            call_id: None,
+        }));
     }
 
     /// 通常生成と公式 compaction の HTTP エラー処理。
@@ -311,7 +435,14 @@ impl CodexClient {
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let response = self
-            .post_response_with_token(request, wire_request, token, mode, observer)
+            .post_response_with_token(
+                request,
+                wire_request,
+                wire_request.is_responses_lite(),
+                token,
+                mode,
+                observer,
+            )
             .await?;
         if !response.status().is_success() {
             let error = map_response_error(response).await;
@@ -331,8 +462,15 @@ impl CodexClient {
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let token = self.session.current().await?;
-        self.post_response_with_token(&scope_probe(model), wire_request, &token, mode, observer)
-            .await
+        self.post_response_with_token(
+            &scope_probe(model),
+            wire_request,
+            false,
+            &token,
+            mode,
+            observer,
+        )
+        .await
     }
 
     /// Sends once; a 401 triggers one recovery and a resend of the same wire body.
@@ -343,12 +481,13 @@ impl CodexClient {
         &self,
         scope_request: &ChatRequest,
         wire_request: &impl serde::Serialize,
+        responses_lite: bool,
         token: &AuthorizedCodexToken,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
     ) -> Result<reqwest::Response, ProviderError> {
         let response = self
-            .post_response_once(wire_request, token, mode, observer)
+            .post_response_once(wire_request, responses_lite, token, mode, observer)
             .await?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(response);
@@ -358,7 +497,7 @@ impl CodexClient {
             .recover_unauthorized(scope_request, token, observer)
             .await?;
         let response = self
-            .post_response_once(wire_request, &fresh, mode, observer)
+            .post_response_once(wire_request, responses_lite, &fresh, mode, observer)
             .await?;
         reject_second_unauthorized(response, observer)
     }
@@ -394,6 +533,7 @@ impl CodexClient {
     async fn post_response_once(
         &self,
         wire_request: &impl serde::Serialize,
+        responses_lite: bool,
         token: &AuthorizedCodexToken,
         mode: ResponseMode,
         observer: &mut AttemptObserver,
@@ -407,6 +547,9 @@ impl CodexClient {
             .await
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&wire_request);
+        if responses_lite {
+            builder = builder.header(RESPONSES_LITE_HEADER, "true");
+        }
         if matches!(mode, ResponseMode::NonStreaming) {
             builder = builder.timeout(self.timeout);
         }
@@ -458,61 +601,27 @@ impl ProviderClient for CodexClient {
     /// Discovery goes through the request session so an idle profile refreshes its token,
     /// and uses the client version its requests send.
     async fn list_models(&self, _: &ProviderAuth) -> Result<Option<Vec<String>>, ProviderError> {
-        let started = std::time::Instant::now();
-        let result = async {
-            let token = self.session.current().await?;
-            crate::list_codex_models(
-                &self.catalog_base_url,
-                &ProviderAuth::new(token.access_token),
-                &token.chatgpt_account_id,
-            )
-            .await
-            .map(|models| {
-                Some(
-                    models
-                        .into_iter()
-                        .map(|model| model.slug)
-                        .collect::<Vec<_>>(),
-                )
-            })
+        let (outcome, fetched) = self.catalog_outcome(true).await?;
+        if !fetched && outcome.models.is_ok() {
+            self.emit_catalog_diagnostic(outcome, true, Duration::ZERO);
         }
-        .await;
-        if let Some(bus) = &self.event_bus {
-            let failure = result.as_ref().err().map(catalog_failure);
-            let count = result.as_ref().ok().and_then(Option::as_ref).map(Vec::len);
-            bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-                source: "providers::codex::catalog".into(),
-                severity: if result.is_err() {
-                    event_bus::DiagnosticSeverity::Warning
-                } else {
-                    event_bus::DiagnosticSeverity::Info
+        outcome
+            .models
+            .as_ref()
+            .map(|models| Some(models.iter().map(|model| model.slug.clone()).collect()))
+            .map_err(|error| match error.clone() {
+                ProviderError::Http { status, .. } => ProviderError::Http {
+                    status,
+                    body: "catalog verification failed".into(),
                 },
-                code: event_bus::event::diagnostic_codes::PROVIDER_CATALOG_FETCH.into(),
-                detail: format!(
-                    "profile={} client_version={CODEX_CLIENT_VERSION} catalog_cache_hit=false catalog_result={} model_count={} elapsed_ms={}",
-                    self.profile.as_deref().unwrap_or("unknown"),
-                    failure.as_deref().unwrap_or("ok"),
-                    count.map_or_else(|| "unknown".into(), |n| n.to_string()),
-                    started.elapsed().as_millis(),
-                ),
-                run_id: None,
-                thread_id: None,
-                call_id: None,
-            }));
-        }
-        result.map_err(|error| match error {
-            ProviderError::Http { status, .. } => ProviderError::Http {
-                status,
-                body: "catalog verification failed".into(),
-            },
-            ProviderError::Request(_) | ProviderError::Transport { .. } => {
-                ProviderError::Request("catalog verification failed (transport/auth)".into())
-            }
-            ProviderError::InvalidJson { .. } => ProviderError::InvalidJson {
-                detail: "catalog verification failed".into(),
-            },
-            other => other,
-        })
+                ProviderError::Request(_) | ProviderError::Transport { .. } => {
+                    ProviderError::Request("catalog verification failed (transport/auth)".into())
+                }
+                ProviderError::InvalidJson { .. } => ProviderError::InvalidJson {
+                    detail: "catalog verification failed".into(),
+                },
+                other => other,
+            })
     }
 
     fn hosted_web_search(&self) -> Option<&dyn crate::HostedWebSearch> {

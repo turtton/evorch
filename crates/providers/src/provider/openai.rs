@@ -115,6 +115,7 @@ impl OpenAiClient {
                     .observation
                     .as_ref()
                     .map(|context| context.run_id.clone()),
+                codex_model: None,
             },
             &scope,
         )?;

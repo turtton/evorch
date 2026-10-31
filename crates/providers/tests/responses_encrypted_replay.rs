@@ -54,6 +54,7 @@ async fn b3_both_providers_send_stream_replay_and_compaction_share_scope_guards(
             for effort in [None, Some("high".to_owned())] {
                 for tools in [false, true] {
                     let server = MockServer::start().await;
+                    codex_support::mount_empty_catalog(&server).await;
                     let endpoint = if codex {
                         "/backend-api/codex/responses"
                     } else {
@@ -140,7 +141,7 @@ async fn b3_both_providers_send_stream_replay_and_compaction_share_scope_guards(
                             .unwrap();
                     request.messages.push(restored);
                     client.send(&auth, &request).await.unwrap();
-                    let requests = server.received_requests().await.unwrap();
+                    let requests = codex_support::response_requests(&server).await;
                     for captured in &requests {
                         let body: Value = serde_json::from_slice(&captured.body).unwrap();
                         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
@@ -173,7 +174,7 @@ async fn b3_both_providers_send_stream_replay_and_compaction_share_scope_guards(
                             Err(ProviderError::ResponsesScopeChanged { .. })
                         ));
                     }
-                    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+                    assert_eq!(codex_support::response_requests(&server).await.len(), 2);
                 }
             }
         }
@@ -183,6 +184,7 @@ async fn b3_both_providers_send_stream_replay_and_compaction_share_scope_guards(
 #[tokio::test]
 async fn b3_compaction_keeps_eligible_reasoning_but_preserves_its_old_include_contract() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw(
         "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"checkpoint\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":4}}}\n\n", "text/event-stream"))
         .expect(1).mount(&server).await;
@@ -207,7 +209,7 @@ async fn b3_compaction_keeps_eligible_reasoning_but_preserves_its_old_include_co
     });
     let result = client.compactor().unwrap().compact(&request).await.unwrap();
     assert_eq!(result.encrypted_content, "checkpoint");
-    let requests = server.received_requests().await.unwrap();
+    let requests = codex_support::response_requests(&server).await;
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["include"], json!([]));
     assert_eq!(body["input"][1], reasoning());
@@ -219,6 +221,7 @@ async fn b3_same_account_new_token_preserves_scope_different_account_does_not() 
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use providers::provider::codex::tokens::{CodexTokenStore, TokenBundle};
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     let store = contract_support::seeded_store();
     let make_client = || {
         CodexClient::with_config(

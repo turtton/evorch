@@ -152,7 +152,7 @@ async fn assert_http_prefix_contract(
         assert!(matches!(events.last(), Some(StreamEvent::Completed { .. })));
     }
 
-    let requests = server.received_requests().await.unwrap();
+    let requests = codex_support::response_requests(server).await;
     assert_eq!(requests.len(), 4);
     let bodies: Vec<Value> = requests
         .iter()
@@ -215,6 +215,7 @@ async fn compatible_normal_turns_preserve_the_sent_prefix() {
 #[tokio::test]
 async fn codex_normal_turns_preserve_the_sent_prefix() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     let client = codex_support::client(&server, codex_contract_support::seeded_store());
     assert_http_prefix_contract(
         &server,

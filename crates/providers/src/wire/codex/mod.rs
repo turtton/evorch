@@ -22,6 +22,7 @@ pub fn to_wire_request(request: &ChatRequest) -> CodexResponsesRequest {
         &ResponsesRequestOptions {
             dialect: ResponsesDialect::Codex,
             prompt_cache_key: None,
+            codex_model: None,
         },
     )
 }

@@ -40,3 +40,30 @@ pub fn client(server: &MockServer, store: Arc<dyn CodexTokenStore>) -> CodexClie
     )
     .expect("Codex client can be built")
 }
+
+/// Serves an empty Codex catalog. A Codex client reads `GET {base}/models` once before its
+/// first generation, so a server that scripts a chat flow must answer it.
+#[allow(dead_code)]
+pub async fn mount_empty_catalog(server: &MockServer) {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path_regex("/models$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})))
+        .mount(server)
+        .await;
+}
+
+/// The requests that carried a Responses body (generation or compaction), in arrival
+/// order, without the catalog read.
+#[allow(dead_code)]
+pub async fn response_requests(server: &MockServer) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .expect("requests are recorded")
+        .into_iter()
+        .filter(|request| request.method == wiremock::http::Method::POST)
+        .collect()
+}

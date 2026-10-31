@@ -18,6 +18,7 @@ async fn streaming_recovers_from_http_and_sse_overload_failures() {
         )),
     ] {
         let server = MockServer::start().await;
+        codex_support::mount_empty_catalog(&server).await;
         Mock::given(method("POST"))
             .and(path("/backend-api/codex/responses"))
             .respond_with(response)
@@ -39,7 +40,7 @@ async fn streaming_recovers_from_http_and_sse_overload_failures() {
             .await
             .expect("third attempt recovers from overload");
         assert_eq!(response.finish_reason, FinishReason::Stop);
-        let requests = server.received_requests().await.expect("requests recorded");
+        let requests = codex_support::response_requests(&server).await;
         assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|request| {
             request.body == requests[0].body

@@ -219,7 +219,7 @@ const FRESH_ID_TOKEN: &str = "e30.eyJleHAiOjQwMDAwMDAwMDAsImh0dHBzOi8vYXBpLm9wZW
 
 async fn mount_codex_catalog(server: &wiremock::MockServer, access_token: &str) {
     wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .and(wiremock::matchers::path("/models"))
+        .and(wiremock::matchers::path("/backend-api/codex/models"))
         .and(wiremock::matchers::header(
             "authorization",
             format!("Bearer {access_token}"),
@@ -361,7 +361,7 @@ async fn codex_catalog_success_reports_hardcoded_client_version() {
     assert!(!catalog.detail.contains("version_lookup"), "{catalog:?}");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].url.path(), "/models");
+    assert_eq!(requests[0].url.path(), "/backend-api/codex/models");
 }
 
 #[tokio::test]
@@ -370,7 +370,7 @@ async fn codex_catalog_api_errors_are_not_unadvertised_or_secret_bearing() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     for status in [429, 503, 200] {
         let server = MockServer::start().await;
-        Mock::given(path("/models"))
+        Mock::given(path("/backend-api/codex/models"))
             .respond_with(
                 ResponseTemplate::new(status)
                     .set_body_string(r#"{"models":[{"slug":{"access-token":"account"}}]}"#),

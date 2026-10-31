@@ -48,6 +48,7 @@ async fn mount(server: &MockServer, response: ResponseTemplate) {
 async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
     // Given: 同じクライアントからの2リクエストを記録するサーバー。
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     Mock::given(method("POST"))
         .and(path("/backend-api/codex/responses"))
         .respond_with(sse_response(&fixture("codex", "responses_success.sse")))
@@ -63,10 +64,7 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
             .expect("send succeeds");
     }
     // Then: セッションは共通で、ターン識別子だけが更新される。
-    let requests = server
-        .received_requests()
-        .await
-        .expect("requests are recorded");
+    let requests = codex_support::response_requests(&server).await;
     assert!(
         requests
             .iter()
@@ -91,6 +89,7 @@ async fn session_id_is_stable_across_requests_and_turn_id_fresh() {
 #[tokio::test]
 async fn system_prompt_reaches_the_backend_as_a_developer_input_message() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         sse_response(&fixture("codex", "responses_success.sse")),
@@ -113,10 +112,7 @@ async fn system_prompt_reaches_the_backend_as_a_developer_input_message() {
         .await
         .expect("send succeeds");
 
-    let requests = server
-        .received_requests()
-        .await
-        .expect("requests are recorded");
+    let requests = codex_support::response_requests(&server).await;
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert!(body.get("instructions").is_none());
     assert_eq!(body["input"][0]["role"], "developer");
@@ -130,7 +126,7 @@ async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup()
     let server = MockServer::start().await;
     let version = providers::CODEX_CLIENT_VERSION;
     Mock::given(method("GET"))
-        .and(path("/models"))
+        .and(path("/backend-api/codex/models"))
         .and(wiremock::matchers::query_param("client_version", version))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"models": [{"slug": "gpt-4o"}]})),
@@ -178,6 +174,7 @@ async fn built_in_version_reaches_catalog_and_inference_headers_without_lookup()
 #[tokio::test]
 async fn send_sets_codex_headers_and_aggregates_stream() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         sse_response(&fixture("codex", "responses_success.sse")),
@@ -309,6 +306,7 @@ async fn stream_tool_call_flow() {
 #[tokio::test]
 async fn stream_parallel_tool_calls_recover_final_arguments() {
     let server = MockServer::start().await;
+    codex_support::mount_empty_catalog(&server).await;
     mount(
         &server,
         sse_response(&fixture("codex", "responses_parallel_tool_calls.sse")),

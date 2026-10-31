@@ -26,8 +26,13 @@ const DENY: &str = r#"{"approve":false,"reason":"unsafe effects"}"#;
 
 async fn server(codex: bool) -> MockServer {
     let server = MockServer::start().await;
+    // The Codex client reads its catalog from the normalized `/backend-api/codex` base.
     Mock::given(method("GET"))
-        .and(path("/models"))
+        .and(path(if codex {
+            "/backend-api/codex/models"
+        } else {
+            "/models"
+        }))
         .respond_with(ResponseTemplate::new(200).set_body_json(if codex {
             json!({"models":[{"slug":MODEL},{"slug":REVIEW_MODEL}]})
         } else {

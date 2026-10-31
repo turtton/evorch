@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+#[path = "support/codex.rs"]
+mod codex_support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,6 +79,7 @@ impl Scenario {
         cached_tokens: u64,
     ) -> (Value, Vec<DiagnosticEvent>) {
         self.server.reset().await;
+        codex_support::mount_empty_catalog(&self.server).await;
         let completed = json!({
             "type": "response.completed",
             "response": {
@@ -122,7 +127,7 @@ impl Scenario {
                 _ => {}
             }
         }
-        let requests = self.server.received_requests().await.unwrap();
+        let requests = codex_support::response_requests(&self.server).await;
         let body = serde_json::from_slice(&requests[0].body).unwrap();
         (body, diagnostics)
     }
