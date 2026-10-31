@@ -206,6 +206,37 @@ fn inspection_never_creates_or_migrates_a_store() {
 }
 
 #[test]
+fn storage_reports_sizes_without_conversation_text_or_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _) = fixture(dir.path());
+    let before = std::fs::read(&db).unwrap();
+
+    let logical = inspect(&db, &["storage"]).unwrap();
+    assert_eq!(logical["run_contexts"]["rows"], 2);
+    assert!(logical["events"]["rows"].as_i64().unwrap() >= 3);
+    assert_eq!(logical["files"]["db_bytes"], before.len());
+    assert!(logical.get("physical").is_none());
+    assert!(logical["top_threads"].as_array().unwrap().len() <= 10);
+
+    let physical = inspect(&db, &["storage", "--physical", "--top", "1"]).unwrap();
+    assert_eq!(physical["physical"]["auto_vacuum"]["mode"], "incremental");
+    assert!(physical["physical"]["page_size"].as_i64().unwrap() > 0);
+    assert!(
+        physical["physical"]["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|table| table["table"] == "events")
+    );
+
+    // run-7's snapshot holds "stuck"; sizes may be reported, text never.
+    for output in [&logical, &physical] {
+        assert!(!output.to_string().contains("stuck"));
+    }
+    assert_eq!(std::fs::read(&db).unwrap(), before);
+}
+
+#[test]
 fn malformed_arguments_print_usage() {
     let dir = tempfile::tempdir().unwrap();
     let (db, _) = fixture(dir.path());
@@ -215,6 +246,10 @@ fn malformed_arguments_print_usage() {
         &["candidate"],
         &["candidates", "--status", "open"],
         &["run", "run-7", "--bogus", "x"],
+        &["storage", "--top", "0"],
+        &["storage", "--top"],
+        &["storage", "--full"],
+        &["candidates", "--physical"],
     ] {
         assert!(
             inspect(&db, args)

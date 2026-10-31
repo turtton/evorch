@@ -18,6 +18,9 @@ use crate::repo::event::select::{
 };
 use crate::{Database, StorageError};
 
+mod storage_summary;
+pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
+
 /// Columns holding JSON text that are expanded in inspection output.
 const JSON_COLUMNS: [&str; 6] = [
     "payload",
