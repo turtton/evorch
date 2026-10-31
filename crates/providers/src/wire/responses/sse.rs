@@ -1,4 +1,5 @@
 mod custom;
+mod failure;
 mod ordering;
 
 use std::collections::BTreeMap;
@@ -7,6 +8,7 @@ use custom::CustomToolState;
 
 use serde::Deserialize;
 
+use crate::ResponsesDialect;
 use crate::error::ProviderError;
 use crate::http::stream::{FrameInterpretation, WireStreamInterpreter};
 use crate::message::{ContentBlock, FinishReason, Message, Usage};
@@ -16,9 +18,11 @@ use crate::stream::StreamEvent;
 /// Responses API の SSE フレームを canonical 差分へ変換する状態機械。
 ///
 /// Codex backend と公式 OpenAI API で共有します。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResponsesStreamInterpreter {
     origin: Option<crate::ResponsesReplayOrigin>,
+    /// 失敗イベントの分類規則を選ぶ。`new()` は公式 OpenAI、`with_origin` は scope に従う。
+    dialect: ResponsesDialect,
     ordering: ordering::OutputOrdering,
     tool_indices: BTreeMap<String, usize>,
     tool_arguments: BTreeMap<usize, String>,
@@ -32,14 +36,31 @@ impl ResponsesStreamInterpreter {
     /// 空の interpreter を生成します。
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_dialect(None, ResponsesDialect::OpenAi)
     }
 
     /// Bind confirmed items to the scope used by this HTTP attempt.
+    ///
+    /// 失敗イベントの分類は `origin.dialect` に従います。
     pub fn with_origin(origin: crate::ResponsesReplayOrigin) -> Self {
+        let dialect = origin.dialect;
+        Self::with_dialect(Some(origin), dialect)
+    }
+
+    fn with_dialect(
+        origin: Option<crate::ResponsesReplayOrigin>,
+        dialect: ResponsesDialect,
+    ) -> Self {
         Self {
-            origin: Some(origin),
-            ..Self::default()
+            origin,
+            dialect,
+            ordering: ordering::OutputOrdering::default(),
+            tool_indices: BTreeMap::new(),
+            tool_arguments: BTreeMap::new(),
+            custom_tools: BTreeMap::new(),
+            saw_tool_call: false,
+            discard_tool_calls: false,
+            done: false,
         }
     }
 
@@ -85,6 +106,12 @@ impl ResponsesStreamInterpreter {
         } else {
             FinishReason::Stop
         }
+    }
+}
+
+impl Default for ResponsesStreamInterpreter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -280,18 +307,13 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
                 })
             }
             "response.failed" => {
-                let event: ResponseFailed = parse(value)?;
                 self.done = true;
-                Err(failure_error(
-                    event.response.error.code,
-                    &event.response.error.message,
-                ))
+                Err(failure::Failure::from_failed_event(&value).into_error(self.dialect))
             }
             // 公式 API は stream 途中の失敗を response を伴わないトップレベル error で通知する
             "error" => {
-                let event: ErrorEvent = parse(value)?;
                 self.done = true;
-                Err(failure_error(event.code, &event.message))
+                Err(failure::Failure::from_error_event(&value).into_error(self.dialect))
             }
             // backend が新イベントを追加しても既存 client を壊さないよう、未知イベントは無視する
             _ => Ok(FrameInterpretation::default()),
@@ -323,30 +345,6 @@ impl WireStreamInterpreter for ResponsesStreamInterpreter {
             });
         }
         self.ordering.finalize(message, self.origin.as_ref());
-    }
-}
-
-/// stream 内の失敗イベントを HTTP 応答と同じ再試行・routing 分類へ正規化します。
-///
-/// SSE は HTTP 200 で始まるため、status の代わりに code で一時障害を見分けます。
-/// `server_error` は 5xx (再試行・Server 障害)、`rate_limit_exceeded` は
-/// [`ProviderError::RateLimited`] (routing の待機・切替) へ寄せます。それ以外は
-/// `code: message` 形式の HTTP 400 とし、`server_is_overloaded` の再試行判定と
-/// structured output 非対応判定はこの形式の code を参照します。
-fn failure_error(code: Option<String>, message: &str) -> ProviderError {
-    match code.as_deref() {
-        Some("rate_limit_exceeded") => ProviderError::RateLimited { retry_after: None },
-        Some("server_error") => ProviderError::Http {
-            status: 500,
-            body: format!("server_error: {message}"),
-        },
-        _ => ProviderError::Http {
-            status: 400,
-            body: match code {
-                Some(code) => format!("{code}: {message}"),
-                None => message.to_owned(),
-            },
-        },
     }
 }
 
@@ -474,30 +472,6 @@ struct IncompleteResponse {
 struct IncompleteDetails {
     #[serde(default)]
     reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ErrorEvent {
-    #[serde(default)]
-    code: Option<String>,
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct ResponseFailed {
-    response: FailedResponse,
-}
-
-#[derive(Deserialize)]
-struct FailedResponse {
-    error: ErrorDetail,
-}
-
-#[derive(Deserialize)]
-struct ErrorDetail {
-    #[serde(default)]
-    code: Option<String>,
-    message: String,
 }
 
 #[cfg(test)]

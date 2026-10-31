@@ -68,9 +68,36 @@ do not gain retries; recovery remains in the shared `send_streaming` path.
 
 Responses API streams (Codex and `openai`) begin with HTTP 200, so failures that
 arrive as `response.failed` or top-level `error` SSE events are classified by
-their code: `server_error` is handled as an HTTP 500 server failure and retried,
-and `rate_limit_exceeded` is handled as a rate limit. Other codes remain HTTP 400
-errors. A `response.incomplete` with an unknown or missing reason finishes as
+their code. Both dialects accept the same event shapes: an `error` event may carry
+`code`/`message` at the top level or nested under `error` (nested fields win), and
+`response.failed` carries them under `response.error`. A `retry-after` entry in
+`error.headers` (integer seconds or an HTTP-date, name matched case-insensitively)
+is read the same way as the `Retry-After` header of an HTTP 429 response, which
+now also accepts an HTTP-date. The body of the resulting error always starts with
+`code: message`, even when the status is synthesized.
+
+- `openai`: `server_error` is handled as an HTTP 500 server failure and retried,
+  and `rate_limit_exceeded` is handled as a rate limit without a delay. Other
+  codes remain HTTP 400 errors.
+- Codex follows the classes of Codex CLI 0.166.0:
+
+  | Code | Result |
+  |---|---|
+  | `rate_limit_exceeded`, `slow_down` | rate limit; the delay comes from `error.headers`, else from a "try again in N s/ms/m" hint in the message |
+  | `server_error` | HTTP 500 (retried) |
+  | `policy_capacity_unavailable` | HTTP 503 (retried) |
+  | `server_is_overloaded` | HTTP 400, retried as described above |
+  | `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded`, `usage_not_included`, `usage_limit_reached` | HTTP 402, which routing treats as a quota failure |
+  | `model_not_found` | HTTP 404 |
+  | `context_length_exceeded` | HTTP 400; `ProviderError::is_context_window_exceeded()` identifies it (no runtime recovery yet) |
+  | `flex_unavailable`, `invalid_prompt`, `cyber_policy`, `bio_policy`, `misalignment_policy_violation`, any unknown code | HTTP 400, not retried |
+
+Semantic difference from Codex CLI: evorch ends the turn at the first failure
+event. Codex CLI treats a top-level `error` event as terminal only for
+`flex_unavailable` and `model_not_found` and otherwise keeps reading the stream;
+evorch treats a top-level `error` with any code as terminal.
+
+A `response.incomplete` with an unknown or missing reason finishes as
 `Other`: executable tool calls are removed from the final response and logged
 for diagnosis, so the runtime ends in Error without executing them or requesting
 a continuation. Partial text, reasoning, and usage are retained. Known reasons

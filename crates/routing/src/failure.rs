@@ -239,6 +239,56 @@ mod tests {
         );
     }
 
+    // Given: Codex の response.failed を providers が合成した HTTP エラー (402 の quota 系、
+    // 503 の capacity、500 の server_error、404 の model_not_found、400 の context 超過) と retry 済みの 402
+    // When: Codex の種別で分類する
+    // Then: quota 系は Quota、capacity と server_error は Server、残りは Other になる
+    #[test]
+    fn classify_maps_codex_sse_failures_to_routing_kinds() {
+        use model::ProviderType;
+        let http = |status, body: &str| providers::ProviderError::Http {
+            status,
+            body: body.to_string(),
+        };
+        let quota = http(402, "usage_limit_reached: The usage limit has been reached");
+        for (error, expected) in [
+            (quota.clone(), FailureKind::Quota),
+            (
+                http(402, "insufficient_quota: You exceeded your current quota"),
+                FailureKind::Quota,
+            ),
+            (
+                http(503, "policy_capacity_unavailable: Capacity is unavailable"),
+                FailureKind::Server,
+            ),
+            (
+                http(500, "server_error: The server had an error"),
+                FailureKind::Server,
+            ),
+            (
+                http(404, "model_not_found: no such model"),
+                FailureKind::Other,
+            ),
+            (
+                http(400, "context_length_exceeded: too long"),
+                FailureKind::Other,
+            ),
+            (
+                providers::ProviderError::RetriesExhausted {
+                    attempts: 2,
+                    last: Box::new(quota),
+                },
+                FailureKind::Quota,
+            ),
+        ] {
+            assert_eq!(
+                FailureKind::classify(&error, ProviderType::OpenAiCodex),
+                expected,
+                "{error}"
+            );
+        }
+    }
+
     // Given: Retry-After 付きの 429、retry 済みの 429、他の障害 / When: 待機時間を取り出す
     // Then: 429 の Retry-After だけが返る
     #[test]

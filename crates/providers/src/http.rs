@@ -80,7 +80,7 @@ fn http_client_builder(
 pub(crate) async fn map_response_error(response: reqwest::Response) -> ProviderError {
     let status = response.status().as_u16();
     let retry_after = if status == 429 {
-        parse_retry_after(response.headers())
+        crate::retry_after::from_header_map(response.headers())
     } else {
         None
     };
@@ -105,22 +105,6 @@ fn http_error_from_parts(
     } else {
         ProviderError::Http { status, body }
     }
-}
-
-/// `Retry-After` ヘッダを秒数形式として解析する。
-///
-/// ヘッダが欠落している場合、HTTP-date 形式など u64 として解釈できない
-/// 場合は `None` を返す ([`ProviderError::RateLimited`] の `retry_after: None`
-/// に対応)。
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
 }
 
 /// reqwest の送信系エラーを [`ProviderError`] へ変換する。
@@ -195,44 +179,6 @@ impl UsageEmitter {
 mod tests {
     use super::*;
     use event_bus::EventKind;
-
-    // Given: 秒数形式の Retry-After ヘッダ / When: parse_retry_after / Then: 秒の Duration になる
-    #[test]
-    fn retry_after_seconds_header_parses_to_duration() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
-
-        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(120)));
-    }
-
-    // Given: HTTP-date 形式の Retry-After ヘッダ / When: parse_retry_after / Then: None (秒数形式ではない)
-    #[test]
-    fn retry_after_http_date_header_is_none() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
-        );
-
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    // Given: Retry-After ヘッダが無い / When: parse_retry_after / Then: None
-    #[test]
-    fn missing_retry_after_header_is_none() {
-        let headers = reqwest::header::HeaderMap::new();
-
-        assert_eq!(parse_retry_after(&headers), None);
-    }
-
-    // Given: 非数値の Retry-After ヘッダ / When: parse_retry_after / Then: None
-    #[test]
-    fn non_numeric_retry_after_header_is_none() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "soon".parse().unwrap());
-
-        assert_eq!(parse_retry_after(&headers), None);
-    }
 
     // Given: 429 と Retry-After / When: http_error_from_parts / Then: retry_after 付き RateLimited になる
     #[test]

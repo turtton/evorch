@@ -1,0 +1,5 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp-quota","status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp-quota","status":"failed","error":{"code":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus","resets_at":1704067242}}}

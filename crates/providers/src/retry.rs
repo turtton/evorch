@@ -63,13 +63,8 @@ pub fn is_retryable(error: &ProviderError) -> bool {
 }
 
 fn is_server_overloaded(body: &str) -> bool {
-    const CODE: &str = "server_is_overloaded";
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-        let error = value.get("error").unwrap_or(&value);
-        return error.get("code").and_then(serde_json::Value::as_str) == Some(CODE);
-    }
     // Codex の response.failed は code と message を `code: message` に平坦化する。
-    body.trim().split(':').next() == Some(CODE)
+    crate::error::body_error_code_is(body, "server_is_overloaded")
 }
 
 #[cfg(test)]

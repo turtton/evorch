@@ -1,4 +1,5 @@
 mod custom;
+mod failure;
 
 use super::ResponsesStreamInterpreter;
 use crate::error::ProviderError;
@@ -23,10 +24,18 @@ fn frame(event: &str, data: serde_json::Value) -> SseFrame {
 
 /// Feeds every frame and returns the completed response, or the first error.
 fn interpret_all(frames: Vec<SseFrame>) -> Result<Option<ChatResponse>, ProviderError> {
+    interpret_all_in(crate::ResponsesDialect::OpenAi, frames)
+}
+
+/// Same as [`interpret_all`], bound to a scope of the given dialect.
+fn interpret_all_in(
+    dialect: crate::ResponsesDialect,
+    frames: Vec<SseFrame>,
+) -> Result<Option<ChatResponse>, ProviderError> {
     let mut interpreter =
         ResponsesStreamInterpreter::with_origin(crate::ResolvedResponsesScope::resolve(
             &serde_json::from_value(serde_json::json!({"model":"m","messages":[]})).unwrap(),
-            crate::ResponsesDialect::OpenAi,
+            dialect,
             Some("test"),
             "https://example.test/v1/responses",
             crate::ResponsesAccount::Unavailable,
