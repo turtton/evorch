@@ -245,7 +245,10 @@ async fn codex_models_response_supplies_runtime_window_for_base_and_fast() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
-        .and(query_param("client_version", "0.156.1"))
+        .and(query_param(
+            "client_version",
+            providers::CODEX_CLIENT_VERSION,
+        ))
         .and(header("authorization", "Bearer test-access"))
         .and(header("chatgpt-account-id", "test-account"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -287,7 +290,7 @@ async fn codex_models_response_supplies_runtime_window_for_base_and_fast() {
         },
     );
     let store: std::sync::Arc<dyn CredentialStore> = store;
-    let windows = load_codex_windows(&config, &store, "0.156.1").await;
+    let windows = load_codex_windows(&config, &store).await;
     assert_eq!(windows["codex/gpt-6-astra"], 272_000);
     assert_eq!(windows["codex/gpt-6-astra+fast"], 272_000);
     let mut settings = CompactionSettings::default();

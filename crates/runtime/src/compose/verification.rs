@@ -11,8 +11,6 @@ enum RouteFailure {
 impl RoutedModel {
     /// Verify every composed profile, including cross-role fallbacks and explicit selections.
     /// Results, including failures, are retained until this composition is replaced.
-    /// Degraded absence fails early and requires a new composition; refreshing a
-    /// running client's version would invalidate its prompt-cache affinity.
     pub async fn verify_candidates(&self) -> BTreeSet<String> {
         self.verification
             .get_or_init(|| async {
@@ -128,11 +126,7 @@ impl RoutedModel {
             .and_then(|results| results.get(&route.profile))
         {
             Some(Ok(models)) if models.iter().any(|model| model == base) => return None,
-            Some(Ok(_)) => self
-                .providers
-                .get(&route.profile)
-                .and_then(|provider| provider.client.catalog_degradation())
-                .unwrap_or_else(|| "model is not advertised by provider".to_owned()),
+            Some(Ok(_)) => "model is not advertised by provider".to_owned(),
             Some(Err(error)) => error.to_string(),
             None => "profile was not verified".to_owned(),
         };
@@ -170,60 +164,22 @@ impl RoutedModel {
     }
 
     /// Evaluation gate: every route must be listed and advertised by a fetched
-    /// catalog. A route the catalog advertises passes even when the client-version
-    /// lookup degraded (for example a GitHub rate limit), because the advertised
-    /// model proves the catalog is usable; the degradation is reported as a
-    /// warning. A degraded catalog that does not advertise the model still fails.
-    /// This sends no inference requests.
+    /// catalog. This sends no inference requests.
     pub async fn preflight_routes(
         &self,
         routes: &[routing::ResolvedRoute],
     ) -> Result<(), crate::RuntimeError> {
         self.verify_candidates().await;
-        let mut warnings = BTreeSet::new();
         for route in routes {
-            match self.route_failure(route) {
-                Some(RouteFailure::Unlisted(reason) | RouteFailure::Unavailable(reason)) => {
-                    return Err(crate::RuntimeError::Model {
-                        reason: self.scrub(&route.profile, &reason),
-                    });
-                }
-                None => {
-                    if let Some(reason) = self
-                        .providers
-                        .get(&route.profile)
-                        .and_then(|provider| provider.client.catalog_degradation())
-                    {
-                        warnings.insert(self.scrub(
-                            &route.profile,
-                            &format!(
-                                "profile={} model={}: {reason}",
-                                route.profile, route.model_id
-                            ),
-                        ));
-                    }
-                }
+            if let Some(RouteFailure::Unlisted(reason) | RouteFailure::Unavailable(reason)) =
+                self.route_failure(route)
+            {
+                return Err(crate::RuntimeError::Model {
+                    reason: self.scrub(&route.profile, &reason),
+                });
             }
         }
-        self.report_preflight_warnings(warnings);
         Ok(())
-    }
-
-    fn report_preflight_warnings(&self, warnings: BTreeSet<String>) {
-        let Some(bus) = &self.event_bus else {
-            return;
-        };
-        for detail in warnings {
-            bus.emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-                source: "runtime::compose".into(),
-                severity: event_bus::DiagnosticSeverity::Warning,
-                code: event_bus::event::diagnostic_codes::PROVIDER_UNAVAILABLE.into(),
-                detail: detail.chars().take(500).collect(),
-                run_id: None,
-                thread_id: None,
-                call_id: None,
-            }));
-        }
     }
 
     /// Warns once per composition about configured routes that fallback will pass over.

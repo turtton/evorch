@@ -57,12 +57,6 @@ impl Scenario {
                 auth_base_url: server.uri(),
                 timeout: Duration::from_secs(2),
                 event_bus: Some(bus.clone()),
-                client_version: providers::CodexClientVersion::Fixed(
-                    providers::CodexCatalogVersion {
-                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                        warning: None,
-                    },
-                ),
             },
             store,
         )

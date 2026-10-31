@@ -188,10 +188,6 @@ fn surfaces_hint_when_backend_returns_zero_models() {
     tx.send(Ok(CodexFetchedModels {
         models: Vec::new(),
         context_windows: BTreeMap::new(),
-        version: providers::CodexCatalogVersion {
-            version: "0.157.0".into(),
-            warning: None,
-        },
     }))
     .unwrap();
     editor.fetch.models_rx = Some(rx);
@@ -200,7 +196,7 @@ fn surfaces_hint_when_backend_returns_zero_models() {
     // Then
     assert!(
         matches!(&editor.fetch.models_fetch_state, ModelsFetchState::Failed(message)
-        if message.contains("0 models") && message.contains("0.157.0"))
+        if message.contains("0 models") && message.contains(providers::CODEX_CLIENT_VERSION))
     );
     assert_eq!(editor.models, configured);
     assert!(editor.fetch.available_models.is_none());

@@ -57,7 +57,7 @@ pub struct CodexEditorModel {
 pub enum ProfileEditor {
     OpenAiCompatible(OpenAiEditorModel),
     Codex(CodexEditorModel),
-    Subscription(super::subscription_provider::SubscriptionEditorModel),
+    Subscription(Box<super::subscription_provider::SubscriptionEditorModel>),
 }
 
 #[derive(Debug, Default)]
@@ -139,9 +139,11 @@ impl ProviderSettingsModel {
                 default_model: config::types::provider::CLAUDE_DEFAULT_MODEL.into(),
                 ..Default::default()
             }),
-            ProviderKind::ClaudeSubscription | ProviderKind::Cursor => ProfileEditor::Subscription(
-                super::subscription_provider::SubscriptionEditorModel::new(name, kind),
-            ),
+            ProviderKind::ClaudeSubscription | ProviderKind::Cursor => {
+                ProfileEditor::Subscription(Box::new(
+                    super::subscription_provider::SubscriptionEditorModel::new(name, kind),
+                ))
+            }
             ProviderKind::KimiSubscription => ProfileEditor::OpenAiCompatible(OpenAiEditorModel {
                 name,
                 provider_type: config::ProviderTypeConfig::KimiSubscription,
@@ -192,9 +194,9 @@ impl ProviderSettingsModel {
         }
         self.editor = Some(match profile.provider_type {
             config::ProviderTypeConfig::AnthropicSubscription
-            | config::ProviderTypeConfig::Cursor => ProfileEditor::Subscription(
+            | config::ProviderTypeConfig::Cursor => ProfileEditor::Subscription(Box::new(
                 super::subscription_provider::SubscriptionEditorModel::from_profile(name, profile),
-            ),
+            )),
             config::ProviderTypeConfig::OpenAiCodex => {
                 let account = match &profile.credential {
                     config::CredentialRefConfig::Keyring { account, .. } => account.clone(),

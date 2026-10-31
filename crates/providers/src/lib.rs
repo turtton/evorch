@@ -2,7 +2,6 @@
 
 pub mod auth;
 pub mod client;
-mod codex_catalog_version;
 mod compaction;
 pub(crate) mod dedup;
 pub mod error;
@@ -21,10 +20,6 @@ pub mod wire;
 
 pub use auth::ProviderAuth;
 pub use client::ProviderClient;
-pub use codex_catalog_version::{
-    CODEX_MODELS_FALLBACK_VERSION, CodexCatalogVersion, CodexCatalogVersionResolver,
-    CodexClientVersion, CodexVersionResolution,
-};
 pub use compaction::{CompactionResult, Compactor};
 pub use error::ProviderError;
 pub use hosted_web_search::{
@@ -40,7 +35,9 @@ pub use message::{
     FinishReason, JsonSchema, Message, ObservationContext, ProviderCapabilities,
     RequestTurnContext, Role, ServiceTier, ToolResultContent, ToolSpec, Usage,
 };
-pub use models::{CodexModelInfo, list_codex_models, list_models, verify_connectivity};
+pub use models::{
+    CODEX_CLIENT_VERSION, CodexModelInfo, list_codex_models, list_models, verify_connectivity,
+};
 pub use responses_replay::{
     ResolvedResponsesScope, ResponsesAccount, ResponsesDialect, ResponsesOutputPosition,
     ResponsesReplayContext, ResponsesReplayOrigin, ResponsesSpeed,

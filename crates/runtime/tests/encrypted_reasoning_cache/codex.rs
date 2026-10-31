@@ -84,12 +84,6 @@ fn routed(
             catalog: model::ModelCatalog::new(),
             factory: routing::factory::FactoryOptions {
                 auth_base_url_override: Some(mock.codex_base_url()),
-                codex_client_version: Some(providers::CodexClientVersion::Fixed(
-                    providers::CodexCatalogVersion {
-                        version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                        warning: None,
-                    },
-                )),
                 ..Default::default()
             },
         },

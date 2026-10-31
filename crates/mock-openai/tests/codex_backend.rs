@@ -30,10 +30,6 @@ fn codex_client(server: &StreamingMockOpenAi) -> CodexClient {
         CodexConfig {
             base_url: server.codex_base_url(),
             auth_base_url: server.codex_base_url(),
-            client_version: providers::CodexClientVersion::Fixed(providers::CodexCatalogVersion {
-                version: providers::CODEX_MODELS_FALLBACK_VERSION.into(),
-                warning: None,
-            }),
             ..CodexConfig::default()
         },
         store,

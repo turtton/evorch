@@ -28,8 +28,11 @@ async fn search_shares_chat_session_headers_endpoint_and_refresh() {
         .and(header("originator", "codex_cli_rs"))
         .and(header("OpenAI-Beta", "responses=experimental"))
         .and(header("accept", "text/event-stream"))
-        .and(header("version", "0.200.0"))
-        .and(header("user-agent", "codex_cli_rs/0.200.0"))
+        .and(header("version", providers::CODEX_CLIENT_VERSION))
+        .and(header(
+            "user-agent",
+            format!("codex_cli_rs/{}", providers::CODEX_CLIENT_VERSION),
+        ))
         .respond_with(|request: &wiremock::Request| {
             let body: Value = request.body_json().unwrap();
             let body = if body["tools"][0]["type"] == "web_search" {
