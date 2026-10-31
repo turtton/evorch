@@ -73,8 +73,12 @@ their code. Both dialects accept the same event shapes: an `error` event may car
 `response.failed` carries them under `response.error`. A `retry-after` entry in
 `error.headers` (integer seconds or an HTTP-date, name matched case-insensitively)
 is read the same way as the `Retry-After` header of an HTTP 429 response, which
-now also accepts an HTTP-date. The body of the resulting error always starts with
-`code: message`, even when the status is synthesized.
+now also accepts an HTTP-date. A delay too large to become a deadline (for
+example `u64::MAX` seconds) is ignored, so it never reaches routing's cooldown
+arithmetic. Only the Codex `rate_limit_exceeded` and `slow_down` codes carry an
+SSE delay into the resulting error; no other code uses it. When a status is
+synthesized, the error body keeps the code first: `code: message` when the event
+has a message, otherwise just the code.
 
 - `openai`: `server_error` is handled as an HTTP 500 server failure and retried,
   and `rate_limit_exceeded` is handled as a rate limit without a delay. Other

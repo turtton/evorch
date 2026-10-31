@@ -342,3 +342,22 @@ fn failure_events_terminate_the_stream_in_both_dialects() {
     }
     assert!(interpret_all(vec![text_delta("ok")]).unwrap().is_none());
 }
+
+// Given: Codex rate limits whose header or message delay cannot become a deadline
+// When: interpreted / Then: RateLimited carries no delay instead of an overflowing one
+#[test]
+fn codex_rate_limit_drops_delays_that_overflow_a_deadline() {
+    let huge_header = u64::MAX.to_string();
+    for error in [
+        json!({"code": "rate_limit_exceeded", "message": "x",
+            "headers": {"retry-after": huge_header}}),
+        json!({"code": "slow_down", "message": "try again in 9223372036854775807s"}),
+    ] {
+        for failure in shapes(error).into_iter().skip(1) {
+            assert_eq!(
+                fail(Codex, failure),
+                ProviderError::RateLimited { retry_after: None }
+            );
+        }
+    }
+}

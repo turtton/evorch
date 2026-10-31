@@ -3,19 +3,29 @@
 //! Codex CLI (`http-client/src/retry_after.rs`, `codex-api/src/sse/responses_error.rs`)
 //! と同じく、非負整数秒と HTTP-date の両方を受理します。
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+/// 期限 (`Instant` + 遅延) に変換できる遅延だけを返します。
+///
+/// 下流 (routing のクールダウンなど) は遅延を期限へ加算するため、加算がオーバーフローする
+/// 値は助言として無効です。Codex CLI の `RetryAfter` も `Instant::checked_add` が
+/// 失敗する値を受け付けません。
+fn representable(delay: Duration) -> Option<Duration> {
+    Instant::now().checked_add(delay).map(|_| delay)
+}
 
 /// `Retry-After` の値 (非負整数秒または HTTP-date) を待機時間へ変換します。
 ///
-/// 過去の HTTP-date は待機なし (`Duration::ZERO`) とします。解釈できない値は `None` です。
+/// 過去の HTTP-date は待機なし (`Duration::ZERO`) とします。解釈できない値と、期限へ
+/// 変換できないほど大きい値は `None` です。
 pub(crate) fn parse_value(value: &str) -> Option<Duration> {
     // 現在時刻を先に採取し、スケジューリング遅延で期限を縮めない。
     let now = SystemTime::now();
     let value = value.trim();
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return value.parse().ok().map(Duration::from_secs);
+        return representable(Duration::from_secs(value.parse().ok()?));
     }
-    Some(
+    representable(
         httpdate::parse_http_date(value)
             .ok()?
             .duration_since(now)
@@ -66,7 +76,7 @@ pub(crate) fn from_message(message: &str) -> Option<Duration> {
         "m" | "minute" | "minutes" => value * 60.0,
         _ => return None,
     };
-    Duration::try_from_secs_f64(seconds).ok()
+    representable(Duration::try_from_secs_f64(seconds).ok()?)
 }
 
 #[cfg(test)]

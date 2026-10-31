@@ -87,3 +87,26 @@ fn header_map_accepts_seconds_and_http_dates() {
     assert_eq!(from_header_map(&header("soon")), None);
     assert_eq!(from_header_map(&reqwest::header::HeaderMap::new()), None);
 }
+
+// Given: Duration には収まるが Instant に加算できない遅延 (u64::MAX 秒、巨大な message 遅延)
+// When: 値・ヘッダ・JSON headers・message から解釈 / Then: 無効として None になり、panic しない
+#[test]
+fn delays_that_cannot_become_a_deadline_are_rejected() {
+    let max = u64::MAX.to_string();
+
+    assert_eq!(parse_value(&max), None);
+    assert_eq!(from_json_headers(&json!({"retry-after": max})), None);
+    assert_eq!(from_json_headers(&json!({"retry-after": u64::MAX})), None);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, max.parse().unwrap());
+    assert_eq!(from_header_map(&headers), None);
+    for message in [
+        "try again in 18446744073709551615 seconds",
+        "try again in 9223372036854775807s",
+        "try again in 307445734561825860 minutes",
+    ] {
+        assert_eq!(from_message(message), None, "{message}");
+    }
+    // The advice stays usable just below the limit.
+    assert_eq!(parse_value("86400"), Some(Duration::from_secs(86_400)));
+}
