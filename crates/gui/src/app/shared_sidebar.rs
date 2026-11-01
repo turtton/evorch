@@ -167,8 +167,12 @@ fn all_thread_ids(history: &HistorySidebar) -> BTreeSet<String> {
         .collect()
 }
 
+/// Reads a saved sidebar, converting an older file (once) and deriving the
+/// per-record cache of the family states.
 fn parse(bytes: &[u8]) -> Result<HistorySidebar, serde_json::Error> {
-    serde_json::from_slice(bytes)
+    let mut parsed: HistorySidebar = serde_json::from_slice(bytes)?;
+    parsed.sidebar.settle_loaded();
+    Ok(parsed)
 }
 
 /// The merge of `disk` into `local` (both serialised), as serialised bytes.
@@ -330,27 +334,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(output)
     }
 
-    /// [`Self::shared_sidebar_transact`] for an edit made while events are being
-    /// folded: the result is written to the file but not adopted, nothing is
-    /// mirrored, and the next import or save merges what other windows saved. The
-    /// caller applies `op`'s output to its own copy of the records it edited.
-    ///
-    /// # Errors
-    /// As [`Self::shared_sidebar_transact`].
-    pub(super) fn shared_sidebar_transact_detached<T>(
-        &mut self,
-        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
-    ) -> Result<T, Box<dyn std::error::Error>> {
-        let (output, commit) = self.commit_shared_sidebar(op)?;
-        if commit.is_some_and(|commit| commit.written.is_some()) {
-            let mut shared = self.shared_sidebar.borrow_mut();
-            shared.stamp = None;
-            shared.import_pending = true;
-            shared.save_deferred = false;
-        }
-        Ok(output)
-    }
-
     /// Runs `op` on the newest state and writes the result. `None` when `op` changed
     /// nothing; `Commit::written` is `None` without a shared file.
     fn commit_shared_sidebar<T>(
@@ -411,7 +394,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             && latest.user_messages == merged.user_messages
             && latest.composer_drafts == merged.composer_drafts
         {
-            return Ok((output, None));
+            // Nothing to write, but the merge may still have brought in what another
+            // process saved: take that in too, so a no-op edit does not leave this
+            // window on an older view than the one the edit was checked against.
+            let stale = merged.sidebar != local.sidebar
+                || merged.user_messages != local.user_messages
+                || merged.composer_drafts != local.composer_drafts;
+            let commit = stale.then(|| Commit {
+                local,
+                latest: merged,
+                own: BTreeSet::new(),
+                written: None,
+                stamp: None,
+            });
+            return Ok((output, commit));
         }
         latest.sidebar.validate()?;
         let bytes = serde_json::to_vec_pretty(&HistorySidebarRef {
@@ -524,14 +520,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|thread| !known.contains_key(&thread.id))
             .map(|thread| thread.id.to_string())
             .collect();
-        let changed_threads: Vec<String> = merged
-            .sidebar
-            .threads
-            .iter()
-            .filter(|thread| known.get(&thread.id).is_none_or(|old| *old != *thread))
-            .map(|thread| thread.id.to_string())
-            .filter(|id| !own.contains(id))
-            .collect();
         let bound_before: BTreeSet<&String> = before
             .sidebar
             .threads
@@ -601,6 +589,5 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.rebuild_delivery_rows();
         self.refresh_draft_banner();
         self.sync_project_trust();
-        self.note_threads_mirrored(&changed_threads);
     }
 }

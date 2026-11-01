@@ -73,6 +73,22 @@ impl Splash {
             StartupEvent::SidebarLoaded { threads } => {
                 self.message = format!("Checking {threads} threads…");
             }
+            StartupEvent::SidebarConverted {
+                families,
+                mixed,
+                unresolved,
+            } => {
+                self.message = if *families == 0 {
+                    "Updating thread numbering…".to_owned()
+                } else {
+                    format!("Converted {families} thread families to the new format…")
+                };
+                if *mixed > 0 || *unresolved > 0 {
+                    self.message.push_str(&format!(
+                        " ({mixed} partly archived kept as not archived, {unresolved} unresolved)"
+                    ));
+                }
+            }
             StartupEvent::Phase(progress) => self.apply_progress(progress),
             StartupEvent::Shared => {
                 "Locks are now shared.".clone_into(&mut self.message);
@@ -217,6 +233,26 @@ mod tests {
         harness.get_by_label("Confirmed families: 1");
         assert!(harness.query_by_label_contains("Confirmed").is_some());
         assert!(harness.query_by_label_contains("Startup failed").is_none());
+    }
+
+    #[test]
+    fn the_conversion_of_an_older_sidebar_is_announced_with_what_was_kept_aside() {
+        // Given: a splash told the sidebar was converted, with a partly archived family.
+        let mut splash = Splash::new();
+        splash.apply(&StartupEvent::SidebarConverted {
+            families: 189,
+            mixed: 1,
+            unresolved: 0,
+        });
+
+        // When: it is drawn.
+        let mut harness = Harness::new_ui(|ui| splash.ui(ui));
+        harness.run_steps(2);
+
+        // Then: the line names the families and the one that stays as not archived.
+        harness.get_by_label(
+            "Converted 189 thread families to the new format… (1 partly archived kept as not archived, 0 unresolved)",
+        );
     }
 
     #[test]

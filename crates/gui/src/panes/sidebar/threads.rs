@@ -665,7 +665,9 @@ fn block_reason_text(reason: &BlockReason) -> String {
             format!("related thread {thread} is not due yet")
         }
         BlockReason::FamilyMemberBlocked(thread) => format!("related thread {thread} is on hold"),
-        BlockReason::FamilyUnresolved(_) => "thread family cannot be resolved".to_owned(),
+        BlockReason::FamilyUnresolved(thread) => {
+            format!("the family of related thread {thread} cannot be resolved")
+        }
         BlockReason::Owner(owner) => owner_hold_text(owner),
         BlockReason::Exploring => "still preparing".to_owned(),
         BlockReason::OverBudget => "retried at next startup".to_owned(),
@@ -1509,7 +1511,7 @@ mod tests {
             ),
             (
                 BlockReason::FamilyUnresolved("t2".into()),
-                "Deletion on hold (thread family cannot be resolved)",
+                "Deletion on hold (the family of related thread t2 cannot be resolved)",
             ),
             (
                 BlockReason::Owner("owner busy".into()),
@@ -1571,13 +1573,15 @@ mod tests {
         use storage::thread_retention::RetentionStatus;
         // Given: one archived and one live thread, each with a status.
         let project = ProjectId::new("demo");
-        let mut archived = ThreadRecord::new(ThreadId::new("old"), project.clone(), "Old chat");
-        archived.set_archived(true, 1);
+        let archived = ThreadRecord::new(ThreadId::new("old"), project.clone(), "Old chat");
         let live = ThreadRecord::new(ThreadId::new("live"), project, "Live chat");
-        let sidebar = workspace_ui::SidebarState {
+        let mut sidebar = workspace_ui::SidebarState {
             threads: vec![archived, live],
             ..Default::default()
         };
+        sidebar
+            .set_family_archived(&ThreadId::new("old"), true, 1)
+            .unwrap();
         let retention = BTreeMap::from([
             (ThreadId::new("old"), RetentionStatus::DueIn { days: 3 }),
             (ThreadId::new("live"), RetentionStatus::DueIn { days: 9 }),

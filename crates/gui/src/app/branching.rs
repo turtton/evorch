@@ -80,9 +80,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
-    /// Show another version of the active conversation. The row keeps its archive
-    /// and pin state across versions, taken from the newest sidebar under the save
-    /// lock; when that cannot be locked or read, nothing changes.
+    /// Show another version of the active conversation. Archive and pin state belong
+    /// to the family, not to a version, so showing another one changes none of it.
+    /// The switch is made on the newest sidebar under the save lock; when that cannot
+    /// be locked or read, nothing changes.
     pub fn switch_version(&mut self, target: ThreadId) -> Result<(), WorkbenchError> {
         if !self
             .sidebar
@@ -97,14 +98,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if !threads.iter().any(|thread| thread.id == target) {
                 return Err(ThreadError::UnknownThread);
             }
-            let shown = workspace_ui::visible_version(threads, &target)
-                .and_then(|current| threads.iter().find(|thread| thread.id == current).cloned());
             workspace_ui::show_version(threads, &target);
-            if let Some(shown) = &shown
-                && let Some(thread) = threads.iter_mut().find(|thread| thread.id == target)
-            {
-                thread.adopt_state_of(shown);
-            }
+            latest.sidebar.refresh_derived();
             Ok(())
         })
         .map_err(WorkbenchError::sidebar_busy)?;
@@ -186,11 +181,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// Creates a branch of `source` and shows it. The branch is created, and its
-    /// archive and pin state taken from the source, on the newest sidebar under the
-    /// save lock, so a window that never saw another window archive the source does
-    /// not make a live child of an archived family. When that cannot be locked or
-    /// read, nothing is created.
+    /// Creates a branch of `source` and shows it. The branch only joins the family of
+    /// `source`; it carries no archive or pin state of its own (the family's applies to
+    /// it). It is created on the newest sidebar under the save lock, so two windows
+    /// cannot both add the same ID. When that cannot be locked or read, nothing is
+    /// created.
     pub(super) fn branch_thread(
         &mut self,
         source: &ThreadId,
@@ -223,11 +218,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 return Err(ThreadError::DuplicateThread);
             }
             let mut record = ThreadRecord {
-                archived: original.archived,
-                archived_at: original.archived_at,
-                archive_revision: original.archive_revision,
-                pinned: original.pinned,
-                pin_revision: original.pin_revision,
                 model_preference: original.model_preference.clone(),
                 chat_role: original.chat_role,
                 // Branches keep the source's read-only grant; switching declares it (ADR 0037).
@@ -252,6 +242,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if kind == LineageKind::Rewind {
                 workspace_ui::show_version(threads, &id);
             }
+            latest.sidebar.refresh_derived();
             Ok(())
         })
         .map_err(WorkbenchError::sidebar_busy)?;

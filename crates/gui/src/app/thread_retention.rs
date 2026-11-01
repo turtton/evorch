@@ -15,7 +15,7 @@ use runtime::thread_retention::{
     ThreadRetention, check_binding, startup_input,
 };
 use storage::thread_retention::{
-    RetentionStatus, SidebarThread, ThreadRetentionPolicy, TombstoneSet,
+    BlockReason, RetentionStatus, SidebarThread, ThreadRetentionPolicy, TombstoneSet,
 };
 use storage::{Database, StorageConfig};
 use workspace_ui::{ThreadId, ThreadRecord};
@@ -64,6 +64,11 @@ pub(super) fn prune_tombstoned(history: &mut HistorySidebar, tombstones: &Tombst
         .sidebar
         .threads
         .retain(|thread| !tombstones.contains_thread(&thread.id.to_string()));
+    // The state of a deleted family goes with it, so an old copy cannot bring it back.
+    history
+        .sidebar
+        .families
+        .retain(|family| !tombstones.contains_thread(&family.key.to_string()));
     history
         .user_messages
         .retain(|message| !tombstones.contains_thread(&message.thread_id));
@@ -297,10 +302,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.retention.in_flight = false;
             match result {
                 Ok(snapshot) => {
+                    // A member the sidebar cannot place in a family is sent as not
+                    // archived (nothing is guessed), which the scheduler can only call
+                    // "not due". The sidebar knows the real reason, so it names it.
+                    let unresolved: BTreeSet<String> = self
+                        .sidebar
+                        .unresolved_threads()
+                        .into_iter()
+                        .map(|(thread, _)| thread.to_string())
+                        .collect();
                     self.retention.statuses = snapshot
                         .statuses
                         .into_iter()
-                        .map(|(thread, status)| (ThreadId::new(thread), status))
+                        .map(|(thread, status)| {
+                            let status = match status {
+                                RetentionStatus::Blocked(BlockReason::FamilyMemberNotDue(
+                                    member,
+                                )) if unresolved.contains(&member) => {
+                                    RetentionStatus::Blocked(BlockReason::FamilyUnresolved(member))
+                                }
+                                other => other,
+                            };
+                            (ThreadId::new(thread), status)
+                        })
                         .collect();
                     self.retention.binding = Some(snapshot.binding);
                 }
@@ -698,6 +722,59 @@ mod tests {
         assert_eq!(
             state.retention_statuses()[&thread],
             RetentionStatus::NotArchived
+        );
+    }
+
+    struct FamilyHoldScheduler;
+
+    impl RetentionScheduler for FamilyHoldScheduler {
+        fn schedule(
+            &self,
+            threads: Vec<SidebarThread>,
+            _now_ns: i64,
+        ) -> Result<RetentionSnapshot, String> {
+            // What the real scheduler says of an archived member whose relative is sent
+            // as not archived: held, for "not due".
+            Ok(RetentionSnapshot {
+                statuses: threads
+                    .into_iter()
+                    .map(|thread| {
+                        let status = if thread.archived {
+                            RetentionStatus::Blocked(BlockReason::FamilyMemberNotDue(
+                                "orphan".into(),
+                            ))
+                        } else {
+                            RetentionStatus::NotArchived
+                        };
+                        (thread.thread_id, status)
+                    })
+                    .collect(),
+                binding: BindingStatus::Bound,
+            })
+        }
+    }
+
+    #[test]
+    fn a_hold_by_a_member_without_a_family_is_shown_as_unresolved() {
+        // Given: an archived thread, and a thread naming a parent the sidebar lacks.
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = state(&directory.path().join("sidebar.json"))
+            .with_retention_scheduler(Arc::new(FamilyHoldScheduler));
+        let project = state.sidebar.projects[0].id.clone();
+        state
+            .sidebar
+            .create_thread(ThreadId::new("orphan"), project, "orphan")
+            .unwrap();
+        state.sidebar.threads[1].parent_thread_id = Some(ThreadId::new("gone"));
+        state.toggle_archive(ThreadId::new("thread")).unwrap();
+
+        // When: the statuses are computed.
+        state.finish_retention_refresh();
+
+        // Then: the hold names the member whose family cannot be found.
+        assert_eq!(
+            state.retention_statuses()[&ThreadId::new("thread")],
+            RetentionStatus::Blocked(BlockReason::FamilyUnresolved("orphan".into()))
         );
     }
 

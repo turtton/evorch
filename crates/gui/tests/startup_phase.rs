@@ -29,8 +29,14 @@ impl Fixture {
         }
     }
 
-    /// A sidebar with one live and one thread archived by a version that kept no time.
-    fn write_sidebar(&self) {
+    fn sidebar_path(&self) -> std::path::PathBuf {
+        self.dir.path().join("sidebar.json")
+    }
+
+    /// A sidebar of the older form (every thread keeps its own archive and pin flag):
+    /// one live and one thread archived by a version that kept no time. `edit` changes
+    /// the file's JSON before it is written.
+    fn write_legacy_sidebar(&self, edit: impl FnOnce(&mut serde_json::Value)) {
         let mut sidebar = SidebarState::default();
         let project = ProjectId::new("p");
         sidebar
@@ -43,8 +49,26 @@ impl Fixture {
         sidebar
             .create_thread(ThreadId::new("old"), project, "Old")
             .unwrap();
-        sidebar.threads[1].archived = true;
-        workspace_ui::save_sidebar(&sidebar, &self.dir.path().join("sidebar.json")).unwrap();
+        let mut json = serde_json::to_value(&sidebar).unwrap();
+        json["version"] = 1.into();
+        json.as_object_mut().unwrap().remove("families");
+        json["threads"][1]["archived"] = true.into();
+        // What else the file holds (messages, drafts) is not the sidebar's business.
+        json["user_messages"] = serde_json::json!([]);
+        edit(&mut json);
+        std::fs::write(
+            self.sidebar_path(),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_sidebar(&self) {
+        self.write_legacy_sidebar(|_| {});
+    }
+
+    fn saved(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.sidebar_path()).unwrap()).unwrap()
     }
 }
 
@@ -73,6 +97,14 @@ fn the_start_takes_exclusive_locks_reads_the_sidebar_runs_the_phase_and_shares_t
     // Then: the order is exclusive → sidebar → phase stages → shared.
     assert_eq!(events.first(), Some(&StartupEvent::ExclusiveTaken));
     assert_eq!(events[1], StartupEvent::SidebarLoaded { threads: 2 });
+    assert_eq!(
+        events[2],
+        StartupEvent::SidebarConverted {
+            families: 2,
+            mixed: 0,
+            unresolved: 0
+        }
+    );
     assert_eq!(events.last(), Some(&StartupEvent::Shared));
     let stages: Vec<Stage> = events
         .iter()
@@ -101,7 +133,7 @@ fn the_start_takes_exclusive_locks_reads_the_sidebar_runs_the_phase_and_shares_t
         .iter()
         .rposition(|event| matches!(event, StartupEvent::Phase(_)))
         .unwrap();
-    assert!(1 < first_phase && last_phase < events.len() - 1);
+    assert!(2 < first_phase && last_phase < events.len() - 1);
 
     // And: the archived legacy thread was confirmed, so the re-read tombstones hold it.
     assert!(matches!(prelude.report.outcome, StartupOutcome::Ran { .. }));
@@ -278,9 +310,11 @@ fn held_family(
         sidebar
             .create_thread(ThreadId::new(id), project.clone(), id)
             .unwrap();
-        sidebar.threads.last_mut().unwrap().archived = true;
     }
     sidebar.threads[1].parent_thread_id = Some(ThreadId::new("parent"));
+    sidebar
+        .set_family_archived(&ThreadId::new("parent"), true, 1)
+        .unwrap();
     edit(&mut sidebar);
     workspace_ui::save_sidebar(&sidebar, plan.sidebar_path.as_ref().unwrap()).unwrap();
 
@@ -304,10 +338,14 @@ fn held_family(
 
 #[test]
 fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
-    // Given: the child of an archived family is pinned.
+    // Given: an archived family is pinned (from its child: the pin is the family's).
     // When: the start-up runs (it explores the family but cannot confirm it) and the
     // GUI's scheduler computes the statuses.
-    let (prelude, statuses) = held_family(|sidebar| sidebar.threads[1].pinned = true);
+    let (prelude, statuses) = held_family(|sidebar| {
+        sidebar
+            .set_family_pinned(&ThreadId::new("child"), true)
+            .unwrap();
+    });
 
     // Then: both threads read as held for the pin, not as due.
     assert!(prelude.tombstones.is_empty());
@@ -323,15 +361,15 @@ fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
 }
 
 #[test]
-fn a_family_with_a_pending_child_is_not_deleted_and_reads_as_held() {
-    // Given: the child's archive state is still pending (saved neutral: not archived).
+fn a_family_with_a_member_whose_family_cannot_be_found_is_not_deleted_and_reads_as_held() {
+    // Given: the child names a parent the sidebar does not have (the database knows it
+    // under "parent"), so the sidebar cannot say whether it is archived.
     // When: the start-up runs and the statuses are computed.
     let (prelude, statuses) = held_family(|sidebar| {
-        sidebar.threads[1].archived = false;
-        sidebar.threads[1].state_pending = true;
+        sidebar.threads[1].parent_thread_id = Some(ThreadId::new("gone"));
     });
 
-    // Then: nothing is confirmed, and the family reads as held by the unsettled child.
+    // Then: nothing is confirmed, and the family reads as held by that child.
     assert!(prelude.tombstones.is_empty());
     assert!(gui::app::confirmed_threads(&prelude.report).is_empty());
     assert_eq!(
@@ -340,6 +378,109 @@ fn a_family_with_a_pending_child_is_not_deleted_and_reads_as_held() {
             storage::thread_retention::BlockReason::FamilyMemberNotDue("child".into())
         )
     );
+}
+
+#[test]
+fn an_older_sidebar_is_converted_and_saved_once_while_exclusive() {
+    // Given: a sidebar of the older form, with a file holding more than the sidebar.
+    let fixture = Fixture::new();
+    fixture.write_sidebar();
+    let plan = fixture.plan(true);
+
+    // When: it starts twice.
+    let (first, prelude) = collect(&plan, 30);
+    drop(prelude);
+    let converted = fixture.saved();
+    let (second, _) = collect(&plan, 30);
+
+    // Then: the first start announced and saved the conversion; the file keeps the rest
+    // of its content; the second start found nothing to convert.
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event, StartupEvent::SidebarConverted { families: 2, .. }))
+    );
+    assert_eq!(converted["version"], 2);
+    assert!(converted["user_messages"].is_array());
+    assert_eq!(converted["families"][0]["key"], "old");
+    assert!(
+        converted["threads"][1].get("archived").is_none(),
+        "the record keeps no state of its own"
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, StartupEvent::SidebarConverted { .. }))
+    );
+}
+
+#[test]
+fn a_family_whose_members_disagree_is_kept_and_nothing_in_it_is_deleted() {
+    // Given: an older sidebar where a parent was archived (with a time) and its child
+    // was not, as a version made after the archive would be.
+    let fixture = Fixture::new();
+    fixture.write_legacy_sidebar(|json| {
+        let mut child = json["threads"][0].clone();
+        child["id"] = "child".into();
+        child["parent_thread_id"] = "old".into();
+        json["threads"].as_array_mut().unwrap().push(child);
+        json["threads"][1]["archived_at"] = 100.into();
+    });
+
+    // When: the start-up runs with a 30-day period.
+    let (events, prelude) = collect(&fixture.plan(true), 30);
+
+    // Then: the family is reported as mixed, is not archived, and has no new time;
+    // nothing was confirmed.
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StartupEvent::SidebarConverted { mixed: 1, .. }))
+    );
+    assert!(gui::app::confirmed_threads(&prelude.report).is_empty());
+    let sidebar = workspace_ui::load_sidebar(&fixture.sidebar_path()).unwrap();
+    let states = sidebar.resolve_states();
+    for id in ["old", "child"] {
+        let state = &states[&ThreadId::new(id)];
+        assert!(!state.archived && state.archived_at.is_none(), "{id}");
+    }
+}
+
+#[test]
+fn the_converted_numbers_are_above_what_the_database_already_holds() {
+    // Given: the database holds the archived thread at revision 9 (a projection made by
+    // an earlier version), and the older sidebar knows nothing of that number.
+    let fixture = Fixture::new();
+    fixture.write_sidebar();
+    let plan = fixture.plan(true);
+    {
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: plan.db_path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        storage
+            .handle()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "old".into(),
+                archived: Some(true),
+                archive_revision: 9,
+                created_at_ns: 1,
+                updated_at_ns: 1,
+                ..Default::default()
+            }])
+            .unwrap();
+    }
+
+    // When: the start-up converts the sidebar (with deletion off, to keep the thread).
+    let (_, prelude) = collect(&plan, 0);
+    drop(prelude);
+
+    // Then: the saved state is numbered above 9, so the database never ignores it.
+    let sidebar = workspace_ui::load_sidebar(&fixture.sidebar_path()).unwrap();
+    let state = &sidebar.resolve_states()[&ThreadId::new("old")];
+    assert!(state.archived);
+    assert!(state.archive_revision > 9, "{}", state.archive_revision);
 }
 
 #[test]

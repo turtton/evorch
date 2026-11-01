@@ -156,7 +156,6 @@ pub struct WorkbenchState<S> {
     /// Threads a confirmed deletion removed; the sidebar never holds them again.
     pub(super) tombstones: storage::thread_retention::TombstoneSet,
     pub(super) retention: super::thread_retention::RetentionState,
-    pub(super) family_retry: super::thread_archive::FamilyRetry,
     pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
 }
 
@@ -284,7 +283,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             thread_mirror: None,
             tombstones: Default::default(),
             retention: Default::default(),
-            family_retry: Default::default(),
             agent_browser: super::agent_browser::AgentBrowserTabs::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
@@ -392,7 +390,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
-    pub fn with_sidebar(mut self, sidebar: SidebarState) -> Self {
+    pub fn with_sidebar(mut self, mut sidebar: SidebarState) -> Self {
+        // The records' archive and pin state is derived from the family states.
+        sidebar.refresh_derived();
         if let Some(thread) = sidebar
             .threads
             .iter()

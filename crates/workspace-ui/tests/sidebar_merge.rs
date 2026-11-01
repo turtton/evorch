@@ -139,7 +139,7 @@ fn a_field_edited_on_both_sides_keeps_the_local_value() {
     local.threads[1].title = "Local title".into();
     let mut disk = base.clone();
     disk.threads[1].title = "Disk title".into();
-    disk.threads[1].set_pin(true);
+    disk.set_pinned(&ThreadId::new("beta"), true).unwrap();
 
     // When: merged
     let merged = SidebarState::merge_three_way(&base, &local, &disk);
@@ -251,104 +251,4 @@ fn a_new_thread_keeps_its_project_when_the_other_side_removed_it() {
     // Then: the project is restored so the new thread stays valid
     assert!(merged.threads.iter().any(|t| t.id.to_string() == "fresh"));
     merged.validate().expect("merged sidebar must be valid");
-}
-
-#[test]
-fn the_archive_series_with_the_higher_revision_wins_even_over_a_later_local_edit() {
-    // Given: this process archives a thread, while a stale process only pins and
-    // unpins another thread (it never saw the archive).
-    let dir = TempDir::new().unwrap();
-    let (base, _) = base_state(&dir);
-    let mut disk = base.clone();
-    disk.threads[0].set_archived(true, 100);
-    let mut local = base.clone();
-    local.threads[0].set_pin(true);
-    local.threads[0].set_pin(false);
-
-    // When: merged
-    let merged = SidebarState::merge_three_way(&base, &local, &disk);
-
-    // Then: the archive survives and the pin series is the local one
-    let alpha = thread(&merged, "alpha");
-    assert!(alpha.archived);
-    assert_eq!((alpha.archived_at, alpha.archive_revision), (Some(100), 1));
-    assert!(!alpha.pinned);
-    assert_eq!(alpha.pin_revision, 2);
-}
-
-#[test]
-fn a_newer_unarchive_beats_an_older_archive_and_clears_the_time() {
-    // Given: the disk archived (revision 1), this process unarchived it after (revision 2)
-    let dir = TempDir::new().unwrap();
-    let (mut base, _) = base_state(&dir);
-    base.threads[0].set_archived(true, 100);
-    let mut local = base.clone();
-    local.threads[0].set_archived(false, 0);
-    let disk = base.clone();
-
-    // When: merged either way round
-    let merged = SidebarState::merge_three_way(&base, &local, &disk);
-    let swapped = SidebarState::merge_three_way(&base, &disk, &local);
-
-    // Then: the higher revision wins as one unit
-    for sidebar in [&merged, &swapped] {
-        let alpha = thread(sidebar, "alpha");
-        assert_eq!(
-            (alpha.archived, alpha.archived_at, alpha.archive_revision),
-            (false, None, 2)
-        );
-    }
-}
-
-#[test]
-fn equal_revisions_with_different_values_keep_the_protective_side() {
-    // Given: both sides reached the same revision with different values (records
-    // written by hand, as no numbered edit produces this).
-    let dir = TempDir::new().unwrap();
-    let (base, _) = base_state(&dir);
-    let mut local = base.clone();
-    local.threads[0].archive_revision = 3;
-    local.threads[0].pin_revision = 3;
-    local.threads[0].pinned = true;
-    let mut disk = base.clone();
-    disk.threads[0].archived = true;
-    disk.threads[0].archived_at = Some(40);
-    disk.threads[0].archive_revision = 3;
-    disk.threads[0].pin_revision = 3;
-
-    // When: merged either way round
-    let merged = SidebarState::merge_three_way(&base, &local, &disk);
-    let swapped = SidebarState::merge_three_way(&base, &disk, &local);
-
-    // Then: archived and pinned win, with the time of the archived side
-    for sidebar in [&merged, &swapped] {
-        let alpha = thread(sidebar, "alpha");
-        assert_eq!(
-            (alpha.archived, alpha.archived_at, alpha.pinned),
-            (true, Some(40), true)
-        );
-        assert_eq!((alpha.archive_revision, alpha.pin_revision), (3, 3));
-    }
-}
-
-#[test]
-fn a_record_without_revisions_loads_as_revision_zero_and_numbering_is_not_written_for_it() {
-    // Given: a record saved before the archive series was numbered
-    let dir = TempDir::new().unwrap();
-    let (base, _) = base_state(&dir);
-    let mut value = serde_json::to_value(&base).unwrap();
-    let thread = &mut value["threads"][0];
-    assert!(thread.get("archive_revision").is_none());
-    assert!(thread.get("archived_at").is_none());
-    thread["archived"] = true.into();
-
-    // When: loaded
-    let loaded: SidebarState = serde_json::from_value(value).unwrap();
-
-    // Then: the series is revision 0 with no time
-    let alpha = &loaded.threads[0];
-    assert_eq!(
-        (alpha.archived, alpha.archived_at, alpha.archive_revision),
-        (true, None, 0)
-    );
 }

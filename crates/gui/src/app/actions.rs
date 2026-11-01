@@ -395,8 +395,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .find(|thread| thread.id == thread_id)
             .ok_or(ThreadError::UnknownThread)?
             .pinned;
-        // Only the pin series changes, on the newest state under the save lock: a
-        // stale view of the archive series cannot undo another window's archive.
+        // The whole family is pinned or unpinned, and only its pin series changes, on the
+        // newest state under the save lock: a stale view of the archive series cannot
+        // undo another window's archive.
         self.shared_sidebar_transact(|latest| {
             if workspace_ui::display_parent(&latest.sidebar.threads, &thread_id).is_some() {
                 return Ok(());

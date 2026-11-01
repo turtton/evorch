@@ -4,6 +4,7 @@
 //! 公開 API に持ち込まないことで GUI framework の交換可能性を保ちます。
 
 mod errors;
+mod family;
 mod lineage;
 mod merge;
 mod migrate;
@@ -20,6 +21,7 @@ mod validate;
 pub use errors::{
     LayoutError, PersistError, ProjectError, SettingsError, SidebarError, ThreadError,
 };
+pub use family::{FamilyState, FamilyUnresolved, MigrationReport, ResolvedState};
 pub use lineage::{
     LineageIndex, display_parent, normalize_versions, point_versions, show_version, version_root,
     visible_version,
@@ -27,8 +29,9 @@ pub use lineage::{
 pub use merge::merge_keyed;
 pub use panels::{Panel, PanelId, PanelKind, default_panels, default_panels_v02};
 pub use persist::{
-    from_json, load_from, load_settings, load_sidebar, load_workspace, save_settings, save_sidebar,
-    save_to, save_workspace, sidebar_from_json, sidebar_to_json, to_json,
+    from_json, load_from, load_settings, load_sidebar, load_sidebar_report, load_workspace,
+    save_settings, save_sidebar, save_to, save_workspace, sidebar_from_json,
+    sidebar_from_json_report, sidebar_to_json, to_json,
 };
 pub use project::{AllowedDirectory, Membership, ProjectId, ProjectRecord, TrustState};
 pub use settings::{

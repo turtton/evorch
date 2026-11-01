@@ -29,7 +29,7 @@ use runtime::thread_retention::{
 };
 use storage::thread_retention::{SidebarThread, ThreadRetentionPolicy, TombstoneSet};
 use storage::{Database, SharedLeases, StorageConfig, StorageError};
-use workspace_ui::SidebarState;
+use workspace_ui::{MigrationReport, SidebarState};
 
 /// How long the shared locks are waited for: another process may be in its own
 /// exclusive phase (or offline maintenance) for a while.
@@ -56,6 +56,15 @@ pub enum StartupEvent {
     ExclusiveUnavailable,
     /// The sidebar was read.
     SidebarLoaded { threads: usize },
+    /// The sidebar was converted to family states and saved (the one-time conversion of
+    /// an older file, or a raise of the numbers above the database's).
+    SidebarConverted {
+        families: usize,
+        /// Families whose members disagreed about being archived: kept as not
+        /// archived, with no new time.
+        mixed: usize,
+        unresolved: usize,
+    },
     /// The phase reported progress.
     Phase(StartupProgress),
     /// The locks are held shared.
@@ -87,31 +96,101 @@ pub struct StartupPrelude {
     pub binding: Option<BindingStatus>,
 }
 
-/// The sidebar's threads as the retention phase reads them.
+/// The sidebar's threads as the retention phase reads them, with the archive and pin
+/// state their family resolves to (the same resolution the mirror and the sidebar
+/// use). A thread whose family cannot be found is told as not archived: nothing is
+/// guessed about it, and the deletion of its storage family is held.
 #[must_use]
 pub fn sidebar_threads(sidebar: &SidebarState) -> Vec<SidebarThread> {
+    let states = sidebar.resolve_states();
     sidebar
         .threads
         .iter()
-        .map(|thread| SidebarThread {
-            thread_id: thread.id.to_string(),
-            archived: thread.archived,
-            archived_at_s: thread.archived_at,
-            pinned: thread.pinned,
-            updated_at_s: thread.last_activity(),
-            created_at_s: thread.created_at,
-            archive_revision: Some(thread.archive_revision),
-            pin_revision: Some(thread.pin_revision),
+        .map(|thread| {
+            let state = states.get(&thread.id).filter(|state| state.is_resolved());
+            SidebarThread {
+                thread_id: thread.id.to_string(),
+                archived: state.is_some_and(|state| state.archived),
+                archived_at_s: state.and_then(|state| state.archived_at),
+                pinned: state.is_some_and(|state| state.pinned),
+                updated_at_s: thread.last_activity(),
+                created_at_s: thread.created_at,
+                archive_revision: state.map(|state| state.archive_revision),
+                pin_revision: state.map(|state| state.pin_revision),
+            }
         })
         .collect()
 }
 
-fn load_sidebar(path: &std::path::Path) -> Result<SidebarState, StartupError> {
+fn load_sidebar(
+    path: &std::path::Path,
+) -> Result<(SidebarState, Option<MigrationReport>), StartupError> {
     if path.exists() {
-        Ok(workspace_ui::load_sidebar(path)?)
+        Ok(workspace_ui::load_sidebar_report(path)?)
     } else {
-        Ok(SidebarState::default())
+        Ok((SidebarState::default(), None))
     }
+}
+
+/// Writes the settled family states into the sidebar file while the exclusive locks
+/// are held, keeping everything else in it (messages, drafts) as it is.
+fn save_converted(path: &std::path::Path, sidebar: &SidebarState) -> Result<(), StartupError> {
+    let io = |error: &dyn std::fmt::Display| workspace_ui::SidebarError::Io(error.to_string());
+    let mut file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).map_err(|error| io(&error))?)
+            .map_err(|error| workspace_ui::SidebarError::Serialization(error.to_string()))?;
+    let settled = serde_json::to_value(sidebar)
+        .map_err(|error| workspace_ui::SidebarError::Serialization(error.to_string()))?;
+    if let (Some(file), serde_json::Value::Object(settled)) = (file.as_object_mut(), settled) {
+        file.extend(settled);
+    }
+    let bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|error| workspace_ui::SidebarError::Serialization(error.to_string()))?;
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| -> std::io::Result<()> {
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        std::io::Write::write_all(&mut out, &bytes)?;
+        out.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io(&error).into());
+    }
+    Ok(())
+}
+
+/// Brings the numbers of the family states above those the database holds for their
+/// members, so the database never ignores what the sidebar says for being older.
+fn raise_above_database(plan: &StartupPlan, sidebar: &mut SidebarState) -> usize {
+    let database = match Database::open(&StorageConfig {
+        db_path: plan.db_path.clone(),
+        ..StorageConfig::default()
+    }) {
+        Ok(database) => database,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the database revisions of the threads");
+            return 0;
+        }
+    };
+    let floors: std::collections::BTreeMap<workspace_ui::ThreadId, (u64, u64)> = sidebar
+        .threads
+        .iter()
+        .filter_map(|thread| {
+            let row = database.thread(&thread.id.to_string()).ok()??;
+            Some((
+                thread.id.clone(),
+                (
+                    row.archive_revision.unwrap_or(0),
+                    row.pin_revision.unwrap_or(0),
+                ),
+            ))
+        })
+        .collect();
+    sidebar.raise_family_revisions(&|id| floors.get(id).copied().unwrap_or((0, 0)))
 }
 
 fn now_ns() -> i64 {
@@ -167,7 +246,7 @@ pub fn run_startup(
             storage::shared_with_wait(&plan.db_path, &plan.ownership_root, SHARED_LOCK_WAIT)?;
         emit(StartupEvent::Shared);
         let sidebar = match (&plan.sidebar_path, plan.run_phase) {
-            (Some(path), true) => Some(load_sidebar(path)?),
+            (Some(path), true) => Some(load_sidebar(path)?.0),
             _ => None,
         };
         let (tombstones, binding) = reread(plan)?;
@@ -180,13 +259,27 @@ pub fn run_startup(
         });
     };
     emit(StartupEvent::ExclusiveTaken);
-    let sidebar = match &plan.sidebar_path {
+    let (mut sidebar, converted) = match &plan.sidebar_path {
         Some(path) => load_sidebar(path)?,
-        None => SidebarState::default(),
+        None => (SidebarState::default(), None),
     };
     emit(StartupEvent::SidebarLoaded {
         threads: sidebar.threads.len(),
     });
+    // The one place the family states are made (or raised) and saved: only the process
+    // that holds the exclusive locks does it, before anything is decided from them.
+    if let Some(path) = plan.sidebar_path.as_ref().filter(|path| path.exists()) {
+        let raised = raise_above_database(plan, &mut sidebar);
+        if converted.is_some() || raised > 0 {
+            save_converted(path, &sidebar)?;
+            let report = converted.unwrap_or_default();
+            emit(StartupEvent::SidebarConverted {
+                families: report.families,
+                mixed: report.mixed,
+                unresolved: report.unresolved,
+            });
+        }
+    }
     let report = match &plan.sidebar_path {
         Some(sidebar_path) => {
             let paths = StartupPaths {

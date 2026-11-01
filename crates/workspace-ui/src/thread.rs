@@ -109,11 +109,6 @@ pub enum ThreadChatRole {
     Orchestrator,
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
-const fn is_zero(value: &u64) -> bool {
-    *value == 0
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: ThreadId,
@@ -123,22 +118,22 @@ pub struct ThreadRecord {
     /// first message may replace it. Cleared by any rename or applied auto-title.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_is_placeholder: bool,
+    /// Derived from the thread's family (see [`SidebarState::refresh_derived`], its
+    /// only writer) for the views that read a record; never saved. An older file
+    /// still carries it, which is how it is converted into family states.
+    #[serde(default, skip_serializing)]
     pub pinned: bool,
-    #[serde(default)]
+    /// Derived like `pinned`.
+    #[serde(default, skip_serializing)]
     pub archived: bool,
-    /// UNIX seconds the thread was archived at; `None` when it is not archived or
-    /// was archived before the time was recorded (such a thread is dated by the
-    /// first mirror that saw it, never newer than that).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Derived like `pinned`: the time the family was archived at, if known.
+    #[serde(default, skip_serializing)]
     pub archived_at: Option<i64>,
-    /// Counts every edit of the archive series (`archived`, `archived_at`). The
-    /// merge of two sidebars keeps the series with the higher revision, so an
-    /// edit made on a stale snapshot never undoes a newer one. `0` is a record
-    /// that predates numbering.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Read from an older file only, for its conversion into family states.
+    #[serde(default, skip_serializing)]
     pub archive_revision: u64,
-    /// Counts every edit of `pinned`, as `archive_revision` does for the archive.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Read from an older file only, for its conversion into family states.
+    #[serde(default, skip_serializing)]
     pub pin_revision: u64,
     #[serde(default)]
     pub created_at: i64,
@@ -172,12 +167,6 @@ pub struct ThreadRecord {
     /// A rewound version kept for restoration but hidden behind its visible version.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub superseded: bool,
-    /// The archive and pin state of this record is not settled against its parent's
-    /// yet (an escalated conversation created while the shared sidebar could not be
-    /// locked). Saved with the record, so any window that can lock the file settles
-    /// it, also after a restart; until then the record is not told to the database.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub state_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,56 +219,7 @@ impl ThreadRecord {
             escalation_source_run_id: None,
             lineage: None,
             superseded: false,
-            state_pending: false,
         }
-    }
-
-    /// Sets the archive series, numbering the edit. Unarchiving clears the time.
-    /// A call that changes nothing leaves the revision as it is.
-    pub fn set_archived(&mut self, archived: bool, at: i64) {
-        let archived_at = archived.then_some(at);
-        if self.archived == archived && (!archived || self.archived_at.is_some()) {
-            return;
-        }
-        self.archived = archived;
-        self.archived_at = archived_at;
-        self.archive_revision += 1;
-    }
-
-    /// Sets `pinned`, numbering the edit. A call that changes nothing leaves the
-    /// revision as it is.
-    pub fn set_pin(&mut self, pinned: bool) {
-        if self.pinned != pinned {
-            self.pinned = pinned;
-            self.pin_revision += 1;
-        }
-    }
-
-    /// Takes over the archive and pin state of `source`, for a thread created from
-    /// or shown in place of it: both start in the same state. An edit that changes
-    /// this record's series is numbered above both records' revisions, so it
-    /// outranks either when sidebars are merged.
-    pub fn adopt_state_of(&mut self, source: &Self) {
-        if self.archived != source.archived || self.archived_at != source.archived_at {
-            self.archived = source.archived;
-            self.archived_at = source.archived_at;
-            self.archive_revision = self.archive_revision.max(source.archive_revision) + 1;
-        }
-        if self.pinned != source.pinned {
-            self.pinned = source.pinned;
-            self.pin_revision = self.pin_revision.max(source.pin_revision) + 1;
-        }
-    }
-
-    /// Takes the archive and pin series of `other` exactly (value, time and
-    /// revision): the record is the same thread, settled elsewhere.
-    pub fn inherit_series_of(&mut self, other: &Self) {
-        self.archived = other.archived;
-        self.archived_at = other.archived_at;
-        self.archive_revision = other.archive_revision;
-        self.pinned = other.pinned;
-        self.pin_revision = other.pin_revision;
-        self.state_pending = other.state_pending;
     }
 
     /// When the conversation last had activity, never earlier than its creation.

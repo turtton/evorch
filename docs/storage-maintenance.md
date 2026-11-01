@@ -320,22 +320,38 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   （`Storage::open_with_lease` → 参照を記録する artifact store（`store_with_refs`）→ `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
   段 7（artifact の実体回収）もスプラッシュに段として出る。
   ②・③の失敗はスプラッシュと stderr に出て、ウィンドウを閉じるとコード 1 で終わる。
-- **sidebar の採番。** `ThreadRecord` に `archived_at`（unix 秒）・`archive_revision`・`pin_revision` を持つ。
-  archive / unarchive / pin は保存ロックの中で最新の sidebar（ファイル＋手元の 3-way merge）に対して
-  適用して採番し（`shared_sidebar_transact`）、書き込み、直後に DB へ mirror する。古い画面での操作が
-  他のウィンドウの archive を取り消すことはない。ロックを取れなければ手元の状態は変えず、エラーを表示する。
-  merge は archive 系列・pin 系列をそれぞれ revision の高い側を丸ごと採る（同値で割れたら保護側）。
-  fork・rewind・版切替も同じ transact の中で行い（新しい記録の作成と、親または切替前の版の archive / pin 状態の継承を
-  最新の sidebar に対して確定する）、ロックを取れない・ファイルを読めない場合は何も作らず失敗する。sidebar.json を
-  読めない（壊れている）ときは、archive / pin の操作も通常の保存も、ファイルを上書きせずエラーにする（他のウィンドウの
-  pin / archive を確認できないまま古い状態を書くと、次回起動の削除判定に使われるため）。escalation の子はイベントの
-  畳み込み中に作るため失敗させられない: transact（書込みのみで手元へは取り込まない）で親の最新の状態を継承し、
-  ロックを取れなければ中立の状態（未 archive・未 pin・revision 0）で `state_pending` を立てて作る。このフラグは
-  sidebar.json に記録の一部として保存されるため、どのウィンドウも（再起動後も）ロックを取れた時点でまとめて
-  1 つの transact で親の状態を継承して解除する（1 秒間隔で再試行）。フラグの立った記録は、どの GUI からも DB へ
-  mirror しない。親も pending の子は親が確定するまで待つ。保留判定の入力ではこの子は未 archive として読まれ、
-  family は保留になる。sidebar.json が import できなかったときも、通常保存は同じファイルを読み直して merge し、
-  読めない間は上書きしない。
+- **sidebar の採番（family が状態を持つ）。** archive と pin は **family 単位**で、スレッド記録は状態を持たない。
+  family = `parent_thread_id` をたどった最上位の祖先から降りる全員（fork・rewind の旧版・escalation の子と、その子孫）。
+  キー = 最上位の祖先の ID で、表示中の版や選択中のスレッドに依存しない。sidebar.json の `families`
+  （`FamilyState { key, archived, archived_at, archive_revision, pinned, pin_revision }`）が **archive 系列 1 本・pin 系列 1 本**を持つ
+  （状態の無い family は未 archive・未 pin・revision 0）。スレッド記録の `archived` / `archived_at` / `pinned` は、
+  `SidebarState::refresh_derived`（唯一の書き手）が family から導いて表示に使う**派生値で、保存しない**。
+  GUI・DB への mirror・起動時の削除入力・60 秒ごとの schedule は、すべて `SidebarState::resolve_states`（同じ解決関数）を読む。
+  - **採番する操作は archive / unarchive / pin / unpin だけ。** 保存ロックの中で最新の sidebar（ファイル＋手元の
+    3-way merge）に対して family の該当系列だけを採番して書き（`shared_sidebar_transact`）、直後に DB へ mirror する。
+    archive は pin を、pin は archive を動かさない。pin は family 全体（過去の版・fork・escalation を含む）に効く。
+    ロックを取れなければ手元の状態は変えず、エラーを表示する。no-op の操作でも、他者が保存した内容は取り込む。
+  - **子の追加と版切替は所属を足すだけ。** fork・rewind・escalation の子の作成と版切替は、状態をコピーも採番もしない
+    （子は family の状態をそのまま読む）。fork・rewind・版切替は、ID の重複を防ぐため保存ロックの中で行い、ロックを取れない・
+    ファイルを読めない場合は何も作らない。escalation の子はイベントの畳み込み中に作るので失敗させず、手元に足して
+    次の保存で merge する（状態を持たないので、ロックが取れない間も状態は食い違わない）。
+  - **merge。** `families` はキーの和集合で、系列ごとに revision の高い側を採る（同値で内容が割れたら保護側 =
+    archived / pinned）。どちらか一方にしか無い状態は残す。古い画面の再追加・replay・import・再起動で、保存済みの revision は戻らない。
+  - **DB への射影。** DB のスレッド単位の列は、family 状態からの射影（派生）。family の状態が変わると、全メンバーの
+    upsert を作り直して送る（新しいメンバーにも同じ状態が付く）。再送は冪等で、プロセスが落ちても次の起動が sidebar から再構成する。
+  - **解決できない所属。** 親が sidebar に無い、親の鎖が輪になっている、のスレッドは「解決不能」。状態を持たず
+    （未 archive・未 pin として表示）、archive / pin の操作は拒否し、DB へは archive / pin を送らず（DB の既存値を保つ）、
+    削除の入力では未 archive として送るので、その family の削除は保留になる。archive 一覧のホバーは、
+    保留の理由を "the family of related thread X cannot be resolved" と出す。
+  - **一度きりの変換（sidebar version 1 → 2）。** 起動の排他フェーズで、旧形式（スレッドごとの archived / pinned）を
+    読んだときに行い、保存してから判定に使う。archive は family 全員が archived のときだけ archived
+    （`archived_at` = 持っているメンバーの最大。時刻を持つメンバーが無ければ時刻なしのまま = 即時対象）。
+    **混在（一部だけ archived）の family は未 archive にし、新しい時刻は作らない。** pin は 1 人でも pinned なら pinned。
+    revision は旧メンバーの最大値と DB 側の値（スレッド行の revision）の最大より 1 大きくして始め、DB に無視されない。
+    変換した family 数・混在数・解決不能数はスプラッシュに出る。以後は変換しない。
+  - sidebar.json を読めない（壊れている）ときは、archive / pin の操作も通常の保存も、ファイルを上書きせずエラーにする
+    （他のウィンドウの pin / archive を確認できないまま古い状態を書くと、次回起動の削除判定に使われるため）。
+    import が失敗したときも、通常保存は同じファイルを読み直して merge し、読めない間は上書きしない。
 - **確定後の片付け。** 再読込した tombstone に載るスレッドは、sidebar・`user_messages`・下書き・選択から外れ、
   sidebar の 3-way merge・import・復元・保存直前（merge しない保存も）でも戻らない（tombstone が merge の
   「他方の編集を残す」規則に優先する）。

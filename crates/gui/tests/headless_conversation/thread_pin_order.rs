@@ -36,10 +36,12 @@ fn fixture(root: &std::path::Path) -> HeadlessWorkbench<EmptySource> {
     for (id, title, parent, pinned, created_at) in THREADS {
         let mut thread = ThreadRecord::new(ThreadId::new(id), project.clone(), title);
         thread.parent_thread_id = parent.map(ThreadId::new);
-        thread.pinned = pinned;
         thread.created_at = created_at;
         thread.run_ids = vec![format!("run-{id}")];
         sidebar.threads.push(thread);
+        if pinned {
+            sidebar.set_pinned(&ThreadId::new(id), true).unwrap();
+        }
     }
     sidebar.switch_thread(&ThreadId::new("new")).unwrap();
     let state = WorkbenchState::new(EmptySource, &UiSettings::default())

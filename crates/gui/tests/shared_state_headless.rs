@@ -1323,8 +1323,9 @@ fn an_archive_survives_a_stale_windows_pin_and_unpin() {
         let thread = sidebar.threads.iter().find(|t| t.id == alpha).unwrap();
         assert!(thread.archived);
         assert!(thread.archived_at.is_some());
-        assert_eq!((thread.archive_revision, thread.pin_revision), (1, 2));
         assert!(!thread.pinned);
+        let state = &sidebar.resolve_states()[&alpha];
+        assert_eq!((state.archive_revision, state.pin_revision), (1, 2));
     }
 }
 
@@ -1342,8 +1343,8 @@ fn archiving_a_family_numbers_every_member_and_restoring_clears_the_time() {
     // Then: both members carry the same time and revision 1, on disk too.
     let on_disk = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
     let series = |sidebar: &workspace_ui::SidebarState, id: &ThreadId| {
-        let t = sidebar.threads.iter().find(|t| &t.id == id).unwrap();
-        (t.archived, t.archived_at, t.archive_revision)
+        let state = &sidebar.resolve_states()[id];
+        (state.archived, state.archived_at, state.archive_revision)
     };
     let root = series(&on_disk, &alpha);
     assert!(root.0 && root.1.is_some() && root.2 == 1);

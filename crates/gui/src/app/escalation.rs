@@ -75,13 +75,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         created || bound
     }
 
-    /// Creates the escalated conversation as a child of `parent` and settles its
-    /// archive and pin state against the newest sidebar under the save lock. A
-    /// history event cannot fail, so when the sidebar cannot be locked or read the
-    /// child is still created, in the neutral state (not archived, not pinned,
-    /// revision 0) and flagged `state_pending`. The flag is saved with the record: any
-    /// window that can lock the file settles it later ([`Self::retry_pending_family_state`]),
-    /// also after a restart, and until then the record is not told to the database.
+    /// Creates the escalated conversation as a child of `parent`. It only joins the
+    /// family of `parent`: archive and pin state belong to the family, so there is
+    /// nothing to copy, settle or retry, and the child reads the family's state as soon
+    /// as it is a member. A history event cannot fail, and adding a member needs no
+    /// lock; the next save merges it into the shared sidebar.
     fn create_escalation_thread(
         &mut self,
         id: &ThreadId,
@@ -99,31 +97,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
         child.parent_thread_id = Some(parent.id.clone());
         child.escalation_source_run_id = Some(source_run_id.into());
-        child.state_pending = true;
-        self.sidebar.threads.push(child.clone());
-        let settled = self.shared_sidebar_transact_detached(|latest| {
-            let threads = &mut latest.sidebar.threads;
-            // The local child is the record to settle: it joins the newest state.
-            if !threads.iter().any(|thread| &thread.id == id) {
-                threads.push(child.clone());
-            }
-            super::thread_archive::settle_pending_threads(threads);
-            threads
-                .iter()
-                .find(|thread| &thread.id == id)
-                .cloned()
-                .ok_or(workspace_ui::ThreadError::UnknownThread)
-        });
-        match settled {
-            Ok(settled) => {
-                if let Some(local) = self.sidebar.threads.iter_mut().find(|t| &t.id == id) {
-                    local.inherit_series_of(&settled);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, thread = %id, "escalated thread created before its archive state could be settled; it is saved as pending");
-            }
-        }
+        self.sidebar.threads.push(child);
+        self.sidebar.refresh_derived();
     }
 
     pub(super) fn prepare_escalation_thread(&mut self, _source_run_id: &str, run_id: &str) {
