@@ -75,9 +75,10 @@ pub struct BudgetSegment {
     pub tokens: u64,
 }
 
-const PROMPT_KINDS: [ContextSectionKind; 4] = [
+const PROMPT_KINDS: [ContextSectionKind; 5] = [
     ContextSectionKind::RoleBaseline,
     ContextSectionKind::ModelFamily,
+    ContextSectionKind::RoleFamily,
     ContextSectionKind::CategoryOverlay,
     ContextSectionKind::Appendix,
 ];
@@ -290,10 +291,11 @@ pub struct CompareRow {
     pub identical: Option<bool>,
 }
 
-const COMPARE_KINDS: [ContextSectionKind; 13] = [
+const COMPARE_KINDS: [ContextSectionKind; 14] = [
     ContextSectionKind::Preamble,
     ContextSectionKind::RoleBaseline,
     ContextSectionKind::ModelFamily,
+    ContextSectionKind::RoleFamily,
     ContextSectionKind::CategoryOverlay,
     ContextSectionKind::IntentGate,
     ContextSectionKind::Appendix,

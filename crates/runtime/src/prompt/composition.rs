@@ -80,6 +80,8 @@ fn appendix_body<'a>(sources: &'a AgentPromptSources, preset: &str) -> &'a str {
 ///   型付きエラーになる。
 /// - family section: config のキーは素のファミリー名、カタログキーは
 ///   `family-` 接頭辞付きのため `format!("family-{key}")` で写像する。
+/// - role×family section: キー `(role, family)` を `family-<family>` と preset 名
+///   `role-<role>-<family>` に写像する。適用条件 (category なし) はカタログ側が持つ。
 /// - category overlay: カテゴリ名をそのまま引き渡す。
 /// - appendix: ロール直下の `preset` 参照をロールレベル appendix へ、
 ///   `categories.<name>.preset` 参照をカテゴリスコープ appendix へ登録する
@@ -124,6 +126,19 @@ pub fn build_catalog(
     }
     for (family_key, body) in &sources.family_sections {
         builder = builder.family_section(format!("family-{family_key}"), body.as_str());
+    }
+    for ((role_key, family_key), body) in &sources.role_family_sections {
+        let role = role_bindings(input.config)
+            .into_iter()
+            .map(|(role, _)| role)
+            .find(|role| role.name().to_lowercase() == *role_key)
+            .expect("resolver は固定 9 ロールの role×family だけを返す");
+        builder = builder.role_family_section(
+            role,
+            format!("family-{family_key}"),
+            format!("role-{role_key}-{family_key}"),
+            body.as_str(),
+        );
     }
     for (category, body) in &sources.category_overlays {
         builder = builder.category_overlay(category.as_str(), body.as_str());

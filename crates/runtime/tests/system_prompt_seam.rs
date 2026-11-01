@@ -23,6 +23,7 @@ use support::{ScriptedModel, text_response, tool_response};
 
 const GATE_MARK: &str = "## Intent Gate";
 const QUICK_OVERLAY_MARK: &str = "QUICK-OVERLAY-MARK";
+const ROLE_FAMILY_MARK: &str = "ROLE-FAMILY-MARK";
 
 fn catalog_builder() -> SystemPromptCatalogBuilder {
     let mut builder = SystemPromptCatalog::builder();
@@ -287,6 +288,55 @@ async fn system_message_is_assembled_once_and_byte_stable_across_turns() {
     assert_eq!(observed.len(), 2);
     let stable_prefix = observed[0][0].clone();
     assert_eq!(stable_prefix.role, MessageRole::System);
+    for call in &observed {
+        assert_eq!(
+            call[0], stable_prefix,
+            "System メッセージはターン間でバイト一致する"
+        );
+    }
+}
+
+// Given: Reviewer × family-gpt5 の role×family 層を持つカタログと gpt-6.1-sol 選択の対話 run
+// When: send_message で再開し 2 ターン目まで実行する
+// Then: System メッセージに層が 1 回だけ ModelFamily の直後に入り、
+//       すべての complete 呼び出しで先頭の System メッセージがバイト一致する (Stable Prefix)
+#[tokio::test]
+async fn reviewer_role_family_layer_is_byte_stable_across_turns() {
+    let review_storage = support::ReviewStorage::new();
+    let catalog = catalog_builder()
+        .role_family_section(
+            Role::Reviewer,
+            "family-gpt5",
+            "role-reviewer-gpt5",
+            ROLE_FAMILY_MARK,
+        )
+        .build()
+        .expect("テスト用カタログは必須部品をすべて満たす");
+    let model = Arc::new(
+        ScriptedModel::new([
+            Ok(text_response("waiting", FinishReason::Stop)),
+            Ok(text_response("done", FinishReason::Stop)),
+        ])
+        .with_selected_model("gpt-6.1-sol"),
+    );
+    let (runtime, _bus) = runtime_with(model.clone(), Some(catalog));
+    let run_id = runtime.delegate_background(Role::Reviewer, "R".to_string(), cfg(true, None));
+    review_storage.attach(&runtime);
+    runtime
+        .send_message(run_id, "continue".to_string())
+        .expect("inbox は受信可能");
+    assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+    let observed = model.observed().await;
+    assert_eq!(observed.len(), 2);
+    let stable_prefix = observed[0][0].clone();
+    assert_eq!(stable_prefix.role, MessageRole::System);
+    let system = text_of_role(&observed[0], MessageRole::System).expect("System がある");
+    assert_eq!(system.matches(ROLE_FAMILY_MARK).count(), 1);
+    assert!(
+        system.find("GPT5").expect("family 本文がある") < system.find(ROLE_FAMILY_MARK).unwrap(),
+        "role×family 層は family の直後に入る"
+    );
     for call in &observed {
         assert_eq!(
             call[0], stable_prefix,

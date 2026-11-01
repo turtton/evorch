@@ -184,3 +184,26 @@ fn internal_lesson_prompt_overlays_resolve_by_runtime_category_name() {
     assert!(sources.category_overlays["lesson"].contains("stack_lesson_candidate"));
     assert!(sources.category_overlays["lesson_review"].contains("submit_lesson_review"));
 }
+
+// Given: 同梱の role-reviewer-gpt5 と、それを上書きしたユーザーディレクトリ
+// When: resolve_prompt_sources する
+// Then: ("reviewer", "gpt5") に同梱本文、上書き時は上書き本文が入り、family-gpt5 は空のまま
+#[test]
+fn role_family_sources_resolve_bundled_body_and_honor_user_override() {
+    let tmp = tempfile::tempdir().expect("一時ディレクトリを作成できる");
+    let key = ("reviewer".to_owned(), "gpt5".to_owned());
+
+    let bundled = resolve_prompt_sources(&Config::default(), Some(tmp.path()))
+        .expect("同梱プリセットのみで解決できる");
+    assert_eq!(
+        bundled.role_family_sections[&key],
+        PresetStore::resolve("role-reviewer-gpt5", None).expect("同梱プリセットを解決できる")
+    );
+    assert!(bundled.role_family_sections[&key].starts_with("## 指摘の重要度"));
+    assert!(bundled.family_sections["gpt5"].is_empty());
+
+    write_override(&tmp, "role-reviewer-gpt5", b"USER-ROLE-FAMILY\n");
+    let overridden =
+        resolve_prompt_sources(&Config::default(), Some(tmp.path())).expect("上書きを解決できる");
+    assert_eq!(overridden.role_family_sections[&key], "USER-ROLE-FAMILY\n");
+}

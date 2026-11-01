@@ -50,6 +50,7 @@ pub enum ContextSectionKind {
     Preamble,
     RoleBaseline,
     ModelFamily,
+    RoleFamily,
     CategoryOverlay,
     IntentGate,
     Appendix,
@@ -72,6 +73,7 @@ impl ContextSectionKind {
             Self::Preamble => "Preamble",
             Self::RoleBaseline => "Role baseline",
             Self::ModelFamily => "Model family",
+            Self::RoleFamily => "Role family preset",
             Self::CategoryOverlay => "Category overlay",
             Self::IntentGate => "Intent gate",
             Self::Appendix => "Preset appendix",
@@ -96,6 +98,7 @@ impl From<PromptPartKind> for ContextSectionKind {
         match kind {
             PromptPartKind::RoleBaseline => Self::RoleBaseline,
             PromptPartKind::ModelFamily => Self::ModelFamily,
+            PromptPartKind::RoleFamily => Self::RoleFamily,
             PromptPartKind::CategoryOverlay => Self::CategoryOverlay,
             PromptPartKind::IntentGate => Self::IntentGate,
             PromptPartKind::Appendix => Self::Appendix,

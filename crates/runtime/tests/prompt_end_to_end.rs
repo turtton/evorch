@@ -273,3 +273,89 @@ fn user_family_overrides_are_selected_by_model_without_leaking_other_families() 
         assert!(prompt.ends_with(sources.appendices[ORCHESTRATOR_APPENDIX_PRESET].trim_end()));
     }
 }
+
+/// 同梱の role×family preset 名と、その本文を一意に識別する見出し。
+const REVIEWER_GPT5_PRESET: &str = "role-reviewer-gpt5";
+const REVIEWER_GPT5_HEADING: &str = "## 指摘の重要度";
+
+// Given: 同梱プリセットのみで production 経路から構築したカタログ
+// When: Reviewer / Worker を category・model を変えて system_prompt_sections_for する
+// Then: 同梱の role-reviewer-gpt5 は category なしの Reviewer × GPT-5 以降 (gpt-6.1-sol を含む)
+//       にだけ入り、それ以外 (category あり・別ロール・Claude・gpt-4o) には入らない
+#[test]
+fn bundled_reviewer_gpt5_preset_applies_only_to_plain_reviewer_on_gpt_family() {
+    let user_dir = empty_user_dir();
+    let config = bound_config();
+    let sources = resolve_prompt_sources(&config, Some(user_dir.path())).unwrap();
+    let body = sources.role_family_sections[&("reviewer".to_owned(), "gpt5".to_owned())].clone();
+    assert!(body.starts_with(REVIEWER_GPT5_HEADING));
+    let catalog = production_catalog(&config, &user_dir).unwrap();
+
+    let applies = [
+        (Role::Reviewer, None, "gpt-5"),
+        (Role::Reviewer, None, "gpt-6.1-sol"),
+        (Role::Reviewer, None, "openai/gpt-6-astra"),
+    ];
+    for (role, category, model) in applies {
+        let sections = catalog
+            .system_prompt_sections_for(role, category, model)
+            .unwrap();
+        let layer = sections
+            .iter()
+            .find(|section| section.kind == PromptPartKind::RoleFamily)
+            .unwrap_or_else(|| panic!("{model} の Reviewer に層が付くはずです"));
+        assert_eq!(layer.preset.as_deref(), Some(REVIEWER_GPT5_PRESET));
+        assert_eq!(layer.text, body.trim_end());
+    }
+
+    let skipped = [
+        (Role::Reviewer, Some("plan-review"), "gpt-5"),
+        (Role::Reviewer, Some("lesson_review"), "gpt-6.1-sol"),
+        (Role::Reviewer, None, "claude-opus-4-1"),
+        (Role::Reviewer, None, "gpt-4o"),
+        (Role::Worker, None, "gpt-6.1-sol"),
+        (Role::Orchestrator, None, "gpt-6.1-sol"),
+    ];
+    for (role, category, model) in skipped {
+        let prompt = catalog.system_prompt_for(role, category, model).unwrap();
+        assert!(
+            !prompt.contains(REVIEWER_GPT5_HEADING),
+            "{} / {category:?} / {model} には付かないはずです",
+            role.name()
+        );
+    }
+}
+
+// Given: role-reviewer-gpt5 をユーザー上書きした設定ディレクトリ
+// When: 上書き前後のカタログで Reviewer / gpt-6.1-sol の各セクションを比較する
+// Then: RoleFamily 層だけが上書き本文に差し替わり、他の層は同一
+#[test]
+fn user_override_replaces_only_the_reviewer_gpt5_layer() {
+    let user_dir = empty_user_dir();
+    let config = bound_config();
+    let before = production_catalog(&config, &user_dir)
+        .unwrap()
+        .system_prompt_sections_for(Role::Reviewer, None, "gpt-6.1-sol")
+        .unwrap();
+    std::fs::write(
+        user_dir
+            .path()
+            .join(format!("presets/{REVIEWER_GPT5_PRESET}.md")),
+        format!("{OVERRIDE_SENTINEL}\n"),
+    )
+    .unwrap();
+    let after = production_catalog(&config, &user_dir)
+        .unwrap()
+        .system_prompt_sections_for(Role::Reviewer, None, "gpt-6.1-sol")
+        .unwrap();
+
+    assert_eq!(before.len(), after.len());
+    for (old, new) in before.iter().zip(&after) {
+        if new.kind == PromptPartKind::RoleFamily {
+            assert_eq!(new.text, OVERRIDE_SENTINEL);
+            assert_ne!(old.text, new.text);
+        } else {
+            assert_eq!(old, new);
+        }
+    }
+}

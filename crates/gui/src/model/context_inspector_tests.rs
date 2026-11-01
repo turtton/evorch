@@ -48,6 +48,7 @@ fn preview_segments_group_sections_and_drop_empty_groups() {
         vec![
             section(ContextSectionKind::RoleBaseline, "role", 100),
             section(ContextSectionKind::ModelFamily, "family", 20),
+            section(ContextSectionKind::RoleFamily, "role family", 30),
             section(ContextSectionKind::IntentGate, "gate", 300),
             section(ContextSectionKind::Rules, "rules", 50),
             section(ContextSectionKind::Workspace, "ws", 5),
@@ -60,7 +61,7 @@ fn preview_segments_group_sections_and_drop_empty_groups() {
         [
             BudgetSegment {
                 label: "System prompt",
-                tokens: 120
+                tokens: 150
             },
             BudgetSegment {
                 label: "Intent gate",
@@ -97,6 +98,7 @@ fn compare_rows_align_sections_and_flag_shared_text() {
         Role::Worker,
         vec![
             section(ContextSectionKind::RoleBaseline, "worker", 12),
+            section(ContextSectionKind::RoleFamily, "role family", 9),
             section(ContextSectionKind::Rules, "same rules", 7),
         ],
         vec![tool("read", 4), tool("shell", 9)],
@@ -104,6 +106,13 @@ fn compare_rows_align_sections_and_flag_shared_text() {
 
     let rows = compare_rows(&orchestrator, &worker);
     let row = |label: &str| rows.iter().find(|row| row.label == label).unwrap();
+    assert_eq!(
+        (
+            row("Role family preset").left,
+            row("Role family preset").right
+        ),
+        (None, Some(9))
+    );
     assert_eq!(row("Role baseline").identical, Some(false));
     assert_eq!(
         (row("Intent gate").left, row("Intent gate").right),
@@ -113,7 +122,7 @@ fn compare_rows_align_sections_and_flag_shared_text() {
     assert_eq!(row("Tools (2 / 2)").identical, Some(false));
     assert_eq!(
         (row("Total").left, row("Total").right),
-        (Some(57), Some(32))
+        (Some(57), Some(41))
     );
     assert_eq!(
         tool_difference(&orchestrator, &worker),

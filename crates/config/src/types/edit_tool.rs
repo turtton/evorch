@@ -63,8 +63,8 @@ impl EditToolConfig {
 ///
 /// `gpt-` の直後に続く数字列 (小数点より前) だけを読む: `gpt-5.1-codex` は 5、
 /// `gpt-6-astra` は 6。`gpt-` で始まらない ID、直後が数字でない ID (`gpt-oss-120b`)
-/// は `None`。runtime の model family 判定 (`prompt::family::classify`) と同じく
-/// 大文字小文字を区別しないため、`GPT-5` も 5。
+/// は `None`。大文字小文字を区別しないため、`GPT-5` も 5。runtime の model family
+/// 判定 (`prompt::family::classify`) も、この関数で世代を読んで GPT-5 以降を判定する。
 pub fn gpt_generation(model_id: &str) -> Option<u32> {
     let model_id = model_id.to_ascii_lowercase();
     let rest = model_id.strip_prefix("gpt-")?;

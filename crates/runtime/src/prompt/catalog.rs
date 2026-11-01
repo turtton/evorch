@@ -65,6 +65,7 @@ const ALL_ROLES: [Role; 4] = [
 pub struct SystemPromptCatalog {
     role_baselines: BTreeMap<String, String>,
     family_sections: BTreeMap<String, String>,
+    role_family_sections: BTreeMap<(String, String), AppendixPart>,
     category_overlays: BTreeMap<String, String>,
     appendices: BTreeMap<String, AppendixPart>,
     category_appendices: BTreeMap<(String, String), AppendixPart>,
@@ -107,6 +108,11 @@ impl SystemPromptCatalog {
     ///
     /// 各セクションの `text` を空行 1 つで連結した結果は
     /// [`Self::system_prompt_for`] とバイト単位で一致する。
+    ///
+    /// ロール × ファミリの section
+    /// ([`SystemPromptCatalogBuilder::role_family_section`]) は `category` が
+    /// `None` のときだけ付く。カテゴリ付きの run は overlay が振る舞いを決める
+    /// ため、ロールの base binding (カテゴリなし) にだけ適用する。
     pub fn system_prompt_sections_for(
         &self,
         role: Role,
@@ -135,6 +141,13 @@ impl SystemPromptCatalog {
                     })
             })
             .transpose()?;
+        let role_family = match category {
+            None => self.role_family_sections.get(&(
+                role.name().to_lowercase(),
+                family.base_section_key().to_owned(),
+            )),
+            Some(_) => None,
+        };
         let scoped_appendix = category.and_then(|category| {
             self.category_appendices
                 .get(&(role.name().to_lowercase(), category.to_owned()))
@@ -146,6 +159,7 @@ impl SystemPromptCatalog {
             family,
             role_baseline,
             family_section,
+            role_family_section: role_family.map(|part| part.text.as_str()),
             category_overlay,
             appendix: appendix.map(|part| part.text.as_str()),
             triggers: &self.triggers,
@@ -159,6 +173,7 @@ impl SystemPromptCatalog {
                         Some(format!("role-{}", role.name().to_lowercase()))
                     }
                     PromptPartKind::ModelFamily => Some(family.base_section_key().to_owned()),
+                    PromptPartKind::RoleFamily => role_family.and_then(|part| part.preset.clone()),
                     PromptPartKind::CategoryOverlay => category.map(category_overlay_preset),
                     PromptPartKind::IntentGate => None,
                     PromptPartKind::Appendix => appendix.and_then(|part| part.preset.clone()),
@@ -199,6 +214,7 @@ fn category_overlay_preset(category: &str) -> String {
 pub struct SystemPromptCatalogBuilder {
     role_baselines: BTreeMap<String, String>,
     family_sections: BTreeMap<String, String>,
+    role_family_sections: BTreeMap<(String, String), AppendixPart>,
     category_overlays: BTreeMap<String, String>,
     appendices: BTreeMap<String, AppendixPart>,
     category_appendices: BTreeMap<(String, String), AppendixPart>,
@@ -216,6 +232,27 @@ impl SystemPromptCatalogBuilder {
     /// ファミリセクションを登録する (6 キー全てが必須)。
     pub fn family_section(mut self, key: impl Into<String>, text: impl Into<String>) -> Self {
         self.family_sections.insert(key.into(), text.into());
+        self
+    }
+
+    /// ロール × ファミリの section を登録する (任意)。
+    ///
+    /// `family_key` は [`ModelFamily::base_section_key`] の値 (例: `family-gpt5`)。
+    /// `preset` は解決元 preset 名で、セクションの由来として返る。
+    pub fn role_family_section(
+        mut self,
+        role: Role,
+        family_key: impl Into<String>,
+        preset: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.role_family_sections.insert(
+            (role.name().to_lowercase(), family_key.into()),
+            AppendixPart {
+                preset: Some(preset.into()),
+                text: text.into(),
+            },
+        );
         self
     }
 
@@ -325,6 +362,7 @@ impl SystemPromptCatalogBuilder {
         Ok(SystemPromptCatalog {
             role_baselines: self.role_baselines,
             family_sections: self.family_sections,
+            role_family_sections: self.role_family_sections,
             category_overlays: self.category_overlays,
             appendices: self.appendices,
             category_appendices: self.category_appendices,
@@ -531,6 +569,91 @@ mod tests {
             assert_eq!(sections[0].preset.as_deref(), Some("role-worker"));
             assert_eq!(sections[1].preset.as_deref(), Some("family-claude"));
         }
+    }
+
+    // Given: Reviewer × family-gpt5 の role×family 層を登録したカタログ
+    // When: category なしの Reviewer を gpt-6.1-sol で system_prompt_sections_for する
+    // Then: ModelFamily の直後に層が入り、登録した preset 名が由来として返る
+    #[test]
+    fn role_family_section_follows_model_family_for_plain_reviewer_on_gpt6() {
+        let catalog = complete_builder()
+            .role_family_section(
+                Role::Reviewer,
+                "family-gpt5",
+                "role-reviewer-gpt5",
+                "ROLE-FAMILY-MARK",
+            )
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        let sections = catalog
+            .system_prompt_sections_for(Role::Reviewer, None, "gpt-6.1-sol")
+            .expect("登録済みの部品のみを参照するはずです");
+
+        let kinds: Vec<_> = sections.iter().map(|section| section.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                crate::prompt::PromptPartKind::RoleBaseline,
+                crate::prompt::PromptPartKind::ModelFamily,
+                crate::prompt::PromptPartKind::RoleFamily,
+            ]
+        );
+        assert_eq!(sections[2].text, "ROLE-FAMILY-MARK");
+        assert_eq!(sections[2].preset.as_deref(), Some("role-reviewer-gpt5"));
+    }
+
+    // Given: Reviewer × family-gpt5 の role×family 層を登録したカタログ
+    // When: 適用条件を外れる組み合わせ (category あり / 別ロール / 別 family) で解決する
+    // Then: どれにも層は入らない (通常 Reviewer × GPT 系のみに付く)
+    #[test]
+    fn role_family_section_is_limited_to_plain_reviewer_of_the_registered_family() {
+        let catalog = complete_builder()
+            .role_family_section(
+                Role::Reviewer,
+                "family-gpt5",
+                "role-reviewer-gpt5",
+                "ROLE-FAMILY-MARK",
+            )
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+
+        let cases = [
+            (Role::Reviewer, Some("bug"), "gpt-5"),
+            (Role::Worker, None, "gpt-5"),
+            (Role::Reviewer, None, "claude-opus-4-1"),
+            (Role::Reviewer, None, "gpt-4o"),
+        ];
+        for (role, category, model_id) in cases {
+            let prompt = catalog
+                .system_prompt_for(role, category, model_id)
+                .expect("登録済みの部品のみを参照するはずです");
+            assert!(
+                !prompt.contains("ROLE-FAMILY-MARK"),
+                "{} / {category:?} / {model_id} には付かないはずです",
+                role.name()
+            );
+        }
+    }
+
+    // Given: role×family 層を一切登録しない完全なカタログ
+    // When: build し、Reviewer × gpt-5 を解決する
+    // Then: 層は任意なので build は成功し、プロンプトに層は現れない
+    #[test]
+    fn role_family_section_is_optional_for_catalog_build() {
+        let catalog = complete_builder()
+            .build()
+            .expect("role×family 層が未登録でも構築できるはずです");
+
+        let sections = catalog
+            .system_prompt_sections_for(Role::Reviewer, None, "gpt-5")
+            .expect("登録済みの部品のみを参照するはずです");
+
+        assert!(
+            sections
+                .iter()
+                .all(|section| section.kind != crate::prompt::PromptPartKind::RoleFamily)
+        );
     }
 
     // Given: ロールレベル appendix のみを持ち bug スコープは未登録のカタログ
