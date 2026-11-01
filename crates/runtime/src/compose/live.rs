@@ -250,6 +250,10 @@ impl AgentModel for SwitchableModel {
         self.current().selected_model(role, category)
     }
 
+    fn chain_models(&self, role: Role, category: Option<&str>) -> Vec<String> {
+        self.current().chain_models(role, category)
+    }
+
     fn selected_model_for_run(&self, run_id: &str, role: Role, category: Option<&str>) -> String {
         self.current()
             .selected_model_for_run(run_id, role, category)

@@ -307,6 +307,14 @@ pub trait AgentModel: Send + Sync {
     /// (lib.rs の「ルーティングの委譲」契約と一貫)。
     fn selected_model(&self, role: Role, category: Option<&str>) -> String;
 
+    /// Identities of every member of the role's model chain, in declaration order.
+    ///
+    /// The system prompt applies a role×family layer only when all of them belong to one
+    /// family. A fixed model has no chain, so it is its own only member.
+    fn chain_models(&self, role: Role, category: Option<&str>) -> Vec<String> {
+        vec![self.selected_model(role, category)]
+    }
+
     /// Identity the run's next request goes to, following its chain pin when it has one.
     fn selected_model_for_run(&self, _run_id: &str, role: Role, category: Option<&str>) -> String {
         self.selected_model(role, category)

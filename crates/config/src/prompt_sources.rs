@@ -18,6 +18,12 @@ const FAMILY_NAMES: &[&str] = &[
     "generic",
 ];
 
+/// 同梱の role×family preset (`role-<role>-<family>`) を持つ (ロール, ファミリー) の組。
+///
+/// ロール名は `role_bindings`、ファミリー名は [`FAMILY_NAMES`] のキー。組み合わせの
+/// 適用条件 (カテゴリなしのロールにだけ付く) は runtime のカタログが決める。
+const ROLE_FAMILY_PRESETS: &[(&str, &str)] = &[("reviewer", "gpt5")];
+
 /// 収集したエージェントプロンプトのソース集合。
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentPromptSources {
@@ -25,6 +31,8 @@ pub struct AgentPromptSources {
     pub role_baselines: BTreeMap<String, String>,
     /// モデルファミリー別セクション (キー: ファミリー名、generic を含む全 6 種)。
     pub family_sections: BTreeMap<String, String>,
+    /// ロール × ファミリー別セクション (キー: (ロール名, ファミリー名))。
+    pub role_family_sections: BTreeMap<(String, String), String>,
     /// カテゴリ別オーバーレイ (worker/reviewer 公開カテゴリと内部カテゴリ)。
     pub category_overlays: BTreeMap<String, String>,
     /// agents 設定が参照する appendix プリセット本文 (キー: プリセット名)。
@@ -52,6 +60,7 @@ pub fn resolve_prompt_sources(
     Ok(AgentPromptSources {
         role_baselines: resolve_role_baselines(&config.agents, presets_dir.as_deref())?,
         family_sections: resolve_families(presets_dir.as_deref())?,
+        role_family_sections: resolve_role_families(presets_dir.as_deref())?,
         category_overlays: resolve_categories(presets_dir.as_deref())?,
         appendices: resolve_appendices(&config.agents, presets_dir.as_deref())?,
     })
@@ -93,6 +102,19 @@ fn resolve_families(presets_dir: Option<&Path>) -> Result<BTreeMap<String, Strin
         let name = format!("family-{family}");
         let body = PresetStore::resolve(&name, presets_dir)?;
         sources.insert((*family).to_string(), body);
+    }
+    Ok(sources)
+}
+
+/// ロール × ファミリー別セクション (`role-<role>-<family>`) を解決する。
+fn resolve_role_families(
+    presets_dir: Option<&Path>,
+) -> Result<BTreeMap<(String, String), String>, ConfigError> {
+    let mut sources = BTreeMap::new();
+    for (role, family) in ROLE_FAMILY_PRESETS {
+        let name = format!("role-{role}-{family}");
+        let body = PresetStore::resolve(&name, presets_dir)?;
+        sources.insert(((*role).to_string(), (*family).to_string()), body);
     }
     Ok(sources)
 }

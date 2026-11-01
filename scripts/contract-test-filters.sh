@@ -36,6 +36,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=structured_escalation)
       | binary(=tool_output_history)
       | binary(=system_prompt_seam)
+      | binary(=gpt6_orchestrator_cache)
       | binary(=compaction_triggers)
       | binary(=model_switch_cache)
       | binary(=owned_route_fallback)

@@ -10,7 +10,9 @@ pub enum ModelFamily {
     Claude,
     /// OpenAI の reasoning 系 (o1 / o3 / o4)。
     OpenAiReasoning,
-    /// OpenAI の GPT-5 系。
+    /// OpenAI の GPT-5 以降 (`gpt-<N>`、N ≥ 5)。
+    ///
+    /// variant 名と `family-gpt5` キーは GPT-5 の導入時のまま維持している。
     Gpt5,
     /// Google Gemini 系。
     Gemini,
@@ -50,7 +52,7 @@ pub fn classify(model_id: &str) -> ModelFamily {
         .to_ascii_lowercase();
     if id.contains("claude") {
         ModelFamily::Claude
-    } else if id.starts_with("gpt-5") {
+    } else if config::gpt_generation(&id).is_some_and(|generation| generation >= 5) {
         ModelFamily::Gpt5
     } else if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
         ModelFamily::OpenAiReasoning
@@ -107,6 +109,55 @@ mod tests {
         ];
         for (model_id, expected) in cases {
             assert_eq!(classify(model_id), expected, "model_id = {model_id}");
+        }
+    }
+
+    // Given: GPT-5 以降 (世代 N >= 5) の model id (gpt-6.x と将来世代、profile 接頭辞付きを含む)
+    // When: classify する
+    // Then: 世代の小数点以下・サフィックス・大文字小文字によらず Gpt5 に分類される
+    #[test]
+    fn classify_maps_gpt_generation_five_and_later_to_gpt5() {
+        let cases = [
+            "gpt-5",
+            "gpt-5-codex",
+            "gpt-5.1-codex",
+            "gpt-5.5+fast",
+            "GPT-5",
+            "gpt-6-luna",
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "openai/gpt-6-astra",
+            "gpt-10",
+            "gpt-10-pro",
+        ];
+        for model_id in cases {
+            assert_eq!(
+                classify(model_id),
+                ModelFamily::Gpt5,
+                "model_id = {model_id}"
+            );
+        }
+    }
+
+    // Given: GPT-5 未満の世代、または世代を読めない gpt 風の model id
+    // When: classify する
+    // Then: Unknown にフォールバックする (gpt-oss など別系統を巻き込まない)
+    #[test]
+    fn classify_keeps_older_or_non_generation_gpt_ids_unknown() {
+        let cases = [
+            "gpt-4o",
+            "gpt-4.5",
+            "gpt-oss-120b",
+            "codex-mini-latest",
+            "chatgpt-5",
+            "gpt-99999999999",
+        ];
+        for model_id in cases {
+            assert_eq!(
+                classify(model_id),
+                ModelFamily::Unknown,
+                "model_id = {model_id}"
+            );
         }
     }
 

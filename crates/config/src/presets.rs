@@ -46,6 +46,10 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../assets/presets/role-reviewer.md"),
     ),
     (
+        "role-reviewer-gpt5",
+        include_str!("../assets/presets/role-reviewer-gpt5.md"),
+    ),
+    (
         "family-claude",
         include_str!("../assets/presets/family-claude.md"),
     ),
@@ -196,6 +200,7 @@ mod tests {
             "role-explorer",
             "role-worker",
             "role-reviewer",
+            "role-reviewer-gpt5",
             "family-claude",
             "family-openai-reasoning",
             "family-gpt5",

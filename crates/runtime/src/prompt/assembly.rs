@@ -1,7 +1,7 @@
 //! システムプロンプトの決定論的組立 (issue #49 / AC3, AC7, AC10)。
 //!
-//! 固定順 (role baseline → family section → category overlay → Intent Gate →
-//! appendix) でセクションを連結する。各セクションの末尾余白を除去し、
+//! 固定順 (role baseline → family section → role×family section →
+//! category overlay → Intent Gate → appendix) でセクションを連結する。各セクションの末尾余白を除去し、
 //! 空でないセクションのみを空行 1 つで連結し、末尾改行を付けない。
 //! 同一入力に対してバイト単位で同一の出力を返す。
 
@@ -23,6 +23,8 @@ pub struct SystemPromptInput<'a> {
     pub role_baseline: &'a str,
     /// ファミリの base section 本文。
     pub family_section: &'a str,
+    /// ロール × ファミリの section 本文 (任意)。
+    pub role_family_section: Option<&'a str>,
     /// カテゴリ overlay 本文 (任意)。
     pub category_overlay: Option<&'a str>,
     /// appendix 本文 (任意)。
@@ -38,6 +40,8 @@ pub enum PromptPartKind {
     RoleBaseline,
     /// モデルファミリの base section。
     ModelFamily,
+    /// ロール × ファミリの section (family の直後に入る)。
+    RoleFamily,
     /// カテゴリ overlay。
     CategoryOverlay,
     /// Orchestrator 専用の Intent Gate (keyTriggers を含む生成テキスト)。
@@ -76,6 +80,12 @@ pub fn assemble_system_prompt_parts(
             input.family_section.trim_end().to_owned(),
         ),
     ];
+    if let Some(role_family) = input.role_family_section {
+        sections.push((
+            PromptPartKind::RoleFamily,
+            role_family.trim_end().to_owned(),
+        ));
+    }
     if let Some(overlay) = input.category_overlay {
         sections.push((
             PromptPartKind::CategoryOverlay,
@@ -102,6 +112,7 @@ mod tests {
 
     const BASELINE: &str = "BASELINE-MARKER あなたは調整役です。";
     const FAMILY: &str = "FAMILY-MARKER 出力規約です。";
+    const ROLE_FAMILY: &str = "ROLE-FAMILY-MARKER ロール別の判定基準です。";
     const OVERLAY: &str = "OVERLAY-MARKER カテゴリ上書きです。";
     const APPENDIX: &str = "APPENDIX-MARKER 追加指示です。";
     const GATE_MARK: &str = "## Intent Gate";
@@ -118,6 +129,7 @@ mod tests {
             family: ModelFamily::Claude,
             role_baseline: BASELINE,
             family_section: FAMILY,
+            role_family_section: None,
             category_overlay: overlay,
             appendix,
             triggers: &[],
@@ -126,26 +138,38 @@ mod tests {
 
     // Given: Orchestrator と全レイヤーが存在する入力
     // When: assemble_system_prompt する
-    // Then: baseline → family → overlay → gate → appendix の順に連結される
+    // Then: baseline → family → role×family → overlay → gate → appendix の順に連結される
     #[test]
     fn assembly_orders_sections_role_family_category_gate_preset() {
-        let assembled = assemble_system_prompt(&input(
-            Role::Orchestrator,
-            Some("bug"),
-            Some(OVERLAY),
-            Some(APPENDIX),
-        ));
+        let assembled = assemble_system_prompt(&SystemPromptInput {
+            role_family_section: Some(ROLE_FAMILY),
+            ..input(
+                Role::Orchestrator,
+                Some("bug"),
+                Some(OVERLAY),
+                Some(APPENDIX),
+            )
+        });
 
         let baseline = assembled
             .find(BASELINE)
             .expect("baseline が含まれるはずです");
         let family = assembled.find(FAMILY).expect("family が含まれるはずです");
+        let role_family = assembled
+            .find(ROLE_FAMILY)
+            .expect("role×family が含まれるはずです");
         let overlay = assembled.find(OVERLAY).expect("overlay が含まれるはずです");
         let gate = assembled.find(GATE_MARK).expect("gate が含まれるはずです");
         let appendix = assembled
             .find(APPENDIX)
             .expect("appendix が含まれるはずです");
-        assert!(baseline < family && family < overlay && overlay < gate && gate < appendix);
+        assert!(
+            baseline < family
+                && family < role_family
+                && role_family < overlay
+                && overlay < gate
+                && gate < appendix
+        );
     }
 
     // Given: 同一の入力

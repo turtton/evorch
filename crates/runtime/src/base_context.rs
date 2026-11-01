@@ -50,6 +50,7 @@ pub enum ContextSectionKind {
     Preamble,
     RoleBaseline,
     ModelFamily,
+    RoleFamily,
     CategoryOverlay,
     IntentGate,
     Appendix,
@@ -72,6 +73,7 @@ impl ContextSectionKind {
             Self::Preamble => "Preamble",
             Self::RoleBaseline => "Role baseline",
             Self::ModelFamily => "Model family",
+            Self::RoleFamily => "Role family preset",
             Self::CategoryOverlay => "Category overlay",
             Self::IntentGate => "Intent gate",
             Self::Appendix => "Preset appendix",
@@ -96,6 +98,7 @@ impl From<PromptPartKind> for ContextSectionKind {
         match kind {
             PromptPartKind::RoleBaseline => Self::RoleBaseline,
             PromptPartKind::ModelFamily => Self::ModelFamily,
+            PromptPartKind::RoleFamily => Self::RoleFamily,
             PromptPartKind::CategoryOverlay => Self::CategoryOverlay,
             PromptPartKind::IntentGate => Self::IntentGate,
             PromptPartKind::Appendix => Self::Appendix,
@@ -199,7 +202,13 @@ pub(crate) fn compose_system_sections(
         ));
     }
     if let Some(catalog) = shared.system_prompts.as_ref() {
-        for part in catalog.system_prompt_sections_for(inputs.role, inputs.category, &model_id)? {
+        let chain = shared.model.chain_models(inputs.role, inputs.category);
+        for part in catalog.system_prompt_sections_for_chain(
+            inputs.role,
+            inputs.category,
+            &model_id,
+            &chain,
+        )? {
             let source =
                 part.preset
                     .map_or(ContextSource::Generated, |name| ContextSource::Preset {
