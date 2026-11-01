@@ -119,15 +119,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .sidebar
             .threads
             .iter()
-            // A thread whose archive state is not settled against the shared sidebar
-            // is not told to the database yet.
-            .filter(|thread| {
-                !self
-                    .pending_family
-                    .threads
-                    .iter()
-                    .any(|(pending, _)| pending == &thread.id)
-            })
             .filter_map(|thread| thread_upsert(thread, roots.get(&thread.project_id).cloned()))
             .filter(|upsert| link.mirrored.get(&upsert.thread_id) != Some(upsert))
             .collect();
@@ -141,10 +132,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 }
 
 /// The stored definition of a sidebar thread. `None` for an empty ID, which
-/// storage would reject together with the rest of the batch.
+/// storage would reject together with the rest of the batch, and for a record
+/// whose state is still pending.
 fn thread_upsert(thread: &ThreadRecord, project_root: Option<String>) -> Option<ThreadUpsert> {
     let thread_id = thread.id.to_string();
-    if thread_id.is_empty() {
+    // A record whose archive and pin state is not settled yet is not told to the
+    // database: the neutral values it holds are not final.
+    if thread_id.is_empty() || thread.state_pending {
         return None;
     }
     let point = thread

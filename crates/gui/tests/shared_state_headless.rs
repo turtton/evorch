@@ -1466,3 +1466,37 @@ fn an_unreadable_shared_sidebar_is_never_written_over() {
         b"{ not a sidebar"
     );
 }
+
+#[test]
+fn a_failed_import_of_a_broken_sidebar_does_not_let_later_saves_overwrite_it() {
+    // Given: a window that read a good sidebar; then the file breaks.
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let alpha = a.open_thread(&shared, "Alpha");
+    let good = std::fs::read(shared.sidebar()).expect("saved sidebar");
+    std::fs::write(shared.sidebar(), b"{ broken").expect("break");
+
+    // When: the shared feed tries to import it (and fails), then ordinary saves follow.
+    a.state.poll_shared_feed();
+    a.state.poll_shared_feed();
+    for title in ["one", "two", "three"] {
+        a.state.rename_thread(alpha.clone(), title.into()).ok();
+        a.state.save_sidebar();
+        a.state.flush_deferred_sidebar_save();
+    }
+
+    // Then: the broken file was never written over, however often a save ran.
+    assert_eq!(
+        std::fs::read(shared.sidebar()).expect("sidebar"),
+        b"{ broken"
+    );
+
+    // And: once the file is good again, the window imports and saves normally.
+    std::fs::write(shared.sidebar(), &good).expect("repair");
+    a.state.poll_shared_feed();
+    a.state
+        .rename_thread(alpha, "after".into())
+        .expect("rename");
+    let saved = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
+    assert!(saved.threads.iter().any(|thread| thread.title == "after"));
+}

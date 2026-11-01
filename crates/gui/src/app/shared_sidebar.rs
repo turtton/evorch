@@ -32,6 +32,10 @@ pub(super) struct SharedSidebar {
     import_pending: bool,
     /// A save found the file locked by another process and must be repeated.
     save_deferred: bool,
+    /// The file stamp whose content could not be imported. It only stops the import
+    /// from being repeated for the same file: a save still reads and merges the file
+    /// itself, and refuses to write over it while it cannot.
+    import_failed: Option<FileStamp>,
 }
 
 impl SharedSidebar {
@@ -446,6 +450,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         let stamp = FileStamp::of(&path);
+        if stamp.is_some() && self.shared_sidebar.borrow().import_failed == stamp {
+            return;
+        }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -477,9 +484,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%error, "shared sidebar could not be merged; keeping this process's state");
-                let mut shared = self.shared_sidebar.borrow_mut();
-                shared.stamp = stamp;
-                shared.import_pending = false;
+                // The stamp is not taken over: this process has not seen this content,
+                // so a later save must not treat the file as already merged.
+                self.shared_sidebar.borrow_mut().import_failed = stamp;
                 return;
             }
         };
@@ -490,6 +497,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut shared = self.shared_sidebar.borrow_mut();
         shared.stamp = stamp;
         shared.import_pending = false;
+        shared.import_failed = None;
         shared.base = Some(bytes);
     }
 

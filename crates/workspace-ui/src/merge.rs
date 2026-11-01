@@ -239,5 +239,10 @@ fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) 
         ),
         lineage: pick(&base.lineage, &local.lineage, &disk.lineage),
         superseded: pick(&base.superseded, &local.superseded, &disk.superseded),
+        state_pending: pick(
+            &base.state_pending,
+            &local.state_pending,
+            &disk.state_pending,
+        ),
     }
 }

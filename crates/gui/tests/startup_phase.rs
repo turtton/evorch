@@ -237,10 +237,15 @@ fn a_panic_in_the_startup_thread_becomes_a_startup_error() {
     );
 }
 
-#[test]
-fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
-    // Given: two archived threads of one family (the child forked from the parent),
-    // the child pinned, known to the database.
+/// Two archived threads of one family (the child forked from the parent), known to the
+/// database; `edit` changes the sidebar before it is saved. Returns the start-up's
+/// prelude and the GUI scheduler's statuses.
+fn held_family(
+    edit: impl FnOnce(&mut SidebarState),
+) -> (
+    gui::startup::StartupPrelude,
+    std::collections::BTreeMap<String, storage::thread_retention::RetentionStatus>,
+) {
     let fixture = Fixture::new();
     let plan = fixture.plan(true);
     let config = storage::StorageConfig {
@@ -276,13 +281,10 @@ fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
         sidebar.threads.last_mut().unwrap().archived = true;
     }
     sidebar.threads[1].parent_thread_id = Some(ThreadId::new("parent"));
-    sidebar.threads[1].pinned = true;
+    edit(&mut sidebar);
     workspace_ui::save_sidebar(&sidebar, plan.sidebar_path.as_ref().unwrap()).unwrap();
 
-    // When: the start-up runs (it explores the family but cannot confirm it) and the
-    // GUI's scheduler computes the statuses.
     let (_, prelude) = collect(&plan, 30);
-    assert!(prelude.tombstones.is_empty());
     let scheduler = gui::app::StorageRetentionScheduler {
         storage_config: config,
         ownership_root: plan.ownership_root.clone(),
@@ -296,17 +298,48 @@ fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
     let snapshot = scheduler
         .schedule(gui::startup::sidebar_threads(&sidebar), 1_000_000_000_000)
         .unwrap();
+    drop(fixture);
+    (prelude, snapshot.statuses)
+}
+
+#[test]
+fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
+    // Given: the child of an archived family is pinned.
+    // When: the start-up runs (it explores the family but cannot confirm it) and the
+    // GUI's scheduler computes the statuses.
+    let (prelude, statuses) = held_family(|sidebar| sidebar.threads[1].pinned = true);
 
     // Then: both threads read as held for the pin, not as due.
+    assert!(prelude.tombstones.is_empty());
     for id in ["parent", "child"] {
         assert_eq!(
-            snapshot.statuses[id],
+            statuses[id],
             storage::thread_retention::RetentionStatus::Blocked(
                 storage::thread_retention::BlockReason::Pinned
             ),
             "{id}"
         );
     }
+}
+
+#[test]
+fn a_family_with_a_pending_child_is_not_deleted_and_reads_as_held() {
+    // Given: the child's archive state is still pending (saved neutral: not archived).
+    // When: the start-up runs and the statuses are computed.
+    let (prelude, statuses) = held_family(|sidebar| {
+        sidebar.threads[1].archived = false;
+        sidebar.threads[1].state_pending = true;
+    });
+
+    // Then: nothing is confirmed, and the family reads as held by the unsettled child.
+    assert!(prelude.tombstones.is_empty());
+    assert!(gui::app::confirmed_threads(&prelude.report).is_empty());
+    assert_eq!(
+        statuses["parent"],
+        storage::thread_retention::RetentionStatus::Blocked(
+            storage::thread_retention::BlockReason::FamilyMemberNotDue("child".into())
+        )
+    );
 }
 
 #[test]

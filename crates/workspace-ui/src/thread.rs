@@ -172,6 +172,12 @@ pub struct ThreadRecord {
     /// A rewound version kept for restoration but hidden behind its visible version.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub superseded: bool,
+    /// The archive and pin state of this record is not settled against its parent's
+    /// yet (an escalated conversation created while the shared sidebar could not be
+    /// locked). Saved with the record, so any window that can lock the file settles
+    /// it, also after a restart; until then the record is not told to the database.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +230,7 @@ impl ThreadRecord {
             escalation_source_run_id: None,
             lineage: None,
             superseded: false,
+            state_pending: false,
         }
     }
 
@@ -272,6 +279,7 @@ impl ThreadRecord {
         self.archive_revision = other.archive_revision;
         self.pinned = other.pinned;
         self.pin_revision = other.pin_revision;
+        self.state_pending = other.state_pending;
     }
 
     /// When the conversation last had activity, never earlier than its creation.

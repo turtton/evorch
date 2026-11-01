@@ -86,67 +86,72 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
-    /// Takes the archive and pin state of `source` from the newest sidebar, under the
-    /// save lock, for `thread` (created from it).
-    ///
-    /// # Errors
-    /// The sidebar could not be locked, read or written; nothing changed.
-    fn reconcile_family_state(
-        &mut self,
-        thread: &ThreadId,
-        source: &ThreadId,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.shared_sidebar_transact(|latest| {
-            let Some(source) = latest
-                .sidebar
-                .threads
-                .iter()
-                .find(|record| &record.id == source)
-                .cloned()
-            else {
-                return Ok(());
-            };
-            let target = latest
-                .sidebar
-                .threads
-                .iter_mut()
-                .find(|record| &record.id == thread)
-                .ok_or(ThreadError::UnknownThread)?;
-            target.adopt_state_of(&source);
-            Ok(())
-        })
-    }
-
-    /// Remembers a thread whose archive and pin state could not be settled against
-    /// the newest sidebar yet. Until it is, it is not mirrored, and
-    /// [`Self::retry_pending_family_state`] settles it.
-    pub(super) fn defer_family_state(&mut self, thread: ThreadId, source: ThreadId) {
-        self.pending_family.threads.push((thread, source));
-    }
-
-    /// Settles the deferred threads once the sidebar can be locked again; tried at
-    /// most once a second.
+    /// Settles every thread flagged `state_pending` (see [`ThreadRecord`]) against
+    /// its parent on the newest sidebar, under the save lock, in one transaction. The
+    /// flag is saved with the record, so whichever window can lock the file settles
+    /// it, also after a restart. Tried at most once a second.
     pub(super) fn retry_pending_family_state(&mut self, now: Instant) {
-        if self.pending_family.threads.is_empty()
-            || self.pending_family.next_try.is_some_and(|next| now < next)
+        if !self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| thread.state_pending)
+            || self.family_retry.0.is_some_and(|next| now < next)
         {
             return;
         }
-        self.pending_family.next_try = Some(now + FAMILY_RETRY);
-        for (thread, source) in std::mem::take(&mut self.pending_family.threads) {
-            if let Err(error) = self.reconcile_family_state(&thread, &source) {
-                tracing::debug!(%error, %thread, "archive state still waits for the shared sidebar");
-                self.pending_family.threads.push((thread, source));
-            }
+        self.family_retry.0 = Some(now + FAMILY_RETRY);
+        let settled = self.shared_sidebar_transact(|latest| {
+            settle_pending_threads(&mut latest.sidebar.threads);
+            Ok(())
+        });
+        if let Err(error) = settled {
+            tracing::debug!(%error, "archive state still waits for the shared sidebar");
         }
     }
 }
 
-/// Threads created while the shared sidebar could not be locked.
-#[derive(Default)]
-pub(super) struct PendingFamily {
-    pub(super) threads: Vec<(ThreadId, ThreadId)>,
-    next_try: Option<Instant>,
+/// Gives each pending thread its parent's archive and pin state and clears the flag.
+/// A thread whose parent is itself pending waits for it; one whose parent is gone has
+/// nothing to take over and is settled as it is.
+pub(super) fn settle_pending_threads(threads: &mut [ThreadRecord]) {
+    loop {
+        let mut progress = false;
+        let pending: Vec<ThreadId> = threads
+            .iter()
+            .filter(|thread| thread.state_pending)
+            .map(|thread| thread.id.clone())
+            .collect();
+        for id in pending {
+            let parent = threads
+                .iter()
+                .find(|candidate| {
+                    threads
+                        .iter()
+                        .find(|thread| thread.id == id)
+                        .and_then(|thread| thread.parent_thread_id.as_ref())
+                        == Some(&candidate.id)
+                })
+                .cloned();
+            if parent.as_ref().is_some_and(|parent| parent.state_pending) {
+                continue;
+            }
+            if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
+                if let Some(parent) = &parent {
+                    thread.adopt_state_of(parent);
+                }
+                thread.state_pending = false;
+                progress = true;
+            }
+        }
+        if !progress {
+            return;
+        }
+    }
 }
+
+/// When the pending threads were last tried.
+#[derive(Default)]
+pub(super) struct FamilyRetry(Option<Instant>);
 
 const FAMILY_RETRY: Duration = Duration::from_secs(1);

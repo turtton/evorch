@@ -1117,6 +1117,34 @@ fn schedule_shows_why_an_explored_family_is_held() {
 }
 
 #[test]
+fn schedule_tells_preparing_from_due_while_the_backfill_is_unfinished() {
+    // Given: an archived, due thread and an event the backfill has not converted yet.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.sql("INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) VALUES (1, 1, 1, 'Message', '{}');");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    let status = |database: &Database| {
+        database
+            .retention_schedule(&input, &policy(), &BTreeMap::new())
+            .unwrap()[0]
+            .1
+            .clone()
+    };
+
+    // When / Then: it reads as preparing, not as due at the next start.
+    assert_eq!(
+        status(&database),
+        RetentionStatus::Blocked(BlockReason::Exploring)
+    );
+
+    // And: once the backfill is done the same thread is due.
+    database.retention_backfill_startup(100, 1_000).unwrap();
+    assert_eq!(status(&database), RetentionStatus::DueNextStartup);
+}
+
+#[test]
 fn the_fence_rejects_writers_but_not_deletes_after_confirmation() {
     // Given: a confirmed family whose rows are not reclaimed yet.
     let f = Fixture::new();

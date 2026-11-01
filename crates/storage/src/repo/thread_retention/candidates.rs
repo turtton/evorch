@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::StorageError;
+use crate::migrations::backfill::backfill_pending;
 use crate::thread_retention::{
     BlockReason, LegacyArchivedPolicy, NANOS_PER_DAY, RetentionInput, RetentionStatus,
     SidebarThread, ThreadRetentionPolicy,
@@ -99,10 +100,17 @@ pub(crate) fn schedule(
                 }
                 _ => RetentionStatus::DueNextStartup,
             };
+            // Nothing can be confirmed while the event backfill is unfinished: the start
+            // is still preparing, which is not the same as "due".
+            let preparing = own == RetentionStatus::DueNextStartup && backfill_pending(conn)?;
             // A thread is deleted with its family, so the family's state decides.
-            match family_hold(conn, &thread.thread_id, input, policy, overrides)? {
-                Some(reason) => RetentionStatus::Blocked(reason),
-                None => own,
+            if preparing {
+                RetentionStatus::Blocked(BlockReason::Exploring)
+            } else {
+                match family_hold(conn, &thread.thread_id, input, policy, overrides)? {
+                    Some(reason) => RetentionStatus::Blocked(reason),
+                    None => own,
+                }
             }
         };
         statuses.push((thread.thread_id.clone(), status));

@@ -152,44 +152,39 @@ fn an_escalated_thread_takes_the_parents_newest_state() {
         (saved.archived, saved.archived_at, saved.archive_revision),
         child
     );
-    assert!(b.pending_family.threads.is_empty());
+    assert!(!pending(&b, "escalation-run-2"));
 }
 
-#[test]
-fn an_escalated_thread_created_under_a_lock_is_settled_later_and_mirrored_only_then() {
-    // Given: a mirroring window whose parent was archived elsewhere, and a locked sidebar.
-    let directory = tempfile::tempdir().unwrap();
-    let (mut a, _, path) = two_windows(directory.path());
+fn pending(state: &WorkbenchState<DemoSource>, id: &str) -> bool {
+    state
+        .sidebar()
+        .threads
+        .iter()
+        .find(|thread| thread.id.to_string() == id)
+        .unwrap_or_else(|| panic!("thread {id} must exist"))
+        .state_pending
+}
+
+/// A mirroring window on the shared file, with the database it mirrors into.
+fn mirroring(
+    path: &Path,
+    directory: &Path,
+) -> (
+    WorkbenchState<DemoSource>,
+    storage::Storage,
+    storage::StorageConfig,
+) {
     let config = storage::StorageConfig {
-        db_path: directory.path().join("events.db"),
+        db_path: directory.join("events.db"),
         ..Default::default()
     };
     let storage = storage::Storage::open(config.clone()).unwrap();
-    let mut b = window_on(&path).with_thread_mirror(storage.handle());
-    a.toggle_archive(ThreadId::new("thread")).unwrap();
-    let lock = lock_file(&path);
+    let window = window_on(path).with_thread_mirror(storage.handle());
+    (window, storage, config)
+}
 
-    // When: the escalation is folded while the lock is held.
-    b.apply_events([escalation("run-1", "run-2")]);
-    b.sync_thread_mirror(Instant::now());
-    let barrier = storage::threads::ThreadUpsert {
-        thread_id: "barrier".into(),
-        created_at_ns: 1,
-        updated_at_ns: 1,
-        ..Default::default()
-    };
-    storage.handle().upsert_threads_host(&[barrier]).unwrap();
-
-    // Then: the thread exists in the neutral state, waits to be settled and is not
-    // in the database.
-    assert_eq!(series(&b, "escalation-run-2"), (false, None, 0));
-    assert_eq!(b.pending_family.threads.len(), 1);
-    let database = storage::Database::open(&config).unwrap();
-    assert!(database.thread("escalation-run-2").unwrap().is_none());
-
-    // When: the lock is free again and the retry runs.
-    drop(lock);
-    b.retry_pending_family_state(Instant::now() + Duration::from_secs(5));
+/// Waits until the writer has handled everything sent before (it runs commands in order).
+fn barrier(storage: &storage::Storage) {
     storage
         .handle()
         .upsert_threads_host(&[storage::threads::ThreadUpsert {
@@ -199,18 +194,129 @@ fn an_escalated_thread_created_under_a_lock_is_settled_later_and_mirrored_only_t
             ..Default::default()
         }])
         .unwrap();
+}
+
+fn row(config: &storage::StorageConfig, id: &str) -> Option<storage::threads::ThreadRow> {
+    storage::Database::open(config).unwrap().thread(id).unwrap()
+}
+
+#[test]
+fn an_escalated_thread_created_under_a_lock_is_pending_unmirrored_and_settled_later() {
+    // Given: a mirroring window whose parent was archived elsewhere, and a locked sidebar.
+    let directory = tempfile::tempdir().unwrap();
+    let (mut a, _, path) = two_windows(directory.path());
+    let (mut b, storage, config) = mirroring(&path, directory.path());
+    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    let lock = lock_file(&path);
+
+    // When: the escalation is folded while the lock is held, and the mirror ticks.
+    b.apply_events([escalation("run-1", "run-2")]);
+    b.sync_thread_mirror(Instant::now());
+    barrier(&storage);
+
+    // Then: the thread exists in the neutral state, is flagged and is not in the database.
+    assert_eq!(series(&b, "escalation-run-2"), (false, None, 0));
+    assert!(pending(&b, "escalation-run-2"));
+    assert!(row(&config, "escalation-run-2").is_none());
+
+    // When: the lock is free again and the retry runs.
+    drop(lock);
+    b.retry_pending_family_state(Instant::now() + Duration::from_secs(5));
+    barrier(&storage);
 
     // Then: the child follows the parent and reaches the database in that state.
-    assert!(b.pending_family.threads.is_empty());
-    let (archived, archived_at, _) = series(&b, "escalation-run-2");
-    assert_eq!((archived, archived_at), {
-        let parent = series(&a, "thread");
-        (parent.0, parent.1)
-    });
-    let row = storage::Database::open(&config)
-        .unwrap()
-        .thread("escalation-run-2")
-        .unwrap()
-        .expect("mirrored once settled");
-    assert!(row.archived);
+    assert!(!pending(&b, "escalation-run-2"));
+    let parent = series(&a, "thread");
+    let child = series(&b, "escalation-run-2");
+    assert_eq!((child.0, child.1), (parent.0, parent.1));
+    assert!(
+        row(&config, "escalation-run-2")
+            .expect("mirrored once settled")
+            .archived
+    );
+}
+
+#[test]
+fn a_pending_thread_saved_before_the_retry_is_settled_by_a_restarted_or_another_window() {
+    // Given: the escalation was folded under a lock; then the lock was freed and an
+    // ordinary save wrote the pending child before any retry ran.
+    let directory = tempfile::tempdir().unwrap();
+    let (mut a, _, path) = two_windows(directory.path());
+    let mut b = window_on(&path);
+    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    let lock = lock_file(&path);
+    b.apply_events([escalation("run-1", "run-2")]);
+    drop(lock);
+    b.save_sidebar();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("\"state_pending\": true"), "{saved}");
+    drop(b);
+
+    // When: another window (a restart, or a window of another process) loads the file
+    // and mirrors.
+    let (mut c, storage, config) = mirroring(&path, directory.path());
+    assert!(pending(&c, "escalation-run-2"));
+    c.sync_thread_mirror(Instant::now());
+    barrier(&storage);
+
+    // Then: the pending record is held back from the database until it settles it.
+    assert!(row(&config, "escalation-run-2").is_none());
+    c.retry_pending_family_state(Instant::now() + Duration::from_secs(5));
+    barrier(&storage);
+    assert!(!pending(&c, "escalation-run-2"));
+    assert!(row(&config, "escalation-run-2").expect("mirrored").archived);
+    // And: the file no longer carries the flag.
+    let settled = workspace_ui::load_sidebar(&path).unwrap();
+    assert!(settled.threads.iter().all(|thread| !thread.state_pending));
+}
+
+#[test]
+fn several_pending_threads_stay_unmirrored_until_one_transaction_settles_all_of_them() {
+    // Given: two escalated children created under a lock, a retry that still cannot lock.
+    let directory = tempfile::tempdir().unwrap();
+    let (mut a, _, path) = two_windows(directory.path());
+    let (mut b, storage, config) = mirroring(&path, directory.path());
+    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    let lock = lock_file(&path);
+    b.apply_events([escalation("run-1", "run-2"), escalation("run-1", "run-3")]);
+    b.retry_pending_family_state(Instant::now() + Duration::from_secs(5));
+    b.sync_thread_mirror(Instant::now());
+    barrier(&storage);
+    assert!(pending(&b, "escalation-run-2") && pending(&b, "escalation-run-3"));
+    assert!(row(&config, "escalation-run-2").is_none());
+    assert!(row(&config, "escalation-run-3").is_none());
+
+    // When: the lock is free and one retry runs.
+    drop(lock);
+    b.retry_pending_family_state(Instant::now() + Duration::from_secs(10));
+    barrier(&storage);
+
+    // Then: both are settled in that one transaction and both are mirrored as archived.
+    for id in ["escalation-run-2", "escalation-run-3"] {
+        assert!(!pending(&b, id), "{id}");
+        assert!(row(&config, id).expect("mirrored").archived, "{id}");
+    }
+}
+
+#[test]
+fn a_pending_thread_waits_for_its_own_pending_parent() {
+    use workspace_ui::{ProjectId, ThreadRecord};
+    let project = ProjectId::new("p");
+    let mut parent = ThreadRecord::new(ThreadId::new("parent"), project.clone(), "parent");
+    parent.set_archived(true, 5);
+    let mut middle = ThreadRecord::new(ThreadId::new("middle"), project.clone(), "middle");
+    middle.parent_thread_id = Some(parent.id.clone());
+    middle.state_pending = true;
+    let mut leaf = ThreadRecord::new(ThreadId::new("leaf"), project, "leaf");
+    leaf.parent_thread_id = Some(middle.id.clone());
+    leaf.state_pending = true;
+    // The leaf comes first: it can only settle after its parent did.
+    let mut threads = vec![leaf, middle, parent];
+
+    super::thread_archive::settle_pending_threads(&mut threads);
+
+    for thread in &threads {
+        assert!(!thread.state_pending, "{}", thread.id);
+        assert!(thread.archived, "{}", thread.id);
+    }
 }

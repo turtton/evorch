@@ -79,8 +79,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// archive and pin state against the newest sidebar under the save lock. A
     /// history event cannot fail, so when the sidebar cannot be locked or read the
     /// child is still created, in the neutral state (not archived, not pinned,
-    /// revision 0), and settled later by [`Self::retry_pending_family_state`]; until
-    /// then it is not mirrored to the database.
+    /// revision 0) and flagged `state_pending`. The flag is saved with the record: any
+    /// window that can lock the file settles it later ([`Self::retry_pending_family_state`]),
+    /// also after a restart, and until then the record is not told to the database.
     fn create_escalation_thread(
         &mut self,
         id: &ThreadId,
@@ -98,24 +99,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
         child.parent_thread_id = Some(parent.id.clone());
         child.escalation_source_run_id = Some(source_run_id.into());
+        child.state_pending = true;
         self.sidebar.threads.push(child.clone());
         let settled = self.shared_sidebar_transact_detached(|latest| {
             let threads = &mut latest.sidebar.threads;
-            let source = threads
-                .iter()
-                .find(|thread| thread.id == parent.id)
-                .cloned()
-                .ok_or(workspace_ui::ThreadError::UnknownThread)?;
             // The local child is the record to settle: it joins the newest state.
             if !threads.iter().any(|thread| &thread.id == id) {
                 threads.push(child.clone());
             }
-            let record = threads
-                .iter_mut()
+            super::thread_archive::settle_pending_threads(threads);
+            threads
+                .iter()
                 .find(|thread| &thread.id == id)
-                .ok_or(workspace_ui::ThreadError::UnknownThread)?;
-            record.adopt_state_of(&source);
-            Ok(record.clone())
+                .cloned()
+                .ok_or(workspace_ui::ThreadError::UnknownThread)
         });
         match settled {
             Ok(settled) => {
@@ -124,8 +121,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, thread = %id, "escalated thread created before its archive state could be settled");
-                self.defer_family_state(id.clone(), parent.id.clone());
+                tracing::warn!(%error, thread = %id, "escalated thread created before its archive state could be settled; it is saved as pending");
             }
         }
     }
