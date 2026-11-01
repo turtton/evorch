@@ -80,7 +80,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(id)
     }
 
-    /// Show another version of the active conversation.
+    /// Show another version of the active conversation. The row keeps its archive
+    /// and pin state across versions, taken from the newest sidebar under the save
+    /// lock; when that cannot be locked or read, nothing changes.
     pub fn switch_version(&mut self, target: ThreadId) -> Result<(), WorkbenchError> {
         if !self
             .sidebar
@@ -90,28 +92,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             return Err(ThreadError::UnknownThread.into());
         }
-        let current = workspace_ui::visible_version(&self.sidebar.threads, &target);
-        let shown = current.as_ref().and_then(|id| {
-            self.sidebar
-                .threads
-                .iter()
-                .find(|thread| &thread.id == id)
-                .cloned()
-        });
-        workspace_ui::show_version(&mut self.sidebar.threads, &target);
-        if let Some(shown) = &shown
-            && let Some(thread) = self
-                .sidebar
-                .threads
-                .iter_mut()
-                .find(|thread| thread.id == target)
-        {
-            // The sidebar row keeps its state across versions; the edit is numbered.
-            thread.adopt_state_of(shown);
-        }
-        if let Some(current) = &current {
-            self.reconcile_family_state(&target, current);
-        }
+        self.shared_sidebar_transact(|latest| {
+            let threads = &mut latest.sidebar.threads;
+            if !threads.iter().any(|thread| thread.id == target) {
+                return Err(ThreadError::UnknownThread);
+            }
+            let shown = workspace_ui::visible_version(threads, &target)
+                .and_then(|current| threads.iter().find(|thread| thread.id == current).cloned());
+            workspace_ui::show_version(threads, &target);
+            if let Some(shown) = &shown
+                && let Some(thread) = threads.iter_mut().find(|thread| thread.id == target)
+            {
+                thread.adopt_state_of(shown);
+            }
+            Ok(())
+        })
+        .map_err(WorkbenchError::sidebar_busy)?;
         self.switch_thread(target)?;
         self.save_sidebar();
         Ok(())
@@ -190,19 +186,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    /// Creates a branch of `source` and shows it. The branch is created, and its
+    /// archive and pin state taken from the source, on the newest sidebar under the
+    /// save lock, so a window that never saw another window archive the source does
+    /// not make a live child of an archived family. When that cannot be locked or
+    /// read, nothing is created.
     pub(super) fn branch_thread(
         &mut self,
         source: &ThreadId,
         point: Option<ForkPoint>,
         kind: LineageKind,
     ) -> Result<ThreadId, WorkbenchError> {
-        let original = self
+        if !self
             .sidebar
             .threads
             .iter()
-            .find(|thread| &thread.id == source)
-            .cloned()
-            .ok_or(ThreadError::UnknownThread)?;
+            .any(|thread| &thread.id == source)
+        {
+            return Err(ThreadError::UnknownThread.into());
+        }
         let empty = TranscriptModel::new();
         let transcript = self
             .thread_transcript(source)
@@ -210,39 +212,50 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .branch_at(point.as_ref(), kind, &source.to_string())
             .ok_or(WorkbenchError::Branch("Branch point not found in history"))?;
         let id = self.branch_id(source, kind);
-        let mut record = ThreadRecord {
-            archived: original.archived,
-            archived_at: original.archived_at,
-            archive_revision: original.archive_revision,
-            pinned: original.pinned,
-            pin_revision: original.pin_revision,
-            model_preference: original.model_preference.clone(),
-            chat_role: original.chat_role,
-            // Branches keep the source's read-only grant; switching declares it (ADR 0037).
-            extra_read_dirs: original.extra_read_dirs.clone(),
-            ..ThreadRecord::new(
-                id.clone(),
-                original.project_id.clone(),
-                original.title.clone(),
-            )
-        };
-        record.parent_thread_id = Some(source.clone());
-        record.lineage = Some(ThreadLineage { kind, point });
-        match kind {
-            LineageKind::Fork => record.title = format!("{} (fork)", original.title),
-            LineageKind::Rewind => {
-                // A version replaces its source in place, including its sidebar position.
-                record.created_at = original.created_at;
-                record.title_is_placeholder = original.title_is_placeholder;
+        self.shared_sidebar_transact(|latest| {
+            let threads = &mut latest.sidebar.threads;
+            let original = threads
+                .iter()
+                .find(|thread| &thread.id == source)
+                .cloned()
+                .ok_or(ThreadError::UnknownThread)?;
+            if threads.iter().any(|thread| thread.id == id) {
+                return Err(ThreadError::DuplicateThread);
             }
-        }
-        self.sidebar.threads.push(record);
+            let mut record = ThreadRecord {
+                archived: original.archived,
+                archived_at: original.archived_at,
+                archive_revision: original.archive_revision,
+                pinned: original.pinned,
+                pin_revision: original.pin_revision,
+                model_preference: original.model_preference.clone(),
+                chat_role: original.chat_role,
+                // Branches keep the source's read-only grant; switching declares it (ADR 0037).
+                extra_read_dirs: original.extra_read_dirs.clone(),
+                ..ThreadRecord::new(
+                    id.clone(),
+                    original.project_id.clone(),
+                    original.title.clone(),
+                )
+            };
+            record.parent_thread_id = Some(source.clone());
+            record.lineage = Some(ThreadLineage { kind, point });
+            match kind {
+                LineageKind::Fork => record.title = format!("{} (fork)", original.title),
+                LineageKind::Rewind => {
+                    // A version replaces its source in place, including its sidebar position.
+                    record.created_at = original.created_at;
+                    record.title_is_placeholder = original.title_is_placeholder;
+                }
+            }
+            threads.push(record);
+            if kind == LineageKind::Rewind {
+                workspace_ui::show_version(threads, &id);
+            }
+            Ok(())
+        })
+        .map_err(WorkbenchError::sidebar_busy)?;
         self.transcripts.insert_thread(&id.to_string(), transcript);
-        if kind == LineageKind::Rewind {
-            workspace_ui::show_version(&mut self.sidebar.threads, &id);
-        }
-        // The branch starts in its source's state as the newest sidebar has it.
-        self.reconcile_family_state(&id, source);
         self.switch_thread(id.clone())?;
         self.save_sidebar();
         Ok(id)

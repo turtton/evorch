@@ -119,6 +119,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .sidebar
             .threads
             .iter()
+            // A thread whose archive state is not settled against the shared sidebar
+            // is not told to the database yet.
+            .filter(|thread| {
+                !self
+                    .pending_family
+                    .threads
+                    .iter()
+                    .any(|(pending, _)| pending == &thread.id)
+            })
             .filter_map(|thread| thread_upsert(thread, roots.get(&thread.project_id).cloned()))
             .filter(|upsert| link.mirrored.get(&upsert.thread_id) != Some(upsert))
             .collect();

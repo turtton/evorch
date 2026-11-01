@@ -38,13 +38,13 @@ impl Default for Splash {
 #[allow(unreachable_patterns)]
 fn stage_label(stage: Stage) -> String {
     match stage {
-        Stage::Backfill => "イベントの帰属を整理".to_owned(),
-        Stage::Explore => "削除対象を探索".to_owned(),
-        Stage::Finalize => "削除を確定".to_owned(),
-        Stage::Owners => "所有情報を整理".to_owned(),
-        Stage::Scratch => "作業ディレクトリを削除".to_owned(),
-        Stage::Oversized => "大きな行を削除".to_owned(),
-        Stage::Vacuum => "空き領域を回収".to_owned(),
+        Stage::Backfill => "Attributing events".to_owned(),
+        Stage::Explore => "Exploring threads to delete".to_owned(),
+        Stage::Finalize => "Confirming deletions".to_owned(),
+        Stage::Owners => "Cleaning owner records".to_owned(),
+        Stage::Scratch => "Removing scratch directories".to_owned(),
+        Stage::Oversized => "Removing oversized rows".to_owned(),
+        Stage::Vacuum => "Reclaiming free space".to_owned(),
         _ => format!("{stage:?}"),
     }
 }
@@ -54,7 +54,7 @@ impl Splash {
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
-            message: "ロックを取得しています…".to_owned(),
+            message: "Acquiring locks…".to_owned(),
             stages: Vec::new(),
             confirmed_families: 0,
             error: None,
@@ -64,19 +64,17 @@ impl Splash {
 
     pub fn apply(&mut self, event: &StartupEvent) {
         match event {
-            StartupEvent::ExclusiveTaken => {
-                "サイドバーを読み込んでいます…".clone_into(&mut self.message)
-            }
+            StartupEvent::ExclusiveTaken => "Reading the sidebar…".clone_into(&mut self.message),
             StartupEvent::ExclusiveUnavailable => {
-                "別のウィンドウが動作中のため、起動時の保守は行いません。"
+                "Another window is running; startup maintenance is skipped."
                     .clone_into(&mut self.message);
             }
             StartupEvent::SidebarLoaded { threads } => {
-                self.message = format!("{threads} 件のスレッドを確認しています…");
+                self.message = format!("Checking {threads} threads…");
             }
             StartupEvent::Phase(progress) => self.apply_progress(progress),
             StartupEvent::Shared => {
-                "共有ロックに切り替えました。".clone_into(&mut self.message);
+                "Locks are now shared.".clone_into(&mut self.message);
             }
         }
     }
@@ -105,7 +103,7 @@ impl Splash {
     /// The start-up is over and the workbench is being restored.
     pub fn restoring(&mut self) {
         self.restoring = true;
-        "履歴を復元しています…".clone_into(&mut self.message);
+        "Restoring history…".clone_into(&mut self.message);
     }
 
     pub fn fail(&mut self, error: impl Into<String>) {
@@ -144,15 +142,15 @@ impl Splash {
             }
             if self.confirmed_families > 0 {
                 ui.add_space(8.0);
-                ui.label(format!("削除を確定した系統: {}", self.confirmed_families));
+                ui.label(format!("Confirmed families: {}", self.confirmed_families));
             }
             ui.add_space(8.0);
-            ui.label(format!("経過 {:.1} 秒", self.elapsed().as_secs_f32()));
+            ui.label(format!("Elapsed {:.1} s", self.elapsed().as_secs_f32()));
             if let Some(error) = &self.error {
                 ui.add_space(12.0);
                 ui.colored_label(
                     ui.visuals().error_fg_color,
-                    format!("起動に失敗しました: {error}"),
+                    format!("Startup failed: {error}"),
                 );
             }
         });
@@ -212,11 +210,11 @@ mod tests {
         harness.run_steps(2);
 
         // Then: finished and running stages are marked, and the confirmed count shows.
-        harness.get_by_label("✓ イベントの帰属を整理");
-        harness.get_by_label("● 削除対象を探索");
-        harness.get_by_label("削除を確定した系統: 1");
-        assert!(harness.query_by_label_contains("確定").is_some());
-        assert!(harness.query_by_label_contains("起動に失敗").is_none());
+        harness.get_by_label("✓ Attributing events");
+        harness.get_by_label("● Exploring threads to delete");
+        harness.get_by_label("Confirmed families: 1");
+        assert!(harness.query_by_label_contains("Confirmed").is_some());
+        assert!(harness.query_by_label_contains("Startup failed").is_none());
     }
 
     #[test]
@@ -230,7 +228,7 @@ mod tests {
         let mut harness = Harness::new_ui(|ui| splash.ui(ui));
         harness.run_steps(2);
 
-        harness.get_by_label("履歴を復元しています…");
-        harness.get_by_label_contains("起動に失敗しました: database is locked");
+        harness.get_by_label("Restoring history…");
+        harness.get_by_label_contains("Startup failed: database is locked");
     }
 }

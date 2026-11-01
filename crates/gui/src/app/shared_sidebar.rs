@@ -141,6 +141,19 @@ fn merge_three_way(
     }
 }
 
+/// The outcome of one transaction on the shared sidebar.
+struct Commit {
+    /// This process's state when the transaction began.
+    local: HistorySidebar,
+    /// The newest state with the edit applied.
+    latest: HistorySidebar,
+    /// Threads whose records differ from the file's (this process's own changes).
+    own: BTreeSet<String>,
+    /// What was written to the file, if anything.
+    written: Option<Vec<u8>>,
+    stamp: Option<FileStamp>,
+}
+
 fn all_thread_ids(history: &HistorySidebar) -> BTreeSet<String> {
     history
         .sidebar
@@ -262,8 +275,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             match merged {
                 Ok(merged) if merged != local => output = Some(merged),
                 Ok(_) => {}
+                // The newest saved state cannot be read or merged, so this process cannot
+                // tell what pins and archives other windows made. Writing its own state
+                // could undo them (and the next start would trust the result), so
+                // nothing is written until the file can be read again.
                 Err(error) => {
-                    tracing::warn!(%error, "could not merge the shared sidebar; saving this process's state only");
+                    tracing::error!(%error, path = %path.display(), "could not merge the shared sidebar; not saving over it");
+                    return Err(error);
                 }
             }
         }
@@ -282,8 +300,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// windows saved meanwhile. The result is written, adopted by this process and
     /// mirrored at once.
     ///
-    /// Nothing changes here when the lock cannot be taken, when `op` fails or
-    /// when it changes nothing (nothing is written then).
+    /// Nothing changes here when the lock cannot be taken, when the file cannot be
+    /// read or merged, when `op` fails or when it changes nothing (nothing is
+    /// written then).
     ///
     /// # Errors
     /// The file is locked by another process, unreadable or unwritable, or `op` failed.
@@ -291,6 +310,49 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &mut self,
         op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        let (output, commit) = self.commit_shared_sidebar(op)?;
+        let Some(commit) = commit else {
+            return Ok(output);
+        };
+        self.adopt_saved(&commit.local, commit.latest, &commit.own);
+        if let Some(bytes) = commit.written {
+            let mut shared = self.shared_sidebar.borrow_mut();
+            shared.stamp = commit.stamp;
+            shared.import_pending = false;
+            shared.save_deferred = false;
+            shared.base = Some(bytes);
+        }
+        self.force_thread_mirror();
+        Ok(output)
+    }
+
+    /// [`Self::shared_sidebar_transact`] for an edit made while events are being
+    /// folded: the result is written to the file but not adopted, nothing is
+    /// mirrored, and the next import or save merges what other windows saved. The
+    /// caller applies `op`'s output to its own copy of the records it edited.
+    ///
+    /// # Errors
+    /// As [`Self::shared_sidebar_transact`].
+    pub(super) fn shared_sidebar_transact_detached<T>(
+        &mut self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let (output, commit) = self.commit_shared_sidebar(op)?;
+        if commit.is_some_and(|commit| commit.written.is_some()) {
+            let mut shared = self.shared_sidebar.borrow_mut();
+            shared.stamp = None;
+            shared.import_pending = true;
+            shared.save_deferred = false;
+        }
+        Ok(output)
+    }
+
+    /// Runs `op` on the newest state and writes the result. `None` when `op` changed
+    /// nothing; `Commit::written` is `None` without a shared file.
+    fn commit_shared_sidebar<T>(
+        &self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+    ) -> Result<(T, Option<Commit>), Box<dyn std::error::Error>> {
         let local = HistorySidebar {
             sidebar: self.sidebar.clone(),
             user_messages: self.history.clone(),
@@ -302,9 +364,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             let output = op(&mut latest)?;
             super::thread_retention::prune_tombstoned(&mut latest, &self.tombstones);
             let own = all_thread_ids(&latest);
-            self.adopt_saved(&local, latest, &own);
-            self.force_thread_mirror();
-            return Ok(output);
+            let commit = Commit {
+                local,
+                latest,
+                own,
+                written: None,
+                stamp: None,
+            };
+            return Ok((output, Some(commit)));
         };
         let _lock = SidebarLock::acquire(&path)?;
         let disk = match std::fs::read(&path) {
@@ -315,28 +382,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut latest = local.clone();
         let mut disk_threads = BTreeMap::new();
         if let Some(bytes) = &disk {
-            match parse(bytes) {
-                Ok(parsed) => {
-                    let base = self
-                        .shared_sidebar
-                        .borrow()
-                        .base
-                        .as_deref()
-                        .map(parse)
-                        .transpose()?
-                        .unwrap_or_default();
-                    latest = merge_saved(&base, &local, &parsed, &self.tombstones);
-                    disk_threads = parsed
-                        .sidebar
-                        .threads
-                        .into_iter()
-                        .map(|thread| (thread.id.to_string(), thread))
-                        .collect();
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not merge the shared sidebar; saving this process's state only");
-                }
-            }
+            // An unreadable file is not "no file": the pins and archives in it are
+            // unknown, so the edit is refused and the file stays as it is.
+            let parsed = parse(bytes)?;
+            let base = self
+                .shared_sidebar
+                .borrow()
+                .base
+                .as_deref()
+                .map(parse)
+                .transpose()?
+                .unwrap_or_default();
+            latest = merge_saved(&base, &local, &parsed, &self.tombstones);
+            disk_threads = parsed
+                .sidebar
+                .threads
+                .into_iter()
+                .map(|thread| (thread.id.to_string(), thread))
+                .collect();
         }
         let merged = latest.clone();
         let output = op(&mut latest)?;
@@ -344,7 +407,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             && latest.user_messages == merged.user_messages
             && latest.composer_drafts == merged.composer_drafts
         {
-            return Ok(output);
+            return Ok((output, None));
         }
         latest.sidebar.validate()?;
         let bytes = serde_json::to_vec_pretty(&HistorySidebarRef {
@@ -353,6 +416,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             composer_drafts: &latest.composer_drafts,
         })?;
         write_atomically(&path, &bytes)?;
+        #[cfg(test)]
+        self.sidebar_write_count
+            .set(self.sidebar_write_count.get() + 1);
         let own: BTreeSet<String> = latest
             .sidebar
             .threads
@@ -360,19 +426,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .filter(|thread| disk_threads.get(&thread.id.to_string()) != Some(*thread))
             .map(|thread| thread.id.to_string())
             .collect();
-        self.adopt_saved(&local, latest, &own);
-        {
-            let mut shared = self.shared_sidebar.borrow_mut();
-            shared.stamp = FileStamp::of(&path);
-            shared.import_pending = false;
-            shared.save_deferred = false;
-            shared.base = Some(bytes);
-        }
-        #[cfg(test)]
-        self.sidebar_write_count
-            .set(self.sidebar_write_count.get() + 1);
-        self.force_thread_mirror();
-        Ok(output)
+        Ok((
+            output,
+            Some(Commit {
+                local,
+                latest,
+                own,
+                written: Some(bytes),
+                stamp: FileStamp::of(&path),
+            }),
+        ))
     }
 
     /// Takes over what other processes saved: merges the shared file into this
@@ -518,7 +581,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
-        for thread in &new_threads {
+        for thread in new_threads.iter().filter(|thread| !own.contains(*thread)) {
             self.seed_imported_branch(thread);
         }
         for message in appeared {

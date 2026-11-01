@@ -236,3 +236,75 @@ fn a_panic_in_the_startup_thread_becomes_a_startup_error() {
         "{error}"
     );
 }
+
+#[test]
+fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
+    // Given: two archived threads of one family (the child forked from the parent),
+    // the child pinned, known to the database.
+    let fixture = Fixture::new();
+    let plan = fixture.plan(true);
+    let config = storage::StorageConfig {
+        db_path: plan.db_path.clone(),
+        ..Default::default()
+    };
+    {
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let thread = |id: &str, parent: Option<&str>| storage::threads::ThreadUpsert {
+            thread_id: id.into(),
+            parent_thread_id: parent.map(str::to_owned),
+            lineage_kind: parent.map(|_| storage::threads::ThreadLineageKind::Fork),
+            root_run_id: Some(format!("run-{id}")),
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            ..Default::default()
+        };
+        storage
+            .handle()
+            .upsert_threads_host(&[thread("parent", None), thread("child", Some("parent"))])
+            .unwrap();
+    }
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("p");
+    sidebar
+        .add_project(project.clone(), "P", fixture.dir.path())
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    for id in ["parent", "child"] {
+        sidebar
+            .create_thread(ThreadId::new(id), project.clone(), id)
+            .unwrap();
+        sidebar.threads.last_mut().unwrap().archived = true;
+    }
+    sidebar.threads[1].parent_thread_id = Some(ThreadId::new("parent"));
+    sidebar.threads[1].pinned = true;
+    workspace_ui::save_sidebar(&sidebar, plan.sidebar_path.as_ref().unwrap()).unwrap();
+
+    // When: the start-up runs (it explores the family but cannot confirm it) and the
+    // GUI's scheduler computes the statuses.
+    let (_, prelude) = collect(&plan, 30);
+    assert!(prelude.tombstones.is_empty());
+    let scheduler = gui::app::StorageRetentionScheduler {
+        storage_config: config,
+        ownership_root: plan.ownership_root.clone(),
+        sidebar_path: plan.sidebar_path.clone().unwrap(),
+        policy: std::sync::Arc::new(std::sync::Mutex::new(ThreadRetentionPolicy {
+            archived_delete_after_days: 30,
+            legacy: LegacyArchivedPolicy::Immediate,
+        })),
+    };
+    use gui::app::RetentionScheduler as _;
+    let snapshot = scheduler
+        .schedule(gui::startup::sidebar_threads(&sidebar), 1_000_000_000_000)
+        .unwrap();
+
+    // Then: both threads read as held for the pin, not as due.
+    for id in ["parent", "child"] {
+        assert_eq!(
+            snapshot.statuses[id],
+            storage::thread_retention::RetentionStatus::Blocked(
+                storage::thread_retention::BlockReason::Pinned
+            ),
+            "{id}"
+        );
+    }
+}

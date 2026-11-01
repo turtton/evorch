@@ -324,15 +324,25 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   適用して採番し（`shared_sidebar_transact`）、書き込み、直後に DB へ mirror する。古い画面での操作が
   他のウィンドウの archive を取り消すことはない。ロックを取れなければ手元の状態は変えず、エラーを表示する。
   merge は archive 系列・pin 系列をそれぞれ revision の高い側を丸ごと採る（同値で割れたら保護側）。
-  fork・rewind の版切替・escalation で作る記録は、親（または切替前の版）の archive / pin 状態を採番付きで受け継ぐ。
+  fork・rewind・版切替も同じ transact の中で行い（新しい記録の作成と、親または切替前の版の archive / pin 状態の継承を
+  最新の sidebar に対して確定する）、ロックを取れない・ファイルを読めない場合は何も作らず失敗する。sidebar.json を
+  読めない（壊れている）ときは、archive / pin の操作も通常の保存も、ファイルを上書きせずエラーにする（他のウィンドウの
+  pin / archive を確認できないまま古い状態を書くと、次回起動の削除判定に使われるため）。escalation の子はイベントの
+  畳み込み中に作るため失敗させられない: transact（書込みのみで手元へは取り込まない）で親の最新の状態を継承し、ロックを
+  取れなければ中立の状態（未 archive・未 pin・revision 0）で作って、取れるまで再試行する。それまで DB へは mirror しない。
 - **確定後の片付け。** 再読込した tombstone に載るスレッドは、sidebar・`user_messages`・下書き・選択から外れ、
-  sidebar の 3-way merge・import・復元でも戻らない（tombstone が merge の「他方の編集を残す」規則に優先する）。
-- **表示。** アーカイブ一覧のタイトルのホバーに「あと N 日で削除」「次回起動時に削除予定」
-  「削除保留（理由）」を出す（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
-  起動後・60 秒ごと・archive / unarchive / pin の後に計算する。束縛が不一致のときは「削除無効（構成不一致）」。
-- **通知。** 起動後に確定があった（または失敗があった）ときだけ「起動時の保守: N スレッド（M run）を削除確定、
-  約 X MB を回収予定。スキップ理由: …」を 1 件出す。束縛不一致は「削除機能は無効です（構成不一致: 理由）」。
-  `NoExclusive` は通知せず、ログだけ。
+  sidebar の 3-way merge・import・復元・保存直前（merge しない保存も）でも戻らない（tombstone が merge の
+  「他方の編集を残す」規則に優先する）。
+- **guard。** 再読込した tombstone は `AgentRuntime` と `OwnerHost` の両方に設定する（別々の保存先）。
+  runtime への設定は、目標・手順の復元など runtime の入口を使う前に行い、復元関数は設定した証拠を引数に取る。
+- **表示。** アーカイブ一覧のタイトルのホバーに "Deletes in N days" / "Deletes at next startup" /
+  "Deletion on hold (reason)" を出す（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
+  起動後・60 秒ごと・archive / unarchive / pin の後に計算し、探索済みの family の保留理由（pin・owner・
+  未期限の関連スレッド・系統の未解決・探索中）も含む。束縛が不一致のときは "Deletion disabled (configuration mismatch)"。
+  GUI の文言は既存の GUI に合わせて英語。
+- **通知。** 起動後に確定があった（または失敗があった）ときだけ "Startup maintenance: deleted N threads
+  (M runs); about X MB will be reclaimed. Skipped: …" を 1 件出す。束縛不一致は "Thread deletion is disabled
+  (configuration mismatch: reason)"。`NoExclusive` は通知せず、ログだけ。
 
 実 DB のコピーでの確認は `cargo run -p gui --example startup_phase_check -- --db COPY/evorch-events.db --root COPY/threads --sidebar COPY/sidebar.json [--days 30] [--reclaim-cycles N]`
 （窓なしで起動フェーズ・sidebar の片付け・背景回収を走らせる。**原本には使わない**）。

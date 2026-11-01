@@ -23,20 +23,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let id = ThreadId::new(event_bus::escalation_thread_id(new_run_id));
         let created = !self.sidebar.threads.iter().any(|thread| thread.id == id);
         if created {
-            let mut child = ThreadRecord::new(
-                id.clone(),
-                parent.project_id.clone(),
-                format!("Orchestrator · {}", parent.title),
-            );
-            // Numbered like any edit of the series, so it merges with other windows.
-            child.adopt_state_of(&parent);
-            child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
-            // The runtime copies the declaration at handoff; the record keeps it
-            // across restarts (ADR 0037).
-            child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
-            child.parent_thread_id = Some(parent.id.clone());
-            child.escalation_source_run_id = Some(source_run_id.into());
-            self.sidebar.threads.push(child);
+            self.create_escalation_thread(&id, &parent, source_run_id);
         }
         let thread_id = id.to_string();
         let adopted = !self.transcripts.is_thread_root(new_run_id);
@@ -86,6 +73,61 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         created || bound
+    }
+
+    /// Creates the escalated conversation as a child of `parent` and settles its
+    /// archive and pin state against the newest sidebar under the save lock. A
+    /// history event cannot fail, so when the sidebar cannot be locked or read the
+    /// child is still created, in the neutral state (not archived, not pinned,
+    /// revision 0), and settled later by [`Self::retry_pending_family_state`]; until
+    /// then it is not mirrored to the database.
+    fn create_escalation_thread(
+        &mut self,
+        id: &ThreadId,
+        parent: &ThreadRecord,
+        source_run_id: &str,
+    ) {
+        let mut child = ThreadRecord::new(
+            id.clone(),
+            parent.project_id.clone(),
+            format!("Orchestrator · {}", parent.title),
+        );
+        child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
+        // The runtime copies the declaration at handoff; the record keeps it
+        // across restarts (ADR 0037).
+        child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
+        child.parent_thread_id = Some(parent.id.clone());
+        child.escalation_source_run_id = Some(source_run_id.into());
+        self.sidebar.threads.push(child.clone());
+        let settled = self.shared_sidebar_transact_detached(|latest| {
+            let threads = &mut latest.sidebar.threads;
+            let source = threads
+                .iter()
+                .find(|thread| thread.id == parent.id)
+                .cloned()
+                .ok_or(workspace_ui::ThreadError::UnknownThread)?;
+            // The local child is the record to settle: it joins the newest state.
+            if !threads.iter().any(|thread| &thread.id == id) {
+                threads.push(child.clone());
+            }
+            let record = threads
+                .iter_mut()
+                .find(|thread| &thread.id == id)
+                .ok_or(workspace_ui::ThreadError::UnknownThread)?;
+            record.adopt_state_of(&source);
+            Ok(record.clone())
+        });
+        match settled {
+            Ok(settled) => {
+                if let Some(local) = self.sidebar.threads.iter_mut().find(|t| &t.id == id) {
+                    local.inherit_series_of(&settled);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, thread = %id, "escalated thread created before its archive state could be settled");
+                self.defer_family_state(id.clone(), parent.id.clone());
+            }
+        }
     }
 
     pub(super) fn prepare_escalation_thread(&mut self, _source_run_id: &str, run_id: &str) {

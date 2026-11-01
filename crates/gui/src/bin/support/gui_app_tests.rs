@@ -219,3 +219,59 @@ fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
             .is_some()
     );
 }
+
+#[test]
+fn the_start_up_wiring_makes_both_the_runtime_and_the_host_refuse_deleted_threads() {
+    // Given: a runtime and an ownership host as the start-up composes them, and the
+    // tombstones it read after the locks became shared.
+    let directory = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(32));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(DemoScriptModel::new(bus.clone())),
+    );
+    let host = runtime::ownership::OwnerHost::open(
+        &directory.path().join("owners"),
+        Default::default(),
+        bus,
+    )
+    .unwrap();
+    let tombstones = storage::thread_retention::TombstoneSet {
+        threads: ["gone".to_owned()].into(),
+        runs: ["gone-run".to_owned()].into(),
+        ..Default::default()
+    };
+    let goal = |thread: &str, root: &str| -> event_bus::ThreadGoalSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "goal_id": "g", "thread_id": thread, "root_run_id": root,
+            "related_root_run_ids": [], "objective": "o", "criteria": [], "checks": [],
+            "phase": "working", "review_enabled": false, "checks_paused": false,
+            "work_stopped": false, "epoch": 1, "review_round": 0, "findings": [],
+            "reason": null,
+            "usage": {"model_requests": 0, "input_tokens": 0, "output_tokens": 0},
+            "max_review_rounds": 1, "max_tokens": null, "original_request": "r"
+        }))
+        .unwrap()
+    };
+
+    // When: the wiring runs.
+    let guarded = install_runtime_tombstones(&runtime, &tombstones);
+    install_host_tombstones(&host, &tombstones);
+
+    // Then: a restore of a deleted thread or a deleted run is refused, a live one is
+    // not, and the host refuses to start the deleted thread.
+    let refusal = |thread, root| {
+        runtime
+            .restore_thread_goal(goal(thread, root))
+            .err()
+            .unwrap_or_default()
+    };
+    assert!(refusal("gone", "r1").contains("削除"));
+    assert!(refusal("live", "gone-run").contains("削除"));
+    assert!(!refusal("live", "r2").contains("削除"));
+    assert!(host.start("gone").is_err());
+    assert!(host.start("live").is_ok());
+    // And: the restore helpers only accept the proof the wiring returns.
+    restore_thread_goals(Default::default(), &runtime, &guarded);
+}

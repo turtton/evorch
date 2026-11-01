@@ -15,6 +15,8 @@ mod delivery;
 mod delivery_tests;
 mod escalation;
 mod external_commands;
+#[cfg(test)]
+mod family_state_tests;
 mod follow_ups;
 mod frame;
 mod frame_trace;
@@ -79,9 +81,7 @@ pub enum WorkbenchError {
     Thread(#[from] workspace_ui::ThreadError),
     #[error("{0}")]
     Branch(&'static str),
-    #[error(
-        "サイドバーを保存できませんでした（別のウィンドウが保存中の可能性があります）。もう一度お試しください: {0}"
-    )]
+    #[error("Could not save the sidebar (another window may be saving it). Try again: {0}")]
     SidebarBusy(String),
 }
 

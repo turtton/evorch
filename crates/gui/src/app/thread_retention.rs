@@ -215,6 +215,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
+    /// What would be saved without the deleted threads; `None` when none is held
+    /// (the common case, which costs only a scan of the ids).
+    pub(super) fn without_deleted_threads(&self) -> Option<HistorySidebar> {
+        if self.tombstones.threads.is_empty() {
+            return None;
+        }
+        let held = self
+            .sidebar
+            .threads
+            .iter()
+            .any(|thread| self.tombstones.contains_thread(&thread.id.to_string()))
+            || self
+                .history
+                .iter()
+                .any(|message| self.tombstones.contains_thread(&message.thread_id))
+            || self
+                .composer_drafts
+                .iter()
+                .any(|draft| self.tombstones.contains_thread(&draft.thread_id));
+        held.then(|| {
+            let mut history = HistorySidebar {
+                sidebar: self.sidebar.clone(),
+                user_messages: self.history.clone(),
+                composer_drafts: self.composer_drafts.clone(),
+            };
+            prune_tombstoned(&mut history, &self.tombstones);
+            history
+        })
+    }
+
     /// Drops the threads already deleted from the sidebar, its messages and drafts,
     /// then saves. A failed save is harmless: the next load removes them again.
     pub fn prune_deleted_threads(&mut self) -> usize {
@@ -340,7 +370,7 @@ pub fn startup_notice(
                 ..
             },
             _,
-        ) => Some("不明".to_owned()),
+        ) => Some("unknown".to_owned()),
         _ => None,
     };
     if let Some(reason) = mismatch {
@@ -348,7 +378,7 @@ pub fn startup_notice(
             NotificationKind::RetentionDisabled {
                 reason: reason.clone(),
             },
-            format!("削除機能は無効です（構成不一致: {reason}）"),
+            format!("Thread deletion is disabled (configuration mismatch: {reason})"),
         ));
     }
     let StartupOutcome::Ran {
@@ -367,27 +397,27 @@ pub fn startup_notice(
     let bytes: u64 = confirmed.iter().map(|family| family.estimate_bytes).sum();
     let mut skipped = Vec::new();
     if !blocked.is_empty() {
-        skipped.push(format!("{} 系統が保留", blocked.len()));
+        skipped.push(format!("{} families on hold", blocked.len()));
     }
     if !retried_over_budget.is_empty() {
         skipped.push(format!(
-            "{} 系統は次回起動で再試行",
+            "{} families retry at next startup",
             retried_over_budget.len()
         ));
     }
     if let Some(error) = owner_registry_error {
-        skipped.push(format!("所有情報を読めません（{error}）"));
+        skipped.push(format!("owner registry unreadable ({error})"));
     }
     skipped.extend(errors.iter().cloned());
     if confirmed.is_empty() && owner_registry_error.is_none() && errors.is_empty() {
         return None;
     }
     let mut summary = format!(
-        "起動時の保守: {threads} スレッド（{runs} run）を削除確定、約 {} MB を回収予定。",
+        "Startup maintenance: deleted {threads} threads ({runs} runs); about {} MB will be reclaimed.",
         bytes.div_ceil(BYTES_PER_MB)
     );
     if !skipped.is_empty() {
-        summary.push_str(&format!("スキップ理由: {}", skipped.join("、")));
+        summary.push_str(&format!(" Skipped: {}", skipped.join("; ")));
     }
     Some((NotificationKind::RetentionStartup, summary))
 }
@@ -541,6 +571,30 @@ mod tests {
         assert!(state.composer_drafts.iter().all(|d| d.thread_id != "dead"));
     }
 
+    #[test]
+    fn a_save_that_merges_nothing_still_leaves_deleted_threads_out_of_the_file() {
+        // Given: a window that still holds a thread a deletion removed, and no file yet
+        // (so the save writes this window's state as it is).
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sidebar.json");
+        let mut state = state(&path);
+        let project = state.sidebar.projects[0].id.clone();
+        state
+            .sidebar
+            .create_thread(ThreadId::new("dead"), project, "dead")
+            .unwrap();
+        state.history.push(message("dead"));
+        let state = state.with_tombstones(tombstones(&["dead"]));
+
+        // When: it saves.
+        state.save_sidebar();
+
+        // Then: the file holds the live thread and nothing of the deleted one.
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"thread\""), "{saved}");
+        assert!(!saved.contains("dead"), "{saved}");
+    }
+
     fn stale_json(history: &HistorySidebar) -> serde_json::Value {
         let mut value = serde_json::to_value(&history.sidebar).unwrap();
         value["user_messages"] = serde_json::to_value(&history.user_messages).unwrap();
@@ -658,7 +712,7 @@ mod tests {
         assert_eq!(kind, NotificationKind::RetentionStartup);
         assert_eq!(
             summary,
-            "起動時の保守: 3 スレッド（6 run）を削除確定、約 2 MB を回収予定。スキップ理由: scratch failed"
+            "Startup maintenance: deleted 3 threads (6 runs); about 2 MB will be reclaimed. Skipped: scratch failed"
         );
     }
 
@@ -693,7 +747,10 @@ mod tests {
                     reason: "sidebar differs".into()
                 }
             );
-            assert_eq!(summary, "削除機能は無効です（構成不一致: sidebar differs）");
+            assert_eq!(
+                summary,
+                "Thread deletion is disabled (configuration mismatch: sidebar differs)"
+            );
         }
     }
 

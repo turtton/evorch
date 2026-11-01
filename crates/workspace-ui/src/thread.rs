@@ -264,6 +264,16 @@ impl ThreadRecord {
         }
     }
 
+    /// Takes the archive and pin series of `other` exactly (value, time and
+    /// revision): the record is the same thread, settled elsewhere.
+    pub fn inherit_series_of(&mut self, other: &Self) {
+        self.archived = other.archived;
+        self.archived_at = other.archived_at;
+        self.archive_revision = other.archive_revision;
+        self.pinned = other.pinned;
+        self.pin_revision = other.pin_revision;
+    }
+
     /// When the conversation last had activity, never earlier than its creation.
     pub fn last_activity(&self) -> i64 {
         self.updated_at.max(self.created_at)

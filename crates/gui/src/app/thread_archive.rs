@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use workspace_ui::{LineageIndex, ThreadError, ThreadId, ThreadRecord};
 
@@ -85,13 +86,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         Ok(())
     }
 
-    /// A thread created from, or shown in place of, `source` takes its archive and
-    /// pin state from the newest sidebar, so a window that did not see another
-    /// window's archive of the source does not create a live child of an archived
-    /// family. Best effort: the local copy stands when the file cannot be locked,
-    /// and the caller's own save repeats the merge.
-    pub(super) fn reconcile_family_state(&mut self, thread: &ThreadId, source: &ThreadId) {
-        let result = self.shared_sidebar_transact(|latest| {
+    /// Takes the archive and pin state of `source` from the newest sidebar, under the
+    /// save lock, for `thread` (created from it).
+    ///
+    /// # Errors
+    /// The sidebar could not be locked, read or written; nothing changed.
+    fn reconcile_family_state(
+        &mut self,
+        thread: &ThreadId,
+        source: &ThreadId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.shared_sidebar_transact(|latest| {
             let Some(source) = latest
                 .sidebar
                 .threads
@@ -109,9 +114,39 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .ok_or(ThreadError::UnknownThread)?;
             target.adopt_state_of(&source);
             Ok(())
-        });
-        if let Err(error) = result {
-            tracing::debug!(%error, %thread, "kept the locally copied archive state");
+        })
+    }
+
+    /// Remembers a thread whose archive and pin state could not be settled against
+    /// the newest sidebar yet. Until it is, it is not mirrored, and
+    /// [`Self::retry_pending_family_state`] settles it.
+    pub(super) fn defer_family_state(&mut self, thread: ThreadId, source: ThreadId) {
+        self.pending_family.threads.push((thread, source));
+    }
+
+    /// Settles the deferred threads once the sidebar can be locked again; tried at
+    /// most once a second.
+    pub(super) fn retry_pending_family_state(&mut self, now: Instant) {
+        if self.pending_family.threads.is_empty()
+            || self.pending_family.next_try.is_some_and(|next| now < next)
+        {
+            return;
+        }
+        self.pending_family.next_try = Some(now + FAMILY_RETRY);
+        for (thread, source) in std::mem::take(&mut self.pending_family.threads) {
+            if let Err(error) = self.reconcile_family_state(&thread, &source) {
+                tracing::debug!(%error, %thread, "archive state still waits for the shared sidebar");
+                self.pending_family.threads.push((thread, source));
+            }
         }
     }
 }
+
+/// Threads created while the shared sidebar could not be locked.
+#[derive(Default)]
+pub(super) struct PendingFamily {
+    pub(super) threads: Vec<(ThreadId, ThreadId)>,
+    next_try: Option<Instant>,
+}
+
+const FAMILY_RETRY: Duration = Duration::from_secs(1);

@@ -627,27 +627,32 @@ fn hidden_count_badge(ui: &mut Ui, count: usize) {
 pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
     Some(match status {
         RetentionStatus::NotArchived | RetentionStatus::Disabled => return None,
-        RetentionStatus::DueIn { days } => format!("あと {days} 日で削除"),
-        RetentionStatus::DueNextStartup => "次回起動時に削除予定".to_owned(),
+        RetentionStatus::DueIn { days: 1 } => "Deletes in 1 day".to_owned(),
+        RetentionStatus::DueIn { days } => format!("Deletes in {days} days"),
+        RetentionStatus::DueNextStartup => "Deletes at next startup".to_owned(),
         RetentionStatus::Blocked(BlockReason::Owner(owner))
             if owner == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
         {
-            "削除無効（構成不一致）".to_owned()
+            "Deletion disabled (configuration mismatch)".to_owned()
         }
-        RetentionStatus::Blocked(reason) => format!("削除保留（{}）", block_reason_text(reason)),
+        RetentionStatus::Blocked(reason) => {
+            format!("Deletion on hold ({})", block_reason_text(reason))
+        }
     })
 }
 
 fn block_reason_text(reason: &BlockReason) -> String {
     match reason {
-        BlockReason::Pinned => "ピン留め".to_owned(),
-        BlockReason::EvalSample => "評価サンプル".to_owned(),
-        BlockReason::FamilyMemberNotDue(thread) => format!("関連スレッド {thread} が未期限"),
-        BlockReason::FamilyMemberBlocked(thread) => format!("関連スレッド {thread} が保留"),
-        BlockReason::FamilyUnresolved(_) => "系統を解決できません".to_owned(),
+        BlockReason::Pinned => "pinned".to_owned(),
+        BlockReason::EvalSample => "evaluation sample".to_owned(),
+        BlockReason::FamilyMemberNotDue(thread) => {
+            format!("related thread {thread} is not due yet")
+        }
+        BlockReason::FamilyMemberBlocked(thread) => format!("related thread {thread} is on hold"),
+        BlockReason::FamilyUnresolved(_) => "thread family cannot be resolved".to_owned(),
         BlockReason::Owner(owner) => owner.clone(),
-        BlockReason::Exploring => "準備中".to_owned(),
-        BlockReason::OverBudget => "次回起動で再試行".to_owned(),
+        BlockReason::Exploring => "still preparing".to_owned(),
+        BlockReason::OverBudget => "retried at next startup".to_owned(),
     }
 }
 
@@ -1466,36 +1471,42 @@ mod tests {
         let text = |status| super::retention_hover_text(&status);
         assert_eq!(
             text(RetentionStatus::DueIn { days: 5 }).as_deref(),
-            Some("あと 5 日で削除")
+            Some("Deletes in 5 days")
         );
         assert_eq!(
             text(RetentionStatus::DueNextStartup).as_deref(),
-            Some("次回起動時に削除予定")
+            Some("Deletes at next startup")
         );
         for (reason, expected) in [
-            (BlockReason::Pinned, "削除保留（ピン留め）"),
-            (BlockReason::EvalSample, "削除保留（評価サンプル）"),
+            (BlockReason::Pinned, "Deletion on hold (pinned)"),
+            (
+                BlockReason::EvalSample,
+                "Deletion on hold (evaluation sample)",
+            ),
             (
                 BlockReason::FamilyMemberNotDue("t2".into()),
-                "削除保留（関連スレッド t2 が未期限）",
+                "Deletion on hold (related thread t2 is not due yet)",
             ),
             (
                 BlockReason::FamilyMemberBlocked("t2".into()),
-                "削除保留（関連スレッド t2 が保留）",
+                "Deletion on hold (related thread t2 is on hold)",
             ),
             (
                 BlockReason::FamilyUnresolved("t2".into()),
-                "削除保留（系統を解決できません）",
+                "Deletion on hold (thread family cannot be resolved)",
             ),
             (
                 BlockReason::Owner("owner busy".into()),
-                "削除保留（owner busy）",
+                "Deletion on hold (owner busy)",
             ),
-            (BlockReason::Exploring, "削除保留（準備中）"),
-            (BlockReason::OverBudget, "削除保留（次回起動で再試行）"),
+            (BlockReason::Exploring, "Deletion on hold (still preparing)"),
+            (
+                BlockReason::OverBudget,
+                "Deletion on hold (retried at next startup)",
+            ),
             (
                 BlockReason::Owner(runtime::thread_retention::BINDING_MISMATCH_BLOCK.into()),
-                "削除無効（構成不一致）",
+                "Deletion disabled (configuration mismatch)",
             ),
         ] {
             assert_eq!(
@@ -1565,10 +1576,14 @@ mod tests {
         harness.get_by_label("Old chat").hover();
         harness.run_steps(3);
         // Then: the deadline shows for the archived thread only.
-        harness.get_by_label_contains("あと 3 日で削除");
+        harness.get_by_label_contains("Deletes in 3 days");
         harness.get_by_label("Live chat").hover();
         harness.run_steps(3);
-        assert!(harness.query_by_label_contains("あと 9 日で削除").is_none());
+        assert!(
+            harness
+                .query_by_label_contains("Deletes in 9 days")
+                .is_none()
+        );
     }
 
     #[test]

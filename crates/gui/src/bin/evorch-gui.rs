@@ -453,9 +453,46 @@ impl eval::evaluator::EvaluatorHost for EvaluatorHost {
     }
 }
 
+/// Proof that the runtime refuses deleted threads and runs; the restore functions
+/// below need it, so they cannot be called before the guard is installed.
+struct RuntimeGuarded(());
+
+/// Installs the deleted identities (read after the start-up locks became shared) on
+/// the runtime. Every public entry that checks them reads this one guard.
+fn install_runtime_tombstones(
+    runtime: &runtime::AgentRuntime,
+    tombstones: &storage::thread_retention::TombstoneSet,
+) -> RuntimeGuarded {
+    if runtime
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
+            tombstones.clone(),
+        ))
+        .is_err()
+    {
+        tracing::warn!("a tombstone guard was already installed on the runtime");
+    }
+    RuntimeGuarded(())
+}
+
+/// The ownership host keeps a guard of its own (`OwnerHost::start / claim / attach`).
+fn install_host_tombstones(
+    host: &runtime::ownership::OwnerHost,
+    tombstones: &storage::thread_retention::TombstoneSet,
+) {
+    if host
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
+            tombstones.clone(),
+        ))
+        .is_err()
+    {
+        tracing::warn!("a tombstone guard was already installed on the ownership host");
+    }
+}
+
 fn restore_thread_goals(
     goals: std::collections::BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     runtime: &runtime::AgentRuntime,
+    _guarded: &RuntimeGuarded,
 ) {
     for snapshot in goals.into_values() {
         if let Err(error) = runtime.restore_thread_goal(snapshot) {
@@ -469,6 +506,7 @@ fn restore_thread_todos(
     todos: std::collections::BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     runtime: &runtime::AgentRuntime,
     sidebar: &workspace_ui::SidebarState,
+    _guarded: &RuntimeGuarded,
 ) {
     for snapshot in todos.into_values() {
         if sidebar.threads.iter().any(|thread| {
@@ -895,6 +933,8 @@ fn build_workbench(
             (runtime, agent_browser)
         }
     };
+    // Before anything restores or continues a conversation.
+    let runtime_guarded = install_runtime_tombstones(&runtime, &prelude.tombstones);
     #[cfg(not(feature = "browser"))]
     drop(agent_browser);
 
@@ -1122,7 +1162,7 @@ fn build_workbench(
         });
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_goals");
-    restore_thread_goals(snapshots.goals, &runtime);
+    restore_thread_goals(snapshots.goals, &runtime, &runtime_guarded);
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_evaluator_host");
     let _ = evaluator_host.runtime.set(runtime.downgrade());
@@ -1144,7 +1184,7 @@ fn build_workbench(
     });
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_todos");
-    restore_thread_todos(snapshots.todos, &runtime, &sidebar);
+    restore_thread_todos(snapshots.todos, &runtime, &sidebar, &runtime_guarded);
     stage.finish();
     restore.finish();
 
@@ -1160,14 +1200,7 @@ fn build_workbench(
     )?);
     // Deleted threads and runs are refused from here on. The set was read after the
     // start-up locks became shared, so no other process can add to it meanwhile.
-    if ownership
-        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
-            prelude.tombstones.clone(),
-        ))
-        .is_err()
-    {
-        tracing::warn!("a tombstone guard was already installed");
-    }
+    install_host_tombstones(&ownership, &prelude.tombstones);
     // Thread scratch lives as long as this process owns the thread (ADR 0033).
     runtime.set_thread_scratch(ownership.thread_scratch());
     // Install the retained host before any later fallible startup work. State

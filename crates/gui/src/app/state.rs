@@ -156,6 +156,7 @@ pub struct WorkbenchState<S> {
     /// Threads a confirmed deletion removed; the sidebar never holds them again.
     pub(super) tombstones: storage::thread_retention::TombstoneSet,
     pub(super) retention: super::thread_retention::RetentionState,
+    pub(super) pending_family: super::thread_archive::PendingFamily,
     pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
 }
 
@@ -283,6 +284,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             thread_mirror: None,
             tombstones: Default::default(),
             retention: Default::default(),
+            pending_family: Default::default(),
             agent_browser: super::agent_browser::AgentBrowserTabs::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
