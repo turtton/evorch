@@ -120,7 +120,8 @@ impl ThreadRetention {
                 .filter(|thread| thread.archived)
                 .map(|thread| thread.thread_id.clone())
                 .collect::<Vec<_>>();
-            let now_ms = u64::try_from(input.now_ns / 1_000_000).unwrap_or(0);
+            let now_ms = u64::try_from(input.now_ns / 1_000_000)
+                .map_err(|_| RetentionError::Input("now_ns is negative".into()))?;
             let verdicts = registry.classify_for_retention(&archived)?;
             for (thread, reason) in
                 owner_blocks(&verdicts, now_ms, policy.archived_delete_after_days)

@@ -169,6 +169,7 @@ impl ArtifactStore {
                 }
             };
             outcome.listed += 1;
+            // A name that is not UTF-8 cannot be a meta file (their names are ASCII).
             let Some(name) = name.to_str() else { continue };
             if !is_meta_name(name) || after.is_some_and(|after| name <= after) {
                 continue;

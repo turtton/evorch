@@ -107,6 +107,25 @@ pub struct ScratchRemoval {
     pub complete: bool,
 }
 
+/// A failed [`ThreadScratch::remove_thread`]: what it removed before it stopped.
+#[derive(Debug)]
+pub struct ScratchRemovalError {
+    pub removed_entries: usize,
+    pub error: io::Error,
+}
+
+impl std::fmt::Display for ScratchRemovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (after removing {} entries)",
+            self.error, self.removed_entries
+        )
+    }
+}
+
+impl std::error::Error for ScratchRemovalError {}
+
 /// Per-thread scratch directories under one parent.
 #[derive(Debug)]
 pub struct ThreadScratch {
@@ -212,11 +231,23 @@ impl ThreadScratch {
     ///
     /// # Errors
     /// Fails when the parent is not a private directory of this user or an entry
-    /// cannot be unlinked (the path is in the message); the directory stays.
-    pub fn remove_thread(&self, thread_id: &str, max_entries: usize) -> io::Result<ScratchRemoval> {
+    /// cannot be unlinked (the path is in the message); the directory stays. The error
+    /// carries the entries removed before the failure, which count against the caller's
+    /// budget.
+    pub fn remove_thread(
+        &self,
+        thread_id: &str,
+        max_entries: usize,
+    ) -> Result<ScratchRemoval, ScratchRemovalError> {
         let name = thread_dir_name(thread_id);
         let mut state = self.lock();
-        let done = self.root.remove_bounded(&name, max_entries)?;
+        let done = self
+            .root
+            .remove_bounded(&name, max_entries)
+            .map_err(|failed| ScratchRemovalError {
+                removed_entries: failed.removed_entries,
+                error: failed.source,
+            })?;
         if done.complete {
             state.seen.retain(|_, (seen, _)| *seen != name);
             state.resets.remove(&name);
@@ -227,9 +258,17 @@ impl ThreadScratch {
         })
     }
 
-    /// Whether `thread_id`'s directory exists now (without following a symlink).
-    pub fn thread_dir_exists(&self, thread_id: &str) -> bool {
-        self.thread_dir(thread_id).symlink_metadata().is_ok()
+    /// Whether `thread_id`'s directory exists now, without following a link. Only an
+    /// explicit "not found" means it does not: any other failure to look is an error.
+    ///
+    /// # Errors
+    /// Fails when the path cannot be examined (a loop, a permission error, ...).
+    pub fn thread_dir_exists(&self, thread_id: &str) -> io::Result<bool> {
+        match self.thread_dir(thread_id).symlink_metadata() {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Delete directories nobody can still be using: discarded trees, threads
@@ -507,7 +546,7 @@ mod tests {
         std::fs::write(plain.join("deep/er/leaf"), "x").unwrap();
         std::os::unix::fs::symlink(&outside, plain.join("link-out")).unwrap();
 
-        assert!(scratch.thread_dir_exists("gone"));
+        assert!(scratch.thread_dir_exists("gone").unwrap());
         let first = scratch.remove_thread("gone", usize::MAX).unwrap();
         assert!(first.complete && first.removed_entries > 4, "{first:?}");
         assert!(scratch.remove_thread(odd, usize::MAX).unwrap().complete);
@@ -519,7 +558,7 @@ mod tests {
                 complete: true
             }
         );
-        assert!(!scratch.thread_dir_exists("gone"));
+        assert!(!scratch.thread_dir_exists("gone").unwrap());
 
         assert!(!plain.exists() && !digest.exists());
         assert!(other.is_dir() && run.is_dir());
@@ -601,7 +640,7 @@ mod tests {
         }
 
         let error = scratch.remove_thread("stuck", usize::MAX).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("locked"), "{error}");
         assert!(dir.exists(), "a failed deletion leaves the directory");
 

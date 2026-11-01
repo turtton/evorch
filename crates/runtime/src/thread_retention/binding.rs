@@ -51,20 +51,28 @@ struct RootBinding {
 }
 
 /// The absolute path with symlinks resolved. A missing final component (a sidebar
-/// that was never saved) resolves through its parent.
-#[must_use]
-pub fn canonical_string(path: &Path) -> String {
-    let resolved = path.canonicalize().unwrap_or_else(|_| {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        parent
-            .canonicalize()
-            .map(|parent| parent.join(path.file_name().unwrap_or_default()))
-            .unwrap_or_else(|_| path.to_path_buf())
-    });
-    resolved.to_string_lossy().into_owned()
+/// that was never saved) resolves through its parent; that is the only failure that
+/// falls back. Any other (a loop, a permission error, a path without a file name) is
+/// an error: the binding cannot be checked against a path nobody could resolve.
+///
+/// # Errors
+/// Fails when the path or its parent cannot be resolved.
+pub fn canonical_string(path: &Path) -> Result<String, RetentionError> {
+    let resolved = match path.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let name = path.file_name().ok_or_else(|| {
+                RetentionError::Input(format!("{} has no file name", path.display()))
+            })?;
+            parent.canonicalize()?.join(name)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(resolved.to_string_lossy().into_owned())
 }
 
 fn root_file(ownership_root: &Path) -> PathBuf {
@@ -114,17 +122,38 @@ pub fn check_binding(
     let Some(row) = row else {
         return Ok(BindingStatus::Unbound);
     };
-    if row.ownership_root != canonical_string(paths.ownership_root) {
+    let (root, sidebar) = match (
+        canonical_string(paths.ownership_root),
+        canonical_string(paths.sidebar_path),
+    ) {
+        (Ok(root), Ok(sidebar)) => (root, sidebar),
+        (Err(error), _) | (_, Err(error)) => {
+            return Ok(BindingStatus::Mismatch(format!(
+                "cannot resolve the paths to compare with the binding: {error}"
+            )));
+        }
+    };
+    if row.ownership_root != root {
         return Ok(BindingStatus::Mismatch(
             "database is bound to another ownership root".into(),
         ));
     }
-    if row.sidebar_path != canonical_string(paths.sidebar_path) {
+    if row.sidebar_path != sidebar {
         return Ok(BindingStatus::Mismatch(
             "database is bound to another sidebar file".into(),
         ));
     }
     Ok(BindingStatus::Bound)
+}
+
+/// Remove the scratch file the binding was written to. A failure leaves an unused
+/// file behind and never changes the outcome, so it is logged, not returned.
+fn discard_temporary(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %path.display(), "could not remove a temporary binding file");
+    }
 }
 
 /// Write the root side of the binding unless it exists. An existing file must name
@@ -142,7 +171,7 @@ pub fn write_root_binding(
     let target = root_file(ownership_root);
     let body = serde_json::to_vec(&RootBinding {
         db_id: db_id.to_owned(),
-        db_path: canonical_string(db_path),
+        db_path: canonical_string(db_path)?,
         bound_at_ns: now_ns,
     })
     .map_err(|error| RetentionError::Binding(error.to_string()))?;
@@ -153,11 +182,11 @@ pub fn write_root_binding(
         file.sync_all()
     })();
     if let Err(error) = written {
-        let _ = fs::remove_file(&temporary);
+        discard_temporary(&temporary);
         return Err(error.into());
     }
     let linked = fs::hard_link(&temporary, &target);
-    let _ = fs::remove_file(&temporary);
+    discard_temporary(&temporary);
     match linked {
         Ok(()) => {
             // Durable before the database may record the pairing.

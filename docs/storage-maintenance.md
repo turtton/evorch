@@ -227,12 +227,16 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - **scratch は実際に消えたことで完了とする。** `ThreadScratch::remove_thread(thread, max_entries)` は管理
   領域内を link をたどらずに 1 entry ずつ同期的に消し、`complete` は dir 自体を消せたときだけ true。
   予算（`scratch_dirs` と `scratch_entries`）に収まらない tree は部分的に残り、`ScratchReport.incomplete` に
-  載って次の起動が続ける。権限などの失敗は `failed`（path 付き）で、`removed` に数えない。
+  載って次の起動が続ける。権限などの失敗は `failed`（path 付き）で、`removed` に数えない。失敗するまでに消した
+  entry も予算から引く（失敗しても後続の dir が予算を超えて消すことはない）。存在確認も同じ規則で、
+  明示的な NotFound だけが「無い」を意味し、それ以外の失敗は `failed` として報告する。
 - **進捗。** `run_exclusive_phase_with_progress` が段の開始・終了、root 束縛、family の確定を呼び出し元のスレッドで
   順に通知する（`tracing` の `thread_retention` target にも info で出す）。
 - **owner の残骸。** 両ロックの下に生きたプロセスはないので、owners.db の行はすべて残骸として扱う。
   released / idle は確定でき、turn や run を持つ行は、lease の期限切れから保持期間（日数）が経つまで
-  `Blocked(Owner)`。owners.db を読めなければ何も確定しない。
+  `Blocked(Owner)`。owners.db が「無い」のは明示的な NotFound のときだけで、調べられない（symlink loop など）・
+  読めない場合は何も確定しない。パスの解決（`canonical_string`）も NotFound の最終要素だけを許し、他の失敗は
+  エラーにする。
 - **束縛。** DB と ownership root の組を最初の確定で両側に記録する（DB: `retention_identity` と
   `retention_binding`、root: `.evorch-retention-binding.json`。root 側は最初の確定の直前に書き、上書きしない）。
   どちらかが欠ける、`db_id` が違う、sidebar（`--state` で別ファイルを渡した起動を含む）や root が違う場合は

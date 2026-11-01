@@ -135,7 +135,7 @@ impl World {
             .map(|id| thread(id, true))
             .chain(active.iter().map(|id| thread(id, false)))
             .collect();
-        startup_input(&self.paths(), threads, NOW_NS)
+        startup_input(&self.paths(), threads, NOW_NS).unwrap()
     }
 
     pub fn exclusive(&self) -> ExclusiveLeases {
@@ -184,6 +184,10 @@ impl World {
             .into_iter()
             .map(|owner| owner.thread_id)
             .collect()
+    }
+
+    pub fn scratch_exists(&self, thread: &str) -> bool {
+        self.scratch().thread_dir_exists(thread).unwrap()
     }
 
     pub fn scratch(&self) -> ThreadScratch {

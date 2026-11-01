@@ -26,7 +26,7 @@ fn world_with_thread() -> World {
 fn assert_outside_state_untouched(world: &World) {
     assert!(world.tombstones().is_empty(), "no tombstone");
     assert_eq!(world.owner_rows(), ["T"], "owners.db unchanged");
-    assert!(world.scratch().thread_dir_exists("T"), "scratch unchanged");
+    assert!(world.scratch_exists("T"), "scratch unchanged");
 }
 
 // Given: a long-archived thread with an idle owner row and scratch files
@@ -48,7 +48,7 @@ fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
     assert!(report.tombstones.contains_thread("T"));
     assert!(report.tombstones.contains_run("rt"));
     assert!(world.owner_rows().is_empty());
-    assert!(!world.scratch().thread_dir_exists("T"));
+    assert!(!world.scratch_exists("T"));
     assert!(world.root_binding_file().is_file());
     assert!(world.database().retention_binding().unwrap().is_some());
     assert_eq!(
@@ -207,7 +207,7 @@ fn a_crash_after_any_stage_is_resumed_by_the_next_start() {
         assert!(ran(&report).errors.is_empty(), "{crash_at:?}");
         assert!(report.tombstones.contains_thread("T"), "{crash_at:?}");
         assert!(world.owner_rows().is_empty(), "{crash_at:?}");
-        assert!(!world.scratch().thread_dir_exists("T"), "{crash_at:?}");
+        assert!(!world.scratch_exists("T"), "{crash_at:?}");
     }
 }
 
@@ -237,7 +237,7 @@ fn owner_remnants_block_only_inside_the_grace_period() {
         );
         if confirmed {
             assert!(world.owner_rows().is_empty());
-            assert!(!world.scratch().thread_dir_exists("T"));
+            assert!(!world.scratch_exists("T"));
         } else {
             assert!(
                 matches!(view.blocked, [(_, BlockReason::Owner(_))]),
@@ -249,7 +249,7 @@ fn owner_remnants_block_only_inside_the_grace_period() {
                 "a blocked family binds nothing"
             );
             assert_eq!(world.owner_rows(), ["T"]);
-            assert!(world.scratch().thread_dir_exists("T"));
+            assert!(world.scratch_exists("T"));
             assert!(world.tombstones().is_empty());
         }
     }
@@ -274,7 +274,7 @@ fn an_unreadable_owner_registry_confirms_nothing() {
     assert!(view.confirmed.is_empty());
     assert!(view.owner_registry_error.is_some());
     assert!(world.tombstones().is_empty());
-    assert!(world.scratch().thread_dir_exists("T"));
+    assert!(world.scratch_exists("T"));
 }
 
 // Given: more scratch directories than the budget / When: the phase runs twice
@@ -296,17 +296,13 @@ fn scratch_removal_is_bounded_per_start_and_continues() {
     assert_eq!(ran(&first).scratch.removed, 2);
     let left = ["A", "B", "C"]
         .into_iter()
-        .filter(|thread| world.scratch().thread_dir_exists(thread))
+        .filter(|thread| world.scratch_exists(thread))
         .count();
     assert_eq!(left, 1);
 
     let second = world.phase_with(&policy(), &input, &budget);
     assert_eq!(ran(&second).scratch.removed, 1);
-    assert!(
-        !world.scratch().thread_dir_exists("A")
-            && !world.scratch().thread_dir_exists("B")
-            && !world.scratch().thread_dir_exists("C")
-    );
+    assert!(!world.scratch_exists("A") && !world.scratch_exists("B") && !world.scratch_exists("C"));
 }
 
 fn confirmed(key: &str) -> ConfirmedFamily {
@@ -590,9 +586,9 @@ fn a_failure_after_a_confirmation_keeps_the_report() {
     let confirmed = view.confirmed[0].to_owned();
     assert_eq!(report.tombstones.threads.len(), 1);
     assert!(report.tombstones.contains_thread(&confirmed));
-    assert!(!world.scratch().thread_dir_exists(&confirmed));
+    assert!(!world.scratch_exists(&confirmed));
     let other = if confirmed == "T" { "U" } else { "T" };
-    assert!(world.scratch().thread_dir_exists(other));
+    assert!(world.scratch_exists(other));
 }
 
 fn scratch_dir_with_files(world: &World, thread: &str, files: usize) -> std::path::PathBuf {
@@ -675,4 +671,167 @@ fn a_scratch_failure_is_reported_and_retried() {
     let again = world.phase(&policy(), &input);
     assert_eq!(ran(&again).scratch.removed, 1);
     assert!(!dir.exists());
+}
+
+/// Entries below `path` plus `path` itself, 0 when it is gone.
+fn entries_on_disk(path: &std::path::Path) -> usize {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return 1;
+    }
+    1 + std::fs::read_dir(path)
+        .unwrap()
+        .flatten()
+        .map(|entry| entries_on_disk(&entry.path()))
+        .sum::<usize>()
+}
+
+// Given: thread A whose scratch tree fails part-way (after some entries were unlinked)
+// and thread B with plenty left, and a small entry budget for the whole start
+// When: the phase runs / Then: the entries A lost before failing are charged to the
+// budget: the real total removed on disk never exceeds the budget, and the report counts
+// exactly what disappeared.
+#[test]
+fn entries_removed_before_a_failure_count_against_the_start_budget() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    for (thread, run) in [("A", "ra"), ("B", "rb")] {
+        world.archived_thread(thread, run);
+    }
+    // A holds only `sub`, full of files. Its own mode stops `sub` from being unlinked, so
+    // the failure comes last, after all of `sub`'s files were removed.
+    let a = world.scratch_dir("A");
+    for entry in std::fs::read_dir(&a).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    let sub = a.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    for index in 0..8 {
+        std::fs::write(sub.join(format!("file-{index}")), "x").unwrap();
+    }
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let b = scratch_dir_with_files(&world, "B", 30);
+    if std::fs::write(a.join("probe"), "x").is_ok() {
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let budget = StartupBudget {
+        scratch_entries: 12,
+        ..StartupBudget::default()
+    };
+    let before = entries_on_disk(&a) + entries_on_disk(&b);
+
+    let report = world.phase_with(&policy(), &world.input(&["A", "B"], &[]), &budget);
+
+    let view = ran(&report);
+    let removed_on_disk = before - (entries_on_disk(&a) + entries_on_disk(&b));
+    assert!(
+        removed_on_disk <= 12,
+        "{removed_on_disk} entries removed, budget 12"
+    );
+    assert_eq!(
+        view.scratch.entries_removed, removed_on_disk,
+        "{:?}",
+        view.scratch
+    );
+    assert_eq!(view.scratch.failed.len(), 1, "{:?}", view.scratch);
+    assert_eq!(view.scratch.failed[0].0, "A");
+    assert!(a.exists(), "A could not be emptied");
+    assert_eq!(
+        view.scratch.entries_removed, 12,
+        "8 from A, the 4 left from B"
+    );
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+// Given: an owners.db that cannot even be examined (a symlink loop)
+// When: the phase runs / Then: that is not "no registry": nothing is confirmed, no
+// tombstone is written, nothing outside the database changes and the reason is reported.
+#[test]
+fn an_unexaminable_owner_registry_confirms_nothing() {
+    let world = World::new();
+    world.archived_thread("T", "rt");
+    world.scratch_dir("T");
+    let owners = world.root.join("owners.db");
+    std::os::unix::fs::symlink("owners.db", &owners).unwrap();
+
+    let report = world.phase(&policy(), &world.input(&["T"], &[]));
+
+    let view = ran(&report);
+    assert!(view.confirmed.is_empty());
+    assert!(
+        view.owner_registry_error.is_some(),
+        "{view:?}",
+        view = view.errors
+    );
+    assert!(world.tombstones().is_empty());
+    assert!(world.scratch_exists("T"));
+    assert!(!world.root_binding_file().exists());
+}
+
+// Given: a scratch parent that cannot be examined (a symlink loop) and a confirmed thread
+// When: the phase runs / Then: the failure to look is reported for the thread (not read as
+// "no directory"), and the next start with a readable parent finishes the removal.
+#[test]
+fn a_scratch_directory_that_cannot_be_examined_is_reported_not_skipped() {
+    let world = World::new();
+    world.archived_thread("T", "rt");
+    let parent = world.scratch().parent().to_path_buf();
+    let name = parent.file_name().unwrap().to_owned();
+    assert!(!parent.exists());
+    std::os::unix::fs::symlink(&name, &parent).unwrap();
+
+    let report = world.phase(&policy(), &world.input(&["T"], &[]));
+
+    let view = ran(&report);
+    assert_eq!(view.confirmed.len(), 1, "the deletion itself stands");
+    assert_eq!(view.scratch.removed, 0);
+    assert_eq!(view.scratch.failed.len(), 1, "{:?}", view.scratch);
+    assert_eq!(view.scratch.failed[0].0, "T");
+
+    std::fs::remove_file(&parent).unwrap();
+    let dir = world.scratch_dir("T");
+    let again = world.phase(&policy(), &world.input(&["T"], &[]));
+    assert_eq!(ran(&again).scratch.removed, 1);
+    assert!(!dir.exists());
+}
+
+// Given: a sidebar path below a symlink loop / When: building the phase input
+// Then: it fails instead of silently comparing an unresolved path.
+#[test]
+fn a_path_that_cannot_be_resolved_is_an_error() {
+    let world = World::new();
+    let looped = world.dir.path().join("loop");
+    std::os::unix::fs::symlink("loop", &looped).unwrap();
+    let mut paths = world.paths();
+    paths.sidebar_path = looped.join("sidebar.json");
+    assert!(super::super::startup_input(&paths, vec![], NOW_NS).is_err());
+    let database = world.database();
+    let status = super::super::check_binding(
+        &database,
+        super::super::BindingPaths {
+            ownership_root: &world.root,
+            sidebar_path: &paths.sidebar_path,
+        },
+    );
+    // Nothing is bound yet, so the check never needs the sidebar; once bound it does.
+    assert_eq!(status.unwrap(), BindingStatus::Unbound);
+    world.archived_thread("T", "rt");
+    world.phase(&policy(), &world.input(&["T"], &[]));
+    let bound = super::super::check_binding(
+        &world.database(),
+        super::super::BindingPaths {
+            ownership_root: &world.root,
+            sidebar_path: &paths.sidebar_path,
+        },
+    )
+    .unwrap();
+    assert!(matches!(bound, BindingStatus::Mismatch(reason) if reason.contains("cannot resolve")));
 }

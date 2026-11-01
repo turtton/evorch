@@ -412,9 +412,12 @@ impl ReclaimExecutor {
     }
 
     fn join(&mut self) {
+        // A closed channel means the thread already ended.
         let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::error!("the thread retention reclaim thread panicked");
         }
     }
 }

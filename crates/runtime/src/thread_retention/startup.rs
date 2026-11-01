@@ -224,18 +224,20 @@ pub enum StartupProgress {
 
 /// The input the phase needs, with the canonical paths it will compare against the
 /// binding. Build it after taking the exclusive locks.
-#[must_use]
+///
+/// # Errors
+/// Fails when a path cannot be resolved (see [`canonical_string`]).
 pub fn startup_input(
     paths: &StartupPaths,
     threads: Vec<SidebarThread>,
     now_ns: i64,
-) -> RetentionInput {
-    RetentionInput {
+) -> Result<RetentionInput, RetentionError> {
+    Ok(RetentionInput {
         threads,
-        sidebar_path: canonical_string(&paths.sidebar_path),
-        ownership_root: canonical_string(&paths.ownership_root),
+        sidebar_path: canonical_string(&paths.sidebar_path)?,
+        ownership_root: canonical_string(&paths.ownership_root)?,
         now_ns,
-    }
+    })
 }
 
 fn open_database(db_path: &Path) -> Result<Database, RetentionError> {
@@ -296,12 +298,15 @@ pub fn run_exclusive_phase_with_progress(
         }
         progress(&event);
     };
-    if input.ownership_root != canonical_string(&paths.ownership_root)
-        || input.sidebar_path != canonical_string(&paths.sidebar_path)
+    if input.ownership_root != canonical_string(&paths.ownership_root)?
+        || input.sidebar_path != canonical_string(&paths.sidebar_path)?
     {
         return Err(RetentionError::Input(
             "input paths differ from the startup paths; build it with startup_input".into(),
         ));
+    }
+    if input.now_ns < 0 {
+        return Err(RetentionError::Input("now_ns is negative".into()));
     }
     let database = open_database(&paths.db_path)?;
     // Stage 0.
@@ -473,12 +478,16 @@ fn owners_db(ownership_root: &Path) -> PathBuf {
 }
 
 /// The owner registry, or `None` when this root has none yet.
+///
+/// Only an explicit "not found" means there is none. A path that cannot be examined (a
+/// loop, a permission error) is an error: who holds the threads is then unknown.
 fn open_registry(ownership_root: &Path) -> Result<Option<Registry>, RetentionError> {
     let path = owners_db(ownership_root);
-    if !path.exists() {
-        return Ok(None);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(Registry::open_existing(&path)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(RetentionError::Io(error)),
     }
-    Ok(Some(Registry::open_existing(&path)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -530,7 +539,8 @@ fn confirm_families(
             return Ok(());
         }
     };
-    let now_ms = u64::try_from(now_ns / 1_000_000).unwrap_or(0);
+    let now_ms = u64::try_from(now_ns / 1_000_000)
+        .map_err(|_| RetentionError::Input("now_ns is negative".into()))?;
     let blocks = owner_blocks(&verdicts, now_ms, policy.archived_delete_after_days);
     let binding = BindingInput {
         ownership_root: input.ownership_root.clone(),
@@ -646,14 +656,22 @@ fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudg
     let mut dirs = 0;
     let mut entries_left = budget.scratch_entries;
     for thread in threads {
-        if !scratch.thread_dir_exists(thread) {
-            continue;
+        match scratch.thread_dir_exists(thread) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            // Not "absent": nobody could look, so it is reported and retried.
+            Err(error) => {
+                ran.scratch.failed.push((thread.clone(), error.to_string()));
+                continue;
+            }
         }
         if dirs >= budget.scratch_dirs || entries_left == 0 {
             ran.scratch.remaining += 1;
             continue;
         }
         dirs += 1;
+        // Entries unlinked count against the budget whether or not the call went on to
+        // fail: the next directory gets only what is left.
         match scratch.remove_thread(thread, entries_left) {
             Ok(done) => {
                 entries_left = entries_left.saturating_sub(done.removed_entries);
@@ -664,7 +682,13 @@ fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudg
                     ran.scratch.incomplete.push(thread.clone());
                 }
             }
-            Err(error) => ran.scratch.failed.push((thread.clone(), error.to_string())),
+            Err(failed) => {
+                entries_left = entries_left.saturating_sub(failed.removed_entries);
+                ran.scratch.entries_removed += failed.removed_entries;
+                ran.scratch
+                    .failed
+                    .push((thread.clone(), failed.error.to_string()));
+            }
         }
     }
 }
