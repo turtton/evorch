@@ -245,7 +245,10 @@ pub(crate) const COLUMNS: &str = "run_id, role, name, parent_run_id, config_json
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM run_contexts WHERE run_id = ?1"),
+            &format!(
+                "SELECT {COLUMNS} FROM run_contexts WHERE run_id = ?1 \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)"
+            ),
             [run_id],
             from_row,
         )
@@ -259,7 +262,8 @@ pub(crate) fn meta(
     Ok(conn
         .query_row(
             "SELECT name, role, parent_run_id, terminal_phase, updated_at_ns \
-             FROM run_contexts WHERE run_id = ?1",
+             FROM run_contexts WHERE run_id = ?1 \
+             AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
             [run_id],
             |row| {
                 Ok(crate::RunContextMeta {
@@ -281,7 +285,8 @@ pub(crate) fn checkpoint_messages(
     Ok(conn
         .query_row(
             "SELECT messages_json FROM run_contexts \
-             WHERE run_id = ?1 AND terminal_phase = 'Checkpoint'",
+             WHERE run_id = ?1 AND terminal_phase = 'Checkpoint' \
+             AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
             [run_id],
             |row| crate::codec::text_column(row, 0),
         )
@@ -299,6 +304,7 @@ pub(crate) fn headers(
     let mut statement = conn.prepare(
         "SELECT c.run_id, c.terminal_phase, c.updated_at_ns \
          FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
+         WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
     )?;
     let rows = statement.query_map([ids], |row| {
@@ -365,7 +371,8 @@ pub fn with_descendants(
          UNION SELECT c.run_id FROM run_contexts c JOIN tree t ON c.parent_run_id = t.run_id \
          UNION SELECT u.run_id FROM usage_requests u JOIN tree t ON u.parent_run_id = t.run_id \
          WHERE u.run_id IS NOT NULL) \
-         SELECT run_id FROM tree ORDER BY run_id",
+         SELECT run_id FROM tree WHERE run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         ORDER BY run_id",
     )?;
     let rows = statement.query_map(params![ids], |row| row.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)

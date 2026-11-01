@@ -121,6 +121,22 @@ pub struct ThreadUpsert {
     pub archived: Option<bool>,
     /// Stored as `false` when a new row leaves it unknown.
     pub superseded: Option<bool>,
+    /// Unix nanoseconds the thread was archived at; `None` when no time is
+    /// known (a legacy archive) or the thread is not archived. Only the host
+    /// writes it, together with `archived` and `archive_revision`.
+    pub archived_at_ns: Option<i64>,
+    /// Whether the thread is pinned (kept from retention). Host only.
+    pub pinned: Option<bool>,
+    /// Monotonic revision of the `archived` series (`archived`,
+    /// `archived_at_ns`). `None` counts as generation 0 and is only for a host
+    /// that does not number its edits yet: an unnumbered write replaces a series
+    /// whose last writer was unnumbered too, ties with one a numbered writer has
+    /// touched (the protective side wins) and never overrides a higher
+    /// revision. Remove this path once the host numbers every edit. Host only.
+    pub archive_revision: Option<u64>,
+    /// Monotonic revision of the `pinned` series; `None` as for
+    /// [`Self::archive_revision`]. Host only.
+    pub pin_revision: Option<u64>,
     /// Unix nanoseconds. The host's positive value replaces the stored one;
     /// the runtime's is used only when none is stored.
     pub created_at_ns: i64,
@@ -135,6 +151,12 @@ impl ThreadUpsert {
         }
         if let Some(length) = self.fork_point_context_len {
             i64::try_from(length).map_err(|_| StorageError::OutOfRange("fork point length"))?;
+        }
+        for revision in [self.archive_revision, self.pin_revision]
+            .into_iter()
+            .flatten()
+        {
+            i64::try_from(revision).map_err(|_| StorageError::OutOfRange("thread revision"))?;
         }
         Ok(())
     }
@@ -157,6 +179,14 @@ pub struct ThreadRow {
     pub escalation_source_run_id: Option<String>,
     pub archived: bool,
     pub superseded: bool,
+    /// When the thread was archived; `None` for an unarchived thread or an
+    /// archive recorded without a time.
+    pub archived_at_ns: Option<i64>,
+    pub pinned: bool,
+    /// `None` until the host first synchronised the series.
+    pub archive_revision: Option<u64>,
+    /// `None` until the host first synchronised the series.
+    pub pin_revision: Option<u64>,
     pub created_at_ns: i64,
     pub updated_at_ns: i64,
     pub source: ThreadSource,
@@ -256,7 +286,7 @@ impl Database {
         cursor: Option<&ThreadCursor>,
         limit: usize,
     ) -> Result<ThreadPage, StorageError> {
-        crate::repo::threads::in_project(&self.conn, project_root, cursor, limit)
+        crate::repo::threads::in_project(&self.conn, project_root, cursor, limit, true)
     }
 
     /// Encode a position without exposing a potentially secret-bearing thread ID.

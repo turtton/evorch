@@ -58,7 +58,9 @@ pub fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadStartState
     let row = conn
         .query_row(
             "SELECT root_run_id, project_root, repo_prefix, head_commit, diff, captured_at_ns, \
-             reason, head_ref FROM thread_start_states WHERE thread_id = ?1",
+             reason, head_ref FROM thread_start_states WHERE thread_id = ?1 \
+             AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones) \
+             AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)",
             [thread_id],
             |row| {
                 Ok((
@@ -142,7 +144,8 @@ pub fn list_since(
 ) -> Result<Vec<ThreadStartSummary>, StorageError> {
     let mut statement = conn.prepare(
         "SELECT thread_id, root_run_id, project_root, captured_at_ns, reason \
-         FROM thread_start_states WHERE captured_at_ns >= ?1 \
+         FROM thread_start_states WHERE captured_at_ns >= ?1 AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones) \
+         AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY captured_at_ns DESC, thread_id",
     )?;
     let rows = statement.query_map([since_ns], |row| {

@@ -26,7 +26,10 @@ mod index;
 use crate::{RunContextReceipt, RunContextRecord, RunLedgerEntry, StorageError};
 pub(crate) use dependencies::LegacyDependencies;
 #[allow(unused_imports)]
-pub(crate) use index::{DiscoveryBatch, MAX_ATTEMPTS, SqliteThreadIndex, retry_delay_ns};
+pub(crate) use index::{
+    DiscoveryBatch, MAX_ATTEMPTS, OversizedBlock, SqliteThreadIndex, purge_index_rows,
+    purge_index_rows_with, retry_delay_ns,
+};
 
 /// What one R2 cell does. `Keep` also preserves attempts, retry time and reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +635,9 @@ fn current_source_revision(conn: &Connection, run_id: &str) -> Result<u64, Stora
 }
 
 fn load_bundle(conn: &Connection, run_id: &str) -> Result<Option<SnapshotBundle>, StorageError> {
+    if run_tombstoned(conn, run_id)? {
+        return Ok(None);
+    }
     let row = conn
         .query_row(
             &format!(
@@ -731,6 +737,15 @@ fn message_block_exists(messages_json: &str, ordinal: usize, block_index: usize)
         .is_some_and(|content| block_index < content.len())
 }
 
+/// Whether a confirmed deletion removed the run; its rows are only waiting to be reclaimed.
+fn run_tombstoned(conn: &Connection, run_id: &str) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?)
+}
+
 fn resolve(
     conn: &Connection,
     reference: &GuardedReference,
@@ -739,8 +754,9 @@ fn resolve(
         return Ok(GuardedResolution::UnsupportedVersion);
     }
     atomic(conn, || {
-        if run_row(conn, &reference.run_id)?
-            .is_some_and(|row| row.state == IndexState::Deleted || !row.source_present)
+        if run_tombstoned(conn, &reference.run_id)?
+            || run_row(conn, &reference.run_id)?
+                .is_some_and(|row| row.state == IndexState::Deleted || !row.source_present)
         {
             return Ok(GuardedResolution::SourceDeleted);
         }

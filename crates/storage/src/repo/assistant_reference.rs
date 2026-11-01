@@ -30,7 +30,7 @@ pub fn save(conn: &Connection, row: &AssistantReferenceRow) -> Result<(), Storag
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<AssistantReferenceRow>, StorageError> {
     Ok(conn.query_row(
-        "SELECT reference_id, source_run_id, turn_end, text, consumed, created_at_ns FROM assistant_references WHERE reference_id = ?1",
+        "SELECT reference_id, source_run_id, turn_end, text, consumed, created_at_ns FROM assistant_references WHERE reference_id = ?1 AND source_run_id NOT IN (SELECT run_id FROM run_tombstones)",
         [id],
         |row| {
             let turn_end: i64 = row.get(2)?;

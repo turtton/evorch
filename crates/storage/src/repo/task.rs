@@ -31,10 +31,14 @@ pub fn create(conn: &Connection, record: &TaskRecord) -> Result<(), StorageError
 
 /// 識別子に一致するタスクを返します。
 pub fn get(conn: &Connection, id: &str) -> Result<Option<TaskRecord>, StorageError> {
-    conn.query_row("SELECT * FROM tasks WHERE id = ?1", [id], task_row)
-        .optional()?
-        .map(task_from_row)
-        .transpose()
+    conn.query_row(
+        "SELECT * FROM tasks WHERE id = ?1 AND id NOT IN (SELECT task_id FROM task_tombstones)",
+        [id],
+        task_row,
+    )
+    .optional()?
+    .map(task_from_row)
+    .transpose()
 }
 
 /// タスクの全フィールドを更新します。
@@ -73,8 +77,10 @@ pub fn list_by_session(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<TaskRecord>, StorageError> {
-    let mut statement =
-        conn.prepare("SELECT * FROM tasks WHERE session_id = ?1 ORDER BY created_at_ns, id")?;
+    let mut statement = conn.prepare(
+        "SELECT * FROM tasks WHERE session_id = ?1 \
+         AND id NOT IN (SELECT task_id FROM task_tombstones) ORDER BY created_at_ns, id",
+    )?;
     statement
         .query_map([session_id], task_row)?
         .map(|row| task_from_row(row?))

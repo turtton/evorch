@@ -30,6 +30,7 @@ struct Inner {
     skipped_message_deltas: AtomicU64,
     skipped_run_progress: AtomicU64,
     skipped_subscriber_lags: AtomicU64,
+    skipped_tombstoned: AtomicU64,
     lagged_events: AtomicU64,
     failed_events: AtomicU64,
     #[cfg(test)]
@@ -75,6 +76,9 @@ pub struct StorageBridgeSnapshot {
     /// `SubscriberLagged` faults. The bus still logs each episode; only the
     /// durable row is dropped.
     pub skipped_subscriber_lags: u64,
+    /// Events refused because their run or thread was deleted by retention.
+    /// They are neither retried nor counted in `failed_events`.
+    pub skipped_tombstoned: u64,
     /// Events the lagged subscribers reported as dropped, summed over the
     /// skipped `SubscriberLagged` faults.
     pub lagged_events: u64,
@@ -122,6 +126,7 @@ impl StorageBridgeMonitor {
             skipped_message_deltas: self.0.skipped_message_deltas.load(Ordering::Relaxed),
             skipped_run_progress: self.0.skipped_run_progress.load(Ordering::Relaxed),
             skipped_subscriber_lags: self.0.skipped_subscriber_lags.load(Ordering::Relaxed),
+            skipped_tombstoned: self.0.skipped_tombstoned.load(Ordering::Relaxed),
             lagged_events: self.0.lagged_events.load(Ordering::Relaxed),
             failed_events: self.0.failed_events.load(Ordering::Relaxed),
         }
@@ -155,6 +160,10 @@ impl StorageBridgeMonitor {
 
     pub(super) fn skipped_run_progress(&self) {
         self.0.skipped_run_progress.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn skipped_tombstoned(&self) {
+        self.0.skipped_tombstoned.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn skipped_subscriber_lag(&self, skipped: u64) {

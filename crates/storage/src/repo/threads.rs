@@ -14,7 +14,69 @@ use crate::{RunContextRecord, RunLedgerEntry, StorageError};
 const COLUMNS: &str = "thread_id, project_id, project_root, title, root_run_id, chat_role, \
                        parent_thread_id, lineage_kind, fork_point_run_id, \
                        fork_point_context_len, escalation_source_run_id, archived, superseded, \
-                       created_at_ns, updated_at_ns, source";
+                       created_at_ns, updated_at_ns, source, archived_at_ns, pinned, archive_revision, \
+                       pin_revision";
+
+/// Whether the thread is invisible because a confirmed deletion tombstoned it.
+const THREAD_LIVE: &str = "thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
+
+/// How the host's archive and pin series merge into a stored row. `{r}` is the
+/// stored revision column, `{u}` its "last writer sent no revision" marker, `{p}`
+/// the supplied value and `{rev}` the supplied revision. Parameters are numbered
+/// so that a series is applied only when the host supplied its flag.
+///
+/// - Revision not initialised (NULL): adopt the supplied series as it is, with a
+///   missing revision counted as generation 0 and remembered as unnumbered. The
+///   time is never invented: it stays NULL unless supplied.
+/// - Newer revision: replace. Older: ignore. Equal: keep the protective side
+///   (archived / pinned wins) so concurrent edits never lose protection.
+/// - Unnumbered sender (the host before it numbers its edits; retire this path
+///   when it does): a missing revision is generation 0. It replaces a series whose
+///   last writer was also unnumbered, so sequential edits keep working. Against a
+///   series a numbered writer has touched (`Some(0)` included) it is an equal
+///   generation, so the protective side wins; it can never override a higher one.
+///   A numbered write that adopts or ties clears the marker, so the series stays
+///   protected from then on.
+fn series_sql(
+    flag: &str,
+    time: Option<&str>,
+    revision: &str,
+    unnumbered: &str,
+    p: &str,
+    rev: &str,
+) -> Vec<String> {
+    let adopt = format!(
+        "({p} IS NOT NULL AND (threads.{revision} IS NULL \
+         OR COALESCE({rev}, 0) > threads.{revision} \
+         OR ({rev} IS NULL AND threads.{revision} = 0 AND threads.{unnumbered} = 1)))"
+    );
+    let tie = format!(
+        "({p} IS NOT NULL AND threads.{revision} IS NOT NULL \
+         AND COALESCE({rev}, 0) = threads.{revision} \
+         AND ({rev} IS NOT NULL OR threads.{unnumbered} = 0))"
+    );
+    let mut updates = vec![
+        format!(
+            "{flag} = CASE WHEN {adopt} THEN {p} WHEN {tie} THEN max(threads.{flag}, {p}) \
+             ELSE threads.{flag} END"
+        ),
+        format!(
+            "{revision} = CASE WHEN {adopt} THEN COALESCE({rev}, 0) ELSE threads.{revision} END"
+        ),
+        format!(
+            "{unnumbered} = CASE WHEN {adopt} THEN ({rev} IS NULL) WHEN {tie} THEN 0 \
+             ELSE threads.{unnumbered} END"
+        ),
+    ];
+    if let Some(time) = time {
+        updates.push(format!(
+            "{time} = CASE WHEN {adopt} THEN (CASE WHEN {p} = 1 THEN ?16 END) \
+             WHEN {tie} AND threads.{flag} = 0 AND {p} = 1 THEN ?16 \
+             ELSE threads.{time} END"
+        ));
+    }
+    updates
+}
 
 /// Nullable definition columns merged one by one, in parameter order from `?2`.
 const MERGED: [&str; 10] = [
@@ -54,19 +116,49 @@ fn upsert_sql(writer: ThreadWriter) -> String {
         .iter()
         .map(|column| merge.replace("{c}", column))
         .collect();
-    for (column, parameter) in [("archived", "?12"), ("superseded", "?13")] {
-        updates.push(flag.replace("{c}", column).replace("{p}", parameter));
+    match writer {
+        ThreadWriter::Host => {
+            updates.extend(series_sql(
+                "archived",
+                Some("archived_at_ns"),
+                "archive_revision",
+                "archive_unnumbered",
+                "?12",
+                "?18",
+            ));
+            updates.extend(series_sql(
+                "pinned",
+                None,
+                "pin_revision",
+                "pin_unnumbered",
+                "?17",
+                "?19",
+            ));
+            updates.push(flag.replace("{c}", "superseded").replace("{p}", "?13"));
+        }
+        // The runtime never writes the archive and pin series, `archived` included.
+        ThreadWriter::Runtime => {
+            updates.push(flag.replace("{c}", "superseded").replace("{p}", "?13"));
+        }
     }
     updates.push(format!("created_at_ns = {created_at}"));
     updates.push("updated_at_ns = max(threads.updated_at_ns, excluded.updated_at_ns)".into());
     updates.push(format!("source = {source}"));
-    let inserted_source = match writer {
-        ThreadWriter::Host => ThreadSource::Host,
-        ThreadWriter::Runtime => ThreadSource::Runtime,
+    let (inserted_source, archived, series) = match writer {
+        ThreadWriter::Host => (
+            ThreadSource::Host,
+            "COALESCE(?12, 0)",
+            "CASE WHEN COALESCE(?12, 0) = 1 THEN ?16 END, COALESCE(?17, 0), \
+             CASE WHEN ?12 IS NOT NULL THEN COALESCE(?18, 0) END, \
+             CASE WHEN ?17 IS NOT NULL THEN COALESCE(?19, 0) END, \
+             CASE WHEN ?12 IS NOT NULL AND ?18 IS NULL THEN 1 ELSE 0 END, \
+             CASE WHEN ?17 IS NOT NULL AND ?19 IS NULL THEN 1 ELSE 0 END",
+        ),
+        ThreadWriter::Runtime => (ThreadSource::Runtime, "0", "NULL, 0, NULL, NULL, 0, 0"),
     };
     format!(
-        "INSERT INTO threads ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
-         COALESCE(?12, 0), COALESCE(?13, 0), ?14, ?15, '{}') \
+        "INSERT INTO threads ({COLUMNS}, archive_unnumbered, pin_unnumbered) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+         {archived}, COALESCE(?13, 0), ?14, ?15, '{}', {series}) \
          ON CONFLICT(thread_id) DO UPDATE SET {}",
         inserted_source.as_str(),
         updates.join(", ")
@@ -74,20 +166,37 @@ fn upsert_sql(writer: ThreadWriter) -> String {
 }
 
 /// Write a batch atomically; one invalid definition rejects the whole batch.
+///
+/// A host definition whose thread, parent thread, root run or escalation source
+/// was tombstoned is left out before the statement runs, so a deleted thread's
+/// late mirror cannot abort the rest of the batch; the count of those is
+/// returned. A runtime definition of such an identity (a new child thread, a
+/// lineage record) is refused with `StorageError::Tombstoned` instead: the
+/// caller is creating something new and must not be told it worked.
 pub(crate) fn upsert(
     conn: &Connection,
     writer: ThreadWriter,
     threads: &[ThreadUpsert],
-) -> Result<(), StorageError> {
+) -> Result<usize, StorageError> {
     if threads.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     threads.iter().try_for_each(ThreadUpsert::validate)?;
     let redactor = secret_guard::SecretRedactor::from_env();
     let transaction = conn.unchecked_transaction()?;
+    let mut skipped = 0;
     {
         let mut statement = transaction.prepare(&upsert_sql(writer))?;
         for thread in threads {
+            if let Some(error) = tombstoned_identity(&transaction, thread)? {
+                match writer {
+                    ThreadWriter::Host => {
+                        skipped += 1;
+                        continue;
+                    }
+                    ThreadWriter::Runtime => return Err(error),
+                }
+            }
             let title = thread
                 .title
                 .as_deref()
@@ -98,7 +207,7 @@ pub(crate) fn upsert(
                     i64::try_from(length).map_err(|_| StorageError::OutOfRange("fork point length"))
                 })
                 .transpose()?;
-            statement.execute(params![
+            let base = params![
                 thread.thread_id,
                 thread.project_id,
                 thread.project_root,
@@ -114,17 +223,70 @@ pub(crate) fn upsert(
                 thread.superseded,
                 thread.created_at_ns,
                 thread.updated_at_ns,
-            ])?;
+            ];
+            match writer {
+                ThreadWriter::Runtime => statement.execute(base)?,
+                ThreadWriter::Host => {
+                    statement.execute(rusqlite::params_from_iter(base.iter().copied().chain([
+                        &thread.archived_at_ns as &dyn rusqlite::ToSql,
+                        &thread.pinned,
+                        &thread.archive_revision.map(revision_param).transpose()?,
+                        &thread.pin_revision.map(revision_param).transpose()?,
+                    ])))?
+                }
+            };
         }
     }
     transaction.commit()?;
-    Ok(())
+    Ok(skipped)
+}
+
+fn revision_param(revision: u64) -> Result<i64, StorageError> {
+    i64::try_from(revision).map_err(|_| StorageError::OutOfRange("thread revision"))
+}
+
+/// The tombstoned identity a definition touches, if any.
+fn tombstoned_identity(
+    conn: &Connection,
+    thread: &ThreadUpsert,
+) -> Result<Option<StorageError>, StorageError> {
+    let thread_ids = [Some(&thread.thread_id), thread.parent_thread_id.as_ref()];
+    for thread_id in thread_ids.into_iter().flatten() {
+        let hit: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        if hit {
+            return Ok(Some(StorageError::Tombstoned {
+                run_id: None,
+                thread_id: Some(thread_id.clone()),
+            }));
+        }
+    }
+    for run_id in [&thread.root_run_id, &thread.escalation_source_run_id]
+        .into_iter()
+        .flatten()
+    {
+        let hit: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if hit {
+            return Ok(Some(StorageError::Tombstoned {
+                run_id: Some(run_id.clone()),
+                thread_id: None,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn get(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRow>, StorageError> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM threads WHERE thread_id = ?1"),
+            &format!("SELECT {COLUMNS} FROM threads WHERE thread_id = ?1 AND {THREAD_LIVE}"),
             [thread_id],
             thread_from_row,
         )
@@ -136,13 +298,19 @@ pub(crate) fn in_project(
     project_root: &str,
     cursor: Option<&ThreadCursor>,
     limit: usize,
+    include_archived: bool,
 ) -> Result<ThreadPage, StorageError> {
+    let live = if include_archived {
+        THREAD_LIVE.to_owned()
+    } else {
+        format!("archived = 0 AND {THREAD_LIVE}")
+    };
     let limit = limit.clamp(1, MAX_THREAD_PAGE);
     let fetch = i64::try_from(limit + 1).map_err(|_| StorageError::OutOfRange("thread page"))?;
     let mut threads = match cursor {
         None => {
             let mut statement = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 \
+                "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 AND {live} \
                  ORDER BY updated_at_ns DESC, thread_id DESC LIMIT ?2"
             ))?;
             statement
@@ -151,7 +319,7 @@ pub(crate) fn in_project(
         }
         Some(cursor) => {
             let mut statement = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 \
+                "SELECT {COLUMNS} FROM threads WHERE project_root = ?1 AND {live} \
                  AND (updated_at_ns < ?2 OR (updated_at_ns = ?2 AND thread_id < ?3)) \
                  ORDER BY updated_at_ns DESC, thread_id DESC LIMIT ?4"
             ))?;
@@ -180,7 +348,8 @@ pub(crate) fn in_project(
 
 pub(crate) fn children(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadRow>, StorageError> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM threads WHERE thread_id <> ?1 AND (parent_thread_id = ?1 \
+        "SELECT {COLUMNS} FROM threads WHERE thread_id <> ?1 AND {THREAD_LIVE} \
+         AND (parent_thread_id = ?1 \
          OR escalation_source_run_id IN (SELECT run_id FROM thread_runs WHERE thread_id = ?1)) \
          ORDER BY created_at_ns, thread_id"
     ))?;
@@ -193,9 +362,17 @@ pub(crate) fn thread_of_run(
     run_id: &str,
 ) -> Result<Option<ThreadRunRow>, StorageError> {
     let transaction = conn.unchecked_transaction()?;
-    let walk = walk(&transaction, run_id)?;
+    let walk = if run_tombstoned(&transaction, run_id)? {
+        Walk::Top {
+            root_run_id: run_id.to_owned(),
+            hops: 0,
+        }
+    } else {
+        walk(&transaction, run_id)?
+    };
     transaction.commit()?;
     match walk {
+        Walk::Thread(row) if thread_tombstoned(conn, &row.thread_id)? => Ok(None),
         Walk::Thread(row) => Ok(Some(row)),
         Walk::Top { .. } => Ok(None),
         Walk::Broken => Err(StorageError::Serialization(format!(
@@ -211,16 +388,38 @@ pub(crate) fn resolve_thread_id(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<String>, StorageError> {
+    if run_tombstoned(conn, run_id)? {
+        return Ok(None);
+    }
     Ok(match walk(conn, run_id)? {
-        Walk::Thread(row) => Some(row.thread_id),
-        Walk::Top { .. } | Walk::Broken => None,
+        Walk::Thread(row) if !thread_tombstoned(conn, &row.thread_id)? => Some(row.thread_id),
+        Walk::Thread(_) | Walk::Top { .. } | Walk::Broken => None,
     })
+}
+
+fn run_tombstoned(conn: &Connection, run_id: &str) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn thread_tombstoned(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
+        [thread_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub(crate) fn runs_of_thread(
     conn: &Connection,
     thread_id: &str,
 ) -> Result<Vec<ThreadRunRow>, StorageError> {
+    if thread_tombstoned(conn, thread_id)? {
+        return Ok(Vec::new());
+    }
     // Seeds mirror `walk`: bindings, parentless runs named for the thread and
     // the recorded root. Descendants follow both kinds of parent link.
     let mut statement = conn.prepare(
@@ -242,6 +441,7 @@ pub(crate) fn runs_of_thread(
              WHERE u.run_id IS NOT NULL AND tree.depth < ?2\
          ) \
          SELECT run_id, root_run_id, MIN(depth) AS depth FROM tree \
+         WHERE run_id NOT IN (SELECT run_id FROM run_tombstones) \
          GROUP BY run_id ORDER BY depth, run_id",
     )?;
     let rows = statement.query_map(params![thread_id, MAX_RUN_LINKS], |row| {
@@ -262,7 +462,9 @@ pub(crate) fn run_contexts_for(
     // No json_each column shares a name with a run_contexts column.
     let mut statement = conn.prepare(&format!(
         "SELECT {} FROM json_each(?1) AS requested \
-         JOIN run_contexts ON run_contexts.run_id = requested.value ORDER BY requested.key",
+         JOIN run_contexts ON run_contexts.run_id = requested.value \
+         WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
+         ORDER BY requested.key",
         crate::repo::run_context::COLUMNS
     ))?;
     let rows = statement.query_map(
@@ -279,7 +481,8 @@ pub(crate) fn latest_ledgers(
     let mut statement = conn.prepare(
         "SELECT seq, run_id, body, created_at_ns FROM run_ledger WHERE seq IN (\
          SELECT MAX(seq) FROM run_ledger \
-         WHERE run_id IN (SELECT value FROM json_each(?1)) GROUP BY run_id) \
+         WHERE run_id IN (SELECT value FROM json_each(?1)) \
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones) GROUP BY run_id) \
          ORDER BY seq",
     )?;
     let rows = statement.query_map([distinct_json(run_ids)?], crate::repo::run_ledger::from_row)?;
@@ -304,6 +507,7 @@ pub(crate) fn terminal_summaries(
              THEN json_extract(c.messages_json, '$[#-1]') END, \
          CASE WHEN typeof(c.messages_json) = 'blob' THEN c.messages_json END \
          FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
+         WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
     )?;
     let rows = statement.query_map([distinct_json(run_ids)?], |row| {
@@ -408,29 +612,75 @@ enum Walk {
 /// if it has no parent, its `chat:<Role>:<thread>` name, then a thread recording
 /// it as root; otherwise its parent.
 fn walk(conn: &Connection, run_id: &str) -> Result<Walk, StorageError> {
+    walk_counted(conn, run_id, &mut 0, false)
+}
+
+/// What the canonical run→thread rule makes of a run, for the retention closure.
+pub(crate) enum CanonicalThread {
+    Thread(String),
+    /// The ancestry names no thread.
+    None,
+    /// A parent cycle, or more than [`MAX_RUN_LINKS`] links.
+    Broken,
+}
+
+/// The thread [`thread_of_run`] would answer, without hiding tombstoned ones, and how
+/// many links were followed (`steps`). Unlike the reader, a binding found on the way
+/// does not end the walk: the whole ancestry up to its top must be acyclic and
+/// within [`MAX_RUN_LINKS`], so a bound run with a self parent or a loop is `Broken`.
+pub(crate) fn canonical_thread(
+    conn: &Connection,
+    run_id: &str,
+    steps: &mut u64,
+) -> Result<CanonicalThread, StorageError> {
+    Ok(match walk_counted(conn, run_id, steps, true)? {
+        Walk::Thread(row) => CanonicalThread::Thread(row.thread_id),
+        Walk::Top { .. } => CanonicalThread::None,
+        Walk::Broken => CanonicalThread::Broken,
+    })
+}
+
+fn walk_counted(
+    conn: &Connection,
+    run_id: &str,
+    steps: &mut u64,
+    validate_ancestry: bool,
+) -> Result<Walk, StorageError> {
     let mut current = run_id.to_owned();
     let mut seen = HashSet::new();
+    // The first binding wins; with `validate_ancestry` the walk goes on to the top.
+    let mut found: Option<ThreadRunRow> = None;
     for hops in 0..=MAX_RUN_LINKS {
+        *steps += 1;
         if !seen.insert(current.clone()) {
             return Ok(Walk::Broken);
         }
-        let bound = conn
-            .query_row(
-                "SELECT thread_id, root_run_id, depth FROM thread_runs WHERE run_id = ?1",
-                [&current],
-                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?)),
-            )
-            .optional()?;
-        if let Some((thread_id, root_run_id, depth)) = bound {
-            return Ok(Walk::Thread(ThreadRunRow {
-                run_id: run_id.to_owned(),
-                thread_id,
-                root_run_id,
-                depth: depth.saturating_add(hops),
-            }));
+        if found.is_none() {
+            let bound = conn
+                .query_row(
+                    "SELECT thread_id, root_run_id, depth FROM thread_runs WHERE run_id = ?1",
+                    [&current],
+                    |row| Ok((row.get::<_, String>(0)?, row.get(1)?, depth_from(row, 2)?)),
+                )
+                .optional()?;
+            if let Some((thread_id, root_run_id, depth)) = bound {
+                let row = ThreadRunRow {
+                    run_id: run_id.to_owned(),
+                    thread_id,
+                    root_run_id,
+                    depth: depth.saturating_add(hops),
+                };
+                if !validate_ancestry {
+                    return Ok(Walk::Thread(row));
+                }
+                found = Some(row);
+            }
         }
         let (name, parent) = identity(conn, &current)?;
         let Some(parent) = parent else {
+            if let Some(row) = found {
+                return Ok(Walk::Thread(row));
+            }
             let named = name
                 .as_deref()
                 .and_then(parse_chat_run_name)
@@ -520,6 +770,16 @@ fn assistant_text(message: &str) -> Option<String> {
     (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
+fn revision_from(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+    let revision: Option<i64> = row.get(index)?;
+    revision
+        .map(|revision| {
+            u64::try_from(revision)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, revision))
+        })
+        .transpose()
+}
+
 fn depth_from(row: &Row<'_>, index: usize) -> rusqlite::Result<u32> {
     let depth: i64 = row.get(index)?;
     u32::try_from(depth).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, depth))
@@ -555,6 +815,10 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
         escalation_source_run_id: row.get(10)?,
         archived: row.get(11)?,
         superseded: row.get(12)?,
+        archived_at_ns: row.get(16)?,
+        pinned: row.get(17)?,
+        archive_revision: revision_from(row, 18)?,
+        pin_revision: revision_from(row, 19)?,
         created_at_ns: row.get(13)?,
         updated_at_ns: row.get(14)?,
         source,
