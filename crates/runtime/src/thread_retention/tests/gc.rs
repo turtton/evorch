@@ -510,30 +510,137 @@ fn a_meta_added_between_starts_without_a_reference_is_still_protected() {
     assert!(store.blob(&sha(2)).is_file());
 }
 
-// Given: more names than the lookup budget / When: the collection runs / Then: the
-// listing is not exhaustive, so the references are not complete and nothing is swept.
-#[test]
-fn a_directory_beyond_the_lookup_budget_is_never_proven_complete() {
-    let store = Store::new();
-    store.add_blob(&sha(99));
-    for n in 1..=5_u32 {
-        store.add_meta(n, &sha(u8::try_from(n).unwrap()), "T");
+/// `count` metas, each with its own blob, optionally already registered.
+fn many_metas(store: &Store, count: u32, registered: bool) {
+    for n in 1..=count {
+        let blob = sha(u8::try_from(n).unwrap());
+        store.add_blob(&blob);
+        store.add_meta(n, &blob, "T");
     }
-    let report = store.collect_with(&GcBudget {
+    if registered {
+        let references = (1..=count)
+            .map(|n| storage::artifact_refs::ArtifactRef {
+                artifact_id: id(n),
+                sha256: sha(u8::try_from(n).unwrap()),
+                thread_id: None,
+                run_id: None,
+                recorded_at_ns: 1,
+            })
+            .collect::<Vec<_>>();
+        store.world.database().gc_insert_refs(&references).unwrap();
+    }
+}
+
+// Given: more metas than one start may look up, all with references already
+// When: starts repeat with the same budget / Then: the pass continues from its position,
+// the references are complete only at the start that gets past the last name, and only
+// then is the unreferenced blob unlinked.
+#[test]
+fn a_pass_beyond_the_lookup_budget_finishes_over_several_starts_when_all_are_registered() {
+    let store = Store::new();
+    many_metas(&store, 8, true);
+    store.add_blob(&sha(99));
+    let budget = GcBudget {
         meta_lookups: 3,
         ..GcBudget::default()
-    });
+    };
 
-    assert!(!report.refs_complete);
-    assert!(
-        report.stops.contains(&GcStop::MetaLookupBudget),
-        "{report:?}"
-    );
-    assert_nothing_unlinked(&report);
+    for start in 1..=2 {
+        let report = store.collect_with(&budget);
+        assert!(!report.refs_complete, "start {start}: {report:?}");
+        assert!(report.stops.contains(&GcStop::MetaLookupBudget));
+        assert!(!report.pass_restarted);
+        assert_nothing_unlinked(&report);
+        assert!(store.blob(&sha(99)).is_file());
+    }
+    assert!(store.state().meta_cursor.is_some(), "a pass is under way");
+
+    let last = store.collect_with(&budget);
+    assert!(last.refs_complete, "{last:?}");
+    assert_eq!((last.refs_added, last.blobs_unlinked), (0, 1));
+    assert!(store.state().meta_cursor.is_none());
+
+    // The next start begins a new pass (and takes three starts again).
+    assert!(!store.collect_with(&budget).refs_complete);
+}
+
+// Given: more unregistered metas than one start may look up / When: starts repeat
+// Then: each start registers its share and the pass completes over the same number of
+// starts as the lookups need.
+#[test]
+fn a_pass_beyond_the_lookup_budget_finishes_over_several_starts_when_none_is_registered() {
+    let store = Store::new();
+    many_metas(&store, 8, false);
+    store.add_blob(&sha(99));
+    let budget = GcBudget {
+        meta_lookups: 3,
+        ..GcBudget::default()
+    };
+
+    let added = (0..3)
+        .map(|_| {
+            let report = store.collect_with(&budget);
+            (report.refs_added, report.refs_complete)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(added, [(3, false), (3, false), (2, true)]);
+    assert!(!store.blob(&sha(99)).exists());
+    assert_eq!(store.refs().len(), 8);
+}
+
+// Given: a pass under way / When: a meta without a reference appears behind its position
+// (a host that records none), a meta appears ahead of it, or a meta behind it is removed
+// Then: only the changes behind the position restart the pass; the new meta's blob is never
+// swept and the pass still finishes in a bounded number of starts.
+#[test]
+fn a_meta_added_behind_the_position_restarts_the_pass_and_keeps_its_blob() {
+    let store = Store::new();
+    many_metas(&store, 8, true);
+    let budget = GcBudget {
+        meta_lookups: 3,
+        ..GcBudget::default()
+    };
+    store.collect_with(&budget);
+
+    // Ahead of the position: no restart.
+    store.add_blob(&sha(50));
+    store.add_meta(50, &sha(50), "T");
+    let ahead = store.collect_with(&budget);
+    assert!(!ahead.pass_restarted, "{ahead:?}");
+
+    // Behind the position, no reference: restart, and nothing is swept meanwhile.
+    store.add_blob(&sha(60));
+    store.add_meta(0, &sha(60), "T");
+    let mut complete_at = None;
+    for start in 1..=6 {
+        let report = store.collect_with(&budget);
+        assert_eq!(
+            report.pass_restarted,
+            start == 1,
+            "start {start}: {report:?}"
+        );
+        assert!(store.blob(&sha(60)).is_file(), "start {start}");
+        assert_nothing_unlinked(&report);
+        if report.refs_complete {
+            complete_at = Some(start);
+            break;
+        }
+    }
+    assert!(complete_at.is_some(), "the restarted pass must finish");
+    assert!(store.refs().contains(&id(0)), "the new meta was registered");
+    assert!(store.blob(&sha(60)).is_file());
+
+    // Removal behind the position also restarts (the names no longer match).
+    store.collect_with(&budget);
+    std::fs::remove_file(store.meta(1)).unwrap();
+    let removed = store.collect_with(&budget);
+    assert!(removed.pass_restarted, "{removed:?}");
 }
 
 // Given: a byte budget smaller than the metas / When: the collection runs
-// Then: reading stops with the budget, the rest waits, and nothing is swept.
+// Then: reading stops with the budget, the rest waits for the next start, and nothing is swept
+// until every meta is registered.
 #[test]
 fn the_byte_budget_bounds_reading_and_blocks_the_sweep() {
     let store = Store::new();
@@ -550,6 +657,33 @@ fn the_byte_budget_bounds_reading_and_blocks_the_sweep() {
     assert!(!report.refs_complete);
     assert!(report.stops.contains(&GcStop::MetaBytesBudget));
     assert_nothing_unlinked(&report);
+}
+
+// Given: metas whose reads fail after consuming bytes (larger than the limit) and a byte
+// budget of one and a half of them / When: the collection runs
+// Then: the bytes of the failed reads count, so reading stops after two files and the rest
+// waits for the next start; they are all unknown, so nothing is swept.
+#[test]
+fn bytes_consumed_by_failed_reads_count_against_the_budget() {
+    let store = Store::new();
+    store.add_blob(&sha(99));
+    for n in 1..=5_u32 {
+        let mut content = b"{\"pad\":\"".to_vec();
+        content.resize(2 * 1024 * 1024, b'x');
+        std::fs::write(store.meta(n), content).unwrap();
+    }
+
+    let report = store.collect_with(&GcBudget {
+        meta_bytes: 3 * 1024 * 1024 / 2,
+        ..GcBudget::default()
+    });
+
+    assert_eq!(report.meta_scanned, 2, "{report:?}");
+    assert_eq!(report.unknown_remaining, 2);
+    assert!(report.stops.contains(&GcStop::MetaBytesBudget));
+    assert!(!report.refs_complete);
+    assert_nothing_unlinked(&report);
+    assert!(store.blob(&sha(99)).is_file());
 }
 
 // Given: more garbage than the unlink budget, and more entries than the entry budget

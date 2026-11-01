@@ -16,7 +16,11 @@ fn triggers(connection: &Connection) -> Vec<String> {
 /// Removes the column migration v37 added to a table the older schema keeps.
 pub fn undo_v37(connection: &Connection) {
     connection
-        .execute_batch("ALTER TABLE gc_state DROP COLUMN ref_cursor;")
+        .execute_batch(
+            "ALTER TABLE gc_state DROP COLUMN ref_cursor;
+             ALTER TABLE gc_state DROP COLUMN meta_count;
+             ALTER TABLE gc_state DROP COLUMN meta_hash;",
+        )
         .unwrap();
 }
 

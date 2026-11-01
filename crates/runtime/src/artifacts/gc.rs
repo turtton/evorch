@@ -6,11 +6,14 @@
 //! the exclusive startup phase (no other evorch process exists, so no capture is in
 //! flight) and removes the blobs that nothing refers to any more.
 //!
-//! * **Mark.** The `artifact_refs` table mirrors the meta files. Every start lists the
-//!   metadata directory completely and gives each meta file without a row a row, by
-//!   reading it. The listing is repeated every start on purpose: no position is carried
-//!   over, so a meta file written between two starts by a host that does not record
-//!   references is still found before anything is swept.
+//! * **Mark.** The `artifact_refs` table mirrors the meta files. A *pass* walks the meta
+//!   file names in order and gives each one without a row a row, by reading it. A pass
+//!   that fits the budget ends in the start that began it. A bigger one continues over
+//!   several starts from a stored position, together with a fingerprint of the names
+//!   up to it: every start lists the whole directory again, and if the names behind the
+//!   position changed (a meta file written by a host that records no references may
+//!   have been added there), the pass starts over. A new pass begins at every start
+//!   after a complete one, so such a file is found before anything is swept.
 //! * **Orphan references.** A row whose meta file is gone is deleted (the runtime
 //!   removes rows with the files; this catches a stop between the two).
 //! * **Sweep.** A blob whose SHA-256 no row names is unlinked, but **only** when the
@@ -45,8 +48,8 @@ pub struct GcBudget {
     pub meta_files: usize,
     /// Bytes read from them.
     pub meta_bytes: u64,
-    /// Meta file names looked up in the reference table. A directory with more
-    /// meta files than this cannot be proven complete.
+    /// Meta file names looked up in the reference table, and held in memory, per start.
+    /// A directory with more meta files is marked over several starts.
     pub meta_lookups: usize,
     /// Unreadable-meta records read again.
     pub unknown_retries: usize,
@@ -63,7 +66,7 @@ impl Default for GcBudget {
         Self {
             meta_files: 20_000,
             meta_bytes: 32 * 1024 * 1024,
-            meta_lookups: 500_000,
+            meta_lookups: 100_000,
             unknown_retries: 1_000,
             ref_checks: 20_000,
             blob_entries: 50_000,
@@ -79,7 +82,8 @@ pub enum GcStop {
     MetaDirMissing,
     /// `meta/` could not be listed (completely).
     MetaListing(String),
-    /// More meta files than `meta_lookups`.
+    /// More meta files after the pass position than `meta_lookups`; the pass continues at
+    /// the next start.
     MetaLookupBudget,
     /// More meta files without a reference than `meta_files`.
     MetaOpenBudget,
@@ -110,6 +114,9 @@ pub struct GcReport {
     /// Meta files seen in the directory, and opened.
     pub meta_listed: usize,
     pub meta_scanned: usize,
+    /// A marking pass left by an earlier start was dropped because meta files were added
+    /// or removed behind its position; this start began a new one.
+    pub pass_restarted: bool,
     /// Every meta file has a reference and none is unreadable: references prove which
     /// blobs are in use. Only then is anything swept.
     pub refs_complete: bool,
@@ -222,6 +229,64 @@ fn interpret_meta(
     })
 }
 
+/// An order-independent fingerprint of a set of names: the count and two 64-bit sums of
+/// independently seeded hashes. Adding or removing any name changes it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Fingerprint {
+    count: u64,
+    first: u64,
+    second: u64,
+}
+
+impl Fingerprint {
+    fn hash(name: &str, seed: u64) -> u64 {
+        // FNV-1a, then a finalizer so that sums of similar names do not cancel.
+        let mut value = 0xcbf2_9ce4_8422_2325_u64 ^ seed;
+        for byte in name.bytes() {
+            value ^= u64::from(byte);
+            value = value.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn add(&mut self, name: &str) {
+        self.count += 1;
+        self.first = self
+            .first
+            .wrapping_add(Self::hash(name, 0x1234_5678_9abc_def0));
+        self.second = self
+            .second
+            .wrapping_add(Self::hash(name, 0x0fed_cba9_8765_4321));
+    }
+
+    /// Whether this is the fingerprint `state` recorded.
+    fn matches(&self, state: &GcState) -> bool {
+        self.count == state.meta_count
+            && state.meta_hash == format!("{:016x}{:016x}", self.first, self.second)
+    }
+
+    fn store(&self, state: &mut GcState) {
+        state.meta_count = self.count;
+        state.meta_hash = format!("{:016x}{:016x}", self.first, self.second);
+    }
+}
+
+/// One listing of the metadata directory.
+struct Scan {
+    /// The names up to the cursor.
+    prefix: Fingerprint,
+    /// The smallest names after the cursor, up to the lookup budget.
+    chunk: Smallest,
+    /// How many names there are after the cursor.
+    qualifying: usize,
+    /// Meta file names in the directory.
+    listed: usize,
+}
+
 struct Mark {
     /// The directory could be listed to the end of what was looked at.
     readable: bool,
@@ -256,7 +321,7 @@ impl Collection<'_> {
     fn execute(&mut self) -> Result<(), StorageError> {
         let mut state = self.database.gc_state()?;
         self.retry_unknown()?;
-        let mark = self.mark()?;
+        let mark = self.mark(&mut state)?;
         let unknown = self.database.gc_unknown_meta_count()?;
         self.report.unknown_remaining = unknown;
         self.report.unknown_sample = self
@@ -318,7 +383,9 @@ impl Collection<'_> {
                 self.report.unknown_resolved += 1;
                 continue;
             }
-            if self.bytes_read >= self.budget.meta_bytes {
+            // Half of the byte budget at most, so that re-reading files that keep failing
+            // never leaves the marking pass without any.
+            if self.bytes_read >= self.budget.meta_bytes / 2 {
                 self.stop(GcStop::MetaBytesBudget);
                 break;
             }
@@ -351,83 +418,144 @@ impl Collection<'_> {
         Ok(())
     }
 
-    /// Give every meta file a reference row.
-    fn mark(&mut self) -> Result<Mark, StorageError> {
+    /// Give every meta file a reference row, continuing a pass an earlier start left
+    /// unfinished.
+    ///
+    /// A pass walks the meta file names in order and may span several starts: `state`
+    /// keeps the last name looked at and a fingerprint of the names up to it. The
+    /// directory is listed completely every start; if the names up to the cursor are no
+    /// longer the ones the pass covered, a meta file may have been added behind the
+    /// cursor without a reference, so the pass starts over. It is complete only when a
+    /// start gets past the last name with the fingerprint intact.
+    fn mark(&mut self, state: &mut GcState) -> Result<Mark, StorageError> {
         let unreadable = Mark {
             readable: false,
             all_marked: false,
         };
-        let entries = match std::fs::read_dir(&self.meta_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.stop(GcStop::MetaDirMissing);
-                return Ok(unreadable);
-            }
-            Err(error) => {
-                self.stop(GcStop::MetaListing(error.to_string()));
-                self.fail(self.meta_dir.clone(), error);
+        let mut scan = match self.scan_meta_dir(state.meta_cursor.as_deref()) {
+            Ok(scan) => scan,
+            Err(stop) => {
+                self.stop(stop);
                 return Ok(unreadable);
             }
         };
-        let mut missing = Smallest::new(self.budget.meta_files);
-        let mut all_marked = true;
+        if state.meta_cursor.is_some() && scan.prefix.matches(state) {
+            // Same names up to the cursor: carry on.
+        } else if state.meta_cursor.is_some() {
+            // Names behind the cursor were added or removed since the pass looked at
+            // them: nothing it concluded there can be trusted.
+            self.report.pass_restarted = true;
+            state.meta_cursor = None;
+            state.meta_count = 0;
+            state.meta_hash.clear();
+            scan = match self.scan_meta_dir(None) {
+                Ok(scan) => scan,
+                Err(stop) => {
+                    self.stop(stop);
+                    return Ok(unreadable);
+                }
+            };
+        }
+        self.report.meta_listed = scan.listed;
+
+        let qualifying = scan.qualifying;
+        let names = scan.chunk.into_sorted();
+        let chunk_len = names.len();
+        let mut covered = scan.prefix;
+        let mut last = state.meta_cursor.clone();
+        let mut found = Vec::new();
+        let mut opened = 0_usize;
+        let mut stopped = false;
+        for name in names {
+            let id = name.strip_suffix(".json").unwrap_or(&name);
+            if self.database.artifact_meta_state(id)? == MetaState::Missing {
+                if opened >= self.budget.meta_files {
+                    self.stop(GcStop::MetaOpenBudget);
+                    stopped = true;
+                    break;
+                }
+                if self.bytes_read >= self.budget.meta_bytes {
+                    self.stop(GcStop::MetaBytesBudget);
+                    stopped = true;
+                    break;
+                }
+                opened += 1;
+                self.report.meta_scanned += 1;
+                match self.read_meta(&name) {
+                    ReadMeta::Ref(reference) => found.push(reference),
+                    ReadMeta::Absent => {}
+                    ReadMeta::Failed(error) => {
+                        self.database
+                            .gc_unknown_meta_upsert(&name, &error, self.now_ns)?;
+                        self.fail(self.meta_dir.join(&name), error);
+                    }
+                }
+            }
+            covered.add(&name);
+            last = Some(name);
+        }
+        self.database.gc_insert_refs(&found)?;
+        self.report.refs_added += found.len();
+
+        let finished = !stopped && qualifying == chunk_len;
+        if finished {
+            state.meta_cursor = None;
+            state.meta_count = 0;
+            state.meta_hash.clear();
+        } else {
+            if !stopped {
+                self.stop(GcStop::MetaLookupBudget);
+            }
+            state.meta_cursor = last;
+            covered.store(state);
+        }
+        Ok(Mark {
+            readable: true,
+            all_marked: finished,
+        })
+    }
+
+    /// List the metadata directory: fingerprint the names up to `cursor` and keep the
+    /// `meta_lookups` smallest names after it.
+    fn scan_meta_dir(&mut self, cursor: Option<&str>) -> Result<Scan, GcStop> {
+        let entries = match std::fs::read_dir(&self.meta_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(GcStop::MetaDirMissing);
+            }
+            Err(error) => {
+                self.fail(self.meta_dir.clone(), &error);
+                return Err(GcStop::MetaListing(error.to_string()));
+            }
+        };
+        let mut scan = Scan {
+            prefix: Fingerprint::default(),
+            chunk: Smallest::new(self.budget.meta_lookups),
+            qualifying: 0,
+            listed: 0,
+        };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
                     // A listing that failed midway says nothing about the rest.
-                    self.stop(GcStop::MetaListing(error.to_string()));
-                    self.fail(self.meta_dir.clone(), error);
-                    return Ok(unreadable);
+                    self.fail(self.meta_dir.clone(), &error);
+                    return Err(GcStop::MetaListing(error.to_string()));
                 }
             };
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str().filter(|name| is_meta_name(name)) else {
                 continue;
             };
-            self.report.meta_listed += 1;
-            if self.report.meta_listed > self.budget.meta_lookups {
-                self.stop(GcStop::MetaLookupBudget);
-                all_marked = false;
-                break;
-            }
-            let id = name.strip_suffix(".json").unwrap_or(name);
-            if self.database.artifact_meta_state(id)? == MetaState::Missing {
-                missing.push(name);
+            scan.listed += 1;
+            if cursor.is_some_and(|cursor| name <= cursor) {
+                scan.prefix.add(name);
+            } else {
+                scan.qualifying += 1;
+                scan.chunk.push(name);
             }
         }
-        let total = missing.total;
-        let mut processed = 0_usize;
-        let mut found = Vec::new();
-        for name in missing.into_sorted() {
-            if self.bytes_read >= self.budget.meta_bytes {
-                self.stop(GcStop::MetaBytesBudget);
-                break;
-            }
-            processed += 1;
-            self.report.meta_scanned += 1;
-            match self.read_meta(&name) {
-                ReadMeta::Ref(reference) => found.push(reference),
-                ReadMeta::Absent => {}
-                ReadMeta::Failed(error) => {
-                    self.database
-                        .gc_unknown_meta_upsert(&name, &error, self.now_ns)?;
-                    self.fail(self.meta_dir.join(&name), error);
-                }
-            }
-        }
-        self.database.gc_insert_refs(&found)?;
-        self.report.refs_added += found.len();
-        if processed < total {
-            all_marked = false;
-            if !self.report.stops.contains(&GcStop::MetaBytesBudget) {
-                self.stop(GcStop::MetaOpenBudget);
-            }
-        }
-        Ok(Mark {
-            readable: true,
-            all_marked,
-        })
+        Ok(scan)
     }
 
     /// Delete the references whose meta file is gone.
@@ -579,6 +707,22 @@ mod unit_tests {
             &mut read,
         );
         assert!(matches!(outcome, ReadMeta::Failed(error) if error.contains("disk error")));
+    }
+
+    #[test]
+    fn bytes_read_before_a_failure_are_counted() {
+        let data = br#"{"artifact_id":"artifact-00000000000000000000000000000001"}"#;
+        let mut read = 0;
+        for round in 1..=3_u64 {
+            let outcome = interpret_meta(
+                FailsAfter { data, position: 0 },
+                "artifact-00000000000000000000000000000001",
+                1,
+                &mut read,
+            );
+            assert!(matches!(outcome, ReadMeta::Failed(_)));
+            assert_eq!(read, round * data.len() as u64, "round {round}");
+        }
     }
 
     #[test]

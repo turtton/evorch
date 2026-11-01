@@ -79,8 +79,8 @@ pub struct StartupBudget {
     /// Artifact meta files opened by stage 7, and the bytes read from them.
     pub gc_meta_files: usize,
     pub gc_meta_bytes: u64,
-    /// Artifact meta file names checked against the reference table. More meta files
-    /// than this keep the references from being proven complete (no sweep).
+    /// Artifact meta file names checked against the reference table per start. More meta
+    /// files are marked over several starts (no sweep until a pass is complete).
     pub gc_meta_lookups: usize,
     /// Unreadable-meta records read again.
     pub gc_unknown_retries: usize,
@@ -118,7 +118,7 @@ impl Default for StartupBudget {
             scratch_entries: 20_000,
             gc_meta_files: 20_000,
             gc_meta_bytes: 32 * 1024 * 1024,
-            gc_meta_lookups: 500_000,
+            gc_meta_lookups: 100_000,
             gc_unknown_retries: 1_000,
             gc_ref_checks: 20_000,
             gc_blob_entries: 50_000,

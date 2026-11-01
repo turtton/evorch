@@ -145,7 +145,9 @@ fn gc_state_round_trips_and_starts_incomplete() {
     let database = Database::open_in_memory().unwrap();
     assert_eq!(database.gc_state().unwrap(), GcState::default());
     let state = GcState {
-        meta_cursor: None,
+        meta_cursor: Some("m".into()),
+        meta_count: 7,
+        meta_hash: "00ff".into(),
         blob_cursor: Some("b".into()),
         ref_cursor: Some("r".into()),
         refs_complete: true,

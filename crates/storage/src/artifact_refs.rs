@@ -30,8 +30,13 @@ pub struct ArtifactRef {
 /// Where the collector stands between starts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcState {
-    /// Not written any more; kept for the schema (see migration v37).
+    /// The last meta file name the marking pass looked at (`None`: no pass is under way).
     pub meta_cursor: Option<String>,
+    /// How many meta file names up to `meta_cursor` the pass covered, and a fingerprint of
+    /// those names (hex; empty without a cursor). A start that finds a different
+    /// fingerprint over the same range restarts the pass.
+    pub meta_count: u64,
+    pub meta_hash: String,
     /// The last blob name examined by the sweep (`None`: start from the beginning).
     pub blob_cursor: Option<String>,
     /// The last artifact ID whose meta file was checked for the orphan-reference check.

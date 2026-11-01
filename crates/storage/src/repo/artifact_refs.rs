@@ -7,7 +7,8 @@ use crate::artifact_refs::{ArtifactRef, GcState, MetaState, UnknownMeta};
 
 pub(crate) fn gc_state(conn: &Connection) -> Result<GcState, StorageError> {
     Ok(conn.query_row(
-        "SELECT meta_cursor, blob_cursor, ref_cursor, refs_complete FROM gc_state WHERE id = 1",
+        "SELECT meta_cursor, blob_cursor, ref_cursor, refs_complete, meta_count, meta_hash \
+         FROM gc_state WHERE id = 1",
         [],
         |row| {
             Ok(GcState {
@@ -15,6 +16,8 @@ pub(crate) fn gc_state(conn: &Connection) -> Result<GcState, StorageError> {
                 blob_cursor: row.get(1)?,
                 ref_cursor: row.get(2)?,
                 refs_complete: row.get::<_, i64>(3)? != 0,
+                meta_count: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                meta_hash: row.get(5)?,
             })
         },
     )?)
@@ -23,12 +26,15 @@ pub(crate) fn gc_state(conn: &Connection) -> Result<GcState, StorageError> {
 pub(crate) fn set_gc_state(conn: &Connection, state: &GcState) -> Result<(), StorageError> {
     let changed = conn.execute(
         "UPDATE gc_state SET meta_cursor = ?1, blob_cursor = ?2, ref_cursor = ?3, \
-         refs_complete = ?4 WHERE id = 1",
+         refs_complete = ?4, meta_count = ?5, meta_hash = ?6 WHERE id = 1",
         params![
             state.meta_cursor,
             state.blob_cursor,
             state.ref_cursor,
-            i64::from(state.refs_complete)
+            i64::from(state.refs_complete),
+            i64::try_from(state.meta_count)
+                .map_err(|_| StorageError::OutOfRange("gc meta count"))?,
+            state.meta_hash
         ],
     )?;
     if changed == 1 {

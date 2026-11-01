@@ -275,11 +275,16 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   meta を書かず `Err` を返す（blob だけが残り、次の sweep が回収する）。meta が見えるなら必ず行がある。
   この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になる。
   記録しない store（テスト・headless・配線前の GUI）の meta は、次の起動の mark が補う。
-- **mark。** 起動ごとに `meta/` を最後まで列挙し、参照行も `gc_unknown_meta` の記録も無い meta を
-  名前順に `gc_meta_files`（既定 20,000）件・`gc_meta_bytes`（32 MiB）まで開いて行にする。位置を起動間で
-  持ち越さないのが要点で、前の mark の後に記録なしで追加された meta も sweep の前に必ず見つかる。
-  既知の meta は DB の索引引きだけで、開かない（`gc_meta_lookups` = 500,000 件まで）。
-- **参照が完全（`refs_complete`）になる条件。** この起動で列挙が最後まで進み（件数予算を超えていない）、
+- **mark。** meta の名前を順に見て、参照行も `gc_unknown_meta` の記録も無い meta を開いて行にする（1 起動で
+  `gc_meta_files`（既定 20,000）件・`gc_meta_bytes`（32 MiB）まで。読み取り途中で失敗した分の bytes も数える）。
+  既知の meta は DB の索引引きだけで開かない。1 起動で名前を見る数は `gc_meta_lookups`（100,000）まで（保持する名前も
+  この数まで）。それを超える `meta/` は、位置（`gc_state.meta_cursor`）と「その位置までの名前の指紋」
+  （`meta_count` / `meta_hash`）を保存して**複数回の起動に分けて**走査する。起動のたびに `meta/` 全体を列挙し直し、
+  位置までの名前の指紋が保存値と違えば（参照を記録しない host が位置より前に meta を足した可能性があるので）
+  pass を最初からやり直す。位置より後ろの追加はこれから見るので影響しない。完了した pass の次の起動は新しい pass で、
+  記録なしで追加された meta も sweep の前に必ず見つかる。やり直しの原因は位置より前の追加・削除なので、
+  `lookups` を超える巨大な store で pass の途中に meta の増減が毎回起きると完了しない（予算内の store では起きない）。
+- **参照が完全（`refs_complete`）になる条件。** pass が最後の名前を越え（予算で止まらず、位置までの指紋も一致し）、
   参照のない meta を全部読めて行にでき、`gc_unknown_meta` に残る meta が 0 件のとき**だけ**。
   列挙の失敗・開けない・読み取り途中の失敗・1 MiB 超・JSON として壊れている・`artifact_id` が名前と違う・
   `sha256` が小文字 64 桁の 16 進でない・ディレクトリや dangling link である meta は、どの blob を守って

@@ -100,6 +100,9 @@ enum Read {
 /// Read all of `reader`, at most [`MAX_META_BYTES`]. A reader that fails part-way is a
 /// failure, never a short file: whatever was read before the error is dropped.
 ///
+/// Every byte actually read is added to `bytes_read`, whether the read ended well or
+/// not: a budget counts the I/O done, not the files that turned out usable.
+///
 /// `Err(None)` is "the file is gone" (only an explicit not-found); `Err(Some(_))` is a
 /// failure to report.
 pub(super) fn read_bounded(
@@ -107,8 +110,11 @@ pub(super) fn read_bounded(
     bytes_read: &mut u64,
 ) -> Result<Vec<u8>, Option<String>> {
     let mut bytes = Vec::new();
-    match reader.take(MAX_META_BYTES + 1).read_to_end(&mut bytes) {
-        Ok(read) => *bytes_read += read as u64,
+    // `read_to_end` keeps what it read before an error.
+    let outcome = reader.take(MAX_META_BYTES + 1).read_to_end(&mut bytes);
+    *bytes_read += bytes.len() as u64;
+    match outcome {
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(None),
         Err(error) => return Err(Some(format!("read failed: {error}"))),
     }
