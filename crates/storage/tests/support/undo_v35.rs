@@ -13,9 +13,21 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Removes everything migration v35 added to the tables a hand-built older
-/// schema keeps, so that the test can replay the migrations from its version.
+/// Removes everything migration v36 added to a table the older schema keeps.
+/// (Its index goes away with `thread_index_runs`, which v35 rebuilds.)
+pub fn undo_v36(connection: &Connection) {
+    connection
+        .execute_batch(
+            "ALTER TABLE thread_index_state DROP COLUMN archive_backfill_done;
+             ALTER TABLE thread_index_state DROP COLUMN archive_backfill_cursor;",
+        )
+        .unwrap();
+}
+
+/// Removes everything migrations v35 and v36 added to the tables a hand-built
+/// older schema keeps, so that the test can replay the migrations from its version.
 pub fn undo_v35(connection: &Connection) {
+    undo_v36(connection);
     for name in triggers(connection) {
         connection
             .execute_batch(&format!("DROP TRIGGER {name};"))

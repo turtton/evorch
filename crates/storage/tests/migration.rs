@@ -9,7 +9,7 @@ mod undo_v35;
 
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
-use undo_v35::undo_v35;
+use undo_v35::{undo_v35, undo_v36};
 
 const LATEST_SCHEMA: u32 = 36;
 
@@ -970,4 +970,40 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
     let database = Database::open(&config_for(&path)).unwrap();
     let record = database.run_context("run-old").unwrap().unwrap();
     assert_eq!(record.messages_json, "[\"こんにちは\"]");
+}
+
+#[test]
+fn v36_leaves_the_archive_backfill_to_do_only_when_a_thread_is_already_archived() {
+    for archived in [false, true] {
+        // Given: a v35 database with one thread, archived or not.
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("v35.db");
+        drop(Database::open(&config_for(&path)).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        undo_v36(&connection);
+        connection
+            .execute_batch(&format!(
+                "DROP INDEX idx_thread_index_runs_archived_pending;
+                 INSERT INTO threads(thread_id, project_root, archived, created_at_ns,
+                     updated_at_ns, source) VALUES ('t', '/p', {}, 1, 1, 'host');",
+                u8::from(archived)
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 35).unwrap();
+        drop(connection);
+
+        // When: the current schema opens it.
+        drop(Database::open(&config_for(&path)).unwrap());
+
+        // Then: the backfill is pending exactly when a thread was archived.
+        let connection = Connection::open(&path).unwrap();
+        let done: bool = connection
+            .query_row(
+                "SELECT archive_backfill_done FROM thread_index_state",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(done, !archived, "archived = {archived}");
+    }
 }

@@ -1206,8 +1206,9 @@ fn writer_commands_save_bundles_and_notes_before_replying() {
 
 // ---- Archived threads leave the index (PR-2) ----
 
-use super::thread_index::{OversizedBlock, purge_index_rows, purge_index_rows_with};
+use super::thread_index::purge_index_rows;
 use crate::maintenance::archive_purge;
+use crate::repo::thread_retention::reclaim;
 use crate::threads::{ThreadUpsert, ThreadWriter};
 
 const PURGE_ROWS: usize = 200;
@@ -1253,15 +1254,17 @@ fn index_row(conn: &Connection, run_id: &str) -> (String, Option<String>, u64, i
     .unwrap()
 }
 
+/// Ticks until the backfill and the purge have nothing left; returns the runs purged.
 fn purge_all(conn: &Connection) -> usize {
     let mut runs = 0;
-    loop {
+    for _ in 0..1_000 {
         let progress = archive_purge::tick(conn).unwrap();
-        if progress.runs == 0 {
+        runs += progress.runs;
+        if progress.runs == 0 && progress.evicted == 0 && !progress.backfill_pending {
             return runs;
         }
-        runs += progress.runs;
     }
+    panic!("the archive purge did not settle");
 }
 
 #[test]
@@ -1496,29 +1499,31 @@ fn a_run_recorded_only_as_the_root_of_an_archived_thread_is_covered() {
 }
 
 #[test]
-fn purge_takes_an_oversized_block_alone_and_finishes_every_run() {
+fn an_oversized_block_goes_to_the_exclusive_phase_and_the_other_runs_continue() {
     let dir = TempDir::new().unwrap();
     let conn = open(&dir);
     let lease = lease(&conn, 1, i64::MAX);
-    for (thread, run) in [
+    let runs = [
         ("t1", "run-a"),
         ("t2", "run-b"),
         ("t3", "run-c"),
         ("t4", "run-d"),
         ("t5", "run-e"),
-    ] {
+    ];
+    for (thread, run) in runs {
         host_thread(&conn, thread, run, false);
         save(&conn, &bound(run, thread, "alpha apple", 10));
         commit_current(&conn, run, &lease, S);
         host_thread(&conn, thread, run, true);
     }
-    // One block is larger than a step may take; it goes alone.
+    // One block is larger than a normal step may take.
     conn.execute(
         "UPDATE conversation_blocks SET text = hex(zeroblob(1500000)) WHERE id = \
          (SELECT MIN(id) FROM conversation_blocks WHERE run_id = 'run-a')",
         [],
     )
     .unwrap();
+    // The plain step reports it, so the tick registers the run instead of deleting.
     let report = purge_index_rows(
         &conn,
         "run-a",
@@ -1527,66 +1532,171 @@ fn purge_takes_an_oversized_block_alone_and_finishes_every_run() {
         PURGE_BYTES,
     )
     .unwrap();
-    assert!(
-        report.oversized && report.rows == 0,
-        "the plain step reports it"
+    assert!(report.oversized && report.rows == 0);
+    let registered = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM reclaim_oversized WHERE family_key = 'archive-index' \
+             AND tbl = 'conversation_blocks' AND key = 'run-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        purge_all(&conn),
+        5,
+        "every run is looked at once; none is retried"
     );
-    let alone = purge_index_rows_with(
-        &conn,
-        "run-a",
-        PurgeTarget::Archived,
-        PURGE_ROWS,
-        PURGE_BYTES,
-        OversizedBlock::TakeAlone,
-    )
-    .unwrap();
-    assert_eq!(alone.rows, 1);
-    // More runs than one tick takes: the ticks drain all of them.
-    let mut ticks = 0;
-    while archive_purge::tick(&conn).unwrap().runs > 0 {
-        ticks += 1;
-        assert!(ticks < 100, "the purge must terminate");
-    }
-    for run in ["run-a", "run-b", "run-c", "run-d", "run-e"] {
+    assert_eq!(registered(&conn), 1);
+    let (_, _, charged, left) = index_row(&conn, "run-a");
+    assert!(
+        charged > 0 && left > 0,
+        "the tick never deletes the oversized block"
+    );
+    for run in ["run-b", "run-c", "run-d", "run-e"] {
         assert_eq!(
             index_row(&conn, run),
             ("evicted".into(), Some("archived".into()), 0, 0)
         );
     }
-    fts_integrity(&conn);
+    let settled = conn.total_changes();
+    assert_eq!(archive_purge::tick(&conn).unwrap().runs, 0);
     assert_eq!(
-        conn.query_row(
-            "SELECT COALESCE(SUM(charged_bytes), 0) FROM thread_index_runs",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
+        conn.total_changes(),
+        settled,
+        "a registered run is not retried"
+    );
+
+    // The exclusive phase works the registration off, and the run ends empty.
+    let mut calls = 0;
+    loop {
+        let step = reclaim::reclaim_oversized_step(&conn, 64 * 1024 * 1024).unwrap();
+        calls += 1;
+        assert!(calls < 100, "the exclusive phase must terminate");
+        if step.remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(registered(&conn), 0);
+    assert_eq!(
+        index_row(&conn, "run-a"),
+        ("evicted".into(), Some("archived".into()), 0, 0)
+    );
+    fts_integrity(&conn);
+}
+
+#[test]
+fn the_exclusive_phase_keeps_the_blocks_of_a_run_unarchived_in_the_meantime() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    host_thread(&conn, "t1", "run-a", false);
+    save(&conn, &bound("run-a", "t1", "alpha apple", 10));
+    commit_current(&conn, "run-a", &lease, S);
+    host_thread(&conn, "t1", "run-a", true);
+    conn.execute(
+        "UPDATE conversation_blocks SET text = hex(zeroblob(1500000)) WHERE run_id = 'run-a'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(purge_all(&conn), 1);
+    host_thread(&conn, "t1", "run-a", false);
+    let before = index_row(&conn, "run-a");
+    assert_eq!(before.0, "pending");
+    let step = reclaim::reclaim_oversized_step(&conn, 64 * 1024 * 1024).unwrap();
+    assert_eq!((step.rows, step.remaining), (0, 0));
+    assert_eq!(
+        index_row(&conn, "run-a"),
+        before,
+        "nothing is deleted or changed"
     );
 }
 
 #[test]
-fn migration_evicts_runs_of_threads_that_were_already_archived() {
+fn the_backfill_evicts_runs_of_already_archived_threads_in_bounded_resumable_ticks() {
     let dir = TempDir::new().unwrap();
     let conn = open(&dir);
     let lease = lease(&conn, 1, i64::MAX);
-    for (thread, run) in [("t-old", "run-old"), ("t-live", "run-live")] {
-        host_thread(&conn, thread, run, false);
-        save(&conn, &bound(run, thread, "alpha apple", 10));
-        commit_current(&conn, run, &lease, S);
+    let archived = 2 * archive_purge::ARCHIVE_BACKFILL_THREADS_PER_TICK + 5;
+    for n in 0..archived {
+        let (thread, run) = (format!("t-{n:03}"), format!("run-{n:03}"));
+        host_thread(&conn, &thread, &run, false);
+        save(&conn, &bound(&run, &thread, "alpha apple", 10));
+        commit_current(&conn, &run, &lease, S);
     }
-    // The flag was set before this version, so no mirror hook ever ran.
+    host_thread(&conn, "t-live", "run-live", false);
+    save(&conn, &bound("run-live", "t-live", "beta", 11));
+    commit_current(&conn, "run-live", &lease, S);
+    // The flags were set before the mirror hook existed: no eviction ever ran.
     conn.execute(
-        "UPDATE threads SET archived = 1 WHERE thread_id = 't-old'",
+        "UPDATE threads SET archived = 1 WHERE thread_id LIKE 't-0%'",
         [],
     )
     .unwrap();
-    conn.execute_batch("DROP INDEX idx_thread_index_runs_archived_pending")
+    // The migration of such a database leaves the backfill to do (a new one has none).
+    let fresh_done: bool = conn
+        .query_row(
+            "SELECT archive_backfill_done FROM thread_index_state",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    conn.execute_batch(include_str!("../migrations/v36.sql"))
-        .unwrap();
-    assert_eq!(index_row(&conn, "run-old").1.as_deref(), Some("archived"));
+    assert!(
+        fresh_done,
+        "a database with no archived thread has nothing to backfill"
+    );
+    conn.execute(
+        "UPDATE thread_index_state SET archive_backfill_done = 0",
+        [],
+    )
+    .unwrap();
+
+    let mut evicted = 0;
+    let mut ticks = 0;
+    let mut conn = conn;
+    loop {
+        let progress = archive_purge::tick(&conn).unwrap();
+        assert!(
+            progress.evicted <= archive_purge::ARCHIVE_BACKFILL_THREADS_PER_TICK,
+            "one tick evicts at most one batch of threads"
+        );
+        evicted += progress.evicted;
+        ticks += 1;
+        if ticks == 2 {
+            // The cursor is persisted: a restart continues instead of starting over.
+            drop(conn);
+            conn = open(&dir);
+        }
+        if !progress.backfill_pending {
+            break;
+        }
+        assert!(ticks < 20, "the backfill must terminate");
+    }
+    assert_eq!(evicted, archived);
     assert_eq!(index_row(&conn, "run-live").0, "indexed");
-    assert_eq!(purge_all(&conn), 1);
-    assert_eq!(index_row(&conn, "run-old").3, 0);
+    for n in 0..archived {
+        assert_eq!(
+            index_row(&conn, &format!("run-{n:03}")).1.as_deref(),
+            Some("archived")
+        );
+    }
+    purge_all(&conn);
+    for n in 0..archived {
+        assert_eq!(
+            index_row(&conn, &format!("run-{n:03}")).3,
+            0,
+            "run {n} is purged"
+        );
+    }
+    let settled = conn.total_changes();
+    let progress = archive_purge::tick(&conn).unwrap();
+    assert_eq!(
+        (progress.runs, progress.evicted, progress.backfill_pending),
+        (0, 0, false)
+    );
+    assert_eq!(
+        conn.total_changes(),
+        settled,
+        "a finished backfill is not repeated"
+    );
 }

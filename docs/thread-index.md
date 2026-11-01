@@ -43,10 +43,20 @@ or whether deletion is enabled:
 - When the flag turns on, the thread's runs become `evicted` with the reason
   `archived` in the same transaction as the mirror write. Their blocks stay
   until the writer's maintenance tick removes them (at most four runs per tick,
-  bounded rows and bytes per transaction, independent of the index job and of
-  `enabled`). A newly saved or discovered run of an archived thread is
-  registered as `evicted(archived)` without blocks, and the scheduler never
-  picks it.
+  at most 200 rows / 2 MiB per transaction, independent of the index job and of
+  `enabled`). A single block above that limit is never deleted by the tick: it
+  is registered in `reclaim_oversized` (family `archive-index`) and removed by
+  the exclusive startup phase, which deletes it only if the thread is still
+  archived. A newly saved or discovered run of an archived thread is registered
+  as `evicted(archived)` without blocks.
+- Whether a run may enter the index is decided from the thread's archive flag
+  now (its run binding or its recorded root run), never from the eviction
+  reason: the scheduler (`next_work`) and `reindex-threads` (with or without
+  `--include-evicted`) skip such runs whatever state or reason they have.
+- Threads archived before this version are handled by the same tick in bounded
+  steps (32 threads, about 1,000 runs per tick, with a persisted cursor in
+  `thread_index_state`); nothing is rewritten by the migration itself. Search
+  exclusion does not wait for it.
 - When the flag turns off, `evicted(archived)` runs return to `pending` and are
   extracted again. Evictions for other reasons (logical budget, oversized,
   physical reclaim) stay evicted.
@@ -54,8 +64,9 @@ or whether deletion is enabled:
   archived threads, **the caller's own thread included**, and so do the child
   threads in a `thread_read` overview. Reading or grepping an archived thread by
   an explicit ID still works; a deleted (tombstoned) thread does not.
-- `reindex-threads --include-evicted` does not revive `evicted(archived)` runs.
-  Unarchive the thread instead.
+- `reindex-threads --include-evicted` does not revive runs of an archived
+  thread, whatever the reason they were evicted for. Unarchive the thread
+  instead; only `evicted(archived)` runs return to `pending` then.
 
 ## CLI
 

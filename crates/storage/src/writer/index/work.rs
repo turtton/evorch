@@ -1172,22 +1172,24 @@ fn guard(lease: &IndexLease, work: &Work) -> IndexCommitGuard {
 /// Request targets first (so a foreground CLI finishes its own request),
 /// then ordinary work newest first.
 pub(crate) fn next_work(conn: &Connection) -> Result<Option<Work>, StorageError> {
+    // A pending row of an archived thread is never work, whichever way it got there.
+    let archived = crate::repo::thread_index::archived_run_predicate("r.run_id");
     let requested = conn
         .query_row(
-            "SELECT r.run_id, r.source_revision, r.extractor_version, r.accounting_version, \
+            &format!(
+                "SELECT r.run_id, r.source_revision, r.extractor_version, r.accounting_version, \
              r.work_generation, r.retention_at_ns, t.request_id \
              FROM thread_index_request_targets t \
              JOIN thread_index_requests q ON q.request_id = t.request_id AND q.state = 'pending' \
              JOIN thread_index_runs r ON r.run_id = t.run_id AND r.state = 'pending' \
-             AND NOT EXISTS (SELECT 1 FROM thread_runs tr \
-                 JOIN threads th ON th.thread_id = tr.thread_id \
-                 WHERE tr.run_id = r.run_id AND th.archived = 1) \
+             AND NOT {archived} \
              AND r.source_revision = t.source_revision \
              AND r.extractor_version = t.extractor_version \
              AND r.accounting_version = t.accounting_version \
              AND r.work_generation = t.work_generation \
              WHERE t.state = 'pending' \
-             ORDER BY r.retention_at_ns DESC, r.run_id DESC LIMIT 1",
+             ORDER BY r.retention_at_ns DESC, r.run_id DESC LIMIT 1"
+            ),
             [],
             work_row,
         )
@@ -1197,13 +1199,12 @@ pub(crate) fn next_work(conn: &Connection) -> Result<Option<Work>, StorageError>
     }
     Ok(conn
         .query_row(
-            "SELECT run_id, source_revision, extractor_version, accounting_version, \
+            &format!(
+                "SELECT run_id, source_revision, extractor_version, accounting_version, \
              work_generation, retention_at_ns, NULL FROM thread_index_runs r \
-             WHERE state = 'pending' \
-             AND NOT EXISTS (SELECT 1 FROM thread_runs tr \
-                 JOIN threads th ON th.thread_id = tr.thread_id \
-                 WHERE tr.run_id = r.run_id AND th.archived = 1) \
-             ORDER BY priority DESC, retention_at_ns DESC, run_id DESC LIMIT 1",
+             WHERE state = 'pending' AND NOT {archived} \
+             ORDER BY priority DESC, retention_at_ns DESC, run_id DESC LIMIT 1"
+            ),
             [],
             work_row,
         )

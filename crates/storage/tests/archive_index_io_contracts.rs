@@ -1,6 +1,6 @@
 //! IO contracts of the archived-thread index exclusion (PR-2): the archive
 //! mirror hook follows the size of the thread, not of the database, and one
-//! purge transaction stays inside a WAL frame budget.
+//! purge or backfill transaction stays inside a WAL frame budget.
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
@@ -126,10 +126,8 @@ fn archive_steps(others: i64) -> (u64, i64) {
     (steps, evicted)
 }
 
-#[test]
-fn the_archive_hook_scales_with_the_threads_runs_not_with_the_database() {
-    // SAFETY: instrument only registers a callback; it opens/closes no DB.
-    unsafe { rusqlite::auto_extension::register_auto_extension(instrument) }.unwrap();
+/// The archive hook follows the thread's runs, not the size of the database.
+fn archive_hook_scales_with_the_threads_runs() {
     let (small, small_evicted) = archive_steps(1_000);
     let (large, large_evicted) = archive_steps(50_000);
     assert_eq!((small_evicted, large_evicted), (20, 20));
@@ -140,8 +138,8 @@ fn the_archive_hook_scales_with_the_threads_runs_not_with_the_database() {
     );
 }
 
-#[test]
-fn one_purge_transaction_stays_inside_its_wal_frame_budget_and_an_empty_tick_writes_nothing() {
+/// One purge transaction stays inside its WAL frame budget and an empty tick writes nothing.
+fn purge_transaction_is_bounded_and_an_empty_tick_writes_nothing() {
     const ROWS: u64 = 200;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -224,4 +222,76 @@ fn one_purge_transaction_stays_inside_its_wal_frame_budget_and_an_empty_tick_wri
     assert_eq!(wal_bytes(&path), idle, "an empty tick adds no WAL frames");
     observer.execute_batch("COMMIT").unwrap();
     storage.close();
+}
+
+/// One backfill tick evicts at most one batch of threads, inside a WAL frame budget.
+fn backfill_tick_is_bounded() {
+    const THREADS: i64 = 40;
+    const RUNS_PER_THREAD: i64 = 20;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("io.db");
+    drop(Database::open(&config(&path)).unwrap());
+    let observer = Connection::open(&path).unwrap();
+    let total = THREADS * RUNS_PER_THREAD;
+    observer
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {THREADS} - 1)
+             INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns,
+                 updated_at_ns, source)
+             SELECT printf('t-%03d', x), '/p', printf('r-%04d', x * {RUNS_PER_THREAD}), 1, 1, 1, 'host' FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {total} - 1)
+             INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
+             SELECT printf('r-%04d', x), printf('t-%03d', x / {RUNS_PER_THREAD}),
+                 printf('r-%04d', x / {RUNS_PER_THREAD} * {RUNS_PER_THREAD}), x % {RUNS_PER_THREAD} > 0 FROM n;
+             WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {total} - 1)
+             {INDEX_ROW}
+             SELECT printf('r-%04d', x), 'indexed', NULL, 1, 1, '', 1, 1, 1, 1, 1, 10 FROM n;
+             UPDATE thread_index_state SET archive_backfill_done = 0;
+             PRAGMA wal_checkpoint(TRUNCATE);"
+        ))
+        .unwrap();
+    let page_size: u64 = observer
+        .pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0).map(u64::from))
+        .unwrap();
+    let storage = Storage::open(config(&path)).unwrap();
+    let handle = storage.handle();
+    observer.execute_batch("BEGIN").unwrap();
+    let _: i64 = observer
+        .query_row("SELECT COUNT(*) FROM thread_runs", [], |row| row.get(0))
+        .unwrap();
+    let before = wal_bytes(&path);
+    handle.checkpoint_now().unwrap();
+    let frames = (wal_bytes(&path) - before) / (page_size + PAGE_OVERHEAD);
+    observer.execute_batch("COMMIT").unwrap();
+    let evicted: i64 = observer
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_runs WHERE evicted_reason = 'archived'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // 32 threads per tick; the 4 runs the same tick purges end with zero charges.
+    assert_eq!(
+        evicted,
+        32 * RUNS_PER_THREAD,
+        "one tick visits one batch of threads"
+    );
+    let budget = 6 * (evicted as u64 + 4) + 64;
+    println!("backfill frames: {frames} (budget {budget}) for {evicted} runs");
+    assert!(
+        frames > 0 && frames <= budget,
+        "{frames} WAL frames exceed {budget}"
+    );
+    storage.close();
+}
+
+// SQLite's profiler is registered for every connection of the process and adds to
+// one counter, so the measurements share a single test and run one after another.
+#[test]
+fn archived_thread_index_work_is_bounded() {
+    // SAFETY: instrument only registers a callback; it opens/closes no DB.
+    unsafe { rusqlite::auto_extension::register_auto_extension(instrument) }.unwrap();
+    archive_hook_scales_with_the_threads_runs();
+    purge_transaction_is_bounded_and_an_empty_tick_writes_nothing();
+    backfill_tick_is_bounded();
 }

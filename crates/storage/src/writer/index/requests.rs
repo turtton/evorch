@@ -92,37 +92,32 @@ pub(crate) fn submit_in(
     now_ns: i64,
 ) -> Result<(String, u64), StorageError> {
     let request_id = insert_request(conn, request, now_ns)?;
-    let mut statement = conn.prepare(
-        "SELECT r.run_id, r.state, r.evicted_reason FROM thread_index_runs r \
-         WHERE (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
+    // A run of a thread that is archived now is never a target, whatever its state or
+    // why it was evicted: only unarchiving brings it back.
+    let archived = crate::repo::thread_index::archived_run_predicate("r.run_id");
+    let mut statement = conn.prepare(&format!(
+        "SELECT r.run_id, r.state FROM thread_index_runs r \
+         WHERE NOT {archived} AND (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
          AND (?2 IS NULL OR EXISTS (SELECT 1 FROM thread_runs tr \
               JOIN threads t ON t.thread_id = tr.thread_id \
               WHERE tr.run_id = r.run_id AND t.project_root = ?2)) \
-         ORDER BY r.retention_at_ns DESC, r.run_id DESC",
-    )?;
+         ORDER BY r.retention_at_ns DESC, r.run_id DESC"
+    ))?;
     let candidates = statement
         .query_map(
             params![request.since_ns, request.canonical_project],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let mut deleted = 0_u64;
     let mut targets = 0_u64;
-    for (run_id, state, evicted_reason) in candidates {
+    for (run_id, state) in candidates {
         match state.as_str() {
             "deleted" => {
                 deleted += 1;
                 continue;
             }
-            // An archived thread stays out of the index until it is unarchived.
-            "evicted" if evicted_reason.as_deref() == Some("archived") => continue,
             "evicted" if !request.include_evicted => continue,
             _ => {}
         }

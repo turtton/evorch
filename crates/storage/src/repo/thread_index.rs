@@ -130,13 +130,26 @@ pub(crate) fn index_transition_for(
     }
 }
 
-/// Whether a thread that owns `run_id` is archived, through its run binding or as
-/// its recorded root run. Runs that name no thread are not archived.
-fn run_in_archived_thread(conn: &Connection, run_id: &str) -> Result<bool, StorageError> {
+/// SQL condition: the run named by `run_expr` belongs to an archived thread, through
+/// its run binding or as the recorded root run of the thread. Every decision about
+/// whether a run may enter the index uses this one definition, so no path can look at
+/// only one of the two memberships. A run that names no thread is not archived.
+pub(crate) fn archived_run_predicate(run_expr: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM thread_runs tr JOIN threads th ON th.thread_id = tr.thread_id \
+         WHERE tr.run_id = {run_expr} AND th.archived = 1) \
+         OR EXISTS (SELECT 1 FROM threads th WHERE th.root_run_id = {run_expr} \
+         AND th.archived = 1))"
+    )
+}
+
+/// Whether a thread that owns `run_id` is archived now (see [`archived_run_predicate`]).
+pub(crate) fn run_in_archived_thread(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<bool, StorageError> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM thread_runs tr JOIN threads t ON t.thread_id = tr.thread_id \
-         WHERE tr.run_id = ?1 AND t.archived = 1) \
-         OR EXISTS(SELECT 1 FROM threads WHERE root_run_id = ?1 AND archived = 1)",
+        &format!("SELECT {}", archived_run_predicate("?1")),
         [run_id],
         |row| row.get(0),
     )?)

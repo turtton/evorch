@@ -6,12 +6,13 @@
 CREATE INDEX idx_thread_index_runs_archived_pending ON thread_index_runs(run_id)
     WHERE state = 'evicted' AND evicted_reason = 'archived' AND charged_bytes > 0;
 
--- Threads archived before this version were never evicted from the index (the
--- mirror hook only acts on a change of the flag). Evict their runs once; the
--- blocks are removed by the maintenance purge.
-UPDATE thread_index_runs SET state = 'evicted', evicted_reason = 'archived',
-    next_attempt_at_ns = NULL, blocked_reason = NULL, work_generation = work_generation + 1
-WHERE state IN ('pending', 'indexed', 'retry_wait', 'blocked') AND run_id IN (
-    SELECT tr.run_id FROM thread_runs tr JOIN threads t ON t.thread_id = tr.thread_id
-    WHERE t.archived = 1
-    UNION SELECT root_run_id FROM threads WHERE archived = 1 AND root_run_id IS NOT NULL);
+-- Threads archived before this version were never evicted from the index (the mirror
+-- hook only acts on a change of the flag). The maintenance tick evicts their runs in
+-- bounded steps and records its position here; no data is rewritten by this migration.
+ALTER TABLE thread_index_state ADD COLUMN archive_backfill_done INTEGER NOT NULL DEFAULT 0
+    CHECK (archive_backfill_done IN (0, 1));
+ALTER TABLE thread_index_state ADD COLUMN archive_backfill_cursor TEXT;
+-- Nothing to visit when no thread is archived yet (every fresh database), so the
+-- first maintenance tick writes nothing.
+UPDATE thread_index_state SET archive_backfill_done =
+    NOT EXISTS (SELECT 1 FROM threads WHERE archived = 1) WHERE id = 1;

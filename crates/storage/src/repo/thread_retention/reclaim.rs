@@ -950,22 +950,43 @@ fn delete_oversized(
             (work, true)
         }
         "conversation_blocks" => {
-            let progress = purge_index_rows_with(
-                &tx,
-                key,
-                PurgeTarget::Tombstoned,
-                RECLAIM_INDEX_ROWS,
-                RECLAIM_INDEX_TEXT_BYTES,
-                OversizedBlock::TakeAlone,
+            // A deleted run's blocks (a reclaim job), or those of a run the archive
+            // purge handed over. The latter is deleted only while its thread is
+            // still archived and the run is still `evicted(archived)`: an
+            // unarchive in between leaves everything and just drops the entry.
+            let tombstoned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
+                [key],
+                |row| row.get(0),
             )?;
-            (
-                Work {
-                    rows: progress.rows as u64,
-                    bytes: progress.text_bytes,
-                    updated: progress.gapped as u64,
-                },
-                !progress.remaining,
-            )
+            let target = if tombstoned {
+                Some(PurgeTarget::Tombstoned)
+            } else if crate::repo::thread_index::run_in_archived_thread(&tx, key)? {
+                Some(PurgeTarget::Archived)
+            } else {
+                None
+            };
+            match target {
+                Some(target) => {
+                    let progress = purge_index_rows_with(
+                        &tx,
+                        key,
+                        target,
+                        RECLAIM_INDEX_ROWS,
+                        RECLAIM_INDEX_TEXT_BYTES,
+                        OversizedBlock::TakeAlone,
+                    )?;
+                    (
+                        Work {
+                            rows: progress.rows as u64,
+                            bytes: progress.text_bytes,
+                            updated: progress.gapped as u64,
+                        },
+                        !progress.remaining,
+                    )
+                }
+                None => (Work::default(), true),
+            }
         }
         "run_contexts" => {
             let size: Option<u64> = tx
