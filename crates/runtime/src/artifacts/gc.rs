@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use storage::Database;
 use storage::StorageError;
 use storage::artifact_refs::{ArtifactRef, GcState, MetaState};
@@ -229,49 +230,64 @@ fn interpret_meta(
     })
 }
 
-/// An order-independent fingerprint of a set of names: the count and two 64-bit sums of
-/// independently seeded hashes. Adding or removing any name changes it.
+/// An order-independent fingerprint of a set of names: the count, and the sum modulo
+/// 2^256 of the SHA-256 digest of each name.
+///
+/// Adding, removing or exchanging any name changes the sum unless the digests happen to
+/// cancel, which for names nobody crafted has probability about 2^-256 per change. It is
+/// a change detector for directories that only this program and its own captures write;
+/// it is not a proof of identity against someone who can write arbitrary file names into
+/// `meta/` (they can already write any meta file, and so any reference they like).
+/// A name occurs once in a directory; a sum, unlike an XOR, would also tell a repeated one.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Fingerprint {
     count: u64,
-    first: u64,
-    second: u64,
+    /// Little-endian 64-bit limbs of the sum.
+    sum: [u64; 4],
 }
 
 impl Fingerprint {
-    fn hash(name: &str, seed: u64) -> u64 {
-        // FNV-1a, then a finalizer so that sums of similar names do not cancel.
-        let mut value = 0xcbf2_9ce4_8422_2325_u64 ^ seed;
-        for byte in name.bytes() {
-            value ^= u64::from(byte);
-            value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    /// The SHA-256 of `name` under a fixed label, as four little-endian limbs.
+    fn digest(name: &str) -> [u64; 4] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"evorch artifact gc meta name\0");
+        hasher.update(name.as_bytes());
+        let bytes = hasher.finalize();
+        let (chunks, _) = bytes.as_slice().as_chunks::<8>();
+        let mut limbs = [0_u64; 4];
+        for (limb, chunk) in limbs.iter_mut().zip(chunks) {
+            *limb = u64::from_le_bytes(*chunk);
         }
-        value ^= value >> 30;
-        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        value ^= value >> 27;
-        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
-        value ^ (value >> 31)
+        limbs
     }
 
     fn add(&mut self, name: &str) {
         self.count += 1;
-        self.first = self
-            .first
-            .wrapping_add(Self::hash(name, 0x1234_5678_9abc_def0));
-        self.second = self
-            .second
-            .wrapping_add(Self::hash(name, 0x0fed_cba9_8765_4321));
+        let mut carry = false;
+        for (limb, addend) in self.sum.iter_mut().zip(Self::digest(name)) {
+            let (partial, first) = limb.overflowing_add(addend);
+            let (total, second) = partial.overflowing_add(u64::from(carry));
+            *limb = total;
+            carry = first || second;
+        }
+    }
+
+    fn hex(&self) -> String {
+        self.sum
+            .iter()
+            .rev()
+            .map(|limb| format!("{limb:016x}"))
+            .collect()
     }
 
     /// Whether this is the fingerprint `state` recorded.
     fn matches(&self, state: &GcState) -> bool {
-        self.count == state.meta_count
-            && state.meta_hash == format!("{:016x}{:016x}", self.first, self.second)
+        self.count == state.meta_count && state.meta_hash == self.hex()
     }
 
     fn store(&self, state: &mut GcState) {
         state.meta_count = self.count;
-        state.meta_hash = format!("{:016x}{:016x}", self.first, self.second);
+        state.meta_hash = self.hex();
     }
 }
 
@@ -723,6 +739,74 @@ mod unit_tests {
             assert!(matches!(outcome, ReadMeta::Failed(_)));
             assert_eq!(read, round * data.len() as u64, "round {round}");
         }
+    }
+
+    fn fingerprint(names: &[&str]) -> Fingerprint {
+        let mut fingerprint = Fingerprint::default();
+        for name in names {
+            fingerprint.add(name);
+        }
+        fingerprint
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_order_and_detects_every_kind_of_change() {
+        let names = ["artifact-a.json", "artifact-b.json", "artifact-c.json"];
+        let reference = fingerprint(&names);
+        assert_eq!(
+            reference,
+            fingerprint(&[names[2], names[0], names[1]]),
+            "order does not matter"
+        );
+        assert_eq!(reference.hex().len(), 64);
+
+        // Added, removed, exchanged (same count), and doubled names all differ.
+        assert_ne!(reference, fingerprint(&[names[0], names[1]]));
+        assert_ne!(
+            reference,
+            fingerprint(&[names[0], names[1], names[2], "artifact-d.json"])
+        );
+        assert_ne!(
+            reference,
+            fingerprint(&[names[0], names[1], "artifact-d.json"])
+        );
+        assert_ne!(
+            fingerprint(&[names[0], names[1]]),
+            fingerprint(&[names[0], names[1], names[1]]),
+        );
+        assert_ne!(
+            fingerprint(&[names[0], names[0]]),
+            Fingerprint::default(),
+            "a repeated name does not cancel itself out (as it would under XOR)"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_sum_carries_across_limbs_and_round_trips_through_the_state() {
+        // Many names make carries between limbs certain; the result must not depend on
+        // the order they are added in.
+        let names = (0..2_000)
+            .map(|n| format!("artifact-{n:032x}.json"))
+            .collect::<Vec<_>>();
+        let mut forward = Fingerprint::default();
+        let mut backward = Fingerprint::default();
+        for name in &names {
+            forward.add(name);
+        }
+        for name in names.iter().rev() {
+            backward.add(name);
+        }
+        assert_eq!(forward, backward);
+
+        let mut state = GcState::default();
+        assert!(!forward.matches(&state));
+        forward.store(&mut state);
+        assert!(forward.matches(&state));
+        let mut other = forward.clone();
+        other.add("artifact-extra.json");
+        assert!(!other.matches(&state));
+        state.meta_hash.pop();
+        assert!(!forward.matches(&state), "a truncated value never matches");
     }
 
     #[test]
