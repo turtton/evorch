@@ -15,7 +15,7 @@ use crate::thread_index::PurgeTarget;
 use crate::thread_retention::{
     FilesOutcome, OversizedProgress, RECLAIM_EVENT_BYTES, RECLAIM_EVENT_ROWS, RECLAIM_INDEX_ROWS,
     RECLAIM_INDEX_TEXT_BYTES, RECLAIM_ROW_BUDGET, RECLAIM_ROWS, RECLAIM_SCAN_ROWS, ReclaimBudget,
-    ReclaimProgress, ReclaimSummary,
+    ReclaimJobMembers, ReclaimJobState, ReclaimProgress, ReclaimSummary,
 };
 
 /// Empty cursor advances (a run without rows in a table) one transaction may make.
@@ -1104,4 +1104,45 @@ pub(crate) fn summary(conn: &Connection) -> Result<ReclaimSummary, StorageError>
     summary.oversized_rows = rows;
     summary.oversized_bytes = bytes;
     Ok(summary)
+}
+
+/// Jobs in `state` in family-key order, at most `limit`, with the members the
+/// tombstone tables hold for each family. A family is small by construction (the
+/// whole tombstone set is read into memory at startup).
+pub(crate) fn jobs_in_state(
+    conn: &Connection,
+    state: ReclaimJobState,
+    limit: usize,
+) -> Result<Vec<ReclaimJobMembers>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_state \
+         WHERE state = ?1 ORDER BY family_key LIMIT ?2",
+    )?;
+    let families = statement
+        .query_map(params![state.as_str(), limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let column = |sql: &str, family: &str| -> Result<Vec<String>, StorageError> {
+        let mut statement = conn.prepare_cached(sql)?;
+        let rows = statement.query_map([family], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    families
+        .into_iter()
+        .map(|family_key| {
+            Ok(ReclaimJobMembers {
+                threads: column(
+                    "SELECT thread_id FROM thread_tombstones WHERE family_key = ?1 \
+                     ORDER BY thread_id",
+                    &family_key,
+                )?,
+                runs: column(
+                    "SELECT run_id FROM run_tombstones WHERE family_key = ?1 ORDER BY run_id",
+                    &family_key,
+                )?,
+                family_key,
+            })
+        })
+        .collect()
 }

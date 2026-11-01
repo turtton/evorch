@@ -6,6 +6,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use super::observe::{DbOperation, DbPhase, GuardHold, Site};
 use super::{OwnershipError, ThreadOwner};
 
+/// Threads removed by one `Registry::remove_threads` transaction.
+pub const REMOVE_BATCH: usize = 500;
+
 /// Per-lock wait of a single registry access, as before bounded retries.
 pub(super) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -36,6 +39,9 @@ pub enum RegistryError {
     Ownership(#[from] OwnershipError),
     #[error("thread does not exist")]
     Absent,
+    /// Retention deleted the thread; it can no longer be started, claimed or attached.
+    #[error(transparent)]
+    ThreadDeleted(#[from] crate::thread_retention::ThreadDeleted),
     #[error("thread already exists; attach or claim explicitly")]
     Exists,
     #[error("ownership reader lock is poisoned")]
@@ -107,6 +113,22 @@ impl RegistryError {
             other => other,
         }
     }
+}
+
+/// What the registry holds for a thread whose deletion retention is deciding.
+///
+/// Used only while every other evorch process is known to be gone (both startup
+/// locks held exclusively), so a row is a remnant, never a live owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerVerdict {
+    /// No row.
+    Absent,
+    /// The owner released the thread.
+    Released,
+    /// A row that is not released but had no turn or run in flight.
+    IdleRemnant,
+    /// A row that still claims an active turn or run; its lease expired at this time.
+    ActiveRemnant { expires_at_ms: u64 },
 }
 
 /// What one heartbeat tick did to a thread the owner held at its start.
@@ -208,6 +230,75 @@ impl Registry {
             since: Instant::now(),
         });
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_for_tests(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Classify the rows of `thread_ids` for retention. Fails if the registry cannot
+    /// be read or a row cannot be parsed: retention then decides nothing.
+    ///
+    /// # Errors
+    /// Returns an error on a SQLite or JSON failure.
+    pub fn classify_for_retention(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, OwnerVerdict>, RegistryError> {
+        let mut verdicts = std::collections::BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT state FROM thread_owners WHERE thread_id = ?1")?;
+        for thread_id in thread_ids {
+            let json: Option<String> = statement
+                .query_row([thread_id], |row| row.get(0))
+                .optional()?;
+            let verdict = match json {
+                None => OwnerVerdict::Absent,
+                Some(json) => {
+                    let owner: ThreadOwner = serde_json::from_str(&json)?;
+                    if owner.state == super::OwnerState::Released {
+                        OwnerVerdict::Released
+                    } else if !owner.active_turn && owner.active_runs.is_empty() {
+                        OwnerVerdict::IdleRemnant
+                    } else {
+                        OwnerVerdict::ActiveRemnant {
+                            expires_at_ms: owner.lease.expires_at,
+                        }
+                    }
+                }
+            };
+            verdicts.insert(thread_id.clone(), verdict);
+        }
+        Ok(verdicts)
+    }
+
+    /// Delete the owner rows and checkpoints of `thread_ids`, in transactions of at
+    /// most [`REMOVE_BATCH`] threads. Returns how many owner rows existed. Only
+    /// retention calls this, under the exclusive startup locks.
+    ///
+    /// # Errors
+    /// Returns an error on a SQLite failure; finished batches stay deleted.
+    pub fn remove_threads(&mut self, thread_ids: &[String]) -> Result<usize, RegistryError> {
+        let mut removed = 0;
+        for batch in thread_ids.chunks(REMOVE_BATCH) {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for thread_id in batch {
+                removed += transaction.execute(
+                    "DELETE FROM thread_owners WHERE thread_id = ?1",
+                    [thread_id],
+                )?;
+                transaction.execute(
+                    "DELETE FROM owner_checkpoints WHERE thread_id = ?1",
+                    [thread_id],
+                )?;
+            }
+            transaction.commit()?;
+        }
+        Ok(removed)
     }
 
     pub fn list(&self) -> Result<Vec<ThreadOwner>, RegistryError> {

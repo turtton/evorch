@@ -14,7 +14,7 @@ pub use permit::OwnerPermit;
 pub use retry::RetryPolicy;
 pub use state::{HeartbeatTick, OwnershipError, ThreadOwner};
 mod registry;
-pub use registry::{Registry, RegistryError};
+pub use registry::{OwnerVerdict, Registry, RegistryError};
 #[cfg(unix)]
 mod host;
 #[cfg(unix)]

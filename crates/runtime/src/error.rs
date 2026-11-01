@@ -178,4 +178,7 @@ pub enum RunRestoreFailure {
     /// Cancellation discards the run, so nothing may continue it.
     #[error("取り消された実行のため継続しません。作業がまだ必要なら新しい run に委譲してください")]
     Cancelled,
+    /// Retention deleted the thread (or the thread of the run); nothing may restore it.
+    #[error("{0}")]
+    ThreadDeleted(crate::thread_retention::ThreadDeleted),
 }

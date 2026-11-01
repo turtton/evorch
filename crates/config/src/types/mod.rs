@@ -57,8 +57,8 @@ pub use routing::{
 pub use rules::RulesConfig;
 pub use sandbox::{EscalationApproval, SandboxConfig};
 pub use storage::{
-    DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES, MIN_THREAD_INDEX_MAX_BYTES,
-    StorageConfig, ThreadIndexConfig,
+    DEFAULT_ARCHIVED_DELETE_AFTER_DAYS, DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES,
+    MIN_THREAD_INDEX_MAX_BYTES, StorageConfig, ThreadIndexConfig, ThreadRetentionConfig,
 };
 pub use team::TeamConfig;
 pub use tools::{

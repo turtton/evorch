@@ -18,12 +18,38 @@ pub const MIN_THREAD_INDEX_MAX_BYTES: u64 = 1024 * 1024;
 /// （`hard_limits.max_db_bytes`）と同じで、これを超える索引予算は意味を持たない。
 pub const MAX_THREAD_INDEX_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// アーカイブ済みスレッドを削除するまでの日数の既定値。
+pub const DEFAULT_ARCHIVED_DELETE_AFTER_DAYS: u32 = 30;
+
 /// ストレージ層の利用者設定。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     /// 会話全文索引（`thread_grep` の索引）の設定。
     pub thread_index: ThreadIndexConfig,
+    /// アーカイブ済みスレッドの期限削除（`[storage.thread_retention]`）。
+    pub thread_retention: ThreadRetentionConfig,
+}
+
+/// アーカイブ済みスレッドの期限削除の設定。
+///
+/// 削除の確定は起動時の排他フェーズだけで行われます。他の evorch プロセスが
+/// 動いている起動では確定せず、次の単独起動まで待ちます。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThreadRetentionConfig {
+    /// アーカイブしてから削除するまでの日数。既定 30、0 で新規の削除確定を無効化する。
+    /// 時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる
+    /// （pin・評価サンプル・実行中の family は除外）。
+    pub archived_delete_after_days: u32,
+}
+
+impl Default for ThreadRetentionConfig {
+    fn default() -> Self {
+        Self {
+            archived_delete_after_days: DEFAULT_ARCHIVED_DELETE_AFTER_DAYS,
+        }
+    }
 }
 
 impl StorageConfig {
@@ -89,6 +115,27 @@ mod tests {
         assert!(config.thread_index.enabled);
         assert_eq!(config.thread_index.max_bytes, 536_870_912);
         config.validate().expect("既定値は有効");
+    }
+
+    // Given: 一部のキーだけを指定した TOML / When: パースする
+    // Then: 省略したキーは既定値で補完される
+    #[test]
+    fn thread_retention_defaults_to_thirty_days_and_zero_disables() {
+        assert_eq!(
+            StorageConfig::default()
+                .thread_retention
+                .archived_delete_after_days,
+            30
+        );
+        let config: StorageConfig =
+            toml::from_str("[thread_retention]\narchived_delete_after_days = 0\n").expect("TOML");
+        assert_eq!(config.thread_retention.archived_delete_after_days, 0);
+        assert!(config.thread_index.enabled, "other sections keep defaults");
+        config.validate().expect("0 is valid");
+        assert!(
+            toml::from_str::<StorageConfig>("[thread_retention]\ndays = 3\n").is_err(),
+            "unknown keys are rejected"
+        );
     }
 
     // Given: 一部のキーだけを指定した TOML / When: パースする

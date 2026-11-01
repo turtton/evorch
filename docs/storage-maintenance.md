@@ -123,7 +123,7 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 ## スレッドの期限削除（storage 基盤）
 
 アーカイブ済みスレッドを期限後に削除するための storage 側の基盤（schema v35）。
-「いつ確定するか」（起動時の排他フェーズ、ロック、設定、GUI）は別の変更が担い、
+「いつ確定するか」（起動時の排他フェーズ、ロック、設定）は次の節の runtime が担い、
 ここでは storage が提供する契約だけを説明する。
 
 - **tombstone が唯一の不可逆境界。** `Database::retention_finalize` が、family
@@ -201,6 +201,42 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 - **会計。** 回収は events の日次・session 集計、`sessions.total_event_bytes`、索引の
   `charged_bytes` を同じ transaction で更新する。tombstone 済み run の索引行は fence のため
   最後の block を消すまで課金を減らさず、最後に `deleted` として 0 にする。
+
+## スレッドの期限削除（runtime：起動フェーズ・束縛・回収）
+
+`crates/runtime/src/thread_retention/` が、上の storage 基盤を「いつ確定し、誰が回収するか」へつなぐ。
+GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にある。設定は
+`[storage.thread_retention] archived_delete_after_days`（既定 30、0 で新規の確定を行わない。
+時刻のない legacy アーカイブは日数に関係なく即 due で、pin・評価サンプル・実行中の family は除外）。
+
+- **ロックは 2 本。** DB のリース（`<db>.maintenance-lock`）と ownership root のリース
+  （`<root>/.ownership-lock`）。稼働中のプロセスは両方を共有で、起動フェーズは両方を排他で持つ
+  （取得順は DB → root。root が取れなければ DB も手放す）。両方取れた起動だけが、他の evorch プロセスが
+  存在しないと言える。`ExclusiveLeases::downgrade` は flock の変換が原子的でないため、共有へ戻した
+  **後に** tombstone と束縛を読み直す。`Storage::open_with_lease` が DB のリースを writer スレッドへ渡す。
+  回収の実行者は `<db>.reclaim-lock` を排他で持つ 1 プロセスだけ。
+- **確定は起動フェーズ（`run_exclusive_phase`）だけ。** 段 0 束縛確認 → 1 backfill → 2 探索 →
+  3 owner 分類・root 束縛・family ごとの確定 → 4 owners.db と scratch の削除 → 5 巨大行 → 6 incremental vacuum。
+  量（行数・辺数・件数）で区切り、実時間では区切らない。残りは次の起動が続ける。段 0〜3 は確定の commit まで
+  DB の外を変えない。段 4 以降は確定済みの集合に対する回収で、失敗や crash でも削除は取り消されず、
+  次の起動が同じ段をやり直す。family は分割しない（`OverBudget` は予算を倍にして最大 4 回、足りなければ次回）。
+- **owner の残骸。** 両ロックの下に生きたプロセスはないので、owners.db の行はすべて残骸として扱う。
+  released / idle は確定でき、turn や run を持つ行は、lease の期限切れから保持期間（日数）が経つまで
+  `Blocked(Owner)`。owners.db を読めなければ何も確定しない。
+- **束縛。** DB と ownership root の組を最初の確定で両側に記録する（DB: `retention_identity` と
+  `retention_binding`、root: `.evorch-retention-binding.json`。root 側は最初の確定の直前に書き、上書きしない）。
+  どちらかが欠ける、`db_id` が違う、sidebar（`--state` で別ファイルを渡した起動を含む）や root が違う場合は
+  不一致で、新規の確定・owner 行の除去・scratch の削除をしない。DB 側の回収、artifacts の meta の削除、
+  検索除外は続く。rebind は提供しない。root のファイルが同じ DB を指し DB 側の行がないだけの状態は、
+  最初の試みが途中で止まった跡として再開する。
+- **回収（`ReclaimExecutor`）。** reclaim-lock を持つプロセスが 5 秒ごとに backfill の残り、`reclaim_step`、
+  `db_done` の family の artifacts の meta の削除（`ArtifactStore::remove_meta_for`）を行う。読めない meta は
+  「対象外」にせず失敗として数え、`files_failed` で再試行する（20 回で打ち切って報告）。blob は触らない。
+  通常稼働中は owners.db と scratch を触らない。停止は `shutdown()` で join してから storage を閉じる。
+- **ガード。** 起動後に tombstone を 1 回読み、削除済みの thread・run への `OwnerHost::start / claim / attach`、
+  `bind_thread_root`、run の復元と継続、fork seed、escalation seed、host input の配送を `ThreadDeleted` で
+  拒否する。
+- **`--state` で別の sidebar を使う起動は束縛不一致になり、自動確定が無効になる。**
 
 ## 既知の制約
 

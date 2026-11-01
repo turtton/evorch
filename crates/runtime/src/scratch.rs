@@ -191,6 +191,30 @@ impl ThreadScratch {
         state.seen.retain(|_, (seen, _)| *seen != name);
     }
 
+    /// Delete the directory of a thread whose deletion retention confirmed, and
+    /// forget what this process noted about it. Returns whether a directory existed.
+    ///
+    /// Unlike [`Self::release_thread`] this reports failure, and it only ever
+    /// resolves `thread_id` through the same name mapping as every other
+    /// operation, so nothing outside the managed parent is touched. The tree is
+    /// renamed aside at once (an O(1) step whatever its size) and deleted in the
+    /// background; a tree left behind by an exit is purged by the next [`Self::sweep`].
+    ///
+    /// # Errors
+    /// Fails when the parent is not a private directory of this user, or the rename fails.
+    pub fn remove_thread(&self, thread_id: &str) -> io::Result<bool> {
+        let name = thread_dir_name(thread_id);
+        let mut state = self.lock();
+        state.seen.retain(|_, (seen, _)| *seen != name);
+        state.resets.remove(&name);
+        self.root.discard(&name)
+    }
+
+    /// Whether `thread_id`'s directory exists now (without following a symlink).
+    pub fn thread_dir_exists(&self, thread_id: &str) -> bool {
+        self.thread_dir(thread_id).symlink_metadata().is_ok()
+    }
+
     /// Delete directories nobody can still be using: discarded trees, threads
     /// outside `live_threads`, and unbound runs unless another process may be live.
     pub fn sweep(&self, live_threads: &HashSet<String>, other_process_may_be_live: bool) {
@@ -440,6 +464,36 @@ mod tests {
         assert!(!dir.join("file").exists());
         scratch.release_thread("thread");
         assert!(!dir.exists());
+    }
+
+    // Given: plain and digest-named thread directories next to other threads' and
+    // runs' directories and an unrelated file / When: one thread is removed
+    // Then: only that thread's directory goes (by either name form); a missing one is
+    // reported as absent and nothing outside the managed parent is touched.
+    #[test]
+    fn remove_thread_resolves_both_name_forms_and_leaves_everything_else() {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "x").unwrap();
+        let scratch = ThreadScratch::at(base.path().join("scratch"));
+        let odd = "thread/with.dots";
+        let prepare = |key: ScratchKey| scratch.prepare(&key).unwrap();
+        let plain = prepare(ScratchKey::Thread("gone".into()));
+        let digest = prepare(ScratchKey::Thread(odd.into()));
+        let other = prepare(ScratchKey::Thread("other".into()));
+        let run = prepare(ScratchKey::Run(RunId::new(3)));
+        std::fs::write(plain.join("file"), "x").unwrap();
+
+        assert!(scratch.thread_dir_exists("gone"));
+        assert!(scratch.remove_thread("gone").unwrap());
+        assert!(scratch.remove_thread(odd).unwrap());
+        assert!(!scratch.remove_thread("gone").unwrap(), "already absent");
+        assert!(!scratch.thread_dir_exists("gone"));
+
+        assert!(!plain.exists() && !digest.exists());
+        assert!(other.is_dir() && run.is_dir());
+        assert!(outside.join("keep").is_file());
     }
 
     // Given: a reset thread / When: runs observe it / Then: only restored runs that have

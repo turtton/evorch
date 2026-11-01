@@ -63,6 +63,7 @@ pub mod team_context;
 pub mod thread_goals;
 mod thread_lineage;
 pub mod thread_read_dirs;
+pub mod thread_retention;
 mod thread_start;
 mod thread_todos;
 pub mod topology;

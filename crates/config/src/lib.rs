@@ -76,8 +76,8 @@ pub use types::{
     validate_run_js_scope,
 };
 pub use types::{ChainPurpose, chain_kind_problems, route_mixing_problems, scope_kind_problems};
-pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};
 pub use types::{
-    DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES, MIN_THREAD_INDEX_MAX_BYTES,
-    StorageConfig, ThreadIndexConfig,
+    DEFAULT_ARCHIVED_DELETE_AFTER_DAYS, DEFAULT_THREAD_INDEX_MAX_BYTES, MAX_THREAD_INDEX_MAX_BYTES,
+    MIN_THREAD_INDEX_MAX_BYTES, StorageConfig, ThreadIndexConfig, ThreadRetentionConfig,
 };
+pub use types::{DEFAULT_ROLE_PROFILE, RoleProfileConfig, is_valid_role_profile_name};

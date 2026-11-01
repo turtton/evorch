@@ -269,6 +269,8 @@ pub(crate) enum SnapshotError {
     Clock(#[from] std::time::SystemTimeError),
     #[error("保存時刻が範囲外です: {0}")]
     Timestamp(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    ThreadDeleted(#[from] crate::thread_retention::ThreadDeleted),
 }
 
 /// Persist only at a completed tool round; a failed write leaves the last snapshot intact.

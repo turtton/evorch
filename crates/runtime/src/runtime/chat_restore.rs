@@ -117,6 +117,8 @@ impl AgentRuntime {
             run_id: run_id.to_string(),
             reason,
         };
+        self.deny_deleted_run(&run_id.to_string())
+            .map_err(|deleted| fail(RunRestoreFailure::ThreadDeleted(deleted)))?;
         let store = self.shared.run_store.get();
         let _guard = store.map(|store| {
             store
@@ -538,6 +540,15 @@ impl AgentRuntime {
         mut config: RunConfig,
         seed: Option<crate::restore::ChatForkSeed>,
     ) -> Result<RunId, RuntimeError> {
+        let deleted = |deleted| RuntimeError::RunRestoreFailed {
+            run_id: format!("chat:{thread_id}"),
+            reason: RunRestoreFailure::ThreadDeleted(deleted),
+        };
+        self.deny_deleted_thread(thread_id).map_err(deleted)?;
+        if let Some(seed) = &seed {
+            self.deny_deleted_run(&seed.source_run_id)
+                .map_err(deleted)?;
+        }
         let mentions = std::mem::take(&mut config.skill_mentions);
         if let Some((objective, criteria)) = &config.initial_thread_goal {
             self.validate_new_thread_goal(thread_id, objective, criteria)
@@ -925,6 +936,8 @@ impl AgentRuntime {
             run_id: seed.source_run_id.clone(),
             reason,
         };
+        self.deny_deleted_run(&seed.source_run_id)
+            .map_err(|deleted| fail(RunRestoreFailure::ThreadDeleted(deleted)))?;
         if let Some(permit) = &authority.ownership {
             permit
                 .validate_generation()

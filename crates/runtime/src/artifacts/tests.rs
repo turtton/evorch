@@ -622,3 +622,128 @@ async fn orchestrator_cannot_capture_and_missing_store_fails_closed() {
 
 mod inspect;
 mod scratch;
+
+fn capture_for(
+    store: &ArtifactStore,
+    workspace: &Path,
+    run: &str,
+    root: &str,
+    thread: Option<&str>,
+) -> ArtifactRecord {
+    store
+        .capture(
+            workspace,
+            None,
+            Path::new("mock.png"),
+            CaptureRequest {
+                title: "t",
+                caption: None,
+                run_id: run.into(),
+                root_run_id: root.into(),
+                thread_id: thread.map(str::to_owned),
+            },
+        )
+        .unwrap()
+}
+
+fn set(items: &[&str]) -> std::collections::HashSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+// Given: captures of a deleted thread, of a deleted run without a thread, and of a
+// survivor, all sharing one blob / When: their meta is removed
+// Then: only the family's meta files go; the shared blob and the survivor stay.
+#[test]
+fn remove_meta_for_deletes_matching_thread_and_run_meta_but_never_blobs() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let by_thread = capture_for(&store, workspace.path(), "7", "7", Some("gone"));
+    let by_run = capture_for(&store, workspace.path(), "8", "8", None);
+    let by_root = capture_for(&store, workspace.path(), "9", "8", Some("other"));
+    let survivor = capture_for(&store, workspace.path(), "10", "10", Some("kept"));
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&["8"]), 100);
+
+    assert!(removal.complete && removal.failed.is_empty());
+    let mut removed = removal.removed.clone();
+    removed.sort();
+    let mut expected = vec![
+        by_thread.artifact_id.clone(),
+        by_run.artifact_id.clone(),
+        by_root.artifact_id.clone(),
+    ];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(store.load(&survivor.artifact_id).is_ok());
+    assert!(store.load(&by_thread.artifact_id).is_err());
+    assert!(
+        store.blob_path(&survivor).is_file(),
+        "the blob is shared and is never removed here"
+    );
+}
+
+// Given: a meta file that cannot be parsed next to a matching one / When: removing
+// Then: the unreadable file is reported as failed (not skipped as "not ours") and
+// the readable match is still removed.
+#[test]
+fn remove_meta_for_reports_unreadable_meta_as_failed() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let ours = capture_for(&store, workspace.path(), "7", "7", Some("gone"));
+    let corrupt = store
+        .meta_path("artifact-00000000000000000000000000000000")
+        .unwrap();
+    std::fs::write(&corrupt, b"{ not json").unwrap();
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+
+    assert_eq!(removal.removed, vec![ours.artifact_id]);
+    assert_eq!(removal.failed.len(), 1);
+    assert_eq!(removal.failed[0].0, corrupt);
+    assert!(corrupt.exists(), "an unreadable file is left in place");
+}
+
+// Given: more meta files than the budget / When: continuing from `last_name`
+// Then: each call reads at most `budget` files and the calls together cover all.
+#[test]
+fn remove_meta_after_resumes_within_a_budget() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let records = (0..5)
+        .map(|index| {
+            capture_for(
+                &store,
+                workspace.path(),
+                &index.to_string(),
+                "1",
+                Some("gone"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut after: Option<String> = None;
+    let mut removed = Vec::new();
+    let mut calls = 0;
+    loop {
+        let step = store.remove_meta_after(&set(&["gone"]), &set(&[]), after.as_deref(), 2);
+        assert!(step.scanned <= 2);
+        removed.extend(step.removed);
+        calls += 1;
+        if step.complete {
+            break;
+        }
+        after = step.last_name;
+    }
+
+    assert_eq!(calls, 3);
+    removed.sort();
+    let mut expected = records
+        .into_iter()
+        .map(|r| r.artifact_id)
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(removed, expected);
+}

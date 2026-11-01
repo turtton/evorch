@@ -63,6 +63,9 @@ impl AgentRuntime {
         if thread_id.is_empty() {
             return Err("thread_id must not be empty".into());
         }
+        self.deny_deleted_thread(thread_id)
+            .and_then(|()| self.deny_deleted_run(&run_id.to_string()))
+            .map_err(|deleted| deleted.to_string())?;
         if self
             .list_agents()
             .iter()
