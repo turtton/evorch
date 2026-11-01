@@ -93,7 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let storage =
             storage::Storage::open_with_lease(config.clone(), prelude.leases.db_lease()?)?;
-        let mut executor_config = ExecutorConfig::new(storage.handle(), config, None);
+        // As the GUI does: without the store the executor leaves artifact files alone.
+        let artifacts = plan
+            .artifacts_dir
+            .as_deref()
+            .and_then(|dir| runtime::artifacts::ArtifactStore::new(dir).ok())
+            .map(std::sync::Arc::new);
+        let mut executor_config = ExecutorConfig::new(storage.handle(), config, artifacts);
         executor_config.interval = std::time::Duration::from_millis(10);
         let executor = ReclaimExecutor::spawn(executor_config)?;
         let report = executor.wait_for_cycles(reclaim_cycles);
