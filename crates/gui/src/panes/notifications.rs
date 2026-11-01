@@ -46,6 +46,8 @@ pub fn notifications_pane(
                     (CANCELLED_LABEL, cancelled_color())
                 }
                 NotificationKind::RunFailed { .. } => terminal(ThreadRunPhase::Error),
+                NotificationKind::RetentionStartup => ("Storage", terminal(ThreadRunPhase::Done).1),
+                NotificationKind::RetentionDisabled { .. } => ("Storage", attention_color()),
             };
             let row = ui
                 .push_id(notification.id, |ui| {

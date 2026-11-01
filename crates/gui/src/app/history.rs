@@ -238,6 +238,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Ok(bytes) => {
                     let saved: HistorySidebar = serde_json::from_slice(&bytes)
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
+                    let mut saved = saved;
+                    // A deleted thread's messages and drafts stay in a file saved
+                    // before its deletion; the tombstone wins.
+                    super::thread_retention::prune_tombstoned(&mut saved, &self.tombstones);
                     self.history = saved.user_messages;
                     self.composer_drafts = saved.composer_drafts;
                     self.shared_sidebar_restored();

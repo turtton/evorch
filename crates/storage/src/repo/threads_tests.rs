@@ -411,7 +411,7 @@ mod retention_series {
         }
     }
 
-    fn archive(id: &str, archived: bool, at: Option<i64>, revision: Option<u64>) -> ThreadUpsert {
+    fn archive(id: &str, archived: bool, at: Option<i64>, revision: u64) -> ThreadUpsert {
         ThreadUpsert {
             archived: Some(archived),
             archived_at_ns: at,
@@ -420,7 +420,7 @@ mod retention_series {
         }
     }
 
-    fn pin(id: &str, pinned: bool, revision: Option<u64>) -> ThreadUpsert {
+    fn pin(id: &str, pinned: bool, revision: u64) -> ThreadUpsert {
         ThreadUpsert {
             pinned: Some(pinned),
             pin_revision: revision,
@@ -444,11 +444,7 @@ mod retention_series {
     fn the_first_synchronisation_adopts_the_sidebar_without_inventing_a_time() {
         // Given: a legacy archived thread mirrored without time or revision.
         let database = Database::open_in_memory().unwrap();
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, None, None),
-        );
+        write(&database, ThreadWriter::Host, archive("t", true, None, 0));
         // A missing revision is generation 0, which initialises the series.
         assert_eq!(archived_state(&row(&database, "t")), (true, None, Some(0)));
 
@@ -456,7 +452,7 @@ mod retention_series {
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(5), Some(3)),
+            archive("t", true, Some(5), 3),
         );
 
         // Then: the uninitialised series adopts them as sent.
@@ -465,11 +461,7 @@ mod retention_series {
             (true, Some(5), Some(3))
         );
         // And: a repeated mirror without a time does not erase or refresh it.
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, None, Some(3)),
-        );
+        write(&database, ThreadWriter::Host, archive("t", true, None, 3));
         assert_eq!(
             archived_state(&row(&database, "t")),
             (true, Some(5), Some(3))
@@ -482,77 +474,69 @@ mod retention_series {
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(5), Some(3)),
+            archive("t", true, Some(5), 3),
         );
 
         // A newer revision replaces the whole series; unarchiving clears the time.
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", false, Some(7), Some(4)),
+            archive("t", false, Some(7), 4),
         );
         assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(4)));
         // An older revision is ignored.
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(9), Some(2)),
+            archive("t", true, Some(9), 2),
         );
         assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(4)));
         // The same revision with a different value keeps the archived side...
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(9), Some(4)),
+            archive("t", true, Some(9), 4),
         );
         assert_eq!(
             archived_state(&row(&database, "t")),
             (true, Some(9), Some(4))
         );
         // ...and cannot be undone without a newer revision.
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, Some(4)),
-        );
+        write(&database, ThreadWriter::Host, archive("t", false, None, 4));
         assert_eq!(
             archived_state(&row(&database, "t")),
             (true, Some(9), Some(4))
         );
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, Some(5)),
-        );
+        write(&database, ThreadWriter::Host, archive("t", false, None, 5));
         assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(5)));
     }
 
     #[test]
     fn the_pin_series_follows_the_same_rules() {
         let database = Database::open_in_memory().unwrap();
-        write(&database, ThreadWriter::Host, pin("t", true, None));
+        write(&database, ThreadWriter::Host, pin("t", true, 0));
         assert_eq!(
             (row(&database, "t").pinned, row(&database, "t").pin_revision),
             (true, Some(0))
         );
         // The same generation, now numbered, cannot undo the initial pin.
-        write(&database, ThreadWriter::Host, pin("t", false, Some(0)));
+        write(&database, ThreadWriter::Host, pin("t", false, 0));
         assert!(row(&database, "t").pinned);
-        write(&database, ThreadWriter::Host, pin("t", false, Some(1)));
+        write(&database, ThreadWriter::Host, pin("t", false, 1));
         assert_eq!(
             (row(&database, "t").pinned, row(&database, "t").pin_revision),
             (false, Some(1))
         );
         // Equal revision: pinned wins.
-        write(&database, ThreadWriter::Host, pin("t", true, Some(1)));
-        write(&database, ThreadWriter::Host, pin("t", false, Some(1)));
+        write(&database, ThreadWriter::Host, pin("t", true, 1));
+        write(&database, ThreadWriter::Host, pin("t", false, 1));
         assert!(row(&database, "t").pinned);
-        write(&database, ThreadWriter::Host, pin("t", false, Some(2)));
+        write(&database, ThreadWriter::Host, pin("t", false, 2));
         assert_eq!(
             (row(&database, "t").pinned, row(&database, "t").pin_revision),
             (false, Some(2))
         );
-        write(&database, ThreadWriter::Host, pin("t", true, Some(1)));
+        write(&database, ThreadWriter::Host, pin("t", true, 1));
         assert!(!row(&database, "t").pinned, "older revision is ignored");
     }
 
@@ -562,16 +546,16 @@ mod retention_series {
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(5), Some(3)),
+            archive("t", true, Some(5), 3),
         );
-        write(&database, ThreadWriter::Host, pin("t", true, Some(2)));
+        write(&database, ThreadWriter::Host, pin("t", true, 2));
 
         // A host mirror that carries neither flag, and a runtime upsert.
         write(&database, ThreadWriter::Host, host("t"));
         let mut runtime = host("t");
         runtime.archived = Some(false);
         runtime.pinned = Some(false);
-        runtime.archive_revision = Some(99);
+        runtime.archive_revision = 99;
         runtime.archived_at_ns = Some(1);
         write(&database, ThreadWriter::Runtime, runtime);
         let stored = row(&database, "t");
@@ -581,7 +565,7 @@ mod retention_series {
         // A thread first seen by the runtime has an uninitialised series.
         let mut fresh = host("fresh");
         fresh.archived = Some(true);
-        fresh.archive_revision = Some(7);
+        fresh.archive_revision = 7;
         write(&database, ThreadWriter::Runtime, fresh);
         let fresh = row(&database, "fresh");
         assert_eq!(
@@ -597,7 +581,7 @@ mod retention_series {
         write(
             &database,
             ThreadWriter::Host,
-            archive("fresh", true, Some(8), Some(1)),
+            archive("fresh", true, Some(8), 1),
         );
         assert_eq!(
             archived_state(&row(&database, "fresh")),
@@ -606,120 +590,14 @@ mod retention_series {
     }
 
     #[test]
-    fn an_unnumbered_initial_archive_is_generation_zero_and_cannot_be_undone_by_it() {
-        let database = Database::open_in_memory().unwrap();
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, None, None),
-        );
-        // Equal generation, different value: the protective side stays.
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, Some(0)),
-        );
-        assert_eq!(archived_state(&row(&database, "t")), (true, None, Some(0)));
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, Some(1)),
-        );
-        assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(1)));
-    }
-
-    #[test]
-    fn an_unnumbered_host_keeps_editing_its_own_unnumbered_series() {
-        let database = Database::open_in_memory().unwrap();
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, None, None),
-        );
-        // Sequential edits without revisions replace each other...
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, None),
-        );
-        assert_eq!(archived_state(&row(&database, "t")), (false, None, Some(0)));
-        write(&database, ThreadWriter::Host, pin("t", true, None));
-        write(&database, ThreadWriter::Host, pin("t", false, None));
-        assert!(!row(&database, "t").pinned);
-        // ...but never override a numbered series.
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, Some(0), Some(2)),
-        );
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, None),
-        );
-        assert_eq!(
-            archived_state(&row(&database, "t")),
-            (true, Some(0), Some(2))
-        );
-    }
-
-    #[test]
-    fn an_unnumbered_sender_never_releases_a_generation_zero_series_a_numbered_writer_made() {
-        let database = Database::open_in_memory().unwrap();
-        // A pin and an archive written with an explicit generation 0.
-        write(&database, ThreadWriter::Host, pin("t", true, Some(0)));
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, Some(10), Some(0)),
-        );
-        // An unnumbered release is an equal generation: the protective side wins.
-        write(&database, ThreadWriter::Host, pin("t", false, None));
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, None),
-        );
-        assert!(row(&database, "t").pinned);
-        assert_eq!(
-            archived_state(&row(&database, "t")),
-            (true, Some(10), Some(0))
-        );
-        // The same holds however often it repeats, and a numbered release works.
-        write(&database, ThreadWriter::Host, pin("t", false, None));
-        assert!(row(&database, "t").pinned);
-        write(&database, ThreadWriter::Host, pin("t", false, Some(1)));
-        assert!(!row(&database, "t").pinned);
-    }
-
-    #[test]
-    fn a_numbered_tie_with_an_unnumbered_series_protects_it_for_good() {
-        let database = Database::open_in_memory().unwrap();
-        write(&database, ThreadWriter::Host, pin("t", false, None));
-        // Some(0) against an unnumbered generation 0 is an equal generation.
-        write(&database, ThreadWriter::Host, pin("t", true, Some(0)));
-        assert!(row(&database, "t").pinned);
-        // The series now counts as numbered: an unnumbered release is ignored.
-        write(&database, ThreadWriter::Host, pin("t", false, None));
-        assert!(row(&database, "t").pinned);
-        // A numbered write of the same generation keeps the protective side too.
-        write(&database, ThreadWriter::Host, pin("t", false, Some(0)));
-        assert!(row(&database, "t").pinned);
-    }
-
-    #[test]
     fn a_row_inserted_with_an_explicit_generation_zero_is_numbered_from_the_start() {
         let database = Database::open_in_memory().unwrap();
         write(
             &database,
             ThreadWriter::Host,
-            archive("t", true, Some(5), Some(0)),
+            archive("t", true, Some(5), 0),
         );
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", false, None, None),
-        );
+        write(&database, ThreadWriter::Host, archive("t", false, None, 0));
         assert_eq!(
             archived_state(&row(&database, "t")),
             (true, Some(5), Some(0))
@@ -737,11 +615,7 @@ mod retention_series {
         write(&database, ThreadWriter::Runtime, created);
         assert!(!row(&database, "t").archived);
         // A backfilled or runtime-owned row follows the host only.
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("t", true, None, None),
-        );
+        write(&database, ThreadWriter::Host, archive("t", true, None, 0));
         let mut unarchive = host("t");
         unarchive.archived = Some(false);
         write(&database, ThreadWriter::Runtime, unarchive);
@@ -751,15 +625,11 @@ mod retention_series {
     #[test]
     fn project_listing_can_leave_archived_threads_out() {
         let database = Database::open_in_memory().unwrap();
+        write(&database, ThreadWriter::Host, archive("old", true, None, 0));
         write(
             &database,
             ThreadWriter::Host,
-            archive("old", true, None, None),
-        );
-        write(
-            &database,
-            ThreadWriter::Host,
-            archive("live", false, None, None),
+            archive("live", false, None, 0),
         );
         let ids = |include_archived| {
             in_project(&database.conn, "/repo", None, 10, include_archived)

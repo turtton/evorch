@@ -21,7 +21,7 @@ use crate::panes::{
     file_viewer::{FileLink, file_viewer_pane, take_file_links},
     notifications::{NotificationsAction, notifications_pane},
     requests::RequestAction,
-    sidebar::{SidebarAction, sidebar_pane},
+    sidebar::{SidebarAction, sidebar_pane_with_retention},
     tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
@@ -62,6 +62,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) sidebar: &'a SidebarState,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) unread_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
+    pub(super) retention:
+        &'a BTreeMap<workspace_ui::ThreadId, storage::thread_retention::RetentionStatus>,
     pub(super) sidebar_action: &'a mut Option<SidebarAction>,
     pub(super) agents_action: &'a mut Option<AgentsAction>,
     pub(super) focus: &'a ConversationFocus,
@@ -322,13 +324,14 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     })
                     .map(|thread| thread.id.clone())
                     .collect();
-                if let Some(action) = sidebar_pane(
+                if let Some(action) = sidebar_pane_with_retention(
                     ui,
                     self.sidebar,
                     self.phases,
                     &question_threads,
                     &approval_threads,
                     self.unread_threads,
+                    self.retention,
                 ) {
                     *self.sidebar_action = Some(action);
                 }

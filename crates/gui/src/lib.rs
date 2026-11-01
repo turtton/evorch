@@ -23,6 +23,7 @@ pub mod repaint;
 pub mod restore_metrics;
 pub mod runtime_sink;
 pub mod shared_state;
+pub mod startup;
 pub mod startup_restore;
 pub mod terminal;
 pub mod theme;

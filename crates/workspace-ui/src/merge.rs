@@ -148,6 +148,44 @@ fn merge_project(
     }
 }
 
+/// The archive series (`archived`, `archived_at`, `archive_revision`) is one unit:
+/// the side with the higher revision wins as a whole, so an edit made on a stale
+/// snapshot never undoes a newer one. Equal revisions with different values keep
+/// the protective side (archived).
+fn merge_archive_series(local: &ThreadRecord, disk: &ThreadRecord) -> (bool, Option<i64>, u64) {
+    let winner = match local.archive_revision.cmp(&disk.archive_revision) {
+        std::cmp::Ordering::Greater => local,
+        std::cmp::Ordering::Less => disk,
+        std::cmp::Ordering::Equal if local.archived != disk.archived => {
+            if local.archived {
+                local
+            } else {
+                disk
+            }
+        }
+        std::cmp::Ordering::Equal => {
+            return (
+                local.archived,
+                local.archived_at.or(disk.archived_at),
+                local.archive_revision,
+            );
+        }
+    };
+    (winner.archived, winner.archived_at, winner.archive_revision)
+}
+
+/// The pin series (`pinned`, `pin_revision`), merged as the archive series is.
+fn merge_pin_series(local: &ThreadRecord, disk: &ThreadRecord) -> (bool, u64) {
+    let winner = match local.pin_revision.cmp(&disk.pin_revision) {
+        std::cmp::Ordering::Greater => local,
+        std::cmp::Ordering::Less => disk,
+        std::cmp::Ordering::Equal => {
+            return (local.pinned || disk.pinned, local.pin_revision);
+        }
+    };
+    (winner.pinned, winner.pin_revision)
+}
+
 fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) -> ThreadRecord {
     let mut run_ids = local.run_ids.clone();
     run_ids.extend(
@@ -156,6 +194,8 @@ fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) 
             .filter(|run_id| !local.run_ids.contains(run_id))
             .cloned(),
     );
+    let archive = merge_archive_series(local, disk);
+    let pin = merge_pin_series(local, disk);
     ThreadRecord {
         id: local.id.clone(),
         project_id: pick(&base.project_id, &local.project_id, &disk.project_id),
@@ -165,8 +205,11 @@ fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) 
             &local.title_is_placeholder,
             &disk.title_is_placeholder,
         ),
-        pinned: pick(&base.pinned, &local.pinned, &disk.pinned),
-        archived: pick(&base.archived, &local.archived, &disk.archived),
+        pinned: pin.0,
+        archived: archive.0,
+        archived_at: archive.1,
+        archive_revision: archive.2,
+        pin_revision: pin.1,
         created_at: pick(&base.created_at, &local.created_at, &disk.created_at),
         updated_at: local.updated_at.max(disk.updated_at),
         run_ids,

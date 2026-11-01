@@ -48,6 +48,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v35.sql"),
     include_str!("migrations/v36.sql"),
     include_str!("migrations/v37.sql"),
+    include_str!("migrations/v38.sql"),
 ];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
@@ -139,7 +140,6 @@ DROP INDEX idx_run_contexts_chat_thread; DROP INDEX idx_threads_archived;
 DROP INDEX idx_threads_root_run; DROP INDEX idx_threads_escalation_source;
 ALTER TABLE threads DROP COLUMN archived_at_ns; ALTER TABLE threads DROP COLUMN pinned;
 ALTER TABLE threads DROP COLUMN archive_revision; ALTER TABLE threads DROP COLUMN pin_revision;
-ALTER TABLE threads DROP COLUMN archive_unnumbered; ALTER TABLE threads DROP COLUMN pin_unnumbered;
 DROP TRIGGER run_ledger_no_delete;
 CREATE TRIGGER run_ledger_no_delete BEFORE DELETE ON run_ledger
 BEGIN SELECT RAISE(ABORT, 'run ledger is append-only'); END;

@@ -1302,3 +1302,88 @@ fn recovering_a_long_history_reads_it_in_pages_without_losing_the_latest_replies
     let expected: Vec<String> = before.into_iter().chain(after).collect();
     assert_eq!(texts(&b.state), expected);
 }
+
+#[test]
+fn an_archive_survives_a_stale_windows_pin_and_unpin() {
+    // Given: two windows on one thread; A archives it, B never saw that.
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let alpha = a.open_thread(&shared, "Alpha");
+    let mut b = open_window(&shared, "evorch-gui:b");
+    a.state.toggle_archive(alpha.clone()).expect("archive");
+
+    // When: B, on its stale view, pins and unpins the thread.
+    b.state.toggle_pin(alpha.clone()).expect("pin");
+    b.state.toggle_pin(alpha.clone()).expect("unpin");
+
+    // Then: the file and B both keep the archive (revision 1, with its time), and
+    // only the pin series carries B's two numbered edits.
+    let on_disk = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
+    for sidebar in [&on_disk, b.state.sidebar()] {
+        let thread = sidebar.threads.iter().find(|t| t.id == alpha).unwrap();
+        assert!(thread.archived);
+        assert!(thread.archived_at.is_some());
+        assert_eq!((thread.archive_revision, thread.pin_revision), (1, 2));
+        assert!(!thread.pinned);
+    }
+}
+
+#[test]
+fn archiving_a_family_numbers_every_member_and_restoring_clears_the_time() {
+    // Given: a thread with a fork.
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let alpha = a.open_thread(&shared, "Alpha");
+    let fork = a.state.fork_thread(alpha.clone()).expect("fork");
+
+    // When: the root is archived.
+    a.state.toggle_archive(alpha.clone()).expect("archive");
+
+    // Then: both members carry the same time and revision 1, on disk too.
+    let on_disk = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
+    let series = |sidebar: &workspace_ui::SidebarState, id: &ThreadId| {
+        let t = sidebar.threads.iter().find(|t| &t.id == id).unwrap();
+        (t.archived, t.archived_at, t.archive_revision)
+    };
+    let root = series(&on_disk, &alpha);
+    assert!(root.0 && root.1.is_some() && root.2 == 1);
+    assert_eq!(series(&on_disk, &fork), root);
+
+    // When: it is restored.
+    a.state.toggle_archive(alpha.clone()).expect("restore");
+
+    // Then: the time is gone and the revision moved on, for the whole family.
+    let on_disk = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
+    assert_eq!(series(&on_disk, &alpha), (false, None, 2));
+    assert_eq!(series(&on_disk, &fork), (false, None, 2));
+}
+
+#[test]
+fn a_locked_sidebar_leaves_the_archive_undone_until_it_is_free() {
+    // Given: another process holds the sidebar's save lock.
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let alpha = a.open_thread(&shared, "Alpha");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(shared.sidebar().with_file_name("sidebar.json.lock"))
+        .expect("lock file");
+    lock.try_lock().expect("take the lock");
+    let before = a.state.sidebar().clone();
+    let saved = std::fs::read(shared.sidebar()).expect("saved sidebar");
+
+    // When: A archives the thread.
+    let result = a.state.toggle_archive(alpha.clone());
+
+    // Then: it fails, and neither the window nor the file changed.
+    assert!(result.is_err());
+    assert_eq!(a.state.sidebar(), &before);
+    assert_eq!(std::fs::read(shared.sidebar()).expect("sidebar"), saved);
+
+    // When: the lock is released, the same action works.
+    drop(lock);
+    a.state.toggle_archive(alpha.clone()).expect("archive");
+    assert!(a.state.sidebar().threads[0].archived);
+}

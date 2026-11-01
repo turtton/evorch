@@ -128,15 +128,14 @@ pub struct ThreadUpsert {
     /// Whether the thread is pinned (kept from retention). Host only.
     pub pinned: Option<bool>,
     /// Monotonic revision of the `archived` series (`archived`,
-    /// `archived_at_ns`). `None` counts as generation 0 and is only for a host
-    /// that does not number its edits yet: an unnumbered write replaces a series
-    /// whose last writer was unnumbered too, ties with one a numbered writer has
-    /// touched (the protective side wins) and never overrides a higher
-    /// revision. Remove this path once the host numbers every edit. Host only.
-    pub archive_revision: Option<u64>,
-    /// Monotonic revision of the `pinned` series; `None` as for
+    /// `archived_at_ns`); every host edit of the series numbers it. A higher
+    /// revision replaces the stored series, a lower one is ignored and an equal
+    /// one keeps the protective side (archived). `0` is the generation of a
+    /// record that predates numbering. Host only.
+    pub archive_revision: u64,
+    /// Monotonic revision of the `pinned` series; numbered as
     /// [`Self::archive_revision`]. Host only.
-    pub pin_revision: Option<u64>,
+    pub pin_revision: u64,
     /// Unix nanoseconds. The host's positive value replaces the stored one;
     /// the runtime's is used only when none is stored.
     pub created_at_ns: i64,
@@ -152,10 +151,7 @@ impl ThreadUpsert {
         if let Some(length) = self.fork_point_context_len {
             i64::try_from(length).map_err(|_| StorageError::OutOfRange("fork point length"))?;
         }
-        for revision in [self.archive_revision, self.pin_revision]
-            .into_iter()
-            .flatten()
-        {
+        for revision in [self.archive_revision, self.pin_revision] {
             i64::try_from(revision).map_err(|_| StorageError::OutOfRange("thread revision"))?;
         }
         Ok(())

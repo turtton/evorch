@@ -407,10 +407,11 @@ fn saved_contexts_feed_thread_reads_with_stored_redactions() {
     );
 }
 
-fn archived_thread(id: &str, root: &str, archived: bool) -> ThreadUpsert {
+fn archived_thread(id: &str, root: &str, archived: bool, revision: u64) -> ThreadUpsert {
     ThreadUpsert {
         root_run_id: Some(root.into()),
         archived: Some(archived),
+        archive_revision: revision,
         ..thread(id, "/repo", 10)
     }
 }
@@ -438,7 +439,7 @@ fn host_archive_flag_flips_the_index_and_the_runtime_writer_never_does() {
     let (_dir, config, storage) = fixture();
     let handle = storage.handle();
     handle
-        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .upsert_threads_host(&[archived_thread("t", "run-1", false, 0)])
         .unwrap();
     handle
         .upsert_run_context(&context(
@@ -452,7 +453,7 @@ fn host_archive_flag_flips_the_index_and_the_runtime_writer_never_does() {
 
     // When: the host leaves the flag unchanged, the runtime writes, nothing moves.
     handle
-        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .upsert_threads_host(&[archived_thread("t", "run-1", false, 0)])
         .unwrap();
     handle
         .upsert_thread_runtime(&thread("t", "/repo", 20))
@@ -461,7 +462,7 @@ fn host_archive_flag_flips_the_index_and_the_runtime_writer_never_does() {
 
     // And: the flag flips to archived, the run is evicted for that reason.
     handle
-        .upsert_threads_host(&[archived_thread("t", "run-1", true)])
+        .upsert_threads_host(&[archived_thread("t", "run-1", true, 1)])
         .unwrap();
     assert_eq!(
         index_state(&config, "run-1"),
@@ -475,7 +476,7 @@ fn host_archive_flag_flips_the_index_and_the_runtime_writer_never_does() {
 
     // And: unarchiving returns it to pending.
     handle
-        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .upsert_threads_host(&[archived_thread("t", "run-1", false, 2)])
         .unwrap();
     assert_eq!(index_state(&config, "run-1"), ("Pending".into(), None));
 }
@@ -485,7 +486,7 @@ fn a_thread_first_mirrored_as_archived_registers_its_runs_evicted() {
     let (_dir, config, storage) = fixture();
     let handle = storage.handle();
     handle
-        .upsert_threads_host(&[archived_thread("t", "run-1", true)])
+        .upsert_threads_host(&[archived_thread("t", "run-1", true, 0)])
         .unwrap();
     handle
         .upsert_run_context(&context(
@@ -507,8 +508,8 @@ fn the_visible_listing_skips_archived_threads_but_explicit_reads_still_work() {
     let handle = storage.handle();
     handle
         .upsert_threads_host(&[
-            archived_thread("live", "run-l", false),
-            archived_thread("old", "run-o", true),
+            archived_thread("live", "run-l", false, 0),
+            archived_thread("old", "run-o", true, 0),
         ])
         .unwrap();
     let database = Database::open(&config).unwrap();

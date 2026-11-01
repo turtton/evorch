@@ -17,6 +17,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.dispatch_system_notifications(ctx);
         // Folded events add and bind threads while the window is hidden, too.
         self.sync_thread_mirror(Instant::now());
+        self.poll_retention(Instant::now());
         ctx.request_repaint_after(self.logic_repaint_delay());
     }
 
@@ -99,6 +100,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.telemetry.refresh_costs(&self.provider_settings);
         self.sync_usage_ledger(Instant::now());
         self.sync_thread_mirror(Instant::now());
+        self.poll_retention(Instant::now());
         self.usage
             .update(&ctx, Instant::now(), self.memory.config.as_ref(), || {
                 self.provider_settings.usage_pricing()

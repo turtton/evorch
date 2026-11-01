@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use egui::{Align, Layout, Rect, Sense, Stroke, Ui};
+use storage::thread_retention::{BlockReason, RetentionStatus};
 use workspace_ui::{
     LineageIndex, LineageKind, ProjectId, ProjectRecord, SidebarState, ThreadId, ThreadRecord,
     ThreadRunPhase, ThreadState,
@@ -137,6 +138,8 @@ pub(super) struct ThreadIndicators<'a> {
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads with a pending or running run of their own.
     pub active_runs: &'a HashSet<&'a workspace_ui::ThreadId>,
+    /// When each archived thread is deleted, or why it is kept.
+    pub retention: &'a BTreeMap<workspace_ui::ThreadId, RetentionStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -284,7 +287,8 @@ fn render_tree(
                     Hidden::default()
                 };
                 if archived {
-                    archived_row(ui, thread, display_root, hidden.count, action);
+                    let retention = indicators.retention.get(&thread.id);
+                    archived_row(ui, thread, display_root, hidden.count, retention, action);
                 } else {
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
@@ -559,7 +563,7 @@ fn active_row(
         }
         ui.add_space(SP_1);
         hidden_count_badge(ui, hidden.count);
-        thread_title(ui, thread, !display_root, action);
+        thread_title(ui, thread, !display_root, None, action);
     });
 }
 
@@ -568,6 +572,7 @@ fn archived_row(
     thread: &ThreadRecord,
     display_root: bool,
     hidden_count: usize,
+    retention: Option<&RetentionStatus>,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -576,7 +581,8 @@ fn archived_row(
             *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
         }
         hidden_count_badge(ui, hidden_count);
-        thread_title(ui, thread, !display_root, action);
+        let note = retention.and_then(retention_hover_text);
+        thread_title(ui, thread, !display_root, note.as_deref(), action);
     });
 }
 
@@ -616,6 +622,35 @@ fn hidden_count_badge(ui: &mut Ui, count: usize) {
     response.on_hover_text(label);
 }
 
+/// What the archived-list hover says about the deletion of a thread; nothing when
+/// deletion is off or the thread is not archived.
+pub(crate) fn retention_hover_text(status: &RetentionStatus) -> Option<String> {
+    Some(match status {
+        RetentionStatus::NotArchived | RetentionStatus::Disabled => return None,
+        RetentionStatus::DueIn { days } => format!("あと {days} 日で削除"),
+        RetentionStatus::DueNextStartup => "次回起動時に削除予定".to_owned(),
+        RetentionStatus::Blocked(BlockReason::Owner(owner))
+            if owner == runtime::thread_retention::BINDING_MISMATCH_BLOCK =>
+        {
+            "削除無効（構成不一致）".to_owned()
+        }
+        RetentionStatus::Blocked(reason) => format!("削除保留（{}）", block_reason_text(reason)),
+    })
+}
+
+fn block_reason_text(reason: &BlockReason) -> String {
+    match reason {
+        BlockReason::Pinned => "ピン留め".to_owned(),
+        BlockReason::EvalSample => "評価サンプル".to_owned(),
+        BlockReason::FamilyMemberNotDue(thread) => format!("関連スレッド {thread} が未期限"),
+        BlockReason::FamilyMemberBlocked(thread) => format!("関連スレッド {thread} が保留"),
+        BlockReason::FamilyUnresolved(_) => "系統を解決できません".to_owned(),
+        BlockReason::Owner(owner) => owner.clone(),
+        BlockReason::Exploring => "準備中".to_owned(),
+        BlockReason::OverBudget => "次回起動で再試行".to_owned(),
+    }
+}
+
 fn restore_button(ui: &mut Ui) -> egui::Response {
     let response = ui.add(
         ghost(icon_text(icons::ARROW_U_UP_LEFT)).min_size(egui::vec2(ACTION_SIZE, ACTION_SIZE)),
@@ -628,6 +663,7 @@ fn thread_title(
     ui: &mut Ui,
     thread: &ThreadRecord,
     child: bool,
+    note: Option<&str>,
     action: &mut Option<SidebarAction>,
 ) {
     // Indentation and the caret already show nesting; "↳" stays in the
@@ -637,7 +673,10 @@ fn thread_title(
         let label = format!("↳ {}", thread.title);
         title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     }
-    let title = title.on_hover_text(format!("thread ID: {}", thread.id));
+    let title = title.on_hover_text(match note {
+        Some(note) => format!("{note}\nthread ID: {}", thread.id),
+        None => format!("thread ID: {}", thread.id),
+    });
     title.context_menu(|ui| {
         if ui.button("Copy thread ID").clicked() {
             ui.ctx().copy_text(thread.id.to_string());
@@ -864,6 +903,7 @@ mod tests {
             approval_threads: &approval_threads,
             unread_threads: &unread_threads,
             active_runs: &HashSet::new(),
+            retention: &BTreeMap::new(),
         };
         // a hides a1, a1x and a2, but neither itself nor b's subtree.
         assert_eq!(
@@ -1352,6 +1392,7 @@ mod tests {
                         approval_threads: &none,
                         unread_threads: &none,
                         active_runs: &active,
+                        retention: &BTreeMap::new(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1406,6 +1447,7 @@ mod tests {
                         approval_threads: &none,
                         unread_threads: &none,
                         active_runs: &active,
+                        retention: &BTreeMap::new(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1416,6 +1458,117 @@ mod tests {
         assert!(harness.query_by_label("other").is_some());
         assert!(harness.query_by_label("child").is_none());
         assert!(harness.query_by_label("grandchild").is_none());
+    }
+
+    #[test]
+    fn hover_text_names_the_deadline_or_the_reason_a_thread_is_kept() {
+        use storage::thread_retention::{BlockReason, RetentionStatus};
+        let text = |status| super::retention_hover_text(&status);
+        assert_eq!(
+            text(RetentionStatus::DueIn { days: 5 }).as_deref(),
+            Some("あと 5 日で削除")
+        );
+        assert_eq!(
+            text(RetentionStatus::DueNextStartup).as_deref(),
+            Some("次回起動時に削除予定")
+        );
+        for (reason, expected) in [
+            (BlockReason::Pinned, "削除保留（ピン留め）"),
+            (BlockReason::EvalSample, "削除保留（評価サンプル）"),
+            (
+                BlockReason::FamilyMemberNotDue("t2".into()),
+                "削除保留（関連スレッド t2 が未期限）",
+            ),
+            (
+                BlockReason::FamilyMemberBlocked("t2".into()),
+                "削除保留（関連スレッド t2 が保留）",
+            ),
+            (
+                BlockReason::FamilyUnresolved("t2".into()),
+                "削除保留（系統を解決できません）",
+            ),
+            (
+                BlockReason::Owner("owner busy".into()),
+                "削除保留（owner busy）",
+            ),
+            (BlockReason::Exploring, "削除保留（準備中）"),
+            (BlockReason::OverBudget, "削除保留（次回起動で再試行）"),
+            (
+                BlockReason::Owner(runtime::thread_retention::BINDING_MISMATCH_BLOCK.into()),
+                "削除無効（構成不一致）",
+            ),
+        ] {
+            assert_eq!(
+                text(RetentionStatus::Blocked(reason)).as_deref(),
+                Some(expected)
+            );
+        }
+        // Deletion off, or nothing to delete: no line at all.
+        assert_eq!(text(RetentionStatus::Disabled), None);
+        assert_eq!(text(RetentionStatus::NotArchived), None);
+    }
+
+    #[test]
+    fn the_archived_list_hover_shows_the_deadline_and_the_live_list_does_not() {
+        use storage::thread_retention::RetentionStatus;
+        // Given: one archived and one live thread, each with a status.
+        let project = ProjectId::new("demo");
+        let mut archived = ThreadRecord::new(ThreadId::new("old"), project.clone(), "Old chat");
+        archived.set_archived(true, 1);
+        let live = ThreadRecord::new(ThreadId::new("live"), project, "Live chat");
+        let sidebar = workspace_ui::SidebarState {
+            threads: vec![archived, live],
+            ..Default::default()
+        };
+        let retention = BTreeMap::from([
+            (ThreadId::new("old"), RetentionStatus::DueIn { days: 3 }),
+            (ThreadId::new("live"), RetentionStatus::DueIn { days: 9 }),
+        ]);
+        let (phases, none, active) = (BTreeMap::new(), BTreeSet::new(), HashSet::new());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(400.0, 200.0))
+            .build_ui_state(
+                |ui, action: &mut Option<SidebarAction>| {
+                    crate::theme::install(ui.ctx());
+                    let lineage = LineageIndex::new(&sidebar.threads);
+                    let indicators = ThreadIndicators {
+                        phases: &phases,
+                        question_threads: &none,
+                        approval_threads: &none,
+                        unread_threads: &none,
+                        active_runs: &active,
+                        retention: &retention,
+                    };
+                    for (archived, id) in [(true, "old"), (false, "live")] {
+                        let section: Vec<&ThreadRecord> = sidebar
+                            .threads
+                            .iter()
+                            .filter(|thread| thread.id.to_string() == id)
+                            .collect();
+                        let rows = nested_threads(&section, &lineage);
+                        super::render_tree(
+                            ui,
+                            &sidebar,
+                            &lineage,
+                            &rows,
+                            &indicators,
+                            archived,
+                            action,
+                        );
+                    }
+                },
+                None,
+            );
+        harness.run_steps(2);
+
+        // When: hovering the archived title, then the live one.
+        harness.get_by_label("Old chat").hover();
+        harness.run_steps(3);
+        // Then: the deadline shows for the archived thread only.
+        harness.get_by_label_contains("あと 3 日で削除");
+        harness.get_by_label("Live chat").hover();
+        harness.run_steps(3);
+        assert!(harness.query_by_label_contains("あと 9 日で削除").is_none());
     }
 
     #[test]

@@ -109,6 +109,11 @@ pub enum ThreadChatRole {
     Orchestrator,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: ThreadId,
@@ -121,6 +126,20 @@ pub struct ThreadRecord {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+    /// UNIX seconds the thread was archived at; `None` when it is not archived or
+    /// was archived before the time was recorded (such a thread is dated by the
+    /// first mirror that saw it, never newer than that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// Counts every edit of the archive series (`archived`, `archived_at`). The
+    /// merge of two sidebars keeps the series with the higher revision, so an
+    /// edit made on a stale snapshot never undoes a newer one. `0` is a record
+    /// that predates numbering.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub archive_revision: u64,
+    /// Counts every edit of `pinned`, as `archive_revision` does for the archive.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pin_revision: u64,
     #[serde(default)]
     pub created_at: i64,
     /// Latest conversation activity in UNIX seconds; older records fall back to `created_at`.
@@ -189,6 +208,9 @@ impl ThreadRecord {
             title_is_placeholder: false,
             pinned: false,
             archived: false,
+            archived_at: None,
+            archive_revision: 0,
+            pin_revision: 0,
             created_at: unix_seconds(std::time::SystemTime::now()),
             updated_at: 0,
             run_ids: Vec::new(),
@@ -202,6 +224,43 @@ impl ThreadRecord {
             escalation_source_run_id: None,
             lineage: None,
             superseded: false,
+        }
+    }
+
+    /// Sets the archive series, numbering the edit. Unarchiving clears the time.
+    /// A call that changes nothing leaves the revision as it is.
+    pub fn set_archived(&mut self, archived: bool, at: i64) {
+        let archived_at = archived.then_some(at);
+        if self.archived == archived && (!archived || self.archived_at.is_some()) {
+            return;
+        }
+        self.archived = archived;
+        self.archived_at = archived_at;
+        self.archive_revision += 1;
+    }
+
+    /// Sets `pinned`, numbering the edit. A call that changes nothing leaves the
+    /// revision as it is.
+    pub fn set_pin(&mut self, pinned: bool) {
+        if self.pinned != pinned {
+            self.pinned = pinned;
+            self.pin_revision += 1;
+        }
+    }
+
+    /// Takes over the archive and pin state of `source`, for a thread created from
+    /// or shown in place of it: both start in the same state. An edit that changes
+    /// this record's series is numbered above both records' revisions, so it
+    /// outranks either when sidebars are merged.
+    pub fn adopt_state_of(&mut self, source: &Self) {
+        if self.archived != source.archived || self.archived_at != source.archived_at {
+            self.archived = source.archived;
+            self.archived_at = source.archived_at;
+            self.archive_revision = self.archive_revision.max(source.archive_revision) + 1;
+        }
+        if self.pinned != source.pinned {
+            self.pinned = source.pinned;
+            self.pin_revision = self.pin_revision.max(source.pin_revision) + 1;
         }
     }
 

@@ -168,7 +168,7 @@ impl SidebarState {
     }
 
     pub fn set_pinned(&mut self, id: &ThreadId, pinned: bool) -> Result<(), ThreadError> {
-        self.thread_mut(id)?.pinned = pinned;
+        self.thread_mut(id)?.set_pin(pinned);
         Ok(())
     }
 

@@ -148,11 +148,10 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
   sidebar から初期同期し、その際 archive 時刻を新しくしない。同じ revision で値が
   割れたら保護側（archived / pinned）を採る。Runtime writer はこれらの列を変えない。
-  revision を送らない（未採番）host は世代 0 として扱う。系列ごとに「最後の書き手が
-  未採番か」を `archive_unnumbered` / `pin_unnumbered` に記録し、未採番どうしは置換
-  （採番前の GUI が連続して編集できる）、未採番と採番済み（`Some(0)` を含む）は同世代
-  として保護側を採り、採番を一度でも受けた系列は未採番では上書きできない。host が採番
-  するようになったら、この未採番の経路と 2 列を廃止する（PR-4 の申し送り）。
+  host（GUI）は archive / pin の編集ごとに revision を採番して送る（`ThreadUpsert` の revision は必須で、
+  採番前の記録は世代 0・時刻なし）。高い revision が置換し、低いものは無視し、同じ revision で
+  値が割れたら保護側を採る。未採番の経路（`archive_unnumbered` / `pin_unnumbered` 列）は
+  v38 で廃止した。
 - **予算の意味。** `ExploreBudget` / `FinalizeBudget` が制限するのは新しく読む辺の数だけで、1 回の呼び出しの総 I/O ではない。
   2 つの family を併合するときの staging 行の付け替え、family 破棄（unresolved・機能の無効化）での staging 削除、
   探索済み family のメンバー一覧の読み出しは、以前に溜めた staging の量に比例する。起動時の排他フェーズで
@@ -306,6 +305,34 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   `refs_complete = false` のあいだ blob は残るだけで他は何も壊れない。
 - **運用。** meta が `gc_unknown_meta` に残り続ける間は blob が回収されない。報告の `unknown_sample` のファイルを
   修復するか削除すれば、次の起動で解消する。
+
+## スレッドの期限削除（GUI：起動・表示・採番）
+
+`evorch-gui` は起動を 3 段に分け、削除機能を有効にする。判定と削除は runtime / storage にあり、GUI は
+駆動・表示・sidebar の片付けだけを担う。
+
+- **起動の 3 段。** ① `prepare()`（引数・設定・DB と ownership root と sidebar のパスを確定。ロックは持たない）
+  → ウィンドウを開く。② 背景スレッド（`gui::startup`）が DB・root の排他ロックを取り（`try_exclusive`）、
+  sidebar を読み、起動フェーズを走らせ、共有ロックへ `downgrade` して tombstone と束縛を読み直す。
+  進捗はスプラッシュ（`gui::app::splash`）に段ごとに出る（● 実行中 / ✓ 完了、確定した family 数、経過時間）。
+  フェーズが終わるまでウィンドウの閉じる操作は無視される。他のプロセスがロックを持っていれば（`NoExclusive`）
+  フェーズは飛ばして通常起動し、`--demo` はフェーズを行わない。③ 1 フレーム内で `build_workbench`
+  （`Storage::open_with_lease` → `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
+  ②・③の失敗はスプラッシュと stderr に出て、ウィンドウを閉じるとコード 1 で終わる。
+- **sidebar の採番。** `ThreadRecord` に `archived_at`（unix 秒）・`archive_revision`・`pin_revision` を持つ。
+  archive / unarchive / pin は保存ロックの中で最新の sidebar（ファイル＋手元の 3-way merge）に対して
+  適用して採番し（`shared_sidebar_transact`）、書き込み、直後に DB へ mirror する。古い画面での操作が
+  他のウィンドウの archive を取り消すことはない。ロックを取れなければ手元の状態は変えず、エラーを表示する。
+  merge は archive 系列・pin 系列をそれぞれ revision の高い側を丸ごと採る（同値で割れたら保護側）。
+  fork・rewind の版切替・escalation で作る記録は、親（または切替前の版）の archive / pin 状態を採番付きで受け継ぐ。
+- **確定後の片付け。** 再読込した tombstone に載るスレッドは、sidebar・`user_messages`・下書き・選択から外れ、
+  sidebar の 3-way merge・import・復元でも戻らない（tombstone が merge の「他方の編集を残す」規則に優先する）。
+- **表示。** アーカイブ一覧のタイトルのホバーに「あと N 日で削除」「次回起動時に削除予定」
+  「削除保留（理由）」を出す（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
+  起動後・60 秒ごと・archive / unarchive / pin の後に計算する。束縛が不一致のときは「削除無効（構成不一致）」。
+- **通知。** 起動後に確定があった（または失敗があった）ときだけ「起動時の保守: N スレッド（M run）を削除確定、
+  約 X MB を回収予定。スキップ理由: …」を 1 件出す。束縛不一致は「削除機能は無効です（構成不一致: 理由）」。
+  `NoExclusive` は通知せず、ログだけ。
 
 ## 既知の制約
 

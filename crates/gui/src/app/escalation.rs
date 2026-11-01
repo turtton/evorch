@@ -25,10 +25,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if created {
             let mut child = ThreadRecord::new(
                 id.clone(),
-                parent.project_id,
+                parent.project_id.clone(),
                 format!("Orchestrator · {}", parent.title),
             );
-            child.archived = parent.archived;
+            // Numbered like any edit of the series, so it merges with other windows.
+            child.adopt_state_of(&parent);
             child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
             // The runtime copies the declaration at handoff; the record keeps it
             // across restarts (ADR 0037).

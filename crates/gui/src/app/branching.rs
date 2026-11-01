@@ -82,28 +82,35 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Show another version of the active conversation.
     pub fn switch_version(&mut self, target: ThreadId) -> Result<(), WorkbenchError> {
-        let thread = self
+        if !self
             .sidebar
             .threads
             .iter()
-            .find(|thread| thread.id == target)
-            .ok_or(ThreadError::UnknownThread)?;
-        let carried = (thread.pinned, thread.archived);
-        let current = workspace_ui::visible_version(&self.sidebar.threads, &target);
-        let (pinned, archived) = current
-            .as_ref()
-            .and_then(|id| self.sidebar.threads.iter().find(|thread| &thread.id == id))
-            .map_or(carried, |thread| (thread.pinned, thread.archived));
-        workspace_ui::show_version(&mut self.sidebar.threads, &target);
-        if let Some(thread) = self
-            .sidebar
-            .threads
-            .iter_mut()
-            .find(|thread| thread.id == target)
+            .any(|thread| thread.id == target)
         {
-            // The sidebar row keeps its state across versions.
-            thread.pinned = pinned;
-            thread.archived = archived;
+            return Err(ThreadError::UnknownThread.into());
+        }
+        let current = workspace_ui::visible_version(&self.sidebar.threads, &target);
+        let shown = current.as_ref().and_then(|id| {
+            self.sidebar
+                .threads
+                .iter()
+                .find(|thread| &thread.id == id)
+                .cloned()
+        });
+        workspace_ui::show_version(&mut self.sidebar.threads, &target);
+        if let Some(shown) = &shown
+            && let Some(thread) = self
+                .sidebar
+                .threads
+                .iter_mut()
+                .find(|thread| thread.id == target)
+        {
+            // The sidebar row keeps its state across versions; the edit is numbered.
+            thread.adopt_state_of(shown);
+        }
+        if let Some(current) = &current {
+            self.reconcile_family_state(&target, current);
         }
         self.switch_thread(target)?;
         self.save_sidebar();
@@ -205,7 +212,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let id = self.branch_id(source, kind);
         let mut record = ThreadRecord {
             archived: original.archived,
+            archived_at: original.archived_at,
+            archive_revision: original.archive_revision,
             pinned: original.pinned,
+            pin_revision: original.pin_revision,
             model_preference: original.model_preference.clone(),
             chat_role: original.chat_role,
             // Branches keep the source's read-only grant; switching declares it (ADR 0037).
@@ -231,6 +241,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if kind == LineageKind::Rewind {
             workspace_ui::show_version(&mut self.sidebar.threads, &id);
         }
+        // The branch starts in its source's state as the newest sidebar has it.
+        self.reconcile_family_state(&id, source);
         self.switch_thread(id.clone())?;
         self.save_sidebar();
         Ok(id)

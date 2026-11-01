@@ -13,8 +13,21 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Removes the column migration v37 added to a table the older schema keeps.
+/// Restores what migration v38 dropped: the unnumbered-writer markers.
+pub fn undo_v38(connection: &Connection) {
+    connection
+        .execute_batch(
+            "ALTER TABLE threads ADD COLUMN archive_unnumbered INTEGER NOT NULL DEFAULT 0
+                 CHECK (archive_unnumbered IN (0, 1));
+             ALTER TABLE threads ADD COLUMN pin_unnumbered INTEGER NOT NULL DEFAULT 0
+                 CHECK (pin_unnumbered IN (0, 1));",
+        )
+        .unwrap();
+}
+
+/// Removes the columns migration v37 added to a table the older schema keeps.
 pub fn undo_v37(connection: &Connection) {
+    undo_v38(connection);
     connection
         .execute_batch(
             "ALTER TABLE gc_state DROP COLUMN ref_cursor;
@@ -24,7 +37,7 @@ pub fn undo_v37(connection: &Connection) {
         .unwrap();
 }
 
-/// Removes the columns migrations v36 and v37 added to tables the older schema keeps.
+/// Removes the columns migrations v36 to v38 added to tables the older schema keeps.
 /// (Its indexes are created with `IF NOT EXISTS`, so replaying leaves them be.)
 pub fn undo_v36(connection: &Connection) {
     undo_v37(connection);
@@ -39,7 +52,7 @@ pub fn undo_v36(connection: &Connection) {
         .unwrap();
 }
 
-/// Removes everything migrations v35 and v36 added to the tables a hand-built
+/// Removes everything migrations v35 to v38 changed to the tables a hand-built
 /// older schema keeps, so that the test can replay the migrations from its version.
 pub fn undo_v35(connection: &Connection) {
     undo_v36(connection);

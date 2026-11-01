@@ -387,14 +387,24 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if workspace_ui::display_parent(&self.sidebar.threads, &thread_id).is_some() {
             return Ok(());
         }
-        let pinned = self
+        // The target is what the user asked for on the thread this window shows.
+        let pinned = !self
             .sidebar
             .threads
             .iter()
             .find(|thread| thread.id == thread_id)
             .ok_or(ThreadError::UnknownThread)?
             .pinned;
-        self.sidebar.set_pinned(&thread_id, !pinned)?;
+        // Only the pin series changes, on the newest state under the save lock: a
+        // stale view of the archive series cannot undo another window's archive.
+        self.shared_sidebar_transact(|latest| {
+            if workspace_ui::display_parent(&latest.sidebar.threads, &thread_id).is_some() {
+                return Ok(());
+            }
+            latest.sidebar.set_pinned(&thread_id, pinned)
+        })
+        .map_err(WorkbenchError::sidebar_busy)?;
+        self.refresh_retention();
         Ok(())
     }
 

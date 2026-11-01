@@ -54,6 +54,28 @@ pub fn sidebar_pane(
     approval_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
 ) -> Option<SidebarAction> {
+    sidebar_pane_with_retention(
+        ui,
+        sidebar,
+        phases,
+        question_threads,
+        approval_threads,
+        unread_threads,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`sidebar_pane`] that also explains, on hover over an archived thread, when it
+/// is deleted or why it is kept.
+pub fn sidebar_pane_with_retention(
+    ui: &mut egui::Ui,
+    sidebar: &SidebarState,
+    phases: &BTreeMap<String, ThreadRunPhase>,
+    question_threads: &BTreeSet<ThreadId>,
+    approval_threads: &BTreeSet<ThreadId>,
+    unread_threads: &BTreeSet<ThreadId>,
+    retention: &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
+) -> Option<SidebarAction> {
     let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
     let indicators = threads::ThreadIndicators {
         phases,
@@ -61,6 +83,7 @@ pub fn sidebar_pane(
         approval_threads,
         unread_threads,
         active_runs: &active_runs,
+        retention,
     };
     let pane_state = ui
         .ctx()

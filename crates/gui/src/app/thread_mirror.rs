@@ -88,6 +88,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
+    /// Sends what changed now instead of at the next tick: an archive or unarchive
+    /// has an effect on the conversation index that should not lag behind it.
+    pub(super) fn force_thread_mirror(&mut self) {
+        if let Some(link) = self.thread_mirror.as_mut() {
+            link.next_sync = None;
+        }
+        self.sync_thread_mirror(Instant::now());
+    }
+
     /// Send the definitions that changed since the last sync, at most once per
     /// [`SYNC_INTERVAL`]. The first sync sends every thread.
     pub(super) fn sync_thread_mirror(&mut self, now: Instant) {
@@ -158,12 +167,18 @@ fn thread_upsert(thread: &ThreadRecord, project_root: Option<String>) -> Option<
             .filter(|length| i64::try_from(*length).is_ok()),
         escalation_source_run_id: thread.escalation_source_run_id.clone(),
         archived: Some(thread.archived),
+        // A record archived before the time was kept sends none: storage keeps the
+        // time unknown (and never invents a newer one) until a numbered edit comes.
+        archived_at_ns: thread
+            .archived_at
+            .map(|at| at.saturating_mul(NANOS_PER_SECOND)),
+        pinned: Some(thread.pinned),
+        archive_revision: thread.archive_revision,
+        pin_revision: thread.pin_revision,
         superseded: Some(thread.superseded),
         // Older records without a creation time send 0, which keeps the stored one.
         created_at_ns: thread.created_at.saturating_mul(NANOS_PER_SECOND),
         updated_at_ns: thread.last_activity().saturating_mul(NANOS_PER_SECOND),
-        // The sidebar does not record archive times, pins or revisions yet.
-        ..ThreadUpsert::default()
     })
 }
 
@@ -220,6 +235,46 @@ mod tests {
         assert_eq!(upsert.superseded, Some(false));
         assert_eq!(upsert.created_at_ns, 10 * NANOS_PER_SECOND);
         assert_eq!(upsert.updated_at_ns, 10 * NANOS_PER_SECOND);
+    }
+
+    #[test]
+    fn the_archive_and_pin_series_are_sent_with_their_revisions() {
+        // Given: a record archived before times and revisions existed, one archived
+        // with a time, and a pinned one.
+        let mut legacy = record("legacy");
+        legacy.archived = true;
+        let mut numbered = record("numbered");
+        numbered.set_archived(true, 1_700);
+        let mut pinned = record("pinned");
+        pinned.set_pin(true);
+
+        // When: they are mapped to storage definitions.
+        let legacy = thread_upsert(&legacy, None).unwrap();
+        let numbered = thread_upsert(&numbered, None).unwrap();
+        let pinned = thread_upsert(&pinned, None).unwrap();
+
+        // Then: the legacy archive is revision 0 with no time (storage dates it by
+        // the first mirror, never newer); a numbered edit carries both.
+        assert_eq!(
+            (
+                legacy.archived,
+                legacy.archived_at_ns,
+                legacy.archive_revision
+            ),
+            (Some(true), None, 0)
+        );
+        assert_eq!(
+            (
+                numbered.archived,
+                numbered.archived_at_ns,
+                numbered.archive_revision
+            ),
+            (Some(true), Some(1_700 * NANOS_PER_SECOND), 1)
+        );
+        assert_eq!(
+            (pinned.pinned, pinned.pin_revision, pinned.archive_revision),
+            (Some(true), 1, 0)
+        );
     }
 
     #[test]
