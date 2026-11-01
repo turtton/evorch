@@ -93,7 +93,7 @@ pub(crate) fn submit_in(
 ) -> Result<(String, u64), StorageError> {
     let request_id = insert_request(conn, request, now_ns)?;
     let mut statement = conn.prepare(
-        "SELECT r.run_id, r.state FROM thread_index_runs r \
+        "SELECT r.run_id, r.state, r.evicted_reason FROM thread_index_runs r \
          WHERE (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
          AND (?2 IS NULL OR EXISTS (SELECT 1 FROM thread_runs tr \
               JOIN threads t ON t.thread_id = tr.thread_id \
@@ -103,18 +103,26 @@ pub(crate) fn submit_in(
     let candidates = statement
         .query_map(
             params![request.since_ns, request.canonical_project],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     let mut deleted = 0_u64;
     let mut targets = 0_u64;
-    for (run_id, state) in candidates {
+    for (run_id, state, evicted_reason) in candidates {
         match state.as_str() {
             "deleted" => {
                 deleted += 1;
                 continue;
             }
+            // An archived thread stays out of the index until it is unarchived.
+            "evicted" if evicted_reason.as_deref() == Some("archived") => continue,
             "evicted" if !request.include_evicted => continue,
             _ => {}
         }

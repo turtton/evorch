@@ -53,7 +53,8 @@ impl RunStore {
             .thread_of_run(id)
     }
 
-    /// Page through exact canonical-project matches; unknown roots never match.
+    /// Page through exact canonical-project matches, archived threads included.
+    #[cfg(test)]
     pub(crate) fn threads_in_project(
         &self,
         root: &str,
@@ -64,6 +65,20 @@ impl RunStore {
             .lock()
             .map_err(|e| StorageError::Io(e.to_string()))?
             .threads_in_project(root, cursor, limit)
+    }
+
+    /// Page through exact canonical-project matches, archived threads excluded:
+    /// the listing behind search candidates and completion. Unknown roots never match.
+    pub(crate) fn threads_in_project_visible(
+        &self,
+        root: &str,
+        cursor: Option<&storage::threads::ThreadCursor>,
+        limit: usize,
+    ) -> Result<storage::threads::ThreadPage, StorageError> {
+        self.database
+            .lock()
+            .map_err(|e| StorageError::Io(e.to_string()))?
+            .threads_in_project_visible(root, cursor, limit)
     }
 
     pub(crate) fn thread_cursor_token(

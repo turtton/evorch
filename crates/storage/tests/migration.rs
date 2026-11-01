@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::undo_v35;
 
-const LATEST_SCHEMA: u32 = 35;
+const LATEST_SCHEMA: u32 = 36;
 
 const EXPECTED_TABLES: [&str; 64] = [
     "artifact_refs",
@@ -80,7 +80,7 @@ const EXPECTED_TABLES: [&str; 64] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 66] = [
+const EXPECTED_INDICES: [&str; 67] = [
     "idx_artifact_refs_sha",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
@@ -100,6 +100,7 @@ const EXPECTED_INDICES: [&str; 66] = [
     "learning_claims_day",
     "learning_claim_roots_run",
     "idx_thread_index_runs_work",
+    "idx_thread_index_runs_archived_pending",
     "idx_thread_index_runs_retention",
     "idx_thread_index_runs_retry",
     "idx_conversation_blocks_kind",

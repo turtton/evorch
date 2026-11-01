@@ -1179,6 +1179,9 @@ pub(crate) fn next_work(conn: &Connection) -> Result<Option<Work>, StorageError>
              FROM thread_index_request_targets t \
              JOIN thread_index_requests q ON q.request_id = t.request_id AND q.state = 'pending' \
              JOIN thread_index_runs r ON r.run_id = t.run_id AND r.state = 'pending' \
+             AND NOT EXISTS (SELECT 1 FROM thread_runs tr \
+                 JOIN threads th ON th.thread_id = tr.thread_id \
+                 WHERE tr.run_id = r.run_id AND th.archived = 1) \
              AND r.source_revision = t.source_revision \
              AND r.extractor_version = t.extractor_version \
              AND r.accounting_version = t.accounting_version \
@@ -1195,8 +1198,11 @@ pub(crate) fn next_work(conn: &Connection) -> Result<Option<Work>, StorageError>
     Ok(conn
         .query_row(
             "SELECT run_id, source_revision, extractor_version, accounting_version, \
-             work_generation, retention_at_ns, NULL FROM thread_index_runs \
+             work_generation, retention_at_ns, NULL FROM thread_index_runs r \
              WHERE state = 'pending' \
+             AND NOT EXISTS (SELECT 1 FROM thread_runs tr \
+                 JOIN threads th ON th.thread_id = tr.thread_id \
+                 WHERE tr.run_id = r.run_id AND th.archived = 1) \
              ORDER BY priority DESC, retention_at_ns DESC, run_id DESC LIMIT 1",
             [],
             work_row,

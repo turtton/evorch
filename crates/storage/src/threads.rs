@@ -289,6 +289,20 @@ impl Database {
         crate::repo::threads::in_project(&self.conn, project_root, cursor, limit, true)
     }
 
+    /// [`Database::threads_in_project`] without archived threads, for search and
+    /// candidate listings. Tombstoned threads are never listed either.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn threads_in_project_visible(
+        &self,
+        project_root: &str,
+        cursor: Option<&ThreadCursor>,
+        limit: usize,
+    ) -> Result<ThreadPage, StorageError> {
+        crate::repo::threads::in_project(&self.conn, project_root, cursor, limit, false)
+    }
+
     /// Encode a position without exposing a potentially secret-bearing thread ID.
     ///
     /// # Errors

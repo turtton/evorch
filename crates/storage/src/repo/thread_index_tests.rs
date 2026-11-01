@@ -1203,3 +1203,390 @@ fn writer_commands_save_bundles_and_notes_before_replying() {
         (IndexState::Pending, Some(note.note.seq + 1))
     );
 }
+
+// ---- Archived threads leave the index (PR-2) ----
+
+use super::thread_index::{OversizedBlock, purge_index_rows, purge_index_rows_with};
+use crate::maintenance::archive_purge;
+use crate::threads::{ThreadUpsert, ThreadWriter};
+
+const PURGE_ROWS: usize = 200;
+const PURGE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Host mirror of a thread; the upsert is what flips the index.
+fn host_thread(conn: &Connection, thread: &str, root: &str, archived: bool) {
+    crate::repo::threads::upsert(
+        conn,
+        ThreadWriter::Host,
+        &[ThreadUpsert {
+            thread_id: thread.into(),
+            root_run_id: Some(root.into()),
+            archived: Some(archived),
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            ..ThreadUpsert::default()
+        }],
+    )
+    .unwrap();
+}
+
+fn bound(run_id: &str, thread: &str, body: &str, at: i64) -> SnapshotWrite {
+    let mut write = verified(run_id, &json!([text("user", body)]), 0, at);
+    write.binding = Some(ThreadRunRow {
+        run_id: run_id.into(),
+        thread_id: thread.into(),
+        root_run_id: run_id.into(),
+        depth: 0,
+    });
+    write
+}
+
+/// (state, evicted_reason, charged_bytes, block count).
+fn index_row(conn: &Connection, run_id: &str) -> (String, Option<String>, u64, i64) {
+    conn.query_row(
+        "SELECT state, evicted_reason, charged_bytes, \
+         (SELECT COUNT(*) FROM conversation_blocks b WHERE b.run_id = r.run_id) \
+         FROM thread_index_runs r WHERE run_id = ?1",
+        [run_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .unwrap()
+}
+
+fn purge_all(conn: &Connection) -> usize {
+    let mut runs = 0;
+    loop {
+        let progress = archive_purge::tick(conn).unwrap();
+        if progress.runs == 0 {
+            return runs;
+        }
+        runs += progress.runs;
+    }
+}
+
+#[test]
+fn archiving_evicts_keeping_blocks_then_purge_empties_and_unarchive_revives() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    host_thread(&conn, "t1", "run-a", false);
+    save(&conn, &bound("run-a", "t1", "alpha apple", 10));
+    commit_current(&conn, "run-a", &lease, S);
+    let before = status(&conn, "run-a").work_generation;
+    assert_eq!(index_row(&conn, "run-a").0, "indexed");
+
+    host_thread(&conn, "t1", "run-a", true);
+    let (state, reason, charged, block_count) = index_row(&conn, "run-a");
+    assert_eq!(
+        (state.as_str(), reason.as_deref()),
+        ("evicted", Some("archived"))
+    );
+    assert!(
+        charged > 0 && block_count > 0,
+        "the archive itself does not delete blocks"
+    );
+    assert_eq!(status(&conn, "run-a").work_generation, before + 1);
+
+    // The purge resumes from the persisted state across a restart.
+    drop(conn);
+    let conn = open(&dir);
+    assert_eq!(purge_all(&conn), 1);
+    assert_eq!(
+        index_row(&conn, "run-a"),
+        ("evicted".into(), Some("archived".into()), 0, 0)
+    );
+    assert!(fts_hits(&conn, "apple").is_empty());
+    fts_integrity(&conn);
+    let idle = conn.total_changes();
+    assert_eq!(archive_purge::tick(&conn).unwrap().runs, 0);
+    assert_eq!(conn.total_changes(), idle, "an empty tick writes nothing");
+
+    host_thread(&conn, "t1", "run-a", false);
+    let (state, reason, ..) = index_row(&conn, "run-a");
+    assert_eq!((state.as_str(), reason), ("pending", None));
+}
+
+#[test]
+fn archive_and_unarchive_follow_the_transition_table() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    host_thread(&conn, "t1", "run-0", false);
+    let states: [(&str, Option<&str>); 6] = [
+        ("pending", None),
+        ("indexed", None),
+        ("retry_wait", None),
+        ("blocked", None),
+        ("evicted", Some("archived")),
+        ("evicted", Some("logical_budget")),
+    ];
+    for (n, (state, reason)) in states.into_iter().enumerate() {
+        let thread = format!("t-{n}");
+        let run = format!("run-{n}");
+        host_thread(&conn, &thread, &run, false);
+        save(&conn, &bound(&run, &thread, "body", 10 + n as i64));
+        conn.execute(
+            "UPDATE thread_index_runs SET state = ?2, evicted_reason = ?3, \
+             next_attempt_at_ns = CASE WHEN ?2 = 'retry_wait' THEN 5 END, \
+             blocked_reason = CASE WHEN ?2 = 'blocked' THEN '{\"reason\":\"attempts_exhausted\"}' END \
+             WHERE run_id = ?1",
+            params![run, state, reason],
+        )
+        .unwrap();
+        let parsed = match state {
+            "pending" => IndexState::Pending,
+            "indexed" => IndexState::Indexed,
+            "retry_wait" => IndexState::RetryWait,
+            "blocked" => IndexState::Blocked,
+            _ => IndexState::Evicted,
+        };
+        let why = reason.map(|reason| match reason {
+            "archived" => IndexEvictionReason::Archived,
+            _ => IndexEvictionReason::LogicalBudget,
+        });
+        let index = SqliteThreadIndex::new(&conn);
+        let expect = |event, evicted: Option<(&str, Option<&str>)>| {
+            let stays = (state.to_owned(), reason.map(str::to_owned));
+            match super::thread_index::index_transition_for(parsed, why, event) {
+                IndexTransition::Evict => ("evicted".to_owned(), Some("archived".to_owned())),
+                IndexTransition::Pending { .. } => ("pending".to_owned(), None),
+                IndexTransition::Keep => stays,
+                other => panic!("unexpected {other:?} {evicted:?}"),
+            }
+        };
+        let current = |conn: &Connection| -> (String, Option<String>) {
+            conn.query_row(
+                "SELECT state, evicted_reason FROM thread_index_runs WHERE run_id = ?1",
+                [&run],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        index.archive_runs(&thread).unwrap();
+        assert_eq!(
+            current(&conn),
+            expect(IndexEvent::Archive, None),
+            "archive from {state}/{reason:?}"
+        );
+        // Unarchive from the same starting point.
+        conn.execute(
+            "UPDATE thread_index_runs SET state = ?2, evicted_reason = ?3, \
+             next_attempt_at_ns = CASE WHEN ?2 = 'retry_wait' THEN 5 END, \
+             blocked_reason = CASE WHEN ?2 = 'blocked' THEN '{\"reason\":\"attempts_exhausted\"}' END \
+             WHERE run_id = ?1",
+            params![run, state, reason],
+        )
+        .unwrap();
+        index.unarchive_runs(&thread).unwrap();
+        assert_eq!(
+            current(&conn),
+            expect(IndexEvent::Unarchive, None),
+            "unarchive from {state}/{reason:?}"
+        );
+    }
+    // A deleted row is untouched by both events.
+    host_thread(&conn, "t-del", "run-del", false);
+    save(&conn, &bound("run-del", "t-del", "body", 99));
+    SqliteThreadIndex::new(&conn)
+        .delete_index_source("run-del")
+        .unwrap();
+    let index = SqliteThreadIndex::new(&conn);
+    assert_eq!(
+        index.archive_runs("t-del").unwrap() + index.unarchive_runs("t-del").unwrap(),
+        0
+    );
+    assert_eq!(index_row(&conn, "run-del").0, "deleted");
+}
+
+#[test]
+fn unarchive_before_the_purge_keeps_the_blocks_and_the_purge_then_does_nothing() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    host_thread(&conn, "t1", "run-a", false);
+    save(&conn, &bound("run-a", "t1", "alpha apple", 10));
+    commit_current(&conn, "run-a", &lease, S);
+    host_thread(&conn, "t1", "run-a", true);
+    host_thread(&conn, "t1", "run-a", false);
+    let step = purge_index_rows(
+        &conn,
+        "run-a",
+        PurgeTarget::Archived,
+        PURGE_ROWS,
+        PURGE_BYTES,
+    )
+    .unwrap();
+    assert_eq!((step.rows, step.remaining), (0, false));
+    let (state, _, _, block_count) = index_row(&conn, "run-a");
+    assert_eq!(state, "pending");
+    assert!(block_count > 0);
+    assert_eq!(purge_all(&conn), 0);
+}
+
+#[test]
+fn a_late_commit_after_the_archive_is_discarded() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    host_thread(&conn, "t1", "run-a", false);
+    save(&conn, &bound("run-a", "t1", "alpha apple", 10));
+    let stale = guard(&conn, "run-a", &lease);
+    host_thread(&conn, "t1", "run-a", true);
+    assert!(matches!(
+        commit(&conn, &stale, S),
+        IndexCommitResult::Discarded(_)
+    ));
+    assert_eq!(index_row(&conn, "run-a").3, 0);
+}
+
+#[test]
+fn runs_of_archived_threads_are_registered_evicted_by_every_pending_path() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    host_thread(&conn, "t1", "run-new", true);
+    host_thread(&conn, "t2", "run-free", false);
+
+    // New run saved together with its binding.
+    save(&conn, &bound("run-new", "t1", "alpha", 10));
+    assert_eq!(
+        index_row(&conn, "run-new"),
+        ("evicted".into(), Some("archived".into()), 0, 0)
+    );
+    // A run of another thread is untouched, and a run naming no thread too.
+    save(&conn, &bound("run-free", "t2", "beta", 11));
+    save(
+        &conn,
+        &verified("run-loose", &json!([text("user", "gamma")]), 0, 12),
+    );
+    assert_eq!(index_row(&conn, "run-free").0, "pending");
+    assert_eq!(index_row(&conn, "run-loose").0, "pending");
+
+    // Discovery of a canonical run that has no index row yet.
+    conn.execute("DELETE FROM thread_index_runs WHERE run_id = 'run-new'", [])
+        .unwrap();
+    let mut index = SqliteThreadIndex::new(&conn);
+    while !index.discover_batch(10, 30).unwrap().complete {}
+    assert_eq!(index_row(&conn, "run-new").0, "evicted");
+
+    // A pending row bound to an archived thread later does not go pending again.
+    conn.execute(
+        "INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) \
+         VALUES ('run-loose', 't1', 'run-loose', 0)",
+        [],
+    )
+    .unwrap();
+    save(
+        &conn,
+        &verified("run-loose", &json!([text("user", "gamma two")]), 0, 13),
+    );
+    assert_eq!(index_row(&conn, "run-loose").1.as_deref(), Some("archived"));
+}
+
+#[test]
+fn a_run_recorded_only_as_the_root_of_an_archived_thread_is_covered() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    host_thread(&conn, "t1", "run-root", true);
+    save(
+        &conn,
+        &verified("run-root", &json!([text("user", "alpha")]), 0, 10),
+    );
+    assert_eq!(index_row(&conn, "run-root").1.as_deref(), Some("archived"));
+    host_thread(&conn, "t1", "run-root", false);
+    assert_eq!(index_row(&conn, "run-root").0, "pending");
+}
+
+#[test]
+fn purge_takes_an_oversized_block_alone_and_finishes_every_run() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    for (thread, run) in [
+        ("t1", "run-a"),
+        ("t2", "run-b"),
+        ("t3", "run-c"),
+        ("t4", "run-d"),
+        ("t5", "run-e"),
+    ] {
+        host_thread(&conn, thread, run, false);
+        save(&conn, &bound(run, thread, "alpha apple", 10));
+        commit_current(&conn, run, &lease, S);
+        host_thread(&conn, thread, run, true);
+    }
+    // One block is larger than a step may take; it goes alone.
+    conn.execute(
+        "UPDATE conversation_blocks SET text = hex(zeroblob(1500000)) WHERE id = \
+         (SELECT MIN(id) FROM conversation_blocks WHERE run_id = 'run-a')",
+        [],
+    )
+    .unwrap();
+    let report = purge_index_rows(
+        &conn,
+        "run-a",
+        PurgeTarget::Archived,
+        PURGE_ROWS,
+        PURGE_BYTES,
+    )
+    .unwrap();
+    assert!(
+        report.oversized && report.rows == 0,
+        "the plain step reports it"
+    );
+    let alone = purge_index_rows_with(
+        &conn,
+        "run-a",
+        PurgeTarget::Archived,
+        PURGE_ROWS,
+        PURGE_BYTES,
+        OversizedBlock::TakeAlone,
+    )
+    .unwrap();
+    assert_eq!(alone.rows, 1);
+    // More runs than one tick takes: the ticks drain all of them.
+    let mut ticks = 0;
+    while archive_purge::tick(&conn).unwrap().runs > 0 {
+        ticks += 1;
+        assert!(ticks < 100, "the purge must terminate");
+    }
+    for run in ["run-a", "run-b", "run-c", "run-d", "run-e"] {
+        assert_eq!(
+            index_row(&conn, run),
+            ("evicted".into(), Some("archived".into()), 0, 0)
+        );
+    }
+    fts_integrity(&conn);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COALESCE(SUM(charged_bytes), 0) FROM thread_index_runs",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn migration_evicts_runs_of_threads_that_were_already_archived() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let lease = lease(&conn, 1, i64::MAX);
+    for (thread, run) in [("t-old", "run-old"), ("t-live", "run-live")] {
+        host_thread(&conn, thread, run, false);
+        save(&conn, &bound(run, thread, "alpha apple", 10));
+        commit_current(&conn, run, &lease, S);
+    }
+    // The flag was set before this version, so no mirror hook ever ran.
+    conn.execute(
+        "UPDATE threads SET archived = 1 WHERE thread_id = 't-old'",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch("DROP INDEX idx_thread_index_runs_archived_pending")
+        .unwrap();
+    conn.execute_batch(include_str!("../migrations/v36.sql"))
+        .unwrap();
+    assert_eq!(index_row(&conn, "run-old").1.as_deref(), Some("archived"));
+    assert_eq!(index_row(&conn, "run-live").0, "indexed");
+    assert_eq!(purge_all(&conn), 1);
+    assert_eq!(index_row(&conn, "run-old").3, 0);
+}

@@ -737,6 +737,10 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         }
     }
     removed += retain_observation_events(state, now)?;
+    match crate::maintenance::archive_purge::tick(&state.conn) {
+        Ok(progress) => removed += progress.rows as u64,
+        Err(error) => tracing::warn!(error = %error, "archived thread index purge failed"),
+    }
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {

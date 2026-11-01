@@ -34,6 +34,29 @@ Reindexing them requires `--include-evicted`, and even that flag never bypasses
 the logical budget or physical admission checks. Disabling the index does not
 disable direct conversation reads or grep.
 
+## Archived threads
+
+A thread whose archive flag is set (`threads.archived`, mirrored from the GUI
+sidebar) is out of the index and out of search, whatever the retention period
+or whether deletion is enabled:
+
+- When the flag turns on, the thread's runs become `evicted` with the reason
+  `archived` in the same transaction as the mirror write. Their blocks stay
+  until the writer's maintenance tick removes them (at most four runs per tick,
+  bounded rows and bytes per transaction, independent of the index job and of
+  `enabled`). A newly saved or discovered run of an archived thread is
+  registered as `evicted(archived)` without blocks, and the scheduler never
+  picks it.
+- When the flag turns off, `evicted(archived)` runs return to `pending` and are
+  extracted again. Evictions for other reasons (logical budget, oversized,
+  physical reclaim) stay evicted.
+- `thread_search`, the host's thread search and the candidate lists leave out
+  archived threads, **the caller's own thread included**, and so do the child
+  threads in a `thread_read` overview. Reading or grepping an archived thread by
+  an explicit ID still works; a deleted (tombstoned) thread does not.
+- `reindex-threads --include-evicted` does not revive `evicted(archived)` runs.
+  Unarchive the thread instead.
+
 ## CLI
 
 ```sh

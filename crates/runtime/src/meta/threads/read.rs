@@ -238,7 +238,7 @@ fn overview(
         .thread_children(&row.thread_id)
         .map_err(fail)?
         .into_iter()
-        .filter(|child| scope.resolve(&child.thread_id).is_ok())
+        .filter(|child| !child.archived && scope.resolve(&child.thread_id).is_ok())
         .take(MAX_CHILD_THREADS)
         .map(|child| {
             json!({

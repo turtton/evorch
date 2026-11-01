@@ -50,6 +50,12 @@ fn blocked_code(reason: IndexBlockedReason) -> &'static str {
     }
 }
 
+/// Runs of thread `?1`: its bindings plus its recorded root run. Statements using it
+/// write `+state` so the planner walks this set by primary key instead of scanning
+/// the `state` index, which holds every run of the database.
+const THREAD_RUN_IDS: &str = "(SELECT run_id FROM thread_runs WHERE thread_id = ?1 \
+     UNION SELECT root_run_id FROM threads WHERE thread_id = ?1)";
+
 /// Discovery batch outcome; `complete` resets the resume position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DiscoveryBatch {
@@ -141,6 +147,34 @@ impl<'c> SqliteThreadIndex<'c> {
                 complete,
             })
         })
+    }
+
+    /// Archive of a thread: its live runs become `evicted(archived)` in one
+    /// statement. Blocks stay for the maintenance purge; a delayed job result is
+    /// discarded by the new work generation. Returns the rows evicted.
+    pub(crate) fn archive_runs(&self, thread_id: &str) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "{ARCHIVE_ROWS} WHERE run_id IN {THREAD_RUN_IDS} \
+                 AND +state IN ('pending', 'indexed', 'retry_wait', 'blocked')"
+            ),
+            [thread_id],
+        )?)
+    }
+
+    /// Unarchive: only `evicted(archived)` rows return to pending. Evictions for
+    /// other reasons, and deleted rows, are left alone.
+    pub(crate) fn unarchive_runs(&self, thread_id: &str) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "UPDATE thread_index_runs SET state = 'pending', evicted_reason = NULL, \
+                 attempt_count = 0, next_attempt_at_ns = NULL, blocked_reason = NULL, \
+                 last_error_code = NULL, work_generation = work_generation + 1 \
+                 WHERE run_id IN {THREAD_RUN_IDS} \
+                 AND +state = 'evicted' AND evicted_reason = 'archived'"
+            ),
+            [thread_id],
+        )?)
     }
 
     /// R2 "retry 時刻到達": due retry rows return to pending, keeping attempts.

@@ -3510,3 +3510,106 @@ fn background_owner_detects_another_storages_request_after_wal_expiry() {
     );
     assert_eq!(handle.thread_index_job_status().unwrap().counters.pauses, 2);
 }
+
+// ---- Archived threads (PR-2) ----
+
+fn host_thread(fx: &Fixture, thread: &str, root: &str, archived: bool) {
+    crate::repo::threads::upsert(
+        fx.conn(),
+        crate::threads::ThreadWriter::Host,
+        &[crate::threads::ThreadUpsert {
+            thread_id: thread.into(),
+            root_run_id: Some(root.into()),
+            archived: Some(archived),
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            ..crate::threads::ThreadUpsert::default()
+        }],
+    )
+    .unwrap();
+}
+
+fn bound(run_id: &str, thread: &str, body: &str, at: i64) -> SnapshotWrite {
+    let mut write = verified(run_id, body, at);
+    write.binding = Some(crate::threads::ThreadRunRow {
+        run_id: run_id.into(),
+        thread_id: thread.into(),
+        root_run_id: run_id.into(),
+        depth: 0,
+    });
+    write
+}
+
+#[test]
+fn archived_thread_runs_are_never_scheduled_or_reindexed_and_return_on_unarchive() {
+    let mut fx = Fixture::new(512 * MIB);
+    host_thread(&fx, "t-arch", "run-a", false);
+    host_thread(&fx, "t-live", "run-b", false);
+    fx.save(&bound("run-a", "t-arch", "alpha", 10 * S));
+    fx.save(&bound("run-b", "t-live", "beta", 20 * S));
+    let lease = fx.lease(&gui(), S);
+    assert_eq!(fx.drive(&lease, 2 * S), idle());
+    assert_eq!(
+        (
+            fx.row("run-a").state.as_str(),
+            fx.row("run-b").state.as_str()
+        ),
+        ("indexed", "indexed")
+    );
+
+    host_thread(&fx, "t-arch", "run-a", true);
+    assert_eq!(fx.drive(&lease, 3 * S), idle());
+    let archived = fx.row("run-a");
+    assert_eq!(
+        (archived.state.as_str(), archived.evicted_reason.as_deref()),
+        ("evicted", Some("archived"))
+    );
+    // The purge runs on the writer's maintenance tick, with no job involved.
+    while crate::maintenance::archive_purge::tick(fx.conn())
+        .unwrap()
+        .runs
+        > 0
+    {}
+    assert_eq!(fx.row("run-a").blocks, 0);
+    assert_eq!(fx.row("run-a").charged, 0);
+
+    // A new snapshot and an include-evicted reindex both leave it evicted.
+    fx.save(&bound("run-a", "t-arch", "alpha two", 30 * S));
+    assert_eq!(fx.row("run-a").state, "evicted");
+    let request = ReindexRequest {
+        canonical_project: None,
+        since_ns: None,
+        include_evicted: true,
+    };
+    let submitted = fx
+        .control(4 * S)
+        .submit_request(&request, &gui(), 4 * S, HOUR)
+        .unwrap();
+    assert_eq!(fx.drive(&lease, 5 * S), idle());
+    assert_eq!(fx.row("run-a").state, "evicted");
+    assert_eq!(fx.row("run-a").blocks, 0);
+    assert!(matches!(
+        terminal(&mut fx, &submitted.request_id, 6 * S),
+        ReindexResult::Completed { .. }
+    ));
+
+    host_thread(&fx, "t-arch", "run-a", false);
+    assert_eq!(fx.row("run-a").state, "pending");
+    assert_eq!(fx.drive(&lease, 7 * S), idle());
+    let back = fx.row("run-a");
+    assert_eq!(back.state, "indexed");
+    assert!(back.blocks > 0);
+}
+
+#[test]
+fn next_work_skips_a_pending_run_of_an_archived_thread() {
+    let fx = Fixture::new(512 * MIB);
+    host_thread(&fx, "t1", "run-a", false);
+    fx.save(&bound("run-a", "t1", "alpha", 10 * S));
+    assert!(work::next_work(fx.conn()).unwrap().is_some());
+    // Flag flipped behind the mirror's back: the scheduler still refuses it.
+    fx.conn()
+        .execute("UPDATE threads SET archived = 1 WHERE thread_id = 't1'", [])
+        .unwrap();
+    assert!(work::next_work(fx.conn()).unwrap().is_none());
+}

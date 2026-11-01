@@ -102,8 +102,58 @@ pub(crate) fn index_transition(state: IndexState, event: IndexEvent) -> IndexTra
         IndexEvent::Evict => T::Keep,
         IndexEvent::DeleteSource if state == Deleted => T::Keep,
         IndexEvent::DeleteSource => T::Delete,
+        // The eviction keeps the blocks; maintenance purges them in bounded steps.
+        IndexEvent::Archive if live => T::Evict,
+        IndexEvent::Archive => T::Keep,
+        // Whether an evicted row revives depends on its reason: see
+        // [`index_transition_for`].
+        IndexEvent::Unarchive => T::Keep,
     }
 }
+
+/// [`index_transition`] for an event whose effect also depends on why a row is
+/// evicted: only `evicted(archived)` returns to pending on unarchive; budget and
+/// other evictions stay evicted, and `Archive` never overwrites another reason.
+#[cfg(test)]
+pub(crate) fn index_transition_for(
+    state: IndexState,
+    evicted: Option<IndexEvictionReason>,
+    event: IndexEvent,
+) -> IndexTransition {
+    match (event, state, evicted) {
+        (IndexEvent::Unarchive, IndexState::Evicted, Some(IndexEvictionReason::Archived)) => {
+            IndexTransition::Pending {
+                reset_attempts: true,
+            }
+        }
+        _ => index_transition(state, event),
+    }
+}
+
+/// Whether a thread that owns `run_id` is archived, through its run binding or as
+/// its recorded root run. Runs that name no thread are not archived.
+fn run_in_archived_thread(conn: &Connection, run_id: &str) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_runs tr JOIN threads t ON t.thread_id = tr.thread_id \
+         WHERE tr.run_id = ?1 AND t.archived = 1) \
+         OR EXISTS(SELECT 1 FROM threads WHERE root_run_id = ?1 AND archived = 1)",
+        [run_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Evicts one live row for its archived thread, keeping its blocks for the purge.
+fn archive_run_row(conn: &Connection, run_id: &str) -> Result<(), StorageError> {
+    conn.execute(
+        &format!("{ARCHIVE_ROWS} WHERE run_id = ?1 AND state IN ('pending', 'indexed', 'retry_wait', 'blocked')"),
+        [run_id],
+    )?;
+    Ok(())
+}
+
+const ARCHIVE_ROWS: &str = "UPDATE thread_index_runs SET state = 'evicted', \
+     evicted_reason = 'archived', next_attempt_at_ns = NULL, blocked_reason = NULL, \
+     work_generation = work_generation + 1";
 
 /// Runs `body` in a savepoint: it composes with a caller's transaction, and
 /// outside one it is a deferred transaction committed on success.
@@ -234,12 +284,20 @@ fn retention_floor(conn: &Connection, run_id: &str) -> Result<Option<i64>, Stora
     )?)
 }
 
+/// A new row starts pending, or `evicted(archived)` without blocks when its thread
+/// is already archived, so an archived thread's run is never scheduled.
 fn insert_pending(conn: &Connection, header: &IndexSourceHeader) -> Result<(), StorageError> {
+    let (state, evicted_reason) = if run_in_archived_thread(conn, &header.target.run_id)? {
+        ("evicted", Some("archived"))
+    } else {
+        ("pending", None)
+    };
     conn.execute(
         "INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision, \
          source_context_sha256, source_note_seq, source_provenance_version, extractor_version, \
-         accounting_version, source_updated_at_ns, retention_at_ns, work_generation) \
-         VALUES (?1, 'pending', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)",
+         accounting_version, source_updated_at_ns, retention_at_ns, work_generation, \
+         evicted_reason) \
+         VALUES (?1, ?11, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?12)",
         params![
             header.target.run_id,
             header.target.source_revision,
@@ -251,6 +309,8 @@ fn insert_pending(conn: &Connection, header: &IndexSourceHeader) -> Result<(), S
             header.target.accounting_version,
             header.source_updated_at_ns,
             header.retention_at_ns,
+            state,
+            evicted_reason,
         ],
     )?;
     Ok(())
@@ -268,7 +328,22 @@ struct SourceValues<'a> {
     updated_at_ns: i64,
 }
 
+/// Records a source change. A run that becomes pending while its thread is
+/// archived is evicted instead, keeping the scheduler away from it.
 fn update_source(
+    conn: &Connection,
+    run_id: &str,
+    values: &SourceValues<'_>,
+    to_pending: bool,
+) -> Result<u64, StorageError> {
+    let revision = update_source_row(conn, run_id, values, to_pending)?;
+    if to_pending && run_in_archived_thread(conn, run_id)? {
+        archive_run_row(conn, run_id)?;
+    }
+    Ok(revision)
+}
+
+fn update_source_row(
     conn: &Connection,
     run_id: &str,
     values: &SourceValues<'_>,

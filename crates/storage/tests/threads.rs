@@ -406,3 +406,126 @@ fn saved_contexts_feed_thread_reads_with_stored_redactions() {
         (Some("root"), 1, None)
     );
 }
+
+fn archived_thread(id: &str, root: &str, archived: bool) -> ThreadUpsert {
+    ThreadUpsert {
+        root_run_id: Some(root.into()),
+        archived: Some(archived),
+        ..thread(id, "/repo", 10)
+    }
+}
+
+fn index_state(config: &StorageConfig, run_id: &str) -> (String, Option<String>) {
+    let status = Database::open(config)
+        .unwrap()
+        .thread_index_run_status(run_id)
+        .unwrap()
+        .unwrap();
+    let reason: Option<String> = rusqlite::Connection::open(&config.db_path)
+        .unwrap()
+        .query_row(
+            "SELECT evicted_reason FROM thread_index_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (format!("{:?}", status.state), reason)
+}
+
+#[test]
+fn host_archive_flag_flips_the_index_and_the_runtime_writer_never_does() {
+    // Given: a saved run bound to a live thread.
+    let (_dir, config, storage) = fixture();
+    let handle = storage.handle();
+    handle
+        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .unwrap();
+    handle
+        .upsert_run_context(&context(
+            "run-1",
+            None,
+            r#"{"thread_id":"t"}"#,
+            r#"[{"role":"user","content":[{"type":"text","text":"go"}]}]"#,
+        ))
+        .unwrap();
+    assert_eq!(index_state(&config, "run-1").0, "Pending");
+
+    // When: the host leaves the flag unchanged, the runtime writes, nothing moves.
+    handle
+        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .unwrap();
+    handle
+        .upsert_thread_runtime(&thread("t", "/repo", 20))
+        .unwrap();
+    assert_eq!(index_state(&config, "run-1").0, "Pending");
+
+    // And: the flag flips to archived, the run is evicted for that reason.
+    handle
+        .upsert_threads_host(&[archived_thread("t", "run-1", true)])
+        .unwrap();
+    assert_eq!(
+        index_state(&config, "run-1"),
+        ("Evicted".into(), Some("archived".into()))
+    );
+    // Runtime writes cannot change the archive series, so nothing revives.
+    handle
+        .upsert_thread_runtime(&thread("t", "/repo", 30))
+        .unwrap();
+    assert_eq!(index_state(&config, "run-1").0, "Evicted");
+
+    // And: unarchiving returns it to pending.
+    handle
+        .upsert_threads_host(&[archived_thread("t", "run-1", false)])
+        .unwrap();
+    assert_eq!(index_state(&config, "run-1"), ("Pending".into(), None));
+}
+
+#[test]
+fn a_thread_first_mirrored_as_archived_registers_its_runs_evicted() {
+    let (_dir, config, storage) = fixture();
+    let handle = storage.handle();
+    handle
+        .upsert_threads_host(&[archived_thread("t", "run-1", true)])
+        .unwrap();
+    handle
+        .upsert_run_context(&context(
+            "run-1",
+            None,
+            r#"{"thread_id":"t"}"#,
+            r#"[{"role":"user","content":[{"type":"text","text":"go"}]}]"#,
+        ))
+        .unwrap();
+    assert_eq!(
+        index_state(&config, "run-1"),
+        ("Evicted".into(), Some("archived".into()))
+    );
+}
+
+#[test]
+fn the_visible_listing_skips_archived_threads_but_explicit_reads_still_work() {
+    let (_dir, config, storage) = fixture();
+    let handle = storage.handle();
+    handle
+        .upsert_threads_host(&[
+            archived_thread("live", "run-l", false),
+            archived_thread("old", "run-o", true),
+        ])
+        .unwrap();
+    let database = Database::open(&config).unwrap();
+    let ids = |page: storage::threads::ThreadPage| {
+        let mut ids: Vec<_> = page.threads.into_iter().map(|row| row.thread_id).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(database.threads_in_project("/repo", None, 10).unwrap()),
+        ["live", "old"]
+    );
+    assert_eq!(
+        ids(database
+            .threads_in_project_visible("/repo", None, 10)
+            .unwrap()),
+        ["live"]
+    );
+    assert!(database.thread("old").unwrap().unwrap().archived);
+}

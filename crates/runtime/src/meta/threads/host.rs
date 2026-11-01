@@ -194,7 +194,7 @@ fn scan_titles(
         loop {
             let page = scope
                 .store
-                .threads_in_project(root, cursor.as_ref(), FUZZY_PAGE)
+                .threads_in_project_visible(root, cursor.as_ref(), FUZZY_PAGE)
                 .map_err(|_| super::STORE_ERROR.to_owned())?;
             seen += page.threads.len();
             for row in &page.threads {
