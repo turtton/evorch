@@ -272,8 +272,8 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 
 - **capture の順序。** blob を書く → 参照行を DB に記録して commit を待つ → meta を公開する。記録に失敗したら
   meta を書かず `Err` を返す（blob だけが残り、次の sweep が回収する）。meta が見えるなら必ず行がある。
-  この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になる。
-  記録しない store（テスト・headless・配線前の GUI）の meta は、次の起動の mark が補う。
+  この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になり、GUI はこれを使う。
+  記録しない store（テスト・headless）の meta は、次の起動の mark が補う。
 - **mark。** meta の名前を順に見て、参照行も `gc_unknown_meta` の記録も無い meta を開いて行にする（1 起動で
   `gc_meta_files`（既定 20,000）件・`gc_meta_bytes`（32 MiB）まで。読み取り途中で失敗した分の bytes も数える）。
   既知の meta は DB の索引引きだけで開かない。1 起動で名前を見る数は `gc_meta_lookups`（100,000）まで（保持する名前も
@@ -317,7 +317,8 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   進捗はスプラッシュ（`gui::app::splash`）に段ごとに出る（● 実行中 / ✓ 完了、確定した family 数、経過時間）。
   フェーズが終わるまでウィンドウの閉じる操作は無視される。他のプロセスがロックを持っていれば（`NoExclusive`）
   フェーズは飛ばして通常起動し、`--demo` はフェーズを行わない。③ 1 フレーム内で `build_workbench`
-  （`Storage::open_with_lease` → `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
+  （`Storage::open_with_lease` → 参照を記録する artifact store（`store_with_refs`）→ `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
+  段 7（artifact の実体回収）もスプラッシュに段として出る。
   ②・③の失敗はスプラッシュと stderr に出て、ウィンドウを閉じるとコード 1 で終わる。
 - **sidebar の採番。** `ThreadRecord` に `archived_at`（unix 秒）・`archive_revision`・`pin_revision` を持つ。
   archive / unarchive / pin は保存ロックの中で最新の sidebar（ファイル＋手元の 3-way merge）に対して
@@ -336,12 +337,13 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 - **guard。** 再読込した tombstone は `AgentRuntime` と `OwnerHost` の両方に設定する（別々の保存先）。
   runtime への設定は、目標・手順の復元など runtime の入口を使う前に行い、復元関数は設定した証拠を引数に取る。
 - **表示。** アーカイブ一覧のタイトルのホバーに "Deletes in N days" / "Deletes at next startup" /
-  "Deletion on hold (reason)" を出す（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
+  "Deletion on hold (reason)" を出す（owner が保持している間は "owner active until <ローカル日時>"）（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
   起動後・60 秒ごと・archive / unarchive / pin の後に計算し、探索済みの family の保留理由（pin・owner・
   未期限の関連スレッド・系統の未解決・探索中）も含む。束縛が不一致のときは "Deletion disabled (configuration mismatch)"。
   GUI の文言は既存の GUI に合わせて英語。
 - **通知。** 起動後に確定があった（または失敗があった）ときだけ "Startup maintenance: deleted N threads
-  (M runs); about X MB will be reclaimed. Skipped: …" を 1 件出す。束縛不一致は "Thread deletion is disabled
+  (M runs); about X MB will be reclaimed. Skipped: …" を 1 件出す（artifact の実体を消したときは
+  "removed N unused artifact files (X MB)."、読めない artifact 記録で回収が止まっているときは Skipped に件数）。束縛不一致は "Thread deletion is disabled
   (configuration mismatch: reason)"。`NoExclusive` は通知せず、ログだけ。
 
 実 DB のコピーでの確認は `cargo run -p gui --example startup_phase_check -- --db COPY/evorch-events.db --root COPY/threads --sidebar COPY/sidebar.json [--days 30] [--reclaim-cycles N]`

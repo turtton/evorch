@@ -44,6 +44,7 @@ fn stage_label(stage: Stage) -> String {
         Stage::Owners => "Cleaning owner records".to_owned(),
         Stage::Scratch => "Removing scratch directories".to_owned(),
         Stage::Oversized => "Removing oversized rows".to_owned(),
+        Stage::ArtifactGc => "Collecting unused artifact files".to_owned(),
         Stage::Vacuum => "Reclaiming free space".to_owned(),
         _ => format!("{stage:?}"),
     }
@@ -183,6 +184,7 @@ mod tests {
             Stage::Owners,
             Stage::Scratch,
             Stage::Oversized,
+            Stage::ArtifactGc,
             Stage::Vacuum,
         ] {
             assert_ne!(stage_label(stage), format!("{stage:?}"), "{stage:?}");

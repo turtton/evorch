@@ -961,7 +961,9 @@ fn build_workbench(
     };
     // Presented artifacts must outlive the session so restored conversations show them.
     let mut artifact_store = None;
-    let runtime = match runtime::artifacts::ArtifactStore::new(&artifact_directory) {
+    // Every capture records its reference before its meta file appears, which is
+    // what lets the start-up collection of unused blob files trust the references.
+    let runtime = match runtime::artifacts::store_with_refs(&artifact_directory, storage.handle()) {
         Ok(store) => {
             let store = Arc::new(store);
             artifact_store = Some(Arc::clone(&store));

@@ -308,3 +308,91 @@ fn the_shown_status_of_a_held_family_comes_from_the_real_scheduler() {
         );
     }
 }
+
+#[test]
+fn the_startup_collects_unused_artifact_files_and_keeps_every_captured_one() {
+    // Given: the GUI's artifact directory next to the database. One capture recorded
+    // its reference as the GUI does, one was made by a host that records none (the
+    // meta file alone), and a blob file no meta file points at.
+    use runtime::artifacts::{ArtifactStore, CaptureRequest, store_with_refs};
+    let fixture = Fixture::new();
+    fixture.write_sidebar();
+    let plan = fixture.plan(true);
+    let artifacts = plan.artifacts_dir.clone().unwrap();
+    let workspace = fixture.dir.path().join("work");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("a.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR-a").unwrap();
+    std::fs::write(workspace.join("b.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR-b").unwrap();
+    let request = |run: &str| CaptureRequest {
+        title: "t",
+        caption: None,
+        run_id: run.into(),
+        root_run_id: run.into(),
+        thread_id: Some("live".into()),
+    };
+    let (recorded, unrecorded) = {
+        // The writer holds the database; it is closed before the start-up takes the locks.
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: plan.db_path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        let recorded = store_with_refs(&artifacts, storage.handle())
+            .unwrap()
+            .capture(
+                &workspace,
+                None,
+                std::path::Path::new("a.png"),
+                request("run-a"),
+            )
+            .unwrap();
+        let unrecorded = ArtifactStore::new(&artifacts)
+            .unwrap()
+            .capture(
+                &workspace,
+                None,
+                std::path::Path::new("b.png"),
+                request("run-b"),
+            )
+            .unwrap();
+        (recorded, unrecorded)
+    };
+    let store = ArtifactStore::new(&artifacts).unwrap();
+    let kept = [store.blob_path(&recorded), store.blob_path(&unrecorded)];
+    let orphan = artifacts
+        .join("blobs")
+        .join(format!("{}.png", "ab".repeat(32)));
+    std::fs::write(&orphan, b"nobody refers to this").unwrap();
+
+    // When: the start-up runs.
+    let (events, prelude) = collect(&plan, 30);
+
+    // Then: the collection ran as a stage of the exclusive phase and removed only the
+    // blob nothing refers to; both captured blobs and their meta files are still there.
+    assert!(
+        events.contains(&StartupEvent::Phase(StartupProgress::StageStarted(
+            Stage::ArtifactGc
+        )))
+    );
+    let StartupOutcome::Ran { gc: Some(gc), .. } = &prelude.report.outcome else {
+        panic!(
+            "the phase must report the collection: {:?}",
+            prelude.report.outcome
+        );
+    };
+    assert!(gc.refs_complete, "{gc:?}");
+    assert_eq!(gc.blobs_unlinked, 1, "{gc:?}");
+    assert!(!orphan.exists());
+    for blob in &kept {
+        assert!(blob.exists(), "{} was removed", blob.display());
+    }
+    assert!(store.load(&recorded.artifact_id).is_ok());
+    assert!(store.load(&unrecorded.artifact_id).is_ok());
+    // And: the notice tells about it.
+    let (_, summary) = gui::app::startup_notice(&prelude.report, prelude.binding.as_ref())
+        .expect("a removed file is worth a notice");
+    assert!(
+        summary.contains("removed 1 unused artifact files"),
+        "{summary}"
+    );
+}

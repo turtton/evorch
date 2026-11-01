@@ -387,6 +387,7 @@ pub fn startup_notice(
         retried_over_budget,
         owner_registry_error,
         errors,
+        gc,
         ..
     } = &report.outcome
     else {
@@ -395,6 +396,13 @@ pub fn startup_notice(
     let threads: usize = confirmed.iter().map(|family| family.threads.len()).sum();
     let runs: usize = confirmed.iter().map(|family| family.runs.len()).sum();
     let bytes: u64 = confirmed.iter().map(|family| family.estimate_bytes).sum();
+    let mut done = Vec::new();
+    if !confirmed.is_empty() {
+        done.push(format!(
+            "deleted {threads} threads ({runs} runs); about {} MB will be reclaimed.",
+            bytes.div_ceil(BYTES_PER_MB)
+        ));
+    }
     let mut skipped = Vec::new();
     if !blocked.is_empty() {
         skipped.push(format!("{} families on hold", blocked.len()));
@@ -408,14 +416,40 @@ pub fn startup_notice(
     if let Some(error) = owner_registry_error {
         skipped.push(format!("owner registry unreadable ({error})"));
     }
+    if let Some(gc) = gc {
+        if gc.blobs_unlinked > 0 {
+            done.push(format!(
+                "removed {} unused artifact files ({} MB).",
+                gc.blobs_unlinked,
+                gc.bytes_freed.div_ceil(BYTES_PER_MB)
+            ));
+        }
+        if gc.unknown_remaining > 0 {
+            skipped.push(format!(
+                "{} unreadable artifact records stop artifact file collection",
+                gc.unknown_remaining
+            ));
+        }
+        if gc.failed_total > 0 {
+            skipped.push(format!(
+                "{} artifact files could not be removed",
+                gc.failed_total
+            ));
+        }
+    }
     skipped.extend(errors.iter().cloned());
-    if confirmed.is_empty() && owner_registry_error.is_none() && errors.is_empty() {
+    // Families held back, or retried, are not news by themselves: they are at every start.
+    let gc_trouble = gc
+        .as_ref()
+        .is_some_and(|gc| gc.unknown_remaining > 0 || gc.failed_total > 0);
+    if done.is_empty() && owner_registry_error.is_none() && errors.is_empty() && !gc_trouble {
         return None;
     }
-    let mut summary = format!(
-        "Startup maintenance: deleted {threads} threads ({runs} runs); about {} MB will be reclaimed.",
-        bytes.div_ceil(BYTES_PER_MB)
-    );
+    let mut summary = String::from("Startup maintenance:");
+    for part in &done {
+        summary.push(' ');
+        summary.push_str(part);
+    }
     if !skipped.is_empty() {
         summary.push_str(&format!(" Skipped: {}", skipped.join("; ")));
     }
@@ -683,6 +717,7 @@ mod tests {
                 owners_removed: 0,
                 owner_registry_error: None,
                 errors,
+                gc: None,
             },
             binding: Some(BindingStatus::Bound),
             tombstones: TombstoneSet::default(),
@@ -714,6 +749,75 @@ mod tests {
             summary,
             "Startup maintenance: deleted 3 threads (6 runs); about 2 MB will be reclaimed. Skipped: scratch failed"
         );
+    }
+
+    fn with_gc(
+        mut report: StartupReport,
+        collected: runtime::artifacts::GcReport,
+    ) -> StartupReport {
+        if let StartupOutcome::Ran { gc, .. } = &mut report.outcome {
+            *gc = Some(collected);
+        }
+        report
+    }
+
+    #[test]
+    fn the_startup_notice_reports_the_artifact_file_collection() {
+        // Given: no thread was deleted, but 3 unused artifact files (2.5 MB) were removed.
+        let collected = runtime::artifacts::GcReport {
+            refs_complete: true,
+            blobs_unlinked: 3,
+            bytes_freed: 2_500_000,
+            ..Default::default()
+        };
+
+        let (kind, summary) = startup_notice(
+            &with_gc(ran(Vec::new(), Vec::new()), collected.clone()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(kind, NotificationKind::RetentionStartup);
+        assert_eq!(
+            summary,
+            "Startup maintenance: removed 3 unused artifact files (3 MB)."
+        );
+
+        // And: with a deletion in the same start, both parts are named.
+        let (_, both) = startup_notice(
+            &with_gc(ran(vec![family(1, 2, 3)], Vec::new()), collected),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            both,
+            "Startup maintenance: deleted 1 threads (2 runs); about 1 MB will be reclaimed. \
+             removed 3 unused artifact files (3 MB)."
+        );
+    }
+
+    #[test]
+    fn unreadable_artifact_records_that_stop_the_collection_are_named() {
+        let stuck = runtime::artifacts::GcReport {
+            unknown_remaining: 2,
+            failed_total: 1,
+            ..Default::default()
+        };
+
+        let (_, summary) =
+            startup_notice(&with_gc(ran(Vec::new(), Vec::new()), stuck), None).unwrap();
+
+        assert_eq!(
+            summary,
+            "Startup maintenance: Skipped: 2 unreadable artifact records stop artifact file \
+             collection; 1 artifact files could not be removed"
+        );
+        // A collection that found nothing to do is not news.
+        let quiet = runtime::artifacts::GcReport {
+            refs_complete: true,
+            ..Default::default()
+        };
+        assert!(startup_notice(&with_gc(ran(Vec::new(), Vec::new()), quiet), None).is_none());
     }
 
     #[test]
