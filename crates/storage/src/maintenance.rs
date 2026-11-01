@@ -1,5 +1,6 @@
 //! Explicit offline repair and conservative, replay-equivalent live retention.
 
+pub(crate) mod archive_purge;
 mod compact;
 pub(crate) mod offline;
 pub(crate) mod retention;

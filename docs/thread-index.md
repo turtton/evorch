@@ -34,6 +34,44 @@ Reindexing them requires `--include-evicted`, and even that flag never bypasses
 the logical budget or physical admission checks. Disabling the index does not
 disable direct conversation reads or grep.
 
+## Archived threads
+
+A thread whose archive flag is set (`threads.archived`, mirrored from the GUI
+sidebar) is out of the index and out of search, whatever the retention period
+or whether deletion is enabled:
+
+- When the flag turns on, the thread's runs become `evicted` with the reason
+  `archived` in the same transaction as the mirror write. Their blocks stay
+  until the writer's maintenance tick removes them (at most four runs per tick,
+  at most 200 rows / 2 MiB per transaction, independent of the index job and of
+  `enabled`). A single block above that limit is never deleted by the tick: it
+  is registered in `reclaim_oversized` (family `archive-index`) and removed by
+  the exclusive startup phase, which deletes it only if the thread is still
+  archived. A newly saved or discovered run of an archived thread is registered
+  as `evicted(archived)` without blocks.
+- Whether a run may enter the index is decided from the thread's archive flag
+  now (its run binding or its recorded root run), never from the eviction
+  reason: the scheduler (`next_work`) and `reindex-threads` (with or without
+  `--include-evicted`) skip such runs whatever state or reason they have.
+- Threads archived before this version are handled by the same tick in bounded
+  steps: one tick reads and updates at most about 1,000 index rows, however many
+  runs a single thread has, and a persisted position (the next thread and the last
+  run done inside it) lets it resume after a restart. Nothing is rewritten by the
+  migration itself. Search exclusion does not wait for it.
+- Every statement of the tick is a keyset range over an index, so its `LIMIT` is
+  also its scan bound: archived threads are read in ID order from a partial index,
+  a thread's runs in ID order from `(thread_id, run_id)`, and the runs left to
+  purge from a partial index that excludes the ones handed to the exclusive phase
+  (`purge_deferred`). The tick's cost therefore does not grow with the number of
+  unrelated or waiting runs.
+- `thread_search`, the host's thread search and the candidate lists leave out
+  archived threads, **the caller's own thread included**, and so do the child
+  threads in a `thread_read` overview. Reading or grepping an archived thread by
+  an explicit ID still works; a deleted (tombstoned) thread does not.
+- `reindex-threads --include-evicted` does not revive runs of an archived
+  thread, whatever the reason they were evicted for. Unarchive the thread
+  instead; only `evicted(archived)` runs return to `pending` then.
+
 ## CLI
 
 ```sh

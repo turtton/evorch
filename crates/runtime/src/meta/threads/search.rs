@@ -340,6 +340,10 @@ pub(super) fn run_with_limits(
         if conversation.is_none() {
             return Err(CURSOR_INVALID.into());
         }
+        if resumed.archived {
+            // Archived after the position was issued: it is no longer searchable.
+            return Err(CURSOR_STALE.into());
+        }
         let members = scope.search_members(resumed)?;
         let runs = scan_runs(&members, args.include_children);
         if !runs.contains(&resume.run) {
@@ -699,11 +703,13 @@ fn candidates(scope: &Scope<'_>, after: Option<&ThreadCursor>) -> Result<Vec<Thr
     // Related candidates can include fork children, which are not necessarily
     // visible. Never issue a continuation position the caller cannot resolve.
     rows.retain(|row| scope.resolve(&row.thread_id).is_ok());
+    // An archived thread is out of every search, the caller's own included.
+    rows.retain(|row| !row.archived);
     if let Some(root) = &scope.caller.project_root {
         // Bound work per invocation, not the total searchable history. One
         // lookahead candidate distinguishes an exhausted scan from a full page.
         let page = store
-            .threads_in_project(root, after, MAX_SCAN + 1)
+            .threads_in_project_visible(root, after, MAX_SCAN + 1)
             .map_err(fail)?;
         rows.extend(page.threads);
     }

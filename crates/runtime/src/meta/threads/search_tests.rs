@@ -2444,3 +2444,115 @@ fn byte_heavy_blocks_stay_within_derived_bounds_and_drain_completely() {
         assert_eq!(page["threads"], json!([]));
     }
 }
+
+// ---- Archived threads are out of every search route (PR-2) ----
+
+impl Fixture {
+    /// Host mirror of the archive flag; every other column keeps its value.
+    fn set_archived(&self, id: &str, archived: bool) {
+        self.store()
+            .handle
+            .upsert_threads_host(&[ThreadUpsert {
+                thread_id: id.into(),
+                archived: Some(archived),
+                created_at_ns: 1,
+                updated_at_ns: 1,
+                ..Default::default()
+            }])
+            .unwrap();
+    }
+}
+
+fn listed(value: &Value) -> BTreeSet<String> {
+    value["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| thread["thread_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn archived_threads_leave_every_candidate_route_but_explicit_reads_still_work() {
+    let f = Fixture::new();
+    let project = f.project.path();
+    // The caller's thread reaches a parent and an escalation source by lineage
+    // alone (they name no project), and a child and a sibling through the project.
+    f.thread("own", Some(project), "run-100", |row| {
+        row.parent_thread_id = Some("parent".into());
+        row.escalation_source_run_id = Some("run-710".into());
+    });
+    f.thread("parent", None, "run-700", |_| {});
+    f.thread("source", None, "run-710", |_| {});
+    f.thread("kid", Some(project), "run-720", |row| {
+        row.parent_thread_id = Some("own".into());
+    });
+    f.thread("sibling", Some(project), "run-730", |_| {});
+    let ids = ["own", "parent", "source", "kid", "sibling"];
+    for (id, run) in ids
+        .iter()
+        .zip(["run-100", "run-700", "run-710", "run-720", "run-730"])
+    {
+        f.native_run(run, Some(id), None, vec![user(vec![text("marker phrase")])]);
+        f.index(run);
+    }
+    let caller = ("run-100", Some("own"), Some(project));
+    let everything = || {
+        let list = f.call(caller, "thread_search", json!({})).unwrap();
+        let query = f
+            .call(caller, "thread_search", json!({"query": "marker"}))
+            .unwrap();
+        (listed(&list), listed(&query))
+    };
+    let all: BTreeSet<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    let (list, query) = everything();
+    assert_eq!(
+        (&list, &query),
+        (&all, &all),
+        "every route is reachable first"
+    );
+    let hosted = f
+        .runtime
+        .search_threads_for_host(project, "", 20, None)
+        .unwrap();
+    assert_eq!(
+        hosted.hits.len(),
+        3,
+        "the host lists the project's three threads"
+    );
+
+    // When each thread is archived in turn, it disappears from every route,
+    // the caller's own thread included, while the rest stays searchable.
+    let mut gone = BTreeSet::new();
+    for id in ids {
+        f.set_archived(id, true);
+        gone.insert(id.to_owned());
+        let remaining: BTreeSet<String> = all.difference(&gone).cloned().collect();
+        let (list, query) = everything();
+        assert_eq!(list, remaining, "list after archiving {id}");
+        assert_eq!(query, remaining, "query after archiving {id}");
+        let hosted = f
+            .runtime
+            .search_threads_for_host(project, "", 20, None)
+            .unwrap();
+        assert!(
+            hosted.hits.iter().all(|hit| !gone.contains(&hit.thread_id)),
+            "host listing after archiving {id}"
+        );
+        // An explicit ID still reads (the caller's own thread and others).
+        let read = f
+            .call(caller, "thread_read", json!({"thread": id}))
+            .unwrap_or_else(|error| panic!("read {id}: {error}"));
+        assert_eq!(read["thread"]["thread_id"], id, "{read}");
+        f.call(
+            caller,
+            "thread_grep",
+            json!({"thread": id, "pattern": "marker"}),
+        )
+        .unwrap_or_else(|error| panic!("grep {id}: {error}"));
+    }
+
+    // Unarchiving brings a thread back.
+    f.set_archived("sibling", false);
+    assert!(everything().0.contains("sibling"));
+}

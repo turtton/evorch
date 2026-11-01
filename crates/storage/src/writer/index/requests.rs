@@ -92,14 +92,17 @@ pub(crate) fn submit_in(
     now_ns: i64,
 ) -> Result<(String, u64), StorageError> {
     let request_id = insert_request(conn, request, now_ns)?;
-    let mut statement = conn.prepare(
+    // A run of a thread that is archived now is never a target, whatever its state or
+    // why it was evicted: only unarchiving brings it back.
+    let archived = crate::repo::thread_index::archived_run_predicate("r.run_id");
+    let mut statement = conn.prepare(&format!(
         "SELECT r.run_id, r.state FROM thread_index_runs r \
-         WHERE (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
+         WHERE NOT {archived} AND (?1 IS NULL OR r.source_updated_at_ns >= ?1) \
          AND (?2 IS NULL OR EXISTS (SELECT 1 FROM thread_runs tr \
               JOIN threads t ON t.thread_id = tr.thread_id \
               WHERE tr.run_id = r.run_id AND t.project_root = ?2)) \
-         ORDER BY r.retention_at_ns DESC, r.run_id DESC",
-    )?;
+         ORDER BY r.retention_at_ns DESC, r.run_id DESC"
+    ))?;
     let candidates = statement
         .query_map(
             params![request.since_ns, request.canonical_project],

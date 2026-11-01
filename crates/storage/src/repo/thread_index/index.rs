@@ -50,6 +50,12 @@ fn blocked_code(reason: IndexBlockedReason) -> &'static str {
     }
 }
 
+/// Runs of thread `?1`: its bindings plus its recorded root run. Statements using it
+/// write `+state` so the planner walks this set by primary key instead of scanning
+/// the `state` index, which holds every run of the database.
+const THREAD_RUN_IDS: &str = "(SELECT run_id FROM thread_runs WHERE thread_id = ?1 \
+     UNION SELECT root_run_id FROM threads WHERE thread_id = ?1)";
+
 /// Discovery batch outcome; `complete` resets the resume position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DiscoveryBatch {
@@ -141,6 +147,65 @@ impl<'c> SqliteThreadIndex<'c> {
                 complete,
             })
         })
+    }
+
+    /// Archive of a thread: its live runs become `evicted(archived)` in one
+    /// statement. Blocks stay for the maintenance purge; a delayed job result is
+    /// discarded by the new work generation. Returns the rows evicted.
+    pub(crate) fn archive_runs(&self, thread_id: &str) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "{ARCHIVE_ROWS} WHERE run_id IN {THREAD_RUN_IDS} \
+                 AND +state IN ('pending', 'indexed', 'retry_wait', 'blocked')"
+            ),
+            [thread_id],
+        )?)
+    }
+
+    /// Backfill step: the thread's recorded root run, when it is live.
+    pub(crate) fn archive_thread_root(&self, thread_id: &str) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "{ARCHIVE_ROWS} WHERE run_id = (SELECT root_run_id FROM threads \
+                 WHERE thread_id = ?1) AND +state IN ('pending', 'indexed', 'retry_wait', 'blocked')"
+            ),
+            [thread_id],
+        )?)
+    }
+
+    /// Backfill step: the live runs of `thread_id` bound with a run ID in
+    /// `(after, last]`. The caller bounds the range by reading at most one chunk of
+    /// the thread's bindings in ID order, so the statement touches that many rows.
+    pub(crate) fn archive_thread_runs_between(
+        &self,
+        thread_id: &str,
+        after: &str,
+        last: &str,
+    ) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "{ARCHIVE_ROWS} WHERE run_id IN (SELECT run_id FROM thread_runs \
+                 INDEXED BY idx_thread_runs_thread_run \
+                 WHERE thread_id = ?1 AND run_id > ?2 AND run_id <= ?3) \
+                 AND +state IN ('pending', 'indexed', 'retry_wait', 'blocked')"
+            ),
+            params![thread_id, after, last],
+        )?)
+    }
+
+    /// Unarchive: only `evicted(archived)` rows return to pending. Evictions for
+    /// other reasons, and deleted rows, are left alone.
+    pub(crate) fn unarchive_runs(&self, thread_id: &str) -> Result<usize, StorageError> {
+        Ok(self.conn.execute(
+            &format!(
+                "UPDATE thread_index_runs SET state = 'pending', evicted_reason = NULL, \
+                 purge_deferred = 0, attempt_count = 0, next_attempt_at_ns = NULL, blocked_reason = NULL, \
+                 last_error_code = NULL, work_generation = work_generation + 1 \
+                 WHERE run_id IN {THREAD_RUN_IDS} \
+                 AND +state = 'evicted' AND evicted_reason = 'archived'"
+            ),
+            [thread_id],
+        )?)
     }
 
     /// R2 "retry 時刻到達": due retry rows return to pending, keeping attempts.
@@ -842,8 +907,8 @@ pub(crate) fn purge_index_rows_with(
                         "UPDATE thread_index_runs SET text_bytes = 0, attribute_bytes = 0, \
                          block_count = 0, charged_bytes = 0, indexed_revision = NULL, \
                          indexed_extractor_version = NULL, indexed_accounting_version = NULL, \
-                         indexed_at_ns = NULL, work_generation = work_generation + 1 \
-                         WHERE run_id = ?1",
+                         indexed_at_ns = NULL, purge_deferred = 0, \
+                         work_generation = work_generation + 1 WHERE run_id = ?1",
                         [run_id],
                     )?;
                 }

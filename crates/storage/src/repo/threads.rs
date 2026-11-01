@@ -207,6 +207,10 @@ pub(crate) fn upsert(
                     i64::try_from(length).map_err(|_| StorageError::OutOfRange("fork point length"))
                 })
                 .transpose()?;
+            let archived_before = match writer {
+                ThreadWriter::Host => archived_flag(&transaction, &thread.thread_id)?,
+                ThreadWriter::Runtime => false,
+            };
             let base = params![
                 thread.thread_id,
                 thread.project_id,
@@ -235,10 +239,32 @@ pub(crate) fn upsert(
                     ])))?
                 }
             };
+            // Only the host writes the archive series, so only it can flip the flag.
+            if writer == ThreadWriter::Host {
+                let archived_after = archived_flag(&transaction, &thread.thread_id)?;
+                let index = crate::repo::thread_index::SqliteThreadIndex::new(&transaction);
+                if !archived_before && archived_after {
+                    index.archive_runs(&thread.thread_id)?;
+                } else if archived_before && !archived_after {
+                    index.unarchive_runs(&thread.thread_id)?;
+                }
+            }
         }
     }
     transaction.commit()?;
     Ok(skipped)
+}
+
+/// The stored `archived` flag; a thread with no row counts as not archived.
+fn archived_flag(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT archived FROM threads WHERE thread_id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 fn revision_param(revision: u64) -> Result<i64, StorageError> {

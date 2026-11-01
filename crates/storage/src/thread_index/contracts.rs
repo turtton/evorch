@@ -27,7 +27,9 @@ pub enum IndexEvent {
     DiscoverSameRevision,
     SettingsApplied,
     SourceUpdated,
-    Reindex { include_evicted: bool },
+    Reindex {
+        include_evicted: bool,
+    },
     ExtractorChanged,
     AccountingChanged,
     RetryDue,
@@ -37,6 +39,10 @@ pub enum IndexEvent {
     CapacityPaused,
     Evict,
     DeleteSource,
+    /// The run's thread became archived (mirror `archived` 0 → 1).
+    Archive,
+    /// The run's thread was unarchived (mirror `archived` 1 → 0).
+    Unarchive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
