@@ -288,6 +288,17 @@ impl ReclaimWorker {
                 entry.failures.push(format!("{}: {error}", path.display()));
             }
         }
+        // Their references go with the files. A failure changes nothing about the
+        // family: a row left behind is dropped by the next start's orphan check, and
+        // until then it only keeps a blob.
+        if !removal.removed.is_empty()
+            && let Err(error) = self.config.handle.remove_artifact_refs(&removal.removed)
+        {
+            report.errors.push(format!(
+                "artifact references of {}: {error}",
+                job.family_key
+            ));
+        }
         if removal.stop == Some(MetaStop::Budget) {
             // More to examine: continue next cycle, and say the files are underway.
             entry.after = removal.last_name;

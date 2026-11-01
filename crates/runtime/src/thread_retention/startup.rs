@@ -19,12 +19,15 @@
 //! | 4 | owner rows of deleted threads, scratch directories |
 //! | 5 | oversized rows |
 //! | 6 | incremental vacuum |
+//! | 7 | artifact blob collection (mark and sweep) |
 //!
 //! Stages 1, 4, 5 and 6 do not depend on the retention period: with
 //! `archived_delete_after_days = 0` nothing new is confirmed but what earlier starts
 //! confirmed (and every oversized row registered by any change) is still reclaimed.
 //! Stages 5 and 6 touch only the database, so they also run when the binding does
-//! not match; owner rows and scratch directories never do.
+//! not match; owner rows and scratch directories never do. Stage 7 needs the binding
+//! too (it deletes files), and the artifacts directory; it does not depend on the
+//! retention period either, since earlier starts' deletions leave the blobs behind.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -38,6 +41,7 @@ use storage::{BackfillProgress, Database, ExclusiveLeases, StorageConfig};
 
 use super::binding::{BindingPaths, BindingStatus, canonical_string};
 use super::{RetentionError, check_binding, owner_blocks, write_root_binding};
+use crate::artifacts::{GcBudget, GcReport};
 use crate::ownership::Registry;
 use crate::scratch::ThreadScratch;
 
@@ -47,7 +51,8 @@ pub struct StartupPaths {
     pub db_path: PathBuf,
     pub ownership_root: PathBuf,
     pub sidebar_path: PathBuf,
-    /// Reserved for the blob collector; artifact meta is removed by the reclaim executor.
+    /// The artifact store (`meta/`, `blobs/`). Meta files of deleted threads are removed
+    /// by the reclaim executor; the blobs by stage 7.
     pub artifacts_dir: Option<PathBuf>,
 }
 
@@ -71,6 +76,33 @@ pub struct StartupBudget {
     pub scratch_dirs: usize,
     /// Scratch entries (files, links, directories) deleted in total.
     pub scratch_entries: usize,
+    /// Artifact meta files opened by stage 7, and the bytes read from them.
+    pub gc_meta_files: usize,
+    pub gc_meta_bytes: u64,
+    /// Artifact meta file names checked against the reference table per start. More meta
+    /// files are marked over several starts (no sweep until a pass is complete).
+    pub gc_meta_lookups: usize,
+    /// Unreadable-meta records read again.
+    pub gc_unknown_retries: usize,
+    /// Reference rows checked for a missing meta file.
+    pub gc_ref_checks: usize,
+    /// Blob directory entries examined and blob files unlinked.
+    pub gc_blob_entries: usize,
+    pub gc_unlinks: usize,
+}
+
+impl StartupBudget {
+    fn gc(&self) -> GcBudget {
+        GcBudget {
+            meta_files: self.gc_meta_files,
+            meta_bytes: self.gc_meta_bytes,
+            meta_lookups: self.gc_meta_lookups,
+            unknown_retries: self.gc_unknown_retries,
+            ref_checks: self.gc_ref_checks,
+            blob_entries: self.gc_blob_entries,
+            unlinks: self.gc_unlinks,
+        }
+    }
 }
 
 impl Default for StartupBudget {
@@ -84,6 +116,13 @@ impl Default for StartupBudget {
             vacuum_pages: 50_000,
             scratch_dirs: 50,
             scratch_entries: 20_000,
+            gc_meta_files: 20_000,
+            gc_meta_bytes: 32 * 1024 * 1024,
+            gc_meta_lookups: 100_000,
+            gc_unknown_retries: 1_000,
+            gc_ref_checks: 20_000,
+            gc_blob_entries: 50_000,
+            gc_unlinks: 5_000,
         }
     }
 }
@@ -151,6 +190,9 @@ pub enum StartupOutcome {
         owners_removed: usize,
         /// Why the owner registry could not be read; nothing was confirmed then.
         owner_registry_error: Option<String>,
+        /// The artifact blob collection; `None` when it did not run (no artifacts
+        /// directory, or it could not be examined: see `errors`).
+        gc: Option<GcReport>,
         /// Failures after which a stage stopped short (the next start repeats it). A
         /// failure after a confirmation is reported here, never as `Err`.
         errors: Vec<String>,
@@ -192,6 +234,7 @@ pub enum Stage {
     Scratch,
     Oversized,
     Vacuum,
+    ArtifactGc,
 }
 
 impl Stage {
@@ -204,6 +247,7 @@ impl Stage {
             Self::Scratch => "scratch",
             Self::Oversized => "oversized rows",
             Self::Vacuum => "vacuum",
+            Self::ArtifactGc => "artifact gc",
         }
     }
 }
@@ -401,6 +445,14 @@ pub fn run_exclusive_phase_with_progress(
     stage(&mut notify, Stage::Vacuum, || {
         vacuum(&database, budget, &mut ran);
     });
+    // Stage 7: only where an artifacts directory is known to exist.
+    match artifacts_dir_state(paths) {
+        Ok(true) => stage(&mut notify, Stage::ArtifactGc, || {
+            collect_blobs(&database, paths, budget, now_ns, &mut ran);
+        }),
+        Ok(false) => {}
+        Err(error) => ran.errors.push(format!("artifact gc: {error}")),
+    }
 
     let tombstones = read_tombstones(&database, &mut ran)?;
     Ok(StartupReport {
@@ -450,6 +502,7 @@ struct Ran {
     scratch: ScratchReport,
     owners_removed: usize,
     owner_registry_error: Option<String>,
+    gc: Option<GcReport>,
     errors: Vec<String>,
 }
 
@@ -468,6 +521,7 @@ impl Ran {
             scratch: self.scratch,
             owners_removed: self.owners_removed,
             owner_registry_error: self.owner_registry_error,
+            gc: self.gc,
             errors: self.errors,
         }
     }
@@ -732,4 +786,47 @@ fn vacuum(database: &Database, budget: &StartupBudget, ran: &mut Ran) {
         Ok(None) => ran.vacuum_skipped = true,
         Err(error) => ran.errors.push(format!("incremental vacuum: {error}")),
     }
+}
+
+/// Whether stage 7 has a directory to work on. No configured directory, or one that is
+/// explicitly not there, means no; a path that cannot be examined or is not a
+/// directory is an error (nothing is swept, and it is reported).
+fn artifacts_dir_state(paths: &StartupPaths) -> Result<bool, String> {
+    let Some(directory) = &paths.artifacts_dir else {
+        return Ok(false);
+    };
+    match std::fs::metadata(directory) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(format!("{} is not a directory", directory.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{}: {error}", directory.display())),
+    }
+}
+
+fn collect_blobs(
+    database: &Database,
+    paths: &StartupPaths,
+    budget: &StartupBudget,
+    now_ns: i64,
+    ran: &mut Ran,
+) {
+    let Some(directory) = &paths.artifacts_dir else {
+        return;
+    };
+    let report = crate::artifacts::collect_blobs(database, directory, &budget.gc(), now_ns);
+    tracing::info!(
+        target: "thread_retention",
+        refs_complete = report.refs_complete,
+        refs_added = report.refs_added,
+        unknown_remaining = report.unknown_remaining,
+        blobs_unlinked = report.blobs_unlinked,
+        bytes_freed = report.bytes_freed,
+        "artifact gc"
+    );
+    for stop in &report.stops {
+        if let crate::artifacts::GcStop::Database(error) = stop {
+            ran.errors.push(format!("artifact gc: {error}"));
+        }
+    }
+    ran.gc = Some(report);
 }

@@ -57,6 +57,16 @@ fn running() -> Running {
 /// Like [`running`] with one family (and one artifact) per name in `threads`; `deleted`
 /// is the first one's artifact.
 fn running_with(threads: &[&str]) -> Running {
+    running_configured(threads, false)
+}
+
+/// [`running`] whose captures record their references in the database, the way a host
+/// that collects blobs wires its store.
+fn running_with_refs() -> Running {
+    running_configured(&["T"], true)
+}
+
+fn running_configured(threads: &[&str], record_refs: bool) -> Running {
     let world = World::new();
     for thread in threads {
         world.archived_thread(thread, &format!("r-{thread}"));
@@ -66,14 +76,20 @@ fn running_with(threads: &[&str]) -> Running {
     let workspace = world.dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("mock.png"), PNG).unwrap();
-    let artifacts = Arc::new(ArtifactStore::new(world.dir.path().join("artifacts")).unwrap());
+    let storage = storage::Storage::open(world.storage_config()).unwrap();
+    let root = world.dir.path().join("artifacts");
+    let store = if record_refs {
+        crate::artifacts::store_with_refs(root, storage.handle()).unwrap()
+    } else {
+        ArtifactStore::new(root).unwrap()
+    };
+    let artifacts = Arc::new(store);
     let mut records = threads
         .iter()
         .map(|thread| capture(&artifacts, &workspace, &format!("r-{thread}"), thread))
         .collect::<Vec<_>>();
     let deleted = records.remove(0);
     let survivor = capture(&artifacts, &workspace, "rs", "S");
-    let storage = storage::Storage::open(world.storage_config()).unwrap();
     Running {
         world,
         storage,
@@ -105,7 +121,7 @@ fn only_the_reclaim_lease_holder_reclaims() {
 
 // Given: a confirmed family with artifacts, next to a survivor's / When: cycles run
 // Then: its rows are reclaimed, its meta is removed, the job is done, and the survivor's
-// meta and every blob remain (blobs are collected by a later change).
+// meta and every blob remain (blobs are collected by the next startup's stage 7).
 #[test]
 fn rows_then_meta_are_reclaimed_and_blobs_stay() {
     let run = running();
@@ -173,6 +189,70 @@ fn unreadable_meta_is_retried_then_reported_at_the_limit() {
         worker.run_once();
     }
     assert!(run.artifacts.load(&run.deleted.artifact_id).is_err());
+}
+
+fn reference_rows(run: &Running) -> Vec<String> {
+    run.world
+        .database()
+        .artifact_refs_after(None, 100)
+        .unwrap()
+        .into_iter()
+        .map(|reference| reference.artifact_id)
+        .collect()
+}
+
+// Given: captures that recorded their references / When: the family's meta is reclaimed
+// Then: the reference of the deleted artifact goes with its file and the survivor keeps
+// its own.
+#[test]
+fn reclaiming_meta_removes_its_references() {
+    let run = running_with_refs();
+    assert_eq!(reference_rows(&run).len(), 2);
+    let mut worker = ReclaimWorker::new(run.config());
+    let mut cycles = 0;
+    while run.summary().jobs_done == 0 {
+        let cycle = worker.run_once();
+        assert!(cycle.errors.is_empty(), "{cycle:?}");
+        cycles += 1;
+        assert!(cycles < 100, "reclaim must converge: {:?}", run.summary());
+    }
+
+    assert_eq!(
+        reference_rows(&run),
+        std::slice::from_ref(&run.survivor.artifact_id)
+    );
+}
+
+// Given: deleting references fails / When: the family's meta is reclaimed
+// Then: the failure is reported but the family still finishes (a stale row only keeps a
+// blob), and the next startup's orphan check drops the row.
+#[test]
+fn a_reference_that_cannot_be_removed_does_not_change_the_files_outcome() {
+    let run = running_with_refs();
+    run.world
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER refuse_ref_delete BEFORE DELETE ON artifact_refs \
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    let mut worker = ReclaimWorker::new(run.config());
+    let mut errors = Vec::new();
+    let mut cycles = 0;
+    while run.summary().jobs_done == 0 {
+        errors.extend(worker.run_once().errors);
+        cycles += 1;
+        assert!(cycles < 100, "reclaim must converge: {:?}", run.summary());
+    }
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("artifact references")),
+        "{errors:?}"
+    );
+    assert!(run.artifacts.load(&run.deleted.artifact_id).is_err());
+    assert_eq!(reference_rows(&run).len(), 2, "the stale row remains");
 }
 
 // Given: nothing to reclaim / When: cycles run / Then: the database is not written

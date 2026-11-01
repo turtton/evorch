@@ -12,7 +12,7 @@
 
 use std::collections::{BinaryHeap, HashSet};
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -84,7 +84,7 @@ impl MetaRemoval {
     }
 }
 
-fn is_meta_name(name: &str) -> bool {
+pub(super) fn is_meta_name(name: &str) -> bool {
     name.strip_suffix(".json")
         .and_then(|id| id.strip_prefix("artifact-"))
         .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -97,25 +97,138 @@ enum Read {
     Failed(String),
 }
 
-fn read_owner(path: &std::path::Path, bytes_read: &mut u64) -> Read {
+/// Read all of `reader`, at most [`MAX_META_BYTES`]. A reader that fails part-way is a
+/// failure, never a short file: whatever was read before the error is dropped.
+///
+/// Every byte actually read is added to `bytes_read`, whether the read ended well or
+/// not: a budget counts the I/O done, not the files that turned out usable.
+///
+/// `Err(None)` is "the file is gone" (only an explicit not-found); `Err(Some(_))` is a
+/// failure to report.
+pub(super) fn read_bounded(
+    reader: impl std::io::Read,
+    bytes_read: &mut u64,
+) -> Result<Vec<u8>, Option<String>> {
+    let mut bytes = Vec::new();
+    // `read_to_end` keeps what it read before an error.
+    let outcome = reader.take(MAX_META_BYTES + 1).read_to_end(&mut bytes);
+    *bytes_read += bytes.len() as u64;
+    match outcome {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(None),
+        Err(error) => return Err(Some(format!("read failed: {error}"))),
+    }
+    if bytes.len() as u64 > MAX_META_BYTES {
+        return Err(Some(format!("larger than {MAX_META_BYTES} bytes")));
+    }
+    Ok(bytes)
+}
+
+fn read_owner(path: &Path, bytes_read: &mut u64) -> Read {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
         Err(error) => return Read::Failed(error.to_string()),
     };
-    let mut bytes = Vec::new();
-    match file.take(MAX_META_BYTES + 1).read_to_end(&mut bytes) {
-        Ok(read) => *bytes_read += read as u64,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
-        Err(error) => return Read::Failed(error.to_string()),
-    }
-    if bytes.len() as u64 > MAX_META_BYTES {
-        return Read::Failed(format!("larger than {MAX_META_BYTES} bytes"));
-    }
+    let bytes = match read_bounded(file, bytes_read) {
+        Ok(bytes) => bytes,
+        Err(None) => return Read::Gone,
+        Err(Some(error)) => return Read::Failed(error),
+    };
     match serde_json::from_slice::<MetaOwner>(&bytes) {
         Ok(owner) => Read::Owner(owner),
         Err(error) => Read::Failed(error.to_string()),
     }
+}
+
+/// The `capacity` smallest names pushed, in memory proportional to `capacity` however
+/// many names are pushed. `total` counts every push.
+pub(super) struct Smallest {
+    heap: BinaryHeap<String>,
+    capacity: usize,
+    pub total: usize,
+}
+
+impl Smallest {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            capacity,
+            total: 0,
+        }
+    }
+
+    pub fn push(&mut self, name: &str) {
+        self.total += 1;
+        if self.heap.len() < self.capacity {
+            self.heap.push(name.to_owned());
+        } else if self
+            .heap
+            .peek()
+            .is_some_and(|largest| name < largest.as_str())
+        {
+            self.heap.pop();
+            self.heap.push(name.to_owned());
+        }
+    }
+
+    pub fn into_sorted(self) -> Vec<String> {
+        self.heap.into_sorted_vec()
+    }
+}
+
+/// The result of one pass over a directory: the `budget` smallest accepted names after
+/// a cursor.
+pub(super) struct Listing {
+    /// In name order.
+    pub names: Vec<String>,
+    /// Accepted names after the cursor, kept or not.
+    pub qualifying: usize,
+    /// Directory entries seen.
+    pub listed: usize,
+}
+
+pub(super) struct ListError {
+    /// The directory itself does not exist (as opposed to any other failure).
+    pub not_found: bool,
+    pub message: String,
+    pub listed: usize,
+}
+
+/// List `directory` once, keeping only the `budget` smallest names after `after` for
+/// which `accept` holds. A listing that fails part-way is an error: it says nothing
+/// about the entries not yet seen. A name that is not UTF-8 is never accepted.
+pub(super) fn list_smallest_after(
+    directory: &Path,
+    accept: impl Fn(&str) -> bool,
+    after: Option<&str>,
+    budget: usize,
+) -> Result<Listing, ListError> {
+    let entries = std::fs::read_dir(directory).map_err(|error| ListError {
+        not_found: error.kind() == std::io::ErrorKind::NotFound,
+        message: error.to_string(),
+        listed: 0,
+    })?;
+    let mut smallest = Smallest::new(budget);
+    let mut listed = 0_usize;
+    for entry in entries {
+        let name = entry.map_err(|error| ListError {
+            not_found: false,
+            message: error.to_string(),
+            listed,
+        })?;
+        listed += 1;
+        let name = name.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if accept(name) && !after.is_some_and(|after| name <= after) {
+            smallest.push(name);
+        }
+    }
+    Ok(Listing {
+        qualifying: smallest.total,
+        names: smallest.into_sorted(),
+        listed,
+    })
 }
 
 impl ArtifactStore {
@@ -146,46 +259,19 @@ impl ArtifactStore {
     ) -> MetaRemoval {
         let directory = self.root.join("meta");
         let mut outcome = MetaRemoval::default();
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return outcome,
+        let listing = match list_smallest_after(&directory, is_meta_name, after, budget) {
+            Ok(listing) => listing,
+            Err(error) if error.not_found => return outcome,
             Err(error) => {
-                outcome.fail(directory, &error);
-                outcome.stop = Some(MetaStop::Listing(error.to_string()));
+                outcome.listed = error.listed;
+                outcome.fail(directory, &error.message);
+                outcome.stop = Some(MetaStop::Listing(error.message));
                 return outcome;
             }
         };
-        // The `budget` smallest qualifying names; `qualifying` counts all of them.
-        let mut smallest: BinaryHeap<String> = BinaryHeap::new();
-        let mut qualifying = 0_usize;
-        for entry in entries {
-            let name = match entry {
-                Ok(entry) => entry.file_name(),
-                Err(error) => {
-                    // A listing that failed midway says nothing about the rest.
-                    outcome.fail(directory.clone(), &error);
-                    outcome.stop = Some(MetaStop::Listing(error.to_string()));
-                    return outcome;
-                }
-            };
-            outcome.listed += 1;
-            // A name that is not UTF-8 cannot be a meta file (their names are ASCII).
-            let Some(name) = name.to_str() else { continue };
-            if !is_meta_name(name) || after.is_some_and(|after| name <= after) {
-                continue;
-            }
-            qualifying += 1;
-            if smallest.len() < budget {
-                smallest.push(name.to_owned());
-            } else if smallest
-                .peek()
-                .is_some_and(|largest| name < largest.as_str())
-            {
-                smallest.pop();
-                smallest.push(name.to_owned());
-            }
-        }
-        for name in smallest.into_sorted_vec() {
+        outcome.listed = listing.listed;
+        let qualifying = listing.qualifying;
+        for name in listing.names {
             outcome.scanned += 1;
             let path = directory.join(&name);
             outcome.last_name = Some(name.clone());

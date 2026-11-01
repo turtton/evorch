@@ -47,6 +47,134 @@ fn capture_keeps_the_content_seen_at_capture_time() {
     assert_eq!(first.byte_len, PNG.len() as u64);
 }
 
+/// Looks at the store at the moment a capture asks to record its reference.
+#[derive(Debug)]
+struct ObservingRecorder {
+    root: PathBuf,
+    fail: bool,
+    seen: Mutex<Vec<(storage::artifact_refs::ArtifactRef, bool, bool)>>,
+}
+
+impl ArtifactRefRecorder for ObservingRecorder {
+    fn record(&self, reference: &storage::artifact_refs::ArtifactRef) -> Result<(), String> {
+        let blob = self
+            .root
+            .join("blobs")
+            .join(format!("{}.png", reference.sha256));
+        let meta = self
+            .root
+            .join("meta")
+            .join(format!("{}.json", reference.artifact_id));
+        self.seen
+            .lock()
+            .unwrap()
+            .push((reference.clone(), blob.is_file(), meta.exists()));
+        if self.fail {
+            Err("database is gone".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn observed_store(
+    fail: bool,
+) -> (
+    tempfile::TempDir,
+    PathBuf,
+    Arc<ObservingRecorder>,
+    ArtifactStore,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("artifacts");
+    let recorder = Arc::new(ObservingRecorder {
+        root: root.clone(),
+        fail,
+        seen: Mutex::new(Vec::new()),
+    });
+    let store = ArtifactStore::new(&root)
+        .unwrap()
+        .with_ref_recorder(recorder.clone());
+    (directory, root, recorder, store)
+}
+
+// Given: a store with a reference recorder / When: an image is captured / Then: the
+// reference is recorded after the blob exists and before the meta file is published.
+#[test]
+fn the_reference_is_recorded_between_the_blob_and_the_meta() {
+    let (_directory, root, recorder, store) = observed_store(false);
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+
+    let record = store
+        .capture(
+            workspace.path(),
+            None,
+            Path::new("mock.png"),
+            CaptureRequest {
+                thread_id: Some("thread-1".into()),
+                ..request("t")
+            },
+        )
+        .unwrap();
+
+    let seen = recorder.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (reference, blob_existed, meta_existed) = &seen[0];
+    assert!(*blob_existed && !*meta_existed);
+    assert_eq!(reference.artifact_id, record.artifact_id);
+    assert_eq!(reference.sha256, record.sha256);
+    assert_eq!(reference.thread_id.as_deref(), Some("thread-1"));
+    assert_eq!(reference.run_id.as_deref(), Some("1"));
+    assert!(
+        root.join("meta")
+            .join(format!("{}.json", record.artifact_id))
+            .is_file()
+    );
+}
+
+// Given: a recorder that fails / When: an image is captured / Then: the capture fails
+// without publishing a meta file; the blob stays for the collector to reclaim.
+#[test]
+fn a_capture_whose_reference_cannot_be_recorded_publishes_no_meta() {
+    let (_directory, root, recorder, store) = observed_store(true);
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+
+    let error = store
+        .capture(workspace.path(), None, Path::new("mock.png"), request("t"))
+        .unwrap_err();
+
+    assert!(error.contains("database is gone"), "{error}");
+    assert_eq!(recorder.seen.lock().unwrap().len(), 1);
+    assert_eq!(std::fs::read_dir(root.join("meta")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(root.join("blobs")).unwrap().count(), 1);
+}
+
+// Given: a store wired to a storage writer that has stopped / When: an image is captured
+// Then: the capture fails and no meta file appears (no reference, so no visible artifact).
+#[test]
+fn a_stopped_writer_fails_the_capture_before_any_meta_appears() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = storage::Storage::open(storage::StorageConfig {
+        db_path: directory.path().join("events.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    let root = directory.path().join("artifacts");
+    let store = store_with_refs(&root, storage.handle()).unwrap();
+    storage.close();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+
+    let error = store
+        .capture(workspace.path(), None, Path::new("mock.png"), request("t"))
+        .unwrap_err();
+
+    assert!(error.contains("cannot record"), "{error}");
+    assert_eq!(std::fs::read_dir(root.join("meta")).unwrap().count(), 0);
+}
+
 #[test]
 fn capture_rejects_files_outside_or_unlike_supported_artifacts() {
     let (_store_dir, store) = store();

@@ -53,6 +53,7 @@
 //! }
 //! ```
 
+pub mod artifact_refs;
 mod codec;
 pub mod config;
 mod db;

@@ -604,6 +604,22 @@ pub(super) fn run_writer_with_index(
                     outcome,
                 ));
             }
+            Ok(Command::RecordArtifactRef(artifact_ref, reply)) => {
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "artifact reference writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::repo::artifact_refs::insert_refs(&state.conn, &[artifact_ref])
+                };
+                let _ = reply.send(result);
+            }
+            Ok(Command::RemoveArtifactRefs(artifact_ids, reply)) => {
+                let _ = reply.send(crate::repo::artifact_refs::delete_refs(
+                    &state.conn,
+                    &artifact_ids,
+                ));
+            }
             Ok(Command::RetentionBackfillStep(rows, reply)) => {
                 let result = crate::migrations::backfill::backfill_step(&state.conn, rows);
                 state.accounting = event::EventAccounting::default();

@@ -16,6 +16,7 @@ use crate::scratch::ThreadScratch;
 mod binding;
 mod entries;
 mod executor;
+mod gc;
 pub(super) mod guard;
 mod startup;
 
@@ -234,6 +235,7 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
             families,
             backfill,
             stale,
+            gc,
             ..
         } => RanView {
             confirmed: confirmed
@@ -248,6 +250,7 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
             families,
             remaining_backfill: backfill.remaining_unconverted + backfill.remaining_unattributed,
             stale,
+            gc: gc.as_ref(),
         },
         other => panic!("phase was skipped: {other:?}"),
     }
@@ -263,4 +266,5 @@ pub(super) struct RanView<'a> {
     pub families: &'a [(String, storage::thread_retention::FamilyState)],
     pub remaining_backfill: u64,
     pub stale: &'a [String],
+    pub gc: Option<&'a crate::artifacts::GcReport>,
 }
