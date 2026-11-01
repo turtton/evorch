@@ -22,8 +22,9 @@ pub use binding::{BindingPaths, BindingStatus, check_binding, write_root_binding
 pub use executor::{ExecutorConfig, ExecutorReport, ReclaimExecutor};
 pub use guard::{ThreadDeleted, TombstoneGuard};
 pub use startup::{
-    ScratchReport, SkipReason, StartupBudget, StartupOutcome, StartupPaths, StartupReport,
-    run_exclusive_phase, startup_input,
+    DbMaintenance, ScratchReport, SkipReason, Stage, StartupBudget, StartupOutcome, StartupPaths,
+    StartupProgress, StartupReport, run_exclusive_phase, run_exclusive_phase_with_progress,
+    startup_input,
 };
 use storage::Database;
 use storage::thread_retention::{

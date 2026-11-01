@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{AgentRuntime, Role, RunPurpose, agent_loop::LoopState, meta::DispatchResult};
 
-pub use meta_removal::MetaRemoval;
+pub use meta_removal::{MAX_FAILURES_KEPT, MAX_META_BYTES, MetaRemoval, MetaStop};
 
 pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// The HTML file as written; its referenced images do not count.

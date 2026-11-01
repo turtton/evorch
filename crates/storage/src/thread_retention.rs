@@ -480,7 +480,22 @@ impl Database {
         state: ReclaimJobState,
         limit: usize,
     ) -> Result<Vec<ReclaimJobMembers>, StorageError> {
-        crate::repo::thread_retention::reclaim::jobs_in_state(&self.conn, state, limit)
+        crate::repo::thread_retention::reclaim::jobs_in_state(&self.conn, state, None, limit)
+    }
+
+    /// Like [`Self::reclaim_jobs_in_state`], continuing after the family key `after`
+    /// (`None` starts from the beginning). A caller that pages through the jobs of a
+    /// state passes the last key it saw, so jobs it must skip never hide later ones.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn reclaim_jobs_after(
+        &self,
+        state: ReclaimJobState,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReclaimJobMembers>, StorageError> {
+        crate::repo::thread_retention::reclaim::jobs_in_state(&self.conn, state, after, limit)
     }
 
     /// Return up to `pages` free pages to the file, for the startup phase after a
@@ -494,6 +509,10 @@ impl Database {
         const AUTO_VACUUM_INCREMENTAL: i64 = 2;
         if self.pragma_i64("auto_vacuum")? != AUTO_VACUUM_INCREMENTAL {
             return Ok(None);
+        }
+        // `incremental_vacuum(0)` means "every free page" to SQLite, not "none".
+        if pages == 0 {
+            return Ok(Some(0));
         }
         let before = self.pragma_i64("freelist_count")?;
         // The pragma yields one row per freed page; draining the rows runs it.

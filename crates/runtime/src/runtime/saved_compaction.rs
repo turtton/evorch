@@ -47,6 +47,12 @@ impl AgentRuntime {
             run_id: run.to_string(),
             reason,
         };
+        self.deny_deleted_run(&run.to_string()).map_err(|deleted| {
+            RuntimeError::RunRestoreFailed {
+                run_id: run.to_string(),
+                reason: crate::RunRestoreFailure::ThreadDeleted(deleted),
+            }
+        })?;
         let store = self
             .shared
             .run_store

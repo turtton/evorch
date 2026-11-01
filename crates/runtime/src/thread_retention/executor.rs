@@ -6,8 +6,14 @@
 //! families whose rows are gone. It never touches owner rows or scratch directories:
 //! those belong to the exclusive startup phase, because a second process may share
 //! the ownership root while this one runs.
+//!
+//! A family's files are `done` only after a pass over the artifact metadata that
+//! examined all of it without a single failure. A budget stop continues from a
+//! cursor, a listing or file failure makes the round `files_failed` and is retried,
+//! and a family that keeps failing is reported (never skipped silently and never
+//! marked done).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -19,24 +25,39 @@ use storage::thread_retention::{
 };
 use storage::{Database, StorageConfig, StorageHandle};
 
-use crate::artifacts::ArtifactStore;
+use crate::artifacts::{ArtifactStore, MetaStop};
 
 /// A family whose files failed this many times stays `files_failed` (reported).
 pub const FILES_RETRY_LIMIT: u32 = 20;
 /// Meta files examined per cycle across all families.
 pub const META_SCANS_PER_CYCLE: usize = 5_000;
 /// Jobs listed per state and cycle.
-const JOBS_PER_STATE: usize = 16;
+pub const JOBS_PER_PAGE: usize = 16;
+/// Exhausted families named in a report; the rest are counted.
+const EXHAUSTED_LISTED: usize = 64;
+/// Failure details kept per family and round.
+const FAILURES_KEPT: usize = 8;
+
+const FILE_STATES: [ReclaimJobState; 3] = [
+    ReclaimJobState::DbDone,
+    ReclaimJobState::FilesPending,
+    ReclaimJobState::FilesFailed,
+];
 
 pub struct ExecutorConfig {
     pub handle: StorageHandle,
     /// Locates the database for the executor's own read connection and the lease.
     pub storage: StorageConfig,
+    /// Without a store the executor cannot finish any family's files and leaves them
+    /// as they are (another process with a store does).
     pub artifacts: Option<Arc<ArtifactStore>>,
     /// Pause between cycles.
     pub interval: Duration,
     /// Cycles between attempts to take the reclaim lease while another process holds it.
     pub lease_retry_cycles: u32,
+    pub files_retry_limit: u32,
+    pub jobs_per_page: usize,
+    pub meta_scans_per_cycle: usize,
 }
 
 impl ExecutorConfig {
@@ -52,6 +73,9 @@ impl ExecutorConfig {
             artifacts,
             interval: Duration::from_secs(5),
             lease_retry_cycles: 12,
+            files_retry_limit: FILES_RETRY_LIMIT,
+            jobs_per_page: JOBS_PER_PAGE,
+            meta_scans_per_cycle: META_SCANS_PER_CYCLE,
         }
     }
 }
@@ -70,8 +94,10 @@ pub struct ExecutorReport {
     pub oversized_pending: u64,
     pub files_done: u64,
     pub files_failed: u64,
-    /// Families whose files still fail after [`FILES_RETRY_LIMIT`] attempts.
+    /// Families whose files still fail after the retry limit (the first few).
     pub files_exhausted: Vec<String>,
+    /// How many families are exhausted, listed or not.
+    pub files_exhausted_total: usize,
     pub errors: Vec<String>,
     /// The thread ended (shutdown or failure to start).
     pub finished: bool,
@@ -81,6 +107,7 @@ pub struct ExecutorReport {
 struct FamilyFiles {
     after: Option<String>,
     failures: Vec<String>,
+    failed_total: usize,
     attempts: u32,
 }
 
@@ -93,6 +120,9 @@ pub struct ReclaimWorker {
     cycles: u64,
     backfill_done: bool,
     files: HashMap<String, FamilyFiles>,
+    exhausted: BTreeSet<String>,
+    /// Where the next page of each file-state listing starts.
+    cursors: [Option<String>; 3],
 }
 
 impl ReclaimWorker {
@@ -105,6 +135,8 @@ impl ReclaimWorker {
             cycles: 0,
             backfill_done: false,
             files: HashMap::new(),
+            exhausted: BTreeSet::new(),
+            cursors: [None, None, None],
         }
     }
 
@@ -141,8 +173,17 @@ impl ReclaimWorker {
         if report.holds_lease {
             self.backfill(&mut report);
             self.reclaim(&mut report);
-            self.remove_files(&mut report);
+            if self.config.artifacts.is_some() {
+                self.remove_files(&mut report);
+            }
         }
+        report.files_exhausted_total = self.exhausted.len();
+        report.files_exhausted = self
+            .exhausted
+            .iter()
+            .take(EXHAUSTED_LISTED)
+            .cloned()
+            .collect();
         report
     }
 
@@ -181,46 +222,48 @@ impl ReclaimWorker {
         }
     }
 
+    /// The next page of `state`'s jobs. Pages follow the family key, so a family that
+    /// is skipped (exhausted) or slow never keeps later families from being reached;
+    /// after the last page the listing starts over.
+    fn next_page(&mut self, slot: usize) -> Result<Vec<ReclaimJobMembers>, String> {
+        let limit = self.config.jobs_per_page.max(1);
+        let after = self.cursors[slot].clone();
+        let page = self
+            .reader()?
+            .reclaim_jobs_after(FILE_STATES[slot], after.as_deref(), limit)
+            .map_err(|error| error.to_string())?;
+        self.cursors[slot] = if page.len() < limit {
+            None
+        } else {
+            page.last().map(|job| job.family_key.clone())
+        };
+        Ok(page)
+    }
+
     fn remove_files(&mut self, report: &mut ExecutorReport) {
-        let mut jobs = Vec::new();
-        for state in [
-            ReclaimJobState::DbDone,
-            ReclaimJobState::FilesPending,
-            ReclaimJobState::FilesFailed,
-        ] {
-            match self.reader().and_then(|reader| {
-                reader
-                    .reclaim_jobs_in_state(state, JOBS_PER_STATE)
-                    .map_err(|error| error.to_string())
-            }) {
-                Ok(listed) => jobs.extend(listed),
+        let mut scans_left = self.config.meta_scans_per_cycle;
+        for slot in 0..FILE_STATES.len() {
+            let page = match self.next_page(slot) {
+                Ok(page) => page,
                 Err(error) => {
                     report.errors.push(format!("reclaim jobs: {error}"));
                     // A broken reader is reopened next cycle.
                     self.reader = None;
                     return;
                 }
+            };
+            for job in page {
+                if self.files.get(&job.family_key).map_or(0, |f| f.attempts)
+                    >= self.config.files_retry_limit
+                {
+                    self.exhausted.insert(job.family_key);
+                    continue;
+                }
+                if scans_left == 0 {
+                    return;
+                }
+                self.remove_family_files(&job, &mut scans_left, report);
             }
-        }
-        let live = jobs
-            .iter()
-            .map(|job| job.family_key.clone())
-            .collect::<HashSet<_>>();
-        self.files.retain(|family, _| live.contains(family));
-        let mut scans_left = META_SCANS_PER_CYCLE;
-        for job in jobs {
-            let attempts = self
-                .files
-                .get(&job.family_key)
-                .map_or(0, |files| files.attempts);
-            if attempts >= FILES_RETRY_LIMIT {
-                report.files_exhausted.push(job.family_key);
-                continue;
-            }
-            if scans_left == 0 {
-                break;
-            }
-            self.remove_family_files(&job, &mut scans_left, report);
         }
     }
 
@@ -230,28 +273,31 @@ impl ReclaimWorker {
         scans_left: &mut usize,
         report: &mut ExecutorReport,
     ) {
+        let Some(artifacts) = self.config.artifacts.clone() else {
+            return;
+        };
+        let threads = job.threads.iter().cloned().collect::<HashSet<_>>();
+        let runs = job.runs.iter().cloned().collect::<HashSet<_>>();
         let entry = self.files.entry(job.family_key.clone()).or_default();
-        if let Some(artifacts) = &self.config.artifacts {
-            let threads = job.threads.iter().cloned().collect::<HashSet<_>>();
-            let runs = job.runs.iter().cloned().collect::<HashSet<_>>();
-            let removal =
-                artifacts.remove_meta_after(&threads, &runs, entry.after.as_deref(), *scans_left);
-            *scans_left = scans_left.saturating_sub(removal.scanned.max(1));
-            entry.failures.extend(
-                removal
-                    .failed
-                    .iter()
-                    .map(|(path, error)| format!("{}: {error}", path.display())),
-            );
-            if !removal.complete {
-                entry.after = removal.last_name;
-                self.mark(&job.family_key, FilesOutcome::Pending, report);
-                return;
+        let removal =
+            artifacts.remove_meta_after(&threads, &runs, entry.after.as_deref(), *scans_left);
+        *scans_left = scans_left.saturating_sub(removal.scanned.max(1));
+        entry.failed_total += removal.failed_total;
+        for (path, error) in &removal.failed {
+            if entry.failures.len() < FAILURES_KEPT {
+                entry.failures.push(format!("{}: {error}", path.display()));
             }
         }
-        let entry = self.files.get_mut(&job.family_key).expect("inserted above");
+        if removal.stop == Some(MetaStop::Budget) {
+            // More to examine: continue next cycle, and say the files are underway.
+            entry.after = removal.last_name;
+            self.mark(&job.family_key, FilesOutcome::Pending, report);
+            return;
+        }
+        // Complete, or the listing failed (which counted as a failure above): either
+        // way this round is over and the next one starts from the beginning.
         entry.after = None;
-        if entry.failures.is_empty() {
+        if entry.failed_total == 0 {
             self.files.remove(&job.family_key);
             if self.mark(&job.family_key, FilesOutcome::Done, report) {
                 report.files_done += 1;
@@ -261,10 +307,11 @@ impl ReclaimWorker {
             report.errors.push(format!(
                 "files of {}: {} failure(s), first: {}",
                 job.family_key,
-                entry.failures.len(),
-                entry.failures[0]
+                entry.failed_total,
+                entry.failures.first().map_or("(listing)", String::as_str)
             ));
             entry.failures.clear();
+            entry.failed_total = 0;
             if self.mark(&job.family_key, FilesOutcome::Failed, report) {
                 report.files_failed += 1;
             }

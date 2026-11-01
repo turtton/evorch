@@ -14,6 +14,7 @@ use crate::ownership::{Lease, Registry, ThreadOwner};
 use crate::scratch::ThreadScratch;
 
 mod binding;
+mod entries;
 mod executor;
 pub(super) mod guard;
 mod startup;
@@ -237,7 +238,7 @@ pub(super) fn ran(report: &StartupReport) -> RanView<'_> {
                 .collect(),
             blocked,
             owners_removed: *owners_removed,
-            scratch_removed: scratch.removed,
+            scratch,
             owner_registry_error: owner_registry_error.as_deref(),
             errors,
             families,
@@ -252,7 +253,7 @@ pub(super) struct RanView<'a> {
     pub confirmed: Vec<&'a str>,
     pub blocked: &'a [(String, storage::thread_retention::BlockReason)],
     pub owners_removed: usize,
-    pub scratch_removed: usize,
+    pub scratch: &'a super::startup::ScratchReport,
     pub owner_registry_error: Option<&'a str>,
     pub errors: &'a [String],
     pub families: &'a [(String, storage::thread_retention::FamilyState)],

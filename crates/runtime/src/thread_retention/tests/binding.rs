@@ -189,10 +189,74 @@ fn two_databases_sharing_a_root_never_delete_each_others_state() {
     assert!(matches!(
         report.outcome,
         StartupOutcome::Skipped {
-            reason: SkipReason::BindingMismatch
+            reason: SkipReason::BindingMismatch,
+            ..
         }
     ));
     assert!(b.tombstones().is_empty());
     assert!(b_scratch.is_dir());
     assert_eq!(b.owner_rows(), ["T"]);
+}
+
+// Given: a crash at each boundary of the first confirmation (after the root side of the
+// binding, and after the commit that wrote tombstones and the database side)
+// When: the next start runs / Then: both resume to a bound pair, and until then the
+// half-written state reads as this database's own interrupted attempt for this database
+// but as a mismatch for any other database.
+#[test]
+fn a_crash_at_each_binding_boundary_resumes_to_a_bound_pair() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::super::{StartupProgress, run_exclusive_phase_with_progress};
+
+    for crash_at in [
+        StartupProgress::RootBound,
+        StartupProgress::FamilyConfirmed {
+            family_key: "T".into(),
+        },
+    ] {
+        let world = World::new();
+        world.archived_thread("T", "rt");
+        let stranger = world.sibling_sharing_root("stranger");
+        let input = world.input(&["T"], &[]);
+        {
+            let leases = world.exclusive();
+            let crashed = catch_unwind(AssertUnwindSafe(|| {
+                run_exclusive_phase_with_progress(
+                    &leases,
+                    &world.paths(),
+                    &policy(),
+                    &input,
+                    &super::super::StartupBudget::default(),
+                    super::NOW_NS,
+                    &mut |event| {
+                        if *event == crash_at {
+                            panic!("injected crash at {event:?}");
+                        }
+                    },
+                )
+            }));
+            assert!(crashed.is_err());
+        }
+        assert!(world.root_binding_file().is_file());
+        let committed = crash_at != StartupProgress::RootBound;
+        assert_eq!(world.tombstones().contains_thread("T"), committed);
+        assert_eq!(
+            status(&world),
+            if committed {
+                BindingStatus::Bound
+            } else {
+                BindingStatus::Unbound
+            }
+        );
+        assert!(
+            matches!(status(&stranger), BindingStatus::Mismatch(_)),
+            "another database never adopts a root that is half-bound to this one"
+        );
+
+        let report = world.phase(&policy(), &input);
+        assert!(ran(&report).errors.is_empty());
+        assert!(report.tombstones.contains_thread("T"));
+        assert_eq!(status(&world), BindingStatus::Bound);
+    }
 }

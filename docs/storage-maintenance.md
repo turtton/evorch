@@ -220,6 +220,16 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   量（行数・辺数・件数）で区切り、実時間では区切らない。残りは次の起動が続ける。段 0〜3 は確定の commit まで
   DB の外を変えない。段 4 以降は確定済みの集合に対する回収で、失敗や crash でも削除は取り消されず、
   次の起動が同じ段をやり直す。family は分割しない（`OverBudget` は予算を倍にして最大 4 回、足りなければ次回）。
+  確定後に DB エラーが起きても `Err` にせず、確定済みの family と失敗を `StartupOutcome::Ran` に載せて返す。
+- **保守は保持期間と束縛に依存しない。** 段 1・4・5・6 は `archived_delete_after_days = 0` でも動き、
+  他の変更が登録した巨大行（`reclaim_oversized`）も回収する。段 5・6 は DB だけを触るので、束縛が
+  不一致の起動でも動く（`Skipped { BindingMismatch, maintenance }`）。owner 行と scratch は動かない。
+- **scratch は実際に消えたことで完了とする。** `ThreadScratch::remove_thread(thread, max_entries)` は管理
+  領域内を link をたどらずに 1 entry ずつ同期的に消し、`complete` は dir 自体を消せたときだけ true。
+  予算（`scratch_dirs` と `scratch_entries`）に収まらない tree は部分的に残り、`ScratchReport.incomplete` に
+  載って次の起動が続ける。権限などの失敗は `failed`（path 付き）で、`removed` に数えない。
+- **進捗。** `run_exclusive_phase_with_progress` が段の開始・終了、root 束縛、family の確定を呼び出し元のスレッドで
+  順に通知する（`tracing` の `thread_retention` target にも info で出す）。
 - **owner の残骸。** 両ロックの下に生きたプロセスはないので、owners.db の行はすべて残骸として扱う。
   released / idle は確定でき、turn や run を持つ行は、lease の期限切れから保持期間（日数）が経つまで
   `Blocked(Owner)`。owners.db を読めなければ何も確定しない。
@@ -230,12 +240,22 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   検索除外は続く。rebind は提供しない。root のファイルが同じ DB を指し DB 側の行がないだけの状態は、
   最初の試みが途中で止まった跡として再開する。
 - **回収（`ReclaimExecutor`）。** reclaim-lock を持つプロセスが 5 秒ごとに backfill の残り、`reclaim_step`、
-  `db_done` の family の artifacts の meta の削除（`ArtifactStore::remove_meta_for`）を行う。読めない meta は
-  「対象外」にせず失敗として数え、`files_failed` で再試行する（20 回で打ち切って報告）。blob は触らない。
-  通常稼働中は owners.db と scratch を触らない。停止は `shutdown()` で join してから storage を閉じる。
-- **ガード。** 起動後に tombstone を 1 回読み、削除済みの thread・run への `OwnerHost::start / claim / attach`、
-  `bind_thread_root`、run の復元と継続、fork seed、escalation seed、host input の配送を `ThreadDeleted` で
-  拒否する。
+  `db_done` の family の artifacts の meta の削除（`ArtifactStore::remove_meta_for`）を行う。meta の走査は
+  結果を区別する: 全件を調べ終えた（`stop == None`）、予算切れ（`Budget`。`last_name` から続ける）、一覧の取得失敗
+  （`Listing`。完了ではない）、個別の読取・削除の失敗（`failed`。不在とは扱わない）。不在として許すのは
+  明示的な `NotFound` だけ。files は、失敗ゼロで全件を調べ終えたときだけ `done` になり、失敗は
+  `files_failed` として再試行する（20 回で打ち切って報告）。job は family key のカーソルで巡回し、
+  retry 上限に達した family があっても後ろの family が止まらない。1 回の走査は一覧に全 entry を 1 回
+  読むが、保持する名前と開くファイルは予算（既定 5,000/周回）以内で、1 ファイルは 1 MiB までしか読まない。
+  artifacts の store を持たないプロセスは files に触れない。blob は触らない。通常稼働中は owners.db と
+  scratch を触らない。停止は `shutdown()` で join してから storage を閉じる。
+- **ガード。** 起動後に tombstone を 1 回読み、削除済みの thread・run を外から受け取る入口を
+  `ThreadDeleted` で拒否する: `OwnerHost::start / claim / attach`、`bind_thread_root`、
+  `create_thread_goal` / `restore_thread_goal` / `restore_thread_todo`、
+  `set_thread_read_only_directories`、run の復元と継続（`resume_chat` / `wake_chat` / `continue_goal`）、
+  `delegate_chat(_seeded)`、fork seed、escalation seed、host input の配送、保存済み root の compaction、
+  質問への回答。公開入口の一覧と、それぞれの拒否方法（または不要な理由）は
+  `thread_retention/tests/entries.rs` の表で固定し、新しい入口が増えるとテストが落ちる。
 - **`--state` で別の sidebar を使う起動は束縛不一致になり、自動確定が無効になる。**
 
 ## 既知の制約

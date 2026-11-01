@@ -1,4 +1,5 @@
 use super::*;
+use crate::artifacts::MetaStop;
 use crate::{AgentInvocationContext, AgentModel, AgentRunPhase, RunConfig, RunId, RuntimeError};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, Usage};
 use std::collections::{HashMap, VecDeque};
@@ -665,7 +666,7 @@ fn remove_meta_for_deletes_matching_thread_and_run_meta_but_never_blobs() {
 
     let removal = store.remove_meta_for(&set(&["gone"]), &set(&["8"]), 100);
 
-    assert!(removal.complete && removal.failed.is_empty());
+    assert!(removal.is_complete() && removal.failed.is_empty());
     let mut removed = removal.removed.clone();
     removed.sort();
     let mut expected = vec![
@@ -730,9 +731,10 @@ fn remove_meta_after_resumes_within_a_budget() {
     loop {
         let step = store.remove_meta_after(&set(&["gone"]), &set(&[]), after.as_deref(), 2);
         assert!(step.scanned <= 2);
+        let complete = step.is_complete();
         removed.extend(step.removed);
         calls += 1;
-        if step.complete {
+        if complete {
             break;
         }
         after = step.last_name;
@@ -746,4 +748,123 @@ fn remove_meta_after_resumes_within_a_budget() {
         .collect::<Vec<_>>();
     expected.sort();
     assert_eq!(removed, expected);
+}
+
+fn meta_dir(store_dir: &tempfile::TempDir) -> std::path::PathBuf {
+    store_dir.path().join("artifacts/meta")
+}
+
+fn meta_name(index: u32) -> String {
+    format!("artifact-{index:032x}.json")
+}
+
+// Given: the meta directory cannot be listed (a file stands where it belongs)
+// When: removing / Then: the call reports a listing failure with one counted failure,
+// not "complete": nothing is known about what was left.
+#[test]
+fn an_unlistable_meta_directory_is_a_listing_failure_not_completion() {
+    let (store_dir, store) = store();
+    std::fs::remove_dir_all(meta_dir(&store_dir)).unwrap();
+    std::fs::write(meta_dir(&store_dir), b"not a directory").unwrap();
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+
+    assert!(
+        matches!(removal.stop, Some(MetaStop::Listing(_))),
+        "{removal:?}"
+    );
+    assert!(!removal.is_complete());
+    assert_eq!(removal.failed_total, 1);
+    assert_eq!(removal.scanned, 0);
+
+    // A directory that does not exist holds no meta: that, and only that, is complete.
+    std::fs::remove_file(meta_dir(&store_dir)).unwrap();
+    let missing = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+    assert!(missing.is_complete() && missing.failed_total == 0);
+}
+
+// Given: an entry that cannot be read (a directory with a meta name), one that is gone
+// (a dangling link), an oversized file and many corrupt files / When: removing
+// Then: read errors, oversize and corruption are failures (capped in detail, all counted);
+// only the explicitly missing entry is treated as already gone; reads are bounded.
+#[test]
+fn only_an_explicit_not_found_counts_as_already_gone() {
+    let (store_dir, store) = store();
+    let dir = meta_dir(&store_dir);
+    std::fs::create_dir(dir.join(meta_name(1))).unwrap();
+    std::os::unix::fs::symlink(dir.join("nowhere"), dir.join(meta_name(2))).unwrap();
+    std::fs::write(
+        dir.join(meta_name(3)),
+        vec![b' '; (crate::artifacts::MAX_META_BYTES + 10) as usize],
+    )
+    .unwrap();
+    for index in 100..140 {
+        std::fs::write(dir.join(meta_name(index)), b"{ broken").unwrap();
+    }
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 1_000);
+
+    assert!(removal.is_complete());
+    assert_eq!(removal.scanned, 43);
+    // 1 unreadable + 1 oversized + 40 corrupt; the dangling link is not a failure.
+    assert_eq!(removal.failed_total, 42, "{removal:?}");
+    assert_eq!(removal.failed.len(), crate::artifacts::MAX_FAILURES_KEPT);
+    assert!(removal.bytes_read <= crate::artifacts::MAX_META_BYTES + 1 + 40 * 8);
+    assert!(removal.removed.is_empty());
+}
+
+// Given: a file that exists but cannot be opened / When: removing
+// Then: it is a failure (skipped when the process ignores permissions).
+#[test]
+fn a_permission_error_is_a_failure_not_an_absence() {
+    use std::os::unix::fs::PermissionsExt;
+    let (store_dir, store) = store();
+    let path = meta_dir(&store_dir).join(meta_name(7));
+    std::fs::write(&path, br#"{"thread_id":"gone"}"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        return;
+    }
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 10);
+
+    assert_eq!(removal.failed_total, 1);
+    assert!(removal.removed.is_empty() && path.exists());
+}
+
+// Given: thousands of meta files and a small budget / When: removing in steps
+// Then: each call keeps at most `budget` names and opens at most `budget` files, lists
+// every entry exactly once, resumes from the cursor in name order and the steps together
+// cover each file once.
+#[test]
+fn a_large_meta_directory_is_walked_in_budgeted_steps() {
+    let (store_dir, store) = store();
+    let dir = meta_dir(&store_dir);
+    for index in 0..2_000 {
+        std::fs::write(dir.join(meta_name(index)), br#"{"thread_id":"other"}"#).unwrap();
+    }
+    let expected_last = meta_name(99);
+
+    let first = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+    assert_eq!(first.listed, 2_000);
+    assert_eq!(first.scanned, 100);
+    assert_eq!(first.stop, Some(MetaStop::Budget));
+    assert_eq!(first.last_name.as_deref(), Some(expected_last.as_str()));
+    assert_eq!(first.bytes_read, 100 * 21);
+
+    let mut after = first.last_name;
+    let mut scanned = first.scanned;
+    let mut calls = 1;
+    loop {
+        let step = store.remove_meta_after(&set(&["gone"]), &set(&[]), after.as_deref(), 100);
+        assert_eq!(step.listed, 2_000, "one listing pass per call");
+        assert!(step.scanned <= 100);
+        scanned += step.scanned;
+        calls += 1;
+        if step.is_complete() {
+            break;
+        }
+        after = step.last_name;
+    }
+    assert_eq!((scanned, calls), (2_000, 20));
 }

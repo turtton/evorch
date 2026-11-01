@@ -4,7 +4,9 @@ use storage::thread_retention::{
     BlockReason, ConfirmedFamily, FamilyState, FinalizeBudget, FinalizeOutcome, RetentionStatus,
 };
 
-use super::super::startup::{Settled, Stage, finalize_with_doubling, run_exclusive_phase_with};
+use super::super::startup::{
+    Settled, Stage, StartupProgress, finalize_with_doubling, run_exclusive_phase_with_progress,
+};
 use super::super::{BINDING_MISMATCH_BLOCK, BindingStatus, StartupBudget, ThreadRetention};
 use super::{NOW_NS, World, policy, ran};
 
@@ -41,7 +43,7 @@ fn a_due_family_is_confirmed_and_its_outside_state_is_removed() {
 
     assert_eq!(view.confirmed.len(), 1, "{:?}", view.families);
     assert_eq!(view.owners_removed, 1);
-    assert_eq!(view.scratch_removed, 1);
+    assert_eq!(view.scratch.removed, 1);
     assert!(view.errors.is_empty(), "{:?}", view.errors);
     assert!(report.tombstones.contains_thread("T"));
     assert!(report.tombstones.contains_run("rt"));
@@ -126,15 +128,15 @@ fn nothing_outside_the_database_changes_without_a_confirmation() {
     let world = world_with_thread();
     let input = world.input(&["T"], &[]);
     let leases = world.exclusive();
-    let report = run_exclusive_phase_with(
+    let report = run_exclusive_phase_with_progress(
         &leases,
         &world.paths(),
         &policy(),
         &input,
         &StartupBudget::default(),
         NOW_NS,
-        &mut |stage| {
-            if stage == Stage::Explore {
+        &mut |event| {
+            if *event == StartupProgress::StageFinished(Stage::Explore) {
                 world.archived_thread("T2", "rt2");
                 world
                     .conn()
@@ -178,16 +180,16 @@ fn a_crash_after_any_stage_is_resumed_by_the_next_start() {
         {
             let leases = world.exclusive();
             let crashed = catch_unwind(AssertUnwindSafe(|| {
-                run_exclusive_phase_with(
+                run_exclusive_phase_with_progress(
                     &leases,
                     &world.paths(),
                     &policy(),
                     &input,
                     &StartupBudget::default(),
                     NOW_NS,
-                    &mut |stage| {
-                        if stage == crash_at {
-                            panic!("injected crash after {stage:?}");
+                    &mut |event| {
+                        if *event == StartupProgress::StageFinished(crash_at) {
+                            panic!("injected crash after {crash_at:?}");
                         }
                     },
                 )
@@ -291,7 +293,7 @@ fn scratch_removal_is_bounded_per_start_and_continues() {
     let input = world.input(&["A", "B", "C"], &[]);
 
     let first = world.phase_with(&policy(), &input, &budget);
-    assert_eq!(ran(&first).scratch_removed, 2);
+    assert_eq!(ran(&first).scratch.removed, 2);
     let left = ["A", "B", "C"]
         .into_iter()
         .filter(|thread| world.scratch().thread_dir_exists(thread))
@@ -299,7 +301,7 @@ fn scratch_removal_is_bounded_per_start_and_continues() {
     assert_eq!(left, 1);
 
     let second = world.phase_with(&policy(), &input, &budget);
-    assert_eq!(ran(&second).scratch_removed, 1);
+    assert_eq!(ran(&second).scratch.removed, 1);
     assert!(
         !world.scratch().thread_dir_exists("A")
             && !world.scratch().thread_dir_exists("B")
@@ -436,4 +438,241 @@ fn an_input_for_other_paths_is_refused() {
     .unwrap_err();
     assert!(matches!(error, super::super::RetentionError::Input(_)));
     assert_outside_state_untouched(&world);
+}
+
+fn register_oversized_event(world: &World) -> i64 {
+    let conn = world.conn();
+    conn.execute(
+        "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+         payload, subkind, run_id) VALUES (NULL, 1, 1, 1, 'Lifecycle', 'big', '', NULL)",
+        [],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes) \
+         VALUES ('archive-index', 'events', ?1, 3)",
+        [id.to_string()],
+    )
+    .unwrap();
+    id
+}
+
+fn oversized_left(world: &World, id: i64) -> (i64, i64) {
+    (
+        world.count(&format!("SELECT COUNT(*) FROM events WHERE id = {id}")),
+        world.count("SELECT COUNT(*) FROM reclaim_oversized"),
+    )
+}
+
+// Given: a registered oversized row (as another change registers them) and a retention
+// period of 0 / When: the phase runs / Then: nothing new is confirmed but the row is
+// reclaimed; and the same holds when the binding does not match, where the owner rows
+// and scratch directories are left alone.
+#[test]
+fn database_maintenance_does_not_depend_on_the_retention_period_or_the_binding() {
+    let world = world_with_thread();
+    let id = register_oversized_event(&world);
+    let off = storage::thread_retention::ThreadRetentionPolicy {
+        archived_delete_after_days: 0,
+        ..policy()
+    };
+    let report = world.phase(&off, &world.input(&["T"], &[]));
+    assert!(ran(&report).confirmed.is_empty());
+    assert_eq!(oversized_left(&world, id), (0, 0), "reclaimed at days = 0");
+    assert_outside_state_untouched(&world);
+
+    let world = world_with_thread();
+    let id = register_oversized_event(&world);
+    std::fs::write(
+        world.root_binding_file(),
+        r#"{"db_id":"someone-else","db_path":"/x","bound_at_ns":1}"#,
+    )
+    .unwrap();
+    let report = world.phase(&policy(), &world.input(&["T"], &[]));
+    match &report.outcome {
+        super::super::StartupOutcome::Skipped {
+            reason: super::super::SkipReason::BindingMismatch,
+            maintenance: Some(maintenance),
+        } => assert_eq!(maintenance.oversized.rows, 1, "{maintenance:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        oversized_left(&world, id),
+        (0, 0),
+        "reclaimed despite the mismatch"
+    );
+    assert_outside_state_untouched(&world);
+}
+
+// Given: a host observing a start / When: the phase runs / Then: it is told, in order and
+// before the phase returns, every stage and the confirmed family (public API only).
+#[test]
+fn progress_is_delivered_to_an_external_observer_in_order() {
+    let world = world_with_thread();
+    let input = world.input(&["T"], &[]);
+    let leases = world.exclusive();
+    let mut events = Vec::new();
+    let report = run_exclusive_phase_with_progress(
+        &leases,
+        &world.paths(),
+        &policy(),
+        &input,
+        &StartupBudget::default(),
+        NOW_NS,
+        &mut |event| events.push(event.clone()),
+    )
+    .unwrap();
+
+    use StartupProgress::{FamilyConfirmed, StageFinished, StageStarted};
+    let both = |stage| [StageStarted(stage), StageFinished(stage)];
+    let mut expected = Vec::new();
+    expected.extend(both(Stage::Backfill));
+    expected.extend(both(Stage::Explore));
+    expected.push(StageStarted(Stage::Finalize));
+    expected.push(StartupProgress::RootBound);
+    expected.push(FamilyConfirmed {
+        family_key: ran(&report).confirmed[0].to_owned(),
+    });
+    expected.push(StageFinished(Stage::Finalize));
+    for stage in [
+        Stage::Owners,
+        Stage::Scratch,
+        Stage::Oversized,
+        Stage::Vacuum,
+    ] {
+        expected.extend(both(stage));
+    }
+    assert_eq!(events, expected);
+}
+
+// Given: two due families and a database failure after the first is confirmed
+// When: the phase runs / Then: it still returns a report that names the confirmed
+// family and the failure (and reclaims the confirmed one's owner row and scratch), instead
+// of an error that hides the committed deletion.
+#[test]
+fn a_failure_after_a_confirmation_keeps_the_report() {
+    let world = World::new();
+    for (thread, run) in [("T", "rt"), ("U", "ru")] {
+        world.archived_thread(thread, run);
+        world.owner_row(thread, false, 1);
+        world.scratch_dir(thread);
+    }
+    let input = world.input(&["T", "U"], &[]);
+    let leases = world.exclusive();
+    let report = run_exclusive_phase_with_progress(
+        &leases,
+        &world.paths(),
+        &policy(),
+        &input,
+        &StartupBudget::default(),
+        NOW_NS,
+        &mut |event| {
+            if matches!(event, StartupProgress::FamilyConfirmed { .. }) {
+                world
+                    .conn()
+                    .execute_batch("DROP TABLE retention_staging")
+                    .unwrap();
+            }
+        },
+    )
+    .unwrap();
+
+    let view = ran(&report);
+    assert_eq!(view.confirmed.len(), 1, "{view:?}", view = view.errors);
+    assert!(
+        view.errors
+            .iter()
+            .any(|error| error.starts_with("finalize")),
+        "{:?}",
+        view.errors
+    );
+    let confirmed = view.confirmed[0].to_owned();
+    assert_eq!(report.tombstones.threads.len(), 1);
+    assert!(report.tombstones.contains_thread(&confirmed));
+    assert!(!world.scratch().thread_dir_exists(&confirmed));
+    let other = if confirmed == "T" { "U" } else { "T" };
+    assert!(world.scratch().thread_dir_exists(other));
+}
+
+fn scratch_dir_with_files(world: &World, thread: &str, files: usize) -> std::path::PathBuf {
+    let dir = world.scratch_dir(thread);
+    for index in 0..files {
+        std::fs::write(dir.join(format!("file-{index}")), "x").unwrap();
+    }
+    dir
+}
+
+// Given: a scratch tree larger than the entry budget / When: starts follow each other
+// Then: a start that cannot finish the tree reports it as incomplete (never as removed),
+// removes no more than its budget, and the start that unlinks the directory is the one
+// that reports it removed.
+#[test]
+fn a_scratch_tree_is_reported_removed_only_when_it_is_gone() {
+    let world = World::new();
+    world.archived_thread("T", "rt");
+    let dir = scratch_dir_with_files(&world, "T", 30);
+    let budget = StartupBudget {
+        scratch_entries: 10,
+        ..StartupBudget::default()
+    };
+    let input = world.input(&["T"], &[]);
+
+    let mut starts = 0;
+    let mut entries = 0;
+    loop {
+        let report = world.phase_with(&policy(), &input, &budget);
+        let view = ran(&report);
+        starts += 1;
+        entries += view.scratch.entries_removed;
+        assert!(view.scratch.entries_removed <= 10);
+        assert_eq!(
+            view.scratch.removed == 1,
+            !dir.exists(),
+            "removed means gone"
+        );
+        if view.scratch.removed == 1 {
+            break;
+        }
+        assert_eq!(view.scratch.incomplete, ["T"]);
+        assert!(dir.exists());
+        assert!(starts < 20);
+    }
+    assert!(
+        starts >= 3 && entries >= 31,
+        "{starts} starts, {entries} entries"
+    );
+}
+
+// Given: a scratch tree that cannot be emptied / When: starts run
+// Then: the failure is reported with the path, the directory is not counted removed and
+// the tombstone stays; once the obstacle is gone the next start finishes.
+#[test]
+fn a_scratch_failure_is_reported_and_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    world.archived_thread("T", "rt");
+    let dir = scratch_dir_with_files(&world, "T", 2);
+    let locked = dir.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("file"), "x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(locked.join("probe"), "x").is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let input = world.input(&["T"], &[]);
+
+    let report = world.phase(&policy(), &input);
+    let view = ran(&report);
+    assert_eq!(view.scratch.removed, 0);
+    assert_eq!(view.scratch.failed.len(), 1, "{:?}", view.scratch);
+    assert!(view.scratch.failed[0].1.contains("locked"));
+    assert!(dir.exists());
+    assert!(report.tombstones.contains_thread("T"));
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let again = world.phase(&policy(), &input);
+    assert_eq!(ran(&again).scratch.removed, 1);
+    assert!(!dir.exists());
 }

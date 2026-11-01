@@ -96,3 +96,108 @@ async fn every_entry_refuses_a_deleted_thread_or_run() {
     runtime.bind_thread_root("kept-thread", kept).unwrap();
     runtime.resume_chat(kept, RunConfig::default()).unwrap();
 }
+
+// Given: a guard listing a deleted thread and run
+// When: the host restores goal or todo state, creates a goal, declares read-only
+// directories, answers a question of the deleted run, or compacts it / Then: every one
+// is refused before any state, event or answer changes, and the same calls work for a
+// surviving thread.
+#[tokio::test]
+async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
+    let fixture = Fixture::new();
+    let runtime = &fixture.runtime;
+    let gone = fixture.terminal().await;
+    let kept = fixture.terminal().await;
+    runtime.bind_thread_root("kept-thread", kept).unwrap();
+    let goal = runtime
+        .create_thread_goal("kept-thread", kept, "objective".into(), vec!["done".into()])
+        .unwrap();
+    let todo = event_bus::ThreadTodoSnapshot {
+        list_id: "list".into(),
+        thread_id: "kept-thread".into(),
+        revision: 1,
+        items: vec![event_bus::ThreadTodoItem {
+            content: "item".into(),
+            status: event_bus::ThreadTodoStatus::Pending,
+        }],
+    };
+    let question = event_bus::UserQuestion {
+        id: "question-of-gone".into(),
+        run_id: gone.to_string(),
+        root_run_id: gone.to_string(),
+        root_name: "gone".into(),
+        recipient_run_ids: vec![],
+        title: "?".into(),
+        options: vec![],
+        blocking: false,
+        answer: None,
+        answer_origin: None,
+    };
+    fixture
+        .storage
+        .handle()
+        .create_user_question(&question)
+        .unwrap();
+    runtime
+        .set_tombstone_guard(tombstones(&["gone-thread"], &[&gone.to_string()]))
+        .unwrap();
+
+    // Goals.
+    let mut snapshot = goal.clone();
+    snapshot.thread_id = "gone-thread".into();
+    assert!(runtime.restore_thread_goal(snapshot.clone()).is_err());
+    let mut snapshot = goal.clone();
+    snapshot.root_run_id = gone.to_string();
+    assert!(runtime.restore_thread_goal(snapshot).is_err());
+    let mut snapshot = goal.clone();
+    snapshot.related_root_run_ids = vec![gone.to_string()];
+    assert!(runtime.restore_thread_goal(snapshot).is_err());
+    assert!(
+        runtime
+            .create_thread_goal("gone-thread", kept, "x".into(), vec!["y".into()])
+            .is_err()
+    );
+    assert!(runtime.thread_goal("gone-thread").is_none());
+    // Todos.
+    let mut deleted_todo = todo.clone();
+    deleted_todo.thread_id = "gone-thread".into();
+    assert!(runtime.restore_thread_todo(deleted_todo).is_err());
+    assert!(runtime.thread_todo("gone-thread").is_none());
+    // Declared directories are not kept for it.
+    let dir = tempfile::tempdir().unwrap();
+    runtime.set_thread_read_only_directories("gone-thread", vec![dir.path().to_path_buf()]);
+    assert!(
+        runtime
+            .thread_read_only_directories("gone-thread")
+            .is_empty()
+    );
+    // Answers and compaction of the deleted run.
+    assert!(
+        runtime
+            .answer_user_question("question-of-gone", "yes")
+            .is_err()
+    );
+    assert!(
+        runtime
+            .user_question("question-of-gone")
+            .unwrap()
+            .unwrap()
+            .answer
+            .is_none()
+    );
+    assert_deleted(
+        runtime
+            .compact_saved_chat(gone, RunConfig::default())
+            .await
+            .map_err(|error| match error {
+                RuntimeError::RunRestoreFailed { .. } => error,
+                other => panic!("{other:?}"),
+            }),
+    );
+
+    // The same entries work for the surviving thread.
+    runtime.restore_thread_goal(goal).unwrap();
+    runtime.restore_thread_todo(todo).unwrap();
+    runtime.set_thread_read_only_directories("kept-thread", vec![dir.path().to_path_buf()]);
+    assert_eq!(runtime.thread_read_only_directories("kept-thread").len(), 1);
+}

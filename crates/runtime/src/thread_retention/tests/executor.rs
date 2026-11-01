@@ -51,15 +51,27 @@ fn capture(store: &ArtifactStore, workspace: &Path, run: &str, thread: &str) -> 
 /// `T` confirmed by a startup phase (its rows still to reclaim), one artifact of `T` and
 /// one of a surviving thread, and a storage writer running on the database.
 fn running() -> Running {
+    running_with(&["T"])
+}
+
+/// Like [`running`] with one family (and one artifact) per name in `threads`; `deleted`
+/// is the first one's artifact.
+fn running_with(threads: &[&str]) -> Running {
     let world = World::new();
-    world.archived_thread("T", "rt");
-    let report = world.phase(&policy(), &world.input(&["T"], &["S"]));
-    assert_eq!(ran(&report).confirmed.len(), 1);
+    for thread in threads {
+        world.archived_thread(thread, &format!("r-{thread}"));
+    }
+    let report = world.phase(&policy(), &world.input(threads, &["S"]));
+    assert_eq!(ran(&report).confirmed.len(), threads.len());
     let workspace = world.dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("mock.png"), PNG).unwrap();
     let artifacts = Arc::new(ArtifactStore::new(world.dir.path().join("artifacts")).unwrap());
-    let deleted = capture(&artifacts, &workspace, "rt", "T");
+    let mut records = threads
+        .iter()
+        .map(|thread| capture(&artifacts, &workspace, &format!("r-{thread}"), thread))
+        .collect::<Vec<_>>();
+    let deleted = records.remove(0);
     let survivor = capture(&artifacts, &workspace, "rs", "S");
     let storage = storage::Storage::open(world.storage_config()).unwrap();
     Running {
@@ -210,4 +222,132 @@ fn the_thread_runs_a_cycle_and_releases_the_lease_on_shutdown() {
             .unwrap()
             .is_some()
     );
+}
+
+fn corrupt_meta(run: &Running) -> std::path::PathBuf {
+    let path = run
+        .world
+        .dir
+        .path()
+        .join("artifacts/meta/artifact-00000000000000000000000000000000.json");
+    std::fs::write(&path, b"{ broken").unwrap();
+    path
+}
+
+const FAMILIES: [&str; 5] = ["T0", "T1", "T2", "T3", "T4"];
+
+// Given: five failing families, a page of two and a retry limit of one / When: cycles run
+// Then: every family gets its attempt and is reported exhausted: families at the head of
+// the listing that are exhausted never keep later ones from being reached.
+#[test]
+fn exhausted_families_do_not_starve_the_ones_behind_them() {
+    let run = running_with(&FAMILIES);
+    corrupt_meta(&run);
+    let mut config = run.config();
+    config.jobs_per_page = 2;
+    config.files_retry_limit = 1;
+    let mut worker = ReclaimWorker::new(config);
+
+    let mut exhausted = 0;
+    for _ in 0..40 {
+        exhausted = worker.run_once().files_exhausted_total;
+        if exhausted == FAMILIES.len() {
+            break;
+        }
+    }
+
+    assert_eq!(exhausted, FAMILIES.len(), "{:?}", run.summary());
+    let summary = run.summary();
+    assert_eq!((summary.jobs_files_failed, summary.jobs_done), (5, 0));
+    assert_eq!(summary.jobs_db_done, 0, "none is left waiting unattempted");
+}
+
+// Given: five families failing for a while, a page of two and a generous retry limit
+// When: the obstacle goes away / Then: all five finish, whatever page they are on.
+#[test]
+fn failures_are_retried_across_pages_until_every_family_is_done() {
+    let run = running_with(&FAMILIES);
+    let corrupt = corrupt_meta(&run);
+    let mut config = run.config();
+    config.jobs_per_page = 2;
+    config.files_retry_limit = 50;
+    let mut worker = ReclaimWorker::new(config);
+    for _ in 0..100 {
+        worker.run_once();
+        if run.summary().jobs_files_failed == FAMILIES.len() as u64 {
+            break;
+        }
+    }
+    assert_eq!(run.summary().jobs_files_failed, 5);
+
+    std::fs::remove_file(corrupt).unwrap();
+    for _ in 0..100 {
+        worker.run_once();
+        if run.summary().jobs_done == FAMILIES.len() as u64 {
+            break;
+        }
+    }
+    assert_eq!(run.summary().jobs_done, 5, "{:?}", run.summary());
+    assert!(run.artifacts.load(&run.deleted.artifact_id).is_err());
+    assert!(run.artifacts.load(&run.survivor.artifact_id).is_ok());
+}
+
+// Given: a meta directory that cannot be listed / When: cycles run
+// Then: the family fails (never pending forever, never done), the error is reported, and
+// when the directory is back the next round finishes it.
+#[test]
+fn a_listing_failure_is_a_failed_round_and_recovers() {
+    let run = running();
+    let meta = run.world.dir.path().join("artifacts/meta");
+    let saved = run.world.dir.path().join("artifacts/meta-saved");
+    std::fs::rename(&meta, &saved).unwrap();
+    std::fs::write(&meta, b"not a directory").unwrap();
+    let mut worker = ReclaimWorker::new(run.config());
+
+    let mut errors = Vec::new();
+    for _ in 0..100 {
+        errors = worker.run_once().errors;
+        if run.summary().jobs_files_failed == 1 {
+            break;
+        }
+    }
+    assert_eq!(run.summary().jobs_files_failed, 1, "{:?}", run.summary());
+    assert_eq!(run.summary().jobs_files_pending, 0, "not pending forever");
+    assert!(
+        errors.iter().any(|error| error.contains("failure")),
+        "{errors:?}"
+    );
+
+    std::fs::remove_file(&meta).unwrap();
+    std::fs::rename(&saved, &meta).unwrap();
+    for _ in 0..100 {
+        worker.run_once();
+        if run.summary().jobs_done == 1 {
+            break;
+        }
+    }
+    assert_eq!(run.summary().jobs_done, 1);
+    assert!(run.artifacts.load(&run.deleted.artifact_id).is_err());
+}
+
+// Given: an executor without an artifact store / When: cycles run
+// Then: the rows are reclaimed but the files are left unfinished (not marked done).
+#[test]
+fn without_an_artifact_store_the_files_are_never_marked_done() {
+    let run = running();
+    let mut config = run.config();
+    config.artifacts = None;
+    let mut worker = ReclaimWorker::new(config);
+    for _ in 0..50 {
+        worker.run_once();
+        if run.summary().jobs_db_done == 1 {
+            break;
+        }
+    }
+    for _ in 0..5 {
+        worker.run_once();
+    }
+    let summary = run.summary();
+    assert_eq!((summary.jobs_db_done, summary.jobs_done), (1, 0));
+    assert!(run.artifacts.load(&run.deleted.artifact_id).is_ok());
 }

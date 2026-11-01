@@ -34,6 +34,12 @@ impl AgentRuntime {
         descriptor: &RunRestoreDescriptor,
         ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<RestoredState, RuntimeError> {
+        self.deny_deleted_run(&record.run_id).map_err(|deleted| {
+            RuntimeError::RunRestoreFailed {
+                run_id: record.run_id.clone(),
+                reason: RunRestoreFailure::ThreadDeleted(deleted),
+            }
+        })?;
         let history = descriptor.conversation_descriptor();
         if !(record.restorable && history.restorable)
             && !(history.renewable_ownership_only() && ownership.is_some())
@@ -67,6 +73,8 @@ impl AgentRuntime {
         parent: RunId,
         child: RunId,
     ) -> Result<(), String> {
+        self.deny_deleted_run(&child.to_string())
+            .map_err(|deleted| deleted.to_string())?;
         let ownership = {
             let runs = lock_runs(&self.shared.runs);
             if let Some(reason) = self.continuation_refusal(child, runs.get(&child)) {

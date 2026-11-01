@@ -1,8 +1,8 @@
 //! The exclusive startup phase.
 //!
 //! The caller holds [`storage::ExclusiveLeases`]: no other evorch process has the
-//! database open or shares the ownership root. This is the only place a deletion is
-//! confirmed, and the only place state outside the database (owner rows, scratch
+//! database open or shares the ownership root. This is the only place a deletion
+//! is confirmed, and the only place state outside the database (owner rows, scratch
 //! directories) is removed.
 //!
 //! Order matters. Stages 0-3 prepare (backfill, closure search) and end with one
@@ -19,6 +19,12 @@
 //! | 4 | owner rows of deleted threads, scratch directories |
 //! | 5 | oversized rows |
 //! | 6 | incremental vacuum |
+//!
+//! Stages 1, 4, 5 and 6 do not depend on the retention period: with
+//! `archived_delete_after_days = 0` nothing new is confirmed but what earlier starts
+//! confirmed (and every oversized row registered by any change) is still reclaimed.
+//! Stages 5 and 6 touch only the database, so they also run when the binding does
+//! not match; owner rows and scratch directories never do.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -61,8 +67,10 @@ pub struct StartupBudget {
     pub oversized_bytes: u64,
     /// Free pages returned to the file.
     pub vacuum_pages: u64,
-    /// Scratch directories removed.
+    /// Scratch directories worked on.
     pub scratch_dirs: usize,
+    /// Scratch entries (files, links, directories) deleted in total.
+    pub scratch_entries: usize,
 }
 
 impl Default for StartupBudget {
@@ -75,6 +83,7 @@ impl Default for StartupBudget {
             oversized_bytes: 64 * 1024 * 1024,
             vacuum_pages: 50_000,
             scratch_dirs: 50,
+            scratch_entries: 20_000,
         }
     }
 }
@@ -87,12 +96,31 @@ pub enum SkipReason {
     BindingMismatch,
 }
 
+/// What happened to the scratch directories of deleted threads. A directory counts
+/// as `removed` only once it is gone from disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScratchReport {
+    /// Directories deleted completely.
     pub removed: usize,
-    /// Directories left for the next start (budget).
+    /// Entries deleted, across complete and incomplete directories.
+    pub entries_removed: usize,
+    /// Threads whose directory still exists because the entry budget ran out
+    /// (the next start continues).
+    pub incomplete: Vec<String>,
+    /// Existing directories not touched because a budget was spent.
     pub remaining: usize,
+    /// Directories that could not be deleted, with the error. They stay and are retried.
     pub failed: Vec<(String, String)>,
+}
+
+/// The database-only maintenance of a start (no ownership root involved).
+#[derive(Debug, Clone, Default)]
+pub struct DbMaintenance {
+    pub oversized: OversizedProgress,
+    pub vacuum_pages: u64,
+    /// The database is not `auto_vacuum = INCREMENTAL`, so no space was returned.
+    pub vacuum_skipped: bool,
+    pub errors: Vec<String>,
 }
 
 /// One report per start, built once: the size difference between the variants costs nothing.
@@ -101,6 +129,9 @@ pub struct ScratchReport {
 pub enum StartupOutcome {
     Skipped {
         reason: SkipReason,
+        /// What still ran: after a binding mismatch the database-only maintenance;
+        /// `None` when the exclusive locks were not held.
+        maintenance: Option<DbMaintenance>,
     },
     Ran {
         backfill: BackfillProgress,
@@ -120,7 +151,8 @@ pub enum StartupOutcome {
         owners_removed: usize,
         /// Why the owner registry could not be read; nothing was confirmed then.
         owner_registry_error: Option<String>,
-        /// Failures that stopped a reclaim stage short (the next start repeats it).
+        /// Failures after which a stage stopped short (the next start repeats it). A
+        /// failure after a confirmation is reported here, never as `Err`.
         errors: Vec<String>,
     },
 }
@@ -141,6 +173,7 @@ impl StartupReport {
         Self {
             outcome: StartupOutcome::Skipped {
                 reason: SkipReason::NoExclusive,
+                maintenance: None,
             },
             binding: None,
             tombstones: TombstoneSet::default(),
@@ -149,7 +182,7 @@ impl StartupReport {
     }
 }
 
-/// A phase boundary, for fault injection in tests.
+/// A phase boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Backfill,
@@ -159,6 +192,34 @@ pub enum Stage {
     Scratch,
     Oversized,
     Vacuum,
+}
+
+impl Stage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Backfill => "backfill",
+            Self::Explore => "explore",
+            Self::Finalize => "finalize",
+            Self::Owners => "owner rows",
+            Self::Scratch => "scratch",
+            Self::Oversized => "oversized rows",
+            Self::Vacuum => "vacuum",
+        }
+    }
+}
+
+/// What the phase tells an observer (a splash or a log) while it runs. Events are
+/// delivered on the calling thread, in order, between units of work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupProgress {
+    StageStarted(Stage),
+    /// The root side of the binding was written (before the first confirmation commits).
+    RootBound,
+    /// One family's deletion was just committed.
+    FamilyConfirmed {
+        family_key: String,
+    },
+    StageFinished(Stage),
 }
 
 /// The input the phase needs, with the canonical paths it will compare against the
@@ -199,19 +260,42 @@ pub fn run_exclusive_phase(
     budget: &StartupBudget,
     now_ns: i64,
 ) -> Result<StartupReport, RetentionError> {
-    run_exclusive_phase_with(leases, paths, policy, input, budget, now_ns, &mut |_| {})
+    run_exclusive_phase_with_progress(leases, paths, policy, input, budget, now_ns, &mut |_| {})
 }
 
-pub(crate) fn run_exclusive_phase_with(
+/// [`run_exclusive_phase`] that reports each stage and each confirmed family to
+/// `progress` as it happens, for a host that shows a long start. Each event is also
+/// logged at `info` under the `thread_retention` target.
+///
+/// # Errors
+/// As [`run_exclusive_phase`].
+pub fn run_exclusive_phase_with_progress(
     _leases: &ExclusiveLeases,
     paths: &StartupPaths,
     policy: &ThreadRetentionPolicy,
     input: &RetentionInput,
     budget: &StartupBudget,
     now_ns: i64,
-    after_stage: &mut dyn FnMut(Stage),
+    progress: &mut dyn FnMut(&StartupProgress),
 ) -> Result<StartupReport, RetentionError> {
     let started = Instant::now();
+    let mut notify = |event: StartupProgress| {
+        match &event {
+            StartupProgress::StageStarted(stage) => {
+                tracing::info!(target: "thread_retention", stage = stage.label(), "started");
+            }
+            StartupProgress::RootBound => {
+                tracing::info!(target: "thread_retention", "ownership root bound");
+            }
+            StartupProgress::FamilyConfirmed { family_key } => {
+                tracing::info!(target: "thread_retention", family = %family_key, "family deleted");
+            }
+            StartupProgress::StageFinished(stage) => {
+                tracing::info!(target: "thread_retention", stage = stage.label(), "finished");
+            }
+        }
+        progress(&event);
+    };
     if input.ownership_root != canonical_string(&paths.ownership_root)
         || input.sidebar_path != canonical_string(&paths.sidebar_path)
     {
@@ -227,9 +311,24 @@ pub(crate) fn run_exclusive_phase_with(
     };
     let status = check_binding(&database, binding_paths)?;
     if matches!(status, BindingStatus::Mismatch(_)) {
+        // The pairing is wrong, so nothing outside the database may change; the
+        // database's own maintenance does not depend on it.
+        let mut ran = Ran::default();
+        stage(&mut notify, Stage::Oversized, || {
+            reclaim_oversized(&database, budget, &mut ran);
+        });
+        stage(&mut notify, Stage::Vacuum, || {
+            vacuum(&database, budget, &mut ran);
+        });
         return Ok(StartupReport {
             outcome: StartupOutcome::Skipped {
                 reason: SkipReason::BindingMismatch,
+                maintenance: Some(DbMaintenance {
+                    oversized: ran.oversized,
+                    vacuum_pages: ran.vacuum_pages,
+                    vacuum_skipped: ran.vacuum_skipped,
+                    errors: ran.errors,
+                }),
             },
             binding: Some(status),
             tombstones: database.tombstones()?,
@@ -237,18 +336,21 @@ pub(crate) fn run_exclusive_phase_with(
         });
     }
     let enabled = policy.archived_delete_after_days > 0;
+
     // Stage 1.
+    notify(StartupProgress::StageStarted(Stage::Backfill));
     let mut ran = Ran {
         backfill: database
             .retention_backfill_startup(budget.backfill_rows, budget.backfill_max_rows)?,
         ..Ran::default()
     };
-    after_stage(Stage::Backfill);
+    notify(StartupProgress::StageFinished(Stage::Backfill));
     let backfilled =
         ran.backfill.remaining_unconverted == 0 && ran.backfill.remaining_unattributed == 0;
 
     if enabled && backfilled {
         // Stage 2.
+        notify(StartupProgress::StageStarted(Stage::Explore));
         ran.families = database.retention_explore(
             input,
             policy,
@@ -256,37 +358,77 @@ pub(crate) fn run_exclusive_phase_with(
                 max_edges: budget.explore_edges,
             },
         )?;
-        after_stage(Stage::Explore);
-        // Stage 3.
-        confirm_families(
-            &database, paths, policy, input, budget, now_ns, &status, &mut ran,
-        )?;
-        after_stage(Stage::Finalize);
+        notify(StartupProgress::StageFinished(Stage::Explore));
+        // Stage 3. Once a family is confirmed, a later failure is reported, not raised.
+        notify(StartupProgress::StageStarted(Stage::Finalize));
+        let outcome = confirm_families(
+            &database,
+            paths,
+            policy,
+            input,
+            budget,
+            now_ns,
+            &status,
+            &mut ran,
+            &mut notify,
+        );
+        match outcome {
+            Ok(()) => {}
+            Err(error) if ran.confirmed.is_empty() => return Err(error),
+            Err(error) => ran.errors.push(format!("finalize: {error}")),
+        }
+        notify(StartupProgress::StageFinished(Stage::Finalize));
     }
 
     // Stages 4-7: reclaim what is confirmed. A failure here is reported, not raised.
-    let tombstones = database.tombstones()?;
+    let tombstones = read_tombstones(&database, &mut ran)?;
     let mut threads = tombstones.threads.iter().cloned().collect::<Vec<_>>();
     threads.sort_unstable();
-    remove_owners(paths, &threads, &mut ran);
-    after_stage(Stage::Owners);
-    remove_scratch(paths, &threads, budget, &mut ran);
-    after_stage(Stage::Scratch);
-    reclaim_oversized(&database, budget, &mut ran);
-    after_stage(Stage::Oversized);
-    match database.retention_vacuum_step(budget.vacuum_pages) {
-        Ok(Some(pages)) => ran.vacuum_pages = pages,
-        Ok(None) => ran.vacuum_skipped = true,
-        Err(error) => ran.errors.push(format!("incremental vacuum: {error}")),
-    }
-    after_stage(Stage::Vacuum);
+    stage(&mut notify, Stage::Owners, || {
+        remove_owners(paths, &threads, &mut ran);
+    });
+    stage(&mut notify, Stage::Scratch, || {
+        remove_scratch(paths, &threads, budget, &mut ran);
+    });
+    stage(&mut notify, Stage::Oversized, || {
+        reclaim_oversized(&database, budget, &mut ran);
+    });
+    stage(&mut notify, Stage::Vacuum, || {
+        vacuum(&database, budget, &mut ran);
+    });
 
+    let tombstones = read_tombstones(&database, &mut ran)?;
     Ok(StartupReport {
         outcome: ran.into_outcome(),
         binding: Some(status),
-        tombstones: database.tombstones()?,
+        tombstones,
         elapsed: started.elapsed(),
     })
+}
+
+fn stage(notify: &mut impl FnMut(StartupProgress), stage: Stage, work: impl FnOnce()) {
+    notify(StartupProgress::StageStarted(stage));
+    work();
+    notify(StartupProgress::StageFinished(stage));
+}
+
+/// The tombstones as stored. After a confirmation a failed read must not discard the
+/// report, so the confirmed families stand in for the stored set.
+fn read_tombstones(database: &Database, ran: &mut Ran) -> Result<TombstoneSet, RetentionError> {
+    match database.tombstones() {
+        Ok(tombstones) => Ok(tombstones),
+        Err(error) if ran.confirmed.is_empty() => Err(error.into()),
+        Err(error) => {
+            ran.errors.push(format!("tombstones: {error}"));
+            let mut set = TombstoneSet::default();
+            for family in &ran.confirmed {
+                set.threads.extend(family.threads.iter().cloned());
+                set.runs.extend(family.runs.iter().cloned());
+                set.tasks.extend(family.tasks.iter().cloned());
+            }
+            Ok(set)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -349,6 +491,7 @@ fn confirm_families(
     now_ns: i64,
     status: &BindingStatus,
     ran: &mut Ran,
+    notify: &mut impl FnMut(StartupProgress),
 ) -> Result<(), RetentionError> {
     let mut explored = Vec::new();
     for (key, state) in &ran.families {
@@ -414,12 +557,18 @@ fn confirm_families(
             let db_id = database.retention_identity()?;
             write_root_binding(&paths.ownership_root, &db_id, &paths.db_path, now_ns)?;
             root_bound = true;
+            notify(StartupProgress::RootBound);
         }
         let settled = finalize_with_doubling(first, budget.finalize_rounds, |attempt| {
             database.retention_finalize(&key, input, policy, &family_blocks, &binding, attempt)
         })?;
         match settled {
-            Settled::Confirmed(family) => ran.confirmed.push(family),
+            Settled::Confirmed(family) => {
+                notify(StartupProgress::FamilyConfirmed {
+                    family_key: family.family_key.clone(),
+                });
+                ran.confirmed.push(family);
+            }
             Settled::OverBudget => ran.retried_over_budget.push(key),
             Settled::Stale => ran.stale.push(key),
             Settled::Blocked(reason) => ran.blocked.push((key, reason)),
@@ -479,6 +628,10 @@ fn remove_owners(paths: &StartupPaths, threads: &[String], ran: &mut Ran) {
     }
 }
 
+/// Delete the scratch directories of deleted threads, entry by entry, within the
+/// directory and entry budgets. A directory counts as removed only after the call
+/// that emptied and unlinked it reported completion; anything else stays listed
+/// (incomplete, failed or remaining) and the next start continues from what is left.
 fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudget, ran: &mut Ran) {
     if threads.is_empty() {
         return;
@@ -490,16 +643,27 @@ fn remove_scratch(paths: &StartupPaths, threads: &[String], budget: &StartupBudg
             return;
         }
     };
+    let mut dirs = 0;
+    let mut entries_left = budget.scratch_entries;
     for thread in threads {
         if !scratch.thread_dir_exists(thread) {
             continue;
         }
-        if ran.scratch.removed + ran.scratch.failed.len() >= budget.scratch_dirs {
+        if dirs >= budget.scratch_dirs || entries_left == 0 {
             ran.scratch.remaining += 1;
             continue;
         }
-        match scratch.remove_thread(thread) {
-            Ok(_) => ran.scratch.removed += 1,
+        dirs += 1;
+        match scratch.remove_thread(thread, entries_left) {
+            Ok(done) => {
+                entries_left = entries_left.saturating_sub(done.removed_entries);
+                ran.scratch.entries_removed += done.removed_entries;
+                if done.complete {
+                    ran.scratch.removed += 1;
+                } else {
+                    ran.scratch.incomplete.push(thread.clone());
+                }
+            }
             Err(error) => ran.scratch.failed.push((thread.clone(), error.to_string())),
         }
     }
@@ -535,5 +699,13 @@ fn reclaim_oversized(database: &Database, budget: &StartupBudget, ran: &mut Ran)
         if failed || step.remaining == 0 {
             break;
         }
+    }
+}
+
+fn vacuum(database: &Database, budget: &StartupBudget, ran: &mut Ran) {
+    match database.retention_vacuum_step(budget.vacuum_pages) {
+        Ok(Some(pages)) => ran.vacuum_pages = pages,
+        Ok(None) => ran.vacuum_skipped = true,
+        Err(error) => ran.errors.push(format!("incremental vacuum: {error}")),
     }
 }

@@ -1106,22 +1106,24 @@ pub(crate) fn summary(conn: &Connection) -> Result<ReclaimSummary, StorageError>
     Ok(summary)
 }
 
-/// Jobs in `state` in family-key order, at most `limit`, with the members the
+/// Jobs in `state` in family-key order after `after`, at most `limit`, with the members the
 /// tombstone tables hold for each family. A family is small by construction (the
 /// whole tombstone set is read into memory at startup).
 pub(crate) fn jobs_in_state(
     conn: &Connection,
     state: ReclaimJobState,
+    after: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ReclaimJobMembers>, StorageError> {
     let mut statement = conn.prepare(
         "SELECT family_key FROM reclaim_jobs INDEXED BY idx_reclaim_jobs_state \
-         WHERE state = ?1 ORDER BY family_key LIMIT ?2",
+         WHERE state = ?1 AND family_key > ?3 ORDER BY family_key LIMIT ?2",
     )?;
     let families = statement
-        .query_map(params![state.as_str(), limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            params![state.as_str(), limit as i64, after.unwrap_or("")],
+            |row| row.get::<_, String>(0),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     let column = |sql: &str, family: &str| -> Result<Vec<String>, StorageError> {
         let mut statement = conn.prepare_cached(sql)?;

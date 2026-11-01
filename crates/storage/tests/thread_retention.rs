@@ -701,6 +701,12 @@ fn the_vacuum_step_returns_free_pages_only_for_incremental_databases() {
     f.sql("DROP TABLE ballast");
     let free = database.pragma_i64("freelist_count").unwrap();
     assert!(free > 8, "{free}");
+    assert_eq!(
+        database.retention_vacuum_step(0).unwrap(),
+        Some(0),
+        "a zero page budget frees nothing"
+    );
+    assert_eq!(database.pragma_i64("freelist_count").unwrap(), free);
     let freed = database.retention_vacuum_step(8).unwrap().unwrap();
     assert_eq!(freed, 8);
     assert_eq!(database.pragma_i64("freelist_count").unwrap(), free - 8);

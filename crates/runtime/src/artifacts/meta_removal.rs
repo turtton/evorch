@@ -3,13 +3,26 @@
 //! Only `meta/<artifact_id>.json` is removed here. Blobs are content addressed
 //! and may be shared by other threads; collecting them belongs to the blob
 //! collector, which first needs to know every remaining reference.
+//!
+//! Every file operation has four distinct outcomes and they are never merged:
+//! the work finished (`stop == None`), the budget ran out (`Budget`, continue from
+//! `last_name`), the directory could not be listed (`Listing`), or one file could
+//! not be read or unlinked (an entry in `failed`). Only a file that is explicitly
+//! *not found* is treated as already gone.
 
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashSet};
+use std::io::Read as _;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use super::ArtifactStore;
+
+/// A meta file larger than this is not parsed: a record is a few kilobytes, so a
+/// bigger one is damaged or foreign, and it is reported instead of read into memory.
+pub const MAX_META_BYTES: u64 = 1024 * 1024;
+/// Failure details kept per call; further failures are only counted.
+pub const MAX_FAILURES_KEPT: usize = 16;
 
 /// The identity fields of a meta file; unknown fields are tolerated so a record
 /// written by another version is still matched.
@@ -23,26 +36,86 @@ struct MetaOwner {
     root_run_id: Option<String>,
 }
 
+/// Why a pass over the directory ended before examining all of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaStop {
+    /// `budget` files were examined and more remain; continue after `last_name`.
+    Budget,
+    /// The directory could not be opened or listed; nothing is known about what is in
+    /// it. Retrying from the start is the only way on.
+    Listing(String),
+}
+
 /// What one [`ArtifactStore::remove_meta_for`] call did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MetaRemoval {
     /// Artifact IDs whose meta file was deleted.
     pub removed: Vec<String>,
-    /// Meta files that could not be read, parsed or deleted. They are never
-    /// treated as "not ours": the family's files stay unfinished until they succeed.
+    /// The first [`MAX_FAILURES_KEPT`] meta files that could not be read, parsed or
+    /// deleted. They are never treated as "not ours": the family's files stay
+    /// unfinished until they succeed.
     pub failed: Vec<(PathBuf, String)>,
-    /// Meta files examined by this call.
+    /// All failures, kept or not.
+    pub failed_total: usize,
+    /// Directory entries seen. Listing costs one pass over all of them per call.
+    pub listed: usize,
+    /// Meta files examined (opened) by this call.
     pub scanned: usize,
-    /// The whole directory was examined; `false` when `budget` ran out first.
-    pub complete: bool,
+    /// Bytes read from them.
+    pub bytes_read: u64,
+    /// `None`: the whole directory was examined.
+    pub stop: Option<MetaStop>,
     /// The last file name examined; pass it as `after` to continue.
     pub last_name: Option<String>,
+}
+
+impl MetaRemoval {
+    /// The whole directory was examined (failures may still be listed).
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.stop.is_none()
+    }
+
+    fn fail(&mut self, path: PathBuf, error: impl ToString) {
+        self.failed_total += 1;
+        if self.failed.len() < MAX_FAILURES_KEPT {
+            self.failed.push((path, error.to_string()));
+        }
+    }
 }
 
 fn is_meta_name(name: &str) -> bool {
     name.strip_suffix(".json")
         .and_then(|id| id.strip_prefix("artifact-"))
         .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+enum Read {
+    Owner(MetaOwner),
+    /// Removed since the listing: nothing to do.
+    Gone,
+    Failed(String),
+}
+
+fn read_owner(path: &std::path::Path, bytes_read: &mut u64) -> Read {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
+        Err(error) => return Read::Failed(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    match file.take(MAX_META_BYTES + 1).read_to_end(&mut bytes) {
+        Ok(read) => *bytes_read += read as u64,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
+        Err(error) => return Read::Failed(error.to_string()),
+    }
+    if bytes.len() as u64 > MAX_META_BYTES {
+        return Read::Failed(format!("larger than {MAX_META_BYTES} bytes"));
+    }
+    match serde_json::from_slice::<MetaOwner>(&bytes) {
+        Ok(owner) => Read::Owner(owner),
+        Err(error) => Read::Failed(error.to_string()),
+    }
 }
 
 impl ArtifactStore {
@@ -58,8 +131,12 @@ impl ArtifactStore {
     }
 
     /// [`Self::remove_meta_for`] starting after the file name `after` (the
-    /// `last_name` of an incomplete call). Listing the directory costs one pass over
-    /// its names every call; only `budget` files are opened.
+    /// `last_name` of a call that stopped on its budget).
+    ///
+    /// The directory is listed once per call and only the `budget` smallest names
+    /// after `after` are kept, so memory is bounded by the budget however many files
+    /// exist; time is one pass over the entries (`listed`). At most
+    /// [`MAX_META_BYTES`] of any one file are read.
     pub fn remove_meta_after(
         &self,
         threads: &HashSet<String>,
@@ -69,40 +146,53 @@ impl ArtifactStore {
     ) -> MetaRemoval {
         let directory = self.root.join("meta");
         let mut outcome = MetaRemoval::default();
-        let mut names = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| {
-                    is_meta_name(name) && after.is_none_or(|after| name.as_str() > after)
-                })
-                .collect::<Vec<_>>(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                outcome.complete = true;
-                return outcome;
-            }
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return outcome,
             Err(error) => {
-                outcome.failed.push((directory, error.to_string()));
+                outcome.fail(directory, &error);
+                outcome.stop = Some(MetaStop::Listing(error.to_string()));
                 return outcome;
             }
         };
-        names.sort_unstable();
-        let total = names.len();
-        for name in names.into_iter().take(budget) {
+        // The `budget` smallest qualifying names; `qualifying` counts all of them.
+        let mut smallest: BinaryHeap<String> = BinaryHeap::new();
+        let mut qualifying = 0_usize;
+        for entry in entries {
+            let name = match entry {
+                Ok(entry) => entry.file_name(),
+                Err(error) => {
+                    // A listing that failed midway says nothing about the rest.
+                    outcome.fail(directory.clone(), &error);
+                    outcome.stop = Some(MetaStop::Listing(error.to_string()));
+                    return outcome;
+                }
+            };
+            outcome.listed += 1;
+            let Some(name) = name.to_str() else { continue };
+            if !is_meta_name(name) || after.is_some_and(|after| name <= after) {
+                continue;
+            }
+            qualifying += 1;
+            if smallest.len() < budget {
+                smallest.push(name.to_owned());
+            } else if smallest
+                .peek()
+                .is_some_and(|largest| name < largest.as_str())
+            {
+                smallest.pop();
+                smallest.push(name.to_owned());
+            }
+        }
+        for name in smallest.into_sorted_vec() {
             outcome.scanned += 1;
             let path = directory.join(&name);
             outcome.last_name = Some(name.clone());
-            let owner = std::fs::read(&path)
-                .map_err(|error| error.to_string())
-                .and_then(|bytes| {
-                    serde_json::from_slice::<MetaOwner>(&bytes).map_err(|error| error.to_string())
-                });
-            let owner = match owner {
-                Ok(owner) => owner,
-                // A file removed since the listing is not ours any more.
-                Err(_) if !path.exists() => continue,
-                Err(error) => {
-                    outcome.failed.push((path, error));
+            let owner = match read_owner(&path, &mut outcome.bytes_read) {
+                Read::Owner(owner) => owner,
+                Read::Gone => continue,
+                Read::Failed(error) => {
+                    outcome.fail(path, error);
                     continue;
                 }
             };
@@ -123,10 +213,12 @@ impl ArtifactStore {
                     .removed
                     .push(name.trim_end_matches(".json").to_owned()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => outcome.failed.push((path, error.to_string())),
+                Err(error) => outcome.fail(path, error),
             }
         }
-        outcome.complete = outcome.scanned >= total;
+        if qualifying > outcome.scanned {
+            outcome.stop = Some(MetaStop::Budget);
+        }
         outcome
     }
 }
