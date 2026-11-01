@@ -149,7 +149,7 @@ BEGIN SELECT RAISE(ABORT, 'task queue ledger is append-only'); END;
 DROP TABLE artifact_refs; DROP TABLE gc_state; DROP TABLE gc_unknown_meta;
 DROP TABLE reclaim_jobs; DROP TABLE reclaim_oversized;
 DROP TABLE retention_binding; DROP TABLE retention_identity;
-DROP TABLE retention_staging; DROP TABLE retention_staging_state;
+DROP TABLE retention_unresolved; DROP TABLE retention_staging; DROP TABLE retention_staging_state;
 DROP TABLE run_ledger_delete_grants; DROP TABLE task_queue_delete_grants;
 DROP TABLE run_tombstones; DROP TABLE task_tombstones; DROP TABLE thread_tombstones;
 "#;

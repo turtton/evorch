@@ -13,7 +13,7 @@ use undo_v35::{undo_v35, undo_v36, undo_v38};
 
 const LATEST_SCHEMA: u32 = 38;
 
-const EXPECTED_TABLES: [&str; 64] = [
+const EXPECTED_TABLES: [&str; 65] = [
     "artifact_refs",
     "gc_state",
     "gc_unknown_meta",
@@ -23,6 +23,7 @@ const EXPECTED_TABLES: [&str; 64] = [
     "retention_identity",
     "retention_staging",
     "retention_staging_state",
+    "retention_unresolved",
     "run_ledger_delete_grants",
     "run_tombstones",
     "task_queue_delete_grants",

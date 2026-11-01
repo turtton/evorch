@@ -109,6 +109,7 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ("retention_binding", Keep, "retention bookkeeping"),
     ("retention_staging_state", Keep, "retention bookkeeping"),
     ("retention_staging", Keep, "retention bookkeeping"),
+    ("retention_unresolved", Keep, "retention bookkeeping"),
     ("reclaim_jobs", Keep, "retention bookkeeping"),
     ("reclaim_oversized", Keep, "retention bookkeeping"),
     ("run_ledger_delete_grants", Keep, "retention bookkeeping"),

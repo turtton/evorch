@@ -79,6 +79,11 @@ pub enum StartupError {
     Retention(#[from] RetentionError),
     #[error("sidebar state failed: {0}")]
     Sidebar(#[from] workspace_ui::SidebarError),
+    #[error(
+        "the sidebar file is in the older format and another evorch process holds the database; \
+         close the other windows and start again so that it can be converted"
+    )]
+    ConversionNeedsExclusive,
     #[error("start-up thread panicked: {0}")]
     Panicked(String),
 }
@@ -165,32 +170,36 @@ fn save_converted(path: &std::path::Path, sidebar: &SidebarState) -> Result<(), 
 
 /// Brings the numbers of the family states above those the database holds for their
 /// members, so the database never ignores what the sidebar says for being older.
-fn raise_above_database(plan: &StartupPlan, sidebar: &mut SidebarState) -> usize {
-    let database = match Database::open(&StorageConfig {
+/// `converted` is for a sidebar just made from an older file: its numbers must end
+/// strictly above the database's, equal numbers included (see
+/// [`SidebarState::raise_family_revisions`]).
+///
+/// # Errors
+/// The database cannot be opened or read: a conversion cannot be called done without
+/// knowing the numbers it has to be above.
+fn raise_above_database(
+    plan: &StartupPlan,
+    sidebar: &mut SidebarState,
+    converted: bool,
+) -> Result<usize, StartupError> {
+    let database = Database::open(&StorageConfig {
         db_path: plan.db_path.clone(),
         ..StorageConfig::default()
-    }) {
-        Ok(database) => database,
-        Err(error) => {
-            tracing::warn!(%error, "could not read the database revisions of the threads");
-            return 0;
-        }
-    };
-    let floors: std::collections::BTreeMap<workspace_ui::ThreadId, (u64, u64)> = sidebar
-        .threads
-        .iter()
-        .filter_map(|thread| {
-            let row = database.thread(&thread.id.to_string()).ok()??;
-            Some((
+    })?;
+    let mut floors: std::collections::BTreeMap<workspace_ui::ThreadId, (u64, u64)> =
+        std::collections::BTreeMap::new();
+    for thread in &sidebar.threads {
+        if let Some(row) = database.thread(&thread.id.to_string())? {
+            floors.insert(
                 thread.id.clone(),
                 (
                     row.archive_revision.unwrap_or(0),
                     row.pin_revision.unwrap_or(0),
                 ),
-            ))
-        })
-        .collect();
-    sidebar.raise_family_revisions(&|id| floors.get(id).copied().unwrap_or((0, 0)))
+            );
+        }
+    }
+    Ok(sidebar.raise_family_revisions(&|id| floors.get(id).copied().unwrap_or((0, 0)), converted))
 }
 
 fn now_ns() -> i64 {
@@ -246,7 +255,16 @@ pub fn run_startup(
             storage::shared_with_wait(&plan.db_path, &plan.ownership_root, SHARED_LOCK_WAIT)?;
         emit(StartupEvent::Shared);
         let sidebar = match (&plan.sidebar_path, plan.run_phase) {
-            (Some(path), true) => Some(load_sidebar(path)?.0),
+            (Some(path), true) => {
+                let (sidebar, converted) = load_sidebar(path)?;
+                // The conversion is a cutover that needs the numbers the database holds
+                // and a saved result, which only the process holding the exclusive locks
+                // may make. Without them nothing converted is published or saved.
+                if converted.is_some() {
+                    return Err(StartupError::ConversionNeedsExclusive);
+                }
+                Some(sidebar)
+            }
             _ => None,
         };
         let (tombstones, binding) = reread(plan)?;
@@ -269,7 +287,14 @@ pub fn run_startup(
     // The one place the family states are made (or raised) and saved: only the process
     // that holds the exclusive locks does it, before anything is decided from them.
     if let Some(path) = plan.sidebar_path.as_ref().filter(|path| path.exists()) {
-        let raised = raise_above_database(plan, &mut sidebar);
+        let raised = match raise_above_database(plan, &mut sidebar, converted.is_some()) {
+            Ok(raised) => raised,
+            Err(error) if converted.is_none() => {
+                tracing::warn!(%error, "could not read the database revisions of the threads");
+                0
+            }
+            Err(error) => return Err(error),
+        };
         if converted.is_some() || raised > 0 {
             save_converted(path, &sidebar)?;
             let report = converted.unwrap_or_default();

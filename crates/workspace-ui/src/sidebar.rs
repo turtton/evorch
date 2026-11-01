@@ -21,6 +21,11 @@ pub struct SidebarState {
     /// The archive and pin state of each conversation family; see [`crate::family`].
     #[serde(default)]
     pub families: Vec<crate::family::FamilyState>,
+    /// Threads two sidebars gave different parents (a thread's parent never changes, so
+    /// this is a conflict in the input, not an edit). They and their descendants have no
+    /// resolvable family until the file is repaired by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_conflicts: Vec<ThreadId>,
 }
 
 impl Default for SidebarState {
@@ -32,6 +37,7 @@ impl Default for SidebarState {
             threads: Vec::new(),
             active_thread: None,
             families: Vec::new(),
+            parent_conflicts: Vec::new(),
         }
     }
 }

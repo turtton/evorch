@@ -343,46 +343,105 @@ fn a_stale_window_replaying_a_known_member_never_rewinds_the_database() {
     }
 }
 
+/// Whether the database lists the thread among those search may return.
+fn searchable(config: &storage::StorageConfig, id: &str) -> bool {
+    let database = storage::Database::open(config).unwrap();
+    let Some(row) = database.thread(id).unwrap() else {
+        return false;
+    };
+    let root = row
+        .project_root
+        .expect("a mirrored thread has its project root");
+    database
+        .threads_in_project_visible(&root, None, 100)
+        .unwrap()
+        .threads
+        .iter()
+        .any(|listed| listed.thread_id == id)
+}
+
 #[test]
-fn a_locked_sidebar_then_an_escalation_and_a_branch_ends_in_one_family_state() {
-    // Given: A archived the family; B is stale and the file is locked by someone.
+fn a_child_added_while_the_sidebar_is_locked_is_told_only_with_the_state_the_file_holds() {
+    // Given: B (mirroring) started before A archived the family, so B's own view of the
+    // family is the old, unarchived one; the shared file is then locked by someone.
     let directory = tempfile::tempdir().unwrap();
     let (mut a, _, path) = two_windows(directory.path());
-    drop(a.toggle_archive(ThreadId::new("thread")));
     let (mut b, storage, config) = mirroring(&path, directory.path());
-    b.sidebar.families.clear();
-    b.sidebar.refresh_derived();
+    a.toggle_archive(ThreadId::new("thread")).unwrap();
     let lock = lock_file(&path);
 
-    // When: B folds an escalation (needs no lock), fails to branch and to switch,
-    // and mirrors while the lock is held.
+    // When: B folds an escalation (needs no lock), fails to branch and to switch
+    // version, and mirrors while the lock is held.
     b.apply_events([escalation("run-1", "run-2")]);
     assert!(
         b.branch_thread(&ThreadId::new("escalation-run-2"), None, LineageKind::Fork)
             .is_err()
     );
     assert!(b.switch_version(ThreadId::new("thread")).is_err());
-    b.sync_thread_mirror(Instant::now());
+    b.force_thread_mirror();
     barrier(&storage);
 
-    // Then: nothing was numbered by the failed actions, and the child that exists is a
-    // plain member: the only state a mirror can send for it is its family's.
+    // Then: nothing about the unsaved child reached the database, in any state.
     assert_eq!(b.sidebar().threads.len(), 2);
-    let sent = projected(&config, "escalation-run-2").map(|row| row.1);
-    assert!(matches!(sent, None | Some(Some(0) | None)), "{sent:?}");
+    assert!(row(&config, "escalation-run-2").is_none());
+    assert!(!searchable(&config, "escalation-run-2"));
 
-    // When: the lock is free and B takes in the file.
+    // When: the lock is free and B saves, which merges the file's newer state into the
+    // file but is not taken into B yet (no import).
     drop(lock);
+    b.save_sidebar();
+    assert!(!series(&b, "thread").0, "B has not taken the file in yet");
+    b.force_thread_mirror();
+    barrier(&storage);
+
+    // Then: the child reaches the database with the family state the file holds, so it
+    // is out of search from its first row on; the family's rows agree.
+    for id in ["thread", "escalation-run-2"] {
+        assert_eq!(
+            projected(&config, id).map(|row| (row.0, row.1)),
+            Some((true, Some(1))),
+            "{id}"
+        );
+        assert!(!searchable(&config, id), "{id}");
+    }
+
+    // When: B takes the file in.
     b.import_shared_sidebar();
     b.force_thread_mirror();
     barrier(&storage);
 
-    // Then: the child follows the family, in B and in the database.
+    // Then: B agrees, and the database did not change.
     assert_eq!(series(&b, "escalation-run-2"), series(&a, "thread"));
     assert_eq!(
         projected(&config, "escalation-run-2").map(|row| (row.0, row.1)),
         Some((true, Some(1)))
     );
+}
+
+#[test]
+fn a_child_in_a_window_that_cannot_save_is_not_told_even_when_the_family_is_known() {
+    // Given: a mirroring window whose family is already in the database, and a locked file.
+    let directory = tempfile::tempdir().unwrap();
+    let (a, _, path) = two_windows(directory.path());
+    drop(a);
+    let (mut b, storage, config) = mirroring(&path, directory.path());
+    b.force_thread_mirror();
+    barrier(&storage);
+    let lock = lock_file(&path);
+
+    // When: it adds a child and mirrors repeatedly while the lock is held.
+    b.apply_events([escalation("run-1", "run-2")]);
+    b.force_thread_mirror();
+    b.force_thread_mirror();
+    barrier(&storage);
+
+    // Then: the child is unknown to the database until the save succeeds.
+    assert!(row(&config, "escalation-run-2").is_none());
+    drop(lock);
+    b.save_sidebar();
+    b.force_thread_mirror();
+    barrier(&storage);
+    assert!(row(&config, "escalation-run-2").is_some());
 }
 
 #[test]
@@ -419,5 +478,40 @@ fn an_edit_saved_but_never_mirrored_reaches_the_database_after_a_restart() {
     assert_eq!(
         projected(&config, "thread").map(|row| (row.0, row.1)),
         Some((true, Some(1)))
+    );
+}
+
+#[test]
+fn a_file_of_the_older_form_met_after_start_up_is_not_converted_or_published() {
+    // Given: a mirroring window on an archived family, and a program of the older form
+    // that overwrites the shared file with per-thread flags (everything unarchived).
+    let directory = tempfile::tempdir().unwrap();
+    let (mut a, _, path) = two_windows(directory.path());
+    a.toggle_archive(ThreadId::new("thread")).unwrap();
+    drop(a);
+    let (mut b, storage, config) = mirroring(&path, directory.path());
+    b.force_thread_mirror();
+    barrier(&storage);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    json["version"] = 1.into();
+    json.as_object_mut().unwrap().remove("families");
+    json["threads"][0]["archived"] = false.into();
+    json["threads"][0]["pinned"] = true.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+
+    // When: B takes the file in and saves.
+    b.import_shared_sidebar();
+    b.save_sidebar();
+    b.force_thread_mirror();
+    barrier(&storage);
+
+    // Then: no conversion made a state from it: B's archive stands, nothing was pinned
+    // by it, and the database did not move.
+    assert_eq!(series(&b, "thread"), (true, series(&b, "thread").1, 1));
+    assert_eq!(pin_series(b.sidebar(), "thread"), (false, 0));
+    assert_eq!(
+        projected(&config, "thread").map(|row| (row.0, row.1, row.2)),
+        Some((true, Some(1), false))
     );
 }

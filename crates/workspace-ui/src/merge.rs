@@ -1,5 +1,6 @@
 //! Three-way merge of sidebar states written by processes sharing one file.
 
+use crate::ThreadId;
 use std::collections::BTreeMap;
 
 use crate::{ProjectRecord, SidebarState, ThreadRecord};
@@ -53,8 +54,38 @@ impl SidebarState {
             .active_thread
             .clone()
             .filter(|id| threads.iter().any(|thread| &thread.id == id));
+        // A thread's parent is fixed when it is created. Two sides that disagree about
+        // it (neither agrees with the base) cannot both be right: the thread is set aside
+        // instead of silently taking one of them.
+        let mut parent_conflicts: Vec<ThreadId> = local
+            .parent_conflicts
+            .iter()
+            .chain(&disk.parent_conflicts)
+            .chain(&base.parent_conflicts)
+            .cloned()
+            .collect();
+        for thread in &local.threads {
+            let Some(other) = disk.threads.iter().find(|other| other.id == thread.id) else {
+                continue;
+            };
+            let base_parent = base
+                .threads
+                .iter()
+                .find(|candidate| candidate.id == thread.id)
+                .map(|candidate| &candidate.parent_thread_id);
+            if thread.parent_thread_id != other.parent_thread_id
+                && base_parent != Some(&thread.parent_thread_id)
+                && base_parent != Some(&other.parent_thread_id)
+            {
+                parent_conflicts.push(thread.id.clone());
+            }
+        }
+        parent_conflicts.sort();
+        parent_conflicts.dedup();
+        parent_conflicts.retain(|id| threads.iter().any(|thread| &thread.id == id));
         let mut merged = Self {
             version: local.version.max(disk.version),
+            parent_conflicts,
             projects,
             selected_project,
             threads,

@@ -86,6 +86,8 @@ pub(crate) fn schedule(
             RetentionStatus::Blocked(BlockReason::Pinned)
         } else if let Some(reason) = overrides.get(&thread.thread_id) {
             RetentionStatus::Blocked(reason.clone())
+        } else if let Some(reason) = unresolved_reason(conn, &thread.thread_id)? {
+            RetentionStatus::Blocked(BlockReason::FamilyUnresolved(reason))
         } else if has_eval_sample(conn, &thread.thread_id)? {
             RetentionStatus::Blocked(BlockReason::EvalSample)
         } else {
@@ -116,6 +118,18 @@ pub(crate) fn schedule(
         statuses.push((thread.thread_id.clone(), status));
     }
     Ok(statuses)
+}
+
+/// The identity an exploration could not resolve in the thread's family, if the last
+/// exploration found one.
+fn unresolved_reason(conn: &Connection, thread_id: &str) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT reason_id FROM retention_unresolved WHERE thread_id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// Why the family a thread was already found to belong to would not be confirmed

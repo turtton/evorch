@@ -13,11 +13,13 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Restores what migration v38 dropped: the unnumbered-writer markers.
+/// Restores what migration v38 dropped (the unnumbered-writer markers) and removes what it
+/// added (the table of unresolved families).
 pub fn undo_v38(connection: &Connection) {
     connection
         .execute_batch(
-            "ALTER TABLE threads ADD COLUMN archive_unnumbered INTEGER NOT NULL DEFAULT 0
+            "DROP TABLE IF EXISTS retention_unresolved;
+             ALTER TABLE threads ADD COLUMN archive_unnumbered INTEGER NOT NULL DEFAULT 0
                  CHECK (archive_unnumbered IN (0, 1));
              ALTER TABLE threads ADD COLUMN pin_unnumbered INTEGER NOT NULL DEFAULT 0
                  CHECK (pin_unnumbered IN (0, 1));",

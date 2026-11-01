@@ -414,7 +414,7 @@ fn raising_revisions_above_the_projection_gives_the_sidebars_state_the_last_word
         _ => (0, 0),
     };
 
-    let raised = sidebar.raise_family_revisions(&floor);
+    let raised = sidebar.raise_family_revisions(&floor, false);
 
     assert_eq!(raised, 1);
     let state = &sidebar.families[0];
@@ -424,7 +424,121 @@ fn raising_revisions_above_the_projection_gives_the_sidebars_state_the_last_word
         "the value is kept; the numbers move above the projection's"
     );
     // A second pass has nothing to raise.
-    assert_eq!(sidebar.raise_family_revisions(&floor), 0);
+    assert_eq!(sidebar.raise_family_revisions(&floor, false), 0);
+}
+
+#[test]
+fn a_converted_state_ends_strictly_above_an_equal_projection_but_a_steady_one_is_left_alone() {
+    // Given: a family at archive revision 1 / pin revision 1, and a projection holding
+    // the same numbers (with another value: the protective side would win there).
+    let dir = TempDir::new().unwrap();
+    let mut sidebar = family(&dir);
+    sidebar.set_family_archived(&id("root"), true, 10).unwrap();
+    sidebar.set_family_pinned(&id("root"), true).unwrap();
+    let equal = |thread: &ThreadId| {
+        if thread == &id("other") {
+            (0, 0)
+        } else {
+            (1, 1)
+        }
+    };
+
+    // When: a steady state (not just converted) meets an equal projection.
+    // Then: nothing changes, so a restart does not renumber.
+    assert_eq!(sidebar.raise_family_revisions(&equal, false), 0);
+    assert_eq!(sidebar.families[0].archive_revision, 1);
+
+    // When: the same numbers meet a state that was just converted.
+    assert_eq!(sidebar.raise_family_revisions(&equal, true), 1);
+
+    // Then: it moves strictly above the projection, and once only.
+    let state = &sidebar.families[0];
+    assert_eq!((state.archive_revision, state.pin_revision), (2, 2));
+    assert_eq!(sidebar.raise_family_revisions(&equal, true), 0);
+    // A projection that holds nothing (revision 0 / never synchronised) is no floor.
+    assert_eq!(sidebar.raise_family_revisions(&|_| (0, 0), true), 0);
+}
+
+#[test]
+fn equal_revisions_with_two_archive_times_keep_the_later_one_on_either_side() {
+    let dir = TempDir::new().unwrap();
+    let base = family(&dir);
+    let side = |at: i64| {
+        let mut sidebar = base.clone();
+        sidebar.families.push(workspace_ui::FamilyState {
+            key: id("root"),
+            archived: true,
+            archived_at: Some(at),
+            archive_revision: 4,
+            pinned: false,
+            pin_revision: 0,
+        });
+        sidebar.refresh_derived();
+        sidebar
+    };
+    let (early, late) = (side(10), side(20));
+
+    for merged in [
+        SidebarState::merge_three_way(&base, &early, &late),
+        SidebarState::merge_three_way(&base, &late, &early),
+    ] {
+        assert_eq!(merged.families[0].archived_at, Some(20));
+    }
+}
+
+#[test]
+fn two_sides_that_gave_one_thread_different_parents_set_it_and_its_descendants_aside() {
+    // Given: both sides created the same ID, under different parents.
+    let dir = TempDir::new().unwrap();
+    let base = family(&dir);
+    let project = ProjectId::new("p");
+    let side = |parent: &str| {
+        let mut sidebar = base.clone();
+        sidebar
+            .create_thread(id("twin"), project.clone(), "twin")
+            .unwrap();
+        sidebar.threads.last_mut().unwrap().parent_thread_id = Some(id(parent));
+        sidebar
+            .create_thread(id("twin-child"), project.clone(), "c")
+            .unwrap();
+        sidebar.threads.last_mut().unwrap().parent_thread_id = Some(id("twin"));
+        sidebar.refresh_derived();
+        sidebar
+    };
+    let (a, b) = (side("root"), side("other"));
+
+    // When: they are merged, either way round, and the result is saved and read back.
+    for merged in [
+        SidebarState::merge_three_way(&base, &a, &b),
+        SidebarState::merge_three_way(&base, &b, &a),
+    ] {
+        // Then: the thread and its child have no family (nothing is archived, pinned
+        // or deleted on a guess), the others are unaffected, and the conflict is kept.
+        assert_eq!(merged.parent_conflicts, [id("twin")]);
+        let states = merged.resolve_states();
+        for name in ["twin", "twin-child"] {
+            assert!(matches!(
+                state(&states, name).family,
+                Err(FamilyUnresolved::ParentConflict { .. })
+            ));
+            assert!(
+                merged
+                    .clone()
+                    .set_family_archived(&id(name), true, 1)
+                    .is_err()
+            );
+        }
+        assert!(state(&states, "root").is_resolved());
+        let (loaded, _) =
+            sidebar_from_json_report(&serde_json::to_string(&merged).unwrap()).unwrap();
+        assert_eq!(loaded.parent_conflicts, [id("twin")]);
+    }
+
+    // And: a merge in which only one side changed a parent is not a conflict.
+    let mut moved = base.clone();
+    moved.threads[1].parent_thread_id = Some(id("root"));
+    let merged = SidebarState::merge_three_way(&base, &moved, &base);
+    assert!(merged.parent_conflicts.is_empty());
 }
 
 #[test]

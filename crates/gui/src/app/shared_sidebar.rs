@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::WorkbenchState;
@@ -36,9 +37,22 @@ pub(super) struct SharedSidebar {
     /// from being repeated for the same file: a save still reads and merges the file
     /// itself, and refuses to write over it while it cannot.
     import_failed: Option<FileStamp>,
+    /// The sidebar as the file holds it after this process's last successful save or
+    /// import (or the one it started from): the only state the database mirror projects
+    /// from. What this process holds beyond it (a child not saved yet, a merge not taken
+    /// in yet) is local and unconfirmed, and is not told to anyone.
+    committed: Option<Arc<workspace_ui::SidebarState>>,
 }
 
 impl SharedSidebar {
+    pub(super) fn set_committed(&mut self, sidebar: workspace_ui::SidebarState) {
+        self.committed = Some(Arc::new(sidebar));
+    }
+
+    pub(super) fn committed(&self) -> Option<Arc<workspace_ui::SidebarState>> {
+        self.committed.clone()
+    }
+
     pub(super) const fn stamp(&self) -> Option<&FileStamp> {
         self.stamp.as_ref()
     }
@@ -167,11 +181,14 @@ fn all_thread_ids(history: &HistorySidebar) -> BTreeSet<String> {
         .collect()
 }
 
-/// Reads a saved sidebar, converting an older file (once) and deriving the
-/// per-record cache of the family states.
+/// Reads a saved sidebar and derives the per-record cache of its family states. An older
+/// file is **not** converted here: the conversion needs the database's numbers and a
+/// saved result, so it is made once at start-up while the exclusive locks are held
+/// ([`crate::startup`]). A file of the older form met later (written by an older program)
+/// carries no family states, so it adds none and cannot overrule this process's.
 fn parse(bytes: &[u8]) -> Result<HistorySidebar, serde_json::Error> {
     let mut parsed: HistorySidebar = serde_json::from_slice(bytes)?;
-    parsed.sidebar.settle_loaded();
+    parsed.sidebar.refresh_derived();
     Ok(parsed)
 }
 
@@ -294,6 +311,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         write_atomically(path, output.as_deref().unwrap_or(&local))?;
+        // What the file holds now is the committed state, merged-in changes included.
+        if let Ok(written) = parse(output.as_deref().unwrap_or(&local)) {
+            shared.set_committed(written.sidebar);
+        }
         shared.stamp = FileStamp::of(path);
         shared.import_pending = output.is_some();
         shared.save_deferred = false;
@@ -322,9 +343,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(commit) = commit else {
             return Ok(output);
         };
+        let committed = commit
+            .written
+            .is_some()
+            .then(|| commit.latest.sidebar.clone());
         self.adopt_saved(&commit.local, commit.latest, &commit.own);
         if let Some(bytes) = commit.written {
             let mut shared = self.shared_sidebar.borrow_mut();
+            if let Some(committed) = committed {
+                shared.set_committed(committed);
+            }
             shared.stamp = commit.stamp;
             shared.import_pending = false;
             shared.save_deferred = false;
@@ -491,6 +519,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // changes of this process that were not saved yet (a deferred save)
         // stay differences from it and are written by the next save.
         let mut shared = self.shared_sidebar.borrow_mut();
+        if let Ok(disk) = parse(&bytes) {
+            shared.set_committed(disk.sidebar);
+        }
         shared.stamp = stamp;
         shared.import_pending = false;
         shared.import_failed = None;

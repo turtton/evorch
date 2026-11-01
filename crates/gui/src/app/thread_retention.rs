@@ -341,7 +341,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.retention.dirty = false;
         self.retention.in_flight = true;
         self.retention.next_refresh = Some(now + REFRESH_INTERVAL);
-        let threads = crate::startup::sidebar_threads(&self.sidebar);
+        // The statuses describe what the shared file holds (the same state the database
+        // mirror projects), not a local change that is not saved yet.
+        let committed = self.shared_sidebar.borrow().committed();
+        let threads =
+            crate::startup::sidebar_threads(committed.as_deref().unwrap_or(&self.sidebar));
         let now_ns = now_unix_seconds().saturating_mul(1_000_000_000);
         let sender = self.retention.sender.clone();
         let spawned = std::thread::Builder::new()

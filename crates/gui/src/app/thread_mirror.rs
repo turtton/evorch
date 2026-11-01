@@ -83,8 +83,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         }
         link.next_sync = Some(now + SYNC_INTERVAL);
-        let roots: HashMap<&ProjectId, String> = self
-            .sidebar
+        // Only what the shared file is known to hold is projected: a thread this
+        // process added but has not saved, or a merge it has not taken in, would be
+        // described by a family state that may be older than the file's. Without a
+        // shared file there is nothing to confirm against.
+        let committed = self.shared_sidebar.borrow().committed();
+        let sidebar: &workspace_ui::SidebarState = match (&self.sidebar_path, &committed) {
+            (None, _) => &self.sidebar,
+            (Some(_), Some(committed)) => committed,
+            (Some(_), None) => return,
+        };
+        let roots: HashMap<&ProjectId, String> = sidebar
             .projects
             .iter()
             .filter_map(|project| {
@@ -92,9 +101,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .collect();
         // The one resolution of archive and pin state, shared with the retention input.
-        let states = self.sidebar.resolve_states();
-        let changed: Vec<ThreadUpsert> = self
-            .sidebar
+        let states = sidebar.resolve_states();
+        let changed: Vec<ThreadUpsert> = sidebar
             .threads
             .iter()
             .filter_map(|thread| {

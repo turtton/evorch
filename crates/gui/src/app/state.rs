@@ -408,6 +408,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.transcripts.bind_run(run, &thread.id.to_string());
             }
         }
+        self.shared_sidebar
+            .borrow_mut()
+            .set_committed(sidebar.clone());
         self.shared_sidebar_baseline(
             serde_json::to_vec_pretty(&super::history::HistorySidebarRef {
                 sidebar: &sidebar,

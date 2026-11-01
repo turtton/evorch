@@ -67,6 +67,19 @@ impl Fixture {
         self.write_legacy_sidebar(|_| {});
     }
 
+    /// The same sidebar in the current form (no conversion to make).
+    fn write_current_sidebar(&self) {
+        self.write_legacy_sidebar(|_| {});
+        let converted = workspace_ui::load_sidebar(&self.sidebar_path()).unwrap();
+        let mut json = serde_json::to_value(&converted).unwrap();
+        json["user_messages"] = serde_json::json!([]);
+        std::fs::write(
+            self.sidebar_path(),
+            serde_json::to_vec_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn saved(&self) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(self.sidebar_path()).unwrap()).unwrap()
     }
@@ -166,7 +179,7 @@ fn a_period_of_zero_days_confirms_nothing() {
 fn another_process_holding_a_lock_skips_the_phase_and_the_start_goes_on() {
     // Given: another window holds the locks shared.
     let fixture = Fixture::new();
-    fixture.write_sidebar();
+    fixture.write_current_sidebar();
     let plan = fixture.plan(true);
     let other =
         storage::shared_with_wait(&plan.db_path, &plan.ownership_root, Duration::from_secs(1))
@@ -444,6 +457,106 @@ fn a_family_whose_members_disagree_is_kept_and_nothing_in_it_is_deleted() {
         let state = &states[&ThreadId::new(id)];
         assert!(!state.archived && state.archived_at.is_none(), "{id}");
     }
+}
+
+#[test]
+fn a_projection_at_the_same_revision_is_still_passed_by_the_converted_numbers() {
+    // Given: the older sidebar has a parent archived and its child not (a mixed family,
+    // so it converts to not archived at revision 1), and the database holds the parent
+    // as archived at that very revision 1, where the protective side would win.
+    let fixture = Fixture::new();
+    fixture.write_legacy_sidebar(|json| {
+        let mut child = json["threads"][0].clone();
+        child["id"] = "child".into();
+        child["parent_thread_id"] = "old".into();
+        json["threads"].as_array_mut().unwrap().push(child);
+    });
+    let plan = fixture.plan(true);
+    {
+        let storage = storage::Storage::open(storage::StorageConfig {
+            db_path: plan.db_path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        storage
+            .handle()
+            .upsert_threads_host(&[storage::threads::ThreadUpsert {
+                thread_id: "old".into(),
+                archived: Some(true),
+                archive_revision: 1,
+                created_at_ns: 1,
+                updated_at_ns: 1,
+                ..Default::default()
+            }])
+            .unwrap();
+    }
+
+    // When: the start-up converts the sidebar, and starts again.
+    let (_, prelude) = collect(&plan, 0);
+    drop(prelude);
+    let first = fixture.saved()["families"].clone();
+    let (events, prelude) = collect(&plan, 0);
+    drop(prelude);
+
+    // Then: the family is strictly above the database's revision, so what the sidebar
+    // says (not archived) is no longer overruled; the second start renumbers nothing.
+    let sidebar = workspace_ui::load_sidebar(&fixture.sidebar_path()).unwrap();
+    let state = &sidebar.resolve_states()[&ThreadId::new("old")];
+    assert!(!state.archived);
+    assert!(state.archive_revision > 1, "{}", state.archive_revision);
+    assert_eq!(fixture.saved()["families"], first);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StartupEvent::SidebarConverted { .. }))
+    );
+}
+
+#[test]
+fn a_conversion_that_cannot_read_the_database_is_not_called_done() {
+    // Given: an older sidebar and a database file that is not a database.
+    let fixture = Fixture::new();
+    fixture.write_sidebar();
+    let plan = fixture.plan(true);
+    std::fs::write(&plan.db_path, b"this is not a database").unwrap();
+    let before = std::fs::read(fixture.sidebar_path()).unwrap();
+
+    // When: the start-up runs.
+    let result = run_startup(&plan, policy(30), &mut |_| {});
+
+    // Then: it fails, and the sidebar file is left as it was (still convertible).
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(fixture.sidebar_path()).unwrap(), before);
+}
+
+#[test]
+fn an_older_sidebar_is_not_converted_or_published_without_the_exclusive_locks() {
+    // Given: another process holds the locks shared, and the sidebar is the older form.
+    let fixture = Fixture::new();
+    fixture.write_sidebar();
+    let plan = fixture.plan(true);
+    let before = std::fs::read(fixture.sidebar_path()).unwrap();
+    let other =
+        storage::shared_with_wait(&plan.db_path, &plan.ownership_root, Duration::from_secs(1))
+            .unwrap();
+
+    // When: this process starts.
+    let result = run_startup(&plan, policy(30), &mut |_| {});
+
+    // Then: it refuses (nothing converted is handed out), and the file is untouched;
+    // the locks it took are released again.
+    let error = result.err().expect("an error");
+    assert!(matches!(
+        error,
+        gui::startup::StartupError::ConversionNeedsExclusive
+    ));
+    assert_eq!(std::fs::read(fixture.sidebar_path()).unwrap(), before);
+    drop(other);
+    assert!(
+        storage::try_exclusive(&plan.db_path, &plan.ownership_root)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

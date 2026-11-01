@@ -2434,6 +2434,21 @@ fn a_thread_lineage_cycle_or_a_self_parent_is_unresolved_and_confirms_nothing() 
             0,
             "{label}"
         );
+
+        // And: the schedule shown afterwards keeps the reason instead of "due".
+        let policy = policy();
+        let statuses = database
+            .retention_schedule(&input, &policy, &BTreeMap::new())
+            .unwrap();
+        for (thread, status) in &statuses {
+            assert!(
+                matches!(
+                    status,
+                    RetentionStatus::Blocked(BlockReason::FamilyUnresolved(_))
+                ),
+                "{label}: {thread} {status:?}"
+            );
+        }
     }
 
     // And: a chain below the link limit still resolves and confirms.

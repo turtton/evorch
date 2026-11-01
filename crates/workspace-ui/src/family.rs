@@ -74,6 +74,8 @@ pub enum FamilyUnresolved {
     MissingParent { thread: ThreadId, parent: ThreadId },
     /// The parent chain of `thread` leads back to itself.
     Cycle { thread: ThreadId },
+    /// Two sidebars gave `thread` different parents.
+    ParentConflict { thread: ThreadId },
 }
 
 impl std::fmt::Display for FamilyUnresolved {
@@ -84,6 +86,9 @@ impl std::fmt::Display for FamilyUnresolved {
             }
             Self::Cycle { thread } => {
                 write!(formatter, "the parents of thread {thread} form a cycle")
+            }
+            Self::ParentConflict { thread } => {
+                write!(formatter, "thread {thread} was given different parents")
             }
         }
     }
@@ -163,6 +168,11 @@ impl SidebarState {
                     });
                 }
                 chain.push(current);
+                if self.parent_conflicts.contains(current) {
+                    break Err(FamilyUnresolved::ParentConflict {
+                        thread: current.clone(),
+                    });
+                }
                 match parents.get(current) {
                     Some(Some(parent)) if parents.contains_key(parent) => current = parent,
                     Some(Some(parent)) => {
@@ -313,7 +323,17 @@ impl SidebarState {
     /// already holds (`floor` gives a thread's archive and pin revision there), so
     /// what the sidebar says is never ignored for being older. A family without a
     /// state gets one that says what it said before. Returns how many were raised.
-    pub fn raise_family_revisions(&mut self, floor: &dyn Fn(&ThreadId) -> (u64, u64)) -> usize {
+    ///
+    /// A projection at the *same* revision keeps its own value when the two disagree
+    /// (the protective side wins there), so the sidebar's value could never replace it.
+    /// `converted` is for a sidebar just made from an older file, whose numbers were
+    /// invented without knowing the projection's: it must end strictly above it, equal
+    /// numbers included. Otherwise only a projection strictly ahead is passed.
+    pub fn raise_family_revisions(
+        &mut self,
+        floor: &dyn Fn(&ThreadId) -> (u64, u64),
+        converted: bool,
+    ) -> usize {
         let keys = self.family_keys();
         let mut highest: BTreeMap<ThreadId, (u64, u64)> = BTreeMap::new();
         for thread in &self.threads {
@@ -324,6 +344,13 @@ impl SidebarState {
                 entry.1 = entry.1.max(pin);
             }
         }
+        let needs = |floor: u64, current: u64| {
+            if converted {
+                floor > 0 && floor >= current
+            } else {
+                floor > current
+            }
+        };
         let mut raised = 0;
         for (key, (archive, pin)) in highest {
             let current = self
@@ -331,14 +358,14 @@ impl SidebarState {
                 .iter()
                 .find(|state| state.key == key)
                 .map_or((0, 0), |state| (state.archive_revision, state.pin_revision));
-            if archive <= current.0 && pin <= current.1 {
+            if !needs(archive, current.0) && !needs(pin, current.1) {
                 continue;
             }
             let state = self.family_entry(&key);
-            if archive > state.archive_revision {
+            if needs(archive, current.0) {
                 state.archive_revision = archive + 1;
             }
-            if pin > state.pin_revision {
+            if needs(pin, current.1) {
                 state.pin_revision = pin + 1;
             }
             raised += 1;
@@ -439,17 +466,25 @@ pub(crate) fn merge_families(local: &[FamilyState], disk: &[FamilyState]) -> Vec
 }
 
 fn merge_family(local: &FamilyState, disk: &FamilyState) -> FamilyState {
-    let archive = match local.archive_revision.cmp(&disk.archive_revision) {
-        std::cmp::Ordering::Greater => local,
-        std::cmp::Ordering::Less => disk,
-        std::cmp::Ordering::Equal if local.archived != disk.archived => {
-            if local.archived {
-                local
-            } else {
-                disk
-            }
+    // A higher revision replaces the series. At an equal revision the sides were made
+    // independently from the same base; the result must not depend on which side is
+    // "local", and keeps the protective side: archived wins, and of two archive times
+    // the later one (the longer retention) wins.
+    let (archived, archived_at, archive_revision) = match local
+        .archive_revision
+        .cmp(&disk.archive_revision)
+    {
+        std::cmp::Ordering::Greater => (local.archived, local.archived_at, local.archive_revision),
+        std::cmp::Ordering::Less => (disk.archived, disk.archived_at, disk.archive_revision),
+        std::cmp::Ordering::Equal => {
+            let archived = local.archived || disk.archived;
+            let at = [local, disk]
+                .into_iter()
+                .filter(|side| side.archived)
+                .filter_map(|side| side.archived_at)
+                .max();
+            (archived, at, local.archive_revision)
         }
-        std::cmp::Ordering::Equal => local,
     };
     let (pinned, pin_revision) = match local.pin_revision.cmp(&disk.pin_revision) {
         std::cmp::Ordering::Greater => (local.pinned, local.pin_revision),
@@ -458,13 +493,9 @@ fn merge_family(local: &FamilyState, disk: &FamilyState) -> FamilyState {
     };
     FamilyState {
         key: local.key.clone(),
-        archived: archive.archived,
-        archived_at: archive.archived_at.or_else(|| {
-            (local.archive_revision == disk.archive_revision && local.archived == disk.archived)
-                .then_some(disk.archived_at)
-                .flatten()
-        }),
-        archive_revision: archive.archive_revision,
+        archived,
+        archived_at,
+        archive_revision,
         pinned,
         pin_revision,
     }

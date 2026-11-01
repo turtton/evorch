@@ -143,6 +143,8 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   必要とする行数は探索が読んだ行数と同じなので、`retention_finalize_budget` がそれに
   余裕を足した予算を返す。増えた family は `FinalizeBudget::doubled` で倍にして再試行すれば
   有限回で完遂する。
+  探索が `FamilyUnresolved` と判断した family は staging を捨てるが、メンバーと理由を `retention_unresolved` に残し
+  （探索のたびに作り直す）、表示用の `retention_schedule` はその理由を「保留」として返す（「次回起動時に削除予定」にしない）。
 - **判定入力は sidebar。** `RetentionInput` は呼び手が排他ロック取得後に読んだ
   sidebar を渡す。DB の `threads` の `archived` / `pinned` と revision 列は mirror で、
   検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
@@ -336,10 +338,14 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
     ファイルを読めない場合は何も作らない。escalation の子はイベントの畳み込み中に作るので失敗させず、手元に足して
     次の保存で merge する（状態を持たないので、ロックが取れない間も状態は食い違わない）。
   - **merge。** `families` はキーの和集合で、系列ごとに revision の高い側を採る（同値で内容が割れたら保護側 =
-    archived / pinned）。どちらか一方にしか無い状態は残す。古い画面の再追加・replay・import・再起動で、保存済みの revision は戻らない。
+    archived / pinned。archive の時刻が 2 つあれば遅い方。どちらが local でも同じ結果）。どちらか一方にしか無い状態は残す。古い画面の再追加・replay・import・再起動で、保存済みの revision は戻らない。
   - **DB への射影。** DB のスレッド単位の列は、family 状態からの射影（派生）。family の状態が変わると、全メンバーの
     upsert を作り直して送る（新しいメンバーにも同じ状態が付く）。再送は冪等で、プロセスが落ちても次の起動が sidebar から再構成する。
-  - **解決できない所属。** 親が sidebar に無い、親の鎖が輪になっている、のスレッドは「解決不能」。状態を持たず
+    **射影の元は「確定した snapshot」だけ**: このプロセスが最後に保存・import に成功した結果（起動時は読み込んだファイル）で、
+    未保存の子や取り込み前の merge 結果は含めない（ロックが取れない間の escalation の子は、保存に成功するまで DB に出ない。
+    保存の merge で他者の新しい family 状態が入っていれば、その状態で最初の行が作られ、検索対象にならない）。
+    共有ファイルを持たない構成（テスト）だけは手元の状態から射影する。削除の保留表示（schedule）も同じ snapshot を使う。
+  - **解決できない所属。** 親が sidebar に無い、親の鎖が輪になっている、同じ ID に異なる親を与えた 2 つの sidebar を merge した（`parent_conflicts` に残し、子孫も含めて保留）、のスレッドは「解決不能」。状態を持たず
     （未 archive・未 pin として表示）、archive / pin の操作は拒否し、DB へは archive / pin を送らず（DB の既存値を保つ）、
     削除の入力では未 archive として送るので、その family の削除は保留になる。archive 一覧のホバーは、
     保留の理由を "the family of related thread X cannot be resolved" と出す。
@@ -349,6 +355,10 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
     **混在（一部だけ archived）の family は未 archive にし、新しい時刻は作らない。** pin は 1 人でも pinned なら pinned。
     revision は旧メンバーの最大値と DB 側の値（スレッド行の revision）の最大より 1 大きくして始め、DB に無視されない。
     変換した family 数・混在数・解決不能数はスプラッシュに出る。以後は変換しない。
+    **変換・DB の revision との突き合わせ・保存は排他取得側だけ**が行う。排他を取れない起動（他のプロセスが DB を保持）で
+    旧形式の sidebar を見つけたときは、変換した状態を公開も保存もせず起動を失敗させる（他のウィンドウを閉じて再起動する）。
+    新形式（version 2）の `NoExclusive` 起動は従来どおり。起動後に旧形式のファイルを読んでも（古いプログラムの書込み）変換せず、
+    family の状態を持たないファイルとして merge する。
   - sidebar.json を読めない（壊れている）ときは、archive / pin の操作も通常の保存も、ファイルを上書きせずエラーにする
     （他のウィンドウの pin / archive を確認できないまま古い状態を書くと、次回起動の削除判定に使われるため）。
     import が失敗したときも、通常保存は同じファイルを読み直して merge し、読めない間は上書きしない。
