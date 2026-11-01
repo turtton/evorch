@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36};
 
-const LATEST_SCHEMA: u32 = 36;
+const LATEST_SCHEMA: u32 = 37;
 
 const EXPECTED_TABLES: [&str; 64] = [
     "artifact_refs",

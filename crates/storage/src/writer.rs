@@ -145,6 +145,8 @@ enum Command {
         ReplyTx<crate::thread_retention::ReclaimProgress>,
     ),
     ReclaimMarkFiles(String, crate::thread_retention::FilesOutcome, ReplyTx<bool>),
+    RecordArtifactRef(crate::artifact_refs::ArtifactRef, ReplyTx),
+    RemoveArtifactRefs(Vec<String>, ReplyTx<usize>),
     RetentionBackfillStep(usize, ReplyTx<crate::BackfillProgress>),
     DiagnosticCleanupStatus(DiagnosticCleanupScope, ReplyTx<cleanup::CleanupStatus>),
     CleanupDiagnosticBatch(
@@ -1106,6 +1108,28 @@ impl StorageHandle {
         outcome: crate::thread_retention::FilesOutcome,
     ) -> Result<bool, StorageError> {
         self.request(|reply| Command::ReclaimMarkFiles(family_key.to_owned(), outcome, reply))
+    }
+
+    /// Record that an artifact meta file is about to be published for the blob
+    /// `r.sha256`. The reply is sent after the commit; the caller writes the meta
+    /// file only on success, so a blob a published meta names always has a row.
+    ///
+    /// # Errors
+    /// Fails for SQLite failure, a closed writer or suspended writes.
+    pub fn record_artifact_ref(
+        &self,
+        r: crate::artifact_refs::ArtifactRef,
+    ) -> Result<(), StorageError> {
+        self.request(|reply| Command::RecordArtifactRef(r, reply))
+    }
+
+    /// Delete the reference rows of artifacts whose meta file is gone. Returns how
+    /// many rows existed.
+    ///
+    /// # Errors
+    /// Fails for SQLite failure or a closed writer.
+    pub fn remove_artifact_refs(&self, artifact_ids: &[String]) -> Result<usize, StorageError> {
+        self.request(|reply| Command::RemoveArtifactRefs(artifact_ids.to_vec(), reply))
     }
 
     /// Convert or attribute up to `rows` events that retention needs attributed to

@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{AgentRuntime, Role, RunPurpose, agent_loop::LoopState, meta::DispatchResult};
 
+pub use gc::{GcBudget, GcReport, GcStop, collect as collect_blobs};
 pub use meta_removal::{MAX_FAILURES_KEPT, MAX_META_BYTES, MetaRemoval, MetaStop};
 
 pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -107,11 +108,46 @@ pub struct InlinedAsset {
     pub byte_len: u64,
 }
 
+/// Records that a meta file is about to name a blob (the `artifact_refs` table), so the
+/// blob collector knows the blob is in use.
+pub trait ArtifactRefRecorder: Send + Sync + std::fmt::Debug {
+    /// Durably record `reference`. `Ok` means it is committed; a capture publishes its
+    /// meta file only after that.
+    ///
+    /// # Errors
+    /// The reason the reference could not be recorded.
+    fn record(&self, reference: &storage::artifact_refs::ArtifactRef) -> Result<(), String>;
+}
+
+#[derive(Debug)]
+struct StorageRefRecorder(storage::StorageHandle);
+
+impl ArtifactRefRecorder for StorageRefRecorder {
+    fn record(&self, reference: &storage::artifact_refs::ArtifactRef) -> Result<(), String> {
+        self.0
+            .record_artifact_ref(reference.clone())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// An [`ArtifactStore`] that records every capture in the storage reference table
+/// before its meta file appears. Hosts that collect blobs use this constructor.
+///
+/// # Errors
+/// Fails when the store directories cannot be created.
+pub fn store_with_refs(
+    root: impl Into<PathBuf>,
+    handle: storage::StorageHandle,
+) -> std::io::Result<ArtifactStore> {
+    Ok(ArtifactStore::new(root)?.with_ref_recorder(Arc::new(StorageRefRecorder(handle))))
+}
+
 /// Captures live outside every workspace: `<root>/blobs/<sha256>.<ext>` and
 /// `<root>/meta/<artifact_id>.json`.
 #[derive(Debug)]
 pub struct ArtifactStore {
     root: PathBuf,
+    recorder: Option<Arc<dyn ArtifactRefRecorder>>,
 }
 
 /// The capture inputs that do not come from the file itself.
@@ -128,7 +164,17 @@ impl ArtifactStore {
         let root = root.into();
         std::fs::create_dir_all(root.join("blobs"))?;
         std::fs::create_dir_all(root.join("meta"))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            recorder: None,
+        })
+    }
+
+    /// Record every capture with `recorder` before its meta file is written.
+    #[must_use]
+    pub fn with_ref_recorder(mut self, recorder: Arc<dyn ArtifactRefRecorder>) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 
     pub fn blob_path(&self, record: &ArtifactRecord) -> PathBuf {
@@ -179,6 +225,21 @@ impl ArtifactStore {
         let blob = self.blob_path(&record);
         if !blob.is_file() {
             write_atomically(&blob, &bytes)?;
+        }
+        // The reference comes first: a meta file that names a blob is never visible
+        // without a row for it, so the blob collector cannot mistake the blob for
+        // garbage. A failure leaves only the blob, which the collector reclaims.
+        if let Some(recorder) = &self.recorder {
+            recorder
+                .record(&storage::artifact_refs::ArtifactRef {
+                    artifact_id: record.artifact_id.clone(),
+                    sha256: record.sha256.clone(),
+                    thread_id: record.thread_id.clone(),
+                    run_id: Some(record.run_id.clone()),
+                    recorded_at_ns: storage::system_time_to_ns(std::time::SystemTime::now())
+                        .map_err(|error| error.to_string())?,
+                })
+                .map_err(|error| format!("cannot record the artifact reference: {error}"))?;
         }
         let meta = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
         write_atomically(&self.meta_path(&record.artifact_id)?, &meta)?;
@@ -611,6 +672,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
     })())
 }
 
+mod gc;
 mod inline_images;
 mod inspect;
 mod meta_removal;

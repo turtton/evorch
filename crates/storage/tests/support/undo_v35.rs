@@ -13,9 +13,17 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Removes the columns migration v36 added to tables the older schema keeps.
+/// Removes the column migration v37 added to a table the older schema keeps.
+pub fn undo_v37(connection: &Connection) {
+    connection
+        .execute_batch("ALTER TABLE gc_state DROP COLUMN ref_cursor;")
+        .unwrap();
+}
+
+/// Removes the columns migrations v36 and v37 added to tables the older schema keeps.
 /// (Its indexes are created with `IF NOT EXISTS`, so replaying leaves them be.)
 pub fn undo_v36(connection: &Connection) {
+    undo_v37(connection);
     connection
         .execute_batch(
             "DROP INDEX IF EXISTS idx_thread_index_runs_archived_pending;

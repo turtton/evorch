@@ -216,7 +216,8 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   **後に** tombstone と束縛を読み直す。`Storage::open_with_lease` が DB のリースを writer スレッドへ渡す。
   回収の実行者は `<db>.reclaim-lock` を排他で持つ 1 プロセスだけ。
 - **確定は起動フェーズ（`run_exclusive_phase`）だけ。** 段 0 束縛確認 → 1 backfill → 2 探索 →
-  3 owner 分類・root 束縛・family ごとの確定 → 4 owners.db と scratch の削除 → 5 巨大行 → 6 incremental vacuum。
+  3 owner 分類・root 束縛・family ごとの確定 → 4 owners.db と scratch の削除 → 5 巨大行 → 6 incremental vacuum → 7 artifact の blob 回収
+  （下の節。artifacts ディレクトリがあり、束縛が不一致でないときだけ）。
   量（行数・辺数・件数）で区切り、実時間では区切らない。残りは次の起動が続ける。段 0〜3 は確定の commit まで
   DB の外を変えない。段 4 以降は確定済みの集合に対する回収で、失敗や crash でも削除は取り消されず、
   次の起動が同じ段をやり直す。family は分割しない（`OverBudget` は予算を倍にして最大 4 回、足りなければ次回）。
@@ -251,7 +252,9 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   `files_failed` として再試行する（20 回で打ち切って報告）。job は family key のカーソルで巡回し、
   retry 上限に達した family があっても後ろの family が止まらない。1 回の走査は一覧に全 entry を 1 回
   読むが、保持する名前と開くファイルは予算（既定 5,000/周回）以内で、1 ファイルは 1 MiB までしか読まない。
-  artifacts の store を持たないプロセスは files に触れない。blob は触らない。通常稼働中は owners.db と
+  artifacts の store を持たないプロセスは files に触れない。meta を消したら同じ artifact の参照行
+  （`artifact_refs`）も消す（失敗しても files の判定は変えない。残った行は次の起動の孤立 ref 確認が消す）。
+  blob は触らない（起動フェーズの段 7 だけが消す）。通常稼働中は owners.db と
   scratch を触らない。停止は `shutdown()` で join してから storage を閉じる。
 - **ガード。** 起動後に tombstone を 1 回読み、削除済みの thread・run を外から受け取る入口を
   `ThreadDeleted` で拒否する: `OwnerHost::start / claim / attach`、`bind_thread_root`、
@@ -261,6 +264,41 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   質問への回答。公開入口の一覧と、それぞれの拒否方法（または不要な理由）は
   `thread_retention/tests/entries.rs` の表で固定し、新しい入口が増えるとテストが落ちる。
 - **`--state` で別の sidebar を使う起動は束縛不一致になり、自動確定が無効になる。**
+
+## artifact の実体ファイル回収（起動フェーズの段 7）
+
+アーカイブ削除で消えるのは `artifacts/meta/artifact-<id>.json` だけで、実体の
+`artifacts/blobs/<sha256>.<ext>` は内容アドレスのため複数 thread の meta が共有しうる。段 7 は、どの meta も
+指さなくなった blob を mark & sweep で消す。参照の正本は DB の `artifact_refs`（1 artifact 1 行）。
+
+- **capture の順序。** blob を書く → 参照行を DB に記録して commit を待つ → meta を公開する。記録に失敗したら
+  meta を書かず `Err` を返す（blob だけが残り、次の sweep が回収する）。meta が見えるなら必ず行がある。
+  この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になる。
+  記録しない store（テスト・headless・配線前の GUI）の meta は、次の起動の mark が補う。
+- **mark。** 起動ごとに `meta/` を最後まで列挙し、参照行も `gc_unknown_meta` の記録も無い meta を
+  名前順に `gc_meta_files`（既定 20,000）件・`gc_meta_bytes`（32 MiB）まで開いて行にする。位置を起動間で
+  持ち越さないのが要点で、前の mark の後に記録なしで追加された meta も sweep の前に必ず見つかる。
+  既知の meta は DB の索引引きだけで、開かない（`gc_meta_lookups` = 500,000 件まで）。
+- **参照が完全（`refs_complete`）になる条件。** この起動で列挙が最後まで進み（件数予算を超えていない）、
+  参照のない meta を全部読めて行にでき、`gc_unknown_meta` に残る meta が 0 件のとき**だけ**。
+  列挙の失敗・開けない・読み取り途中の失敗・1 MiB 超・JSON として壊れている・`artifact_id` が名前と違う・
+  `sha256` が小文字 64 桁の 16 進でない・ディレクトリや dangling link である meta は、どの blob を守って
+  いるか分からないので `gc_unknown_meta` に記録し、**修復するか消すまで全 blob の sweep を止める**。
+  `meta/` 自体が無い／読めない場合も同じ。DB エラーも「参照なし」とは読まず、段を打ち切る
+  （`GcStop::Database`）。明示的な NotFound（かつ、その entry 自体が無い）だけが「無い」を意味する。
+- **孤立した参照行。** meta の無い行を `gc_ref_checks`（20,000）件ずつ `ref_cursor` から確認して消す。
+  `meta/` を列挙できたときだけ行い、判断できない（NotFound 以外の失敗）行は残す。
+- **sweep。** `refs_complete` のときだけ。`blobs/` を名前順に `blob_cursor` 以降 `gc_blob_entries`
+  （50,000）件まで調べ、その sha256 を持つ行がなければ（`gc_unlinks` = 5,000 件まで）unlink する。
+  対象は `<小文字 64 桁 hex>.<英数字の拡張子>` の通常ファイルだけ（`.partial-*.tmp`、ディレクトリ、symlink、
+  他の名前には触らない）。共有 blob は、最後の参照が消えるまで残る。起動フェーズ（両 EX 保持）の中だけで動くので、
+  capture と競合しない。
+- **再開。** どの小段も件数で区切り、途中で止まっても（crash を含む）次の起動が同じ手順をやり直せる
+  （unlink は冪等、NotFound は成功扱い）。報告は `StartupOutcome::Ran.gc`（`GcReport`: 追加した行数・
+  残る unknown 件数と先頭数件のエラー・unlink 数と解放 bytes・`failed`・`stops`）。DB の削除とは別の完了項目で、
+  `refs_complete = false` のあいだ blob は残るだけで他は何も壊れない。
+- **運用。** meta が `gc_unknown_meta` に残り続ける間は blob が回収されない。報告の `unknown_sample` のファイルを
+  修復するか削除すれば、次の起動で解消する。
 
 ## 既知の制約
 
