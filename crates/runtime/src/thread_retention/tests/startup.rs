@@ -835,3 +835,106 @@ fn a_path_that_cannot_be_resolved_is_an_error() {
     .unwrap();
     assert!(matches!(bound, BindingStatus::Mismatch(reason) if reason.contains("cannot resolve")));
 }
+
+/// An archived thread whose run is `evicted(archived)` and holds one block larger than a
+/// purge step, as the index leaves it after an archive. The writer's maintenance tick
+/// (not this test) then hands the block to the exclusive phase.
+fn archived_run_with_oversized_block(world: &World) {
+    let conn = world.conn();
+    conn.execute(
+        "INSERT INTO thread_index_runs(run_id, state, evicted_reason, source_revision, \
+         snapshot_revision, source_context_sha256, extractor_version, accounting_version, \
+         source_updated_at_ns, retention_at_ns, work_generation, charged_bytes) \
+         VALUES ('rt', 'evicted', 'archived', 1, 1, '', 1, 1, 1, 1, 1, 3000000)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversation_blocks(run_id, source_kind, source_key, ordinal, block_index, \
+         role, kind, truncated, hash, text) VALUES ('rt', 'message', '0:0', 0, 0, 'user', \
+         'text', 0, 'h', hex(zeroblob(1500000)))",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let storage = storage::Storage::open(world.storage_config()).unwrap();
+    storage.handle().checkpoint_now().unwrap();
+    storage.close();
+}
+
+fn index_blocks(world: &World) -> (i64, i64) {
+    (
+        world.count("SELECT COUNT(*) FROM conversation_blocks WHERE run_id = 'rt'"),
+        world.count(
+            "SELECT COUNT(*) FROM reclaim_oversized WHERE family_key = 'archive-index' \
+             AND tbl = 'conversation_blocks' AND key = 'rt'",
+        ),
+    )
+}
+
+// Given: the archive purge handed an oversized index block of an archived thread to the
+// exclusive phase / When: the phase runs with a retention period of 0, or with a binding
+// that does not match / Then: the block is deleted and the registration dropped, while the
+// owner rows and scratch directory stay; and when the thread was unarchived in the
+// meantime, nothing is deleted and only the registration is dropped.
+#[test]
+fn an_archived_threads_oversized_index_block_is_reclaimed_whatever_the_retention_period() {
+    let off = storage::thread_retention::ThreadRetentionPolicy {
+        archived_delete_after_days: 0,
+        ..policy()
+    };
+
+    let world = world_with_thread();
+    archived_run_with_oversized_block(&world);
+    assert_eq!(
+        index_blocks(&world),
+        (1, 1),
+        "the tick registered it, deleted nothing"
+    );
+    let report = world.phase(&off, &world.input(&["T"], &[]));
+    assert!(
+        ran(&report).confirmed.is_empty(),
+        "days = 0 confirms nothing"
+    );
+    assert_eq!(index_blocks(&world), (0, 0), "reclaimed at days = 0");
+    assert_eq!(
+        world.count("SELECT charged_bytes FROM thread_index_runs WHERE run_id = 'rt'"),
+        0
+    );
+    assert_outside_state_untouched(&world);
+
+    let world = world_with_thread();
+    archived_run_with_oversized_block(&world);
+    std::fs::write(
+        world.root_binding_file(),
+        r#"{"db_id":"someone-else","db_path":"/x","bound_at_ns":1}"#,
+    )
+    .unwrap();
+    let report = world.phase(&policy(), &world.input(&["T"], &[]));
+    assert!(matches!(
+        report.outcome,
+        super::super::StartupOutcome::Skipped {
+            reason: super::super::SkipReason::BindingMismatch,
+            ..
+        }
+    ));
+    assert_eq!(
+        index_blocks(&world),
+        (0, 0),
+        "reclaimed despite the mismatch"
+    );
+    assert_outside_state_untouched(&world);
+
+    let world = world_with_thread();
+    archived_run_with_oversized_block(&world);
+    world
+        .conn()
+        .execute("UPDATE threads SET archived = 0 WHERE thread_id = 'T'", [])
+        .unwrap();
+    world.phase(&off, &world.input(&[], &["T"]));
+    assert_eq!(
+        index_blocks(&world),
+        (1, 0),
+        "an unarchived thread keeps its block"
+    );
+}
