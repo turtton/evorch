@@ -113,11 +113,29 @@ impl SystemPromptCatalog {
     /// ([`SystemPromptCatalogBuilder::role_family_section`]) は `category` が
     /// `None` のときだけ付く。カテゴリ付きの run は overlay が振る舞いを決める
     /// ため、ロールの base binding (カテゴリなし) にだけ適用する。
+    /// モデルチェーンは `model_id` 1 つとして扱う。
     pub fn system_prompt_sections_for(
         &self,
         role: Role,
         category: Option<&str>,
         model_id: &str,
+    ) -> Result<Vec<CatalogSection>, SystemPromptCatalogError> {
+        self.system_prompt_sections_for_chain(role, category, model_id, &[])
+    }
+
+    /// [`Self::system_prompt_sections_for`] を、ロールのモデルチェーン全体を見て解決する。
+    ///
+    /// `chain` は run 開始時点のチェーン全メンバーの model id。role×family section は、
+    /// 選択モデルと同じ family にチェーン全員が属するときだけ付く。run 中のフォール
+    /// バックで別 family のメンバーに切り替わっても System は選び直されない (既存の
+    /// family section と同じ) ため、切替後にその family 向けの層が残らないよう、開始時に
+    /// 判定する。空の `chain` は `model_id` だけのチェーンとして扱う。
+    pub fn system_prompt_sections_for_chain(
+        &self,
+        role: Role,
+        category: Option<&str>,
+        model_id: &str,
+        chain: &[String],
     ) -> Result<Vec<CatalogSection>, SystemPromptCatalogError> {
         let family = classify(model_id);
         let role_baseline = self.role_baselines.get(role.name()).ok_or_else(|| {
@@ -141,12 +159,13 @@ impl SystemPromptCatalog {
                     })
             })
             .transpose()?;
+        let chain_in_family = chain.iter().all(|member| classify(member) == family);
         let role_family = match category {
-            None => self.role_family_sections.get(&(
+            None if chain_in_family => self.role_family_sections.get(&(
                 role.name().to_lowercase(),
                 family.base_section_key().to_owned(),
             )),
-            Some(_) => None,
+            _ => None,
         };
         let scoped_appendix = category.and_then(|category| {
             self.category_appendices
@@ -632,6 +651,51 @@ mod tests {
                 !prompt.contains("ROLE-FAMILY-MARK"),
                 "{} / {category:?} / {model_id} には付かないはずです",
                 role.name()
+            );
+        }
+    }
+
+    // Given: Reviewer × family-gpt5 の層を登録したカタログ
+    // When: モデルチェーンの構成を変えて system_prompt_sections_for_chain で解決する
+    // Then: チェーン全員が選択モデルと同じ family のときだけ層が付く
+    #[test]
+    fn role_family_section_requires_the_whole_chain_to_share_the_family() {
+        let catalog = complete_builder()
+            .role_family_section(
+                Role::Reviewer,
+                "family-gpt5",
+                "role-reviewer-gpt5",
+                "ROLE-FAMILY-MARK",
+            )
+            .build()
+            .expect("完全なカタログは構築できるはずです");
+        let cases: [(&str, &[&str], bool); 6] = [
+            (
+                "gpt-6.1-sol",
+                &["gpt-6.1-sol", "gpt-5", "openai/gpt-10"],
+                true,
+            ),
+            ("gpt-6.1-sol", &["gpt-6.1-sol", "claude-opus-4-1"], false),
+            (
+                "claude-opus-4-1",
+                &["claude-opus-4-1", "gpt-6.1-sol"],
+                false,
+            ),
+            ("gpt-6.1-sol", &["claude-opus-4-1", "gpt-6.1-sol"], false),
+            ("claude-opus-4-1", &["claude-opus-4-1"], false),
+            ("gpt-6.1-sol", &[], true),
+        ];
+        for (selected, chain, expected) in cases {
+            let chain: Vec<String> = chain.iter().map(|id| (*id).to_owned()).collect();
+            let sections = catalog
+                .system_prompt_sections_for_chain(Role::Reviewer, None, selected, &chain)
+                .expect("登録済みの部品のみを参照するはずです");
+            assert_eq!(
+                sections
+                    .iter()
+                    .any(|section| section.kind == crate::prompt::PromptPartKind::RoleFamily),
+                expected,
+                "selected = {selected}, chain = {chain:?}"
             );
         }
     }

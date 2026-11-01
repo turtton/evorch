@@ -1400,6 +1400,18 @@ impl AgentModel for RoutedModel {
             .unwrap_or_else(|_| format!("unresolved:{}", binding.head_route()))
     }
 
+    fn chain_models(&self, role: Role, category: Option<&str>) -> Vec<String> {
+        match self.resolve_binding("runtime-chain-models", role, category, false) {
+            Ok((_, choice)) => choice
+                .chain
+                .members()
+                .iter()
+                .map(|member| format!("{}/{}", member.target.profile, member.target.model_id))
+                .collect(),
+            Err(_) => vec![self.selected_model(role, category)],
+        }
+    }
+
     fn selected_model_for_run(&self, run_id: &str, role: Role, category: Option<&str>) -> String {
         let mut scratch = self
             .affinity

@@ -35,6 +35,7 @@ pub struct ScriptedModel {
     observed_count: watch::Sender<usize>,
     gate: Option<Arc<Notify>>,
     selected_model: Option<String>,
+    chain_models: Option<Vec<String>>,
 }
 
 struct RecordingSandboxFactory {
@@ -66,6 +67,7 @@ impl ScriptedModel {
             observed_count: watch::channel(0).0,
             gate: None,
             selected_model: None,
+            chain_models: None,
         }
     }
 
@@ -82,11 +84,18 @@ impl ScriptedModel {
             observed_count: watch::channel(0).0,
             gate: Some(gate),
             selected_model: None,
+            chain_models: None,
         }
     }
 
     pub fn with_selected_model(mut self, model: &str) -> Self {
         self.selected_model = Some(model.to_owned());
+        self
+    }
+
+    /// Declares the role's whole model chain, as a routed model would report it.
+    pub fn with_chain_models(mut self, models: &[&str]) -> Self {
+        self.chain_models = Some(models.iter().map(|model| (*model).to_owned()).collect());
         self
     }
 
@@ -197,6 +206,12 @@ impl AgentModel for ScriptedModel {
                 reason: "script exhausted".to_string(),
             })
         })
+    }
+
+    fn chain_models(&self, role: Role, category: Option<&str>) -> Vec<String> {
+        self.chain_models
+            .clone()
+            .unwrap_or_else(|| vec![self.selected_model(role, category)])
     }
 
     fn selected_model(&self, role: Role, _category: Option<&str>) -> String {

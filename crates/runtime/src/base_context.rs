@@ -202,7 +202,13 @@ pub(crate) fn compose_system_sections(
         ));
     }
     if let Some(catalog) = shared.system_prompts.as_ref() {
-        for part in catalog.system_prompt_sections_for(inputs.role, inputs.category, &model_id)? {
+        let chain = shared.model.chain_models(inputs.role, inputs.category);
+        for part in catalog.system_prompt_sections_for_chain(
+            inputs.role,
+            inputs.category,
+            &model_id,
+            &chain,
+        )? {
             let source =
                 part.preset
                     .map_or(ContextSource::Generated, |name| ContextSource::Preset {

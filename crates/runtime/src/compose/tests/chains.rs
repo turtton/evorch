@@ -311,3 +311,23 @@ async fn persisted_oracle_fallback_chat_uses_its_pin_after_restart() {
     assert_eq!(pins[0].model, "model-1");
     assert_eq!(model.agents.roles.advisor.models[0].route, "oracle");
 }
+
+#[test]
+fn chain_models_reports_every_member_in_declaration_order() {
+    // Given: three members share the worker pool
+    let (model, _) = fixture(vec![None, None, None]);
+
+    // When: the chain of the category-less worker is asked for
+    let chain = model.chain_models(Role::Worker, None);
+
+    // Then: all members are listed in declaration order, whichever one is selected
+    assert_eq!(
+        chain,
+        [
+            "profile-0/model-0",
+            "profile-1/model-1",
+            "profile-2/model-2"
+        ]
+    );
+    assert!(chain.contains(&model.selected_model(Role::Worker, None)));
+}

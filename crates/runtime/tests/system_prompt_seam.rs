@@ -345,6 +345,52 @@ async fn reviewer_role_family_layer_is_byte_stable_across_turns() {
     }
 }
 
+// Given: Reviewer × family-gpt5 の層を持つカタログと、モデルチェーンの構成違い 5 種
+// When: 各構成で Reviewer (カテゴリなし) を 1 ターン実行し、送信された System を見る
+// Then: チェーン全員が GPT-5 以降のときだけ層が入る (混在・単一 Claude には入らない)
+#[tokio::test]
+async fn reviewer_role_family_layer_requires_every_chain_member_to_be_gpt() {
+    let cases: [(&str, &[&str], bool); 5] = [
+        ("gpt-6.1-sol", &["gpt-6.1-sol", "gpt-5"], true),
+        ("gpt-6.1-sol", &["gpt-6.1-sol", "claude-opus-4-1"], false),
+        (
+            "claude-opus-4-1",
+            &["claude-opus-4-1", "gpt-6.1-sol"],
+            false,
+        ),
+        ("gpt-6.1-sol", &["claude-opus-4-1", "gpt-6.1-sol"], false),
+        ("claude-opus-4-1", &["claude-opus-4-1"], false),
+    ];
+    for (selected, chain, expected) in cases {
+        let catalog = catalog_builder()
+            .role_family_section(
+                Role::Reviewer,
+                "family-gpt5",
+                "role-reviewer-gpt5",
+                ROLE_FAMILY_MARK,
+            )
+            .build()
+            .expect("テスト用カタログは必須部品をすべて満たす");
+        let model = Arc::new(
+            ScriptedModel::new([Ok(text_response("done", FinishReason::Stop))])
+                .with_selected_model(selected)
+                .with_chain_models(chain),
+        );
+        let (runtime, _bus) = runtime_with(model.clone(), Some(catalog));
+        let run_id =
+            runtime.delegate_background(Role::Reviewer, "R".to_string(), RunConfig::default());
+        assert_eq!(runtime.wait(run_id).await, Ok(AgentRunPhase::Done));
+
+        let observed = model.observed().await;
+        let system = text_of_role(&observed[0], MessageRole::System).expect("System がある");
+        assert_eq!(
+            system.contains(ROLE_FAMILY_MARK),
+            expected,
+            "selected = {selected}, chain = {chain:?}"
+        );
+    }
+}
+
 // Given: カタログ未接続のランタイム (v0.1 構成)
 // When: run を終端まで実行する
 // Then: 最初の complete 呼び出しの先頭は User で System は挿入されない
