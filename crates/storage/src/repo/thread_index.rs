@@ -166,7 +166,7 @@ fn archive_run_row(conn: &Connection, run_id: &str) -> Result<(), StorageError> 
 
 const ARCHIVE_ROWS: &str = "UPDATE thread_index_runs SET state = 'evicted', \
      evicted_reason = 'archived', next_attempt_at_ns = NULL, blocked_reason = NULL, \
-     work_generation = work_generation + 1";
+     purge_deferred = 0, work_generation = work_generation + 1";
 
 /// Runs `body` in a savepoint: it composes with a caller's transaction, and
 /// outside one it is a deferred transaction committed on success.

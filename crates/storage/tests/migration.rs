@@ -80,7 +80,7 @@ const EXPECTED_TABLES: [&str; 64] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 67] = [
+const EXPECTED_INDICES: [&str; 69] = [
     "idx_artifact_refs_sha",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
@@ -95,6 +95,7 @@ const EXPECTED_INDICES: [&str; 67] = [
     "idx_tasks_parent_run",
     "idx_thread_tombstones_family",
     "idx_threads_archived",
+    "idx_threads_archived_by_id",
     "idx_threads_escalation_source",
     "idx_threads_root_run",
     "learning_claims_day",
@@ -114,6 +115,7 @@ const EXPECTED_INDICES: [&str; 67] = [
     "idx_threads_project_updated",
     "idx_threads_parent",
     "idx_thread_runs_thread",
+    "idx_thread_runs_thread_run",
     "idx_run_contexts_parent",
     "idx_usage_requests_parent",
     "idx_thread_start_states_captured",
@@ -983,8 +985,7 @@ fn v36_leaves_the_archive_backfill_to_do_only_when_a_thread_is_already_archived(
         undo_v36(&connection);
         connection
             .execute_batch(&format!(
-                "DROP INDEX idx_thread_index_runs_archived_pending;
-                 INSERT INTO threads(thread_id, project_root, archived, created_at_ns,
+                "INSERT INTO threads(thread_id, project_root, archived, created_at_ns,
                      updated_at_ns, source) VALUES ('t', '/p', {}, 1, 1, 'host');",
                 u8::from(archived)
             ))

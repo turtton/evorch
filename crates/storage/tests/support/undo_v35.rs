@@ -13,13 +13,16 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Removes everything migration v36 added to a table the older schema keeps.
-/// (Its index goes away with `thread_index_runs`, which v35 rebuilds.)
+/// Removes the columns migration v36 added to tables the older schema keeps.
+/// (Its indexes are created with `IF NOT EXISTS`, so replaying leaves them be.)
 pub fn undo_v36(connection: &Connection) {
     connection
         .execute_batch(
-            "ALTER TABLE thread_index_state DROP COLUMN archive_backfill_done;
-             ALTER TABLE thread_index_state DROP COLUMN archive_backfill_cursor;",
+            "DROP INDEX IF EXISTS idx_thread_index_runs_archived_pending;
+             ALTER TABLE thread_index_runs DROP COLUMN purge_deferred;
+             ALTER TABLE thread_index_state DROP COLUMN archive_backfill_done;
+             ALTER TABLE thread_index_state DROP COLUMN archive_backfill_thread;
+             ALTER TABLE thread_index_state DROP COLUMN archive_backfill_run;",
         )
         .unwrap();
 }

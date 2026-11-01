@@ -54,12 +54,16 @@ or whether deletion is enabled:
   reason: the scheduler (`next_work`) and `reindex-threads` (with or without
   `--include-evicted`) skip such runs whatever state or reason they have.
 - Threads archived before this version are handled by the same tick in bounded
-  steps (32 threads, about 1,000 runs per tick, with a persisted cursor in
-  `thread_index_state`); nothing is rewritten by the migration itself. Search
-  exclusion does not wait for it.
-- When the flag turns off, `evicted(archived)` runs return to `pending` and are
-  extracted again. Evictions for other reasons (logical budget, oversized,
-  physical reclaim) stay evicted.
+  steps: one tick reads and updates at most about 1,000 index rows, however many
+  runs a single thread has, and a persisted position (the next thread and the last
+  run done inside it) lets it resume after a restart. Nothing is rewritten by the
+  migration itself. Search exclusion does not wait for it.
+- Every statement of the tick is a keyset range over an index, so its `LIMIT` is
+  also its scan bound: archived threads are read in ID order from a partial index,
+  a thread's runs in ID order from `(thread_id, run_id)`, and the runs left to
+  purge from a partial index that excludes the ones handed to the exclusive phase
+  (`purge_deferred`). The tick's cost therefore does not grow with the number of
+  unrelated or waiting runs.
 - `thread_search`, the host's thread search and the candidate lists leave out
   archived threads, **the caller's own thread included**, and so do the child
   threads in a `thread_read` overview. Reading or grepping an archived thread by

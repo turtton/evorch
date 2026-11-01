@@ -1548,6 +1548,15 @@ fn an_oversized_block_goes_to_the_exclusive_phase_and_the_other_runs_continue() 
         "every run is looked at once; none is retried"
     );
     assert_eq!(registered(&conn), 1);
+    let deferred = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT purge_deferred FROM thread_index_runs WHERE run_id = 'run-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(deferred(&conn), 1, "the run leaves the purge tick's index");
     let (_, _, charged, left) = index_row(&conn, "run-a");
     assert!(
         charged > 0 && left > 0,
@@ -1582,6 +1591,7 @@ fn an_oversized_block_goes_to_the_exclusive_phase_and_the_other_runs_continue() 
         index_row(&conn, "run-a"),
         ("evicted".into(), Some("archived".into()), 0, 0)
     );
+    assert_eq!(deferred(&conn), 0, "a finished purge clears the flag");
     fts_integrity(&conn);
 }
 
@@ -1603,6 +1613,14 @@ fn the_exclusive_phase_keeps_the_blocks_of_a_run_unarchived_in_the_meantime() {
     host_thread(&conn, "t1", "run-a", false);
     let before = index_row(&conn, "run-a");
     assert_eq!(before.0, "pending");
+    let deferred: i64 = conn
+        .query_row(
+            "SELECT purge_deferred FROM thread_index_runs WHERE run_id = 'run-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(deferred, 0, "unarchiving clears the deferral");
     let step = reclaim::reclaim_oversized_step(&conn, 64 * 1024 * 1024).unwrap();
     assert_eq!((step.rows, step.remaining), (0, 0));
     assert_eq!(
@@ -1613,11 +1631,11 @@ fn the_exclusive_phase_keeps_the_blocks_of_a_run_unarchived_in_the_meantime() {
 }
 
 #[test]
-fn the_backfill_evicts_runs_of_already_archived_threads_in_bounded_resumable_ticks() {
+fn the_backfill_evicts_many_small_archived_threads_within_one_budget() {
     let dir = TempDir::new().unwrap();
     let conn = open(&dir);
     let lease = lease(&conn, 1, i64::MAX);
-    let archived = 2 * archive_purge::ARCHIVE_BACKFILL_THREADS_PER_TICK + 5;
+    let archived = 69;
     for n in 0..archived {
         let (thread, run) = (format!("t-{n:03}"), format!("run-{n:03}"));
         host_thread(&conn, &thread, &run, false);
@@ -1651,35 +1669,12 @@ fn the_backfill_evicts_runs_of_already_archived_threads_in_bounded_resumable_tic
     )
     .unwrap();
 
-    let mut evicted = 0;
-    let mut ticks = 0;
-    let mut conn = conn;
-    loop {
-        let progress = archive_purge::tick(&conn).unwrap();
-        assert!(
-            progress.evicted <= archive_purge::ARCHIVE_BACKFILL_THREADS_PER_TICK,
-            "one tick evicts at most one batch of threads"
-        );
-        evicted += progress.evicted;
-        ticks += 1;
-        if ticks == 2 {
-            // The cursor is persisted: a restart continues instead of starting over.
-            drop(conn);
-            conn = open(&dir);
-        }
-        if !progress.backfill_pending {
-            break;
-        }
-        assert!(ticks < 20, "the backfill must terminate");
-    }
-    assert_eq!(evicted, archived);
+    let progress = archive_purge::tick(&conn).unwrap();
+    assert_eq!(
+        (progress.evicted, progress.backfill_pending),
+        (archived, false)
+    );
     assert_eq!(index_row(&conn, "run-live").0, "indexed");
-    for n in 0..archived {
-        assert_eq!(
-            index_row(&conn, &format!("run-{n:03}")).1.as_deref(),
-            Some("archived")
-        );
-    }
     purge_all(&conn);
     for n in 0..archived {
         assert_eq!(
@@ -1698,5 +1693,120 @@ fn the_backfill_evicts_runs_of_already_archived_threads_in_bounded_resumable_tic
         conn.total_changes(),
         settled,
         "a finished backfill is not repeated"
+    );
+}
+
+const BIG_RUNS: i64 = 2_500;
+
+/// One archived thread whose runs far exceed one tick's budget. The rows are written
+/// directly, as a database from before the mirror hook would hold them.
+fn seed_big_thread(conn: &Connection) {
+    conn.execute_batch(&format!(
+        "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns,
+             updated_at_ns, source) VALUES ('t-big', '/p', 'r-000000', 1, 1, 1, 'host');
+         INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns,
+             updated_at_ns, source) VALUES ('t-live', '/p', 'live-0000', 0, 1, 1, 'host');
+         WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {BIG_RUNS} - 1)
+         INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
+         SELECT printf('r-%06d', x), 't-big', 'r-000000', x > 0 FROM n;
+         WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < 99)
+         INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
+         SELECT printf('live-%04d', x), 't-live', 'live-0000', x > 0 FROM n;
+         INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision,
+             source_context_sha256, extractor_version, accounting_version, source_updated_at_ns,
+             retention_at_ns, work_generation, charged_bytes)
+         SELECT run_id, 'indexed', 1, 1, '', 1, 1, 1, 1, 1, 10 FROM thread_runs;
+         UPDATE thread_index_state SET archive_backfill_done = 0;"
+    ))
+    .unwrap();
+}
+
+fn evicted_count(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM thread_index_runs WHERE evicted_reason = 'archived'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_backfill_splits_one_huge_thread_into_bounded_resumable_ticks() {
+    let dir = TempDir::new().unwrap();
+    let mut conn = open(&dir);
+    seed_big_thread(&conn);
+    let budget = archive_purge::ARCHIVE_BACKFILL_RUNS_PER_TICK;
+    let mut ticks = 0;
+    loop {
+        let before = evicted_count(&conn);
+        let changes = conn.total_changes();
+        let progress = archive_purge::tick(&conn).unwrap();
+        ticks += 1;
+        // The tick's own purge may reset the charges of runs it evicted earlier, but
+        // the number of runs it evicts is bounded by the budget.
+        assert!(
+            progress.evicted <= budget,
+            "tick {ticks} evicted {}",
+            progress.evicted
+        );
+        assert!(
+            conn.total_changes() - changes <= 3 * (budget as u64 + 8),
+            "tick {ticks} wrote too many rows"
+        );
+        assert!(evicted_count(&conn) - before <= budget as i64);
+        if ticks == 1 {
+            assert!(
+                progress.backfill_pending,
+                "one tick cannot cover the thread"
+            );
+            // The position is persisted: a restart continues inside the thread.
+            drop(conn);
+            conn = open(&dir);
+        }
+        if !progress.backfill_pending {
+            break;
+        }
+        assert!(ticks < 20, "the backfill must terminate");
+    }
+    assert!(ticks >= 3, "{BIG_RUNS} runs need several ticks of {budget}");
+    assert_eq!(
+        evicted_count(&conn),
+        BIG_RUNS,
+        "every run of the thread, the live thread untouched"
+    );
+    let live: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM thread_index_runs WHERE run_id LIKE 'live-%' AND state = 'indexed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live, 100);
+    purge_all(&conn);
+    let settled = conn.total_changes();
+    assert!(!archive_purge::tick(&conn).unwrap().backfill_pending);
+    assert_eq!(
+        conn.total_changes(),
+        settled,
+        "a finished backfill is not repeated"
+    );
+}
+
+#[test]
+fn a_thread_unarchived_during_the_backfill_keeps_its_remaining_runs() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    seed_big_thread(&conn);
+    assert!(archive_purge::tick(&conn).unwrap().backfill_pending);
+    let first = evicted_count(&conn);
+    assert!(first > 0);
+    // The mirror hook revives what was evicted; the backfill must not evict more.
+    host_thread(&conn, "t-big", "r-000000", false);
+    assert_eq!(evicted_count(&conn), 0);
+    while archive_purge::tick(&conn).unwrap().backfill_pending {}
+    assert_eq!(
+        evicted_count(&conn),
+        0,
+        "the rest of an unarchived thread stays indexed"
     );
 }
