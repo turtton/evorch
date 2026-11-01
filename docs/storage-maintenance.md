@@ -334,6 +334,9 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   約 X MB を回収予定。スキップ理由: …」を 1 件出す。束縛不一致は「削除機能は無効です（構成不一致: 理由）」。
   `NoExclusive` は通知せず、ログだけ。
 
+実 DB のコピーでの確認は `cargo run -p gui --example startup_phase_check -- --db COPY/evorch-events.db --root COPY/threads --sidebar COPY/sidebar.json [--days 30] [--reclaim-cycles N]`
+（窓なしで起動フェーズ・sidebar の片付け・背景回収を走らせる。**原本には使わない**）。
+
 ## 既知の制約
 
 - 縮小は停止中の DB が前提。`compact-events` は preview でも稼働中の store を拒否し、`backfill-events` だけが稼働中に使える。リース（`.maintenance-lock`）を迂回する手段はない。
