@@ -220,6 +220,9 @@
         "thread_index": {
           "enabled": true,
           "max_bytes": 536870912
+        },
+        "thread_retention": {
+          "archived_delete_after_days": 30
         }
       }
     },
@@ -1757,6 +1760,13 @@
             "enabled": true,
             "max_bytes": 536870912
           }
+        },
+        "thread_retention": {
+          "description": "アーカイブ済みスレッドの期限削除（`[storage.thread_retention]`）。",
+          "$ref": "#/$defs/ThreadRetentionConfig",
+          "default": {
+            "archived_delete_after_days": 30
+          }
         }
       },
       "additionalProperties": false
@@ -1807,6 +1817,20 @@
           "type": "integer",
           "format": "uint64",
           "default": 536870912,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThreadRetentionConfig": {
+      "description": "アーカイブ済みスレッドの期限削除の設定。\n\n削除の確定は起動時の排他フェーズだけで行われます。他の evorch プロセスが\n動いている起動では確定せず、次の単独起動まで待ちます。",
+      "type": "object",
+      "properties": {
+        "archived_delete_after_days": {
+          "description": "アーカイブしてから削除するまでの日数。既定 30、0 で新規の削除確定を無効化する。\n時刻を持たない古いアーカイブは日数に関係なく直ちに対象になる\n（pin・評価サンプル・実行中の family は除外）。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
           "minimum": 0
         }
       },

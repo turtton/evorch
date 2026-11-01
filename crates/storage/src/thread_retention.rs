@@ -277,6 +277,36 @@ pub struct ReclaimSummary {
     pub oversized_bytes: u64,
 }
 
+/// The state of a reclaim job (see [`Database::reclaim_jobs_in_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimJobState {
+    DbPending,
+    DbDone,
+    FilesPending,
+    FilesFailed,
+    Done,
+}
+
+impl ReclaimJobState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::DbPending => "db_pending",
+            Self::DbDone => "db_done",
+            Self::FilesPending => "files_pending",
+            Self::FilesFailed => "files_failed",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// A reclaim job and the identities its family's tombstones hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimJobMembers {
+    pub family_key: String,
+    pub threads: Vec<String>,
+    pub runs: Vec<String>,
+}
+
 /// Candidate overrides the caller adds to `retention_schedule`.
 pub type BlockOverrides = BTreeMap<String, BlockReason>;
 
@@ -438,6 +468,65 @@ impl Database {
     /// Returns an error if SQLite access fails.
     pub fn reclaim_summary(&self) -> Result<ReclaimSummary, StorageError> {
         crate::repo::thread_retention::reclaim::summary(&self.conn)
+    }
+
+    /// Up to `limit` reclaim jobs in `state`, smallest family key first, with the
+    /// thread and run IDs their tombstones hold. Reads only the jobs returned.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn reclaim_jobs_in_state(
+        &self,
+        state: ReclaimJobState,
+        limit: usize,
+    ) -> Result<Vec<ReclaimJobMembers>, StorageError> {
+        crate::repo::thread_retention::reclaim::jobs_in_state(&self.conn, state, None, limit)
+    }
+
+    /// Like [`Self::reclaim_jobs_in_state`], continuing after the family key `after`
+    /// (`None` starts from the beginning). A caller that pages through the jobs of a
+    /// state passes the last key it saw, so jobs it must skip never hide later ones.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn reclaim_jobs_after(
+        &self,
+        state: ReclaimJobState,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReclaimJobMembers>, StorageError> {
+        crate::repo::thread_retention::reclaim::jobs_in_state(&self.conn, state, after, limit)
+    }
+
+    /// Return up to `pages` free pages to the file, for the startup phase after a
+    /// reclaim. `None` when the database is not `auto_vacuum = INCREMENTAL` (only a
+    /// full `VACUUM` can shrink it then). Otherwise the pages freed, which is at
+    /// most `pages`.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn retention_vacuum_step(&self, pages: u64) -> Result<Option<u64>, StorageError> {
+        const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+        if self.pragma_i64("auto_vacuum")? != AUTO_VACUUM_INCREMENTAL {
+            return Ok(None);
+        }
+        // `incremental_vacuum(0)` means "every free page" to SQLite, not "none".
+        if pages == 0 {
+            return Ok(Some(0));
+        }
+        let before = self.pragma_i64("freelist_count")?;
+        // The pragma yields one row per freed page; draining the rows runs it.
+        let mut statement = self
+            .conn
+            .prepare(&format!("PRAGMA incremental_vacuum({pages})"))?;
+        let mut rows = statement.query([])?;
+        while rows.next()?.is_some() {}
+        drop(rows);
+        drop(statement);
+        let after = self.pragma_i64("freelist_count")?;
+        Ok(Some(
+            u64::try_from(before.saturating_sub(after)).unwrap_or(0),
+        ))
     }
 
     /// The ownership root and sidebar the first confirmation recorded.

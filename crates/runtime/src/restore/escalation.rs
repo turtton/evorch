@@ -30,6 +30,7 @@ pub(crate) fn persist_escalation_seed(
     continuity: &crate::continuity::Continuity,
     pending_reference_id: Option<String>,
 ) -> Result<(), SnapshotError> {
+    runtime.deny_deleted_run(&source_run_id.to_string())?;
     let Some(store) = runtime.shared.run_store.get() else {
         return Ok(());
     };

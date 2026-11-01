@@ -16,6 +16,8 @@ impl AgentRuntime {
         child: RunId,
         question: &UserQuestion,
     ) -> Result<(), String> {
+        self.deny_deleted_run(&child.to_string())
+            .map_err(|deleted| deleted.to_string())?;
         while let Some(mut waiting) = self.try_resume_answered_child(caller, child, question)? {
             tokio::select! {
                 biased;

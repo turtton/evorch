@@ -99,6 +99,33 @@ fn hex_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// What [`ThreadScratch::remove_thread`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScratchRemoval {
+    pub removed_entries: usize,
+    /// The directory is gone from disk.
+    pub complete: bool,
+}
+
+/// A failed [`ThreadScratch::remove_thread`]: what it removed before it stopped.
+#[derive(Debug)]
+pub struct ScratchRemovalError {
+    pub removed_entries: usize,
+    pub error: io::Error,
+}
+
+impl std::fmt::Display for ScratchRemovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (after removing {} entries)",
+            self.error, self.removed_entries
+        )
+    }
+}
+
+impl std::error::Error for ScratchRemovalError {}
+
 /// Per-thread scratch directories under one parent.
 #[derive(Debug)]
 pub struct ThreadScratch {
@@ -189,6 +216,59 @@ impl ThreadScratch {
         let mut state = self.lock();
         self.discard(&name);
         state.seen.retain(|_, (seen, _)| *seen != name);
+    }
+
+    /// Delete the directory of a thread whose deletion retention confirmed, entry by
+    /// entry, and forget what this process noted about it once it is gone.
+    ///
+    /// `complete` in the result is true only when the directory no longer exists on
+    /// disk; a tree larger than `max_entries` stays (partly emptied) and the next
+    /// call continues. The call resolves `thread_id` through the same name mapping as
+    /// every other operation, never follows a link and touches nothing outside the
+    /// managed parent. Deletion is synchronous: nothing is queued, so the result is
+    /// the state of the disk. Only the exclusive startup phase calls this (nothing can
+    /// be using the directory then).
+    ///
+    /// # Errors
+    /// Fails when the parent is not a private directory of this user or an entry
+    /// cannot be unlinked (the path is in the message); the directory stays. The error
+    /// carries the entries removed before the failure, which count against the caller's
+    /// budget.
+    pub fn remove_thread(
+        &self,
+        thread_id: &str,
+        max_entries: usize,
+    ) -> Result<ScratchRemoval, ScratchRemovalError> {
+        let name = thread_dir_name(thread_id);
+        let mut state = self.lock();
+        let done = self
+            .root
+            .remove_bounded(&name, max_entries)
+            .map_err(|failed| ScratchRemovalError {
+                removed_entries: failed.removed_entries,
+                error: failed.source,
+            })?;
+        if done.complete {
+            state.seen.retain(|_, (seen, _)| *seen != name);
+            state.resets.remove(&name);
+        }
+        Ok(ScratchRemoval {
+            removed_entries: done.removed_entries,
+            complete: done.complete,
+        })
+    }
+
+    /// Whether `thread_id`'s directory exists now, without following a link. Only an
+    /// explicit "not found" means it does not: any other failure to look is an error.
+    ///
+    /// # Errors
+    /// Fails when the path cannot be examined (a loop, a permission error, ...).
+    pub fn thread_dir_exists(&self, thread_id: &str) -> io::Result<bool> {
+        match self.thread_dir(thread_id).symlink_metadata() {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Delete directories nobody can still be using: discarded trees, threads
@@ -439,6 +519,133 @@ mod tests {
         assert_eq!(scratch.prepare(&key).unwrap(), dir);
         assert!(!dir.join("file").exists());
         scratch.release_thread("thread");
+        assert!(!dir.exists());
+    }
+
+    // Given: plain and digest-named thread directories next to other threads' and
+    // runs' directories, an unrelated tree, and a link out of the thread directory
+    // When: one thread is removed
+    // Then: only that thread's tree goes (by either name form), the link is removed
+    // without being followed, a missing directory reads as complete with nothing
+    // removed, and nothing outside the managed parent is touched.
+    #[test]
+    fn remove_thread_resolves_both_name_forms_and_leaves_everything_else() {
+        let base = tempfile::tempdir().unwrap();
+        let outside = base.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "x").unwrap();
+        let scratch = ThreadScratch::at(base.path().join("scratch"));
+        let odd = "thread/with.dots";
+        let prepare = |key: ScratchKey| scratch.prepare(&key).unwrap();
+        let plain = prepare(ScratchKey::Thread("gone".into()));
+        let digest = prepare(ScratchKey::Thread(odd.into()));
+        let other = prepare(ScratchKey::Thread("other".into()));
+        let run = prepare(ScratchKey::Run(RunId::new(3)));
+        std::fs::write(plain.join("file"), "x").unwrap();
+        std::fs::create_dir_all(plain.join("deep/er")).unwrap();
+        std::fs::write(plain.join("deep/er/leaf"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, plain.join("link-out")).unwrap();
+
+        assert!(scratch.thread_dir_exists("gone").unwrap());
+        let first = scratch.remove_thread("gone", usize::MAX).unwrap();
+        assert!(first.complete && first.removed_entries > 4, "{first:?}");
+        assert!(scratch.remove_thread(odd, usize::MAX).unwrap().complete);
+        let absent = scratch.remove_thread("gone", usize::MAX).unwrap();
+        assert_eq!(
+            absent,
+            ScratchRemoval {
+                removed_entries: 0,
+                complete: true
+            }
+        );
+        assert!(!scratch.thread_dir_exists("gone").unwrap());
+
+        assert!(!plain.exists() && !digest.exists());
+        assert!(other.is_dir() && run.is_dir());
+        assert!(
+            outside.join("keep").is_file(),
+            "a link is removed, not followed"
+        );
+    }
+
+    // Given: a tree larger than the entry budget / When: removing in steps
+    // Then: no call removes more than the budget or claims completion early, the tree
+    // shrinks monotonically and the call that unlinks the directory reports it.
+    #[test]
+    fn remove_thread_is_bounded_per_call_and_completes_only_when_the_directory_is_gone() {
+        let base = tempfile::tempdir().unwrap();
+        let scratch = ThreadScratch::at(base.path().join("scratch"));
+        let dir = scratch.prepare(&ScratchKey::Thread("big".into())).unwrap();
+        for index in 0..10 {
+            std::fs::create_dir_all(dir.join(format!("d{index}/sub"))).unwrap();
+            std::fs::write(dir.join(format!("d{index}/sub/f")), "x").unwrap();
+            std::fs::write(dir.join(format!("f{index}")), "x").unwrap();
+        }
+        let mut total = 0;
+        let mut calls = 0;
+        loop {
+            let step = scratch.remove_thread("big", 7).unwrap();
+            assert!(step.removed_entries <= 7);
+            total += step.removed_entries;
+            calls += 1;
+            assert_eq!(
+                step.complete,
+                !dir.exists(),
+                "complete means gone from disk"
+            );
+            if step.complete {
+                break;
+            }
+            assert!(calls < 100);
+        }
+        // `prepare` also lays out the HOME skeleton, so count what was really there.
+        assert!(
+            total >= 40 && calls >= 6,
+            "{total} entries in {calls} calls"
+        );
+        let zero = ThreadScratch::at(base.path().join("scratch2"));
+        let dir = zero.prepare(&ScratchKey::Thread("t".into())).unwrap();
+        let none = zero.remove_thread("t", 0).unwrap();
+        assert_eq!(
+            none,
+            ScratchRemoval {
+                removed_entries: 0,
+                complete: false
+            }
+        );
+        assert!(dir.exists(), "a zero budget removes nothing and says so");
+    }
+
+    // Given: a directory an unlink cannot empty (its parent is read-only)
+    // When: removing it
+    // Then: the call fails with the path, the directory stays and is never reported
+    // complete; once the obstacle is gone the same call finishes the job.
+    #[test]
+    fn remove_thread_reports_a_failed_unlink_and_retries_to_completion() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let scratch = ThreadScratch::at(base.path().join("scratch"));
+        let dir = scratch
+            .prepare(&ScratchKey::Thread("stuck".into()))
+            .unwrap();
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("file"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let writable_anyway = std::fs::write(locked.join("probe"), "x").is_ok();
+        if writable_anyway {
+            // Running with privileges that ignore permissions: the obstacle cannot be built.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let error = scratch.remove_thread("stuck", usize::MAX).unwrap_err();
+        assert_eq!(error.error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("locked"), "{error}");
+        assert!(dir.exists(), "a failed deletion leaves the directory");
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(scratch.remove_thread("stuck", usize::MAX).unwrap().complete);
         assert!(!dir.exists());
     }
 

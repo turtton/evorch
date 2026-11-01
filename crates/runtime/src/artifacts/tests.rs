@@ -1,4 +1,5 @@
 use super::*;
+use crate::artifacts::MetaStop;
 use crate::{AgentInvocationContext, AgentModel, AgentRunPhase, RunConfig, RunId, RuntimeError};
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolResultContent, Usage};
 use std::collections::{HashMap, VecDeque};
@@ -622,3 +623,248 @@ async fn orchestrator_cannot_capture_and_missing_store_fails_closed() {
 
 mod inspect;
 mod scratch;
+
+fn capture_for(
+    store: &ArtifactStore,
+    workspace: &Path,
+    run: &str,
+    root: &str,
+    thread: Option<&str>,
+) -> ArtifactRecord {
+    store
+        .capture(
+            workspace,
+            None,
+            Path::new("mock.png"),
+            CaptureRequest {
+                title: "t",
+                caption: None,
+                run_id: run.into(),
+                root_run_id: root.into(),
+                thread_id: thread.map(str::to_owned),
+            },
+        )
+        .unwrap()
+}
+
+fn set(items: &[&str]) -> std::collections::HashSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+// Given: captures of a deleted thread, of a deleted run without a thread, and of a
+// survivor, all sharing one blob / When: their meta is removed
+// Then: only the family's meta files go; the shared blob and the survivor stay.
+#[test]
+fn remove_meta_for_deletes_matching_thread_and_run_meta_but_never_blobs() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let by_thread = capture_for(&store, workspace.path(), "7", "7", Some("gone"));
+    let by_run = capture_for(&store, workspace.path(), "8", "8", None);
+    let by_root = capture_for(&store, workspace.path(), "9", "8", Some("other"));
+    let survivor = capture_for(&store, workspace.path(), "10", "10", Some("kept"));
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&["8"]), 100);
+
+    assert!(removal.is_complete() && removal.failed.is_empty());
+    let mut removed = removal.removed.clone();
+    removed.sort();
+    let mut expected = vec![
+        by_thread.artifact_id.clone(),
+        by_run.artifact_id.clone(),
+        by_root.artifact_id.clone(),
+    ];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(store.load(&survivor.artifact_id).is_ok());
+    assert!(store.load(&by_thread.artifact_id).is_err());
+    assert!(
+        store.blob_path(&survivor).is_file(),
+        "the blob is shared and is never removed here"
+    );
+}
+
+// Given: a meta file that cannot be parsed next to a matching one / When: removing
+// Then: the unreadable file is reported as failed (not skipped as "not ours") and
+// the readable match is still removed.
+#[test]
+fn remove_meta_for_reports_unreadable_meta_as_failed() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let ours = capture_for(&store, workspace.path(), "7", "7", Some("gone"));
+    let corrupt = store
+        .meta_path("artifact-00000000000000000000000000000000")
+        .unwrap();
+    std::fs::write(&corrupt, b"{ not json").unwrap();
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+
+    assert_eq!(removal.removed, vec![ours.artifact_id]);
+    assert_eq!(removal.failed.len(), 1);
+    assert_eq!(removal.failed[0].0, corrupt);
+    assert!(corrupt.exists(), "an unreadable file is left in place");
+}
+
+// Given: more meta files than the budget / When: continuing from `last_name`
+// Then: each call reads at most `budget` files and the calls together cover all.
+#[test]
+fn remove_meta_after_resumes_within_a_budget() {
+    let (_store_dir, store) = store();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("mock.png"), PNG).unwrap();
+    let records = (0..5)
+        .map(|index| {
+            capture_for(
+                &store,
+                workspace.path(),
+                &index.to_string(),
+                "1",
+                Some("gone"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut after: Option<String> = None;
+    let mut removed = Vec::new();
+    let mut calls = 0;
+    loop {
+        let step = store.remove_meta_after(&set(&["gone"]), &set(&[]), after.as_deref(), 2);
+        assert!(step.scanned <= 2);
+        let complete = step.is_complete();
+        removed.extend(step.removed);
+        calls += 1;
+        if complete {
+            break;
+        }
+        after = step.last_name;
+    }
+
+    assert_eq!(calls, 3);
+    removed.sort();
+    let mut expected = records
+        .into_iter()
+        .map(|r| r.artifact_id)
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(removed, expected);
+}
+
+fn meta_dir(store_dir: &tempfile::TempDir) -> std::path::PathBuf {
+    store_dir.path().join("artifacts/meta")
+}
+
+fn meta_name(index: u32) -> String {
+    format!("artifact-{index:032x}.json")
+}
+
+// Given: the meta directory cannot be listed (a file stands where it belongs)
+// When: removing / Then: the call reports a listing failure with one counted failure,
+// not "complete": nothing is known about what was left.
+#[test]
+fn an_unlistable_meta_directory_is_a_listing_failure_not_completion() {
+    let (store_dir, store) = store();
+    std::fs::remove_dir_all(meta_dir(&store_dir)).unwrap();
+    std::fs::write(meta_dir(&store_dir), b"not a directory").unwrap();
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+
+    assert!(
+        matches!(removal.stop, Some(MetaStop::Listing(_))),
+        "{removal:?}"
+    );
+    assert!(!removal.is_complete());
+    assert_eq!(removal.failed_total, 1);
+    assert_eq!(removal.scanned, 0);
+
+    // A directory that does not exist holds no meta: that, and only that, is complete.
+    std::fs::remove_file(meta_dir(&store_dir)).unwrap();
+    let missing = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+    assert!(missing.is_complete() && missing.failed_total == 0);
+}
+
+// Given: an entry that cannot be read (a directory with a meta name), one that is gone
+// (a dangling link), an oversized file and many corrupt files / When: removing
+// Then: read errors, oversize and corruption are failures (capped in detail, all counted);
+// only the explicitly missing entry is treated as already gone; reads are bounded.
+#[test]
+fn only_an_explicit_not_found_counts_as_already_gone() {
+    let (store_dir, store) = store();
+    let dir = meta_dir(&store_dir);
+    std::fs::create_dir(dir.join(meta_name(1))).unwrap();
+    std::os::unix::fs::symlink(dir.join("nowhere"), dir.join(meta_name(2))).unwrap();
+    std::fs::write(
+        dir.join(meta_name(3)),
+        vec![b' '; (crate::artifacts::MAX_META_BYTES + 10) as usize],
+    )
+    .unwrap();
+    for index in 100..140 {
+        std::fs::write(dir.join(meta_name(index)), b"{ broken").unwrap();
+    }
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 1_000);
+
+    assert!(removal.is_complete());
+    assert_eq!(removal.scanned, 43);
+    // 1 unreadable + 1 oversized + 40 corrupt; the dangling link is not a failure.
+    assert_eq!(removal.failed_total, 42, "{removal:?}");
+    assert_eq!(removal.failed.len(), crate::artifacts::MAX_FAILURES_KEPT);
+    assert!(removal.bytes_read <= crate::artifacts::MAX_META_BYTES + 1 + 40 * 8);
+    assert!(removal.removed.is_empty());
+}
+
+// Given: a file that exists but cannot be opened / When: removing
+// Then: it is a failure (skipped when the process ignores permissions).
+#[test]
+fn a_permission_error_is_a_failure_not_an_absence() {
+    use std::os::unix::fs::PermissionsExt;
+    let (store_dir, store) = store();
+    let path = meta_dir(&store_dir).join(meta_name(7));
+    std::fs::write(&path, br#"{"thread_id":"gone"}"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        return;
+    }
+
+    let removal = store.remove_meta_for(&set(&["gone"]), &set(&[]), 10);
+
+    assert_eq!(removal.failed_total, 1);
+    assert!(removal.removed.is_empty() && path.exists());
+}
+
+// Given: thousands of meta files and a small budget / When: removing in steps
+// Then: each call keeps at most `budget` names and opens at most `budget` files, lists
+// every entry exactly once, resumes from the cursor in name order and the steps together
+// cover each file once.
+#[test]
+fn a_large_meta_directory_is_walked_in_budgeted_steps() {
+    let (store_dir, store) = store();
+    let dir = meta_dir(&store_dir);
+    for index in 0..2_000 {
+        std::fs::write(dir.join(meta_name(index)), br#"{"thread_id":"other"}"#).unwrap();
+    }
+    let expected_last = meta_name(99);
+
+    let first = store.remove_meta_for(&set(&["gone"]), &set(&[]), 100);
+    assert_eq!(first.listed, 2_000);
+    assert_eq!(first.scanned, 100);
+    assert_eq!(first.stop, Some(MetaStop::Budget));
+    assert_eq!(first.last_name.as_deref(), Some(expected_last.as_str()));
+    assert_eq!(first.bytes_read, 100 * 21);
+
+    let mut after = first.last_name;
+    let mut scanned = first.scanned;
+    let mut calls = 1;
+    loop {
+        let step = store.remove_meta_after(&set(&["gone"]), &set(&[]), after.as_deref(), 100);
+        assert_eq!(step.listed, 2_000, "one listing pass per call");
+        assert!(step.scanned <= 100);
+        scanned += step.scanned;
+        calls += 1;
+        if step.is_complete() {
+            break;
+        }
+        after = step.last_name;
+    }
+    assert_eq!((scanned, calls), (2_000, 20));
+}

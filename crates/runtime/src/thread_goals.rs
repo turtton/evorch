@@ -63,6 +63,9 @@ impl AgentRuntime {
         if thread_id.is_empty() {
             return Err("thread_id must not be empty".into());
         }
+        self.deny_deleted_thread(thread_id)
+            .and_then(|()| self.deny_deleted_run(&run_id.to_string()))
+            .map_err(|deleted| deleted.to_string())?;
         if self
             .list_agents()
             .iter()
@@ -168,6 +171,9 @@ impl AgentRuntime {
         criteria: Vec<String>,
         replace_blocked: bool,
     ) -> Result<ThreadGoalSnapshot, String> {
+        self.deny_deleted_thread(thread_id)
+            .and_then(|()| self.deny_deleted_run(&run_id.to_string()))
+            .map_err(|deleted| deleted.to_string())?;
         validate_text(&objective)?;
         validate_criteria(&criteria)?;
         // Explicit replacement can reset an exhausted budget, but it cannot
@@ -272,6 +278,15 @@ impl AgentRuntime {
 
     /// Rehydrate event-sourced state without starting work or granting new authority.
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
+        self.deny_deleted_thread(&snapshot.thread_id)
+            .and_then(|()| self.deny_deleted_run(&snapshot.root_run_id))
+            .and_then(|()| {
+                snapshot
+                    .related_root_run_ids
+                    .iter()
+                    .try_for_each(|related| self.deny_deleted_run(related))
+            })
+            .map_err(|deleted| deleted.to_string())?;
         validate_text(&snapshot.objective)?;
         validate_text(&snapshot.original_request)?;
         validate_criteria(&snapshot.criteria)?;

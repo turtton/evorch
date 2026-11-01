@@ -1,7 +1,7 @@
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -14,6 +14,7 @@ use super::{
     permit::now_ms,
 };
 use crate::scratch::ThreadScratch;
+use crate::thread_retention::TombstoneGuard;
 
 pub struct OwnerHost {
     root: PathBuf,
@@ -25,6 +26,8 @@ pub struct OwnerHost {
     // A GUI drain keeps generation guards valid until its queued writes finish.
     release_deferred: Arc<AtomicBool>,
     scratch: Arc<ThreadScratch>,
+    /// Threads retention deleted; set once after the startup phase.
+    tombstones: OnceLock<TombstoneGuard>,
     stop: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -82,12 +85,27 @@ impl OwnerHost {
             reader,
             release_deferred,
             scratch,
+            tombstones: OnceLock::new(),
             stop,
             worker: Some(worker),
         })
     }
 
+    /// Refuse to start, claim or attach the threads retention deleted. Installed once,
+    /// after the startup phase; returns the guard when one is already installed.
+    pub fn set_tombstone_guard(&self, guard: TombstoneGuard) -> Result<(), TombstoneGuard> {
+        self.tombstones.set(guard)
+    }
+
+    fn deny_deleted(&self, thread_id: &str) -> Result<(), RegistryError> {
+        match self.tombstones.get() {
+            Some(guard) => Ok(guard.check_thread(thread_id)?),
+            None => Ok(()),
+        }
+    }
+
     pub fn attach(&self, thread_id: &str) -> Result<ThreadOwner, RegistryError> {
+        self.deny_deleted(thread_id)?;
         self.reader()?.attach(thread_id)
     }
 
@@ -97,6 +115,7 @@ impl OwnerHost {
     }
 
     pub fn start(&self, thread_id: &str) -> Result<OwnerPermit, RegistryError> {
+        self.deny_deleted(thread_id)?;
         let mut owner = ThreadOwner::new(
             thread_id.into(),
             Lease {
@@ -113,6 +132,7 @@ impl OwnerHost {
     }
 
     pub fn claim(&self, expected: &ThreadOwner) -> Result<OwnerPermit, RegistryError> {
+        self.deny_deleted(&expected.thread_id)?;
         let mut registry = Registry::open_existing(&self.root.join("owners.db"))?;
         let socket = socket_path(&self.root, &expected.lease.owner_id)?;
         let owner = ipc::claim_configured(

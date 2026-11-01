@@ -17,6 +17,8 @@ impl AgentRuntime {
     /// Restore data only. The host must independently renew current root authority.
     /// Empty lists remain as tombstones and older revisions cannot resurrect them.
     pub fn restore_thread_todo(&self, snapshot: ThreadTodoSnapshot) -> Result<(), String> {
+        self.deny_deleted_thread(&snapshot.thread_id)
+            .map_err(|deleted| deleted.to_string())?;
         validate_identity(&snapshot.list_id)?;
         validate_identity(&snapshot.thread_id)?;
         validate_items(&snapshot.items)?;

@@ -91,6 +91,9 @@ pub use error::StorageError;
 pub use host_input::{
     HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };
+pub use maintenance::offline::{
+    ExclusiveLeases, SharedLeases, reclaim_lease, shared_with_wait, try_exclusive,
+};
 pub use migrations::backfill::{
     BackfillProgress, DEFAULT_BACKFILL_BATCH_ROWS, EventBackfillOptions, EventBackfillSummary,
 };

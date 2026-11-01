@@ -59,7 +59,197 @@ pub(crate) fn writer_lease(path: &Path) -> Result<File, StorageError> {
     Ok(file)
 }
 
+/// How often a blocked shared acquisition looks again.
+const SHARED_POLL: Duration = Duration::from_millis(50);
+
+/// Both locks of the startup exclusive phase: the database lease and the
+/// ownership-root lease. Holding them proves that no other evorch process has the
+/// database open and that none shares the ownership root (owners, scratch).
+///
+/// Acquisition order is fixed: database first, then root. The root file is
+/// `<ownership_root>/.ownership-lock` and, like the database lease, is never unlinked.
+#[derive(Debug)]
+pub struct ExclusiveLeases {
+    db: File,
+    root: File,
+}
+
+/// Both locks held shared for the whole life of a running process.
+#[derive(Debug)]
+pub struct SharedLeases {
+    db: File,
+    root: File,
+}
+
+fn root_lease_file(ownership_root: &Path) -> Result<File, StorageError> {
+    let io = |error: std::io::Error| StorageError::Io(error.to_string());
+    fs::create_dir_all(ownership_root).map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(ownership_root, fs::Permissions::from_mode(0o700)).map_err(io)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(ownership_root.join(".ownership-lock"))
+        .map_err(io)
+}
+
+fn would_block(error: &fs::TryLockError) -> bool {
+    matches!(error, fs::TryLockError::WouldBlock)
+}
+
+fn lock_error(what: &str, error: fs::TryLockError) -> StorageError {
+    invalid(format!("{what} lease is unavailable: {error}"))
+}
+
+/// Take both locks exclusively without waiting. `Ok(None)` means another process
+/// holds one of them; nothing stays locked then (a refused root lock releases
+/// the database lock again).
+///
+/// # Errors
+/// Fails when a lease file cannot be created or locked for another reason.
+pub fn try_exclusive(
+    db_path: &Path,
+    ownership_root: &Path,
+) -> Result<Option<ExclusiveLeases>, StorageError> {
+    let db = lease_file(db_path)?;
+    match db.try_lock() {
+        Ok(()) => {}
+        Err(error) if would_block(&error) => return Ok(None),
+        Err(error) => return Err(lock_error("database", error)),
+    }
+    // A failure below drops `db`, which releases its lock.
+    let root = root_lease_file(ownership_root)?;
+    match root.try_lock() {
+        Ok(()) => Ok(Some(ExclusiveLeases { db, root })),
+        Err(error) if would_block(&error) => Ok(None),
+        Err(error) => Err(lock_error("ownership root", error)),
+    }
+}
+
+fn lock_shared_within(file: &File, what: &str, max_wait: Duration) -> Result<(), StorageError> {
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(()),
+            Err(error) if would_block(&error) => {
+                if started.elapsed() >= max_wait {
+                    return Err(invalid(format!(
+                        "{what} lease is held exclusively by another process (waited {max_wait:?})"
+                    )));
+                }
+                // The holder is another process (offline maintenance or a startup
+                // phase); it can only be polled, it publishes no signal.
+                std::thread::sleep(SHARED_POLL.min(max_wait.saturating_sub(started.elapsed())));
+            }
+            Err(error) => return Err(lock_error(what, error)),
+        }
+    }
+}
+
+fn shared_pair(db: File, root: File, max_wait: Duration) -> Result<SharedLeases, StorageError> {
+    // A failure of the root lock drops `db` and with it the database lock.
+    lock_shared_within(&db, "database", max_wait)?;
+    lock_shared_within(&root, "ownership root", max_wait)?;
+    Ok(SharedLeases { db, root })
+}
+
+/// Take both locks shared, waiting up to `max_wait` for each. Nothing stays
+/// locked on failure.
+///
+/// # Errors
+/// Fails when a lock stays exclusive for `max_wait` or a lease file is unusable.
+pub fn shared_with_wait(
+    db_path: &Path,
+    ownership_root: &Path,
+    max_wait: Duration,
+) -> Result<SharedLeases, StorageError> {
+    let db = lease_file(db_path)?;
+    let root = root_lease_file(ownership_root)?;
+    shared_pair(db, root, max_wait)
+}
+
+impl ExclusiveLeases {
+    /// Give up exclusivity and hold both locks shared for the rest of the process.
+    ///
+    /// A flock conversion is not atomic: the exclusive lock is removed first, so
+    /// another process may take a lock in between. **Read any state that must not
+    /// change (tombstones, the binding) again after this returns.**
+    ///
+    /// # Errors
+    /// Fails when another process holds a lock exclusively for `max_wait`; then
+    /// nothing stays locked.
+    pub fn downgrade(self, max_wait: Duration) -> Result<SharedLeases, StorageError> {
+        let Self { db, root } = self;
+        // Release both before waiting so two starting processes cannot wait on each other.
+        db.unlock()
+            .and_then(|()| root.unlock())
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+        shared_pair(db, root, max_wait)
+    }
+}
+
+impl SharedLeases {
+    /// A handle on the same database lock for `Storage::open_with_lease`; the
+    /// lock lasts until every handle is dropped.
+    ///
+    /// # Errors
+    /// Fails when the file handle cannot be duplicated.
+    pub fn db_lease(&self) -> Result<File, StorageError> {
+        self.db
+            .try_clone()
+            .map_err(|error| StorageError::Io(error.to_string()))
+    }
+
+    /// A handle on the same ownership-root lock, for components that outlive this value.
+    ///
+    /// # Errors
+    /// Fails when the file handle cannot be duplicated.
+    pub fn root_lease(&self) -> Result<File, StorageError> {
+        self.root
+            .try_clone()
+            .map_err(|error| StorageError::Io(error.to_string()))
+    }
+}
+
+/// The right to remove a reclaimed family's files: one process per database holds
+/// `<db>.reclaim-lock` exclusively. `Ok(None)` when another process holds it. The
+/// returned file keeps the lock until dropped; the path is never unlinked.
+///
+/// # Errors
+/// Fails when the lock file cannot be created or locked for another reason.
+pub fn reclaim_lease(db_path: &Path) -> Result<Option<File>, StorageError> {
+    let path = sibling_path(db_path, ".reclaim-lock")?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| StorageError::Io(error.to_string()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if would_block(&error) => Ok(None),
+        Err(error) => Err(lock_error("reclaim", error)),
+    }
+}
+
 pub(super) fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
+    sibling_path(path, ".maintenance-lock")
+}
+
+/// `<canonical db path><suffix>`; the database need not exist yet.
+fn sibling_path(path: &Path, suffix: &str) -> Result<PathBuf, StorageError> {
     let canonical = path
         .canonicalize()
         .or_else(|_| {
@@ -75,7 +265,7 @@ pub(super) fn lease_path(path: &Path) -> Result<PathBuf, StorageError> {
         })
         .map_err(|error| StorageError::Io(error.to_string()))?;
     let mut name = canonical.into_os_string();
-    name.push(".maintenance-lock");
+    name.push(suffix);
     Ok(name.into())
 }
 
@@ -419,3 +609,6 @@ pub(super) fn read_only_preview_connection(
     files.verify()?;
     Ok((conn, files))
 }
+
+#[cfg(test)]
+mod lease_tests;

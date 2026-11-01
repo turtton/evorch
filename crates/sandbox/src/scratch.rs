@@ -18,6 +18,60 @@ use std::time::Duration;
 
 const TRASH_PREFIX: &str = ".trash-";
 
+/// What [`ScratchRoot::remove_bounded`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedRemoval {
+    /// Entries actually unlinked by this call.
+    pub removed_entries: usize,
+    /// The directory is gone from disk.
+    pub complete: bool,
+}
+
+fn with_path(error: io::Error, path: &Path) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// Unlink one entry, counting it. An entry that vanished meanwhile is not an error
+/// and not counted; any other failure is.
+fn unlink(
+    path: &Path,
+    remove: impl FnOnce(&Path) -> io::Result<()>,
+    progress: &mut BoundedRemoval,
+) -> io::Result<()> {
+    match remove(path) {
+        Ok(()) => {
+            progress.removed_entries += 1;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(with_path(error, path)),
+    }
+}
+
+/// A failed [`ScratchRoot::remove_bounded`]: what it had unlinked when it stopped.
+#[derive(Debug)]
+pub struct BoundedError {
+    /// Entries unlinked before the failure; they are gone and count against a budget.
+    pub removed_entries: usize,
+    pub source: io::Error,
+}
+
+impl std::fmt::Display for BoundedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (after removing {} entries)",
+            self.source, self.removed_entries
+        )
+    }
+}
+
+impl std::error::Error for BoundedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Private per-name scratch directories under one parent directory.
 #[derive(Debug)]
 pub struct ScratchRoot {
@@ -133,6 +187,98 @@ impl ScratchRoot {
                 }
             }
         }
+    }
+
+    /// Delete `name`'s tree in place, entry by entry, without following links, and
+    /// report what was actually removed. At most `max_entries` entries (files,
+    /// links, directories) are unlinked; a tree that does not fit stays on disk, partly
+    /// emptied, and the next call continues with what is left. `complete` is true only
+    /// after the directory itself was unlinked (or never existed).
+    ///
+    /// Unlike [`Self::discard`], nothing is handed to a background worker: the answer
+    /// is the state of the disk. Use it where a caller must know a deletion happened.
+    ///
+    /// # Errors
+    /// Fails when the parent is not a private directory of this user, or on the first
+    /// unlink / read error other than "not found" (the path is in the message). The
+    /// entries removed before it stay removed, and [`BoundedError::removed_entries`]
+    /// says how many, so the caller can charge them to its budget.
+    pub fn remove_bounded(
+        &self,
+        name: &str,
+        max_entries: usize,
+    ) -> Result<BoundedRemoval, BoundedError> {
+        let mut progress = BoundedRemoval {
+            removed_entries: 0,
+            complete: true,
+        };
+        match self.remove_bounded_into(name, max_entries, &mut progress) {
+            Ok(()) => Ok(progress),
+            Err(source) => Err(BoundedError {
+                removed_entries: progress.removed_entries,
+                source,
+            }),
+        }
+    }
+
+    fn remove_bounded_into(
+        &self,
+        name: &str,
+        max_entries: usize,
+        progress: &mut BoundedRemoval,
+    ) -> io::Result<()> {
+        let dir = self.dir(name)?;
+        if !self.owned_parent()? {
+            return Ok(());
+        }
+        match dir.symlink_metadata() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(with_path(error, &dir)),
+            // A link or file where the directory belongs: remove that entry itself.
+            Ok(meta) if !meta.is_dir() => {
+                if max_entries == 0 {
+                    progress.complete = false;
+                    return Ok(());
+                }
+                unlink(&dir, |path| fs::remove_file(path), progress)?;
+                return Ok(());
+            }
+            Ok(_) => {}
+        }
+        let mut stack = vec![(
+            dir.clone(),
+            fs::read_dir(&dir).map_err(|e| with_path(e, &dir))?,
+        )];
+        while let Some((path, entries)) = stack.last_mut() {
+            match entries.next() {
+                Some(Ok(entry)) => {
+                    if progress.removed_entries >= max_entries {
+                        progress.complete = false;
+                        return Ok(());
+                    }
+                    let child = entry.path();
+                    // `file_type` does not follow links: a link is removed, never entered.
+                    let kind = entry.file_type().map_err(|e| with_path(e, &child))?;
+                    if kind.is_dir() {
+                        let reader = fs::read_dir(&child).map_err(|e| with_path(e, &child))?;
+                        stack.push((child, reader));
+                    } else {
+                        unlink(&child, |path| fs::remove_file(path), progress)?;
+                    }
+                }
+                Some(Err(error)) => return Err(with_path(error, path)),
+                None => {
+                    if progress.removed_entries >= max_entries {
+                        progress.complete = false;
+                        return Ok(());
+                    }
+                    let path = path.clone();
+                    stack.pop();
+                    unlink(&path, |path| fs::remove_dir(path), progress)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Names of the existing directories, excluding trees already discarded.

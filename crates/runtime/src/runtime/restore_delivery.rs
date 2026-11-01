@@ -35,6 +35,8 @@ impl AgentRuntime {
             run_id: recipient.to_string(),
             reason,
         };
+        self.deny_deleted_run(&recipient.to_string())
+            .map_err(|deleted| fail(RunRestoreFailure::ThreadDeleted(deleted)))?;
         // Serialize snapshot reads through registration; never acquire this gate under runs.
         let _restore_guard = self.shared.run_store.get().map(|store| {
             store

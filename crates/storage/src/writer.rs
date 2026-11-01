@@ -182,6 +182,18 @@ impl Storage {
     /// ファイル DB を開き、専用 writer スレッドを開始します。
     pub fn open(config: StorageConfig) -> Result<Self, StorageError> {
         let lease = crate::maintenance::offline::writer_lease(&config.db_path)?;
+        Self::open_with_lease(config, lease)
+    }
+
+    /// Like [`Self::open`], for a caller that already holds the database lease
+    /// shared (see [`crate::SharedLeases::db_lease`]). The writer thread keeps
+    /// `db_lease` until it exits; the lock outlives it while another handle on the
+    /// same lease is alive. The caller must have locked it: this does not check.
+    pub fn open_with_lease(
+        config: StorageConfig,
+        db_lease: std::fs::File,
+    ) -> Result<Self, StorageError> {
+        let lease = db_lease;
         let database = Database::open(&config)?;
         let initial_size = file_sizes(&config.db_path)?.total();
         let writes_suspended = initial_size >= config.hard_limits.max_db_bytes;

@@ -18,6 +18,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{AgentRuntime, Role, RunPurpose, agent_loop::LoopState, meta::DispatchResult};
 
+pub use meta_removal::{MAX_FAILURES_KEPT, MAX_META_BYTES, MetaRemoval, MetaStop};
+
 pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// The HTML file as written; its referenced images do not count.
 pub const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
@@ -611,6 +613,7 @@ pub(crate) fn present(state: &LoopState, runtime: &AgentRuntime, input: Value) -
 
 mod inline_images;
 mod inspect;
+mod meta_removal;
 pub(crate) mod source_io;
 pub use inspect::{ArtifactPage, ArtifactPages, INSPECT_ARTIFACT};
 pub(crate) use inspect::{inspect, spec as inspect_spec};

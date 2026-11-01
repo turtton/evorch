@@ -195,6 +195,8 @@ impl AgentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let question = self.user_question(id)?.ok_or("unknown question")?;
+        self.deny_deleted_run(&question.run_id)
+            .map_err(|deleted| deleted.to_string())?;
         let child = crate::meta::parse_run_id(&question.run_id)?;
         self.validate_question_parent(caller, child)?;
         let ownership = self
@@ -288,6 +290,8 @@ impl AgentRuntime {
         // parent agent's answer never does, whatever it relays.
         let trusted_user = origin == AnswerOrigin::Host;
         let question = self.user_question(id)?.ok_or("unknown question")?;
+        self.deny_deleted_run(&question.run_id)
+            .map_err(|deleted| deleted.to_string())?;
         let store = self
             .shared
             .run_store

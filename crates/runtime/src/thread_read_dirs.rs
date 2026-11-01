@@ -20,6 +20,10 @@ impl AgentRuntime {
     /// location, entries that are not existing directories are skipped, and an
     /// empty result removes the declaration.
     pub fn set_thread_read_only_directories(&self, thread_id: &str, directories: Vec<PathBuf>) {
+        if let Err(deleted) = self.deny_deleted_thread(thread_id) {
+            tracing::warn!(%deleted, "read-only directories of a deleted thread are not declared");
+            return;
+        }
         let mut paths = Vec::with_capacity(directories.len());
         for directory in directories {
             match directory.canonicalize() {

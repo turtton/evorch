@@ -12,8 +12,8 @@ use storage::inspect::EventScope;
 use storage::thread_index::IndexBlockKind;
 use storage::thread_retention::{
     BindingInput, BlockReason, ExploreBudget, FamilyState, FilesOutcome, FinalizeBudget,
-    FinalizeOutcome, LegacyArchivedPolicy, ReclaimBudget, RetentionInput, RetentionStatus,
-    SidebarThread, ThreadRetentionPolicy,
+    FinalizeOutcome, LegacyArchivedPolicy, ReclaimBudget, ReclaimJobState, RetentionInput,
+    RetentionStatus, SidebarThread, ThreadRetentionPolicy,
 };
 use storage::thread_search::{ConversationFilter, ConversationQuery, ConversationScan, ScanLimits};
 use storage::{Database, Storage, StorageConfig, StorageError};
@@ -618,6 +618,114 @@ type Mutation = Box<
     ),
 >;
 type Case = (&'static str, Mutation, BlockReason);
+
+// Given: a confirmed family / When: jobs are listed by state while the writer reclaims it
+// Then: the job moves db_pending -> db_done -> done, each listing names the family's
+// threads and runs from the tombstones, and the limit bounds the listing.
+#[test]
+fn reclaim_jobs_are_listed_by_state_with_their_members() {
+    let f = Fixture::new();
+    build_family(&f);
+    let database = confirm_family(&f);
+    let pending = database
+        .reclaim_jobs_in_state(ReclaimJobState::DbPending, 10)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].family_key, "C");
+    assert_eq!(pending[0].threads, ["C", "E", "P"]);
+    assert_eq!(pending[0].runs, ["rc", "re", "rp", "rp2", "ru"]);
+    assert!(
+        database
+            .reclaim_jobs_in_state(ReclaimJobState::DbPending, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .reclaim_jobs_in_state(ReclaimJobState::DbDone, 10)
+            .unwrap()
+            .is_empty()
+    );
+    drop(database);
+
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+    while handle
+        .reclaim_step(ReclaimBudget::default())
+        .unwrap()
+        .jobs_db_pending
+        > 0
+    {}
+    let database = f.database();
+    let done = database
+        .reclaim_jobs_in_state(ReclaimJobState::DbDone, 10)
+        .unwrap();
+    assert_eq!(
+        done, pending,
+        "members survive the reclaim in the tombstones"
+    );
+    assert!(handle.reclaim_mark_files("C", FilesOutcome::Done).unwrap());
+    assert!(
+        database
+            .reclaim_jobs_in_state(ReclaimJobState::DbDone, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .reclaim_jobs_in_state(ReclaimJobState::Done, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    storage.close();
+}
+
+// Given: a database that is incremental / and one that is not / When: a vacuum step runs
+// Then: the first returns pages to the file (never more than asked), the legacy one
+// reports `None` and changes nothing.
+#[test]
+fn the_vacuum_step_returns_free_pages_only_for_incremental_databases() {
+    let f = Fixture::new();
+    let database = f.database();
+    if database.pragma_i64("auto_vacuum").unwrap() != 2 {
+        assert_eq!(database.retention_vacuum_step(10).unwrap(), None);
+        return;
+    }
+    f.sql("CREATE TABLE ballast(x BLOB)");
+    for _ in 0..64 {
+        f.conn
+            .execute("INSERT INTO ballast VALUES (zeroblob(65536))", [])
+            .unwrap();
+    }
+    f.sql("DROP TABLE ballast");
+    let free = database.pragma_i64("freelist_count").unwrap();
+    assert!(free > 8, "{free}");
+    assert_eq!(
+        database.retention_vacuum_step(0).unwrap(),
+        Some(0),
+        "a zero page budget frees nothing"
+    );
+    assert_eq!(database.pragma_i64("freelist_count").unwrap(), free);
+    let freed = database.retention_vacuum_step(8).unwrap().unwrap();
+    assert_eq!(freed, 8);
+    assert_eq!(database.pragma_i64("freelist_count").unwrap(), free - 8);
+    let rest = database.retention_vacuum_step(1_000_000).unwrap().unwrap();
+    assert_eq!(rest, u64::try_from(free - 8).unwrap());
+    assert_eq!(database.retention_vacuum_step(1_000).unwrap(), Some(0));
+
+    // A legacy file (auto_vacuum NONE) cannot be shrunk incrementally.
+    let legacy = tempfile::tempdir().unwrap();
+    let path = legacy.path().join("legacy.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA auto_vacuum = NONE; CREATE TABLE t(x);")
+            .unwrap();
+    }
+    let database = Database::open(&config(&path)).unwrap();
+    assert_eq!(database.pragma_i64("auto_vacuum").unwrap(), 0);
+    assert_eq!(database.retention_vacuum_step(10).unwrap(), None);
+}
 
 #[test]
 fn protections_keep_a_family_from_being_confirmed() {

@@ -1198,3 +1198,79 @@ fn one_heartbeat_tick_writes_every_due_thread_in_a_single_transaction() {
     );
     assert_eq!(data_version(&observer), before);
 }
+
+// Given: owner rows of every kind and a checkpoint / When: classifying for retention and
+// removing threads
+// Then: absent, released, idle and active rows are told apart (the active one with its
+// lease expiry), and removal deletes rows and checkpoints of the named threads only.
+#[test]
+fn retention_classifies_owner_rows_and_removes_only_named_threads() {
+    let directory = tempfile::tempdir().expect("directory");
+    let mut registry = Registry::open(&directory.path().join("owners.db")).expect("registry");
+    let row = |thread: &str| {
+        ThreadOwner::new(
+            thread.into(),
+            Lease {
+                owner_id: "gone".into(),
+                generation: 1,
+                expires_at: 42,
+            },
+        )
+    };
+    let idle = row("idle");
+    let mut active = row("active");
+    active.active_turn = true;
+    let mut released = row("released");
+    released.state = OwnerState::Released;
+    for owner in [&idle, &active, &released, &row("other")] {
+        registry.start(owner).expect("start");
+    }
+    let ids = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let verdicts = registry
+        .classify_for_retention(&ids(&["absent", "idle", "active", "released"]))
+        .expect("classify");
+
+    assert_eq!(verdicts["absent"], OwnerVerdict::Absent);
+    assert_eq!(verdicts["idle"], OwnerVerdict::IdleRemnant);
+    assert_eq!(verdicts["released"], OwnerVerdict::Released);
+    assert_eq!(
+        verdicts["active"],
+        OwnerVerdict::ActiveRemnant { expires_at_ms: 42 }
+    );
+
+    registry
+        .connection_for_tests()
+        .execute(
+            "INSERT INTO owner_checkpoints VALUES ('idle', 'g', '{}')",
+            [],
+        )
+        .expect("checkpoint");
+    assert_eq!(
+        registry
+            .remove_threads(&ids(&["idle", "active", "absent"]))
+            .expect("remove"),
+        2
+    );
+    let left = registry
+        .list()
+        .expect("list")
+        .into_iter()
+        .map(|owner| owner.thread_id)
+        .collect::<Vec<_>>();
+    assert_eq!(left, ["other", "released"]);
+    let checkpoints: i64 = registry
+        .connection_for_tests()
+        .query_row(
+            "SELECT COUNT(*) FROM owner_checkpoints WHERE thread_id = 'idle'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(checkpoints, 0);
+}
