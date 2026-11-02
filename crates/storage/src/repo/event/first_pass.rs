@@ -92,6 +92,10 @@ pub struct FirstPassScan {
     /// The time of the last event the replay accepts: the last in ID order, a
     /// response counting at its final part.
     pub replay_end: Option<SystemTime>,
+    /// The largest event ID of the snapshot the pass read. The replay that
+    /// follows reads up to it and the live feed continues after it, so an event
+    /// another process appends in between is neither skipped nor shown twice.
+    pub through_id: i64,
     pub metrics: FirstPassMetrics,
 }
 
@@ -463,6 +467,10 @@ pub(crate) fn scan(
     let tombstones = TombstoneSet::load(&transaction)?;
     let fallback = select::has_unbackfilled(&transaction)?;
     let probe_threads = !tombstones.threads.is_empty();
+    let through_id: i64 =
+        transaction.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+            row.get(0)
+        })?;
     let mut metrics = FirstPassMetrics {
         used_fallback: fallback,
         ..FirstPassMetrics::default()
@@ -486,14 +494,46 @@ pub(crate) fn scan(
         };
         // A deleted run's rows stay on disk until reclaimed; the replay never
         // sees them, so they neither move the replay end nor close a response.
-        if !matches!(reading, Reading::Decode(_))
-            && run_id.is_some_and(|run| tombstones.contains_run(run))
-        {
+        let deleted = run_id.is_some_and(|run| tombstones.contains_run(run));
+        if let Reading::Decode(decoding) = reading {
+            if fallback {
+                metrics.fallback_events_decoded += 1;
+                metrics.fallback_payload_bytes += row.get_ref(PAYLOAD).map(stored_len).unwrap_or(0);
+            } else {
+                match decoding {
+                    Decoding::Task => metrics.task_event_decodes += 1,
+                    Decoding::Unclassified => metrics.unclassified_event_decodes += 1,
+                    Decoding::ThreadProbe => metrics.thread_probe_decodes += 1,
+                }
+            }
+            match row_to_event(row) {
+                // A row that cannot be read may still name a deleted run.
+                Err(_) if deleted => {}
+                Err(error) => isolate(&mut metrics, &mut on_failure, id, run_id, &error),
+                Ok(stored) if tombstones.rejects(&stored.event.kind).is_some() => {}
+                Ok(stored) => {
+                    if is_task_event(&stored.event) {
+                        on_task_event(&stored);
+                    }
+                    reducer.decoded(&stored);
+                }
+            }
             continue;
         }
+        if deleted {
+            continue;
+        }
+        // The decoder would refuse a row whose own columns are unusable, so a
+        // pass that never decodes it must refuse it too.
+        let wall_clock = match row_wall_clock(row) {
+            Ok(wall_clock) => wall_clock,
+            Err(error) => {
+                isolate(&mut metrics, &mut on_failure, id, run_id, &error);
+                continue;
+            }
+        };
         match reading {
             Reading::Columns => {
-                let wall_clock = ns_to_system_time(row.get(4)?);
                 let effect = match (kind, column_str(row, SUBKIND), run_id) {
                     (Some("Provider"), Some("RequestStarted"), Some(run)) => {
                         Effect::RequestStarted(run)
@@ -508,75 +548,64 @@ pub(crate) fn scan(
             Reading::SessionMarker => {
                 metrics.session_marker_rows += 1;
                 match session_marker(row) {
-                    Ok(session) => {
-                        reducer.accepted(
-                            ns_to_system_time(row.get(4)?),
-                            Some(&session),
-                            Effect::None,
-                        );
-                    }
-                    Err(error) => {
-                        metrics.isolated_events += 1;
-                        on_failure(id, run_id, &error.to_string());
-                    }
+                    Ok(session) => reducer.accepted(wall_clock, Some(&session), Effect::None),
+                    Err(error) => isolate(&mut metrics, &mut on_failure, id, run_id, &error),
                 }
             }
             Reading::Part => {
                 metrics.message_part_metadata_rows += 1;
                 match part_metadata(row, run_id, &mut metrics) {
                     Ok((run, meta)) => reducer.part(
-                        ns_to_system_time(row.get(4)?),
+                        wall_clock,
                         run,
                         &meta.response_id,
                         meta.index,
                         meta.total,
                         meta.text.0,
                     ),
-                    Err(error) => {
-                        metrics.isolated_events += 1;
-                        on_failure(id, run_id, &error.to_string());
-                    }
+                    Err(error) => isolate(&mut metrics, &mut on_failure, id, run_id, &error),
                 }
             }
-            Reading::Decode(decoding) => {
-                if fallback {
-                    metrics.fallback_events_decoded += 1;
-                    metrics.fallback_payload_bytes +=
-                        row.get_ref(PAYLOAD).map(stored_len).unwrap_or(0);
-                } else {
-                    match decoding {
-                        Decoding::Task => metrics.task_event_decodes += 1,
-                        Decoding::Unclassified => metrics.unclassified_event_decodes += 1,
-                        Decoding::ThreadProbe => metrics.thread_probe_decodes += 1,
-                    }
-                }
-                let stored = match row_to_event(row) {
-                    Ok(stored) => stored,
-                    Err(error) => {
-                        metrics.isolated_events += 1;
-                        // A row that cannot be read may still name its run.
-                        if !run_id.is_some_and(|run| tombstones.contains_run(run)) {
-                            on_failure(id, run_id, &error.to_string());
-                        }
-                        continue;
-                    }
-                };
-                if tombstones.rejects(&stored.event.kind).is_some() {
-                    continue;
-                }
-                if is_task_event(&stored.event) {
-                    on_task_event(&stored);
-                }
-                reducer.decoded(&stored);
-            }
+            Reading::Decode(_) => {}
         }
     }
     Ok(FirstPassScan {
         last_waiting: reducer.last_waiting,
         completed_at_waiting: reducer.completed_at_waiting,
         replay_end: reducer.replay_end,
+        through_id,
         metrics,
     })
+}
+
+fn isolate(
+    metrics: &mut FirstPassMetrics,
+    on_failure: &mut impl FnMut(i64, Option<&str>, &str),
+    id: i64,
+    run_id: Option<&str>,
+    error: &StorageError,
+) {
+    metrics.isolated_events += 1;
+    on_failure(id, run_id, &error.to_string());
+}
+
+/// The checks `row_to_event` makes of the columns around the payload, for rows
+/// the pass reads without decoding them. Returns the event's wall-clock time.
+fn row_wall_clock(row: &Row<'_>) -> Result<SystemTime, StorageError> {
+    match row.get_ref(1)? {
+        ValueRef::Null => {}
+        ValueRef::Text(bytes) if std::str::from_utf8(bytes).is_ok() => {}
+        _ => {
+            return Err(StorageError::Serialization(
+                "session_id column is not text".to_owned(),
+            ));
+        }
+    }
+    let schema_version: i64 = row.get(2)?;
+    u32::try_from(schema_version).map_err(|_| StorageError::OutOfRange("event schema version"))?;
+    let monotonic_ns: i64 = row.get(3)?;
+    u64::try_from(monotonic_ns).map_err(|_| StorageError::OutOfRange("monotonic nanoseconds"))?;
+    Ok(ns_to_system_time(row.get(4)?))
 }
 
 fn session_marker(row: &Row<'_>) -> Result<String, StorageError> {
@@ -604,21 +633,22 @@ fn part_metadata<'a>(
     Ok((run, meta.payload.payload))
 }
 
-/// Every event in ID order, each reported as read or as failed. A row that
+/// Every event up to `through_id` in ID order, each reported as read or as failed. A row that
 /// cannot be read is handed to `on_failure` with its ID and, when the `run_id`
 /// column names one, its run, and the replay goes on. Only a failure of the
 /// query itself ends it.
 pub(crate) fn for_each_isolated(
     conn: &Connection,
+    through_id: i64,
     mut visit: impl FnMut(StoredEvent),
     mut on_failure: impl FnMut(i64, Option<&str>, &str),
 ) -> Result<(), StorageError> {
     let tombstones = TombstoneSet::load(conn)?;
     let mut statement = conn.prepare(
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, \
-         subkind, run_id FROM events ORDER BY id ASC",
+         subkind, run_id FROM events WHERE id <= ?1 ORDER BY id ASC",
     )?;
-    let mut rows = statement.query([])?;
+    let mut rows = statement.query([through_id])?;
     while let Some(row) = rows.next()? {
         match row_to_event(row) {
             Ok(stored) if tombstones.rejects(&stored.event.kind).is_some() => {}

@@ -105,6 +105,16 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
         serde_json::to_value(&old.history).unwrap(),
         serde_json::to_value(&new.history).unwrap()
     );
+    // Rows hold no clock reading once the history is finished, so they compare.
+    let telemetry_runs: Vec<_> = old.telemetry.run_ids().collect();
+    assert_eq!(telemetry_runs, new.telemetry.run_ids().collect::<Vec<_>>());
+    for run in telemetry_runs {
+        assert_eq!(
+            old.telemetry.row(run),
+            new.telemetry.row(run),
+            "telemetry of {run}"
+        );
+    }
     assert_eq!(old.thread_goals, new.thread_goals);
     assert_eq!(old.thread_todos, new.thread_todos);
     assert_eq!(format!("{:?}", old.ledger), format!("{:?}", new.ledger));
@@ -141,7 +151,9 @@ fn restore_skips_unreadable_events_like_legacy() {
     });
 }
 
-fn assert_restore_matches_legacy(damage: impl FnOnce(&rusqlite::Connection)) {
+fn assert_restore_matches_legacy(
+    damage: impl FnOnce(&rusqlite::Connection),
+) -> WorkbenchState<DemoSource> {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("events.db"),
@@ -341,6 +353,7 @@ fn assert_restore_matches_legacy(damage: impl FnOnce(&rusqlite::Connection)) {
     damage(&rusqlite::Connection::open(&config.db_path).unwrap());
     let registry_path = dir.path().join("owners.db");
     drop(runtime::ownership::Registry::open(&registry_path).unwrap());
+    let mut restored = None;
     for registry_path in [None, Some(registry_path.as_path())] {
         let mut old = state(sidebar.clone());
         let mut new = state(sidebar.clone());
@@ -393,8 +406,10 @@ fn assert_restore_matches_legacy(damage: impl FnOnce(&rusqlite::Connection)) {
         assert!(new.transcripts.run("run-3").unwrap().entries().iter().any(
             |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "first second")
         ));
+        restored = Some(new);
     }
     drop(storage);
+    restored.expect("restored at least once")
 }
 
 #[test]
@@ -553,4 +568,110 @@ fn restored_task_rows_match_legacy_whichever_pass_reads_the_history() {
         assert_same(&old, &new);
         drop(storage);
     }
+}
+
+/// A completion event the replay cannot read does not count as a completion,
+/// so the saved snapshot repairs the wait after it exactly as it did when the
+/// first pass read the event itself.
+#[test]
+fn a_wait_after_an_unreadable_completion_is_still_repaired_from_the_snapshot() {
+    let restored = assert_restore_matches_legacy(|conn| {
+        let damaged = conn
+            .execute(
+                "UPDATE events SET payload = '{not json' \
+                 WHERE subkind = 'MessageCompleted' AND run_id = 'run-2'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(damaged, 1);
+    });
+    let repaired = restored.transcripts.run("run-2").unwrap().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "must not duplicate"),
+    );
+    assert!(repaired, "the snapshot's answer shows where the wait is");
+}
+
+fn damaged_tool_history() -> Vec<Event> {
+    let mut events = vec![started("run-1", None, "chat:Worker:one"), request("run-1")];
+    for n in 0..13 {
+        events.push(Event::new(ToolEvent::ToolStarted {
+            run_id: Some("run-1".into()),
+            tool_name: "shell".into(),
+            call_id: format!("call-{n}"),
+            input: None,
+            parent_call_id: None,
+        }));
+    }
+    events.push(Event::new(ToolEvent::ToolStarted {
+        run_id: Some("deleted".into()),
+        tool_name: "shell".into(),
+        call_id: "gone".into(),
+        input: None,
+        parent_call_id: None,
+    }));
+    events.push(phase("run-1", AgentRunPhase::Waiting));
+    events
+}
+
+/// Every event that cannot be read stays reachable by ID, however many there
+/// are, once per event although both passes meet it; a deleted run's events
+/// never come back as failures; and none of it stops the restore.
+#[test]
+fn unreadable_events_are_all_kept_by_id_once_and_never_for_deleted_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    for event in damaged_tool_history() {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    // Alternate the damage: an unusable column for some, a broken payload for
+    // the rest. The first pass never opens a tool payload, the replay does.
+    conn.execute(
+        "UPDATE events SET wall_clock_ns = 'late' WHERE subkind = 'ToolStarted' AND id % 2 = 0",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE events SET payload = '{broken' WHERE subkind = 'ToolStarted' AND id % 2 = 1",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES ('deleted', 't', 'f')",
+        [],
+    )
+    .unwrap();
+    let damaged: Vec<i64> = conn
+        .prepare("SELECT id FROM events WHERE subkind = 'ToolStarted' AND run_id = 'run-1'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(damaged.len(), 13);
+
+    let db = Database::open(&config).unwrap();
+    let mut restored = state(SidebarState::default());
+    restored.restore_history(&db).unwrap();
+
+    assert_eq!(
+        restored
+            .unreadable_history_events
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        damaged
+    );
+    assert!(
+        restored
+            .unreadable_history_events
+            .values()
+            .all(|event| event.run_id.as_deref() == Some("run-1") && !event.reason.is_empty())
+    );
+    assert_eq!(restored.shown_through_event, db.last_event_id().unwrap());
+    drop(storage);
 }

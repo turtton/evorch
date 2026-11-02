@@ -680,18 +680,20 @@ impl Database {
         event::first_pass::scan(&self.conn, on_task_event, on_failure)
     }
 
-    /// [`Self::for_each_event_ordered`] that reports an event it cannot read
-    /// to `on_failure` as `(event ID, run from the run_id column, reason)`
-    /// instead of dropping it silently, and goes on with the next one.
+    /// [`Self::for_each_event_ordered`] over the events up to `through_id`
+    /// (the first pass reports it), reporting an event it cannot read to
+    /// `on_failure` as `(event ID, run from the run_id column, reason)` instead
+    /// of dropping it silently, and going on with the next one.
     ///
     /// # Errors
     /// Returns an error if the query itself fails.
     pub fn for_each_event_isolated(
         &self,
+        through_id: i64,
         visit: impl FnMut(StoredEvent),
         on_failure: impl FnMut(i64, Option<&str>, &str),
     ) -> Result<(), StorageError> {
-        event::first_pass::for_each_isolated(&self.conn, visit, on_failure)
+        event::first_pass::for_each_isolated(&self.conn, through_id, visit, on_failure)
     }
 
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。

@@ -34,6 +34,14 @@ pub(super) struct UserMessage {
     pub resolution: Option<Resolution>,
 }
 
+/// A stored event the restore skipped because it could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UnreadableEvent {
+    /// The run the event's `run_id` column named, when it named one.
+    pub run_id: Option<String>,
+    pub reason: String,
+}
+
 /// How far a composer message got towards the agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -192,9 +200,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let scan = db.scan_history_first_pass(
             |stored| self.tasks.restore_event(&mut restored_tasks, &stored.event),
             |id, run, reason| {
-                unreadable
-                    .entry(id)
-                    .or_insert_with(|| (run.map(str::to_owned), reason.to_owned()));
+                unreadable.entry(id).or_insert_with(|| UnreadableEvent {
+                    run_id: run.map(str::to_owned),
+                    reason: reason.to_owned(),
+                });
             },
         )?;
         let figures = &scan.metrics;
@@ -218,9 +227,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         // A legacy event subscriber could drop stream deltas under load. The
         // context snapshot still contains the complete accepted response.
         // Repair the final waiting turn at its original position in the replay.
+        //
+        // Whether the response was completed is decided again by the replay,
+        // from the events it can read: a completion whose payload is damaged
+        // looks complete in the event columns but is not in the replay.
         let last_waiting = scan.last_waiting;
-        let completed_at_waiting = scan.completed_at_waiting;
         let replay_end = scan.replay_end;
+        let scan_through = scan.through_id;
         self.tasks.finish_restore(restored_tasks);
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_sidebar_receipts");
@@ -304,49 +317,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         stage.finish();
-        let stage = crate::restore_metrics::RestoreTimer::new("history_completed_snapshots");
-        let mut completed_snapshots = std::collections::BTreeMap::new();
-        for thread in &self.sidebar.threads {
-            for run_id in &thread.run_ids {
-                if !last_waiting.contains_key(run_id)
-                    || completed_at_waiting.get(run_id).copied().unwrap_or(false)
-                {
-                    continue;
-                }
-                let Some(messages_json) = db.checkpoint_run_messages(run_id)? else {
-                    continue;
-                };
-                let Ok(messages) = serde_json::from_str::<Vec<providers::Message>>(&messages_json)
-                else {
-                    continue;
-                };
-                let Some(last) = messages.last().filter(|message| {
-                    message.role == providers::Role::Assistant
-                        && !message
-                            .content
-                            .iter()
-                            .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
-                }) else {
-                    continue;
-                };
-                let text: String = last
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        providers::ContentBlock::Text { text } => Some(text.as_str()),
-                        providers::ContentBlock::Compaction { .. } => {
-                            tracing::warn!("テキスト抽出では compaction block をスキップします");
-                            None
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if !text.is_empty() {
-                    completed_snapshots.insert(run_id.clone(), text);
-                }
-            }
-        }
-        stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_second_pass");
         self.seed_branches(None);
         self.adopt_recorded_origins(db);
@@ -355,9 +325,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut messages = messages.into_iter().peekable();
         self.telemetry = crate::model::telemetry::TelemetryOverlay::new();
         let replay_now = std::time::Instant::now();
-        let mut replayed_to = 0;
+        // The replay stops where the first pass did, and the live feed continues
+        // after that point: events other windows appended meanwhile are shown
+        // once, by the feed.
+        let mut replayed_to = scan_through;
+        let mut completed_since_request = std::collections::BTreeMap::new();
+        let mut snapshot_error = None;
         let mut parts = event_bus::MessagePartAssembler::new();
         db.for_each_event_isolated(
+            scan_through,
             |stored| {
                 replayed_to = replayed_to.max(stored.id);
                 let Some(assembled) = parts.accept(&stored.event) else {
@@ -391,6 +367,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }));
                 }
                 self.bind_goal_event(event);
+                match &event.kind {
+                    event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
+                        run_id: Some(run_id),
+                        ..
+                    }) => {
+                        completed_since_request.insert(run_id.clone(), false);
+                    }
+                    event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted {
+                        run_id,
+                        ..
+                    }) => {
+                        completed_since_request.insert(run_id.clone(), true);
+                    }
+                    _ => {}
+                }
                 if let event_bus::EventKind::Lifecycle(
                     event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
                 ) = &event.kind
@@ -402,24 +393,41 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
                 ) = &event.kind
                     && last_waiting.get(run_id) == Some(&stored.id)
-                    && !completed_at_waiting.get(run_id).copied().unwrap_or(false)
-                    && let Some(text) = completed_snapshots.get(run_id)
+                    && !completed_since_request
+                        .get(run_id)
+                        .copied()
+                        .unwrap_or(false)
+                    && snapshot_error.is_none()
+                    && self.thread_for_run(run_id).is_some()
+                    && let Some(text) = completed_snapshot_text(db, run_id)
+                        .map_err(|error| snapshot_error = Some(error))
+                        .ok()
+                        .flatten()
                 {
                     self.apply_conversation_event(&event_bus::Event::new(
                         event_bus::MessageEvent::MessageCompleted {
                             run_id: run_id.clone(),
-                            text: text.clone(),
+                            text,
                         },
                     ));
                 }
             },
             |id, run, reason| {
-                unreadable
-                    .entry(id)
-                    .or_insert_with(|| (run.map(str::to_owned), reason.to_owned()));
+                unreadable.entry(id).or_insert_with(|| UnreadableEvent {
+                    run_id: run.map(str::to_owned),
+                    reason: reason.to_owned(),
+                });
             },
         )?;
-        crate::restore_metrics::report_unreadable_events(&unreadable);
+        if let Some(error) = snapshot_error {
+            return Err(error);
+        }
+        crate::restore_metrics::report_unreadable_events(
+            unreadable
+                .iter()
+                .map(|(id, event)| (*id, event.run_id.as_deref(), event.reason.as_str())),
+        );
+        self.unreadable_history_events = unreadable;
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");
         // A response can finish after the replay cursor, in a later feed batch.
@@ -813,6 +821,43 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
     }
+}
+
+/// The text of a run's last assistant message in its saved snapshot, when that
+/// message ends the turn (it calls no tool). It repairs a response whose
+/// completion event was lost.
+fn completed_snapshot_text(
+    db: &storage::Database,
+    run_id: &str,
+) -> Result<Option<String>, storage::StorageError> {
+    let Some(messages_json) = db.checkpoint_run_messages(run_id)? else {
+        return Ok(None);
+    };
+    let Ok(messages) = serde_json::from_str::<Vec<providers::Message>>(&messages_json) else {
+        return Ok(None);
+    };
+    let Some(last) = messages.last().filter(|message| {
+        message.role == providers::Role::Assistant
+            && !message
+                .content
+                .iter()
+                .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
+    }) else {
+        return Ok(None);
+    };
+    let text: String = last
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            providers::ContentBlock::Text { text } => Some(text.as_str()),
+            providers::ContentBlock::Compaction { .. } => {
+                tracing::warn!("テキスト抽出では compaction block をスキップします");
+                None
+            }
+            _ => None,
+        })
+        .collect();
+    Ok((!text.is_empty()).then_some(text))
 }
 
 #[cfg(test)]

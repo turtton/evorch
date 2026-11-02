@@ -103,24 +103,24 @@ impl FirstPassReport {
 }
 
 /// Reports the stored events the restore skipped because they could not be
-/// read, once per restore: the same event fails in both passes, so they are
-/// keyed by event ID. `(run, reason)` is what the `run_id` column and the
-/// decoder said.
-pub fn report_unreadable_events(
-    events: &std::collections::BTreeMap<i64, (Option<String>, String)>,
+/// read, once per restore: the same event fails in both passes, so the caller
+/// keys them by event ID. Each is `(event ID, run from the run_id column,
+/// reason)`. The warning lists the first few; the caller keeps them all.
+pub fn report_unreadable_events<'a>(
+    events: impl ExactSizeIterator<Item = (i64, Option<&'a str>, &'a str)>,
 ) {
-    if events.is_empty() {
+    const SHOWN: usize = 10;
+    let count = events.len();
+    if count == 0 {
         return;
     }
-    const SHOWN: usize = 10;
     let sample: Vec<String> = events
-        .iter()
         .take(SHOWN)
-        .map(|(id, (run, reason))| format!("#{id} run={} {reason}", run.as_deref().unwrap_or("-")))
+        .map(|(id, run, reason)| format!("#{id} run={} {reason}", run.unwrap_or("-")))
         .collect();
     tracing::warn!(
-        count = events.len(),
-        shown = sample.len(),
+        count,
+        omitted = count - sample.len(),
         events = ?sample,
         "history restore skipped stored events that could not be read"
     );

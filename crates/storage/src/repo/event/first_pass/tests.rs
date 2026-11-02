@@ -13,7 +13,7 @@ use rusqlite::Connection;
 
 use super::*;
 use crate::repo::event::{EventAccounting, append_event};
-use crate::{Database, HardLimits};
+use crate::{Database, HardLimits, Storage, StorageConfig};
 
 #[derive(Debug, PartialEq)]
 struct Answer {
@@ -518,6 +518,7 @@ fn isolated_replay_reports_a_bad_row_and_hands_over_every_other() {
     let mut failed = Vec::new();
     for_each_isolated(
         &db.conn,
+        i64::MAX,
         |stored| seen.push(stored.id),
         |id, run, reason| failed.push((id, run.map(str::to_owned), reason.is_empty())),
     )
@@ -663,4 +664,293 @@ fn only_the_documented_rows_are_decoded() {
         classify("Message", None, false),
         Reading::Decode(Decoding::Unclassified)
     ));
+}
+
+/// A file-backed history written by a live writer, read through a second
+/// connection the way another GUI window reads it.
+struct SharedHistory {
+    _dir: tempfile::TempDir,
+    config: StorageConfig,
+    writer: Storage,
+    reader: Database,
+}
+
+impl SharedHistory {
+    fn open() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let writer = Storage::open(config.clone()).unwrap();
+        let reader = Database::open(&config).unwrap();
+        Self {
+            _dir: dir,
+            config,
+            writer,
+            reader,
+        }
+    }
+
+    fn append(&self, event: &Event) -> i64 {
+        self.writer
+            .handle()
+            .append_event(Some("session"), event)
+            .unwrap();
+        self.reader.last_event_id().unwrap()
+    }
+
+    fn file_len(&self, suffix: &str) -> u64 {
+        let mut path = self.config.db_path.clone().into_os_string();
+        path.push(suffix);
+        std::fs::metadata(path).map_or(0, |meta| meta.len())
+    }
+}
+
+#[test]
+fn the_replay_stops_where_the_first_pass_did_and_a_later_append_is_left_to_the_feed() {
+    let shared = SharedHistory::open();
+    shared.append(&at(10, started("child-1")));
+    let wait = shared.append(&at(20, phase("child-1", AgentRunPhase::Waiting)));
+
+    let scan = shared
+        .reader
+        .scan_history_first_pass(|_| {}, |_, _, _| {})
+        .unwrap();
+    assert_eq!(scan.through_id, wait);
+
+    // Another window appends between the two passes.
+    let later = shared.append(&at(30, phase("child-1", AgentRunPhase::Done)));
+    let mut replayed = Vec::new();
+    shared
+        .reader
+        .for_each_event_isolated(
+            scan.through_id,
+            |stored| replayed.push(stored.id),
+            |_, _, _| {},
+        )
+        .unwrap();
+    assert_eq!(replayed.last(), Some(&wait));
+    assert!(!replayed.contains(&later));
+
+    // The feed continues after the replayed range and shows it exactly once.
+    let mut fed = Vec::new();
+    shared
+        .reader
+        .for_each_event_isolated(i64::MAX, |stored| fed.push(stored.id), |_, _, _| {})
+        .unwrap();
+    assert_eq!(fed.split_off(replayed.len()), vec![later]);
+
+    let again = shared
+        .reader
+        .scan_history_first_pass(|_| {}, |_, _, _| {})
+        .unwrap();
+    assert_eq!(again.through_id, later);
+    assert_eq!(again.replay_end, Some(UNIX_EPOCH + Duration::from_secs(30)));
+}
+
+#[test]
+fn an_empty_history_has_no_upper_id() {
+    let db = Database::open_in_memory().unwrap();
+    let (_, _, _) = first_pass(&db.conn);
+    let scan = scan(&db.conn, |_| {}, |_, _, _| {}).unwrap();
+    assert_eq!(scan.through_id, 0);
+    assert_eq!(scan.replay_end, None);
+}
+
+#[test]
+fn unusable_row_columns_are_isolated_in_both_passes_without_decoding_the_row() {
+    let db = Database::open_in_memory().unwrap();
+    let good = append(&db.conn, &at(10, phase("run", AgentRunPhase::Waiting)));
+    let columns_row = append(&db.conn, &at(20, completed("run", "text")));
+    let part_row = append(&db.conn, &at(30, part("run", "r", 0, 1, "text")));
+    let marker_row = append(
+        &db.conn,
+        &at(
+            40,
+            Event::new(LifecycleEvent::Completed {
+                session_id: "run".into(),
+            }),
+        ),
+    );
+    let task_row = append(&db.conn, &at(50, started("run")));
+    let last = append(&db.conn, &at(60, request("run")));
+    for (id, damage) in [
+        (columns_row, "wall_clock_ns = 'late'"),
+        (part_row, "monotonic_ns = -1"),
+        (marker_row, "schema_version = -1"),
+        (task_row, "session_id = x'00'"),
+    ] {
+        db.conn
+            .execute(&format!("UPDATE events SET {damage} WHERE id = ?1"), [id])
+            .unwrap();
+    }
+
+    let (answer, metrics, failures) = first_pass(&db.conn);
+
+    let damaged = [columns_row, part_row, marker_row, task_row];
+    let mut reported: Vec<_> = failures.iter().map(|(id, _)| *id).collect();
+    reported.sort_unstable();
+    assert_eq!(reported, damaged);
+    assert_eq!(metrics.isolated_events, 4);
+    assert_eq!(answer.last_waiting["run"], good);
+    assert_eq!(answer.replay_end, Some(wall_clock_of(&db.conn, last)));
+    assert_eq!(answer.task_events, vec![good]);
+
+    let mut replayed = Vec::new();
+    let mut second_pass_failures = Vec::new();
+    for_each_isolated(
+        &db.conn,
+        i64::MAX,
+        |stored| replayed.push(stored.id),
+        |id, _, _| second_pass_failures.push(id),
+    )
+    .unwrap();
+    assert_eq!(replayed, vec![good, last]);
+    second_pass_failures.sort_unstable();
+    assert_eq!(second_pass_failures, damaged);
+}
+
+#[test]
+fn the_scan_is_one_forward_pass_over_the_event_table() {
+    let db = Database::open_in_memory().unwrap();
+    let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+        let mut statement = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(params, |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    for sql in [columns_sql(false), columns_sql(true)] {
+        let steps = plan(&sql, if sql.contains("?1") { &[&false] } else { &[] });
+        assert_eq!(steps, ["SCAN events"], "{sql}");
+    }
+    let steps = plan(
+        "SELECT id FROM events WHERE id <= ?1 ORDER BY id ASC",
+        &[&i64::MAX],
+    );
+    assert_eq!(steps.len(), 1);
+    assert!(
+        steps[0].starts_with("SEARCH events USING INTEGER PRIMARY KEY"),
+        "{steps:?}"
+    );
+}
+
+fn scan_vm_steps(conn: &Connection) -> (i32, u64) {
+    let mut statement = conn.prepare(&columns_sql(false)).unwrap();
+    let mut rows = statement.query([false]).unwrap();
+    let mut count = 0_u64;
+    while let Some(row) = rows.next().unwrap() {
+        row.get::<_, i64>(0).unwrap();
+        count += 1;
+    }
+    drop(rows);
+    (
+        statement.get_status(rusqlite::StatementStatus::VmStep),
+        count,
+    )
+}
+
+#[test]
+fn the_scan_costs_a_fixed_number_of_vm_steps_per_row_whatever_the_bodies() {
+    let small = Database::open_in_memory().unwrap();
+    let large = Database::open_in_memory().unwrap();
+    for (db, repeat) in [(&small, 1), (&large, 6)] {
+        for n in 0..25 {
+            let run = format!("run-{n}");
+            append(&db.conn, &started(&run));
+            append(&db.conn, &request(&run));
+            append(&db.conn, &completed(&run, &bulky("answer").repeat(repeat)));
+            append(
+                &db.conn,
+                &part(&run, "r", 0, 1, &bulky("part").repeat(repeat)),
+            );
+            append(&db.conn, &phase(&run, AgentRunPhase::Waiting));
+        }
+    }
+    let (small_steps, small_rows) = scan_vm_steps(&small.conn);
+    let (large_steps, large_rows) = scan_vm_steps(&large.conn);
+    assert_eq!(small_rows, 125);
+    assert_eq!(small_rows, large_rows);
+    assert_eq!(small_steps, large_steps);
+    assert!(
+        i64::from(small_steps) <= 32 * small_rows as i64,
+        "{small_steps} steps for {small_rows} rows"
+    );
+}
+
+#[test]
+fn message_part_expansion_is_each_payload_once_and_never_more() {
+    let db = Database::open_in_memory().unwrap();
+    for (n, text) in [
+        bulky("alpha"),
+        "short".to_owned(),
+        bulky("gamma"),
+        String::new(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let run = format!("run-{n}");
+        append(&db.conn, &part(&run, "r", 0, 2, text));
+        append(&db.conn, &part(&run, "r", 1, 2, "tail"));
+        append(&db.conn, &completed(&run, &bulky("not a part")));
+    }
+    let mut stored_bytes = 0_u64;
+    let mut expanded_bytes = 0_u64;
+    let mut compressed = 0_usize;
+    let mut statement = db
+        .conn
+        .prepare("SELECT payload FROM events WHERE subkind = 'MessagePart'")
+        .unwrap();
+    let mut rows = statement.query([]).unwrap();
+    while let Some(row) = rows.next().unwrap() {
+        let value = row.get_ref(0).unwrap();
+        stored_bytes += stored_len(value);
+        compressed += usize::from(matches!(value, ValueRef::Blob(_)));
+        expanded_bytes += crate::codec::decode(value).unwrap().len() as u64;
+    }
+    drop(rows);
+    drop(statement);
+    assert_eq!(compressed, 2);
+
+    let opened_before = blobs_decoded();
+    let (_, metrics, _) = first_pass(&db.conn);
+
+    assert_eq!(metrics.message_part_metadata_rows, 8);
+    assert_eq!(metrics.message_part_stored_bytes, stored_bytes);
+    assert_eq!(metrics.message_part_expanded_bytes, expanded_bytes);
+    assert_eq!(blobs_decoded() - opened_before, compressed);
+}
+
+#[test]
+fn reading_the_history_appends_nothing_to_the_wal_or_the_database_file() {
+    let shared = SharedHistory::open();
+    for n in 0..30 {
+        let run = format!("run-{n}");
+        shared.append(&started(&run));
+        shared.append(&part(&run, "r", 0, 1, &bulky("part")));
+        shared.append(&completed(&run, &bulky("answer")));
+        shared.append(&phase(&run, AgentRunPhase::Waiting));
+    }
+    let wal_before = shared.file_len("-wal");
+    let database_before = shared.file_len("");
+    assert!(wal_before > 0, "the writer's frames are still in the WAL");
+
+    let scan = shared
+        .reader
+        .scan_history_first_pass(|_| {}, |_, _, _| {})
+        .unwrap();
+    shared
+        .reader
+        .for_each_event_isolated(scan.through_id, |_| {}, |_, _, _| {})
+        .unwrap();
+
+    assert_eq!(scan.metrics.rows_scanned, 120);
+    assert_eq!(shared.file_len("-wal"), wal_before);
+    assert_eq!(shared.file_len(""), database_before);
 }
