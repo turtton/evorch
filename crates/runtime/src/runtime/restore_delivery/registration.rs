@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod idle_turn_tests;
+
 impl AgentRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime) fn register_restored(
@@ -132,6 +135,7 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 terminal_reason: None,
+                idle_turn: None,
                 role,
                 name,
                 model,
