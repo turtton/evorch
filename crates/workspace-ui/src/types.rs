@@ -86,6 +86,9 @@ pub struct Workspace {
     pub main: Window,
     #[serde(default)]
     pub extra_windows: Vec<Window>,
+    /// Local sort and folding of the sidebar project list; kept out of the merged sidebar.
+    #[serde(default, skip_serializing_if = "crate::SidebarView::is_default")]
+    pub sidebar_view: crate::SidebarView,
 }
 
 impl Workspace {
@@ -117,6 +120,7 @@ impl Workspace {
                 rect: None,
             },
             extra_windows: Vec::new(),
+            sidebar_view: crate::SidebarView::default(),
         }
     }
 
@@ -161,6 +165,7 @@ impl Workspace {
                 rect: None,
             },
             extra_windows: Vec::new(),
+            sidebar_view: crate::SidebarView::default(),
         }
     }
 

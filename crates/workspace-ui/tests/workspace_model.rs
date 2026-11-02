@@ -25,6 +25,7 @@ fn workspace_with(root: LayoutNode, panels: BTreeMap<PanelId, Panel>) -> Workspa
             rect: None,
         },
         extra_windows: Vec::new(),
+        sidebar_view: Default::default(),
     }
 }
 

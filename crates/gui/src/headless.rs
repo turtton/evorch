@@ -155,6 +155,21 @@ impl<S: AgentRunSource + 'static> HeadlessWorkbench<S> {
         self.harness.get_by_label(label).click();
     }
 
+    /// 同じラベルの UI node のうち、出現順で `index` 番目をクリックします。
+    pub fn click_nth_label(&self, label: &str, index: usize) {
+        self.harness
+            .get_all_by_label(label)
+            .nth(index)
+            .unwrap_or_else(|| panic!("label {label:?} #{index} not found"))
+            .click();
+    }
+
+    /// 指定ラベルの UI node が操作可能か返します。node が無ければ `None` です。
+    pub fn label_enabled(&self, label: &str) -> Option<bool> {
+        let node = self.harness.query_all_by_label(label).next()?;
+        Some(!egui_kittest::kittest::NodeT::accesskit_node(&node).is_disabled())
+    }
+
     /// 指定ラベルを表示するスクロール要求を次フレームへ送ります。
     pub fn scroll_label_into_view(&self, label: &str) {
         self.harness.get_by_label(label).scroll_to_me();

@@ -149,6 +149,7 @@ fn complex_nested_split_round_trip_preserves_tree_and_active_tabs() {
             rect: None,
         },
         extra_windows: Vec::new(),
+        sidebar_view: Default::default(),
     };
 
     // When: converting twice between the renderer tree and persistence model
