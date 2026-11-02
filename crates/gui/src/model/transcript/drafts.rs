@@ -14,13 +14,19 @@ use std::sync::OnceLock;
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use secret_guard::SecretRedactor;
 
-use super::{ToolStatus, TranscriptEntry, TranscriptModel};
+use super::{ToolStatus, TranscriptEntry, TranscriptModel, draft_text};
 
 /// Raw argument text kept per draft so a credential split across fragments is
-/// still recognised. Only a short redacted tail ever reaches an entry.
-const RAW_WINDOW_BYTES: usize = 16 * 1024;
-/// Redacted tail stored in the entry and handed to the renderer.
-const PREVIEW_BYTES: usize = 2 * 1024;
+/// still recognised. This is the only unredacted copy and never leaves the
+/// model; it is strictly bounded, so a draft holds at most this much raw text.
+pub(super) const RAW_WINDOW_BYTES: usize = 64 * 1024;
+/// Redacted tail stored in the entry and handed to the renderer, once for the
+/// argument JSON and once for the decoded text.
+pub(super) const PREVIEW_BYTES: usize = 16 * 1024;
+/// The text shown is the newest part of a window that was redacted whole, so a
+/// credential cut by the window's start can never reach the shown tail: the
+/// start of the window is further from it than any credential is long.
+const _: () = assert!(RAW_WINDOW_BYTES - PREVIEW_BYTES >= secret_guard::MAX_CREDENTIAL_BYTES);
 /// Tools whose arguments the transcript never shows as a card.
 const HIDDEN_DRAFTS: &[&str] = &["finish"];
 
@@ -41,6 +47,8 @@ struct Draft {
     entry: usize,
     /// Unredacted tail of the arguments; never leaves the model.
     raw: String,
+    /// The start of the arguments was dropped to stay within the window.
+    trimmed: bool,
 }
 
 /// Where each live draft sits in the transcript.
@@ -84,10 +92,90 @@ fn tail(text: &str, limit: usize) -> &str {
     &text[cut..]
 }
 
-/// The redacted tail shown for a draft whose raw arguments are `raw`.
-fn preview(raw: &str) -> String {
-    let redacted = redactor().redact_streaming(raw).text;
-    tail(&redacted, PREVIEW_BYTES).to_owned()
+/// A copy of `value` that is safe to show: credentials are masked. The runtime
+/// keeps and executes the original, which this never touches.
+#[must_use]
+pub fn redacted_for_display(value: &serde_json::Value) -> serde_json::Value {
+    let mut copy = value.clone();
+    redactor().redact_json(&mut copy);
+    copy
+}
+
+/// `text` with credentials masked, for showing a value the runtime owns.
+#[must_use]
+pub fn redacted_text_for_display(text: &str) -> String {
+    redactor().redact(text).text
+}
+
+/// What a draft card shows, all redacted.
+struct DraftView {
+    arguments: String,
+    text: String,
+    omitted: bool,
+}
+
+/// The redacted newest `PREVIEW_BYTES` of `text`, and whether older text was cut.
+fn redacted_tail(text: &str) -> (String, bool) {
+    let redacted = redactor().redact_streaming(text).text;
+    let shown = tail(&redacted, PREVIEW_BYTES);
+    (shown.to_owned(), shown.len() < redacted.len())
+}
+
+/// The redacted tail of the argument JSON. A credential written with JSON
+/// escapes (`\u0067hp_…`) is invisible to the shape rules until decoded, so
+/// when decoding reveals more than the raw text did, the decoded text is shown.
+fn redacted_arguments(raw: &str) -> (String, bool) {
+    let plain = redactor().redact_streaming(raw);
+    let decoded = redactor().redact_streaming(&draft_text::unescape_all(raw));
+    let chosen = if decoded.count > plain.count {
+        decoded.text
+    } else {
+        plain.text
+    };
+    let shown = tail(&chosen, PREVIEW_BYTES);
+    (shown.to_owned(), shown.len() < chosen.len())
+}
+
+fn view(tool_name: &str, raw: &str, trimmed: bool) -> DraftView {
+    let (arguments, arguments_cut) = redacted_arguments(raw);
+    let decoded = draft_text::text_field(tool_name)
+        .and_then(|field| draft_text::field_text(raw, field, trimmed));
+    match decoded {
+        Some((decoded, from_start)) => {
+            // Decoding turns a JSON escape into the character it stands for, so
+            // a credential written with escapes is only recognisable here.
+            let (text, text_cut) = redacted_tail(&decoded);
+            DraftView {
+                arguments,
+                text,
+                omitted: text_cut || !from_start,
+            }
+        }
+        None => DraftView {
+            arguments,
+            text: String::new(),
+            omitted: trimmed || arguments_cut,
+        },
+    }
+}
+
+/// Appends `delta`, then drops the oldest text beyond the window. The cut can
+/// land inside a credential whose opening is then gone, so the partial first
+/// token of what remains is dropped as well.
+fn push_raw(draft: &mut Draft, delta: &str) {
+    draft.raw.push_str(delta);
+    if draft.raw.len() <= RAW_WINDOW_BYTES {
+        return;
+    }
+    let mut cut = draft.raw.len() - RAW_WINDOW_BYTES;
+    while !draft.raw.is_char_boundary(cut) {
+        cut += 1;
+    }
+    draft.raw.drain(..cut);
+    let kept = draft_text::without_partial_first_token(&draft.raw).len();
+    let dropped = draft.raw.len() - kept;
+    draft.raw.drain(..dropped);
+    draft.trimmed = true;
 }
 
 impl TranscriptModel {
@@ -114,9 +202,14 @@ impl TranscriptModel {
         else {
             return;
         };
-        let raw = tail(fragment.arguments_delta, RAW_WINDOW_BYTES).to_owned();
-        let arguments = preview(&raw);
-        let entry = self.next_entry_id;
+        let mut draft = Draft {
+            entry: self.next_entry_id,
+            raw: String::new(),
+            trimmed: false,
+        };
+        push_raw(&mut draft, fragment.arguments_delta);
+        let shown = view(name, &draft.raw, draft.trimmed);
+        let entry = draft.entry;
         self.push(TranscriptEntry::Tool {
             run_id: fragment.run_id.map(str::to_owned),
             tool_name: name.to_owned(),
@@ -129,7 +222,9 @@ impl TranscriptModel {
             is_error: false,
             status: ToolStatus::Drafting {
                 index: fragment.index,
-                arguments,
+                arguments: shown.arguments,
+                text: shown.text,
+                omitted: shown.omitted,
                 sealed: false,
             },
             reviews: Vec::new(),
@@ -137,7 +232,7 @@ impl TranscriptModel {
         });
         // A zero-capacity transcript keeps no entries and so no drafts.
         if self.next_entry_id > entry {
-            self.drafts.drafts.insert(key, Draft { entry, raw });
+            self.drafts.drafts.insert(key, draft);
         }
     }
 
@@ -145,18 +240,25 @@ impl TranscriptModel {
         let Some(draft) = self.drafts.drafts.get_mut(key) else {
             return;
         };
-        draft.raw.push_str(fragment.arguments_delta);
-        if draft.raw.len() > RAW_WINDOW_BYTES * 2 {
-            draft.raw = tail(&draft.raw, RAW_WINDOW_BYTES).to_owned();
-        }
-        let shown = preview(tail(&draft.raw, RAW_WINDOW_BYTES));
+        push_raw(draft, fragment.arguments_delta);
+        let name = match (&self.entries[position], fragment.tool_name) {
+            (_, Some(name)) => name,
+            (TranscriptEntry::Tool { tool_name, .. }, None) => tool_name,
+            _ => return,
+        };
+        let shown = view(name, &draft.raw, draft.trimmed);
         self.entry_meta[position].revision += 1;
         if let TranscriptEntry::Tool {
             tool_name,
             call_id,
-            status: ToolStatus::Drafting {
-                arguments, sealed, ..
-            },
+            status:
+                ToolStatus::Drafting {
+                    arguments,
+                    text,
+                    omitted,
+                    sealed,
+                    ..
+                },
             ..
         } = &mut self.entries[position]
         {
@@ -166,7 +268,9 @@ impl TranscriptModel {
             if let Some(id) = fragment.call_id {
                 id.clone_into(call_id);
             }
-            *arguments = shown;
+            *arguments = shown.arguments;
+            *text = shown.text;
+            *omitted = shown.omitted;
             *sealed = false;
         }
     }

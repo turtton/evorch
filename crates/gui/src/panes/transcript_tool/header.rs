@@ -397,9 +397,14 @@ const fn control_verb(action: &str) -> &'static str {
 
 /// Names a shell job's command and state: control calls show the command
 /// instead of the bare job ID, which moves to the location.
-pub fn with_shell_job(header: &mut ToolHeader, job: &ShellJob, control: bool) {
+pub fn with_shell_job(header: &mut ToolHeader, job: &ShellJob, control: bool, redact: bool) {
     if control && let Some(command) = &job.command {
-        header.location = Some(std::mem::replace(&mut header.subject, one_line(command)));
+        let command = if redact {
+            std::borrow::Cow::Owned(crate::model::transcript::redacted_text_for_display(command))
+        } else {
+            std::borrow::Cow::Borrowed(command.as_str())
+        };
+        header.location = Some(std::mem::replace(&mut header.subject, one_line(&command)));
     }
     header.meta = Some(job.outcome());
 }
@@ -724,10 +729,10 @@ mod tests {
         );
         let job = jobs.get(id).unwrap();
         let mut poll = header("shell", json!({"action": "poll", "job_id": id}), None);
-        with_shell_job(&mut poll, job, true);
+        with_shell_job(&mut poll, job, true, false);
         assert_eq!(poll.text(), "Poll cargo test #3f9c2a1e · running");
         let mut start = header("shell", json!({"command": "cargo test"}), None);
-        with_shell_job(&mut start, job, false);
+        with_shell_job(&mut start, job, false, false);
         assert_eq!(start.text(), "Shell cargo test · running");
     }
 

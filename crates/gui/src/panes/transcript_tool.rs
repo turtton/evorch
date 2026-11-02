@@ -7,13 +7,16 @@ use egui::{
 };
 
 use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey, ShellJobs, result_body};
-use crate::model::transcript::{ToolReview, ToolStatus, TranscriptEntry};
+use crate::model::transcript::{
+    ToolReview, ToolStatus, TranscriptEntry, redacted_for_display, redacted_text_for_display,
+};
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
 use crate::theme::tokens::{FONT_BODY, FONT_SMALL, R_SM, ROW_DENSE, SP_2, palette};
 use crate::theme::widgets::{ghost_icon_button, icon_button, soft_frame};
 
 mod header;
+mod live_detail;
 mod orchestration;
 mod run_js;
 mod sticky;
@@ -240,9 +243,15 @@ pub fn tool_card_group(
     let running = matches!(status, ToolStatus::Running | ToolStatus::Drafting { .. });
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let color = status_color(status, *is_error);
+    // A call that has not finished is shown from a redacted copy of its input:
+    // the header, tooltip, accessible name and detail never see the original,
+    // which the runtime executes unchanged. Finished cards keep showing the
+    // recorded input as they always have; persisted events are already redacted.
+    let display_input = input.as_ref().filter(|_| running).map(redacted_for_display);
+    let shown_input = display_input.as_ref().or(input.as_ref());
     let mut header = header::tool_header(
         tool_name,
-        input.as_ref(),
+        shown_input,
         output.as_deref(),
         *is_error,
         context.repo_root,
@@ -251,7 +260,7 @@ pub fn tool_card_group(
     let last = &group[folded - 1];
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
-        header::with_shell_job(&mut header, job, shell_control(last).is_some());
+        header::with_shell_job(&mut header, job, shell_control(last).is_some(), running);
     }
     if matches!(status, ToolStatus::Drafting { .. }) {
         header.meta = Some(
@@ -284,17 +293,34 @@ pub fn tool_card_group(
     let header_text = header.text();
     let (glyph, mark) = status_mark(status, *is_error, header.icon);
     let label = format!("{mark}{header_text}");
-    let tooltip = focused_input(tool_name, input.as_ref())
-        .or_else(|| job.and_then(|job| job.command.as_deref()))
-        .unwrap_or(&header_text)
-        .to_owned();
+    let tooltip = focused_input(tool_name, shown_input)
+        .map(str::to_owned)
+        .or_else(|| {
+            let command = job?.command.as_deref()?;
+            Some(if running {
+                redacted_text_for_display(command)
+            } else {
+                command.to_owned()
+            })
+        })
+        .unwrap_or_else(|| header_text.clone());
+    let live = match status {
+        ToolStatus::Drafting {
+            arguments,
+            text,
+            omitted,
+            ..
+        } => live_detail::drafting(text, arguments, *omitted),
+        ToolStatus::Running => shown_input.and_then(|input| live_detail::running(tool_name, input)),
+        _ => None,
+    };
     soft_frame(palette().SURFACE).show(ui, |ui| {
         let title = sticky::Header::reserve(ui, id);
         for review in reviews {
             review_line(ui, review);
         }
-        if let ToolStatus::Drafting { arguments, .. } = status {
-            draft_tail(ui, arguments);
+        if let Some(live) = &live {
+            live_detail::show(ui, id, live, expanded);
         }
         // An expanded card already shows the output in full.
         let preview = context.latest_for_job && (running || !expanded);
@@ -397,10 +423,15 @@ pub fn tool_card_group(
                 };
             let width = ui.available_width() - ui.spacing().button_padding.x * 2.0 - reserved;
             let layout = fitted_header_job(ui, glyph, color, &header, width);
-            let button =
-                ui.add_enabled(!running, egui::Button::new(layout).frame(false).truncate());
+            // Expanding only changes what is displayed, so a live card with
+            // detail can be opened; a call with nothing to read stays inert.
+            let interactive = !running || live.is_some();
+            let button = ui.add_enabled(
+                interactive,
+                egui::Button::new(layout).frame(false).truncate(),
+            );
             button.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, !running, &label)
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, interactive, &label)
             });
             if job.is_some() || browser_run.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -485,42 +516,6 @@ fn review_line(ui: &mut Ui, review: &ToolReview) {
 /// expanding anything.
 fn live_tail(ui: &mut Ui, job: &ShellJob) {
     for line in job.tail(LIVE_TAIL_LINES) {
-        ui.add(
-            egui::Label::new(
-                RichText::new(line)
-                    .monospace()
-                    .size(FONT_SMALL)
-                    .color(palette().TEXT_MUTED),
-            )
-            .truncate(),
-        );
-    }
-}
-
-/// Characters of a draft line that are shown; a long one-line JSON keeps its end.
-const DRAFT_LINE_CHARS: usize = 120;
-
-/// The newest lines of the arguments being written, each cut to its end.
-pub fn draft_preview_lines(arguments: &str) -> Vec<String> {
-    let lines: Vec<&str> = arguments.lines().collect();
-    let start = lines.len().saturating_sub(LIVE_TAIL_LINES);
-    lines[start..]
-        .iter()
-        .map(|line| {
-            let count = line.chars().count();
-            if count <= DRAFT_LINE_CHARS {
-                return (*line).to_owned();
-            }
-            let tail: String = line.chars().skip(count - DRAFT_LINE_CHARS).collect();
-            format!("…{tail}")
-        })
-        .collect()
-}
-
-/// The last few lines of the arguments the model is still writing, so a long
-/// call shows its progress without expanding anything.
-fn draft_tail(ui: &mut Ui, arguments: &str) {
-    for line in draft_preview_lines(arguments) {
         ui.add(
             egui::Label::new(
                 RichText::new(line)

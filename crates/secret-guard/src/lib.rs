@@ -53,6 +53,14 @@ const CREDENTIAL_ENV_NAMES: &[&str] = &[
 /// 防ぎます。
 const MIN_KNOWN_VALUE_LEN: usize = 8;
 
+/// Longest credential, in bytes, that the shape rules and the known-value list
+/// are designed to cover. A caller that keeps only a bounded window of
+/// streaming text must discard more than this from the window's start before
+/// showing anything: a credential cut by the window start loses its recognisable
+/// opening, so only text at least this far from the start is certain to be
+/// whole. See [`SecretRedactor::max_credential_len`].
+pub const MAX_CREDENTIAL_BYTES: usize = 8 * 1024;
+
 /// An owned, sanitized copy of text and the number of removed spans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedText {
@@ -84,6 +92,17 @@ impl SecretRedactor {
         known_values.sort_by_key(|value| std::cmp::Reverse(value.len()));
         known_values.dedup();
         Self { known_values }
+    }
+
+    /// The longest credential, in bytes, this redactor must be able to mask: the
+    /// design bound [`MAX_CREDENTIAL_BYTES`], or a longer configured value.
+    #[must_use]
+    pub fn max_credential_len(&self) -> usize {
+        self.known_values
+            .first()
+            .map_or(MAX_CREDENTIAL_BYTES, |longest| {
+                longest.len().max(MAX_CREDENTIAL_BYTES)
+            })
     }
 
     /// Returns only a rule, never the matching credential.
