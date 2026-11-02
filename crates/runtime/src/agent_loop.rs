@@ -24,6 +24,8 @@ mod review_evidence_tests;
 mod review_skills;
 #[cfg(test)]
 mod review_skills_tests;
+#[cfg(test)]
+mod revision_tests;
 mod run_js_accounting;
 mod run_js_host;
 mod stop_context;
@@ -88,6 +90,9 @@ pub(crate) struct RunHandoff {
     pub(crate) pending_reference_id: Option<String>,
     pub(crate) source_run_id: RunId,
     pub(crate) restored: Option<crate::restore::RestoredState>,
+    /// Revision of the seed snapshot already saved for this run (0: none).
+    /// Used when `restored` is absent; a restored state carries its own.
+    pub(crate) seed_revision: u64,
 }
 
 pub(crate) struct LoopChannels {
@@ -401,6 +406,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             checkpoint.messages.clone(),
             Vec::new(),
             crate::ResponsesReplayState::reset(checkpoint.messages.len()),
+            crate::restore::revision::SnapshotRevision::fresh(),
         )
     } else {
         match restored {
@@ -411,6 +417,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.messages,
                     restored.checkpoints,
                     restored.responses_replay,
+                    restored.snapshot_revision,
                 );
                 context.provenance = restored.provenance;
                 match restored.trigger {
@@ -433,7 +440,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 }
                 context
             }
-            None => AgentContext::new(task.run_id, task.role),
+            None => {
+                let mut context = AgentContext::new(task.run_id, task.role);
+                // A handoff seed was saved before the run started.
+                if let Some(handoff) = &task.handoff {
+                    context.snapshot_revision =
+                        crate::restore::revision::SnapshotRevision::known(handoff.seed_revision);
+                }
+                context
+            }
         }
     };
     let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);

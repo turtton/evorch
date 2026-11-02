@@ -244,6 +244,7 @@ mod review_tests {
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
                         provenance: Default::default(),
+                        snapshot_revision: crate::restore::revision::SnapshotRevision::fresh(),
                         responses_replay: Default::default(),
                         host_inputs: Vec::new(),
                         admission_reservation: None,

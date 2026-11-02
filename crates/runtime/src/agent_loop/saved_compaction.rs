@@ -58,6 +58,7 @@ impl LoopState {
             restored.messages,
             restored.checkpoints,
             restored.responses_replay,
+            restored.snapshot_revision,
         );
         context.provenance = restored.provenance;
         let mut state = Self::new(task, shared, channels, context, image_model, policy);

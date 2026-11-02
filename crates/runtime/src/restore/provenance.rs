@@ -172,9 +172,13 @@ impl ConversationProvenance {
         }
     }
 
+    /// `expected_snapshot_revision` is the revision the caller's `record` was
+    /// read at (0 for a run ID with no snapshot). Storage rejects the write with
+    /// `RevisionConflict` when another save has committed since.
     pub(crate) fn write(
         &self,
         record: storage::RunContextRecord,
+        expected_snapshot_revision: u64,
     ) -> Result<SnapshotWrite, serde_json::Error> {
         let messages: Vec<Message> = serde_json::from_str(&record.messages_json)?;
         let checkpoints: Vec<serde_json::Value> = serde_json::from_str(&record.checkpoints_json)?;
@@ -182,7 +186,7 @@ impl ConversationProvenance {
             map: self.map(&messages, checkpoints.len()),
             status: self.status.clone(),
             record,
-            expected_snapshot_revision: None,
+            expected_snapshot_revision: Some(expected_snapshot_revision),
             binding: None,
         })
     }
@@ -196,6 +200,9 @@ pub(crate) fn storage_error(
 ) -> storage::StorageError {
     match error {
         storage::thread_index::SnapshotApiError::Storage(error) => error,
+        storage::thread_index::SnapshotApiError::RevisionConflict => {
+            storage::StorageError::StaleMutation
+        }
         other => storage::StorageError::Serialization(format!("snapshot bundle: {other:?}")),
     }
 }

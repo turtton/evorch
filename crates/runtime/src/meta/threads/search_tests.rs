@@ -26,13 +26,12 @@ impl Fixture {
         messages: Vec<Message>,
     ) {
         self.run(run, thread, parent, messages);
-        let record = self
+        let bundle = self
             .store()
-            .with_database(|db| db.run_context(run))
-            .unwrap()
+            .with_database(|db| Ok(db.snapshot_bundle(run).unwrap().unwrap()))
             .unwrap();
         let write = crate::restore::provenance::ConversationProvenance::default()
-            .write(record)
+            .write(bundle.record, bundle.snapshot_revision)
             .unwrap();
         self.store().handle.save_snapshot_bundle(&write).unwrap();
     }
