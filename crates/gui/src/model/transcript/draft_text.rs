@@ -147,35 +147,6 @@ fn unicode_escape_incomplete(rest: &str) -> bool {
         })
 }
 
-/// `text` without a partial first token. After the start of a window was
-/// dropped, its first run of characters up to a delimiter may be the end of a
-/// credential whose recognisable opening is gone; it is removed rather than
-/// shown.
-pub(super) fn without_partial_first_token(text: &str) -> &str {
-    let delimiter = |c: char| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '"' | '\''
-                    | '\\'
-                    | ','
-                    | ';'
-                    | ':'
-                    | '='
-                    | '('
-                    | ')'
-                    | '{'
-                    | '}'
-                    | '['
-                    | ']'
-                    | '<'
-                    | '>'
-                    | '`'
-            )
-    };
-    text.find(delimiter).map_or("", |at| &text[at..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,19 +213,5 @@ y","b":"ghp_"}"#
         // Not the middle of a string when the window is the whole JSON.
         assert_eq!(field_text(r#"{"name":"w"}"#, "prompt", true), None);
         assert_eq!(field_text(r"middle", "prompt", false), None);
-    }
-
-    #[test]
-    fn the_partial_first_token_of_a_cut_window_is_dropped() {
-        assert_eq!(
-            without_partial_first_token("Lm7Tb2 then text"),
-            " then text"
-        );
-        assert_eq!(
-            without_partial_first_token(" already clean"),
-            " already clean"
-        );
-        assert_eq!(without_partial_first_token("ghp"), "");
-        assert_eq!(without_partial_first_token("tail\\nnext"), "\\nnext");
     }
 }

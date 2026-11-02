@@ -7,7 +7,9 @@ use std::rc::Rc;
 
 use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{Event, MessageEvent, ToolEvent};
+use gui::model::transcript::shell_jobs::ShellJobs;
 use gui::model::transcript::{ToolStatus, TranscriptEntry, TranscriptModel};
+use gui::panes::transcript_tool::ToolCardContext;
 use serde_json::json;
 
 const RUN: &str = "run-1";
@@ -32,7 +34,19 @@ fn card(entry: TranscriptEntry) -> (Harness<'static, State>, Rc<Cell<f32>>) {
                 ui.ctx()
                     .global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
                 let top = ui.cursor().top();
-                gui::panes::transcript_tool::tool_card(ui, &state.entry, egui::Id::new("card"));
+                // The transcript names a card by its entry, not by its call.
+                let jobs = ShellJobs::default();
+                gui::panes::transcript_tool::tool_card_group(
+                    ui,
+                    std::slice::from_ref(&state.entry),
+                    egui::Id::new("card"),
+                    ToolCardContext {
+                        repo_root: None,
+                        jobs: &jobs,
+                        latest_for_job: false,
+                        agents: &[],
+                    },
+                );
                 state.height.set(ui.cursor().top() - top);
             },
             state,
@@ -170,19 +184,47 @@ fn a_running_card_can_be_expanded_to_read_a_long_command() {
 }
 
 #[test]
-fn a_running_card_with_nothing_more_to_read_stays_inert() {
+fn a_short_running_command_is_kept_behind_the_header_until_it_is_expanded() {
+    // Given: a one-line command that the header shows whole.
     let mut model = TranscriptModel::new();
     model.apply(&started(
         "shell",
         "call-1",
         json!({"command": "cargo test"}),
     ));
-    let (mut harness, height) = card(only_entry(&model));
-    let before = height.get();
+    let (mut harness, _) = card(only_entry(&model));
+    assert_eq!(
+        harness.query_all_by_label_contains("cargo test").count(),
+        1,
+        "not repeated below the header"
+    );
+
+    // When: it is expanded, e.g. because a narrow pane cut the header.
     harness.get_by_label_contains("Shell cargo test").click();
     harness.run_steps(3);
-    assert!((height.get() - before).abs() < 1.0);
+
+    // Then: the command is available in full below the header.
+    assert_eq!(harness.query_all_by_label_contains("cargo test").count(), 2);
     assert!(harness.query_by_label(MORE).is_none());
+}
+
+#[test]
+fn a_running_write_shows_a_short_body_the_header_cannot_read() {
+    // Given: a running write whose arguments are short but whose header names only the path.
+    let mut model = TranscriptModel::new();
+    model.apply(&started(
+        "write",
+        "call-1",
+        json!({"path": "a.txt", "content": "first\nsecond"}),
+    ));
+    let (harness, _) = card(only_entry(&model));
+
+    // Then: the body is readable while it runs, and the path is not repeated as detail.
+    harness.get_by_label_contains("first\\nsecond");
+    let mut model = TranscriptModel::new();
+    model.apply(&started("read", "call-2", json!({"path": "a.txt"})));
+    let (harness, _) = card(only_entry(&model));
+    assert!(harness.query_by_label_contains("\"path\"").is_none());
 }
 
 #[test]
@@ -257,4 +299,169 @@ fn a_card_expanded_while_composing_stays_expanded_once_the_call_starts() {
     assert!(harness.query_by_label(MORE).is_none());
     harness.get_by_label_contains("Delegate worker-w1");
     assert!(height.get() < 420.0 && height.get() > 100.0, "{expanded}");
+}
+
+fn completed(name: &str, call: &str, is_error: bool) -> Event {
+    Event::new(ToolEvent::ToolCompleted {
+        tool_name: name.into(),
+        call_id: call.into(),
+        is_error,
+        output: Some("done".into()),
+        detail: None,
+        run_id: Some(RUN.into()),
+        parent_call_id: None,
+    })
+}
+
+fn assert_hides_token(harness: &Harness<'_, State>, body: &str, context: &str) {
+    for window in body.as_bytes().windows(6) {
+        let fragment = std::str::from_utf8(window).unwrap();
+        assert!(
+            harness.query_by_label_contains(fragment).is_none(),
+            "{context}: {fragment} is displayed"
+        );
+    }
+}
+
+const BODY: &str = "Zx9Qw3Lm7Tb2Vc5Nk8Rd4Hf6Jg1Ps0YaEu";
+
+#[test]
+fn a_credential_stays_hidden_when_the_same_card_finishes() {
+    // Given: a call with a token in its input, shown while it runs.
+    let command = format!("curl -H 'Authorization: ghp_{BODY}'\nunset TOKEN");
+    let mut model = TranscriptModel::new();
+    model.apply(&started("shell", "call-1", json!({ "command": command })));
+    let (mut harness, _) = card(only_entry(&model));
+    assert_hides_token(&harness, BODY, "running");
+
+    // When: the same card completes, and is expanded and hovered.
+    model.apply(&completed("shell", "call-1", false));
+    harness.state_mut().entry = only_entry(&model);
+    harness.run_steps(3);
+    harness.get_by_role(egui::accesskit::Role::Button).click();
+    harness.run_steps(3);
+    harness.get_by_role(egui::accesskit::Role::Button).hover();
+    harness.run_steps(3);
+
+    // Then: the token is not displayed in any label, tooltip or section, and the
+    // input the runtime holds is still the original.
+    assert_hides_token(&harness, BODY, "succeeded");
+    assert!(harness.query_by_label_contains("Input").is_some());
+    assert!(matches!(
+        &harness.state().entry,
+        TranscriptEntry::Tool { input: Some(input), .. } if input["command"] == command
+    ));
+}
+
+#[test]
+fn a_run_js_program_never_displays_a_credential_running_or_finished() {
+    // Given: a run_js program that contains a token.
+    let code = format!("const key = 'ghp_{BODY}';\nawait tools.read({{path: 'a'}});");
+    let mut model = TranscriptModel::new();
+    model.apply(&started("run_js", "js-1", json!({ "code": code })));
+    let (mut harness, _) = card(only_entry(&model));
+
+    // When/Then: running, hovered, expanded, then finished and expanded.
+    harness.get_by_role(egui::accesskit::Role::Button).hover();
+    harness.run_steps(3);
+    assert_hides_token(&harness, BODY, "running");
+    harness.get_by_role(egui::accesskit::Role::Button).click();
+    harness.run_steps(3);
+    harness.get_by_label("Code");
+    assert_hides_token(&harness, BODY, "running, expanded");
+    model.apply(&completed("run_js", "js-1", false));
+    harness.state_mut().entry = only_entry(&model);
+    harness.run_steps(3);
+    harness.get_by_role(egui::accesskit::Role::Button).hover();
+    harness.run_steps(3);
+    assert_hides_token(&harness, BODY, "finished, expanded");
+    assert!(matches!(
+        &harness.state().entry,
+        TranscriptEntry::Tool { input: Some(input), .. } if input["code"] == code
+    ));
+}
+
+fn scroll_state(harness: &Harness<'_, State>) -> (f32, f32) {
+    gui::panes::transcript_tool::live_detail_scroll_for_tests(&harness.ctx, egui::Id::new("card"))
+        .expect("the detail area was drawn")
+}
+
+fn wheel_over_detail(harness: &mut Harness<'_, State>, header: &str, delta: f32) {
+    let rect = harness.get_by_label_contains(header).rect();
+    let over = egui::pos2(rect.center().x, rect.bottom() + 60.0);
+    harness.event(egui::Event::PointerMoved(over));
+    harness.run_steps(2);
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, delta),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(3);
+}
+
+#[test]
+fn a_reader_who_scrolled_up_stays_put_and_state_survives_a_call_without_an_id() {
+    // Given: a draft whose call ID the provider never sent, long enough to scroll.
+    let lines: Vec<String> = (0..300)
+        .map(|n| format!("Step {n:03}: do the next thing"))
+        .collect();
+    let open_prompt = |count: usize| {
+        let mut arguments = delegate_arguments(&lines[..count].join("\n"));
+        arguments.truncate(arguments.len() - 2);
+        arguments
+    };
+    let mut model = TranscriptModel::new();
+    model.apply(&Event::new(MessageEvent::ToolCallDelta {
+        run_id: Some(RUN.into()),
+        index: 0,
+        call_id: None,
+        tool_name: Some("delegate".into()),
+        arguments_delta: open_prompt(250),
+    }));
+    let (mut harness, _) = card(only_entry(&model));
+    harness
+        .get_by_label_contains("Delegate · composing…")
+        .click();
+    harness.run_steps(3);
+
+    // Then: expanded, it follows the newest text.
+    let (offset, furthest) = scroll_state(&harness);
+    assert!(
+        furthest > 100.0 && (furthest - offset).abs() < 2.0,
+        "{offset}/{furthest}"
+    );
+
+    // When: the reader scrolls up and more text arrives.
+    wheel_over_detail(&mut harness, "Delegate · composing…", 200.0);
+    let (read_at, _) = scroll_state(&harness);
+    assert!(read_at < offset - 50.0, "{read_at} vs {offset}");
+    let more = &open_prompt(300)[open_prompt(250).len()..];
+    model.apply(&Event::new(MessageEvent::ToolCallDelta {
+        run_id: Some(RUN.into()),
+        index: 0,
+        call_id: None,
+        tool_name: None,
+        arguments_delta: more.into(),
+    }));
+    harness.state_mut().entry = only_entry(&model);
+    harness.run_steps(3);
+
+    // Then: the view was not moved to the end.
+    let (now, furthest_now) = scroll_state(&harness);
+    assert!((now - read_at).abs() < 2.0, "{now} vs {read_at}");
+    assert!(furthest_now > furthest);
+
+    // And: when the runtime starts the call under its own ID, the card is the
+    // same: still expanded and still where the reader left it.
+    model.apply(&started(
+        "delegate",
+        "runtime-call",
+        json!({"name": "worker-w1", "prompt": lines.join("\n")}),
+    ));
+    harness.state_mut().entry = only_entry(&model);
+    harness.run_steps(3);
+    assert!(harness.query_by_label(MORE).is_none(), "still expanded");
+    let (started_at, _) = scroll_state(&harness);
+    assert!((started_at - now).abs() < 2.0, "{started_at} vs {now}");
 }

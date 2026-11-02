@@ -23,9 +23,9 @@ pub(super) const RAW_WINDOW_BYTES: usize = 64 * 1024;
 /// Redacted tail stored in the entry and handed to the renderer, once for the
 /// argument JSON and once for the decoded text.
 pub(super) const PREVIEW_BYTES: usize = 16 * 1024;
-/// The text shown is the newest part of a window that was redacted whole, so a
-/// credential cut by the window's start can never reach the shown tail: the
-/// start of the window is further from it than any credential is long.
+/// A window whose start was cut shows nothing within the longest credential
+/// length of that start (see `shown_tail`). That distance, at least the
+/// designed `MAX_CREDENTIAL_BYTES`, must leave room for a whole preview.
 const _: () = assert!(RAW_WINDOW_BYTES - PREVIEW_BYTES >= secret_guard::MAX_CREDENTIAL_BYTES);
 /// Tools whose arguments the transcript never shows as a card.
 const HIDDEN_DRAFTS: &[&str] = &["finish"];
@@ -108,60 +108,65 @@ pub fn redacted_text_for_display(text: &str) -> String {
 }
 
 /// What a draft card shows, all redacted.
-struct DraftView {
-    arguments: String,
-    text: String,
-    omitted: bool,
+pub(super) struct DraftView {
+    pub arguments: String,
+    pub text: String,
+    pub omitted: bool,
 }
 
-/// The redacted newest `PREVIEW_BYTES` of `text`, and whether older text was cut.
-fn redacted_tail(text: &str) -> (String, bool) {
-    let redacted = redactor().redact_streaming(text).text;
-    let shown = tail(&redacted, PREVIEW_BYTES);
-    (shown.to_owned(), shown.len() < redacted.len())
-}
-
-/// The redacted tail of the argument JSON. A credential written with JSON
-/// escapes (`\u0067hp_…`) is invisible to the shape rules until decoded, so
-/// when decoding reveals more than the raw text did, the decoded text is shown.
-fn redacted_arguments(raw: &str) -> (String, bool) {
-    let plain = redactor().redact_streaming(raw);
-    let decoded = redactor().redact_streaming(&draft_text::unescape_all(raw));
-    let chosen = if decoded.count > plain.count {
-        decoded.text
+/// The newest `PREVIEW_BYTES` of `text` redacted, and whether older text is not
+/// shown.
+///
+/// `head_cut` says the start of `text` was cut from a longer stream, so a
+/// credential may have lost its recognisable opening there. Such a fragment can
+/// only lie within the longest credential length of the start, wherever
+/// redaction later shortens the text, so everything up to that distance is left
+/// out: the whole text is redacted first (a credential straddling the distance
+/// is masked whole) and only what follows it is shown.
+fn shown_tail(redactor: &SecretRedactor, text: &str, head_cut: bool) -> (String, bool) {
+    let skip = if head_cut {
+        redactor.max_credential_len()
     } else {
-        plain.text
+        0
     };
-    let shown = tail(&chosen, PREVIEW_BYTES);
-    (shown.to_owned(), shown.len() < chosen.len())
+    let redacted = redactor.redact_streaming_after(text, skip).text;
+    let shown = tail(&redacted, PREVIEW_BYTES);
+    (shown.to_owned(), head_cut || shown.len() < redacted.len())
 }
 
-fn view(tool_name: &str, raw: &str, trimmed: bool) -> DraftView {
-    let (arguments, arguments_cut) = redacted_arguments(raw);
+/// The view of a draft whose retained raw argument text is `raw`.
+///
+/// Both views are redacted after their JSON escapes are decoded: a credential
+/// written with escapes (`ghp_…\u0042…`) is only recognisable once decoded,
+/// and the decoded text is what is shown, so no escaped form can slip past.
+pub(super) fn view(
+    redactor: &SecretRedactor,
+    tool_name: &str,
+    raw: &str,
+    trimmed: bool,
+) -> DraftView {
+    let (arguments, arguments_omitted) =
+        shown_tail(redactor, &draft_text::unescape_all(raw), trimmed);
     let decoded = draft_text::text_field(tool_name)
         .and_then(|field| draft_text::field_text(raw, field, trimmed));
     match decoded {
         Some((decoded, from_start)) => {
-            // Decoding turns a JSON escape into the character it stands for, so
-            // a credential written with escapes is only recognisable here.
-            let (text, text_cut) = redacted_tail(&decoded);
+            let (text, omitted) = shown_tail(redactor, &decoded, !from_start);
             DraftView {
                 arguments,
                 text,
-                omitted: text_cut || !from_start,
+                omitted,
             }
         }
         None => DraftView {
             arguments,
             text: String::new(),
-            omitted: trimmed || arguments_cut,
+            omitted: arguments_omitted,
         },
     }
 }
 
-/// Appends `delta`, then drops the oldest text beyond the window. The cut can
-/// land inside a credential whose opening is then gone, so the partial first
-/// token of what remains is dropped as well.
+/// Appends `delta`, then drops the oldest text beyond the window.
 fn push_raw(draft: &mut Draft, delta: &str) {
     draft.raw.push_str(delta);
     if draft.raw.len() <= RAW_WINDOW_BYTES {
@@ -172,9 +177,6 @@ fn push_raw(draft: &mut Draft, delta: &str) {
         cut += 1;
     }
     draft.raw.drain(..cut);
-    let kept = draft_text::without_partial_first_token(&draft.raw).len();
-    let dropped = draft.raw.len() - kept;
-    draft.raw.drain(..dropped);
     draft.trimmed = true;
 }
 
@@ -208,7 +210,7 @@ impl TranscriptModel {
             trimmed: false,
         };
         push_raw(&mut draft, fragment.arguments_delta);
-        let shown = view(name, &draft.raw, draft.trimmed);
+        let shown = view(redactor(), name, &draft.raw, draft.trimmed);
         let entry = draft.entry;
         self.push(TranscriptEntry::Tool {
             run_id: fragment.run_id.map(str::to_owned),
@@ -246,7 +248,7 @@ impl TranscriptModel {
             (TranscriptEntry::Tool { tool_name, .. }, None) => tool_name,
             _ => return,
         };
-        let shown = view(name, &draft.raw, draft.trimmed);
+        let shown = view(redactor(), name, &draft.raw, draft.trimmed);
         self.entry_meta[position].revision += 1;
         if let TranscriptEntry::Tool {
             tool_name,

@@ -114,6 +114,12 @@ impl SecretRedactor {
     /// Redacts an owned copy. The caller's live text is never modified.
     #[must_use]
     pub fn redact(&self, text: &str) -> RedactedText {
+        let merged = self.merged_spans(text);
+        render(text, &merged, 0).0
+    }
+
+    /// The disjoint, ordered byte ranges of `text` that hold a credential.
+    fn merged_spans(&self, text: &str) -> Vec<(usize, usize, SecretRule)> {
         let mut spans = Vec::new();
         for known in &self.known_values {
             for (start, _) in text.match_indices(known) {
@@ -165,19 +171,7 @@ impl SecretRedactor {
                 merged.push((start, end, rule));
             }
         }
-        let count = merged.len();
-        let mut result = String::with_capacity(text.len());
-        let mut offset = 0;
-        for (start, end, rule) in merged {
-            result.push_str(&text[offset..start]);
-            result.push_str(&format!("[REDACTED:{rule}]"));
-            offset = end;
-        }
-        result.push_str(&text[offset..]);
-        RedactedText {
-            text: result,
-            count,
-        }
+        merged
     }
 
     /// Like [`Self::redact`] for text that is still being written. An unfinished
@@ -186,7 +180,22 @@ impl SecretRedactor {
     /// that is the beginning of a known credential value.
     #[must_use]
     pub fn redact_streaming(&self, text: &str) -> RedactedText {
-        let mut redacted = self.redact(text);
+        self.redact_streaming_after(text, 0)
+    }
+
+    /// Like [`Self::redact_streaming`], but returns only what follows the first
+    /// `skip` bytes of `text`.
+    ///
+    /// The whole text is redacted first, so a credential that begins before the
+    /// boundary and ends after it is masked whole and never leaves a visible
+    /// remainder; the shown part then starts after such a credential. For a
+    /// window whose start was cut from a longer stream, a `skip` of
+    /// [`Self::max_credential_len`] leaves out every fragment of a credential
+    /// whose opening was cut off, however much redaction later shortens the text.
+    #[must_use]
+    pub fn redact_streaming_after(&self, text: &str, skip: usize) -> RedactedText {
+        let merged = self.merged_spans(text);
+        let (mut redacted, mut shown_from) = render(text, &merged, skip);
         let token_start = redacted
             .text
             .char_indices()
@@ -208,7 +217,10 @@ impl SecretRedactor {
             redacted.text.truncate(start);
             redacted.text.push_str("[REDACTED:partial-credential]");
             redacted.count += 1;
+            // A credential that began before the boundary is shown as its marker.
+            shown_from = shown_from.min(start);
         }
+        redacted.text.drain(..shown_from);
         redacted
     }
 
@@ -254,6 +266,51 @@ impl fmt::Debug for SecretRedactor {
             )
             .finish()
     }
+}
+
+/// `text` with the credential `spans` replaced by markers, and the offset in
+/// that result where the part after the first `skip` bytes of `text` begins. A
+/// credential that straddles the boundary is dropped whole.
+fn render(text: &str, spans: &[(usize, usize, SecretRule)], skip: usize) -> (RedactedText, usize) {
+    let mut from = skip.min(text.len());
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    for &(start, end, _) in spans {
+        if start < from && from < end {
+            from = end;
+        }
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut shown_from = None;
+    let mut offset = 0;
+    for &(start, end, rule) in spans {
+        if shown_from.is_none() && from <= start {
+            let at = from.max(offset);
+            result.push_str(&text[offset..at]);
+            shown_from = Some(result.len());
+            result.push_str(&text[at..start]);
+        } else {
+            result.push_str(&text[offset..start]);
+        }
+        result.push_str(&format!("[REDACTED:{rule}]"));
+        offset = end;
+    }
+    if shown_from.is_none() {
+        let at = from.max(offset);
+        result.push_str(&text[offset..at]);
+        shown_from = Some(result.len());
+        result.push_str(&text[at..]);
+    } else {
+        result.push_str(&text[offset..]);
+    }
+    (
+        RedactedText {
+            text: result,
+            count: spans.len(),
+        },
+        shown_from.unwrap_or_default(),
+    )
 }
 
 fn collect_spans<'a>(

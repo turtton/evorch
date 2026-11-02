@@ -1,4 +1,4 @@
-use super::drafts::{PREVIEW_BYTES, RAW_WINDOW_BYTES};
+use super::drafts::{PREVIEW_BYTES, RAW_WINDOW_BYTES, view};
 use super::{ToolStatus, TranscriptEntry, TranscriptModel};
 use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, ToolEvent};
 use secret_guard::SecretRedactor;
@@ -593,45 +593,133 @@ fn a_credential_is_hidden_at_every_fragment_boundary() {
     }
 }
 
+/// The token with `escaped` written as a JSON `\\u` escape inside a JSON string.
+fn token_forms() -> Vec<(&'static str, String)> {
+    let middle = format!("ghp_{}\\u004c{}", &BODY[..6], &BODY[7..]);
+    vec![
+        ("plain", format!("ghp_{BODY}")),
+        ("escaped opening", format!("\\u0067hp_{BODY}")),
+        ("escaped middle", middle),
+    ]
+}
+
 #[test]
-fn a_credential_cut_by_the_window_start_is_never_shown() {
-    // Given: a token, then a private key block that redaction collapses to one
-    // marker, so the cut token's remnant would sit inside the shown tail.
-    let token = format!("ghp_{BODY}");
-    let key = format!(
-        "-----BEGIN PRIVATE KEY-----\n{}",
-        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(RAW_WINDOW_BYTES / 40)
-    );
-    for cut_in in 0..=token.len() {
-        let mut stream_text = format!("{token} ok {key}");
-        // The window start lands `cut_in` bytes into the token.
-        let excess = stream_text.len().saturating_sub(RAW_WINDOW_BYTES);
-        let pad = cut_in.saturating_sub(excess);
-        stream_text = format!("{token} ok {}{key}", "pad ".repeat(pad / 4));
-        let total = stream_text.len();
-        stream_text.push_str(&" w".repeat((RAW_WINDOW_BYTES + cut_in).saturating_sub(total) / 2));
-
-        for step in [stream_text.len(), 5_000] {
+fn a_credential_with_an_escape_inside_it_is_hidden_at_every_fragment_boundary() {
+    // Given: the token `ghp_<6>L<28>` whose middle character is written `\u004c`,
+    // so the part before the escape alone already looks like a whole credential
+    // while the rest looks like ordinary text.
+    for tool in ["write", "shell", "delegate"] {
+        let field = if tool == "delegate" {
+            "prompt"
+        } else {
+            "command"
+        };
+        let arguments = format!(
+            "{{\"{field}\":\"use ghp_{}\\u004c{} now\"}}",
+            &BODY[..6],
+            &BODY[7..]
+        );
+        // When: the stream is cut after every character boundary.
+        for end in (0..=arguments.len()).filter(|end| arguments.is_char_boundary(*end)) {
             let mut model = TranscriptModel::new();
-            let arguments = format!("{{\"command\":\"{}", stream_text.replace('\n', "\\n"));
-            stream(&mut model, "shell", &arguments, step);
+            model.apply(&delta(0, Some("call-1"), Some(tool), &arguments[..end]));
 
-            // Then: the cut remnant is not displayed in either view.
-            assert_hides_body(&views(&model)[0], &format!("cut {cut_in} step {step}"));
+            // Then: no stretch of the token is displayed, in either view.
+            assert_hides_body(&views(&model)[0], &format!("{tool} at {end}"));
         }
     }
 }
 
 #[test]
-fn the_unredacted_window_is_bounded_and_wider_than_any_credential() {
-    // Given: the redactor the model uses, including a long configured value.
-    let long = "v".repeat(9_000);
-    let redactor = SecretRedactor::with_known_values([long]);
+fn a_credential_cut_by_the_window_start_is_never_shown() {
+    // Given: a token, then a private key block that redaction collapses to one
+    // marker, so the cut token's remnant would sit inside a shown tail that
+    // were taken after redaction.
+    let key = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}",
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(RAW_WINDOW_BYTES / 40)
+    );
+    for (form, token) in token_forms() {
+        for cut_in in 0..=token.len() {
+            let mut stream_text = format!("{token} ok {key}");
+            // The window start lands `cut_in` bytes into the token.
+            let excess = stream_text.len().saturating_sub(RAW_WINDOW_BYTES);
+            let pad = cut_in.saturating_sub(excess);
+            stream_text = format!("{token} ok {}{key}", "pad ".repeat(pad / 4));
+            let total = stream_text.len();
+            stream_text
+                .push_str(&" w".repeat((RAW_WINDOW_BYTES + cut_in).saturating_sub(total) / 2));
 
-    // Then: the part of the window before the shown tail covers every credential
-    // the redactor must mask, so a credential cut by the window start cannot
-    // reach the tail.
-    assert!(RAW_WINDOW_BYTES - PREVIEW_BYTES >= redactor.max_credential_len());
+            for step in [stream_text.len(), 5_000] {
+                let mut model = TranscriptModel::new();
+                let arguments = format!("{{\"command\":\"{}", stream_text.replace('\n', "\\n"));
+                stream(&mut model, "shell", &arguments, step);
+
+                // Then: the cut remnant is not displayed in either view.
+                let context = format!("{form} cut {cut_in} step {step}");
+                assert_hides_body(&views(&model)[0], &context);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cut_window_shows_nothing_near_its_start_even_when_later_credentials_shrink() {
+    // Given: a cut token remnant followed by hundreds of whole tokens that
+    // redaction shrinks, so the shown tail would reach back to the window start.
+    let tokens = format!("ghp_{BODY} ").repeat(300);
+    let raw = format!("{}{tokens}tail", &format!("ghp_{BODY}")[20..]);
+    let redactor = SecretRedactor::with_known_values([]);
+    let shown = view(&redactor, "write", &raw, true);
+
+    // Then: only text beyond the guard distance from the start remains.
+    assert!(shown.omitted);
+    assert_no_fragment(&shown.arguments, &BODY[8..]);
+    assert!(shown.arguments.ends_with("tail"));
+}
+
+#[test]
+fn a_known_credential_longer_than_the_designed_bound_is_still_kept_out() {
+    // Given: a configured credential well beyond the designed length.
+    let known: String = (0..9_000)
+        .map(|n| char::from(b'a' + u8::try_from((n * 7 + n / 26) % 26).unwrap()))
+        .collect();
+    let redactor = SecretRedactor::with_known_values([known.clone()]);
+    assert!(redactor.max_credential_len() >= known.len());
+
+    // When: the window starts in the middle of it.
+    let raw = format!("{} then 日本語 text\n{known} end", &known[2_000..]);
+    let shown = view(&redactor, "write", &raw, true);
+
+    // Then: neither the cut remnant nor the whole value is displayed.
+    assert_no_fragment(&shown.arguments, &known[3_000..3_020]);
+    assert_no_fragment(&shown.arguments, &known[100..120]);
+}
+
+fn assert_no_fragment(shown: &str, secret: &str) {
+    let chars: Vec<char> = secret.chars().collect();
+    for window in chars.windows(10) {
+        let fragment: String = window.iter().collect();
+        assert!(!shown.contains(&fragment), "{fragment} leaked");
+    }
+}
+
+#[test]
+fn the_raw_window_is_bounded_and_leaves_room_for_the_guard_and_a_preview() {
+    // Given/When: far more text than the window streams in.
+    let mut model = TranscriptModel::new();
+    model.apply(&delta(0, Some("call-1"), Some("write"), ""));
+    for _ in 0..30 {
+        model.apply(&delta(0, None, None, &"é".repeat(5_000)));
+    }
+
+    // Then: what is shown is bounded and the default guard fits the window.
+    let shown = &views(&model)[0];
+    assert!(shown.arguments.len() <= PREVIEW_BYTES);
+    assert!(
+        SecretRedactor::with_known_values([]).max_credential_len() + PREVIEW_BYTES
+            <= RAW_WINDOW_BYTES
+    );
 }
 
 #[test]

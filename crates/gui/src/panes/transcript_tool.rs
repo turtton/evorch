@@ -8,7 +8,7 @@ use egui::{
 
 use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey, ShellJobs, result_body};
 use crate::model::transcript::{
-    ToolReview, ToolStatus, TranscriptEntry, redacted_for_display, redacted_text_for_display,
+    ToolReview, ToolStatus, TranscriptEntry, redacted_text_for_display,
 };
 use crate::theme::icons;
 use crate::theme::text::WEIGHT_MEDIUM;
@@ -47,7 +47,22 @@ pub struct ToolCardContext<'a> {
     pub agents: &'a [crate::model::tasks::TaskRow],
 }
 
+/// Scroll offset and furthest offset of the detail area of the card drawn with
+/// `pane_id`, for tests of the reader's scroll position.
+#[doc(hidden)]
+pub fn live_detail_scroll_for_tests(ctx: &egui::Context, pane_id: egui::Id) -> Option<(f32, f32)> {
+    live_detail::scroll_state(ctx, pane_id.with("tool-expanded"))
+}
+
 pub fn tool_card(ui: &mut Ui, entry: &TranscriptEntry, pane_id: egui::Id) {
+    // A standalone card has no entry identity from the caller, so its call is
+    // the identity; transcript cards get theirs from the entry in `pane_id`.
+    let pane_id = match entry {
+        TranscriptEntry::Tool {
+            run_id, call_id, ..
+        } => pane_id.with((run_id, call_id)),
+        _ => pane_id,
+    };
     let jobs = ShellJobs::default();
     let context = ToolCardContext {
         repo_root: None,
@@ -219,7 +234,6 @@ pub fn tool_card_group(
     let Some(
         last @ TranscriptEntry::Tool {
             tool_name,
-            call_id,
             input,
             output,
             detail,
@@ -239,16 +253,22 @@ pub fn tool_card_group(
         return;
     }
     let folded = group.len();
-    let id = pane_id.with(("tool-expanded", run_id, call_id));
+    // The caller's `pane_id` identifies the entry, which outlives the call ID
+    // a draft receives when it starts; the expansion and scroll state hang on it.
+    let id = pane_id.with("tool-expanded");
     let running = matches!(status, ToolStatus::Running | ToolStatus::Drafting { .. });
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let color = status_color(status, *is_error);
-    // A call that has not finished is shown from a redacted copy of its input:
-    // the header, tooltip, accessible name and detail never see the original,
-    // which the runtime executes unchanged. Finished cards keep showing the
-    // recorded input as they always have; persisted events are already redacted.
-    let display_input = input.as_ref().filter(|_| running).map(redacted_for_display);
-    let shown_input = display_input.as_ref().or(input.as_ref());
+    // Whatever the call's state, the card is drawn from a redacted copy of its
+    // input: the header, tooltip, accessible name and every body section never
+    // see the original, which the runtime executes unchanged.
+    let display_input = live_detail::DisplayInput::cached(
+        ui,
+        id,
+        input.as_ref(),
+        matches!(status, ToolStatus::Running),
+    );
+    let shown_input = display_input.as_deref().map(|display| &display.value);
     let mut header = header::tool_header(
         tool_name,
         shown_input,
@@ -311,7 +331,9 @@ pub fn tool_card_group(
             omitted,
             ..
         } => live_detail::drafting(text, arguments, *omitted),
-        ToolStatus::Running => shown_input.and_then(|input| live_detail::running(tool_name, input)),
+        ToolStatus::Running => display_input
+            .as_deref()
+            .and_then(|display| live_detail::running(tool_name, display, &header_text)),
         _ => None,
     };
     soft_frame(palette().SURFACE).show(ui, |ui| {
@@ -351,14 +373,13 @@ pub fn tool_card_group(
         } else if expanded && !running {
             // The patch is what the model asked for; its result stays plain
             // code below, so a rejected patch never reads as applied.
-            let patch = input
-                .as_ref()
+            let patch = shown_input
                 .filter(|_| tool_name == "apply_patch")
                 .and_then(header::patch_text);
             if let Some(patch) = patch {
                 ui.label("Patch");
                 diff_code(ui, patch);
-            } else if let Some(input) = input {
+            } else if let Some(input) = shown_input {
                 ui.label("Input");
                 let content = focused_input(tool_name, Some(input))
                     .map(Cow::Borrowed)

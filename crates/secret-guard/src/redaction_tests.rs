@@ -184,3 +184,51 @@ fn streaming_redaction_masks_credentials_cut_by_a_window_only_past_the_guard() {
     let wide = SecretRedactor::with_known_values([long.clone(), "short-value-1".into()]);
     assert_eq!(wide.max_credential_len(), long.len());
 }
+
+#[test]
+fn streaming_after_a_boundary_drops_a_credential_that_straddles_it_whole() {
+    let redactor = SecretRedactor::with_known_values(["correct horse battery staple".into()]);
+    let token = format!("ghp_{}", "Zx9Qw3Lm7Tb2Vc5Nk8Rd4Hf6Jg1Ps0YaEu");
+    let text = format!("head {token} tail {token}!");
+    // The boundary falls inside the first token: it is dropped, not shown in part.
+    let inside = text.find("ghp_").unwrap() + 12;
+    let shown = redactor.redact_streaming_after(&text, inside);
+    assert_eq!(shown.text, " tail [REDACTED:github-token]!");
+    // A boundary at the token's very start or end keeps the text on its side.
+    let start = text.find("ghp_").unwrap();
+    assert!(
+        redactor
+            .redact_streaming_after(&text, start)
+            .text
+            .starts_with("[REDACTED:github-token] tail")
+    );
+    let end = start + token.len();
+    assert!(
+        redactor
+            .redact_streaming_after(&text, end)
+            .text
+            .starts_with(" tail")
+    );
+    // Without a boundary it is the ordinary streaming redaction.
+    assert_eq!(
+        redactor.redact_streaming_after(&text, 0),
+        redactor.redact_streaming(&text)
+    );
+    // A boundary inside a multi-byte character moves on to the next character.
+    assert_eq!(redactor.redact_streaming_after("あいう", 1).text, "いう");
+    // A boundary past the end leaves nothing.
+    assert_eq!(redactor.redact_streaming_after("abc", 99).text, "");
+    // A known value straddling the boundary is dropped whole too.
+    let known = "pw=correct horse battery staple ok";
+    assert_eq!(redactor.redact_streaming_after(known, 8).text, " ok");
+}
+
+#[test]
+fn streaming_after_a_boundary_masks_an_unfinished_credential_that_began_before_it() {
+    let redactor = SecretRedactor::with_known_values([]);
+    // The token is still being written and began before the boundary, so
+    // what follows the boundary would be an unrecognisable fragment of it.
+    let shown = redactor.redact_streaming_after("some words ghp_AbCdEf", 17);
+    assert_eq!(shown.text, "[REDACTED:partial-credential]");
+    assert!(!shown.text.contains("EfGh"));
+}
