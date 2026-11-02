@@ -1817,9 +1817,31 @@ fn scaled_pages(f: &Fixture) -> Vec<crate::HostThreadSearch> {
     }
 }
 
-/// FNV-1a over every field a page reports, in order. The opaque body cursors
-/// and the times of body hits depend on when the fixture was written, so only
-/// the host's own title cursors and title hit times are included.
+/// A continuation cursor as its logical position. The host's own title cursors
+/// are plain text. A body cursor is a signed token; its MAC and the caller
+/// binding (which holds the fixture's temporary project path) differ on every
+/// run and are dropped, while the position it resumes at (the thread cursor and
+/// the run, block and revisions to resume inside a thread) is kept.
+fn logical_cursor(cursor: &str) -> String {
+    use base64::Engine as _;
+    if cursor.starts_with("host:") {
+        return cursor.to_owned();
+    }
+    let payload = cursor
+        .strip_prefix("ts2.")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(payload, _mac)| payload)
+        .expect("a body cursor is a ts2 token");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    let mut position: serde_json::Map<String, Value> = serde_json::from_slice(&payload).unwrap();
+    position.remove("caller");
+    Value::Object(position).to_string()
+}
+
+/// FNV-1a over every field a page reports, in order. The times of body hits
+/// depend on when the fixture was written, so only title hit times are included.
 fn pages_digest(pages: &[crate::HostThreadSearch]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut feed = |text: &str| {
@@ -1828,13 +1850,7 @@ fn pages_digest(pages: &[crate::HostThreadSearch]) -> u64 {
         }
     };
     for page in pages {
-        let cursor = page.next_cursor.as_deref().map(|cursor| {
-            if cursor.starts_with("host:") {
-                cursor
-            } else {
-                "body"
-            }
-        });
+        let cursor = page.next_cursor.as_deref().map(logical_cursor);
         feed(&format!(
             "page cursor={cursor:?} limited={} index={:?}",
             page.title_scan_limited, page.index
@@ -1858,9 +1874,9 @@ fn host_search_results_are_stable_across_the_title_scan_limit() {
     // mismatch the assertion prints the new values to compare.
     let golden = [
         // (threads, pages, hits, digest)
-        (100_usize, 3_usize, 31_usize, 17_498_888_267_181_643_344_u64),
-        (2000, 46, 516, 8_833_437_848_576_447_440),
-        (2150, 47, 535, 16_138_923_659_166_620_914),
+        (100_usize, 3_usize, 31_usize, 3_763_424_433_782_355_709_u64),
+        (2000, 46, 516, 5_489_298_250_593_877_980),
+        (2150, 47, 535, 14_816_139_041_794_912_385),
     ];
     let mut actual = Vec::new();
     for (total, ..) in golden {
@@ -1894,6 +1910,50 @@ fn host_search_results_are_stable_across_the_title_scan_limit() {
         actual.push((total, pages.len(), ids.len(), pages_digest(&pages)));
     }
     assert_eq!(actual, golden);
+}
+
+#[test]
+fn host_search_resume_cursors_are_stable_when_a_thread_is_cut_mid_conversation() {
+    // Given: a title match whose body holds more matching blocks than one page
+    // may verify, so the body page is cut inside that thread and its cursor
+    // carries a resume position (run, block, revisions), next to other threads.
+    let f = Fixture::new();
+    many_threads_with_titles(&f, &["Notes", "Page group", "Chat", "Chat"]);
+    for (index, blocks) in [(0_usize, 3_usize), (1, 2001), (3, 3)] {
+        let run = format!("run-{}", 3000 + index);
+        f.native_run(
+            &run,
+            Some(&format!("t{index:03}")),
+            None,
+            (0..blocks)
+                .map(|_| assistant(vec![text("pg body")]))
+                .collect(),
+        );
+        f.index(&run);
+    }
+    // When: following the cursors to the end.
+    let pages = scaled_pages(&f);
+    // Then: a body cursor resumes inside the cut thread, and the whole chain is
+    // the one recorded with the implementation before the title scans changed.
+    let cursors: Vec<_> = pages
+        .iter()
+        .filter_map(|page| page.next_cursor.as_deref().map(logical_cursor))
+        .collect();
+    assert!(
+        cursors.iter().any(|cursor| cursor.contains("\"resume\"")),
+        "{cursors:?}"
+    );
+    let ids: Vec<_> = pages
+        .iter()
+        .flat_map(|page| page.hits.iter().map(|hit| hit.thread_id.as_str()))
+        .collect();
+    let unique: BTreeSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    assert_eq!(
+        (pages.len(), ids.len(), pages_digest(&pages)),
+        (2, 3, 2_911_311_821_480_345_036),
+        "{cursors:?}"
+    );
 }
 
 #[test]
