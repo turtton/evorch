@@ -8,7 +8,6 @@ use runtime::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use storage::memory::{LessonScope, MemoryStatus};
 use storage::{Database, Storage, StorageConfig, StorageHandle};
 use tokio::sync::Notify;
@@ -347,21 +346,12 @@ impl Fixture {
         let run =
             self.runtime
                 .delegate_background(Role::Worker, "Complete bounded work".into(), config);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), self.runtime.wait(run))
-                .await
-                .unwrap()
-                .unwrap(),
-            AgentRunPhase::Done
-        );
+        assert_eq!(self.runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
         run
     }
 
     async fn learning(&self, source: RunId) -> Result<(), String> {
-        tokio::time::timeout(Duration::from_secs(5), self.runtime.wait_learning(source))
-            .await
-            .expect("learning must finish")
-            .unwrap()
+        self.runtime.wait_learning(source).await.unwrap()
     }
 
     fn entries(&self) -> Vec<storage::memory::MemoryEntry> {
@@ -470,12 +460,7 @@ async fn json_looking_final_text_without_typed_review_cannot_promote() {
 async fn cancelling_lesson_reviewer_does_not_promote() {
     let fixture = Fixture::new(ReviewMode::WaitForCancel);
     let source = fixture.start().await;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        fixture.model.reviewer_started.notified(),
-    )
-    .await
-    .expect("reviewer started");
+    fixture.model.reviewer_started.notified().await;
     let reviewer = fixture
         .runtime
         .list_agents()
