@@ -300,7 +300,8 @@ fn optimized_restore_matches_legacy_with_repairs_branches_escalation_and_feed_pa
             total: 2,
         }),
     ];
-    // Timestamps are deliberately equal: row ID order is the replay contract.
+    // Timestamps are deliberately equal and fixed: row ID order is the replay
+    // contract, and replay must not read the wall clock for stored events.
     for event in &mut events {
         event.meta.wall_clock = std::time::SystemTime::UNIX_EPOCH;
     }
@@ -335,12 +336,10 @@ fn optimized_restore_matches_legacy_with_repairs_branches_escalation_and_feed_pa
                 .iter()
                 .any(|entry| matches!(entry, TranscriptEntry::Branch { .. }))
         );
-        assert!(
-            new.sidebar
-                .threads
-                .iter()
-                .any(|thread| thread.escalation_source_run_id.as_deref() == Some("run-1"))
-        );
+        // The escalated thread is dated by its event, not by when the replay ran.
+        assert!(new.sidebar.threads.iter().any(|thread| {
+            thread.escalation_source_run_id.as_deref() == Some("run-1") && thread.created_at == 0
+        }));
         // Replay must not reissue historical approval requests.
         assert_eq!(new.pending_approvals.items().count(), 0);
         let continuation = Event::new(MessageEvent::MessagePart {

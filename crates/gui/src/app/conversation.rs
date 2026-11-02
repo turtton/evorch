@@ -44,7 +44,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 source_run_id,
                 new_run_id,
                 summary,
-            }) => self.bind_escalation_thread(source_run_id, new_run_id, summary),
+            }) => self.bind_escalation_thread(
+                source_run_id,
+                new_run_id,
+                summary,
+                event.meta.wall_clock,
+            ),
             EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
                 run_id,
                 parent_run_id,

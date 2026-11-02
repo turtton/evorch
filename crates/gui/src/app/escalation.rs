@@ -10,6 +10,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         source_run_id: &str,
         new_run_id: &str,
         summary: &EscalationMemoSummary,
+        at: std::time::SystemTime,
     ) -> bool {
         let Some(parent) = self
             .sidebar
@@ -23,7 +24,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let id = ThreadId::new(event_bus::escalation_thread_id(new_run_id));
         let created = !self.sidebar.threads.iter().any(|thread| thread.id == id);
         if created {
-            self.create_escalation_thread(&id, &parent, source_run_id);
+            self.create_escalation_thread(&id, &parent, source_run_id, at);
         }
         let thread_id = id.to_string();
         let adopted = !self.transcripts.is_thread_root(new_run_id);
@@ -79,17 +80,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// family of `parent`: archive and pin state belong to the family, so there is
     /// nothing to copy, settle or retry, and the child reads the family's state as soon
     /// as it is a member. A history event cannot fail, and adding a member needs no
-    /// lock; the next save merges it into the shared sidebar.
+    /// lock; the next save merges it into the shared sidebar. `at` is the time of the
+    /// escalation event, so replaying history dates the child by the event, not by the replay.
     fn create_escalation_thread(
         &mut self,
         id: &ThreadId,
         parent: &ThreadRecord,
         source_run_id: &str,
+        at: std::time::SystemTime,
     ) {
-        let mut child = ThreadRecord::new(
+        let mut child = ThreadRecord::new_at(
             id.clone(),
             parent.project_id.clone(),
             format!("Orchestrator · {}", parent.title),
+            at,
         );
         child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
         // The runtime copies the declaration at handoff; the record keeps it
