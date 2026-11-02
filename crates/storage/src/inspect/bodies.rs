@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::body_ref::hex;
 use crate::body_store::PRODUCTION_OWNERS;
 use crate::repo::content_blobs::{
-    BodyScope, blob_references, blob_state, blob_text, check_bodies, find_blobs,
+    BlobReferences, BodyScope, blob_references, blob_state, blob_text, check_bodies, find_blobs,
 };
 use crate::{Database, StorageError};
 
@@ -14,8 +14,10 @@ use crate::{Database, StorageError};
 pub const MIN_BLOB_PREFIX_DIGITS: usize = 12;
 /// Bytes of a body shown unless the whole body is asked for.
 pub const BLOB_PREVIEW_BYTES: usize = 2_048;
-/// Reference rows listed per reference table.
-const REFERENCES_LISTED: usize = 20;
+/// Reference rows listed per reference table unless asked otherwise.
+pub const DEFAULT_REFERENCES_LISTED: usize = 20;
+/// Most reference rows one call lists per reference table.
+pub const MAX_REFERENCES_LISTED: usize = 1_000;
 
 /// Which owner rows `check-bodies` looks at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,16 +27,41 @@ pub enum BodyCheckScope {
     Thread(String),
 }
 
+/// What `inspect blob` shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobOptions {
+    /// The whole body instead of its first [`BLOB_PREVIEW_BYTES`] bytes.
+    pub full_content: bool,
+    /// Reference rows to skip in each reference table, to page through a widely shared
+    /// blob.
+    pub reference_offset: usize,
+    /// Reference rows to list per reference table, clamped to
+    /// `1..=`[`MAX_REFERENCES_LISTED`].
+    pub reference_limit: usize,
+}
+
+impl Default for BlobOptions {
+    fn default() -> Self {
+        Self {
+            full_content: false,
+            reference_offset: 0,
+            reference_limit: DEFAULT_REFERENCES_LISTED,
+        }
+    }
+}
+
 impl Database {
-    /// One blob by hash prefix: size, codec, who refers to it, whether it waits for
-    /// collection, and its body (the first [`BLOB_PREVIEW_BYTES`] bytes unless
-    /// `full_content`).
+    /// One blob by hash prefix: size, codec, who refers to it (a page of each reference
+    /// table, with `next_offset` when more follow), whether it waits for collection, and
+    /// its body (the first [`BLOB_PREVIEW_BYTES`] bytes unless `full_content`).
     ///
     /// # Errors
     /// Fails for a prefix shorter than [`MIN_BLOB_PREFIX_DIGITS`] or not lowercase hex,
     /// for no match, and for an ambiguous prefix. A body that cannot be decoded is
     /// reported in the result (`content_error`), not as a failure.
-    pub fn inspect_blob(&self, prefix: &str, full_content: bool) -> Result<Value, StorageError> {
+    pub fn inspect_blob(&self, prefix: &str, options: BlobOptions) -> Result<Value, StorageError> {
+        let full_content = options.full_content;
+        let limit = options.reference_limit.clamp(1, MAX_REFERENCES_LISTED);
         if prefix.len() < MIN_BLOB_PREFIX_DIGITS {
             return Err(StorageError::Serialization(format!(
                 "a blob hash prefix needs at least {MIN_BLOB_PREFIX_DIGITS} hex digits"
@@ -60,7 +87,7 @@ impl Database {
             _ => unreachable!("find_blobs returns at most two rows"),
         };
         let (queued, registered) = blob_state(conn, meta.id)?;
-        let references = blob_references(conn, meta.id, REFERENCES_LISTED)?;
+        let references = blob_references(conn, meta.id, options.reference_offset, limit)?;
         let mut result = json!({
             "hash": hex(&meta.hash),
             "id": meta.id,
@@ -69,11 +96,16 @@ impl Database {
             "codec": match meta.codec { 0 => "plain", 1 => "zstd", _ => "unknown" },
             "referenced_by": references
                 .iter()
-                .map(|(table, rows, owners)| json!({
-                    "table": table,
-                    "rows": rows,
-                    "owners": owners,
-                }))
+                .map(|(table, rows, owners): &BlobReferences| {
+                    let end = options.reference_offset.saturating_add(owners.len());
+                    json!({
+                        "table": table,
+                        "rows": rows,
+                        "offset": options.reference_offset,
+                        "owners": owners,
+                        "next_offset": (i64::try_from(end).is_ok_and(|end| end < *rows)).then_some(end),
+                    })
+                })
                 .collect::<Vec<_>>(),
             "waiting_for_collection": references.is_empty() && (queued || registered),
             "queued_for_collection": queued,

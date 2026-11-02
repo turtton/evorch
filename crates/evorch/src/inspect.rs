@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use storage::Database;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
 use storage::inspect::{
-    BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json,
+    BlobOptions, BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json,
 };
 
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
@@ -18,7 +18,7 @@ pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   run <run-id> [--full]
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
   storage [--physical] [--top <n>]
-  blob <hash-prefix, 12+ hex digits> [--content]
+  blob <hash-prefix, 12+ hex digits> [--content] [--ref-offset <n>] [--ref-limit <n>]
   check-bodies [--run <run-id> | --thread <thread-id>] [--verify]
 The default database is <user-config-dir>/evorch-events.db, the GUI's store.";
 
@@ -49,7 +49,7 @@ pub enum InspectCommand {
     /// One content blob by hash prefix; `content` shows the whole body.
     Blob {
         prefix: String,
-        content: bool,
+        options: BlobOptions,
     },
     /// Integrity of content blobs against their owners; exit status 1 when it fails.
     CheckBodies {
@@ -169,10 +169,30 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
                     .ok_or_else(|| format!("--top must be a positive integer\n{USAGE}"))
             })?,
         },
-        ("blob", [prefix], false) => InspectCommand::Blob {
-            prefix: prefix.clone(),
-            content,
-        },
+        ("blob", [prefix], false) => {
+            let number = |flag: &str, value: Option<String>, default: usize, min: usize| {
+                value.map_or(Ok(default), |value| {
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|number| *number >= min)
+                        .ok_or_else(|| format!("{flag} must be an integer >= {min}\n{USAGE}"))
+                })
+            };
+            InspectCommand::Blob {
+                prefix: prefix.clone(),
+                options: BlobOptions {
+                    full_content: content,
+                    reference_offset: number("--ref-offset", take("--ref-offset"), 0, 0)?,
+                    reference_limit: number(
+                        "--ref-limit",
+                        take("--ref-limit"),
+                        storage::inspect::DEFAULT_REFERENCES_LISTED,
+                        1,
+                    )?,
+                },
+            }
+        }
         ("check-bodies", [], false) => InspectCommand::CheckBodies {
             scope: match (take("--run"), take("--thread")) {
                 (None, None) => BodyCheckScope::All,
@@ -252,8 +272,8 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
         InspectCommand::Storage { physical, top } => db
             .storage_summary(&path, StorageSummaryOptions { top, physical })
             .map_err(|error| error.to_string())?,
-        InspectCommand::Blob { prefix, content } => db
-            .inspect_blob(&prefix, content)
+        InspectCommand::Blob { prefix, options } => db
+            .inspect_blob(&prefix, options)
             .map_err(|error| error.to_string())?,
         InspectCommand::CheckBodies { scope, verify } => db
             .inspect_check_bodies(&scope, verify)

@@ -308,6 +308,8 @@ fn malformed_arguments_print_usage() {
         &["candidates", "--physical"],
         &["blob"],
         &["blob", "abcdef123456", "--verify"],
+        &["blob", "abcdef123456", "--ref-limit", "0"],
+        &["blob", "abcdef123456", "--ref-offset", "x"],
         &["storage", "--content"],
         &["check-bodies", "--run", "a", "--thread", "b"],
         &["check-bodies", "--content"],

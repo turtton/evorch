@@ -485,6 +485,58 @@ mod check {
     }
 
     #[test]
+    fn tokens_naming_one_blob_with_different_lengths_are_reported_in_either_order() {
+        // Given: a stored row whose container is then edited to hold two tokens for the
+        // same blob, one with a wrong length, in each order.
+        let database = database();
+        let conn = &database.conn;
+        let body = text("dup", 3_000);
+        store(conn, "o1", &json!([body.clone()])).unwrap();
+        let good = BodyToken::of(&body);
+        let bad = BodyToken {
+            byte_len: 2_999,
+            ..good
+        };
+        let (good_text, bad_text) = (good.to_value_string(), bad.to_value_string());
+
+        for (order, first, second) in [
+            ("bad first", &bad_text, &good_text),
+            ("bad last", &good_text, &bad_text),
+        ] {
+            conn.execute(
+                "UPDATE test_owner SET body = ?1 WHERE id = 'o1'",
+                [json!([first, second]).to_string()],
+            )
+            .unwrap();
+
+            for verify in [false, true] {
+                // When: the database is checked.
+                let report = check(conn, verify);
+
+                // Then: the conflict and the wrong length are both findings naming the
+                // row and the blob, and the check fails.
+                let found = kinds(&report);
+                assert!(!report.is_ok(), "{order}, verify={verify}");
+                for kind in ["token_length_conflict", "length_mismatch"] {
+                    assert!(found.contains(&kind), "{order}, verify={verify}: {found:?}");
+                }
+                for problem in &report.problems {
+                    assert_eq!(problem.owner.as_deref(), Some("test_owner owner_id=o1"));
+                    assert_eq!(problem.hash.as_deref(), Some(good.hash_hex().as_str()));
+                }
+            }
+        }
+
+        // The same token twice with the right length is no finding.
+        conn.execute(
+            "UPDATE test_owner SET body = ?1 WHERE id = 'o1'",
+            [json!([good_text, good_text]).to_string()],
+        )
+        .unwrap();
+        assert!(check(conn, true).is_ok());
+    }
+
+    #[test]
     fn unreadable_containers_and_tokens_are_reported_not_skipped() {
         let database = fixture();
         let conn = &database.conn;

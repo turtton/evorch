@@ -28,7 +28,8 @@ use crate::body_store::REF_TABLE_PREFIX;
 mod check;
 
 pub(crate) use check::{
-    BodyScope, blob_references, blob_state, blob_text, body_stats, check_bodies, find_blobs,
+    BlobReferences, BodyScope, blob_references, blob_state, blob_text, body_stats, check_bodies,
+    find_blobs,
 };
 
 /// Queue entries one step looks at.

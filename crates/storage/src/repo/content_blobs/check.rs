@@ -255,7 +255,7 @@ fn check_owner(
             key.push(row.get::<_, SqlValue>(index)?);
         }
         let label = owner.label(&key);
-        let mut expected: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        let mut expected: BTreeMap<[u8; 32], BTreeSet<u64>> = BTreeMap::new();
         let mut readable = true;
         for index in 0..owner.container_columns.len() {
             let Some(text) = row
@@ -282,7 +282,10 @@ fn check_owner(
                 Ok(tokens) => {
                     for token in tokens {
                         report.tokens += 1;
-                        expected.insert(token.hash, token.byte_len);
+                        expected
+                            .entry(token.hash)
+                            .or_default()
+                            .insert(token.byte_len);
                     }
                 }
                 Err(error) => {
@@ -323,8 +326,16 @@ fn check_owner(
                 ),
             }
         }
-        for (hash, token_len) in &expected {
+        for (hash, token_lens) in &expected {
             let hash_text = hex(hash);
+            if token_lens.len() > 1 {
+                report.add(
+                    "token_length_conflict",
+                    Some(&label),
+                    Some(hash_text.clone()),
+                    format!("tokens for this blob declare different lengths: {token_lens:?}"),
+                );
+            }
             let blob: Option<(i64, i64)> = conn
                 .prepare_cached("SELECT id, byte_len FROM content_blobs WHERE hash = ?1")?
                 .query_row([&hash[..]], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -338,13 +349,15 @@ fn check_owner(
                 );
                 continue;
             };
-            if u64::try_from(blob_len).ok() != Some(*token_len) {
-                report.add(
-                    "length_mismatch",
-                    Some(&label),
-                    Some(hash_text.clone()),
-                    format!("token says {token_len} bytes, blob says {blob_len}"),
-                );
+            for token_len in token_lens {
+                if u64::try_from(blob_len).ok() != Some(*token_len) {
+                    report.add(
+                        "length_mismatch",
+                        Some(&label),
+                        Some(hash_text.clone()),
+                        format!("token says {token_len} bytes, blob says {blob_len}"),
+                    );
+                }
             }
             if !referenced.contains(hash) {
                 report.add(
@@ -552,13 +565,18 @@ pub(crate) fn blob_state(conn: &Connection, id: i64) -> Result<(bool, bool), Sto
     )?)
 }
 
-/// Up to `limit` reference rows of blob `id` per reference table, as
-/// `(table, {key column: value})`, and how many rows each table has for it.
+/// One reference table's rows for a blob: `(table, total rows, listed owners)`.
+pub(crate) type BlobReferences = (String, i64, Vec<Value>);
+
+/// For each reference table that names blob `id`: how many rows do, and `limit` of the
+/// owners (as `{key column: value}`) from the `offset`-th on, in key order. The owners of
+/// one blob are a range of the `blob_id` index, so paging reads only that range.
 pub(crate) fn blob_references(
     conn: &Connection,
     id: i64,
+    offset: usize,
     limit: usize,
-) -> Result<Vec<(String, i64, Vec<Value>)>, StorageError> {
+) -> Result<Vec<BlobReferences>, StorageError> {
     let mut found = Vec::new();
     for table in ref_tables(conn)? {
         let count: i64 = conn.query_row(
@@ -574,11 +592,12 @@ pub(crate) fn blob_references(
             .query_map([&table], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         let mut statement = conn.prepare(&format!(
-            "SELECT {} FROM \"{table}\" WHERE blob_id = ?1 LIMIT ?2",
-            columns.join(", ")
+            "SELECT {columns} FROM \"{table}\" WHERE blob_id = ?1 ORDER BY {columns} \
+             LIMIT ?2 OFFSET ?3",
+            columns = columns.join(", ")
         ))?;
         let owners = statement
-            .query_map(params![id, limit as i64], |row| {
+            .query_map(params![id, limit as i64, offset as i64], |row| {
                 let mut owner = serde_json::Map::new();
                 for (index, column) in columns.iter().enumerate() {
                     let value = match row.get::<_, SqlValue>(index)? {

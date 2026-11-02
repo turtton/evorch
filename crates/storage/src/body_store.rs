@@ -382,6 +382,12 @@ impl OwnerSpec {
 /// call behind even if the caller then commits. The owner row must exist after
 /// `write_row`: the reference rows' foreign key points at it.
 ///
+/// **`containers` are consumed.** They are rewritten in place and, after an `Err`, hold
+/// an unspecified mix of original strings and tokens. A caller that retries must start
+/// again from its own copy of the original values: tokenizing a container that already
+/// holds tokens stores the token strings themselves as bodies, and they would read back
+/// as tokens instead of as the original text.
+///
 /// Header-like owners that carry a revision counter must increment it in SQL
 /// (`header_rev = header_rev + 1`) inside `write_row`, never from a value computed by
 /// the client.

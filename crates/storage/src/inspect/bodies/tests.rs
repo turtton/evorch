@@ -1,6 +1,12 @@
 use serde_json::json;
 
 use super::*;
+
+const FULL: BlobOptions = BlobOptions {
+    full_content: true,
+    reference_offset: 0,
+    reference_limit: DEFAULT_REFERENCES_LISTED,
+};
 use crate::body_store::test_owner::{database, store, text};
 
 #[test]
@@ -12,8 +18,10 @@ fn inspect_blob_reports_size_references_and_a_bounded_preview() {
     let hash = crate::body_ref::BodyToken::of(&body).hash_hex();
 
     // When: it is inspected by a 12-digit prefix.
-    let preview = database.inspect_blob(&hash[..12], false).unwrap();
-    let full = database.inspect_blob(&hash, true).unwrap();
+    let preview = database
+        .inspect_blob(&hash[..12], BlobOptions::default())
+        .unwrap();
+    let full = database.inspect_blob(&hash, FULL).unwrap();
 
     // Then: sizes and the referencing row are shown; the preview ends on a character
     // boundary at or below 2 KiB, and the full view returns the whole body.
@@ -41,7 +49,9 @@ fn inspect_blob_distinguishes_waiting_blobs_and_rejects_bad_prefixes() {
     conn.execute("DELETE FROM test_owner", []).unwrap();
     let hash = crate::body_ref::BodyToken::of(&body).hash_hex();
 
-    let waiting = database.inspect_blob(&hash[..16], false).unwrap();
+    let waiting = database
+        .inspect_blob(&hash[..16], BlobOptions::default())
+        .unwrap();
     assert_eq!(waiting["waiting_for_collection"], true);
     assert_eq!(waiting["referenced_by"], json!([]));
 
@@ -51,7 +61,7 @@ fn inspect_blob_distinguishes_waiting_blobs_and_rejects_bad_prefixes() {
         ("000000000000", "no blob"),
     ] {
         let error = database
-            .inspect_blob(prefix, false)
+            .inspect_blob(prefix, BlobOptions::default())
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{prefix}: {error}");
@@ -66,7 +76,7 @@ fn inspect_blob_distinguishes_waiting_blobs_and_rejects_bad_prefixes() {
         .unwrap();
     }
     let error = database
-        .inspect_blob(&"cd".repeat(10), false)
+        .inspect_blob(&"cd".repeat(10), BlobOptions::default())
         .unwrap_err()
         .to_string();
     assert!(error.contains("ambiguous"), "{error}");
@@ -81,7 +91,9 @@ fn a_blob_that_cannot_be_decoded_is_shown_with_the_reason_not_as_a_failure() {
     conn.execute("UPDATE content_blobs SET data = x'00'", [])
         .unwrap();
     let hash = crate::body_ref::BodyToken::of(&body).hash_hex();
-    let shown = database.inspect_blob(&hash, false).unwrap();
+    let shown = database
+        .inspect_blob(&hash, BlobOptions::default())
+        .unwrap();
     assert!(
         shown["content_error"]
             .as_str()
@@ -148,7 +160,7 @@ fn inspection_works_on_a_read_only_connection_and_writes_nothing() {
     let before = std::fs::read(&path).unwrap();
 
     // When: every inspection entry point runs.
-    readonly.inspect_blob(&hash, true).unwrap();
+    readonly.inspect_blob(&hash, FULL).unwrap();
     readonly
         .inspect_check_bodies(&BodyCheckScope::All, true)
         .unwrap();
@@ -163,4 +175,54 @@ fn inspection_works_on_a_read_only_connection_and_writes_nothing() {
     // the summary has its bodies section.
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(summary["bodies"]["blobs"], 1);
+}
+
+#[test]
+fn a_widely_shared_blob_lists_its_owners_a_page_at_a_time() {
+    // Given: a blob referenced by 25 owner rows.
+    let database = database();
+    let conn = &database.conn;
+    let body = text("shared", 3_000);
+    for index in 0..25 {
+        store(conn, &format!("o{index:02}"), &json!([body.clone()])).unwrap();
+    }
+    let hash = crate::body_ref::BodyToken::of(&body).hash_hex();
+    let page = |offset, limit| {
+        let options = BlobOptions {
+            reference_offset: offset,
+            reference_limit: limit,
+            ..BlobOptions::default()
+        };
+        let shown = database.inspect_blob(&hash, options).unwrap();
+        let table = shown["referenced_by"][0].clone();
+        let owners: Vec<String> = table["owners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|owner| owner["owner_id"].as_str().unwrap().to_owned())
+            .collect();
+        (
+            owners,
+            table["rows"].as_i64().unwrap(),
+            table["next_offset"].clone(),
+        )
+    };
+
+    // When: the pages are read one after the other.
+    let (first, total, next) = page(0, 10);
+    let (second, _, next_second) = page(10, 10);
+    let (third, _, next_third) = page(20, 10);
+
+    // Then: every owner appears once, in key order, with the total and where to go on.
+    assert_eq!(total, 25);
+    assert_eq!(
+        (next, next_second, next_third),
+        (json!(10), json!(20), json!(null))
+    );
+    let all: Vec<String> = [first, second, third].concat();
+    let expected: Vec<String> = (0..25).map(|index| format!("o{index:02}")).collect();
+    assert_eq!(all, expected);
+    // The default page is 20 rows and says so.
+    let (default, _, next) = page(0, DEFAULT_REFERENCES_LISTED);
+    assert_eq!((default.len(), next), (20, json!(20)));
 }
