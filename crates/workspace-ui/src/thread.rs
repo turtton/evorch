@@ -196,6 +196,18 @@ pub struct ThreadLineage {
 
 impl ThreadRecord {
     pub fn new(id: ThreadId, project_id: ProjectId, title: impl Into<String>) -> Self {
+        Self::new_at(id, project_id, title, std::time::SystemTime::now())
+    }
+
+    /// Like [`Self::new`], with the creation time supplied by the caller. Replaying a
+    /// stored event passes that event's time so the result does not depend on when
+    /// the replay runs.
+    pub fn new_at(
+        id: ThreadId,
+        project_id: ProjectId,
+        title: impl Into<String>,
+        at: std::time::SystemTime,
+    ) -> Self {
         Self {
             id,
             project_id,
@@ -206,7 +218,7 @@ impl ThreadRecord {
             archived_at: None,
             archive_revision: 0,
             pin_revision: 0,
-            created_at: unix_seconds(std::time::SystemTime::now()),
+            created_at: unix_seconds(at),
             updated_at: 0,
             run_ids: Vec::new(),
             root_run_id: None,
