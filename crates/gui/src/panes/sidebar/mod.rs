@@ -62,12 +62,14 @@ pub fn sidebar_pane(
         question_threads,
         approval_threads,
         unread_threads,
+        &BTreeSet::new(),
         &BTreeMap::new(),
     )
 }
 
 /// [`sidebar_pane`] that also explains, on hover over an archived thread, when it
 /// is deleted or why it is kept.
+#[allow(clippy::too_many_arguments)]
 pub fn sidebar_pane_with_retention(
     ui: &mut egui::Ui,
     sidebar: &SidebarState,
@@ -75,6 +77,7 @@ pub fn sidebar_pane_with_retention(
     question_threads: &BTreeSet<ThreadId>,
     approval_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
+    externally_working_threads: &BTreeSet<ThreadId>,
     retention: &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
 ) -> Option<SidebarAction> {
     let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
@@ -83,6 +86,7 @@ pub fn sidebar_pane_with_retention(
         question_threads,
         approval_threads,
         unread_threads,
+        externally_working: externally_working_threads,
         active_runs: &active_runs,
         retention,
     };

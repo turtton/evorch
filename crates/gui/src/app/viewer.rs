@@ -131,6 +131,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             enabled: !self.settings_save_in_progress(),
         };
         self.sync_agent_browser(&ctx);
+        let externally_working_threads = self.externally_working_threads();
         {
             let rewind_block = self
                 .sidebar
@@ -170,6 +171,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 sidebar: &self.sidebar,
                 phases: &self.phases,
                 unread_threads: &self.unread_threads,
+                externally_working_threads: &externally_working_threads,
                 retention: &self.retention.statuses,
                 sidebar_action: &mut sidebar_action,
                 agents_action: &mut agents_action,

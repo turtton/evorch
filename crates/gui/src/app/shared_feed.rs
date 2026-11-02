@@ -423,6 +423,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .extend(active.map(|(run, _)| run.clone()));
     }
 
+    /// Threads another process is working on, shown from what the shared feed
+    /// already folded: a run of the thread that other processes started or
+    /// changed and that is still Running or Pending, in a thread this process
+    /// does not own. A run that merely is not in this process's runtime, or one
+    /// waiting for an answer, is not enough. Reads the registry only to rule
+    /// out ownership; nothing is claimed, renewed or written.
+    pub fn externally_working_threads(&self) -> std::collections::BTreeSet<workspace_ui::ThreadId> {
+        if self.shared_feed.foreign_runs.is_empty() {
+            return std::collections::BTreeSet::new();
+        }
+        self.sidebar
+            .threads
+            .iter()
+            .filter(|thread| {
+                thread.run_ids.iter().any(|run| {
+                    self.shared_feed.foreign_runs.contains(run)
+                        && matches!(
+                            self.phases.get(run),
+                            Some(ThreadRunPhase::Running | ThreadRunPhase::Pending)
+                        )
+                }) && !self.thread_owned_here(&thread.id.to_string())
+            })
+            .map(|thread| thread.id.clone())
+            .collect()
+    }
+
     fn thread_owned_here(&self, thread_id: &str) -> bool {
         self.ownership
             .as_ref()
