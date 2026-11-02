@@ -184,56 +184,43 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let total = crate::restore_metrics::RestoreTimer::new("history_total");
         let stage = crate::restore_metrics::RestoreTimer::new("history_first_pass");
         // Two streamed passes keep a long history out of memory: the first
-        // finds where each run last waited, the second replays.
+        // finds where each run last waited, the second replays. The first reads
+        // the event columns and opens only the few payloads it needs; a stored
+        // event that cannot be read is skipped and reported, never fatal.
         let mut restored_tasks = crate::model::tasks::TaskRestore::default();
+        let mut unreadable = std::collections::BTreeMap::new();
+        let scan = db.scan_history_first_pass(
+            |stored| self.tasks.restore_event(&mut restored_tasks, &stored.event),
+            |id, run, reason| {
+                unreadable
+                    .entry(id)
+                    .or_insert_with(|| (run.map(str::to_owned), reason.to_owned()));
+            },
+        )?;
+        let figures = &scan.metrics;
+        crate::restore_metrics::FirstPassReport {
+            rows_scanned: figures.rows_scanned,
+            waiting_event_decodes: figures.waiting_event_decodes,
+            task_event_decodes: figures.task_event_decodes,
+            message_part_rows: figures.message_part_metadata_rows,
+            message_part_stored_bytes: figures.message_part_stored_bytes,
+            message_part_expanded_bytes: figures.message_part_expanded_bytes,
+            other_decodes: figures.session_marker_rows
+                + figures.unclassified_event_decodes
+                + figures.thread_probe_decodes,
+            isolated_events: figures.isolated_events,
+            fallback: figures.used_fallback.then_some((
+                figures.fallback_events_decoded,
+                figures.fallback_payload_bytes,
+            )),
+        }
+        .log();
         // A legacy event subscriber could drop stream deltas under load. The
         // context snapshot still contains the complete accepted response.
         // Repair the final waiting turn at its original position in the replay.
-        let mut last_waiting = std::collections::BTreeMap::new();
-        let mut completed_at_waiting = std::collections::BTreeMap::new();
-        let mut completed_since_request = std::collections::BTreeMap::new();
-        let mut replay_end = None;
-        // A response too large for one row is stored as parts; rebuild it.
-        let mut parts = event_bus::MessagePartAssembler::new();
-        db.for_each_event_ordered(|stored| {
-            let Some(assembled) = parts.accept(&stored.event) else {
-                return;
-            };
-            let event: &event_bus::Event = &assembled;
-            self.tasks.restore_event(&mut restored_tasks, event);
-            replay_end = Some(event.meta.wall_clock);
-            match &event.kind {
-                event_bus::EventKind::Provider(event_bus::ProviderEvent::RequestStarted {
-                    run_id: Some(run_id),
-                    ..
-                }) => {
-                    completed_since_request.insert(run_id.clone(), false);
-                }
-                event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted {
-                    run_id,
-                    ..
-                }) => {
-                    completed_since_request.insert(run_id.clone(), true);
-                }
-                event_bus::EventKind::Lifecycle(
-                    event_bus::LifecycleEvent::AgentRunStateChanged {
-                        run_id,
-                        to: event_bus::AgentRunPhase::Waiting,
-                        ..
-                    },
-                ) => {
-                    last_waiting.insert(run_id.clone(), stored.id);
-                    completed_at_waiting.insert(
-                        run_id.clone(),
-                        completed_since_request
-                            .get(run_id)
-                            .copied()
-                            .unwrap_or(false),
-                    );
-                }
-                _ => {}
-            }
-        })?;
+        let last_waiting = scan.last_waiting;
+        let completed_at_waiting = scan.completed_at_waiting;
+        let replay_end = scan.replay_end;
         self.tasks.finish_restore(restored_tasks);
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_sidebar_receipts");
@@ -370,61 +357,69 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let replay_now = std::time::Instant::now();
         let mut replayed_to = 0;
         let mut parts = event_bus::MessagePartAssembler::new();
-        db.for_each_event_ordered(|stored| {
-            replayed_to = replayed_to.max(stored.id);
-            let Some(assembled) = parts.accept(&stored.event) else {
-                return;
-            };
-            let event: &event_bus::Event = &assembled;
-            while messages
-                .peek()
-                .is_some_and(|message| message.at <= event.meta.wall_clock)
-            {
-                if let Some(message) = messages.next() {
-                    self.restore_user_message(message);
+        db.for_each_event_isolated(
+            |stored| {
+                replayed_to = replayed_to.max(stored.id);
+                let Some(assembled) = parts.accept(&stored.event) else {
+                    return;
+                };
+                let event: &event_bus::Event = &assembled;
+                while messages
+                    .peek()
+                    .is_some_and(|message| message.at <= event.meta.wall_clock)
+                {
+                    if let Some(message) = messages.next() {
+                        self.restore_user_message(message);
+                    }
                 }
-            }
-            let at = replay_end
-                .and_then(|end| end.duration_since(event.meta.wall_clock).ok())
-                .and_then(|age| replay_now.checked_sub(age))
-                .unwrap_or(replay_now);
-            self.telemetry.apply_event_at(event, at);
-            self.transcripts.select_thread(None);
-            self.apply_conversation_event(event);
-            self.seed_system_notification(event);
-            if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
-                run_id,
-                context_len,
-            }) = &event.kind
-            {
-                self.seed_branches(Some(&workspace_ui::ForkPoint {
-                    run_id: run_id.clone(),
-                    context_len: *context_len,
-                }));
-            }
-            self.bind_goal_event(event);
-            if let event_bus::EventKind::Lifecycle(
-                event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
-            ) = &event.kind
-            {
-                // In particular, Stopped survives replay as resumable, not failed/idle.
-                self.phases.insert(run_id.clone(), super::frame::phase(*to));
-            }
-            if let event_bus::EventKind::Lifecycle(
-                event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
-            ) = &event.kind
-                && last_waiting.get(run_id) == Some(&stored.id)
-                && !completed_at_waiting.get(run_id).copied().unwrap_or(false)
-                && let Some(text) = completed_snapshots.get(run_id)
-            {
-                self.apply_conversation_event(&event_bus::Event::new(
-                    event_bus::MessageEvent::MessageCompleted {
+                let at = replay_end
+                    .and_then(|end| end.duration_since(event.meta.wall_clock).ok())
+                    .and_then(|age| replay_now.checked_sub(age))
+                    .unwrap_or(replay_now);
+                self.telemetry.apply_event_at(event, at);
+                self.transcripts.select_thread(None);
+                self.apply_conversation_event(event);
+                self.seed_system_notification(event);
+                if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
+                    run_id,
+                    context_len,
+                }) = &event.kind
+                {
+                    self.seed_branches(Some(&workspace_ui::ForkPoint {
                         run_id: run_id.clone(),
-                        text: text.clone(),
-                    },
-                ));
-            }
-        })?;
+                        context_len: *context_len,
+                    }));
+                }
+                self.bind_goal_event(event);
+                if let event_bus::EventKind::Lifecycle(
+                    event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. },
+                ) = &event.kind
+                {
+                    // In particular, Stopped survives replay as resumable, not failed/idle.
+                    self.phases.insert(run_id.clone(), super::frame::phase(*to));
+                }
+                if let event_bus::EventKind::Lifecycle(
+                    event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
+                ) = &event.kind
+                    && last_waiting.get(run_id) == Some(&stored.id)
+                    && !completed_at_waiting.get(run_id).copied().unwrap_or(false)
+                    && let Some(text) = completed_snapshots.get(run_id)
+                {
+                    self.apply_conversation_event(&event_bus::Event::new(
+                        event_bus::MessageEvent::MessageCompleted {
+                            run_id: run_id.clone(),
+                            text: text.clone(),
+                        },
+                    ));
+                }
+            },
+            |id, run, reason| {
+                unreadable
+                    .entry(id)
+                    .or_insert_with(|| (run.map(str::to_owned), reason.to_owned()));
+            },
+        )?;
+        crate::restore_metrics::report_unreadable_events(&unreadable);
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");
         // A response can finish after the replay cursor, in a later feed batch.
