@@ -7,6 +7,39 @@ use crate::model::tasks::AgentRunSource;
 const REGION_HOME: &str = "subagents-home";
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// History rebuilds transcripts and the delegated-run index without live UI
+    /// effects. Recreate their panes once ownership and final phases are known,
+    /// even when no workspace layout was saved before the GUI closed.
+    pub(super) fn restore_subagent_panes(&mut self) {
+        let rows = self.tasks.rows().to_vec();
+        for row in rows {
+            let run_id = row.run_id.to_string();
+            if self.thread_for_run(&run_id).is_none() || self.is_conversation_run(&run_id) {
+                continue;
+            }
+            self.open_subagent_pane(&run_id);
+            if !row.name.trim().is_empty()
+                && let Some(panel) = self
+                    .panels
+                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
+            {
+                panel.title = format!("Transcript: {}", row.name);
+            }
+            let phase = self
+                .phases
+                .get(&run_id)
+                .copied()
+                .unwrap_or_else(|| super::frame::phase(row.status));
+            match phase {
+                workspace_ui::ThreadRunPhase::Done
+                | workspace_ui::ThreadRunPhase::Error
+                | workspace_ui::ThreadRunPhase::Stopped => self.park_completed_subagent(&run_id),
+                _ => self.unpark_subagent(&run_id),
+            }
+        }
+        self.sync_subagent_thread_panes();
+    }
+
     pub fn open_subagent_pane(&mut self, run_id: &str) {
         if self.is_conversation_run(run_id) {
             return;
