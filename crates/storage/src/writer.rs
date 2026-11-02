@@ -919,9 +919,25 @@ impl StorageHandle {
         })
     }
 
+    /// Rejects a lesson. A favorite is refused with [`StorageError::LessonFavorite`]
+    /// and nothing is written.
     pub fn reject_lesson(&self, id: &str) -> Result<(), StorageError> {
         self.request(|reply| {
             Command::Memory(crate::repo::memory::Mutation::Reject(id.into()), reply)
+        })
+    }
+
+    /// Sets or clears the user's approval mark on a lesson of any status except
+    /// `Rejected` (refused). Setting the value it already has writes nothing.
+    pub fn set_lesson_favorite(&self, id: &str, favorite: bool) -> Result<(), StorageError> {
+        self.request(|reply| {
+            Command::Memory(
+                crate::repo::memory::Mutation::SetFavorite {
+                    id: id.into(),
+                    favorite,
+                },
+                reply,
+            )
         })
     }
     /// イベントを容量制限付きで追記します。

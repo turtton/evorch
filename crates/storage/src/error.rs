@@ -74,6 +74,12 @@ pub enum StorageError {
         run_id: Option<String>,
         thread_id: Option<String>,
     },
+    /// The lesson is a favorite (the user's approval mark), so it cannot be rejected
+    /// until the mark is cleared.
+    LessonFavorite {
+        /// The protected lesson.
+        id: String,
+    },
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -136,6 +142,10 @@ impl fmt::Display for StorageError {
                 run_id.as_deref().unwrap_or("-"),
                 thread_id.as_deref().unwrap_or("-")
             ),
+            Self::LessonFavorite { id } => write!(
+                formatter,
+                "lesson {id} is a favorite; clear the approval mark before rejecting it"
+            ),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -168,6 +178,7 @@ impl std::error::Error for StorageError {
             | Self::AssistantReferenceUnavailable
             | Self::QuestionAlreadyAnswered
             | Self::Tombstoned { .. }
+            | Self::LessonFavorite { .. }
             | Self::SecretDetected { .. } => None,
         }
     }
