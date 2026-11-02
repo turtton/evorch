@@ -8,6 +8,7 @@ pub mod cost;
 pub mod driver;
 pub mod evaluator;
 mod git;
+pub mod inspection;
 pub mod judge;
 pub mod metrics;
 pub mod output;
