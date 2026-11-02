@@ -8,7 +8,7 @@ mod budget;
 #[cfg(test)]
 mod continuity_tests;
 #[cfg(test)]
-mod delegate_cleanup_tests;
+pub(crate) mod delegate_cleanup_tests;
 mod durable;
 mod finalization;
 mod host_inputs;
@@ -781,7 +781,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_error(format!("Cannot persist prepared context: {error}"));
             return;
         }
-        if completed_turn_end.is_some() && !state.wait_for_input().await {
+        if completed_turn_end.is_some() && !state.wait_for_input_boundary(true).await {
             return;
         }
         state.execute().await;
@@ -1474,7 +1474,7 @@ impl LoopState {
                         }
                         continue;
                     }
-                    if !self.wait_for_input().await {
+                    if !self.wait_for_input_boundary(true).await {
                         return;
                     }
                 }
@@ -1495,6 +1495,10 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        self.wait_for_input_boundary(false).await
+    }
+
+    async fn wait_for_input_boundary(&mut self, completed_turn: bool) -> bool {
         if let Some(kind) = self.interrupted() {
             self.finish_interrupted(kind);
             return false;
@@ -1526,7 +1530,13 @@ impl LoopState {
             }
         }
         let turn_end = self.persist_turn_boundary();
-        if self.transition(AgentRunPhase::Waiting, None).is_err() {
+        let completed_turn = (completed_turn
+            && !runtime.has_unanswered_questions(self.task.run_id))
+        .then(|| self.final_assistant_text());
+        if self
+            .transition_with_turn(AgentRunPhase::Waiting, None, completed_turn)
+            .is_err()
+        {
             return false;
         }
         if let Some(context_len) = turn_end {
@@ -1596,6 +1606,15 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
+        self.transition_with_turn(phase, reason, None)
+    }
+
+    fn transition_with_turn(
+        &mut self,
+        phase: AgentRunPhase,
+        reason: Option<String>,
+        completed_turn: Option<Option<String>>,
+    ) -> Result<(), ()> {
         let previous = self.run_state;
         let event = self
             .run_state
@@ -1627,8 +1646,17 @@ impl LoopState {
             self.pending_terminal = Some((previous, event));
         } else {
             self.publish_durable_task(phase, reason);
-            self.channels.phase_tx.send_replace(phase);
-            self.shared.bus.emit(Event::new(event));
+            if let Some(runtime) = self.runtime() {
+                runtime.publish_live_phase(
+                    self.task.run_id,
+                    event,
+                    completed_turn,
+                    &self.channels.phase_tx,
+                );
+            } else {
+                self.channels.phase_tx.send_replace(phase);
+                self.shared.bus.emit(Event::new(event));
+            }
         }
         Ok(())
     }

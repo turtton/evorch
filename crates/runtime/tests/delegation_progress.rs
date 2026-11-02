@@ -427,7 +427,7 @@ fn interactive_delegate(index: usize) -> Result<ChatResponse, runtime::RuntimeEr
 
 #[tokio::test]
 async fn a_wait_that_delivers_a_message_is_progress() {
-    // Given: an interactive child that messages the parent and then idles, and
+    // Given: an interactive child that messages the parent and keeps working, and
     // a parent that inspects LIMIT more rounds after receiving the message.
     let mut script = vec![interactive_delegate(0), wait("wait-message", &child_id(0))];
     script.extend((0..LIMIT).map(|index| {
@@ -452,6 +452,11 @@ async fn a_wait_that_delivers_a_message_is_progress() {
             ],
         )
         .await;
+    // Only the send is allowed through: an idle turn would independently count
+    // as progress and mask a regression in message-delivering waits.
+    let gate = Arc::new(Notify::new());
+    model.gate_key(&child(0), gate.clone()).await;
+    gate.notify_one();
     // When: the wait returns with the message.
     let outcome = run_parent(&runtime, &bus).await;
     // Then: the message reset the no-progress streak, and arrived in the result.
@@ -462,7 +467,9 @@ async fn a_wait_that_delivers_a_message_is_progress() {
         "{result}"
     );
     assert_eq!(result["completed_run_ids"], json!([]), "{result}");
-    runtime.cancel(child_id(0).parse().unwrap()).unwrap();
+    let child = child_id(0).parse().unwrap();
+    runtime.cancel(child).unwrap();
+    runtime.wait(child).await.unwrap();
 }
 
 #[tokio::test]

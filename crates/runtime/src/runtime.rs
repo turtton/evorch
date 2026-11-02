@@ -94,6 +94,7 @@ pub(crate) struct Shared {
     pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
+    pub(crate) turn_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     #[cfg(test)]
@@ -107,7 +108,7 @@ pub(crate) struct Shared {
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
-    /// Monotonic incarnation IDs, including same-run-ID restores.
+    /// Monotonic receipt IDs, including same-run-ID restores and idle turns.
     next_completion_generation: AtomicU64,
     /// Messages for finished or stopped runs, released when the run is registered again.
     pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
@@ -283,6 +284,7 @@ pub(crate) struct RunEntry {
     completion_relayed: bool,
     completion_notice: Arc<crate::mailbox::CompletionNotice>,
     terminal_reason: Option<String>,
+    idle_turn: Option<output::IdleTurn>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -705,6 +707,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
+                turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -1029,6 +1032,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
+                turn_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
@@ -1602,6 +1606,7 @@ impl AgentRuntime {
                 run_id,
                 RunEntry {
                     terminal_reason: None,
+                    idle_turn: None,
                     role,
                     name: name.clone(),
                     model,
