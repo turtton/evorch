@@ -8,7 +8,7 @@ mod budget;
 #[cfg(test)]
 mod continuity_tests;
 #[cfg(test)]
-mod delegate_cleanup_tests;
+pub(crate) mod delegate_cleanup_tests;
 mod durable;
 mod finalization;
 mod host_inputs;

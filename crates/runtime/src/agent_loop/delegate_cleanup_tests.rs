@@ -60,7 +60,7 @@ impl AgentModel for BlockedModel {
     }
 }
 
-pub(super) async fn started_fixture(
+pub(crate) async fn started_fixture(
     cancel_rx: watch::Receiver<RunInterrupt>,
 ) -> (AgentRuntime, LoopState) {
     let (started, startup) = oneshot::channel();
