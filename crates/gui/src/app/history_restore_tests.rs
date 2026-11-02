@@ -105,6 +105,16 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
         serde_json::to_value(&old.history).unwrap(),
         serde_json::to_value(&new.history).unwrap()
     );
+    // Rows hold no clock reading once the history is finished, so they compare.
+    let telemetry_runs: Vec<_> = old.telemetry.run_ids().collect();
+    assert_eq!(telemetry_runs, new.telemetry.run_ids().collect::<Vec<_>>());
+    for run in telemetry_runs {
+        assert_eq!(
+            old.telemetry.row(run),
+            new.telemetry.row(run),
+            "telemetry of {run}"
+        );
+    }
     assert_eq!(old.thread_goals, new.thread_goals);
     assert_eq!(old.thread_todos, new.thread_todos);
     assert_eq!(format!("{:?}", old.ledger), format!("{:?}", new.ledger));
@@ -112,6 +122,38 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
 
 #[test]
 fn optimized_restore_matches_legacy_with_repairs_branches_escalation_and_feed_parts() {
+    assert_restore_matches_legacy(|_| {});
+}
+
+/// Without the event columns the first pass cannot tell rows apart by
+/// `subkind`, so it decodes every one; the restored state must not differ.
+#[test]
+fn restore_with_unfilled_event_columns_matches_legacy() {
+    assert_restore_matches_legacy(|conn| {
+        conn.execute("UPDATE events SET subkind = NULL, run_id = NULL", [])
+            .unwrap();
+    });
+}
+
+/// Rows the replay cannot read are skipped by the oracle in both of its
+/// passes; the restore must skip the same rows and lose nothing else.
+#[test]
+fn restore_skips_unreadable_events_like_legacy() {
+    assert_restore_matches_legacy(|conn| {
+        let damaged = conn
+            .execute(
+                "UPDATE events SET payload = '{not json' \
+                 WHERE subkind IN ('ToolStarted', 'ReasoningDelta')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(damaged, 2);
+    });
+}
+
+fn assert_restore_matches_legacy(
+    damage: impl FnOnce(&rusqlite::Connection),
+) -> WorkbenchState<DemoSource> {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("events.db"),
@@ -308,8 +350,10 @@ fn optimized_restore_matches_legacy_with_repairs_branches_escalation_and_feed_pa
     for event in &events {
         storage.handle().append_event(Some("gui"), event).unwrap();
     }
+    damage(&rusqlite::Connection::open(&config.db_path).unwrap());
     let registry_path = dir.path().join("owners.db");
     drop(runtime::ownership::Registry::open(&registry_path).unwrap());
+    let mut restored = None;
     for registry_path in [None, Some(registry_path.as_path())] {
         let mut old = state(sidebar.clone());
         let mut new = state(sidebar.clone());
@@ -362,8 +406,10 @@ fn optimized_restore_matches_legacy_with_repairs_branches_escalation_and_feed_pa
         assert!(new.transcripts.run("run-3").unwrap().entries().iter().any(
             |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "first second")
         ));
+        restored = Some(new);
     }
     drop(storage);
+    restored.expect("restored at least once")
 }
 
 #[test]
@@ -425,4 +471,207 @@ fn non_repair_candidates_never_decode_their_conversation_payloads() {
     assert!(db.checkpoint_run_messages("no-waiting").is_err());
     assert_eq!(db.checkpoint_run_messages("error").unwrap(), None);
     state(sidebar).restore_history(&db).unwrap();
+}
+
+fn task_history() -> Vec<Event> {
+    let at = |seconds: u64, mut event: Event| {
+        event.meta.wall_clock = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        event
+    };
+    vec![
+        at(10, started("run-1", None, "root")),
+        at(20, started("run-11", Some("run-1"), "first child")),
+        at(21, started("run-12", Some("run-1"), "second child")),
+        at(22, started("run-13", Some("run-1"), "third child")),
+        at(30, phase("run-11", AgentRunPhase::Done)),
+        at(
+            31,
+            Event::new(LifecycleEvent::AgentRunStateChanged {
+                run_id: "run-12".into(),
+                from: AgentRunPhase::Running,
+                to: AgentRunPhase::Error,
+                reason: Some(event_bus::CANCELLED_REASON.into()),
+            }),
+        ),
+        // Updates the oldest child after the others finished, but before run-13 waits.
+        at(
+            40,
+            Event::new(LifecycleEvent::TurnCompleted {
+                run_id: "run-11".into(),
+                context_len: 3,
+            }),
+        ),
+        at(41, request("run-13")),
+        at(
+            50,
+            Event::new(MessageEvent::MessagePart {
+                run_id: "run-13".into(),
+                response_id: "r".into(),
+                text: "a".into(),
+                index: 0,
+                total: 2,
+            }),
+        ),
+        at(60, phase("run-13", AgentRunPhase::Waiting)),
+        at(
+            70,
+            Event::new(MessageEvent::MessagePart {
+                run_id: "run-13".into(),
+                response_id: "r".into(),
+                text: "b".into(),
+                index: 1,
+                total: 2,
+            }),
+        ),
+        at(5, phase("run-1", AgentRunPhase::Waiting)),
+    ]
+}
+
+/// Task rows, their order and cancellation mark come from the lifecycle
+/// events alone; a first pass that skipped one would show in the task list.
+#[test]
+fn restored_task_rows_match_legacy_whichever_pass_reads_the_history() {
+    for fill_columns in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("events.db"),
+            ..Default::default()
+        };
+        let storage = Storage::open(config.clone()).unwrap();
+        for event in task_history() {
+            storage.handle().append_event(Some("gui"), &event).unwrap();
+        }
+        if !fill_columns {
+            rusqlite::Connection::open(&config.db_path)
+                .unwrap()
+                .execute("UPDATE events SET subkind = NULL, run_id = NULL", [])
+                .unwrap();
+        }
+        let db = Database::open(&config).unwrap();
+        let mut old = state(SidebarState::default());
+        let mut new = state(SidebarState::default());
+        old.restore_history_legacy(&db, None).unwrap();
+        new.restore_history(&db).unwrap();
+
+        let rows = |state: &WorkbenchState<DemoSource>| state.tasks.rows().to_vec();
+        assert_eq!(rows(&old), rows(&new), "columns filled: {fill_columns}");
+        let ids: Vec<_> = rows(&new)
+            .iter()
+            .map(|row| row.run_id.to_string())
+            .collect();
+        assert_eq!(ids, ["run-13", "run-11", "run-12"]);
+        assert!(rows(&new).iter().any(|row| row.cancelled));
+        assert_eq!(
+            old.telemetry.run_ids().collect::<Vec<_>>(),
+            new.telemetry.run_ids().collect::<Vec<_>>()
+        );
+        assert_same(&old, &new);
+        drop(storage);
+    }
+}
+
+/// A completion event the replay cannot read does not count as a completion,
+/// so the saved snapshot repairs the wait after it exactly as it did when the
+/// first pass read the event itself.
+#[test]
+fn a_wait_after_an_unreadable_completion_is_still_repaired_from_the_snapshot() {
+    let restored = assert_restore_matches_legacy(|conn| {
+        let damaged = conn
+            .execute(
+                "UPDATE events SET payload = '{not json' \
+                 WHERE subkind = 'MessageCompleted' AND run_id = 'run-2'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(damaged, 1);
+    });
+    let repaired = restored.transcripts.run("run-2").unwrap().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "must not duplicate"),
+    );
+    assert!(repaired, "the snapshot's answer shows where the wait is");
+}
+
+fn damaged_tool_history() -> Vec<Event> {
+    let mut events = vec![started("run-1", None, "chat:Worker:one"), request("run-1")];
+    for n in 0..13 {
+        events.push(Event::new(ToolEvent::ToolStarted {
+            run_id: Some("run-1".into()),
+            tool_name: "shell".into(),
+            call_id: format!("call-{n}"),
+            input: None,
+            parent_call_id: None,
+        }));
+    }
+    events.push(Event::new(ToolEvent::ToolStarted {
+        run_id: Some("deleted".into()),
+        tool_name: "shell".into(),
+        call_id: "gone".into(),
+        input: None,
+        parent_call_id: None,
+    }));
+    events.push(phase("run-1", AgentRunPhase::Waiting));
+    events
+}
+
+/// Every event that cannot be read stays reachable by ID, however many there
+/// are, once per event although both passes meet it; a deleted run's events
+/// never come back as failures; and none of it stops the restore.
+#[test]
+fn unreadable_events_are_all_kept_by_id_once_and_never_for_deleted_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = Storage::open(config.clone()).unwrap();
+    for event in damaged_tool_history() {
+        storage.handle().append_event(Some("gui"), &event).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    // Alternate the damage: an unusable column for some, a broken payload for
+    // the rest. The first pass never opens a tool payload, the replay does.
+    conn.execute(
+        "UPDATE events SET wall_clock_ns = 'late' WHERE subkind = 'ToolStarted' AND id % 2 = 0",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE events SET payload = '{broken' WHERE subkind = 'ToolStarted' AND id % 2 = 1",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES ('deleted', 't', 'f')",
+        [],
+    )
+    .unwrap();
+    let damaged: Vec<i64> = conn
+        .prepare("SELECT id FROM events WHERE subkind = 'ToolStarted' AND run_id = 'run-1'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(damaged.len(), 13);
+
+    let db = Database::open(&config).unwrap();
+    let mut restored = state(SidebarState::default());
+    restored.restore_history(&db).unwrap();
+
+    assert_eq!(
+        restored
+            .unreadable_history_events
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        damaged
+    );
+    assert!(
+        restored
+            .unreadable_history_events
+            .values()
+            .all(|event| event.run_id.as_deref() == Some("run-1") && !event.reason.is_empty())
+    );
+    assert_eq!(restored.shown_through_event, db.last_event_id().unwrap());
+    drop(storage);
 }

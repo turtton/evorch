@@ -661,6 +661,41 @@ impl Database {
         event::for_each_ordered(&self.conn, visit)
     }
 
+    /// The first pass of the GUI history restore: where each run last waited,
+    /// the replay end, and the delegated-task events, found without decoding
+    /// the history. `on_task_event` receives the lifecycle events the task
+    /// restore consumes, in ID order. A row that cannot be read is skipped and
+    /// handed to `on_failure` as `(event ID, run from the run_id column,
+    /// reason)`; the pass goes on. A database whose `subkind` column is not
+    /// backfilled is decoded in full instead, which the returned metrics say.
+    /// Everything is read in one snapshot and nothing is written.
+    ///
+    /// # Errors
+    /// Returns an error if the query itself fails.
+    pub fn scan_history_first_pass(
+        &self,
+        on_task_event: impl FnMut(&StoredEvent),
+        on_failure: impl FnMut(i64, Option<&str>, &str),
+    ) -> Result<event::first_pass::FirstPassScan, StorageError> {
+        event::first_pass::scan(&self.conn, on_task_event, on_failure)
+    }
+
+    /// [`Self::for_each_event_ordered`] over the events up to `through_id`
+    /// (the first pass reports it), reporting an event it cannot read to
+    /// `on_failure` as `(event ID, run from the run_id column, reason)` instead
+    /// of dropping it silently, and going on with the next one.
+    ///
+    /// # Errors
+    /// Returns an error if the query itself fails.
+    pub fn for_each_event_isolated(
+        &self,
+        through_id: i64,
+        visit: impl FnMut(StoredEvent),
+        on_failure: impl FnMut(i64, Option<&str>, &str),
+    ) -> Result<(), StorageError> {
+        event::first_pass::for_each_isolated(&self.conn, through_id, visit, on_failure)
+    }
+
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。
     ///
     /// # Errors
