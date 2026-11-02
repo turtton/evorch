@@ -192,10 +192,15 @@ impl AgentRuntime {
             .provenance
             .write(record.clone(), expected)
             .map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        self.execution_hook(
+            super::super::cancellation::HookPoint::ContinuationSnapshotPrepared,
+            &std::sync::Arc::clone(&runs[&child].execution),
+        );
         let saved = store
             .handle
             .save_snapshot_bundle(&write)
-            .map_err(|error| format!("{error:?}"))?;
+            .map_err(crate::restore::provenance::save_failure_reason)?;
         restored.snapshot_revision.commit(saved.snapshot_revision);
         Self::install_restored_execution(
             child,

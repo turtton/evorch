@@ -54,6 +54,47 @@ impl PartialEq for SnapshotRevision {
     }
 }
 
+/// Another writer's save of the revision a test has just read, so that the
+/// code under test loses its compare-and-swap deterministically.
+#[cfg(test)]
+pub(crate) mod conflict_support {
+    use storage::thread_index::SnapshotBundle;
+
+    /// Save `bundle` again with a later timestamp; the stored revision is `bundle`'s + 1.
+    pub(crate) fn replace_snapshot(handle: &storage::StorageHandle, bundle: &SnapshotBundle) {
+        let mut record = bundle.record.clone();
+        record.updated_at_ns += 1;
+        let write = crate::restore::provenance::ConversationProvenance::from_bundle(bundle)
+            .write(record, bundle.snapshot_revision)
+            .unwrap();
+        handle.save_snapshot_bundle(&write).unwrap();
+    }
+
+    /// Events emitted so far: everything up to a sentinel published afterwards.
+    pub(crate) async fn drain(
+        bus: &event_bus::EventBus,
+        subscriber: &mut event_bus::EventReceiver,
+    ) -> Vec<event_bus::Event> {
+        let sentinel = "snapshot-conflict-sentinel";
+        bus.emit(event_bus::Event::new(
+            event_bus::MessageEvent::MessageDelta {
+                delta: sentinel.into(),
+                run_id: None,
+            },
+        ));
+        let mut seen = Vec::new();
+        loop {
+            let event = subscriber.recv().await.unwrap();
+            if matches!(&event.kind, event_bus::EventKind::Message(
+                event_bus::MessageEvent::MessageDelta { delta, .. }) if delta == sentinel)
+            {
+                return seen;
+            }
+            seen.push(event);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SnapshotRevision;

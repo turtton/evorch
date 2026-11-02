@@ -283,9 +283,9 @@ impl AgentRuntime {
                     fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
                 })?;
             let saved = store.handle.save_snapshot_bundle(&write).map_err(|error| {
-                fail(RunRestoreFailure::SnapshotConsumeFailed(format!(
-                    "{error:?}"
-                )))
+                fail(RunRestoreFailure::SnapshotConsumeFailed(
+                    crate::restore::provenance::save_failure_reason(error),
+                ))
             })?;
             restored.snapshot_revision.commit(saved.snapshot_revision);
             Self::install_restored_execution(

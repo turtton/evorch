@@ -190,7 +190,7 @@ impl AgentRuntime {
             store
                 .handle
                 .save_snapshot_bundle(&write)
-                .map_err(|error| fail(format!("{error:?}")))?;
+                .map_err(|error| fail(crate::restore::provenance::save_failure_reason(error)))?;
         }
         for event in events {
             self.shared.bus.emit(event);

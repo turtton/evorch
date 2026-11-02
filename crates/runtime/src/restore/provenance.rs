@@ -195,6 +195,18 @@ impl ConversationProvenance {
 #[cfg(test)]
 mod tests;
 
+/// A save failure for callers that report a string. A lost compare-and-swap
+/// says so, instead of the debug form of the raw storage error or the
+/// owner-generation wording of `StaleMutation`.
+pub(crate) fn save_failure_reason(error: storage::thread_index::SnapshotApiError) -> String {
+    match storage_error(error) {
+        storage::StorageError::StaleMutation => {
+            "the saved snapshot was replaced by a newer save after it was read".into()
+        }
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn storage_error(
     error: storage::thread_index::SnapshotApiError,
 ) -> storage::StorageError {

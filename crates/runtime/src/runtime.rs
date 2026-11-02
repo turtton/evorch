@@ -59,6 +59,8 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 
 #[cfg(test)]
 mod host_input_tests;
+#[cfg(test)]
+mod snapshot_conflict_tests;
 pub(crate) mod user_inbox;
 use user_inbox::UserInbox;
 pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
