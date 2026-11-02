@@ -132,6 +132,7 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 terminal_reason: None,
+                idle_turn: None,
                 role,
                 name,
                 model,

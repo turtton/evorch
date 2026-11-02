@@ -682,3 +682,176 @@ async fn cancellation_wins_over_a_simultaneous_inbox_message() {
     assert_eq!(runtime.take_inbox(parent).unwrap().len(), 1);
     cleanup(&runtime).await;
 }
+
+// A turn boundary is an explicit signal, not a wall-clock completion deadline.
+async fn idle_turn(runtime: &AgentRuntime, model: &GatedModel, run: RunId, first: bool) {
+    let mut events = runtime.shared.bus.subscribe();
+    if first {
+        model.first.notify_one();
+    } else {
+        model.second.notify_one();
+    }
+    loop {
+        if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
+            run_id,
+            ..
+        }) = events.recv().await.unwrap().kind
+            && run_id == run.to_string()
+        {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn interactive_turn_wakes_wait_with_output_before_run_terminates() {
+    let (runtime, model) = fixture(None);
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let child = runtime
+        .delegate_background_as_child(
+            parent,
+            Role::Worker,
+            "first",
+            RunConfig {
+                interactive: true,
+                ..RunConfig::default()
+            },
+        )
+        .unwrap();
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let mut request = request(vec![child], WaitMode::Any, 0);
+    request.deadline = None;
+    let wait = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    idle_turn(&runtime, &model, child, true).await;
+    let result = poll!(&mut wait);
+    assert!(
+        result.is_ready(),
+        "an interactive turn must wake wait without terminal state or external input"
+    );
+    let std::task::Poll::Ready(Ok(result)) = result else {
+        unreachable!()
+    };
+    assert_eq!(result["completed_run_ids"], json!([child.to_string()]));
+    assert_eq!(result["runs"][0]["phase"], "Waiting");
+    assert_eq!(result["runs"][0]["status"], "turn_completed");
+    assert!(
+        result["runs"][0]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("検証済み")
+    );
+    assert_eq!(result["runs"][0]["output_truncated"], true);
+    assert_eq!(result["runs"][0]["has_pending_question"], false);
+    cleanup(&runtime).await;
+}
+
+#[tokio::test]
+async fn all_waits_for_interactive_turns_and_reports_each_generation_once() {
+    let (runtime, model) = fixture(None);
+    let parent =
+        runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
+    let config = RunConfig {
+        interactive: true,
+        keep_alive: true,
+        ..RunConfig::default()
+    };
+    let first = runtime
+        .delegate_background_as_child(parent, Role::Worker, "first", config.clone())
+        .unwrap();
+    let second = runtime
+        .delegate_background_as_child(parent, Role::Worker, "second", config)
+        .unwrap();
+    let (_cancel, receiver) = watch::channel(RunInterrupt::None);
+    let mut request = request(vec![first, second], WaitMode::All, 0);
+    request.deadline = None;
+    let wait = observe(&runtime, parent, &request, receiver.clone());
+    tokio::pin!(wait);
+    assert!(poll!(&mut wait).is_pending());
+    idle_turn(&runtime, &model, first, true).await;
+    assert!(
+        poll!(&mut wait).is_pending(),
+        "mode=all must wait for both turns"
+    );
+    idle_turn(&runtime, &model, second, false).await;
+    let result = poll!(&mut wait);
+    assert!(
+        result.is_ready(),
+        "mode=all must accept idle interactive turns"
+    );
+    let std::task::Poll::Ready(Ok(result)) = result else {
+        unreachable!()
+    };
+    assert_eq!(
+        result["completed_run_ids"],
+        json!([first.to_string(), second.to_string()])
+    );
+    for notice in &result.notices {
+        runtime.observe_completion(notice);
+    }
+    let next = observe(&runtime, parent, &request, receiver);
+    tokio::pin!(next);
+    assert!(
+        poll!(&mut next).is_pending(),
+        "observed idle generations must not spin"
+    );
+    let mut events = runtime.shared.bus.subscribe();
+    runtime
+        .send_agent_message(
+            parent,
+            first,
+            event_bus::AgentMessageKind::Send,
+            "follow up",
+            None,
+        )
+        .unwrap();
+    loop {
+        if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
+            run_id,
+            to: AgentRunPhase::Running,
+            ..
+        }) = events.recv().await.unwrap().kind
+            && run_id == first.to_string()
+        {
+            break;
+        }
+    }
+    let running = serde_json::to_value(runtime.run_output(parent, first).unwrap()).unwrap();
+    assert_eq!(running["status"], "still_running");
+    assert_eq!(
+        running["output"],
+        Value::Null,
+        "a new turn must not expose stale output"
+    );
+    idle_turn(&runtime, &model, first, true).await;
+    assert!(poll!(&mut next).is_pending());
+    runtime
+        .send_agent_message(
+            parent,
+            second,
+            event_bus::AgentMessageKind::Send,
+            "follow up",
+            None,
+        )
+        .unwrap();
+    idle_turn(&runtime, &model, second, false).await;
+    // Observing a retained old snapshot must never acknowledge the new turn.
+    for notice in &result.notices {
+        runtime.observe_completion(notice);
+    }
+    let next = poll!(&mut next);
+    assert!(
+        next.is_ready(),
+        "new turn generations must wake the next wait"
+    );
+    let std::task::Poll::Ready(Ok(next)) = next else {
+        unreachable!()
+    };
+    assert_ne!(
+        result["runs"][0]["turn_generation"],
+        next["runs"][0]["turn_generation"]
+    );
+    cleanup(&runtime).await;
+}

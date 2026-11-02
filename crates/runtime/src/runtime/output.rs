@@ -11,6 +11,8 @@ pub(crate) struct RunOutput {
     phase: AgentRunPhase,
     status: OutputStatus,
     output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_generation: Option<u64>,
     reason: Option<String>,
     /// For a finished direct child: whether a message continues it with its
     /// saved context, which is preferable to delegating the same work again.
@@ -26,13 +28,55 @@ pub(crate) struct RunOutput {
 enum OutputStatus {
     StillRunning,
     Waiting,
+    TurnCompleted,
     Completed,
     Cancelled,
     Stopped,
     Failed,
 }
 
+/// A live interactive turn is distinct from a terminal run incarnation.
+pub(super) struct IdleTurn {
+    output: Option<String>,
+    notice: std::sync::Arc<crate::mailbox::CompletionNotice>,
+}
+
 impl AgentRuntime {
+    /// Publish a nonterminal phase and its optional idle output atomically.
+    /// Only successful interactive turn boundaries supply a completed turn;
+    /// question waits, nested waits and escalation waits must not synthesize one.
+    pub(crate) fn publish_live_phase(
+        &self,
+        run: RunId,
+        event: event_bus::LifecycleEvent,
+        completed_turn: Option<Option<String>>,
+        phase_tx: &tokio::sync::watch::Sender<AgentRunPhase>,
+    ) {
+        let event_bus::LifecycleEvent::AgentRunStateChanged { to, .. } = &event else {
+            return;
+        };
+        let mut runs = lock_runs(&self.shared.runs);
+        if let Some(entry) = runs.get_mut(&run) {
+            entry.idle_turn = completed_turn.map(|output| IdleTurn {
+                output,
+                notice: crate::mailbox::CompletionNotice::new(
+                    entry.parent,
+                    run,
+                    self.shared
+                        .next_completion_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                ),
+            });
+            if entry.idle_turn.is_some() {
+                self.shared
+                    .turn_version
+                    .send_modify(|version| *version += 1);
+            }
+        }
+        phase_tx.send_replace(*to);
+        self.shared.bus.emit(event_bus::Event::new(event));
+    }
+
     /// Only output actually returned by a model-facing tool acknowledges a receipt.
     /// The snapshot's receipt, not today's registry entry, fixes the generation.
     pub(crate) fn observe_completion(&self, notice: &crate::mailbox::CompletionNotice) {
@@ -97,6 +141,7 @@ impl AgentRuntime {
                     phase,
                     status,
                     output: None,
+                    turn_generation: None,
                     reason,
                     continuable: None,
                     continuation_blocked: None,
@@ -128,7 +173,10 @@ impl AgentRuntime {
                 };
                 (status, None, entry.terminal_reason.clone())
             }
-            AgentRunPhase::Waiting => (OutputStatus::Waiting, None, None),
+            AgentRunPhase::Waiting => match &entry.idle_turn {
+                Some(turn) => (OutputStatus::TurnCompleted, turn.output.clone(), None),
+                None => (OutputStatus::Waiting, None, None),
+            },
             AgentRunPhase::Pending | AgentRunPhase::Running => {
                 (OutputStatus::StillRunning, None, None)
             }
@@ -138,7 +186,18 @@ impl AgentRuntime {
                 phase,
                 AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped
             );
-        let completion_notice = finished_child.then(|| entry.completion_notice.clone());
+        let turn_generation = entry
+            .idle_turn
+            .as_ref()
+            .filter(|_| phase == AgentRunPhase::Waiting)
+            .map(|turn| turn.notice.generation);
+        let completion_notice = if finished_child {
+            Some(entry.completion_notice.clone())
+        } else if entry.parent == Some(caller) && phase == AgentRunPhase::Waiting {
+            entry.idle_turn.as_ref().map(|turn| turn.notice.clone())
+        } else {
+            None
+        };
         // Saved state is read without holding the runs lock.
         drop(runs);
         let availability = finished_child.then(|| self.continuation_availability(caller, target));
@@ -148,6 +207,7 @@ impl AgentRuntime {
             phase,
             status,
             output,
+            turn_generation,
             reason,
             continuable: availability.as_ref().map(Result::is_ok),
             continuation_blocked: availability.and_then(Result::err),

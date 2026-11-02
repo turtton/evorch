@@ -176,12 +176,9 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
             ],
         )
         .await;
-    model
-        .add_keyed(
-            "GRANDCHILD",
-            [Ok(text_response("Ready for input", FinishReason::Stop))],
-        )
-        .await;
+    // Keep the grandchild actively working. An idle interactive turn now ends
+    // wait; this scenario specifically checks a nested wait, not turn completion.
+    model.gate_key("GRANDCHILD", Arc::new(Notify::new())).await;
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
