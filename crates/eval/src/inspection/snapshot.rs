@@ -22,6 +22,9 @@ pub enum GroupPhase {
     Incomplete,
     /// No member is known to run, and the end of some was never seen.
     Unverified,
+    /// No listed member runs, but some members were not read, so whether the
+    /// group is done cannot be said.
+    Partial,
 }
 
 /// Where one member (the evaluation of one thread) stands. Process end, trial
@@ -140,7 +143,25 @@ pub enum CostUnavailable {
     NotInReport,
     /// The trial's database is absent.
     NoDatabase,
+    /// A `-wal` or `-journal` file next to the database holds changes that
+    /// reading the database file alone would miss.
+    InUse,
+    /// The database is bigger than the inspection is allowed to read.
+    OverBudget(DatabaseBudget),
     Unreadable(ArtifactProblem),
+}
+
+/// Which bound on reading a trial's database was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBudget {
+    Bytes {
+        limit: u64,
+        actual: u64,
+    },
+    /// More usage rows than `limit`.
+    Rows {
+        limit: usize,
+    },
 }
 
 /// A trial's cost. An unpriced or unreported request keeps the cost marked
@@ -243,8 +264,9 @@ pub enum CostSource {
 pub struct ConfigurationCostSnapshot {
     pub label: String,
     /// Trials whose cost is in `cost`.
-    pub counted: u32,
-    pub planned: u32,
+    pub counted: u64,
+    /// All the configuration's trials, listed or not.
+    pub planned: u64,
     pub cost: Cost,
 }
 
@@ -271,6 +293,23 @@ pub struct TrialProgress {
     pub manifest_finished: bool,
 }
 
+/// How many trials of a member are in each state, over all of them and not
+/// only the listed ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrialTally {
+    /// The configurations times the repeats.
+    pub planned: usize,
+    /// Planned trials and any extra the manifest holds.
+    pub total: usize,
+    pub queued: usize,
+    pub running: usize,
+    pub finished: usize,
+    pub failed: usize,
+    pub interrupted: usize,
+    pub unavailable: usize,
+    pub unverified: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvaluationMemberSnapshot {
     /// Position in the group.
@@ -289,8 +328,10 @@ pub struct EvaluationMemberSnapshot {
     pub started_at: Option<String>,
     pub progress: Option<TrialProgress>,
     /// Planned first, in replay order, then any the manifest has beyond the plan.
+    /// At most the configured number; `tally` covers all trials.
     pub trials: Vec<EvaluationTrialSnapshot>,
     pub trials_omitted: usize,
+    pub tally: TrialTally,
     pub report: ReportStatus,
     pub report_markdown: Option<FileRef>,
     pub cost: MemberCost,
@@ -303,15 +344,13 @@ pub struct EvaluationMemberSnapshot {
 }
 
 impl EvaluationMemberSnapshot {
-    pub fn planned_trials(&self) -> usize {
-        self.progress.map_or(self.trials.len(), |p| p.planned)
+    pub const fn planned_trials(&self) -> usize {
+        self.tally.planned
     }
 
-    pub fn finished_trials(&self) -> usize {
-        self.trials
-            .iter()
-            .filter(|trial| matches!(trial.state, TrialState::Finished | TrialState::Failed))
-            .count()
+    /// Trials that ended, whatever the listing shows.
+    pub const fn finished_trials(&self) -> usize {
+        self.tally.finished + self.tally.failed
     }
 }
 
@@ -326,8 +365,10 @@ pub struct EvaluationGroupSnapshot {
     pub phase: GroupPhase,
     /// The start of the candidate overlay.
     pub candidate: Artifact<BoundedText>,
+    /// The first members, at most the configured number.
     pub members: Vec<EvaluationMemberSnapshot>,
     pub members_omitted: usize,
+    pub members_total: usize,
 }
 
 /// One entry of a group listing, newest first.

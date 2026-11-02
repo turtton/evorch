@@ -100,6 +100,79 @@ impl Fixture {
     }
 }
 
+fn prices() -> Arc<PriceTable> {
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("config.toml"), CONFIG).unwrap();
+    let providers = crate::runner::load_config(Some(config.path()), None, None)
+        .unwrap()
+        .providers;
+    Arc::new(PriceTable::new(providers, None))
+}
+
+/// Removes the sync hook when the test ends, however it ends.
+struct HookGuard;
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        artifact::set_sync_hook(None);
+    }
+}
+
+/// Run `action` once, the first time something named `name` whose path ends in
+/// `suffix` has just been opened.
+fn on_open(
+    name: &'static str,
+    suffix: &'static str,
+    action: impl Fn(&Path) + 'static,
+) -> HookGuard {
+    let done = std::cell::Cell::new(false);
+    artifact::set_sync_hook(Some(Box::new(move |point, path| {
+        if point == name && path.ends_with(suffix) && !done.replace(true) {
+            action(path);
+        }
+    })));
+    HookGuard
+}
+
+/// Put a symlink to `target` where `path` is, keeping what was there.
+fn replace_with_link(path: &Path, target: &Path) {
+    let mut kept = path.as_os_str().to_owned();
+    kept.push(".original");
+    std::fs::rename(path, kept).unwrap();
+    std::os::unix::fs::symlink(target, path).unwrap();
+}
+
+/// A member whose only trial finished, with a database holding `rows`, and
+/// the trial's directory.
+fn finished_trial_with_database(
+    fixture: &Fixture,
+    rows: Vec<storage::usage::UsageRequestRecord>,
+) -> PathBuf {
+    fixture.group(
+        GROUP,
+        &[("thread-1", "member-1", Some(exit(None, Some(15), None)))],
+    );
+    let member = fixture.member_dir("member-1");
+    std::fs::create_dir_all(&member).unwrap();
+    output::write_json(
+        &member.join(output::MANIFEST_FILE),
+        &manifest(
+            &["baseline"],
+            1,
+            vec![run("baseline", 1, Some(Status::Completed))],
+            true,
+        ),
+    )
+    .unwrap();
+    let trial = write_trial(&member, "baseline", 1, Status::Completed);
+    write_run_db(&trial.join(output::DATABASE_FILE), &[], rows);
+    trial
+}
+
+fn first_cost(inspector: &EvaluationInspector) -> TrialCost {
+    member_of(inspector.group(GROUP)).trials.remove(0).cost
+}
+
 fn exit(code: Option<i32>, signal: Option<i32>, error: Option<&str>) -> ProcessExit {
     ProcessExit::now(code, signal, error.map(str::to_owned))
 }
@@ -613,12 +686,7 @@ fn trial_costs_are_estimated_from_finished_databases_and_unknown_costs_are_not_z
         ],
     );
     write_trial(&member_dir, "baseline", 2, Status::Completed);
-    let config = tempfile::tempdir().unwrap();
-    std::fs::write(config.path().join("config.toml"), CONFIG).unwrap();
-    let providers = crate::runner::load_config(Some(config.path()), None, None)
-        .unwrap()
-        .providers;
-    let prices = Arc::new(PriceTable::new(providers, None));
+    let prices = prices();
 
     // When: inspected without and with prices.
     let unpriced = member_of(fixture.inspector().group(GROUP));
@@ -1171,21 +1239,427 @@ fn inspecting_changes_nothing_on_disk() {
 #[test]
 fn group_phase_prefers_activity_then_doubt_then_failure() {
     use MemberPhase::{Failed, Finished, RunningTrials, Unverified};
+    let phase = |phases: &[MemberPhase]| state::group_phase(phases, 0);
+    assert_eq!(phase(&[Finished, RunningTrials]), GroupPhase::Running);
+    assert_eq!(phase(&[Failed, Unverified]), GroupPhase::Unverified);
+    assert_eq!(phase(&[Finished, Failed]), GroupPhase::Incomplete);
+    assert_eq!(phase(&[Finished, Finished]), GroupPhase::Finished);
+    assert_eq!(phase(&[]), GroupPhase::Incomplete);
+    // Members nobody read can hide a running one, but not make the group look idle.
+    assert_eq!(state::group_phase(&[Finished], 1), GroupPhase::Partial);
+    assert_eq!(state::group_phase(&[RunningTrials], 1), GroupPhase::Running);
+}
+
+fn one_priced_row() -> Vec<storage::usage::UsageRequestRecord> {
+    vec![usage("r1", "main", "gpt-test", "agent", 1_000_000)]
+}
+
+#[test]
+fn a_directory_swapped_for_a_link_after_it_was_opened_is_still_read_from_the_opened_one() {
+    // Given: a running member whose manifest is unfinished, and a planted
+    // outside directory claiming everything finished.
+    let fixture = Fixture::new();
+    let record = fixture.group(GROUP, &[("thread-1", "member-1", None)]);
+    let (monitor, _live) = fixture.launched(record);
+    let member = fixture.member_dir("member-1");
+    std::fs::create_dir_all(&member).unwrap();
+    output::write_json(
+        &member.join(output::MANIFEST_FILE),
+        &manifest(&["baseline"], 1, vec![run("baseline", 1, None)], false),
+    )
+    .unwrap();
+    let planted = fixture.outside.join("planted");
+    std::fs::create_dir_all(&planted).unwrap();
+    output::write_json(
+        &planted.join(output::MANIFEST_FILE),
+        &manifest(
+            &["baseline"],
+            1,
+            vec![run("baseline", 1, Some(Status::Completed))],
+            true,
+        ),
+    )
+    .unwrap();
+    let target = planted.clone();
+    let _hook = on_open("opened_dir", "member-1", move |path| {
+        replace_with_link(path, &target);
+    });
+
+    // When: the member directory becomes a link between being opened and being read.
+    let member = member_of(fixture.inspector().with_monitor(monitor).group(GROUP));
+
+    // Then: what was read is the directory that was opened.
+    assert!(fixture.root.join("member-1.original").is_dir());
+    assert_eq!(member.phase, MemberPhase::RunningTrials);
+    assert_eq!(member.trials[0].state, TrialState::Running);
+}
+
+#[test]
+fn a_trial_directory_swapped_after_it_was_opened_keeps_its_own_outcome() {
+    // Given: a finished trial and a planted outcome elsewhere that says failed.
+    let fixture = Fixture::new();
+    fixture.group(
+        GROUP,
+        &[("thread-1", "member-1", Some(exit(Some(0), None, None)))],
+    );
+    let member = fixture.member_dir("member-1");
+    std::fs::create_dir_all(&member).unwrap();
+    output::write_json(
+        &member.join(output::MANIFEST_FILE),
+        &manifest(
+            &["baseline"],
+            1,
+            vec![run("baseline", 1, Some(Status::Completed))],
+            true,
+        ),
+    )
+    .unwrap();
+    write_trial(&member, "baseline", 1, Status::Completed);
+    let planted = fixture.outside.join("planted-trial");
+    std::fs::create_dir_all(&planted).unwrap();
+    output::write_json(
+        &planted.join(output::OUTCOME_FILE),
+        &outcome(Status::Failed),
+    )
+    .unwrap();
+    let target = planted.clone();
+    let _hook = on_open("opened_dir", "baseline-1", move |path| {
+        replace_with_link(path, &target);
+    });
+
+    // When / Then: the outcome is the one the trial directory had when opened.
+    let member = member_of(fixture.inspector().group(GROUP));
+    assert!(
+        fixture
+            .member_dir("member-1")
+            .join("runs/baseline-1.original")
+            .is_dir()
+    );
+    let found = member.trials[0].outcome.present().expect("an outcome");
+    assert_eq!(found.status, Status::Completed);
+}
+
+#[test]
+fn a_database_replaced_after_it_was_checked_is_not_the_one_that_is_priced() {
+    // Given: a database with one priced request, and a different one planted outside.
+    let fixture = Fixture::new();
+    let trial = finished_trial_with_database(&fixture, one_priced_row());
+    let planted = fixture.outside.join("planted.db");
+    write_run_db(
+        &planted,
+        &[],
+        vec![usage("r9", "main", "gpt-test", "agent", 9_000_000)],
+    );
+    let target = planted.clone();
+    let _hook = on_open("opened_database", "evorch.db", move |path| {
+        replace_with_link(path, &target);
+    });
+
+    // When: the path is swapped for a link between the check and the read.
+    let cost = first_cost(&fixture.inspector().with_prices(prices()));
+
+    // Then: the original database is priced (1M tokens at $2), not the planted one.
+    let TrialCost::Estimated(cost) = cost else {
+        panic!("{cost:?}");
+    };
+    assert_eq!(cost.usd, 2.0);
+    assert!(trial.join("evorch.db.original").exists());
+}
+
+#[test]
+fn reading_a_database_creates_no_side_files() {
+    // Given: a finished trial with a database.
+    let fixture = Fixture::new();
+    finished_trial_with_database(&fixture, one_priced_row());
+    let before = tree(&fixture.root);
+
+    // When: its cost is estimated.
+    let cost = first_cost(&fixture.inspector().with_prices(prices()));
+
+    // Then: it is priced and the tree is untouched (no -wal, -shm or -journal).
+    assert!(matches!(cost, TrialCost::Estimated(_)), "{cost:?}");
+    assert_eq!(tree(&fixture.root), before);
+}
+
+#[test]
+fn a_database_over_the_byte_or_row_budget_gives_no_cost_instead_of_a_partial_one() {
+    // Given: a database with three priced requests.
+    let fixture = Fixture::new();
+    let rows = (1..=3)
+        .map(|n| usage(&format!("r{n}"), "main", "gpt-test", "agent", 1_000_000))
+        .collect();
+    let trial = finished_trial_with_database(&fixture, rows);
+    let size = std::fs::metadata(trial.join("evorch.db")).unwrap().len();
+    let limited = |limits: InspectionLimits| {
+        fixture
+            .inspector()
+            .with_prices(prices())
+            .with_limits(limits)
+    };
+
+    // Then: at the row budget exactly, all three are priced.
+    let exact = first_cost(&limited(InspectionLimits {
+        max_database_rows: 3,
+        ..InspectionLimits::default()
+    }));
+    let TrialCost::Estimated(exact) = exact else {
+        panic!("{exact:?}");
+    };
+    assert_eq!(exact.usd, 6.0);
+
+    // Then: one row over the budget gives no cost, and no member cost either.
+    let inspector = limited(InspectionLimits {
+        max_database_rows: 2,
+        ..InspectionLimits::default()
+    });
     assert_eq!(
-        state::group_phase(&[Finished, RunningTrials]),
-        GroupPhase::Running
+        first_cost(&inspector),
+        TrialCost::Unavailable(CostUnavailable::OverBudget(DatabaseBudget::Rows {
+            limit: 2
+        }))
     );
     assert_eq!(
-        state::group_phase(&[Failed, Unverified]),
-        GroupPhase::Unverified
+        member_of(inspector.group(GROUP)).cost.source,
+        CostSource::None
+    );
+
+    // Then: a file over the byte budget is not opened.
+    let inspector = limited(InspectionLimits {
+        max_database_bytes: size - 1,
+        ..InspectionLimits::default()
+    });
+    assert_eq!(
+        first_cost(&inspector),
+        TrialCost::Unavailable(CostUnavailable::OverBudget(DatabaseBudget::Bytes {
+            limit: size - 1,
+            actual: size
+        }))
+    );
+}
+
+#[test]
+fn a_database_with_pending_changes_next_to_it_is_not_priced() {
+    // Given: a database with a non-empty write-ahead log beside it.
+    let fixture = Fixture::new();
+    let trial = finished_trial_with_database(&fixture, one_priced_row());
+    std::fs::write(trial.join("evorch.db-wal"), vec![1_u8; 32]).unwrap();
+
+    // When / Then: the file alone would miss the log, so there is no cost.
+    let inspector = fixture.inspector().with_prices(prices());
+    assert_eq!(
+        first_cost(&inspector),
+        TrialCost::Unavailable(CostUnavailable::InUse)
+    );
+}
+
+#[test]
+fn database_failures_are_classified_not_all_called_io() {
+    // Given: a finished trial with a good database.
+    let fixture = Fixture::new();
+    let trial = finished_trial_with_database(&fixture, one_priced_row());
+    let database = trial.join("evorch.db");
+    let good = std::fs::read(&database).unwrap();
+    let inspector = fixture.inspector().with_prices(prices());
+    let problem = |cost: TrialCost| match cost {
+        TrialCost::Unavailable(CostUnavailable::Unreadable(problem)) => problem.kind,
+        other => panic!("{other:?}"),
+    };
+
+    // When / Then: a file that is not a database is malformed.
+    std::fs::write(
+        &database,
+        "this is not a database, but it is long enough to look at",
+    )
+    .unwrap();
+    assert_eq!(problem(first_cost(&inspector)), ProblemKind::Malformed);
+
+    // When / Then: a schema newer than this build is an unsupported schema.
+    let mut newer = good.clone();
+    newer[60..64].copy_from_slice(&9_999_u32.to_be_bytes());
+    std::fs::write(&database, &newer).unwrap();
+    assert_eq!(
+        problem(first_cost(&inspector)),
+        ProblemKind::UnsupportedSchema
+    );
+
+    // When / Then: so is one older than this build, which only evorch itself may migrate.
+    let mut older = good.clone();
+    older[60..64].copy_from_slice(&1_u32.to_be_bytes());
+    std::fs::write(&database, &older).unwrap();
+    assert_eq!(
+        problem(first_cost(&inspector)),
+        ProblemKind::UnsupportedSchema
+    );
+
+    // When / Then: a database nobody may read is a permission problem.
+    std::fs::write(&database, &good).unwrap();
+    if !rustix::process::geteuid().is_root() {
+        std::fs::set_permissions(
+            &database,
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
+        assert_eq!(
+            problem(first_cost(&inspector)),
+            ProblemKind::PermissionDenied
+        );
+        std::fs::set_permissions(
+            &database,
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+    }
+
+    // When / Then: a link is refused, and a deleted database is missing.
+    let kept = fixture.outside.join("kept.db");
+    std::fs::rename(&database, &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, &database).unwrap();
+    assert_eq!(problem(first_cost(&inspector)), ProblemKind::UnsafePath);
+    std::fs::remove_file(&database).unwrap();
+    assert_eq!(
+        first_cost(&inspector),
+        TrialCost::Unavailable(CostUnavailable::NoDatabase)
+    );
+}
+
+#[test]
+fn an_unresolvable_root_is_a_problem_but_a_missing_one_is_just_empty() {
+    // Given: an evaluation root inside a directory nobody may enter.
+    let fixture = Fixture::new();
+    let parent = fixture.outside.join("closed");
+    std::fs::create_dir_all(parent.join("eval")).unwrap();
+    let missing = EvaluationInspector::new(fixture.root.join("nowhere")).list_groups(10);
+    assert!(missing.entries.is_empty() && missing.problem.is_none());
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    std::fs::set_permissions(&parent, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+
+    // When: the root cannot be resolved for a reason other than absence.
+    let inspector = EvaluationInspector::new(parent.join("eval"));
+    let listing = inspector.list_groups(10);
+    let group = inspector.group(GROUP);
+    std::fs::set_permissions(&parent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    // Then: the listing and the group say so, rather than showing nothing.
+    assert!(listing.entries.is_empty());
+    assert_eq!(
+        listing.problem.map(|p| p.kind),
+        Some(ProblemKind::PermissionDenied)
     );
     assert_eq!(
-        state::group_phase(&[Finished, Failed]),
-        GroupPhase::Incomplete
+        group.problem().map(|p| p.kind),
+        Some(ProblemKind::PermissionDenied)
     );
+}
+
+#[test]
+fn members_left_out_of_the_listing_keep_the_group_from_looking_finished() {
+    // Given: two members; the first is finished, the second still runs.
+    let fixture = Fixture::new();
+    let mut record = fixture.group(
+        GROUP,
+        &[
+            ("thread-1", "member-1", Some(exit(Some(0), None, None))),
+            ("thread-2", "member-2", None),
+        ],
+    );
+    let first = fixture.member_dir("member-1");
+    std::fs::create_dir_all(&first).unwrap();
+    output::write_json(
+        &first.join(output::MANIFEST_FILE),
+        &manifest(
+            &["baseline"],
+            1,
+            vec![run("baseline", 1, Some(Status::Completed))],
+            true,
+        ),
+    )
+    .unwrap();
+    write_trial(&first, "baseline", 1, Status::Completed);
+    output::write_json(
+        &first.join(output::REPORT_JSON_FILE),
+        &report(&[("baseline", 1, 1.0)]),
+    )
+    .unwrap();
+    record.members[0].exit = Some(exit(Some(0), None, None));
+    let (monitor, _live) = fixture.launched(record);
+    let inspector = fixture.inspector().with_monitor(monitor);
+
+    // When: read in full, and with the listing cut after the first member.
+    let full = inspector.group(GROUP).into_present().unwrap();
+    let cut = fixture
+        .inspector()
+        .with_monitor(inspector.monitor.clone().unwrap())
+        .with_limits(InspectionLimits {
+            max_members: 1,
+            ..InspectionLimits::default()
+        })
+        .group(GROUP)
+        .into_present()
+        .unwrap();
+
+    // Then: the whole group runs; the cut one cannot say it finished.
+    assert_eq!(full.phase, GroupPhase::Running);
+    assert_eq!(cut.members[0].phase, MemberPhase::Finished);
+    assert_eq!(cut.phase, GroupPhase::Partial);
     assert_eq!(
-        state::group_phase(&[Finished, Finished]),
-        GroupPhase::Finished
+        (cut.members.len(), cut.members_omitted, cut.members_total),
+        (1, 1, 2)
     );
-    assert_eq!(state::group_phase(&[]), GroupPhase::Incomplete);
+    assert!(cut.finished_at.is_none());
+}
+
+#[test]
+fn trials_left_out_of_the_listing_still_count_and_keep_the_cost_partial() {
+    // Given: a launched member with two baseline repeats, the first finished with a
+    // priced database, the second still running.
+    let fixture = Fixture::new();
+    let record = fixture.group(GROUP, &[("thread-1", "member-1", None)]);
+    let (monitor, _live) = fixture.launched(record);
+    let member = fixture.member_dir("member-1");
+    std::fs::create_dir_all(&member).unwrap();
+    let runs = vec![
+        run("baseline", 1, Some(Status::Completed)),
+        run("baseline", 2, None),
+    ];
+    output::write_json(
+        &member.join(output::MANIFEST_FILE),
+        &manifest(&["baseline"], 2, runs, false),
+    )
+    .unwrap();
+    let first = write_trial(&member, "baseline", 1, Status::Completed);
+    write_run_db(&first.join(output::DATABASE_FILE), &[], one_priced_row());
+
+    // When: only the first trial is listed.
+    let member = member_of(
+        fixture
+            .inspector()
+            .with_monitor(monitor)
+            .with_prices(prices())
+            .with_limits(InspectionLimits {
+                max_trials: 1,
+                ..InspectionLimits::default()
+            })
+            .group(GROUP),
+    );
+
+    // Then: the counts cover both trials, and the cost says it covers one of two.
+    assert_eq!(member.trials.len(), 1);
+    assert_eq!(member.trials_omitted, 1);
+    assert_eq!(
+        (
+            member.tally.total,
+            member.tally.finished,
+            member.tally.running
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(member.finished_trials(), 1);
+    assert_eq!(member.planned_trials(), 2);
+    let [baseline] = member.cost.configurations.as_slice() else {
+        panic!("{:?}", member.cost);
+    };
+    assert_eq!((baseline.counted, baseline.planned), (1, 2));
+    assert!(baseline.is_partial());
 }

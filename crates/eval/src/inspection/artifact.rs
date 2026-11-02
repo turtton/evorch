@@ -7,9 +7,10 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use serde::de::DeserializeOwned;
 
@@ -155,14 +156,43 @@ pub struct FileRef {
     pub state: FileState,
 }
 
-fn from_errno<T>(path: &Path, errno: Errno) -> Artifact<T> {
+#[cfg(test)]
+type SyncHook = Box<dyn Fn(&str, &Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static SYNC_HOOK: std::cell::RefCell<Option<SyncHook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run the hook a test installed, between opening something and using it, to
+/// replace paths at exactly that point.
+#[cfg(test)]
+pub(super) fn sync_point(name: &str, path: &Path) {
+    SYNC_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(name, path);
+        }
+    });
+}
+
+#[cfg(not(test))]
+#[inline]
+pub(super) fn sync_point(_name: &str, _path: &Path) {}
+
+#[cfg(test)]
+pub(super) fn set_sync_hook(hook: Option<SyncHook>) {
+    SYNC_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn from_errno<T>(path: &Path, errno: Errno, directory: bool) -> Artifact<T> {
+    let unsafe_path = |detail: &str| {
+        Artifact::Problem(ArtifactProblem::new(ProblemKind::UnsafePath, path, detail))
+    };
     match errno {
-        Errno::NOENT | Errno::NOTDIR => Artifact::Missing,
-        Errno::LOOP => Artifact::Problem(ArtifactProblem::new(
-            ProblemKind::UnsafePath,
-            path,
-            "is a symbolic link",
-        )),
+        Errno::NOENT => Artifact::Missing,
+        Errno::LOOP => unsafe_path("is a symbolic link"),
+        Errno::NOTDIR if directory => unsafe_path("is not a directory or is a symbolic link"),
+        Errno::NOTDIR => unsafe_path("has a component that is not a directory"),
         Errno::ACCESS | Errno::PERM => Artifact::Problem(ArtifactProblem::new(
             ProblemKind::PermissionDenied,
             path,
@@ -176,125 +206,245 @@ fn from_errno<T>(path: &Path, errno: Errno) -> Artifact<T> {
     }
 }
 
-/// Open a regular file for reading. A symbolic link at the last component is
-/// refused by the kernel, and a FIFO or device cannot block the open.
-fn open_regular(path: &Path) -> Artifact<(File, u64)> {
-    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let descriptor = match rustix::fs::open(path, flags, Mode::empty()) {
-        Ok(descriptor) => descriptor,
-        Err(errno) => return from_errno(path, errno),
-    };
-    let file = File::from(descriptor);
-    match file.metadata() {
-        Ok(meta) if meta.is_file() => Artifact::Present((file, meta.len())),
-        Ok(_) => Artifact::Problem(ArtifactProblem::new(
-            ProblemKind::UnsafePath,
-            path,
-            "is not a regular file",
-        )),
-        Err(error) => Artifact::Problem(ArtifactProblem::io(path, &error)),
+/// An open directory. Every name is resolved against this descriptor and
+/// opened without following a link, so what was checked is what is read even
+/// if the path is replaced afterwards.
+pub(super) struct Dir {
+    fd: OwnedFd,
+    /// Where the directory was opened, for messages and for callers that show it.
+    path: PathBuf,
+}
+
+impl Dir {
+    /// Open the evaluation root. The path itself is trusted and may be a link.
+    pub(super) fn open_root(path: &Path) -> Artifact<Self> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        match rustix::fs::open(path, flags, Mode::empty()) {
+            Ok(fd) => Artifact::Present(Self {
+                fd,
+                path: path.to_path_buf(),
+            }),
+            Err(errno) => from_errno(path, errno, true),
+        }
     }
-}
 
-pub(super) fn read_bytes(path: &Path, limit: u64) -> Artifact<Vec<u8>> {
-    open_regular(path).and_then(|(file, length)| {
-        let too_large = |length: u64| {
-            Artifact::Problem(ArtifactProblem::new(
-                ProblemKind::TooLarge,
-                path,
-                format!("{length} bytes, over the {limit} byte limit"),
-            ))
-        };
-        if length > limit {
-            return too_large(length);
-        }
-        let mut bytes = Vec::new();
-        // The file may grow after the size check; the take keeps the read bounded.
-        if let Err(error) = file.take(limit.saturating_add(1)).read_to_end(&mut bytes) {
-            return Artifact::Problem(ArtifactProblem::io(path, &error));
-        }
-        if bytes.len() as u64 > limit {
-            return too_large(bytes.len() as u64);
-        }
-        Artifact::Present(bytes)
-    })
-}
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
 
-pub(super) fn read_json<T: DeserializeOwned>(path: &Path, limit: u64) -> Artifact<T> {
-    read_bytes(path, limit).and_then(|bytes| match serde_json::from_slice(&bytes) {
-        Ok(value) => Artifact::Present(value),
-        Err(error) => Artifact::Problem(ArtifactProblem::new(
-            ProblemKind::Malformed,
-            path,
-            error.to_string(),
-        )),
-    })
-}
+    pub(super) fn join(&self, name: &str) -> PathBuf {
+        self.path.join(name)
+    }
 
-/// Parse JSON that carries a `schema` number, refusing other versions before
-/// trying to understand the rest.
-pub(super) fn read_versioned_json<T: DeserializeOwned>(
-    path: &Path,
-    limit: u64,
-    supported: u64,
-) -> Artifact<T> {
-    read_json::<serde_json::Value>(path, limit).and_then(|value| {
-        if let Some(found) = value.get("schema")
-            && found.as_u64() != Some(supported)
-        {
+    /// The directory `name` inside this one; a link, or a name with a separator
+    /// or `..`, is refused.
+    pub(super) fn open_dir(&self, name: &str) -> Artifact<Self> {
+        let path = self.join(name);
+        if !is_plain_name(name) {
             return Artifact::Problem(ArtifactProblem::new(
-                ProblemKind::UnsupportedSchema,
-                path,
-                format!("schema {found}, this reader understands {supported}"),
+                ProblemKind::UnsafePath,
+                &path,
+                format!("{name:?} is not a plain directory name"),
             ));
         }
-        match serde_json::from_value(value) {
-            Ok(value) => Artifact::Present(value),
-            Err(error) => Artifact::Problem(ArtifactProblem::new(
-                ProblemKind::Malformed,
-                path,
-                error.to_string(),
-            )),
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        match rustix::fs::openat(&self.fd, name, flags, Mode::empty()) {
+            Ok(fd) => {
+                sync_point("opened_dir", &path);
+                Artifact::Present(Self { fd, path })
+            }
+            Err(errno) => from_errno(&path, errno, true),
         }
-    })
-}
+    }
 
-/// At most `max_bytes` from the start of a text file.
-pub(super) fn read_text_head(path: &Path, max_bytes: u64) -> Artifact<BoundedText> {
-    open_regular(path).and_then(|(file, total_bytes)| {
-        let mut bytes = Vec::new();
-        if let Err(error) = file.take(max_bytes).read_to_end(&mut bytes) {
-            return Artifact::Problem(ArtifactProblem::io(path, &error));
+    /// A regular file `name` inside this directory, never through a link, and
+    /// never blocking on a FIFO or device.
+    pub(super) fn open_regular(&self, name: &str) -> Artifact<(File, u64)> {
+        let path = self.join(name);
+        if !is_plain_name(name) {
+            return Artifact::Problem(ArtifactProblem::new(
+                ProblemKind::UnsafePath,
+                &path,
+                format!("{name:?} is not a plain file name"),
+            ));
         }
-        let truncated = total_bytes > bytes.len() as u64;
-        Artifact::Present(BoundedText {
-            text: decode(&bytes, truncated),
-            total_bytes,
-            truncated,
-        })
-    })
-}
-
-/// Up to `max_bytes` from the end of a text file, starting at a character boundary.
-pub(super) fn read_text_tail(path: &Path, max_bytes: u64) -> Artifact<String> {
-    open_regular(path).and_then(|(mut file, length)| {
-        let start = length.saturating_sub(max_bytes);
-        let mut bytes = Vec::new();
-        let read = file
-            .seek(SeekFrom::Start(start))
-            .and_then(|_| file.take(max_bytes).read_to_end(&mut bytes));
-        if let Err(error) = read {
-            return Artifact::Problem(ArtifactProblem::io(path, &error));
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        // A cut in the middle of a character leaves a replacement character first.
-        let text = if start > 0 {
-            text.strip_prefix('\u{FFFD}').unwrap_or(&text)
-        } else {
-            &text
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let descriptor = match rustix::fs::openat(&self.fd, name, flags, Mode::empty()) {
+            Ok(descriptor) => descriptor,
+            Err(errno) => return from_errno(&path, errno, false),
         };
-        Artifact::Present(text.to_owned())
-    })
+        let file = File::from(descriptor);
+        match file.metadata() {
+            Ok(meta) if meta.is_file() => Artifact::Present((file, meta.len())),
+            Ok(_) => Artifact::Problem(ArtifactProblem::new(
+                ProblemKind::UnsafePath,
+                &path,
+                "is not a regular file",
+            )),
+            Err(error) => Artifact::Problem(ArtifactProblem::io(&path, &error)),
+        }
+    }
+
+    pub(super) fn read_bytes(&self, name: &str, limit: u64) -> Artifact<Vec<u8>> {
+        let path = self.join(name);
+        self.open_regular(name).and_then(|(file, length)| {
+            let too_large = |length: u64| {
+                Artifact::Problem(ArtifactProblem::new(
+                    ProblemKind::TooLarge,
+                    &path,
+                    format!("{length} bytes, over the {limit} byte limit"),
+                ))
+            };
+            if length > limit {
+                return too_large(length);
+            }
+            let mut bytes = Vec::new();
+            // The file may grow after the size check; the take keeps the read bounded.
+            if let Err(error) = file.take(limit.saturating_add(1)).read_to_end(&mut bytes) {
+                return Artifact::Problem(ArtifactProblem::io(&path, &error));
+            }
+            if bytes.len() as u64 > limit {
+                return too_large(bytes.len() as u64);
+            }
+            Artifact::Present(bytes)
+        })
+    }
+
+    pub(super) fn read_json<T: DeserializeOwned>(&self, name: &str, limit: u64) -> Artifact<T> {
+        let path = self.join(name);
+        self.read_bytes(name, limit)
+            .and_then(|bytes| match serde_json::from_slice(&bytes) {
+                Ok(value) => Artifact::Present(value),
+                Err(error) => Artifact::Problem(ArtifactProblem::new(
+                    ProblemKind::Malformed,
+                    &path,
+                    error.to_string(),
+                )),
+            })
+    }
+
+    /// Parse JSON that carries a `schema` number, refusing other versions
+    /// before trying to understand the rest.
+    pub(super) fn read_versioned_json<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        limit: u64,
+        supported: u64,
+    ) -> Artifact<T> {
+        let path = self.join(name);
+        self.read_json::<serde_json::Value>(name, limit)
+            .and_then(|value| {
+                if let Some(found) = value.get("schema")
+                    && found.as_u64() != Some(supported)
+                {
+                    return Artifact::Problem(ArtifactProblem::new(
+                        ProblemKind::UnsupportedSchema,
+                        &path,
+                        format!("schema {found}, this reader understands {supported}"),
+                    ));
+                }
+                match serde_json::from_value(value) {
+                    Ok(value) => Artifact::Present(value),
+                    Err(error) => Artifact::Problem(ArtifactProblem::new(
+                        ProblemKind::Malformed,
+                        &path,
+                        error.to_string(),
+                    )),
+                }
+            })
+    }
+
+    /// At most `max_bytes` from the start of a text file.
+    pub(super) fn read_text_head(&self, name: &str, max_bytes: u64) -> Artifact<BoundedText> {
+        let path = self.join(name);
+        self.open_regular(name).and_then(|(file, total_bytes)| {
+            let mut bytes = Vec::new();
+            if let Err(error) = file.take(max_bytes).read_to_end(&mut bytes) {
+                return Artifact::Problem(ArtifactProblem::io(&path, &error));
+            }
+            let truncated = total_bytes > bytes.len() as u64;
+            Artifact::Present(BoundedText {
+                text: decode(&bytes, truncated),
+                total_bytes,
+                truncated,
+            })
+        })
+    }
+
+    /// Up to `max_bytes` from the end of a text file, from a character boundary.
+    pub(super) fn read_text_tail(&self, name: &str, max_bytes: u64) -> Artifact<String> {
+        let path = self.join(name);
+        self.open_regular(name).and_then(|(mut file, length)| {
+            let start = length.saturating_sub(max_bytes);
+            let mut bytes = Vec::new();
+            let read = file
+                .seek(SeekFrom::Start(start))
+                .and_then(|_| file.take(max_bytes).read_to_end(&mut bytes));
+            if let Err(error) = read {
+                return Artifact::Problem(ArtifactProblem::io(&path, &error));
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            // A cut in the middle of a character leaves a replacement character first.
+            let text = if start > 0 {
+                text.strip_prefix('\u{FFFD}').unwrap_or(&text)
+            } else {
+                &text
+            };
+            Artifact::Present(text.to_owned())
+        })
+    }
+
+    /// Describe a file without reading it.
+    pub(super) fn file_ref(&self, name: &str) -> FileRef {
+        let path = self.join(name);
+        let state = if is_plain_name(name) {
+            match rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => {
+                    FileState::Present {
+                        bytes: u64::try_from(stat.st_size).unwrap_or(0),
+                    }
+                }
+                Ok(_) => FileState::Rejected(ProblemKind::UnsafePath),
+                Err(Errno::NOENT) => FileState::Missing,
+                Err(Errno::ACCESS | Errno::PERM) => {
+                    FileState::Rejected(ProblemKind::PermissionDenied)
+                }
+                Err(_) => FileState::Rejected(ProblemKind::Io),
+            }
+        } else {
+            FileState::Rejected(ProblemKind::UnsafePath)
+        };
+        FileRef { path, state }
+    }
+
+    /// Entry names that are valid UTF-8, up to `max_entries` entries looked
+    /// at, and whether more entries were left.
+    pub(super) fn names(&self, max_entries: usize) -> Artifact<(Vec<String>, bool)> {
+        let entries = match rustix::fs::Dir::read_from(&self.fd) {
+            Ok(entries) => entries,
+            Err(errno) => return from_errno(&self.path, errno, true),
+        };
+        let mut names = Vec::new();
+        let mut looked_at = 0;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(errno) => return from_errno(&self.path, errno, true),
+            };
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            if looked_at == max_entries {
+                return Artifact::Present((names, true));
+            }
+            looked_at += 1;
+            if let Ok(name) = std::str::from_utf8(bytes) {
+                names.push(name.to_owned());
+            }
+        }
+        Artifact::Present((names, false))
+    }
 }
 
 fn decode(bytes: &[u8], cut_at_end: bool) -> String {
@@ -307,20 +457,6 @@ fn decode(bytes: &[u8], cut_at_end: bool) -> String {
     }
 }
 
-/// Describe a file without opening its content.
-pub(super) fn file_ref(path: PathBuf) -> FileRef {
-    let state = match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() => FileState::Present { bytes: meta.len() },
-        Ok(_) => FileState::Rejected(ProblemKind::UnsafePath),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileState::Missing,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            FileState::Rejected(ProblemKind::PermissionDenied)
-        }
-        Err(_) => FileState::Rejected(ProblemKind::Io),
-    };
-    FileRef { path, state }
-}
-
 /// A single plain path component: no separators, no `.` or `..`.
 pub(super) fn is_plain_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
@@ -328,39 +464,4 @@ pub(super) fn is_plain_name(name: &str) -> bool {
         (components.next(), components.next()),
         (Some(std::path::Component::Normal(only)), None) if only == name
     )
-}
-
-/// The directory `name` directly inside `parent`, which must itself be
-/// canonical. A symbolic link or anything that resolves elsewhere is refused.
-pub(super) fn child_dir(parent: &Path, name: &str) -> Artifact<PathBuf> {
-    let path = parent.join(name);
-    if !is_plain_name(name) {
-        return Artifact::Problem(ArtifactProblem::new(
-            ProblemKind::UnsafePath,
-            &path,
-            format!("{name:?} is not a plain directory name"),
-        ));
-    }
-    match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(meta) => {
-            let what = if meta.file_type().is_symlink() {
-                "is a symbolic link"
-            } else {
-                "is not a directory"
-            };
-            return Artifact::Problem(ArtifactProblem::new(ProblemKind::UnsafePath, &path, what));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Artifact::Missing,
-        Err(error) => return Artifact::Problem(ArtifactProblem::io(&path, &error)),
-    }
-    match path.canonicalize() {
-        Ok(resolved) if resolved.parent() == Some(parent) => Artifact::Present(resolved),
-        Ok(resolved) => Artifact::Problem(ArtifactProblem::new(
-            ProblemKind::UnsafePath,
-            &path,
-            format!("resolves to {}", resolved.display()),
-        )),
-        Err(error) => Artifact::Problem(ArtifactProblem::io(&path, &error)),
-    }
 }

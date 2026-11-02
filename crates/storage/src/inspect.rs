@@ -23,6 +23,10 @@ mod storage_summary;
 pub use open::InspectedDatabase;
 pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
 
+/// Wording of the refusal to read a schema older than the current one, which
+/// [`StorageError::class`] recognises.
+pub(crate) const OLDER_SCHEMA: &str = "is older than";
+
 /// Columns holding JSON text that are expanded in inspection output.
 const JSON_COLUMNS: [&str; 6] = [
     "payload",
@@ -67,6 +71,37 @@ impl Database {
         Self::checked(conn)
     }
 
+    /// Opens an existing database as an immutable snapshot: no locks, no journal and no
+    /// `-wal`/`-shm` files are used or created. Only correct for a file nothing writes, such
+    /// as a finished evaluation run's database; the caller must make sure no `-wal` or
+    /// `-journal` file holds unapplied changes. `path` may be `/proc/self/fd/N`, which pins
+    /// the file an already verified descriptor refers to.
+    ///
+    /// # Errors
+    /// Fails like [`Database::open_read_only`].
+    pub fn open_read_only_immutable(path: &Path) -> Result<Self, StorageError> {
+        let text = path
+            .to_str()
+            .ok_or(StorageError::OutOfRange("database path is not UTF-8"))?;
+        let mut uri = String::from("file:");
+        for character in text.chars() {
+            match character {
+                '%' => uri.push_str("%25"),
+                '?' => uri.push_str("%3f"),
+                '#' => uri.push_str("%23"),
+                other => uri.push(other),
+            }
+        }
+        uri.push_str("?immutable=1");
+        let conn = Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        Self::checked(conn)
+    }
+
     fn checked(conn: Connection) -> Result<Self, StorageError> {
         conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
         let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
@@ -77,7 +112,7 @@ impl Database {
         }
         if found < supported {
             return Err(StorageError::Serialization(format!(
-                "schema version {found} is older than {supported}; open it once with the current evorch to migrate"
+                "schema version {found} {OLDER_SCHEMA} {supported}; open it once with the current evorch to migrate"
             )));
         }
         Ok(Self { conn })

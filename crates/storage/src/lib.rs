@@ -88,7 +88,7 @@ pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
 pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary};
 pub use entity::CatalogUpdateRecord;
-pub use error::StorageError;
+pub use error::{FailureClass, StorageError};
 pub use host_input::{
     HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };

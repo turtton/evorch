@@ -19,6 +19,7 @@
 //! otherwise it is [`MemberPhase::Unverified`], not running, and a process id
 //! is never taken as proof that a process lives.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,9 +55,7 @@ pub(crate) use record::{
 pub use record::{LaunchMonitor, ProcessExit, ProcessState, Purpose};
 pub use snapshot::*;
 
-use artifact::{
-    child_dir, file_ref, read_json, read_text_head, read_text_tail, read_versioned_json,
-};
+use artifact::Dir;
 use state::Activity;
 
 const STDERR_BYTES: u64 = 16 * 1024;
@@ -81,6 +80,10 @@ pub struct InspectionLimits {
     pub max_markdown_bytes: u64,
     /// Bytes of the candidate overlay kept in a snapshot.
     pub max_overlay_bytes: u64,
+    /// Size of a trial database that may be read to estimate its cost.
+    pub max_database_bytes: u64,
+    /// Usage rows read from one trial database to estimate its cost.
+    pub max_database_rows: usize,
 }
 
 impl Default for InspectionLimits {
@@ -93,6 +96,8 @@ impl Default for InspectionLimits {
             max_json_bytes: 8 * 1024 * 1024,
             max_markdown_bytes: 1024 * 1024,
             max_overlay_bytes: 4 * 1024,
+            max_database_bytes: 256 * 1024 * 1024,
+            max_database_rows: 200_000,
         }
     }
 }
@@ -155,41 +160,31 @@ impl EvaluationInspector {
             scan_truncated: false,
             problem: None,
         };
-        let Ok(root) = self.root.canonicalize() else {
-            return empty;
+        let failed = |problem| GroupListing {
+            problem: Some(problem),
+            ..GroupListing {
+                entries: Vec::new(),
+                omitted: 0,
+                scan_truncated: false,
+                problem: None,
+            }
         };
-        let groups = match child_dir(&root, GROUPS_DIR) {
+        let root = match self.open_root() {
+            Artifact::Present(root) => root,
+            Artifact::Missing => return empty,
+            Artifact::Problem(problem) => return failed(problem),
+        };
+        let groups = match root.open_dir(GROUPS_DIR) {
             Artifact::Present(groups) => groups,
             Artifact::Missing => return empty,
-            Artifact::Problem(problem) => {
-                return GroupListing {
-                    problem: Some(problem),
-                    ..empty
-                };
-            }
+            Artifact::Problem(problem) => return failed(problem),
         };
-        let entries = match std::fs::read_dir(&groups) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return GroupListing {
-                    problem: Some(ArtifactProblem::io(&groups, &error)),
-                    ..empty
-                };
-            }
+        let (names, scan_truncated) = match groups.names(self.limits.max_scan_entries) {
+            Artifact::Present(found) => found,
+            Artifact::Missing => return empty,
+            Artifact::Problem(problem) => return failed(problem),
         };
-        let mut ids = Vec::new();
-        let mut scan_truncated = false;
-        for (scanned, entry) in entries.filter_map(Result::ok).enumerate() {
-            if scanned == self.limits.max_scan_entries {
-                scan_truncated = true;
-                break;
-            }
-            if let Ok(name) = entry.file_name().into_string()
-                && is_group_id(&name)
-            {
-                ids.push(name);
-            }
-        }
+        let mut ids: Vec<String> = names.into_iter().filter(|name| is_group_id(name)).collect();
         ids.sort();
         ids.reverse();
         let shown = limit.min(self.limits.max_groups);
@@ -200,7 +195,7 @@ impl EvaluationInspector {
                 .into_iter()
                 .map(|id| GroupListEntry {
                     group: self
-                        .inspect_group(&id, false)
+                        .inspect_in(&root, &id, false)
                         .map(|inspected| inspected.snapshot),
                     id,
                 })
@@ -221,10 +216,7 @@ impl EvaluationInspector {
     /// A member's whole `report.json`.
     pub fn member_report(&self, group_id: &str, member: usize) -> Artifact<Report> {
         let dir = present!(self.member_location(group_id, member));
-        read_json(
-            &dir.join(output::REPORT_JSON_FILE),
-            self.limits.max_json_bytes,
-        )
+        dir.read_json(output::REPORT_JSON_FILE, self.limits.max_json_bytes)
     }
 
     /// The start of a member's `report.md`, at most `max_bytes` (and the
@@ -236,41 +228,43 @@ impl EvaluationInspector {
         max_bytes: u64,
     ) -> Artifact<BoundedText> {
         let dir = present!(self.member_location(group_id, member));
-        read_text_head(
-            &dir.join(output::REPORT_MARKDOWN_FILE),
+        dir.read_text_head(
+            output::REPORT_MARKDOWN_FILE,
             max_bytes.min(self.limits.max_markdown_bytes),
         )
     }
 
-    fn canonical_root(&self) -> Artifact<PathBuf> {
+    /// The evaluation root, opened once; a root that does not exist is
+    /// `Missing`, and one that cannot be resolved for any other reason is a
+    /// problem, not an empty root.
+    fn open_root(&self) -> Artifact<Dir> {
         match self.root.canonicalize() {
-            Ok(root) => Artifact::Present(root),
+            Ok(root) => Dir::open_root(&root),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Artifact::Missing,
             Err(error) => Artifact::Problem(ArtifactProblem::io(&self.root, &error)),
         }
     }
 
-    fn member_location(&self, group_id: &str, member: usize) -> Artifact<PathBuf> {
-        let root = present!(self.canonical_root());
-        let group_dir = present!(group_dir(&root, group_id));
+    fn member_location(&self, group_id: &str, member: usize) -> Artifact<Dir> {
+        let root = present!(self.open_root());
+        let group_dir = present!(open_group_dir(&root, group_id));
         let record = present!(self.load_record(&group_dir, group_id));
         match record.members.get(member) {
-            Some(member) => member_dir(&root, member),
+            Some(member) => open_member_dir(&root, member),
             None => Artifact::Missing,
         }
     }
 
-    fn load_record(&self, group_dir: &Path, id: &str) -> Artifact<GroupRecord> {
-        let path = group_dir.join(GROUP_FILE);
-        let record: GroupRecord = present!(read_versioned_json(
-            &path,
+    fn load_record(&self, group_dir: &Dir, id: &str) -> Artifact<GroupRecord> {
+        let record: GroupRecord = present!(group_dir.read_versioned_json(
+            GROUP_FILE,
             self.limits.max_json_bytes,
             GROUP_SCHEMA
         ));
         if record.id != id {
             return Artifact::Problem(ArtifactProblem::new(
                 ProblemKind::Malformed,
-                &path,
+                &group_dir.join(GROUP_FILE),
                 format!("belongs to group {:?}, not {id:?}", record.id),
             ));
         }
@@ -278,8 +272,12 @@ impl EvaluationInspector {
     }
 
     pub(crate) fn inspect_group(&self, id: &str, with_costs: bool) -> Artifact<Inspected> {
-        let root = present!(self.canonical_root());
-        let group_dir = present!(group_dir(&root, id));
+        let root = present!(self.open_root());
+        self.inspect_in(&root, id, with_costs)
+    }
+
+    fn inspect_in(&self, root: &Dir, id: &str, with_costs: bool) -> Artifact<Inspected> {
+        let group_dir = present!(open_group_dir(root, id));
         let record = present!(self.load_record(&group_dir, id));
         let launched = self
             .monitor
@@ -303,7 +301,7 @@ impl EvaluationInspector {
                     .map_or(ProcessStatus::Unknown, ProcessStatus::Exited),
             };
             let (snapshot, report) = self.inspect_member(&MemberInput {
-                root: &root,
+                root,
                 group_dir: &group_dir,
                 index,
                 member,
@@ -313,21 +311,21 @@ impl EvaluationInspector {
             members.push(snapshot);
             reports.push(report);
         }
+        let unread = record.members.len().saturating_sub(members.len());
         let phases: Vec<MemberPhase> = members.iter().map(|member| member.phase).collect();
-        let exits: Option<Vec<&str>> = record
-            .members
-            .iter()
-            .enumerate()
-            .map(
-                |(index, member)| match members.get(index).map(|m| &m.process) {
-                    Some(ProcessStatus::Exited(exit)) => Some(exit.finished_at.as_str()),
-                    Some(_) => None,
-                    None => member.exit.as_ref().map(|exit| exit.finished_at.as_str()),
-                },
-            )
-            .collect();
         // The record on disk can lag the process that waited for the last exit.
         let finished_at = record.finished_at.clone().or_else(|| {
+            let exits: Option<Vec<&str>> = (unread == 0)
+                .then(|| {
+                    members
+                        .iter()
+                        .map(|member| match &member.process {
+                            ProcessStatus::Exited(exit) => Some(exit.finished_at.as_str()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .flatten();
             exits
                 .filter(|exits| !exits.is_empty())
                 .and_then(|exits| exits.into_iter().max().map(str::to_owned))
@@ -339,13 +337,11 @@ impl EvaluationInspector {
                 started_at: record.started_at.clone(),
                 finished_at,
                 notice: record.notice.clone(),
-                phase: state::group_phase(&phases),
-                candidate: read_text_head(
-                    &group_dir.join(OVERLAY_FILE),
-                    self.limits.max_overlay_bytes,
-                ),
+                phase: state::group_phase(&phases, unread),
+                candidate: group_dir.read_text_head(OVERLAY_FILE, self.limits.max_overlay_bytes),
                 members,
-                members_omitted: record.members.len().saturating_sub(self.limits.max_members),
+                members_omitted: unread,
+                members_total: record.members.len(),
             },
             reports,
         })
@@ -364,12 +360,12 @@ impl EvaluationInspector {
             with_costs,
         } = input;
         let limit = self.limits.max_json_bytes;
-        let dir = member_dir(root, member);
+        let dir = open_member_dir(root, member);
         let mut problems = Vec::new();
         let (manifest, report) = match &dir {
             Artifact::Present(dir) => (
-                read_json::<Manifest>(&dir.join(output::MANIFEST_FILE), limit),
-                read_json::<Report>(&dir.join(output::REPORT_JSON_FILE), limit),
+                dir.read_json::<Manifest>(output::MANIFEST_FILE, limit),
+                dir.read_json::<Report>(output::REPORT_JSON_FILE, limit),
             ),
             Artifact::Missing => (Artifact::Missing, Artifact::Missing),
             Artifact::Problem(problem) => {
@@ -404,15 +400,15 @@ impl EvaluationInspector {
         };
 
         let plan = Plan::of(manifest.present(), member.repeat);
-        let runs: &[RunEntry] = manifest.present().map_or(&[], |m| m.runs.as_slice());
-        let specs = self.trial_specs(&plan, runs);
+        let runs = unique_runs(manifest.present().map_or(&[], |m| m.runs.as_slice()));
+        let tally = plan.tally(&runs, activity, manifest_finished == Some(true));
+        let specs = self.trial_specs(&plan, &runs);
         let runs_dir = match &dir {
-            Artifact::Present(dir) => child_dir(dir, RUNS_DIR),
+            Artifact::Present(dir) => dir.open_dir(RUNS_DIR),
             Artifact::Missing => Artifact::Missing,
             Artifact::Problem(problem) => Artifact::Problem(problem.clone()),
         };
         let trials: Vec<EvaluationTrialSnapshot> = specs
-            .0
             .iter()
             .map(|(label, trial, entry)| {
                 self.inspect_trial(&TrialInput {
@@ -460,16 +456,17 @@ impl EvaluationInspector {
                 .unwrap_or_default(),
             report_markdown: dir
                 .present()
-                .map(|dir| file_ref(dir.join(output::REPORT_MARKDOWN_FILE))),
-            dir,
+                .map(|dir| dir.file_ref(output::REPORT_MARKDOWN_FILE)),
+            dir: path_of(&dir),
             pid: member.pid,
             phase,
             process: process.clone(),
             started_at: manifest.present().map(|m| m.started_at.clone()),
             progress,
-            cost: member_cost(full_report.as_ref(), &trials),
+            cost: member_cost(full_report.as_ref(), &trials, &plan.label_totals(&runs)),
             trials,
-            trials_omitted: specs.1,
+            trials_omitted: tally.total.saturating_sub(specs.len()),
+            tally,
             report: report_status,
             failure,
             stderr_tail,
@@ -479,8 +476,8 @@ impl EvaluationInspector {
     }
 
     /// The trials to list, planned ones first in replay order, then any the
-    /// manifest holds beyond the plan, and how many were left out.
-    fn trial_specs<'a>(&self, plan: &'a Plan, runs: &'a [RunEntry]) -> (Vec<TrialSpec<'a>>, usize) {
+    /// manifest holds beyond the plan, up to the configured number.
+    fn trial_specs<'a>(&self, plan: &'a Plan, runs: &[&'a RunEntry]) -> Vec<TrialSpec<'a>> {
         let max = self.limits.max_trials;
         let mut specs = Vec::new();
         'plan: for label in &plan.labels {
@@ -490,24 +487,22 @@ impl EvaluationInspector {
                 }
                 let entry = runs
                     .iter()
-                    .rev()
+                    .copied()
                     .find(|entry| entry.label == *label && entry.index == trial);
                 specs.push((label.as_str(), trial, entry));
             }
         }
-        let extra = |entry: &&RunEntry| !plan.contains(&entry.label, entry.index);
-        let extras = runs.iter().filter(extra).count();
-        for entry in runs.iter().filter(extra) {
+        for entry in runs
+            .iter()
+            .copied()
+            .filter(|entry| !plan.contains(&entry.label, entry.index))
+        {
             if specs.len() >= max {
                 break;
             }
             specs.push((entry.label.as_str(), entry.index, Some(entry)));
         }
-        let omitted = plan
-            .size()
-            .saturating_add(extras)
-            .saturating_sub(specs.len());
-        (specs, omitted)
+        specs
     }
 
     fn inspect_trial(&self, input: &TrialInput<'_>) -> EvaluationTrialSnapshot {
@@ -525,15 +520,14 @@ impl EvaluationInspector {
         let ended = matches!(state, TrialState::Finished | TrialState::Failed);
         let name = format!("{label}-{index}");
         let trial_dir = entry.map(|_| match runs_dir {
-            Artifact::Present(runs) => child_dir(runs, &name),
+            Artifact::Present(runs) => runs.open_dir(&name),
             Artifact::Missing => Artifact::Missing,
             Artifact::Problem(problem) => Artifact::Problem(problem.clone()),
         });
         let outcome = match &trial_dir {
-            Some(Artifact::Present(dir)) if ended => {
-                read_json::<Outcome>(&dir.join(output::OUTCOME_FILE), self.limits.max_json_bytes)
-                    .map(|outcome| outcome_of(&outcome))
-            }
+            Some(Artifact::Present(dir)) if ended => dir
+                .read_json::<Outcome>(output::OUTCOME_FILE, self.limits.max_json_bytes)
+                .map(|outcome| outcome_of(&outcome)),
             Some(Artifact::Problem(problem)) if ended => Artifact::Problem(problem.clone()),
             _ => Artifact::Missing,
         };
@@ -551,7 +545,9 @@ impl EvaluationInspector {
             TrialCost::Unavailable(CostUnavailable::NotInReport)
         } else {
             match (&self.prices, &trial_dir, with_costs) {
-                (Some(prices), Some(Artifact::Present(dir)), true) => estimate_cost(dir, prices),
+                (Some(prices), Some(Artifact::Present(dir)), true) => {
+                    self.estimate_cost(dir, prices)
+                }
                 (Some(_), Some(Artifact::Missing), true) => {
                     TrialCost::Unavailable(CostUnavailable::NoDatabase)
                 }
@@ -572,23 +568,109 @@ impl EvaluationInspector {
             cost,
             artifacts: trial_dir.map(|dir| {
                 dir.map(|dir| TrialArtifacts {
-                    database: file_ref(dir.join(output::DATABASE_FILE)),
-                    diff: file_ref(dir.join(output::DIFF_FILE)),
-                    conversation: file_ref(dir.join(output::CONVERSATION_FILE)),
-                    outcome: file_ref(dir.join(output::OUTCOME_FILE)),
-                    dir,
+                    database: dir.file_ref(output::DATABASE_FILE),
+                    diff: dir.file_ref(output::DIFF_FILE),
+                    conversation: dir.file_ref(output::CONVERSATION_FILE),
+                    outcome: dir.file_ref(output::OUTCOME_FILE),
+                    dir: dir.path().to_path_buf(),
                 })
             }),
         }
     }
+
+    /// Reprice a finished trial's own requests from its database.
+    ///
+    /// The database is opened through the descriptor that was checked (a
+    /// regular file in the trial directory, not a link), as an immutable
+    /// snapshot, so a path replaced meanwhile changes nothing and no `-wal`
+    /// or `-shm` file is created. A `-wal` or `-journal` with content, a file
+    /// over the byte budget and one with more rows than the row budget give no
+    /// cost at all rather than a partial one.
+    fn estimate_cost(&self, dir: &Dir, prices: &PriceTable) -> TrialCost {
+        let unavailable = |reason| TrialCost::Unavailable(reason);
+        let (file, length) = match dir.open_regular(output::DATABASE_FILE) {
+            Artifact::Present(opened) => opened,
+            Artifact::Missing => return unavailable(CostUnavailable::NoDatabase),
+            Artifact::Problem(problem) => return unavailable(CostUnavailable::Unreadable(problem)),
+        };
+        if length > self.limits.max_database_bytes {
+            return unavailable(CostUnavailable::OverBudget(DatabaseBudget::Bytes {
+                limit: self.limits.max_database_bytes,
+                actual: length,
+            }));
+        }
+        for sidecar in [DATABASE_WAL, DATABASE_JOURNAL] {
+            match dir.file_ref(sidecar).state {
+                FileState::Missing | FileState::Present { bytes: 0 } => {}
+                FileState::Present { .. } => return unavailable(CostUnavailable::InUse),
+                FileState::Rejected(kind) => {
+                    return unavailable(CostUnavailable::Unreadable(ArtifactProblem::new(
+                        kind,
+                        &dir.join(sidecar),
+                        "cannot be checked",
+                    )));
+                }
+            }
+        }
+        artifact::sync_point("opened_database", &dir.join(output::DATABASE_FILE));
+        let database = dir.join(output::DATABASE_FILE);
+        let pinned = pinned_path(&file);
+        let rows = storage::Database::open_read_only_immutable(&pinned).and_then(|opened| {
+            opened.usage_requests_between_limited(i64::MIN, i64::MAX, self.limits.max_database_rows)
+        });
+        // The descriptor stays open until the query is done: it pins the file.
+        drop(file);
+        match rows {
+            Ok((_, true)) => unavailable(CostUnavailable::OverBudget(DatabaseBudget::Rows {
+                limit: self.limits.max_database_rows,
+            })),
+            Ok((rows, false)) => {
+                let requests: Vec<RequestUsage> = rows
+                    .iter()
+                    .map(|row| RequestUsage::from_record(&row.record))
+                    .collect();
+                TrialCost::Estimated(prices.cost(requests.iter().filter(|r| !r.is_overhead())))
+            }
+            Err(error) => unavailable(database_failure(&database, &error)),
+        }
+    }
+}
+
+const DATABASE_WAL: &str = "evorch.db-wal";
+const DATABASE_JOURNAL: &str = "evorch.db-journal";
+
+/// Where the kernel exposes an open descriptor as a path, so a library that
+/// opens by path reaches the file the descriptor refers to.
+fn pinned_path(file: &std::fs::File) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    let prefix = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    PathBuf::from(format!("{prefix}/{}", file.as_raw_fd()))
+}
+
+fn database_failure(path: &Path, error: &storage::StorageError) -> CostUnavailable {
+    use storage::FailureClass;
+    let kind = match error.class() {
+        FailureClass::SchemaUnsupported => ProblemKind::UnsupportedSchema,
+        FailureClass::Corrupt => ProblemKind::Malformed,
+        FailureClass::Permission => ProblemKind::PermissionDenied,
+        FailureClass::Busy
+        | FailureClass::CannotOpen
+        | FailureClass::Limit
+        | FailureClass::Other => ProblemKind::Io,
+    };
+    CostUnavailable::Unreadable(ArtifactProblem::new(kind, path, error.to_string()))
 }
 
 /// A trial to list: its label, its repeat number and the manifest's entry for it.
 type TrialSpec<'a> = (&'a str, u32, Option<&'a RunEntry>);
 
 struct MemberInput<'a> {
-    root: &'a Path,
-    group_dir: &'a Path,
+    root: &'a Dir,
+    group_dir: &'a Dir,
     index: usize,
     member: &'a Member,
     process: ProcessStatus,
@@ -599,11 +681,24 @@ struct TrialInput<'a> {
     label: &'a str,
     index: u32,
     entry: Option<&'a RunEntry>,
-    runs_dir: &'a Artifact<PathBuf>,
+    runs_dir: &'a Artifact<Dir>,
     activity: Activity,
     manifest_finished: bool,
     report: Option<&'a Report>,
     with_costs: bool,
+}
+
+/// The manifest's entries with the last of any repeated `(label, index)`, in
+/// file order.
+fn unique_runs(runs: &[RunEntry]) -> Vec<&RunEntry> {
+    let mut seen = HashSet::new();
+    let mut unique: Vec<&RunEntry> = runs
+        .iter()
+        .rev()
+        .filter(|entry| seen.insert((entry.label.as_str(), entry.index)))
+        .collect();
+    unique.reverse();
+    unique
 }
 
 /// The trials a member is to run: its configurations, each repeated.
@@ -616,16 +711,22 @@ impl Plan {
     /// A launched group always has a candidate, so before the manifest names
     /// the configurations both are expected.
     fn of(manifest: Option<&Manifest>, launched_repeat: u32) -> Self {
-        manifest.map_or_else(
-            || Self {
-                labels: vec![BASELINE.to_owned(), CANDIDATE.to_owned()],
-                repeat: launched_repeat,
+        let (configured, repeat) = manifest.map_or_else(
+            || {
+                (
+                    vec![BASELINE.to_owned(), CANDIDATE.to_owned()],
+                    launched_repeat,
+                )
             },
-            |manifest| Self {
-                labels: manifest.configurations.clone(),
-                repeat: manifest.repeat,
-            },
-        )
+            |manifest| (manifest.configurations.clone(), manifest.repeat),
+        );
+        let mut labels: Vec<String> = Vec::new();
+        for label in configured {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        Self { labels, repeat }
     }
 
     fn size(&self) -> usize {
@@ -635,27 +736,82 @@ impl Plan {
     fn contains(&self, label: &str, index: u32) -> bool {
         self.labels.iter().any(|known| known == label) && (1..=self.repeat).contains(&index)
     }
+
+    /// The states of all trials, planned and extra, from the manifest alone.
+    fn tally(&self, runs: &[&RunEntry], activity: Activity, manifest_finished: bool) -> TrialTally {
+        let mut tally = TrialTally {
+            planned: self.size(),
+            ..TrialTally::default()
+        };
+        let mut planned_started = 0_usize;
+        let count = |tally: &mut TrialTally, state: TrialState, times: usize| {
+            let slot = match state {
+                TrialState::Queued => &mut tally.queued,
+                TrialState::Running => &mut tally.running,
+                TrialState::Finished => &mut tally.finished,
+                TrialState::Failed => &mut tally.failed,
+                TrialState::Interrupted => &mut tally.interrupted,
+                TrialState::Unavailable => &mut tally.unavailable,
+                TrialState::Unverified => &mut tally.unverified,
+            };
+            *slot = slot.saturating_add(times);
+        };
+        let mut extras = 0_usize;
+        for entry in runs {
+            if self.contains(&entry.label, entry.index) {
+                planned_started += 1;
+            } else {
+                extras += 1;
+            }
+            let state = state::trial_state(Some(entry), activity, manifest_finished);
+            count(&mut tally, state, 1);
+        }
+        let waiting = state::trial_state(None, activity, manifest_finished);
+        count(
+            &mut tally,
+            waiting,
+            self.size().saturating_sub(planned_started),
+        );
+        tally.total = self.size().saturating_add(extras);
+        tally
+    }
+
+    /// Each configuration's trial count, extras included.
+    fn label_totals(&self, runs: &[&RunEntry]) -> Vec<(String, u64)> {
+        let mut totals: Vec<(String, u64)> = self
+            .labels
+            .iter()
+            .map(|label| (label.clone(), u64::from(self.repeat)))
+            .collect();
+        for entry in runs.iter().filter(|e| !self.contains(&e.label, e.index)) {
+            match totals.iter_mut().find(|(label, _)| *label == entry.label) {
+                Some((_, count)) => *count += 1,
+                None => totals.push((entry.label.clone(), 1)),
+            }
+        }
+        totals
+    }
 }
 
 fn is_group_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn group_dir(root: &Path, id: &str) -> Artifact<PathBuf> {
+fn open_group_dir(root: &Dir, id: &str) -> Artifact<Dir> {
     if !is_group_id(id) {
         return Artifact::Problem(ArtifactProblem::new(
             ProblemKind::UnsafePath,
-            root,
+            root.path(),
             format!("{id:?} is not an evaluation group id"),
         ));
     }
-    let groups = present!(child_dir(root, GROUPS_DIR));
-    child_dir(&groups, id)
+    let groups = present!(root.open_dir(GROUPS_DIR));
+    groups.open_dir(id)
 }
 
 /// A member's output directory: directly under the root, named as recorded,
 /// and not a link.
-fn member_dir(root: &Path, member: &Member) -> Artifact<PathBuf> {
+fn open_member_dir(root: &Dir, member: &Member) -> Artifact<Dir> {
     let unsafe_path = |detail: String| {
         Artifact::Problem(ArtifactProblem::new(
             ProblemKind::UnsafePath,
@@ -670,11 +826,19 @@ fn member_dir(root: &Path, member: &Member) -> Artifact<PathBuf> {
         return unsafe_path("is a hidden directory".into());
     }
     match member.dir.parent().map(Path::canonicalize) {
-        Some(Ok(parent)) if parent == root => child_dir(root, name),
+        Some(Ok(parent)) if parent == root.path() => root.open_dir(name),
         _ => unsafe_path(format!(
             "is not directly under the evaluation root {}",
-            root.display()
+            root.path().display()
         )),
+    }
+}
+
+fn path_of(dir: &Artifact<Dir>) -> Artifact<PathBuf> {
+    match dir {
+        Artifact::Present(dir) => Artifact::Present(dir.path().to_path_buf()),
+        Artifact::Missing => Artifact::Missing,
+        Artifact::Problem(problem) => Artifact::Problem(problem.clone()),
     }
 }
 
@@ -692,47 +856,13 @@ fn outcome_of(outcome: &Outcome) -> TrialOutcome {
     }
 }
 
-/// Reprice a finished trial's own requests. Reads the trial's database through
-/// a read-only connection.
-fn estimate_cost(dir: &Path, prices: &PriceTable) -> TrialCost {
-    let database = dir.join(output::DATABASE_FILE);
-    match std::fs::symlink_metadata(&database) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => {
-            return TrialCost::Unavailable(CostUnavailable::Unreadable(ArtifactProblem::new(
-                ProblemKind::UnsafePath,
-                &database,
-                "is not a regular file",
-            )));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return TrialCost::Unavailable(CostUnavailable::NoDatabase);
-        }
-        Err(error) => {
-            return TrialCost::Unavailable(CostUnavailable::Unreadable(ArtifactProblem::io(
-                &database, &error,
-            )));
-        }
-    }
-    let rows = storage::Database::open_read_only(&database)
-        .and_then(|opened| opened.usage_requests_between(i64::MIN, i64::MAX));
-    match rows {
-        Ok(rows) => {
-            let requests: Vec<RequestUsage> = rows
-                .iter()
-                .map(|row| RequestUsage::from_record(&row.record))
-                .collect();
-            TrialCost::Estimated(prices.cost(requests.iter().filter(|r| !r.is_overhead())))
-        }
-        Err(error) => TrialCost::Unavailable(CostUnavailable::Unreadable(ArtifactProblem::new(
-            ProblemKind::Io,
-            &database,
-            error.to_string(),
-        ))),
-    }
-}
-
-fn member_cost(report: Option<&Report>, trials: &[EvaluationTrialSnapshot]) -> MemberCost {
+/// `totals` holds each configuration's trial count over all trials, listed or
+/// not, so a cost that covers only some of them says so.
+fn member_cost(
+    report: Option<&Report>,
+    trials: &[EvaluationTrialSnapshot],
+    totals: &[(String, u64)],
+) -> MemberCost {
     if let Some(report) = report {
         return MemberCost {
             source: CostSource::Report,
@@ -741,8 +871,8 @@ fn member_cost(report: Option<&Report>, trials: &[EvaluationTrialSnapshot]) -> M
                 .iter()
                 .map(|cost| ConfigurationCostSnapshot {
                     label: cost.label.clone(),
-                    counted: cost.runs,
-                    planned: cost.runs,
+                    counted: u64::from(cost.runs),
+                    planned: u64::from(cost.runs),
                     cost: cost.cost.clone(),
                 })
                 .collect(),
@@ -750,28 +880,31 @@ fn member_cost(report: Option<&Report>, trials: &[EvaluationTrialSnapshot]) -> M
     }
     let mut configurations: Vec<ConfigurationCostSnapshot> = Vec::new();
     for trial in trials {
+        let TrialCost::Estimated(cost) = &trial.cost else {
+            continue;
+        };
         let position = configurations
             .iter()
             .position(|known| known.label == trial.label);
         let slot = match position {
             Some(position) => &mut configurations[position],
             None => {
+                let planned = totals
+                    .iter()
+                    .find(|(label, _)| *label == trial.label)
+                    .map_or(1, |(_, count)| *count);
                 configurations.push(ConfigurationCostSnapshot {
                     label: trial.label.clone(),
                     counted: 0,
-                    planned: 0,
+                    planned,
                     cost: Cost::default(),
                 });
                 configurations.last_mut().expect("just pushed")
             }
         };
-        slot.planned += 1;
-        if let TrialCost::Estimated(cost) = &trial.cost {
-            slot.counted += 1;
-            slot.cost.add(cost);
-        }
+        slot.counted += 1;
+        slot.cost.add(cost);
     }
-    configurations.retain(|configuration| configuration.counted > 0);
     MemberCost {
         source: if configurations.is_empty() {
             CostSource::None
@@ -784,14 +917,11 @@ fn member_cost(report: Option<&Report>, trials: &[EvaluationTrialSnapshot]) -> M
 
 /// The end of the process's stderr, found beside the group record by the name
 /// the record gives, never by the path it gives.
-fn stderr_tail(group_dir: &Path, recorded: &Path, problems: &mut Vec<ArtifactProblem>) -> String {
+fn stderr_tail(group_dir: &Dir, recorded: &Path, problems: &mut Vec<ArtifactProblem>) -> String {
     let Some(name) = recorded.file_name().and_then(OsStr::to_str) else {
         return String::new();
     };
-    if !artifact::is_plain_name(name) {
-        return String::new();
-    }
-    match read_text_tail(&group_dir.join(name), STDERR_BYTES) {
+    match group_dir.read_text_tail(name, STDERR_BYTES) {
         Artifact::Present(text) => {
             let text = text.trim();
             let skip = text.chars().count().saturating_sub(STDERR_CHARS);

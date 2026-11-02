@@ -77,9 +77,13 @@ pub(super) fn member_phase(
     }
 }
 
-pub(super) fn group_phase(phases: &[MemberPhase]) -> GroupPhase {
+/// `unread` counts members that were not inspected. One that runs shows the
+/// group runs; the rest cannot be told, so without it a group is never done.
+pub(super) fn group_phase(phases: &[MemberPhase], unread: usize) -> GroupPhase {
     if phases.iter().any(|phase| phase.is_active()) {
         GroupPhase::Running
+    } else if unread > 0 {
+        GroupPhase::Partial
     } else if phases.contains(&MemberPhase::Unverified) {
         GroupPhase::Unverified
     } else if !phases.is_empty() && phases.iter().all(|phase| *phase == MemberPhase::Finished) {
