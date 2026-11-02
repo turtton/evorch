@@ -15,13 +15,22 @@ pub(crate) enum Treatment {
     ReclaimTask,
     /// Rebuilt from another table's rows (full-text index); follows its source.
     Derived,
+    /// Deleted by the content blob collector once no reference table names the row.
+    GcUnreferenced,
+    /// A content blob reference table: follows its owner row through `ON DELETE
+    /// CASCADE`, and its AFTER DELETE trigger queues the blob for the collector.
+    /// No such table exists yet; the owners' PRs (A2b, B1) add entries.
+    #[allow(dead_code)]
+    CascadeOwner,
     /// Kept on purpose; the reason is the second field of the catalog entry.
     Keep,
     /// The tombstones themselves.
     Tombstone,
 }
 
-use Treatment::{ConfirmDelete, Derived, Keep, ReclaimRun, ReclaimTask, ReclaimThread, Tombstone};
+use Treatment::{
+    ConfirmDelete, Derived, GcUnreferenced, Keep, ReclaimRun, ReclaimTask, ReclaimThread, Tombstone,
+};
 
 /// `(table, treatment, why)`. FTS shadow tables and `sqlite_*` are excluded by the test.
 pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
@@ -69,6 +78,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "task_queue_ledger",
         ReclaimTask,
         "deleted with a grant, found by JSON payload",
+    ),
+    (
+        "content_blobs",
+        GcUnreferenced,
+        "collected once no content_blob_refs_* table names the blob",
+    ),
+    (
+        "content_blob_gc_queue",
+        Keep,
+        "resumable collector work list; the collector empties it",
     ),
     ("usage_requests", Keep, "cost accounting is kept"),
     ("usage_daily", Keep, "cost accounting is kept"),
@@ -153,5 +172,28 @@ mod tests {
             .collect();
         assert_eq!(catalogued.len(), CATALOG.len(), "a table is listed twice");
         assert_eq!(catalogued, tables);
+    }
+
+    #[test]
+    fn content_blob_reference_tables_cascade_with_their_owner() {
+        // Given: the latest schema and the catalog.
+        let database = Database::open_in_memory().unwrap();
+        let tables = crate::repo::content_blobs::ref_tables(&database.conn).unwrap();
+
+        // Then: every reference table in the schema is catalogued as following its
+        // owner, and no other entry claims that treatment, so the collector's table
+        // discovery and the catalog cannot drift apart.
+        let cascading: Vec<&str> = CATALOG
+            .iter()
+            .filter(|(_, treatment, _)| *treatment == super::Treatment::CascadeOwner)
+            .map(|(name, ..)| *name)
+            .collect();
+        assert_eq!(cascading, tables);
+        assert!(
+            CATALOG
+                .iter()
+                .filter(|(name, ..)| name.starts_with(crate::body_store::REF_TABLE_PREFIX))
+                .all(|(_, treatment, _)| *treatment == super::Treatment::CascadeOwner)
+        );
     }
 }

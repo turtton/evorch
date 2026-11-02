@@ -188,12 +188,17 @@ fn evaluate(argv: Vec<String>) -> ExitCode {
 
 fn inspect(argv: Vec<String>) -> ExitCode {
     let result = evorch::inspect::parse_args(argv.into_iter()).and_then(evorch::inspect::run);
+    let failed = result.as_ref().is_ok_and(evorch::inspect::reports_failure);
     match result
         .and_then(|value| serde_json::to_string_pretty(&value).map_err(|error| error.to_string()))
     {
         Ok(text) => {
             println!("{text}");
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => {
             eprintln!("{error}");

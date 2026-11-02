@@ -261,6 +261,10 @@ impl Database {
         summary.insert("events".into(), events.json());
         summary.insert("run_contexts".into(), contexts.sums.json());
         summary.insert("conversation_index".into(), index.json());
+        summary.insert(
+            "bodies".into(),
+            crate::repo::content_blobs::body_stats(conn)?,
+        );
         summary.insert("threads".into(), attribution.counts());
         summary.insert(
             "attribution".into(),

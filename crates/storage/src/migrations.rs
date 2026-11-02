@@ -49,6 +49,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v36.sql"),
     include_str!("migrations/v37.sql"),
     include_str!("migrations/v38.sql"),
+    include_str!("migrations/v39.sql"),
 ];
 
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
@@ -96,6 +97,7 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
 /// the caller drops it, as v35 rebuilds it from scratch.
 #[cfg(test)]
 pub(crate) const UNDO_V35: &str = r#"
+DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
 DROP INDEX idx_events_orchestrator_unattributed;
 DROP TRIGGER fence_run_contexts_insert;
 DROP TRIGGER fence_run_contexts_update;

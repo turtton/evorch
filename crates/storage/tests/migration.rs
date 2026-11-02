@@ -11,9 +11,11 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 38;
+const LATEST_SCHEMA: u32 = 39;
 
-const EXPECTED_TABLES: [&str; 65] = [
+const EXPECTED_TABLES: [&str; 67] = [
+    "content_blobs",
+    "content_blob_gc_queue",
     "artifact_refs",
     "gc_state",
     "gc_unknown_meta",

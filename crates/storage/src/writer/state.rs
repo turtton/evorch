@@ -757,6 +757,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         Ok(progress) => removed += progress.rows as u64,
         Err(error) => tracing::warn!(error = %error, "archived thread index purge failed"),
     }
+    removed += collect_content_blobs(state);
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
@@ -771,6 +772,30 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
+}
+
+/// One bounded step of the content blob collector. It runs on every tick, whether or
+/// not a retention job or the archive purge exists: the blobs it collects are freed by
+/// rewrites, not only by deletions. With nothing queued it only reads. A failure is
+/// logged and retried on the next tick; it never stops the rest of the tick.
+fn collect_content_blobs(state: &WriterState) -> u64 {
+    match crate::repo::content_blobs::gc_step(&state.conn) {
+        Ok(progress) => {
+            if progress.deleted > 0 || progress.registered_oversized > 0 {
+                tracing::debug!(
+                    deleted = progress.deleted,
+                    deleted_bytes = progress.deleted_bytes,
+                    oversized = progress.registered_oversized,
+                    "content blobs collected"
+                );
+            }
+            progress.deleted as u64
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "content blob collection failed");
+            0
+        }
+    }
 }
 
 /// Delete one bounded batch of observational events: leftover
