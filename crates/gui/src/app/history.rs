@@ -141,10 +141,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.sidebar.validate()?;
-        let saved = HistorySidebarRef {
-            sidebar: &self.sidebar,
-            user_messages: &self.history,
-            composer_drafts: &self.composer_drafts,
+        // A deleted thread is never written, whichever way the file is saved.
+        let pruned = self.without_deleted_threads();
+        let saved = match &pruned {
+            Some(pruned) => HistorySidebarRef {
+                sidebar: &pruned.sidebar,
+                user_messages: &pruned.user_messages,
+                composer_drafts: &pruned.composer_drafts,
+            },
+            None => HistorySidebarRef {
+                sidebar: &self.sidebar,
+                user_messages: &self.history,
+                composer_drafts: &self.composer_drafts,
+            },
         };
         let local = serde_json::to_vec_pretty(&saved)?;
         self.shared_sidebar_write(path, local)?;
@@ -238,6 +247,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 Ok(bytes) => {
                     let saved: HistorySidebar = serde_json::from_slice(&bytes)
                         .map_err(|error| storage::StorageError::Serialization(error.to_string()))?;
+                    let mut saved = saved;
+                    // A deleted thread's messages and drafts stay in a file saved
+                    // before its deletion; the tombstone wins.
+                    super::thread_retention::prune_tombstoned(&mut saved, &self.tombstones);
                     self.history = saved.user_messages;
                     self.composer_drafts = saved.composer_drafts;
                     self.shared_sidebar_restored();

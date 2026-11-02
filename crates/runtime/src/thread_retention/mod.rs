@@ -60,6 +60,20 @@ pub fn policy_from_config(config: &config::StorageConfig) -> ThreadRetentionPoli
     }
 }
 
+const OWNER_BLOCK_PREFIX: &str = "owner active remnant until ";
+
+/// The text of a block by an owner row that lasts until `until_ms` (Unix milliseconds).
+fn owner_block_reason(until_ms: u64) -> String {
+    format!("{OWNER_BLOCK_PREFIX}{until_ms}")
+}
+
+/// The Unix milliseconds an owner block (see [`owner_blocks`]) lasts until, so a host can
+/// show it as a date; `None` for any other reason text.
+#[must_use]
+pub fn owner_block_until_ms(reason: &str) -> Option<u64> {
+    reason.strip_prefix(OWNER_BLOCK_PREFIX)?.parse().ok()
+}
+
 /// The reason an owner row keeps its thread from being deleted, per thread.
 ///
 /// A row that still claims a turn or run blocks until its lease expired for the
@@ -81,10 +95,7 @@ pub fn owner_blocks(
             {
                 Some((
                     thread.clone(),
-                    format!(
-                        "owner active remnant until {}",
-                        expires_at_ms.saturating_add(grace_ms)
-                    ),
+                    owner_block_reason(expires_at_ms.saturating_add(grace_ms)),
                 ))
             }
             _ => None,

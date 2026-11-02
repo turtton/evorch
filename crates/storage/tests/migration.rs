@@ -9,11 +9,11 @@ mod undo_v35;
 
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
-use undo_v35::{undo_v35, undo_v36};
+use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 37;
+const LATEST_SCHEMA: u32 = 38;
 
-const EXPECTED_TABLES: [&str; 64] = [
+const EXPECTED_TABLES: [&str; 65] = [
     "artifact_refs",
     "gc_state",
     "gc_unknown_meta",
@@ -23,6 +23,7 @@ const EXPECTED_TABLES: [&str; 64] = [
     "retention_identity",
     "retention_staging",
     "retention_staging_state",
+    "retention_unresolved",
     "run_ledger_delete_grants",
     "run_tombstones",
     "task_queue_delete_grants",
@@ -1007,4 +1008,40 @@ fn v36_leaves_the_archive_backfill_to_do_only_when_a_thread_is_already_archived(
             .unwrap();
         assert_eq!(done, !archived, "archived = {archived}");
     }
+}
+
+#[test]
+fn v38_drops_the_unnumbered_writer_markers_and_keeps_the_series() {
+    // Given: a v37 database whose archived thread carries the old markers.
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("v37.db");
+    drop(Database::open(&config_for(&path)).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    undo_v38(&connection);
+    connection
+        .execute_batch(
+            "INSERT INTO threads(thread_id, project_root, archived, archive_revision,
+                 archive_unnumbered, created_at_ns, updated_at_ns, source)
+                 VALUES ('t', '/p', 1, 4, 1, 1, 1, 'host');",
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 37).unwrap();
+    drop(connection);
+
+    // When: the current schema opens it.
+    let database = Database::open(&config_for(&path)).unwrap();
+
+    // Then: the markers are gone and the series is unchanged.
+    let row = database.thread("t").unwrap().unwrap();
+    assert_eq!((row.archived, row.archive_revision), (true, Some(4)));
+    let connection = Connection::open(&path).unwrap();
+    let markers: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('threads')
+             WHERE name IN ('archive_unnumbered', 'pin_unnumbered')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(markers, 0);
 }

@@ -22,6 +22,12 @@ pub enum NotificationKind {
         tool_name: String,
         call_id: String,
     },
+    /// What the start-up maintenance did (deleted archived threads, reclaim).
+    RetentionStartup,
+    /// Deleting archived threads is off for this start, and why.
+    RetentionDisabled {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,10 +141,34 @@ impl NotificationsModel {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
             NotificationKind::RunStopped => ThreadRunPhase::Stopped,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
-            NotificationKind::QuestionPending { .. } | NotificationKind::ApprovalPending { .. } => {
-                ThreadRunPhase::Waiting
-            }
+            NotificationKind::QuestionPending { .. }
+            | NotificationKind::ApprovalPending { .. }
+            | NotificationKind::RetentionDisabled { .. } => ThreadRunPhase::Waiting,
+            NotificationKind::RetentionStartup => ThreadRunPhase::Done,
         };
+        self.push(kind, run_id, summary, phase);
+    }
+
+    /// Adds a notice about the start-up maintenance of archived threads.
+    pub fn push_retention(&mut self, kind: NotificationKind, summary: String) {
+        debug_assert!(matches!(
+            kind,
+            NotificationKind::RetentionStartup | NotificationKind::RetentionDisabled { .. }
+        ));
+        let phase = match kind {
+            NotificationKind::RetentionDisabled { .. } => ThreadRunPhase::Waiting,
+            _ => ThreadRunPhase::Done,
+        };
+        self.push(kind, None, summary, phase);
+    }
+
+    fn push(
+        &mut self,
+        kind: NotificationKind,
+        run_id: Option<String>,
+        summary: String,
+        phase: ThreadRunPhase,
+    ) {
         // Never reuse an id while a renderer may still hold its revision.
         let Some(next_id) = self.next_id.checked_add(1) else {
             return;

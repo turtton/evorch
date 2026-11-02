@@ -46,8 +46,15 @@ fn fixture_state(
     sidebar.switch_thread(&ThreadId::new("target")).unwrap();
     // Use the persisted shape so the pre-implementation UI test can run.
     let mut json = serde_json::to_value(sidebar).unwrap();
-    json["threads"][0]["archived"] = archived.into();
-    json["threads"][0]["pinned"] = pinned.into();
+    if archived || pinned {
+        json["families"] = serde_json::json!([{
+            "key": "target",
+            "archived": archived,
+            "archive_revision": u64::from(archived),
+            "pinned": pinned,
+            "pin_revision": u64::from(pinned),
+        }]);
+    }
     json["threads"][0]["created_at"] = 0.into();
     WorkbenchState::new(EmptySource, &UiSettings::default())
         .unwrap()
@@ -286,7 +293,7 @@ fn archive_click_moves_thread_out_of_main_and_persists() {
     assert!(harness.state().sidebar().active_thread.is_none());
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();
-    assert_eq!(saved["threads"][0]["archived"], true);
+    assert_eq!(saved["families"][0]["archived"], true);
     harness.click_label("Archived (1)");
     harness.run();
     assert_eq!(harness.count_labels("Target"), 1);
@@ -311,7 +318,9 @@ fn restore_click_returns_archived_thread_to_main_and_persists() {
     assert!(!harness.has_label("Restore"));
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("sidebar.json")).unwrap()).unwrap();
-    assert_eq!(saved["threads"][0]["archived"], false);
+    // Restoring is a numbered edit of the family's archive series.
+    assert!(saved["families"][0].get("archived").is_none());
+    assert_eq!(saved["families"][0]["archive_revision"], 2);
 }
 
 #[test]
@@ -324,7 +333,8 @@ fn fork_inherits_parent_archive_state_and_has_a_new_creation_date() {
         .state_mut()
         .fork_thread(ThreadId::new("target"))
         .unwrap();
-    // Then: the new child inherits its family's archive state and is persisted.
+    // Then: the new child is a member of the archived family (it carries no state of
+    // its own) and the family still has one state, persisted.
     let fork = harness
         .state()
         .sidebar()
@@ -343,6 +353,8 @@ fn fork_inherits_parent_archive_state_and_has_a_new_creation_date() {
             .unwrap()
             .archived
     );
+    assert_eq!(saved.families.len(), 1);
+    assert_eq!(saved.families[0].archive_revision, 1);
     harness
         .state_mut()
         .toggle_archive(ThreadId::new("target"))

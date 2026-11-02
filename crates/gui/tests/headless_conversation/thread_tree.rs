@@ -489,40 +489,41 @@ fn direct_child_archive_and_restore_actions_do_not_split_the_family() {
 }
 
 #[test]
-fn orphaned_and_cyclic_threads_are_reachable_in_both_sections() {
+fn orphaned_and_cyclic_threads_stay_reachable_and_are_never_archived() {
+    // Given: threads whose family cannot be found, even if an older file called them
+    // archived (a family without a resolvable owner has no archive state).
     let temp = tempfile::tempdir().unwrap();
-    for archived in [false, true] {
-        let mut sidebar = SidebarState::default();
-        let project = ProjectId::new("project");
-        sidebar
-            .add_project(project.clone(), "Project", temp.path())
-            .unwrap();
-        sidebar.select_project(&project).unwrap();
-        for (id, parent) in [
-            ("Orphan", "missing"),
-            ("Cycle A", "Cycle B"),
-            ("Cycle B", "Cycle A"),
-        ] {
-            let mut thread = ThreadRecord::new(ThreadId::new(id), project.clone(), id);
-            thread.parent_thread_id = Some(ThreadId::new(parent));
-            thread.archived = archived;
-            sidebar.threads.push(thread);
-        }
-        let state = WorkbenchState::new(EmptySource, &UiSettings::default())
-            .unwrap()
-            .with_sidebar(sidebar);
-        let mut gui = HeadlessWorkbench::new(state, [1600.0, 900.0]);
-        gui.run();
-        if archived {
-            gui.click_label("Archived (3)");
-            gui.run();
-        }
-        for label in ["↳ Orphan", "↳ Cycle A", "↳ Cycle B"] {
-            assert_eq!(gui.count_labels(label), 1);
-        }
-        assert!(!gui.has_label("Archive"));
-        assert!(!gui.has_label("Restore"));
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("project");
+    sidebar
+        .add_project(project.clone(), "Project", temp.path())
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    for (id, parent) in [
+        ("Orphan", "missing"),
+        ("Cycle A", "Cycle B"),
+        ("Cycle B", "Cycle A"),
+    ] {
+        let mut thread = ThreadRecord::new(ThreadId::new(id), project.clone(), id);
+        thread.parent_thread_id = Some(ThreadId::new(parent));
+        thread.archived = true;
+        sidebar.threads.push(thread);
     }
+    let state = WorkbenchState::new(EmptySource, &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar);
+    let mut gui = HeadlessWorkbench::new(state, [1600.0, 900.0]);
+
+    // When / Then: they are listed once each, in the main list, with no archive or
+    // restore action (nothing can be said about their family).
+    gui.run();
+    for label in ["↳ Orphan", "↳ Cycle A", "↳ Cycle B"] {
+        assert_eq!(gui.count_labels(label), 1);
+    }
+    assert!(!gui.has_label("Archived (3)"));
+    assert!(!gui.has_label("Archive"));
+    assert!(!gui.has_label("Restore"));
+    assert!(gui.state().sidebar().threads.iter().all(|t| !t.archived));
 }
 
 const APPROVAL_LABEL: &str = "Approval needed: a tool call is waiting";

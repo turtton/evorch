@@ -6,7 +6,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use secret_guard::SecretRedactor;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -3514,6 +3514,18 @@ fn background_owner_detects_another_storages_request_after_wal_expiry() {
 // ---- Archived threads (PR-2) ----
 
 fn host_thread(fx: &Fixture, thread: &str, root: &str, archived: bool) {
+    // Every host edit of the series is numbered: one past the stored revision.
+    let revision = fx
+        .conn()
+        .query_row(
+            "SELECT archive_revision FROM threads WHERE thread_id = ?1",
+            [thread],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .unwrap()
+        .flatten()
+        .map_or(0, |revision| u64::try_from(revision).unwrap() + 1);
     crate::repo::threads::upsert(
         fx.conn(),
         crate::threads::ThreadWriter::Host,
@@ -3521,6 +3533,7 @@ fn host_thread(fx: &Fixture, thread: &str, root: &str, archived: bool) {
             thread_id: thread.into(),
             root_run_id: Some(root.into()),
             archived: Some(archived),
+            archive_revision: revision,
             created_at_ns: 1,
             updated_at_ns: 1,
             ..crate::threads::ThreadUpsert::default()

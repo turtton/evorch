@@ -143,16 +143,17 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
   必要とする行数は探索が読んだ行数と同じなので、`retention_finalize_budget` がそれに
   余裕を足した予算を返す。増えた family は `FinalizeBudget::doubled` で倍にして再試行すれば
   有限回で完遂する。
+  探索が `FamilyUnresolved` と判断した family は staging を捨てるが、メンバーと理由を `retention_unresolved` に残し
+  （探索のたびに作り直す）、表示用の `retention_schedule` はその理由を「保留」として返す（「次回起動時に削除予定」にしない）。
 - **判定入力は sidebar。** `RetentionInput` は呼び手が排他ロック取得後に読んだ
   sidebar を渡す。DB の `threads` の `archived` / `pinned` と revision 列は mirror で、
   検索除外と表示に使い、判定には使わない。revision が NULL（未初期化）の系列は
   sidebar から初期同期し、その際 archive 時刻を新しくしない。同じ revision で値が
   割れたら保護側（archived / pinned）を採る。Runtime writer はこれらの列を変えない。
-  revision を送らない（未採番）host は世代 0 として扱う。系列ごとに「最後の書き手が
-  未採番か」を `archive_unnumbered` / `pin_unnumbered` に記録し、未採番どうしは置換
-  （採番前の GUI が連続して編集できる）、未採番と採番済み（`Some(0)` を含む）は同世代
-  として保護側を採り、採番を一度でも受けた系列は未採番では上書きできない。host が採番
-  するようになったら、この未採番の経路と 2 列を廃止する（PR-4 の申し送り）。
+  host（GUI）は archive / pin の編集ごとに revision を採番して送る（`ThreadUpsert` の revision は必須で、
+  採番前の記録は世代 0・時刻なし）。高い revision が置換し、低いものは無視し、同じ revision で
+  値が割れたら保護側を採る。未採番の経路（`archive_unnumbered` / `pin_unnumbered` 列）は
+  v38 で廃止した。
 - **予算の意味。** `ExploreBudget` / `FinalizeBudget` が制限するのは新しく読む辺の数だけで、1 回の呼び出しの総 I/O ではない。
   2 つの family を併合するときの staging 行の付け替え、family 破棄（unresolved・機能の無効化）での staging 削除、
   探索済み family のメンバー一覧の読み出しは、以前に溜めた staging の量に比例する。起動時の排他フェーズで
@@ -273,8 +274,8 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
 
 - **capture の順序。** blob を書く → 参照行を DB に記録して commit を待つ → meta を公開する。記録に失敗したら
   meta を書かず `Err` を返す（blob だけが残り、次の sweep が回収する）。meta が見えるなら必ず行がある。
-  この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になる。
-  記録しない store（テスト・headless・配線前の GUI）の meta は、次の起動の mark が補う。
+  この順序は参照を記録する store（`runtime::artifacts::store_with_refs(root, handle)`）で有効になり、GUI はこれを使う。
+  記録しない store（テスト・headless）の meta は、次の起動の mark が補う。
 - **mark。** meta の名前を順に見て、参照行も `gc_unknown_meta` の記録も無い meta を開いて行にする（1 起動で
   `gc_meta_files`（既定 20,000）件・`gc_meta_bytes`（32 MiB）まで。読み取り途中で失敗した分の bytes も数える）。
   既知の meta は DB の索引引きだけで開かない。1 起動で名前を見る数は `gc_meta_lookups`（100,000）まで（保持する名前も
@@ -306,6 +307,78 @@ GUI は起動順に呼ぶだけで、判定と実行は runtime / storage にあ
   `refs_complete = false` のあいだ blob は残るだけで他は何も壊れない。
 - **運用。** meta が `gc_unknown_meta` に残り続ける間は blob が回収されない。報告の `unknown_sample` のファイルを
   修復するか削除すれば、次の起動で解消する。
+
+## スレッドの期限削除（GUI：起動・表示・採番）
+
+`evorch-gui` は起動を 3 段に分け、削除機能を有効にする。判定と削除は runtime / storage にあり、GUI は
+駆動・表示・sidebar の片付けだけを担う。
+
+- **起動の 3 段。** ① `prepare()`（引数・設定・DB と ownership root と sidebar のパスを確定。ロックは持たない）
+  → ウィンドウを開く。② 背景スレッド（`gui::startup`）が DB・root の排他ロックを取り（`try_exclusive`）、
+  sidebar を読み、起動フェーズを走らせ、共有ロックへ `downgrade` して tombstone と束縛を読み直す。
+  進捗はスプラッシュ（`gui::app::splash`）に段ごとに出る（● 実行中 / ✓ 完了、確定した family 数、経過時間）。
+  フェーズが終わるまでウィンドウの閉じる操作は無視される。他のプロセスがロックを持っていれば（`NoExclusive`）
+  フェーズは飛ばして通常起動し、`--demo` はフェーズを行わない。③ 1 フレーム内で `build_workbench`
+  （`Storage::open_with_lease` → 参照を記録する artifact store（`store_with_refs`）→ `OwnerHost::open` → tombstone guard → 回収 executor → 履歴の復元）。
+  段 7（artifact の実体回収）もスプラッシュに段として出る。
+  ②・③の失敗はスプラッシュと stderr に出て、ウィンドウを閉じるとコード 1 で終わる。
+- **sidebar の採番（family が状態を持つ）。** archive と pin は **family 単位**で、スレッド記録は状態を持たない。
+  family = `parent_thread_id` をたどった最上位の祖先から降りる全員（fork・rewind の旧版・escalation の子と、その子孫）。
+  キー = 最上位の祖先の ID で、表示中の版や選択中のスレッドに依存しない。sidebar.json の `families`
+  （`FamilyState { key, archived, archived_at, archive_revision, pinned, pin_revision }`）が **archive 系列 1 本・pin 系列 1 本**を持つ
+  （状態の無い family は未 archive・未 pin・revision 0）。スレッド記録の `archived` / `archived_at` / `pinned` は、
+  `SidebarState::refresh_derived`（唯一の書き手）が family から導いて表示に使う**派生値で、保存しない**。
+  GUI・DB への mirror・起動時の削除入力・60 秒ごとの schedule は、すべて `SidebarState::resolve_states`（同じ解決関数）を読む。
+  - **採番する操作は archive / unarchive / pin / unpin だけ。** 保存ロックの中で最新の sidebar（ファイル＋手元の
+    3-way merge）に対して family の該当系列だけを採番して書き（`shared_sidebar_transact`）、直後に DB へ mirror する。
+    archive は pin を、pin は archive を動かさない。pin は family 全体（過去の版・fork・escalation を含む）に効く。
+    ロックを取れなければ手元の状態は変えず、エラーを表示する。no-op の操作でも、他者が保存した内容は取り込む。
+  - **子の追加と版切替は所属を足すだけ。** fork・rewind・escalation の子の作成と版切替は、状態をコピーも採番もしない
+    （子は family の状態をそのまま読む）。fork・rewind・版切替は、ID の重複を防ぐため保存ロックの中で行い、ロックを取れない・
+    ファイルを読めない場合は何も作らない。escalation の子はイベントの畳み込み中に作るので失敗させず、手元に足して
+    次の保存で merge する（状態を持たないので、ロックが取れない間も状態は食い違わない）。
+  - **merge。** `families` はキーの和集合で、系列ごとに revision の高い側を採る（同値で内容が割れたら保護側 =
+    archived / pinned。archive の時刻が 2 つあれば遅い方。どちらが local でも同じ結果）。どちらか一方にしか無い状態は残す。古い画面の再追加・replay・import・再起動で、保存済みの revision は戻らない。
+  - **DB への射影。** DB のスレッド単位の列は、family 状態からの射影（派生）。family の状態が変わると、全メンバーの
+    upsert を作り直して送る（新しいメンバーにも同じ状態が付く）。再送は冪等で、プロセスが落ちても次の起動が sidebar から再構成する。
+    **射影の元は「確定した snapshot」だけ**: このプロセスが最後に保存・import に成功した結果（起動時は読み込んだファイル）で、
+    未保存の子や取り込み前の merge 結果は含めない（ロックが取れない間の escalation の子は、保存に成功するまで DB に出ない。
+    保存の merge で他者の新しい family 状態が入っていれば、その状態で最初の行が作られ、検索対象にならない）。
+    共有ファイルを持たない構成（テスト）だけは手元の状態から射影する。削除の保留表示（schedule）も同じ snapshot を使う。
+  - **解決できない所属。** 親が sidebar に無い、親の鎖が輪になっている、同じ ID に異なる親を与えた 2 つの sidebar を merge した（`parent_conflicts` に残し、子孫も含めて保留）、のスレッドは「解決不能」。状態を持たず
+    （未 archive・未 pin として表示）、archive / pin の操作は拒否し、DB へは archive / pin を送らず（DB の既存値を保つ）、
+    削除の入力では未 archive として送るので、その family の削除は保留になる。archive 一覧のホバーは、
+    保留の理由を "the family of related thread X cannot be resolved" と出す。
+  - **一度きりの変換（sidebar version 1 → 2）。** 起動の排他フェーズで、旧形式（スレッドごとの archived / pinned）を
+    読んだときに行い、保存してから判定に使う。archive は family 全員が archived のときだけ archived
+    （`archived_at` = 持っているメンバーの最大。時刻を持つメンバーが無ければ時刻なしのまま = 即時対象）。
+    **混在（一部だけ archived）の family は未 archive にし、新しい時刻は作らない。** pin は 1 人でも pinned なら pinned。
+    revision は旧メンバーの最大値と DB 側の値（スレッド行の revision）の最大より 1 大きくして始め、DB に無視されない。
+    変換した family 数・混在数・解決不能数はスプラッシュに出る。以後は変換しない。
+    **変換・DB の revision との突き合わせ・保存は排他取得側だけ**が行う。排他を取れない起動（他のプロセスが DB を保持）で
+    旧形式の sidebar を見つけたときは、変換した状態を公開も保存もせず起動を失敗させる（他のウィンドウを閉じて再起動する）。
+    新形式（version 2）の `NoExclusive` 起動は従来どおり。起動後に旧形式のファイルを読んでも（古いプログラムの書込み）変換せず、
+    family の状態を持たないファイルとして merge する。
+  - sidebar.json を読めない（壊れている）ときは、archive / pin の操作も通常の保存も、ファイルを上書きせずエラーにする
+    （他のウィンドウの pin / archive を確認できないまま古い状態を書くと、次回起動の削除判定に使われるため）。
+    import が失敗したときも、通常保存は同じファイルを読み直して merge し、読めない間は上書きしない。
+- **確定後の片付け。** 再読込した tombstone に載るスレッドは、sidebar・`user_messages`・下書き・選択から外れ、
+  sidebar の 3-way merge・import・復元・保存直前（merge しない保存も）でも戻らない（tombstone が merge の
+  「他方の編集を残す」規則に優先する）。
+- **guard。** 再読込した tombstone は `AgentRuntime` と `OwnerHost` の両方に設定する（別々の保存先）。
+  runtime への設定は、目標・手順の復元など runtime の入口を使う前に行い、復元関数は設定した証拠を引数に取る。
+- **表示。** アーカイブ一覧のタイトルのホバーに "Deletes in N days" / "Deletes at next startup" /
+  "Deletion on hold (reason)" を出す（owner が保持している間は "owner active until <ローカル日時>"）（機能が無効なら何も出さない。「今すぐ削除」はない）。状態は背景スレッドが
+  起動後・60 秒ごと・archive / unarchive / pin の後に計算し、探索済みの family の保留理由（pin・owner・
+  未期限の関連スレッド・系統の未解決・探索中）も含む。束縛が不一致のときは "Deletion disabled (configuration mismatch)"。
+  GUI の文言は既存の GUI に合わせて英語。
+- **通知。** 起動後に確定があった（または失敗があった）ときだけ "Startup maintenance: deleted N threads
+  (M runs); about X MB will be reclaimed. Skipped: …" を 1 件出す（artifact の実体を消したときは
+  "removed N unused artifact files (X MB)."、読めない artifact 記録で回収が止まっているときは Skipped に件数）。束縛不一致は "Thread deletion is disabled
+  (configuration mismatch: reason)"。`NoExclusive` は通知せず、ログだけ。
+
+実 DB のコピーでの確認は `cargo run -p gui --example startup_phase_check -- --db COPY/evorch-events.db --root COPY/threads --sidebar COPY/sidebar.json [--days 30] [--reclaim-cycles N]`
+（窓なしで起動フェーズ・sidebar の片付け・背景回収を走らせる。**原本には使わない**）。
 
 ## 既知の制約
 

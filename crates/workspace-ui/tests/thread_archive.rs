@@ -12,13 +12,15 @@ fn legacy_v1_defaults_when_archive_fields_are_absent() {
     // When: reading and reserializing the legacy v1 shape.
     let sidebar: SidebarState = serde_json::from_str(json).unwrap();
     let saved = serde_json::to_value(&sidebar).unwrap();
-    // Then: metadata defaults, without a schema bump, survive a round trip.
+    // Then: metadata defaults survive a round trip (the conversion into family
+    // states happens when the file is loaded, not when it is parsed).
     assert_eq!(sidebar.version, 1);
     assert!(!sidebar.threads[0].archived);
     assert_eq!(sidebar.threads[0].created_at, 0);
     assert_eq!(sidebar.threads[0].active_root, None);
     assert_eq!(saved["threads"][0]["active_root"], serde_json::Value::Null);
-    assert_eq!(saved["threads"][0]["archived"], false);
+    // The archive state is a family's, not saved with the record.
+    assert!(saved["threads"][0].get("archived").is_none());
     assert_eq!(saved["threads"][0]["created_at"], 0);
     assert_eq!(
         serde_json::from_value::<SidebarState>(saved).unwrap(),

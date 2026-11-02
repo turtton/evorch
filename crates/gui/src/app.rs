@@ -15,6 +15,8 @@ mod delivery;
 mod delivery_tests;
 mod escalation;
 mod external_commands;
+#[cfg(test)]
+mod family_state_tests;
 mod follow_ups;
 mod frame;
 mod frame_trace;
@@ -37,6 +39,7 @@ mod sandbox_settings;
 mod self_improvement_settings;
 mod shared_feed;
 mod shared_sidebar;
+pub mod splash;
 mod state;
 mod storage_settings;
 mod subagent_dock;
@@ -45,6 +48,7 @@ mod tab_viewer;
 mod theme_settings;
 mod thread_archive;
 mod thread_mirror;
+mod thread_retention;
 mod thread_search;
 mod usage_ledger;
 mod viewer;
@@ -52,6 +56,10 @@ mod work_panels;
 
 pub use attention::ack::{AttentionAck, DisplayRevision};
 pub use state::{ConversationFocus, WorkbenchState};
+pub use thread_retention::{
+    RetentionScheduler, RetentionSnapshot, StorageRetentionScheduler, confirmed_threads,
+    prune_deleted, startup_notice,
+};
 
 use crate::dock::DockConvertError;
 use crate::model::tasks::AgentRunSource;
@@ -73,6 +81,18 @@ pub enum WorkbenchError {
     Thread(#[from] workspace_ui::ThreadError),
     #[error("{0}")]
     Branch(&'static str),
+    #[error("Could not save the sidebar (another window may be saving it). Try again: {0}")]
+    SidebarBusy(String),
+}
+
+impl WorkbenchError {
+    /// The shared sidebar could not be edited: the action did not happen.
+    pub(crate) fn sidebar_busy(error: Box<dyn std::error::Error>) -> Self {
+        match error.downcast::<workspace_ui::ThreadError>() {
+            Ok(error) => Self::Thread(*error),
+            Err(error) => Self::SidebarBusy(error.to_string()),
+        }
+    }
 }
 
 /// eframe::App 実装。WorkbenchState をラップします。

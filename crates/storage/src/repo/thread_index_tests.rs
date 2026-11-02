@@ -2,7 +2,7 @@
 //! commits with FTS, guards, retry/backoff, eviction and tombstones. Time is
 //! always passed explicitly; nothing sleeps.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use secret_guard::SecretRedactor;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -1214,8 +1214,22 @@ use crate::threads::{ThreadUpsert, ThreadWriter};
 const PURGE_ROWS: usize = 200;
 const PURGE_BYTES: u64 = 2 * 1024 * 1024;
 
+fn next_archive_revision(conn: &Connection, thread: &str) -> u64 {
+    conn.query_row(
+        "SELECT archive_revision FROM threads WHERE thread_id = ?1",
+        [thread],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .unwrap()
+    .flatten()
+    .map_or(0, |revision| u64::try_from(revision).unwrap() + 1)
+}
+
 /// Host mirror of a thread; the upsert is what flips the index.
 fn host_thread(conn: &Connection, thread: &str, root: &str, archived: bool) {
+    // Every host edit of the series is numbered: one past the stored revision.
+    let revision = next_archive_revision(conn, thread);
     crate::repo::threads::upsert(
         conn,
         ThreadWriter::Host,
@@ -1223,6 +1237,7 @@ fn host_thread(conn: &Connection, thread: &str, root: &str, archived: bool) {
             thread_id: thread.into(),
             root_run_id: Some(root.into()),
             archived: Some(archived),
+            archive_revision: revision,
             created_at_ns: 1,
             updated_at_ns: 1,
             ..ThreadUpsert::default()

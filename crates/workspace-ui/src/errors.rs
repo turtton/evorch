@@ -67,6 +67,8 @@ pub enum ThreadError {
     UnknownThread,
     #[error("invalid extra read directory: {0}")]
     InvalidReadDirectory(String),
+    #[error("the thread's family cannot be resolved: {0}")]
+    UnresolvedFamily(String),
 }
 
 /// Sidebar persistence and validation errors.

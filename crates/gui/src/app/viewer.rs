@@ -170,6 +170,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 sidebar: &self.sidebar,
                 phases: &self.phases,
                 unread_threads: &self.unread_threads,
+                retention: &self.retention.statuses,
                 sidebar_action: &mut sidebar_action,
                 agents_action: &mut agents_action,
                 focus: &self.focus,

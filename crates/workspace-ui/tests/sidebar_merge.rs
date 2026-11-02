@@ -139,7 +139,7 @@ fn a_field_edited_on_both_sides_keeps_the_local_value() {
     local.threads[1].title = "Local title".into();
     let mut disk = base.clone();
     disk.threads[1].title = "Disk title".into();
-    disk.threads[1].pinned = true;
+    disk.set_pinned(&ThreadId::new("beta"), true).unwrap();
 
     // When: merged
     let merged = SidebarState::merge_three_way(&base, &local, &disk);

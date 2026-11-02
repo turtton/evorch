@@ -530,6 +530,8 @@ fn explore_in(
     policy: &ThreadRetentionPolicy,
     budget: ExploreBudget,
 ) -> Result<Vec<(String, FamilyState)>, StorageError> {
+    // What the last exploration could not resolve is recomputed by this one.
+    conn.execute("DELETE FROM retention_unresolved", [])?;
     if policy.archived_delete_after_days == 0 {
         conn.execute("DELETE FROM retention_staging_state", [])?;
         return Ok(Vec::new());
@@ -594,6 +596,14 @@ fn explore_in(
                 FamilyOutcome::OutOfBudget => break,
                 FamilyOutcome::Merged => restart = true,
                 FamilyOutcome::Unresolved(id) => {
+                    // Keep the reason for the schedule before the staging rows go.
+                    for member in members(conn, &key, "thread")? {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO retention_unresolved(thread_id, reason_id) \
+                             VALUES (?1, ?2)",
+                            params![member, id],
+                        )?;
+                    }
                     conn.execute(
                         "DELETE FROM retention_staging_state WHERE family_key = ?1",
                         [&key],

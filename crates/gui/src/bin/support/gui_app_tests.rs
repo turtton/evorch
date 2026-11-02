@@ -89,7 +89,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
         None,
     )
     .unwrap();
-    let mut app = GuiApp {
+    let mut app = Ready {
         workbench: WorkbenchApp(state),
         #[cfg(feature = "cef")]
         html_previews: {
@@ -102,11 +102,18 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
                 )),
             )
         },
+        executor: None,
         _storage: GuiStorageResources {
             _storage: bridge,
             ownership,
             _demo_directory: None,
             _storage_fallback: None,
+            _leases: storage::shared_with_wait(
+                &config.db_path,
+                &directory.path().join("lease-root"),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
         },
     };
     app.workbench.0.composer_mut().input = "hidden draft".into();
@@ -134,4 +141,137 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
     assert!(app.workbench.0.transcripts().thread().entries().iter().any(|entry| {
         matches!(entry, gui::model::transcript::TranscriptEntry::UserMessage { text, .. } if text == "repair me")
     }));
+}
+
+#[test]
+fn dropping_the_running_app_stops_the_executor_before_the_locks_are_released() {
+    // Given: a running app with a reclaim executor holding the reclaim lease, and
+    // shared start-up locks in its storage resources.
+    let directory = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: directory.path().join("events.db"),
+        ..Default::default()
+    };
+    let root = directory.path().join("owners");
+    let leases = storage::shared_with_wait(&config.db_path, &root, Duration::from_secs(1)).unwrap();
+    let storage = Storage::open_with_lease(config.clone(), leases.db_lease().unwrap()).unwrap();
+    let bus = Arc::new(EventBus::new(32));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(DemoScriptModel::new(bus.clone())),
+    );
+    let state = WorkbenchState::new(runtime, &UiSettings::default()).unwrap();
+    let ownership = Arc::new(
+        runtime::ownership::OwnerHost::open(&root, Default::default(), bus.clone()).unwrap(),
+    );
+    let bridge = spawn_storage_bridge(
+        bus,
+        storage,
+        "test",
+        config::DiagnosticPersistence::Off,
+        false,
+        SharedUsagePricing::default(),
+        None,
+    )
+    .unwrap();
+    let executor =
+        ReclaimExecutor::spawn(ExecutorConfig::new(bridge.handle(), config.clone(), None)).unwrap();
+    // The executor takes its lease on the first cycle.
+    assert!(executor.wait_for_cycles(1).holds_lease);
+    let app = Ready {
+        workbench: WorkbenchApp(state),
+        #[cfg(feature = "cef")]
+        html_previews: {
+            let (_, requests) = std::sync::mpsc::channel();
+            gui::html_preview::HtmlPreviewWindows::new(
+                requests,
+                Arc::new(gui::model::artifact_opener::PortalArtifactOpener),
+                Arc::new(gui::model::html_snapshots::HtmlSnapshots::new(
+                    directory.path().join("snapshots"),
+                )),
+            )
+        },
+        executor: Some(executor),
+        _storage: GuiStorageResources {
+            _storage: bridge,
+            ownership,
+            _demo_directory: None,
+            _storage_fallback: None,
+            _leases: leases,
+        },
+    };
+    assert!(storage::reclaim_lease(&config.db_path).unwrap().is_none());
+    assert!(
+        storage::try_exclusive(&config.db_path, &root)
+            .unwrap()
+            .is_none()
+    );
+
+    // When: the app is dropped.
+    drop(app);
+
+    // Then: the reclaim lease and the start-up locks are all released.
+    assert!(storage::reclaim_lease(&config.db_path).unwrap().is_some());
+    assert!(
+        storage::try_exclusive(&config.db_path, &root)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn the_start_up_wiring_makes_both_the_runtime_and_the_host_refuse_deleted_threads() {
+    // Given: a runtime and an ownership host as the start-up composes them, and the
+    // tombstones it read after the locks became shared.
+    let directory = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(32));
+    let runtime = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus.clone())),
+        Arc::new(DemoScriptModel::new(bus.clone())),
+    );
+    let host = runtime::ownership::OwnerHost::open(
+        &directory.path().join("owners"),
+        Default::default(),
+        bus,
+    )
+    .unwrap();
+    let tombstones = storage::thread_retention::TombstoneSet {
+        threads: ["gone".to_owned()].into(),
+        runs: ["gone-run".to_owned()].into(),
+        ..Default::default()
+    };
+    let goal = |thread: &str, root: &str| -> event_bus::ThreadGoalSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "goal_id": "g", "thread_id": thread, "root_run_id": root,
+            "related_root_run_ids": [], "objective": "o", "criteria": [], "checks": [],
+            "phase": "working", "review_enabled": false, "checks_paused": false,
+            "work_stopped": false, "epoch": 1, "review_round": 0, "findings": [],
+            "reason": null,
+            "usage": {"model_requests": 0, "input_tokens": 0, "output_tokens": 0},
+            "max_review_rounds": 1, "max_tokens": null, "original_request": "r"
+        }))
+        .unwrap()
+    };
+
+    // When: the wiring runs.
+    let guarded = install_runtime_tombstones(&runtime, &tombstones);
+    install_host_tombstones(&host, &tombstones);
+
+    // Then: a restore of a deleted thread or a deleted run is refused, a live one is
+    // not, and the host refuses to start the deleted thread.
+    let refusal = |thread, root| {
+        runtime
+            .restore_thread_goal(goal(thread, root))
+            .err()
+            .unwrap_or_default()
+    };
+    assert!(refusal("gone", "r1").contains("削除"));
+    assert!(refusal("live", "gone-run").contains("削除"));
+    assert!(!refusal("live", "r2").contains("削除"));
+    assert!(host.start("gone").is_err());
+    assert!(host.start("live").is_ok());
+    // And: the restore helpers only accept the proof the wiring returns.
+    restore_thread_goals(Default::default(), &runtime, &guarded);
 }

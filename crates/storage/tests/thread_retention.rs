@@ -1068,6 +1068,83 @@ fn schedule_reports_due_dates_and_protections() {
 }
 
 #[test]
+fn schedule_shows_why_an_explored_family_is_held() {
+    // Given: two forked, archived threads explored as one family; the child is pinned.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.thread("B", Some("A"), Some("rb"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.run("rb", None, Some("B"), "chat:Worker:B");
+    let database = f.database();
+    let mut input = sidebar(&["A", "B"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    let status = |input: &RetentionInput, overrides: &BTreeMap<String, BlockReason>| {
+        database
+            .retention_schedule(input, &policy(), overrides)
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    // When / Then: both are due until a member holds the family.
+    let free = status(&input, &BTreeMap::new());
+    assert_eq!(free["A"], RetentionStatus::DueNextStartup);
+    assert_eq!(free["B"], RetentionStatus::DueNextStartup);
+
+    // A pinned member holds the whole family, whatever the other thread alone says.
+    input.threads[1].pinned = true;
+    let pinned = status(&input, &BTreeMap::new());
+    assert_eq!(pinned["A"], RetentionStatus::Blocked(BlockReason::Pinned));
+    assert_eq!(pinned["B"], RetentionStatus::Blocked(BlockReason::Pinned));
+
+    // A member the sidebar no longer knows leaves the family unresolved.
+    input.threads[1].pinned = false;
+    input.threads.remove(1);
+    let unknown = status(&input, &BTreeMap::new());
+    assert_eq!(
+        unknown["A"],
+        RetentionStatus::Blocked(BlockReason::FamilyUnresolved("B".into()))
+    );
+
+    // A member held by an owner holds the family with the owner's reason.
+    let input = sidebar(&["A", "B"], &[]);
+    let owners = BTreeMap::from([("B".to_owned(), BlockReason::Owner("running".into()))]);
+    let held = status(&input, &owners);
+    assert_eq!(
+        held["A"],
+        RetentionStatus::Blocked(BlockReason::Owner("running".into()))
+    );
+}
+
+#[test]
+fn schedule_tells_preparing_from_due_while_the_backfill_is_unfinished() {
+    // Given: an archived, due thread and an event the backfill has not converted yet.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    f.sql("INSERT INTO events(schema_version, monotonic_ns, wall_clock_ns, kind, payload) VALUES (1, 1, 1, 'Message', '{}');");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    let status = |database: &Database| {
+        database
+            .retention_schedule(&input, &policy(), &BTreeMap::new())
+            .unwrap()[0]
+            .1
+            .clone()
+    };
+
+    // When / Then: it reads as preparing, not as due at the next start.
+    assert_eq!(
+        status(&database),
+        RetentionStatus::Blocked(BlockReason::Exploring)
+    );
+
+    // And: once the backfill is done the same thread is due.
+    database.retention_backfill_startup(100, 1_000).unwrap();
+    assert_eq!(status(&database), RetentionStatus::DueNextStartup);
+}
+
+#[test]
 fn the_fence_rejects_writers_but_not_deletes_after_confirmation() {
     // Given: a confirmed family whose rows are not reclaimed yet.
     let f = Fixture::new();
@@ -2357,6 +2434,21 @@ fn a_thread_lineage_cycle_or_a_self_parent_is_unresolved_and_confirms_nothing() 
             0,
             "{label}"
         );
+
+        // And: the schedule shown afterwards keeps the reason instead of "due".
+        let policy = policy();
+        let statuses = database
+            .retention_schedule(&input, &policy, &BTreeMap::new())
+            .unwrap();
+        for (thread, status) in &statuses {
+            assert!(
+                matches!(
+                    status,
+                    RetentionStatus::Blocked(BlockReason::FamilyUnresolved(_))
+                ),
+                "{label}: {thread} {status:?}"
+            );
+        }
     }
 
     // And: a chain below the link limit still resolves and confirms.

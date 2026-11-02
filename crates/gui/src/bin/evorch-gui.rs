@@ -1,12 +1,13 @@
 // allow: SIZE_OK - Existing GUI composition root; T3 only wires UI settings into startup, without restructuring runtime ownership.
 use config::agent_categories::CategoryId;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[cfg(test)]
 use event_bus::EventKind;
 use event_bus::{Event, EventBus, LifecycleEvent};
+use gui::app::splash::Splash;
 use gui::app::{WorkbenchApp, WorkbenchState};
 use gui::diff::FixtureDiffSource;
 use gui::events::EventPump;
@@ -19,17 +20,20 @@ use gui::model::demo::DemoScriptModel;
 use gui::model::provider_settings::{ProviderSettingsModel, provider_status_of};
 use gui::pty::ShellSpawner;
 use gui::runtime_sink::{RuntimeCommandSink, derive_repo_slug, new_stream_id};
+use gui::startup::{StartupMessage, StartupPrelude};
 use recorder::pricing::SharedUsagePricing;
 use recorder::storage_bridge::{self, OwnedStorageBridge, StorageBridge};
 use routing::ProcessEnv;
 use routing::factory::DEFAULT_AUTH_BASE_URL;
+use runtime::thread_retention::{ExecutorConfig, ReclaimExecutor, policy_from_config};
 use runtime::{
     AgentModel, AgentRuntime, ComposedRuntime, CompositionError, ExecutionPolicy, ModelSource,
     Role, RunConfig, RuntimeComposition, WorkspaceSeam, compose_runtime,
     production_executor_with_host_tools,
 };
 use sandbox::{CredentialError, CredentialStore, Secret};
-use storage::{Database, Storage, StorageConfig};
+use storage::thread_retention::ThreadRetentionPolicy;
+use storage::{Database, SharedLeases, Storage, StorageConfig};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 const EVENT_CAPACITY: usize = 2048;
@@ -75,6 +79,8 @@ enum GuiError {
     DemoRepo(String),
     #[error("ownership initialization failed: {0}")]
     Ownership(#[from] runtime::ownership::RegistryError),
+    #[error("start-up failed: {0}")]
+    Startup(String),
 }
 
 #[derive(Debug, Default)]
@@ -208,16 +214,6 @@ fn sidebar_path(arguments: &Arguments) -> Option<PathBuf> {
         .state
         .clone()
         .or_else(|| config::user_config_dir().map(|directory| directory.join("sidebar.json")))
-}
-
-fn load_sidebar(path: Option<&PathBuf>) -> Result<SidebarState, GuiError> {
-    let Some(path) = path else {
-        return Ok(SidebarState::default());
-    };
-    if path.exists() {
-        return Ok(workspace_ui::load_sidebar(path)?);
-    }
-    Ok(SidebarState::default())
 }
 
 /// The project the GUI was last working in; runs still bind to their thread's project.
@@ -457,9 +453,46 @@ impl eval::evaluator::EvaluatorHost for EvaluatorHost {
     }
 }
 
+/// Proof that the runtime refuses deleted threads and runs; the restore functions
+/// below need it, so they cannot be called before the guard is installed.
+struct RuntimeGuarded(());
+
+/// Installs the deleted identities (read after the start-up locks became shared) on
+/// the runtime. Every public entry that checks them reads this one guard.
+fn install_runtime_tombstones(
+    runtime: &runtime::AgentRuntime,
+    tombstones: &storage::thread_retention::TombstoneSet,
+) -> RuntimeGuarded {
+    if runtime
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
+            tombstones.clone(),
+        ))
+        .is_err()
+    {
+        tracing::warn!("a tombstone guard was already installed on the runtime");
+    }
+    RuntimeGuarded(())
+}
+
+/// The ownership host keeps a guard of its own (`OwnerHost::start / claim / attach`).
+fn install_host_tombstones(
+    host: &runtime::ownership::OwnerHost,
+    tombstones: &storage::thread_retention::TombstoneSet,
+) {
+    if host
+        .set_tombstone_guard(runtime::thread_retention::TombstoneGuard::new(
+            tombstones.clone(),
+        ))
+        .is_err()
+    {
+        tracing::warn!("a tombstone guard was already installed on the ownership host");
+    }
+}
+
 fn restore_thread_goals(
     goals: std::collections::BTreeMap<String, event_bus::ThreadGoalSnapshot>,
     runtime: &runtime::AgentRuntime,
+    _guarded: &RuntimeGuarded,
 ) {
     for snapshot in goals.into_values() {
         if let Err(error) = runtime.restore_thread_goal(snapshot) {
@@ -473,6 +506,7 @@ fn restore_thread_todos(
     todos: std::collections::BTreeMap<String, event_bus::ThreadTodoSnapshot>,
     runtime: &runtime::AgentRuntime,
     sidebar: &workspace_ui::SidebarState,
+    _guarded: &RuntimeGuarded,
 ) {
     for snapshot in todos.into_values() {
         if sidebar.threads.iter().any(|thread| {
@@ -595,22 +629,153 @@ fn codex_auth_model(
     }
 }
 
-fn run() -> Result<(), GuiError> {
-    gui::logging::init();
-    // Panicking runs then report where they panicked; the crash spool wraps this later.
-    runtime::panic_capture::install();
+/// Everything decided before the window exists. No lock is held yet.
+struct Prepared {
+    arguments: Arguments,
+    settings: UiSettings,
+    repo_root: PathBuf,
+    state_path: Option<PathBuf>,
+    demo_directory: Option<tempfile::TempDir>,
+    storage_db_path: PathBuf,
+    storage_fallback: Option<tempfile::TempDir>,
+    ownership_root: PathBuf,
+    artifact_directory: PathBuf,
+}
+
+impl Prepared {
+    fn startup_plan(&self) -> gui::startup::StartupPlan {
+        gui::startup::StartupPlan {
+            db_path: self.storage_db_path.clone(),
+            ownership_root: self.ownership_root.clone(),
+            sidebar_path: self.state_path.clone(),
+            artifacts_dir: Some(self.artifact_directory.clone()),
+            // The demo never deletes anything: its state is a temporary directory.
+            run_phase: !self.arguments.demo,
+        }
+    }
+}
+
+/// The project's configuration decides how long archived threads are kept.
+fn retention_policy_for(
+    repo_root: PathBuf,
+) -> impl FnOnce(&SidebarState) -> ThreadRetentionPolicy + Send + 'static {
+    move |sidebar| {
+        let (_, options) = effective_project_context(sidebar, &repo_root);
+        config::Config::load(&options).map_or_else(
+            |error| {
+                // Without a readable configuration nothing is deleted.
+                tracing::warn!(%error, "configuration unreadable; archived threads are kept");
+                ThreadRetentionPolicy {
+                    archived_delete_after_days: 0,
+                    ..ThreadRetentionPolicy::default()
+                }
+            },
+            |config| policy_from_config(&config.storage),
+        )
+    }
+}
+
+fn reload_retention_policy(policy: &Mutex<ThreadRetentionPolicy>, options: &config::LoadOptions) {
+    match config::Config::load(options) {
+        Ok(config) => {
+            if let Ok(mut policy) = policy.lock() {
+                *policy = policy_from_config(&config.storage);
+            }
+        }
+        Err(error) => tracing::warn!(%error, "retention period not reloaded"),
+    }
+}
+
+fn prepare() -> Result<Prepared, GuiError> {
     let arguments = parse_arguments()?;
-    let mut settings = load_settings(&arguments)?;
+    let settings = load_settings(&arguments)?;
     let repo_root = std::fs::canonicalize(std::env::current_dir()?)?;
     let state_path = sidebar_path(&arguments);
     if let Some(parent) = state_path.as_deref().and_then(std::path::Path::parent) {
         std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
     }
     let demo_directory = arguments.demo.then(tempfile::tempdir).transpose()?;
-    let sidebar = match demo_directory.as_ref() {
-        Some(directory) => demo_sidebar(&repo_root, directory.path())?,
-        None => load_sidebar(state_path.as_ref())?,
+    let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
+    let ownership_root = match demo_directory.as_ref() {
+        Some(directory) => directory.path().join("threads"),
+        None => std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
+            .ok_or_else(|| GuiError::Arguments("No state directory for ownership".into()))?
+            .join("evorch/threads"),
     };
+    // Presented artifacts must outlive the session so restored conversations show them.
+    let artifact_directory = storage_db_path.parent().map_or_else(
+        || PathBuf::from("artifacts"),
+        |parent| parent.join("artifacts"),
+    );
+    Ok(Prepared {
+        arguments,
+        settings,
+        repo_root,
+        state_path,
+        demo_directory,
+        storage_db_path,
+        storage_fallback,
+        ownership_root,
+        artifact_directory,
+    })
+}
+
+fn run() -> Result<(), GuiError> {
+    gui::logging::init();
+    // Panicking runs then report where they panicked; the crash spool wraps this later.
+    runtime::panic_capture::install();
+    let prepared = prepare()?;
+    let title = prepared.arguments.window_title.clone();
+    let options = gui::window::native_options(&title);
+    let failure = Arc::new(Mutex::new(None::<String>));
+    let reported = Arc::clone(&failure);
+    eframe::run_native(
+        &title,
+        options,
+        Box::new(move |creation_context| {
+            Ok(Box::new(GuiApp::Starting(Box::new(Starting::begin(
+                prepared,
+                creation_context.egui_ctx.clone(),
+                reported,
+            )))))
+        }),
+    )
+    .map_err(|error| GuiError::Eframe(error.to_string()))?;
+    // A start-up that failed leaves its error on the splash until the window is
+    // closed; the process then ends with it.
+    let failed = failure.lock().ok().and_then(|mut slot| slot.take());
+    failed.map_or(Ok(()), |error| Err(GuiError::Startup(error)))
+}
+
+/// The third stage: everything the old start-up did after reading the sidebar, run
+/// inside a frame once the locks are held.
+#[allow(clippy::too_many_lines)]
+fn build_workbench(
+    prepared: Prepared,
+    mut prelude: StartupPrelude,
+    ctx: &egui::Context,
+) -> Result<Ready, GuiError> {
+    let Prepared {
+        arguments,
+        mut settings,
+        repo_root,
+        state_path,
+        demo_directory,
+        storage_db_path,
+        storage_fallback,
+        ownership_root,
+        artifact_directory,
+    } = prepared;
+    let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
+    let _ = repaint_ctx.set(ctx.clone());
+    let mut sidebar = match demo_directory.as_ref() {
+        Some(directory) => demo_sidebar(&repo_root, directory.path())?,
+        None => prelude.sidebar.take().unwrap_or_default(),
+    };
+    let retention_sidebar_path = state_path.clone().filter(|_| !arguments.demo);
+    let pruned = gui::app::prune_deleted(&mut sidebar, &prelude.tombstones);
     let (effective_project_root, load_options) = effective_project_context(&sidebar, &repo_root);
     let loaded_config: Option<Result<config::Config, config::ConfigError>> = if arguments.demo {
         None
@@ -640,6 +805,9 @@ fn run() -> Result<(), GuiError> {
         }
         None => config::Config::default(),
     };
+    // Shared with the config reload, which replaces it; the sidebar reads it for
+    // the deletion dates it shows.
+    let retention_policy = Arc::new(Mutex::new(policy_from_config(&composition_config.storage)));
     settings.keybinds = gui::keymap::panel_keybinds(&settings.keybinds, &composition_config.panel)?;
     // Retain the fail-closed store when the credential directory cannot be opened.
     let credential_store: Arc<dyn CredentialStore> = settings_store
@@ -669,7 +837,6 @@ fn run() -> Result<(), GuiError> {
             Arc::new(runtime::compose::SwitchableModel::new(initial)),
         )
     });
-    let (storage_db_path, storage_fallback) = storage_db_path(demo_directory.as_ref())?;
     let storage_config = StorageConfig {
         db_path: storage_db_path,
         usage_retention_days: composition_config.metrics.retention_days,
@@ -677,7 +844,7 @@ fn run() -> Result<(), GuiError> {
         retain_terminal_task_progress: composition_config.diagnostics.retain_terminal_task_progress,
         ..StorageConfig::default()
     };
-    let storage = Storage::open(storage_config.clone())?;
+    let storage = Storage::open_with_lease(storage_config.clone(), prelude.leases.db_lease()?)?;
     start_gui_index_owner(&storage.handle())?;
     // The Evaluator reads and pins threads of the same database the GUI records into.
     let evaluator_host = Arc::new(EvaluatorHost::default());
@@ -766,6 +933,8 @@ fn run() -> Result<(), GuiError> {
             (runtime, agent_browser)
         }
     };
+    // Before anything restores or continues a conversation.
+    let runtime_guarded = install_runtime_tombstones(&runtime, &prelude.tombstones);
     #[cfg(not(feature = "browser"))]
     drop(agent_browser);
 
@@ -791,12 +960,15 @@ fn run() -> Result<(), GuiError> {
         }
     };
     // Presented artifacts must outlive the session so restored conversations show them.
-    let artifact_directory = storage_config.db_path.parent().map_or_else(
-        || PathBuf::from("artifacts"),
-        |parent| parent.join("artifacts"),
-    );
-    let runtime = match runtime::artifacts::ArtifactStore::new(&artifact_directory) {
-        Ok(store) => runtime.with_artifact_store(Arc::new(store)),
+    let mut artifact_store = None;
+    // Every capture records its reference before its meta file appears, which is
+    // what lets the start-up collection of unused blob files trust the references.
+    let runtime = match runtime::artifacts::store_with_refs(&artifact_directory, storage.handle()) {
+        Ok(store) => {
+            let store = Arc::new(store);
+            artifact_store = Some(Arc::clone(&store));
+            runtime.with_artifact_store(store)
+        }
         Err(error) => {
             tracing::warn!(%error, path = %artifact_directory.display(), "artifact store unavailable; artifact tools are disabled");
             runtime
@@ -836,7 +1008,6 @@ fn run() -> Result<(), GuiError> {
         }
     };
 
-    let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
     // A new bus event may wait for the coalescing window; work the pump is
     // already holding (backlog, retries) must not, so it gets an immediate hook.
     let arrival_hook = {
@@ -993,7 +1164,7 @@ fn run() -> Result<(), GuiError> {
         });
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_goals");
-    restore_thread_goals(snapshots.goals, &runtime);
+    restore_thread_goals(snapshots.goals, &runtime, &runtime_guarded);
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_evaluator_host");
     let _ = evaluator_host.runtime.set(runtime.downgrade());
@@ -1001,6 +1172,7 @@ fn run() -> Result<(), GuiError> {
         let production = production_model.clone();
         let projects = project_models.clone();
         let handle = storage.handle();
+        let retention_policy = Arc::clone(&retention_policy);
         let options = if demo_directory.is_some() {
             settings_load_options.clone()
         } else {
@@ -1008,23 +1180,16 @@ fn run() -> Result<(), GuiError> {
         };
         Box::new(move || {
             gui::model::production::reload_models(production.as_ref(), projects.as_ref())?;
+            reload_retention_policy(&retention_policy, &options);
             reload_index_settings(&handle, &options)
         })
     });
     stage.finish();
     let stage = gui::restore_metrics::RestoreTimer::new("runtime_todos");
-    restore_thread_todos(snapshots.todos, &runtime, &sidebar);
+    restore_thread_todos(snapshots.todos, &runtime, &sidebar, &runtime_guarded);
     stage.finish();
     restore.finish();
 
-    let ownership_root = match demo_directory.as_ref() {
-        Some(directory) => directory.path().join("threads"),
-        None => std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))
-            .ok_or_else(|| GuiError::Arguments("No state directory for ownership".into()))?
-            .join("evorch/threads"),
-    };
     let ownership_settings = loaded_config
         .as_ref()
         .and_then(|loaded| loaded.as_ref().ok())
@@ -1035,6 +1200,9 @@ fn run() -> Result<(), GuiError> {
         ownership_settings,
         Arc::clone(&bus),
     )?);
+    // Deleted threads and runs are refused from here on. The set was read after the
+    // start-up locks became shared, so no other process can add to it meanwhile.
+    install_host_tombstones(&ownership, &prelude.tombstones);
     // Thread scratch lives as long as this process owns the thread (ADR 0033).
     runtime.set_thread_scratch(ownership.thread_scratch());
     // Install the retained host before any later fallible startup work. State
@@ -1044,6 +1212,7 @@ fn run() -> Result<(), GuiError> {
         ownership: Arc::clone(&ownership),
         _demo_directory: demo_directory,
         _storage_fallback: storage_fallback,
+        _leases: prelude.leases,
     };
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
@@ -1119,6 +1288,7 @@ fn run() -> Result<(), GuiError> {
         }
     }
     state = state.with_sidebar(sidebar);
+
     if let Some(executable) = std::env::var_os("EVORCH_SLASH_COMMAND_EXECUTABLE") {
         state.load_external_commands(executable.into());
     }
@@ -1137,13 +1307,26 @@ fn run() -> Result<(), GuiError> {
             improvement_draft_dir,
         )
         .with_usage_ledger(storage.handle(), usage_pricing)
-        .with_thread_mirror(storage.handle());
+        .with_thread_mirror(storage.handle())
+        .with_tombstones(prelude.tombstones.clone());
+    if pruned > 0 {
+        state.save_sidebar();
+    }
+    if let Some(sidebar_path) = retention_sidebar_path {
+        state = state.with_retention_scheduler(Arc::new(gui::app::StorageRetentionScheduler {
+            storage_config: storage_config.clone(),
+            ownership_root: ownership_root.clone(),
+            sidebar_path,
+            policy: Arc::clone(&retention_policy),
+        }));
+    }
     let stage = gui::restore_metrics::RestoreTimer::new("startup_history");
     state.restore_history_with_ownership(
         &storage::Database::open(&storage_config)?,
         &ownership_root.join("owners.db"),
     )?;
     stage.finish();
+    state.announce_startup_retention(&prelude.report, prelude.binding.as_ref());
     if !arguments.demo {
         // Show what other windows sharing this database do; after the restore,
         // which fixes where following starts.
@@ -1170,44 +1353,137 @@ fn run() -> Result<(), GuiError> {
         });
     }
 
-    // One captured owner preserves shutdown ordering even if run_native fails
-    // before invoking its app constructor and only drops the closure captures.
-    let storage_resources = storage;
+    let executor = if arguments.demo {
+        None
+    } else {
+        match ReclaimExecutor::spawn(ExecutorConfig::new(
+            storage.handle(),
+            storage_config.clone(),
+            artifact_store,
+        )) {
+            Ok(executor) => Some(executor),
+            Err(error) => {
+                tracing::warn!(%error, "the background reclaim of deleted threads could not start");
+                None
+            }
+        }
+    };
     #[cfg(feature = "cef")]
     let inspecting_runtime = runtime.clone();
-    let title = arguments.window_title;
-    let options = gui::window::native_options(&title);
-    eframe::run_native(
-        &title,
-        options,
-        Box::new(move |creation_context| {
-            let _ = repaint_ctx.set(creation_context.egui_ctx.clone());
-            state.reload_theme(&creation_context.egui_ctx, settings.theme_preset.into());
-            #[cfg(feature = "cef")]
-            html_previews.install_snapshots(&creation_context.egui_ctx);
-            // Fix tool availability now without starting CEF. The first page
-            // request wakes this GUI thread to initialize it; shutdown stays
-            // on the same thread and the tool schema never changes.
-            #[cfg(feature = "cef")]
-            match html_previews.artifact_pages(&creation_context.egui_ctx) {
-                Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
-                Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
-            }
-            Ok(Box::new(GuiApp {
-                workbench: WorkbenchApp(state),
-                #[cfg(feature = "cef")]
-                html_previews,
-                _storage: storage_resources,
-            }))
-        }),
-    )
-    .map_err(|error| GuiError::Eframe(error.to_string()))
+    state.reload_theme(ctx, settings.theme_preset.into());
+    #[cfg(feature = "cef")]
+    html_previews.install_snapshots(ctx);
+    // Fix tool availability now without starting CEF. The first page
+    // request wakes this GUI thread to initialize it; shutdown stays
+    // on the same thread and the tool schema never changes.
+    #[cfg(feature = "cef")]
+    match html_previews.artifact_pages(ctx) {
+        Ok(pages) => inspecting_runtime.set_artifact_pages(pages),
+        Err(error) => tracing::warn!(%error, "agents cannot inspect HTML artifacts"),
+    }
+    Ok(Ready {
+        workbench: WorkbenchApp(state),
+        #[cfg(feature = "cef")]
+        html_previews,
+        executor,
+        _storage: storage,
+    })
 }
 
-struct GuiApp {
+/// The window's app: the splash while the start-up runs, then the workbench.
+enum GuiApp {
+    Starting(Box<Starting>),
+    Running(Box<Ready>),
+}
+
+/// The first two stages: the start-up thread runs while the splash shows its
+/// progress, then the workbench is built inside one frame.
+struct Starting {
+    prepared: Option<Prepared>,
+    splash: Splash,
+    receiver: std::sync::mpsc::Receiver<StartupMessage>,
+    prelude: Option<StartupPrelude>,
+    /// The splash was painted once with the "restoring" message.
+    restoring_shown: bool,
+    ctx: egui::Context,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl Starting {
+    fn begin(prepared: Prepared, ctx: egui::Context, failure: Arc<Mutex<Option<String>>>) -> Self {
+        let wake_ctx = ctx.clone();
+        let receiver = gui::startup::spawn_startup(
+            prepared.startup_plan(),
+            retention_policy_for(prepared.repo_root.clone()),
+            Arc::new(move || wake_ctx.request_repaint()),
+        );
+        Self {
+            prepared: Some(prepared),
+            splash: Splash::new(),
+            receiver,
+            prelude: None,
+            restoring_shown: false,
+            ctx,
+            failure,
+        }
+    }
+
+    fn fail(&mut self, error: &str) {
+        eprintln!("evorch-gui: {error}");
+        self.splash.fail(error);
+        if let Ok(mut slot) = self.failure.lock() {
+            *slot = Some(error.to_owned());
+        }
+    }
+
+    /// Draws one frame; returns the workbench once it is built.
+    fn ui(&mut self, ui: &mut egui::Ui) -> Option<Ready> {
+        while let Ok(message) = self.receiver.try_recv() {
+            match message {
+                StartupMessage::Event(event) => self.splash.apply(&event),
+                StartupMessage::Finished(result) => match *result {
+                    Ok(prelude) => {
+                        self.prelude = Some(prelude);
+                        self.splash.restoring();
+                    }
+                    Err(error) => self.fail(&error.to_string()),
+                },
+            }
+        }
+        // Closing now would stop in the middle of a deletion the next start
+        // would have to finish; the phase is bounded, so the window waits for it.
+        if self.splash.error().is_none()
+            && ui.ctx().input(|input| input.viewport().close_requested())
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        self.splash.ui(ui);
+        self.prelude.as_ref()?;
+        if !self.restoring_shown {
+            // Paint "restoring" first: building the workbench occupies the frame.
+            self.restoring_shown = true;
+            self.ctx.request_repaint();
+            return None;
+        }
+        let (prepared, prelude) = (self.prepared.take()?, self.prelude.take()?);
+        match build_workbench(prepared, prelude, &self.ctx) {
+            Ok(ready) => Some(ready),
+            Err(error) => {
+                self.fail(&error.to_string());
+                None
+            }
+        }
+    }
+}
+
+/// The running workbench.
+struct Ready {
     workbench: WorkbenchApp<AgentRuntime>,
     #[cfg(feature = "cef")]
     html_previews: gui::html_preview::HtmlPreviewWindows,
+    /// Stops before the storage resources are released.
+    executor: Option<ReclaimExecutor>,
     _storage: GuiStorageResources,
 }
 
@@ -1218,6 +1494,8 @@ struct GuiStorageResources {
     ownership: Arc<runtime::ownership::OwnerHost>,
     _demo_directory: Option<tempfile::TempDir>,
     _storage_fallback: Option<tempfile::TempDir>,
+    /// Last: the shared locks outlive every user of the database and the ownership root.
+    _leases: SharedLeases,
 }
 
 impl GuiStorageResources {
@@ -1240,11 +1518,12 @@ impl Drop for GuiStorageResources {
         // The bridge is still subscribed when release_ready emits Released.
         // Its final snapshot durably records that transition after prior deltas.
         self._storage.shutdown();
-        // Fields then close SQLite, drop the retained host and remove temp dirs.
+        // Fields then close SQLite, drop the retained host, remove temp dirs and
+        // release the shared locks.
     }
 }
 
-impl eframe::App for GuiApp {
+impl eframe::App for Ready {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.workbench.logic(ctx, frame);
         #[cfg(feature = "cef")]
@@ -1264,9 +1543,38 @@ impl eframe::App for GuiApp {
     }
 }
 
-impl Drop for GuiApp {
+impl Drop for Ready {
     fn drop(&mut self) {
         self.workbench.0.flush_composer_draft();
+        if let Some(executor) = self.executor.take() {
+            executor.shutdown();
+        }
+    }
+}
+
+impl eframe::App for GuiApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Self::Running(ready) = self {
+            ready.logic(ctx, frame);
+        }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Self::Running(ready) = self {
+            ready.raw_input_hook(ctx, raw_input);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        match self {
+            Self::Starting(starting) => {
+                if let Some(ready) = starting.ui(ui) {
+                    *self = Self::Running(Box::new(ready));
+                    ui.ctx().request_repaint();
+                }
+            }
+            Self::Running(ready) => ready.ui(ui, frame),
+        }
     }
 }
 
@@ -1962,6 +2270,12 @@ mod storage_shutdown_tests {
             ownership: host.clone(),
             _demo_directory: None,
             _storage_fallback: None,
+            _leases: storage::shared_with_wait(
+                &config.db_path,
+                &directory.path().join("lease-root"),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
         };
         let constructor = move || resources;
         // Unwinding must resume the writer before the constructor's captured

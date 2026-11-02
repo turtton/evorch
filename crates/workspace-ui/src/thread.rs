@@ -118,9 +118,23 @@ pub struct ThreadRecord {
     /// first message may replace it. Cleared by any rename or applied auto-title.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_is_placeholder: bool,
+    /// Derived from the thread's family (see [`SidebarState::refresh_derived`], its
+    /// only writer) for the views that read a record; never saved. An older file
+    /// still carries it, which is how it is converted into family states.
+    #[serde(default, skip_serializing)]
     pub pinned: bool,
-    #[serde(default)]
+    /// Derived like `pinned`.
+    #[serde(default, skip_serializing)]
     pub archived: bool,
+    /// Derived like `pinned`: the time the family was archived at, if known.
+    #[serde(default, skip_serializing)]
+    pub archived_at: Option<i64>,
+    /// Read from an older file only, for its conversion into family states.
+    #[serde(default, skip_serializing)]
+    pub archive_revision: u64,
+    /// Read from an older file only, for its conversion into family states.
+    #[serde(default, skip_serializing)]
+    pub pin_revision: u64,
     #[serde(default)]
     pub created_at: i64,
     /// Latest conversation activity in UNIX seconds; older records fall back to `created_at`.
@@ -189,6 +203,9 @@ impl ThreadRecord {
             title_is_placeholder: false,
             pinned: false,
             archived: false,
+            archived_at: None,
+            archive_revision: 0,
+            pin_revision: 0,
             created_at: unix_seconds(std::time::SystemTime::now()),
             updated_at: 0,
             run_ids: Vec::new(),

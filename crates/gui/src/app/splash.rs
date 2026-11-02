@@ -1,0 +1,272 @@
+//! The window shown while the process takes its locks and the start-up
+//! maintenance runs (see [`crate::startup`]): it lists each stage as it starts and
+//! finishes, counts the families whose deletion was confirmed, and shows the time
+//! spent and any failure.
+
+use std::time::{Duration, Instant};
+
+use runtime::thread_retention::{Stage, StartupProgress};
+
+use crate::startup::StartupEvent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageState {
+    Running,
+    Finished,
+}
+
+/// What the splash knows so far.
+#[derive(Debug)]
+pub struct Splash {
+    started: Instant,
+    message: String,
+    stages: Vec<(String, StageState)>,
+    confirmed_families: usize,
+    error: Option<String>,
+    /// The workbench is being built; the splash is on screen for this one frame.
+    restoring: bool,
+}
+
+impl Default for Splash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The name of a stage. A stage this build does not know is shown by its debug
+/// name, so adding one to the phase never breaks the splash.
+#[allow(unreachable_patterns)]
+fn stage_label(stage: Stage) -> String {
+    match stage {
+        Stage::Backfill => "Attributing events".to_owned(),
+        Stage::Explore => "Exploring threads to delete".to_owned(),
+        Stage::Finalize => "Confirming deletions".to_owned(),
+        Stage::Owners => "Cleaning owner records".to_owned(),
+        Stage::Scratch => "Removing scratch directories".to_owned(),
+        Stage::Oversized => "Removing oversized rows".to_owned(),
+        Stage::ArtifactGc => "Collecting unused artifact files".to_owned(),
+        Stage::Vacuum => "Reclaiming free space".to_owned(),
+        _ => format!("{stage:?}"),
+    }
+}
+
+impl Splash {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            message: "Acquiring locks…".to_owned(),
+            stages: Vec::new(),
+            confirmed_families: 0,
+            error: None,
+            restoring: false,
+        }
+    }
+
+    pub fn apply(&mut self, event: &StartupEvent) {
+        match event {
+            StartupEvent::ExclusiveTaken => "Reading the sidebar…".clone_into(&mut self.message),
+            StartupEvent::ExclusiveUnavailable => {
+                "Another window is running; startup maintenance is skipped."
+                    .clone_into(&mut self.message);
+            }
+            StartupEvent::SidebarLoaded { threads } => {
+                self.message = format!("Checking {threads} threads…");
+            }
+            StartupEvent::SidebarConverted {
+                families,
+                mixed,
+                unresolved,
+            } => {
+                self.message = if *families == 0 {
+                    "Updating thread numbering…".to_owned()
+                } else {
+                    format!("Converted {families} thread families to the new format…")
+                };
+                if *mixed > 0 || *unresolved > 0 {
+                    self.message.push_str(&format!(
+                        " ({mixed} partly archived kept as not archived, {unresolved} unresolved)"
+                    ));
+                }
+            }
+            StartupEvent::Phase(progress) => self.apply_progress(progress),
+            StartupEvent::Shared => {
+                "Locks are now shared.".clone_into(&mut self.message);
+            }
+        }
+    }
+
+    fn apply_progress(&mut self, progress: &StartupProgress) {
+        match progress {
+            StartupProgress::StageStarted(stage) => {
+                self.stages.push((stage_label(*stage), StageState::Running));
+            }
+            StartupProgress::StageFinished(stage) => {
+                let label = stage_label(*stage);
+                if let Some((_, state)) = self
+                    .stages
+                    .iter_mut()
+                    .rev()
+                    .find(|(name, state)| *name == label && *state == StageState::Running)
+                {
+                    *state = StageState::Finished;
+                }
+            }
+            StartupProgress::FamilyConfirmed { .. } => self.confirmed_families += 1,
+            StartupProgress::RootBound => {}
+        }
+    }
+
+    /// The start-up is over and the workbench is being restored.
+    pub fn restoring(&mut self) {
+        self.restoring = true;
+        "Restoring history…".clone_into(&mut self.message);
+    }
+
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.error = Some(error.into());
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    #[must_use]
+    pub const fn is_restoring(&self) -> bool {
+        self.restoring
+    }
+
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Draws the splash. Elapsed time changes by itself, so a repaint is asked for.
+    pub fn ui(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.25);
+            ui.heading("evorch");
+            ui.add_space(12.0);
+            ui.label(&self.message);
+            ui.add_space(12.0);
+            for (name, state) in &self.stages {
+                let mark = match state {
+                    StageState::Running => "●",
+                    StageState::Finished => "✓",
+                };
+                ui.label(format!("{mark} {name}"));
+            }
+            if self.confirmed_families > 0 {
+                ui.add_space(8.0);
+                ui.label(format!("Confirmed families: {}", self.confirmed_families));
+            }
+            ui.add_space(8.0);
+            ui.label(format!("Elapsed {:.1} s", self.elapsed().as_secs_f32()));
+            if let Some(error) = &self.error {
+                ui.add_space(12.0);
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Startup failed: {error}"),
+                );
+            }
+        });
+        if self.error.is_none() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    use super::*;
+
+    fn started(stage: Stage) -> StartupEvent {
+        StartupEvent::Phase(StartupProgress::StageStarted(stage))
+    }
+
+    fn finished(stage: Stage) -> StartupEvent {
+        StartupEvent::Phase(StartupProgress::StageFinished(stage))
+    }
+
+    #[test]
+    fn every_stage_the_phase_reports_has_a_name_of_its_own() {
+        for stage in [
+            Stage::Backfill,
+            Stage::Explore,
+            Stage::Finalize,
+            Stage::Owners,
+            Stage::Scratch,
+            Stage::Oversized,
+            Stage::ArtifactGc,
+            Stage::Vacuum,
+        ] {
+            assert_ne!(stage_label(stage), format!("{stage:?}"), "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn stages_appear_in_the_order_they_start_and_the_finished_ones_are_ticked() {
+        // Given: a splash that saw the first stage finish and the second start.
+        let mut splash = Splash::new();
+        for event in [
+            StartupEvent::ExclusiveTaken,
+            started(Stage::Backfill),
+            finished(Stage::Backfill),
+            started(Stage::Explore),
+            StartupEvent::Phase(StartupProgress::FamilyConfirmed {
+                family_key: "f".into(),
+            }),
+        ] {
+            splash.apply(&event);
+        }
+
+        // When: it is drawn.
+        let mut harness = Harness::new_ui(|ui| splash.ui(ui));
+        harness.run_steps(2);
+
+        // Then: finished and running stages are marked, and the confirmed count shows.
+        harness.get_by_label("✓ Attributing events");
+        harness.get_by_label("● Exploring threads to delete");
+        harness.get_by_label("Confirmed families: 1");
+        assert!(harness.query_by_label_contains("Confirmed").is_some());
+        assert!(harness.query_by_label_contains("Startup failed").is_none());
+    }
+
+    #[test]
+    fn the_conversion_of_an_older_sidebar_is_announced_with_what_was_kept_aside() {
+        // Given: a splash told the sidebar was converted, with a partly archived family.
+        let mut splash = Splash::new();
+        splash.apply(&StartupEvent::SidebarConverted {
+            families: 189,
+            mixed: 1,
+            unresolved: 0,
+        });
+
+        // When: it is drawn.
+        let mut harness = Harness::new_ui(|ui| splash.ui(ui));
+        harness.run_steps(2);
+
+        // Then: the line names the families and the one that stays as not archived.
+        harness.get_by_label(
+            "Converted 189 thread families to the new format… (1 partly archived kept as not archived, 0 unresolved)",
+        );
+    }
+
+    #[test]
+    fn a_failure_is_shown_and_the_restore_message_replaces_the_progress_line() {
+        let mut splash = Splash::new();
+        splash.restoring();
+        assert!(splash.is_restoring());
+        splash.fail("database is locked");
+        assert_eq!(splash.error(), Some("database is locked"));
+
+        let mut harness = Harness::new_ui(|ui| splash.ui(ui));
+        harness.run_steps(2);
+
+        harness.get_by_label("Restoring history…");
+        harness.get_by_label_contains("Startup failed: database is locked");
+    }
+}

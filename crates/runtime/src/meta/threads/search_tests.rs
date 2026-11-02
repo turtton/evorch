@@ -2448,13 +2448,16 @@ fn byte_heavy_blocks_stay_within_derived_bounds_and_drain_completely() {
 // ---- Archived threads are out of every search route (PR-2) ----
 
 impl Fixture {
-    /// Host mirror of the archive flag; every other column keeps its value.
+    /// Host mirror of the archive flag; every other column keeps its value. A thread
+    /// is archived (revision 1) and may then be restored (revision 2), the numbering
+    /// the sidebar gives those two edits.
     fn set_archived(&self, id: &str, archived: bool) {
         self.store()
             .handle
             .upsert_threads_host(&[ThreadUpsert {
                 thread_id: id.into(),
                 archived: Some(archived),
+                archive_revision: if archived { 1 } else { 2 },
                 created_at_ns: 1,
                 updated_at_ns: 1,
                 ..Default::default()

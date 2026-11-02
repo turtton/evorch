@@ -23,19 +23,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let id = ThreadId::new(event_bus::escalation_thread_id(new_run_id));
         let created = !self.sidebar.threads.iter().any(|thread| thread.id == id);
         if created {
-            let mut child = ThreadRecord::new(
-                id.clone(),
-                parent.project_id,
-                format!("Orchestrator · {}", parent.title),
-            );
-            child.archived = parent.archived;
-            child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
-            // The runtime copies the declaration at handoff; the record keeps it
-            // across restarts (ADR 0037).
-            child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
-            child.parent_thread_id = Some(parent.id.clone());
-            child.escalation_source_run_id = Some(source_run_id.into());
-            self.sidebar.threads.push(child);
+            self.create_escalation_thread(&id, &parent, source_run_id);
         }
         let thread_id = id.to_string();
         let adopted = !self.transcripts.is_thread_root(new_run_id);
@@ -85,6 +73,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         created || bound
+    }
+
+    /// Creates the escalated conversation as a child of `parent`. It only joins the
+    /// family of `parent`: archive and pin state belong to the family, so there is
+    /// nothing to copy, settle or retry, and the child reads the family's state as soon
+    /// as it is a member. A history event cannot fail, and adding a member needs no
+    /// lock; the next save merges it into the shared sidebar.
+    fn create_escalation_thread(
+        &mut self,
+        id: &ThreadId,
+        parent: &ThreadRecord,
+        source_run_id: &str,
+    ) {
+        let mut child = ThreadRecord::new(
+            id.clone(),
+            parent.project_id.clone(),
+            format!("Orchestrator · {}", parent.title),
+        );
+        child.chat_role = Some(workspace_ui::ThreadChatRole::Orchestrator);
+        // The runtime copies the declaration at handoff; the record keeps it
+        // across restarts (ADR 0037).
+        child.extra_read_dirs.clone_from(&parent.extra_read_dirs);
+        child.parent_thread_id = Some(parent.id.clone());
+        child.escalation_source_run_id = Some(source_run_id.into());
+        self.sidebar.threads.push(child);
+        self.sidebar.refresh_derived();
     }
 
     pub(super) fn prepare_escalation_thread(&mut self, _source_run_id: &str, run_id: &str) {

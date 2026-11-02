@@ -10,12 +10,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::WorkbenchState;
 use super::history::{ComposerDraft, HistorySidebar, HistorySidebarRef, UserMessage};
 use crate::model::tasks::AgentRunSource;
 use crate::shared_state::FileStamp;
+use storage::thread_retention::TombstoneSet;
 
 const LOCK_ATTEMPTS: u32 = 3;
 const LOCK_RETRY: Duration = Duration::from_millis(5);
@@ -31,9 +33,26 @@ pub(super) struct SharedSidebar {
     import_pending: bool,
     /// A save found the file locked by another process and must be repeated.
     save_deferred: bool,
+    /// The file stamp whose content could not be imported. It only stops the import
+    /// from being repeated for the same file: a save still reads and merges the file
+    /// itself, and refuses to write over it while it cannot.
+    import_failed: Option<FileStamp>,
+    /// The sidebar as the file holds it after this process's last successful save or
+    /// import (or the one it started from): the only state the database mirror projects
+    /// from. What this process holds beyond it (a child not saved yet, a merge not taken
+    /// in yet) is local and unconfirmed, and is not told to anyone.
+    committed: Option<Arc<workspace_ui::SidebarState>>,
 }
 
 impl SharedSidebar {
+    pub(super) fn set_committed(&mut self, sidebar: workspace_ui::SidebarState) {
+        self.committed = Some(Arc::new(sidebar));
+    }
+
+    pub(super) fn committed(&self) -> Option<Arc<workspace_ui::SidebarState>> {
+        self.committed.clone()
+    }
+
     pub(super) const fn stamp(&self) -> Option<&FileStamp> {
         self.stamp.as_ref()
     }
@@ -98,7 +117,21 @@ fn message_key(message: &UserMessage) -> String {
     }
 }
 
+/// The three-way merge, without any thread a confirmed deletion removed: the merge
+/// keeps "the other side's edit", which would bring a deleted thread back from a
+/// file saved before its deletion.
 fn merge_saved(
+    base: &HistorySidebar,
+    local: &HistorySidebar,
+    disk: &HistorySidebar,
+    tombstones: &TombstoneSet,
+) -> HistorySidebar {
+    let mut merged = merge_three_way(base, local, disk);
+    super::thread_retention::prune_tombstoned(&mut merged, tombstones);
+    merged
+}
+
+fn merge_three_way(
     base: &HistorySidebar,
     local: &HistorySidebar,
     disk: &HistorySidebar,
@@ -126,8 +159,37 @@ fn merge_saved(
     }
 }
 
+/// The outcome of one transaction on the shared sidebar.
+struct Commit {
+    /// This process's state when the transaction began.
+    local: HistorySidebar,
+    /// The newest state with the edit applied.
+    latest: HistorySidebar,
+    /// Threads whose records differ from the file's (this process's own changes).
+    own: BTreeSet<String>,
+    /// What was written to the file, if anything.
+    written: Option<Vec<u8>>,
+    stamp: Option<FileStamp>,
+}
+
+fn all_thread_ids(history: &HistorySidebar) -> BTreeSet<String> {
+    history
+        .sidebar
+        .threads
+        .iter()
+        .map(|thread| thread.id.to_string())
+        .collect()
+}
+
+/// Reads a saved sidebar and derives the per-record cache of its family states. An older
+/// file is **not** converted here: the conversion needs the database's numbers and a
+/// saved result, so it is made once at start-up while the exclusive locks are held
+/// ([`crate::startup`]). A file of the older form met later (written by an older program)
+/// carries no family states, so it adds none and cannot overrule this process's.
 fn parse(bytes: &[u8]) -> Result<HistorySidebar, serde_json::Error> {
-    serde_json::from_slice(bytes)
+    let mut parsed: HistorySidebar = serde_json::from_slice(bytes)?;
+    parsed.sidebar.refresh_derived();
+    Ok(parsed)
 }
 
 /// The merge of `disk` into `local` (both serialised), as serialised bytes.
@@ -135,9 +197,10 @@ fn merged_bytes(
     base: Option<&[u8]>,
     local: &[u8],
     disk: &[u8],
+    tombstones: &TombstoneSet,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let base = base.map(parse).transpose()?.unwrap_or_default();
-    let merged = merge_saved(&base, &parse(local)?, &parse(disk)?);
+    let merged = merge_saved(&base, &parse(local)?, &parse(disk)?, tombstones);
     merged.sidebar.validate()?;
     Ok(serde_json::to_vec_pretty(&HistorySidebarRef {
         sidebar: &merged.sidebar,
@@ -231,23 +294,176 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut output = None;
         let current = FileStamp::of(path);
         if current.is_some() && (current != shared.stamp || shared.import_pending) {
-            let merged = std::fs::read(path)
-                .map_err(Into::into)
-                .and_then(|disk| merged_bytes(shared.base.as_deref(), &local, &disk));
+            let merged = std::fs::read(path).map_err(Into::into).and_then(|disk| {
+                merged_bytes(shared.base.as_deref(), &local, &disk, &self.tombstones)
+            });
             match merged {
                 Ok(merged) if merged != local => output = Some(merged),
                 Ok(_) => {}
+                // The newest saved state cannot be read or merged, so this process cannot
+                // tell what pins and archives other windows made. Writing its own state
+                // could undo them (and the next start would trust the result), so
+                // nothing is written until the file can be read again.
                 Err(error) => {
-                    tracing::warn!(%error, "could not merge the shared sidebar; saving this process's state only");
+                    tracing::error!(%error, path = %path.display(), "could not merge the shared sidebar; not saving over it");
+                    return Err(error);
                 }
             }
         }
         write_atomically(path, output.as_deref().unwrap_or(&local))?;
+        // What the file holds now is the committed state, merged-in changes included.
+        if let Ok(written) = parse(output.as_deref().unwrap_or(&local)) {
+            shared.set_committed(written.sidebar);
+        }
         shared.stamp = FileStamp::of(path);
         shared.import_pending = output.is_some();
         shared.save_deferred = false;
         shared.base = Some(local);
         Ok(())
+    }
+
+    /// Edits the shared sidebar as one transaction under the save lock, on the
+    /// newest state: the file's content merged with this process's. `op` changes
+    /// only what the user's action concerns (it numbers the archive and pin series
+    /// it touches), so an action taken on a stale view still applies to what other
+    /// windows saved meanwhile. The result is written, adopted by this process and
+    /// mirrored at once.
+    ///
+    /// Nothing changes here when the lock cannot be taken, when the file cannot be
+    /// read or merged, when `op` fails or when it changes nothing (nothing is
+    /// written then).
+    ///
+    /// # Errors
+    /// The file is locked by another process, unreadable or unwritable, or `op` failed.
+    pub(super) fn shared_sidebar_transact<T>(
+        &mut self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let (output, commit) = self.commit_shared_sidebar(op)?;
+        let Some(commit) = commit else {
+            return Ok(output);
+        };
+        let committed = commit
+            .written
+            .is_some()
+            .then(|| commit.latest.sidebar.clone());
+        self.adopt_saved(&commit.local, commit.latest, &commit.own);
+        if let Some(bytes) = commit.written {
+            let mut shared = self.shared_sidebar.borrow_mut();
+            if let Some(committed) = committed {
+                shared.set_committed(committed);
+            }
+            shared.stamp = commit.stamp;
+            shared.import_pending = false;
+            shared.save_deferred = false;
+            shared.base = Some(bytes);
+        }
+        self.force_thread_mirror();
+        Ok(output)
+    }
+
+    /// Runs `op` on the newest state and writes the result. `None` when `op` changed
+    /// nothing; `Commit::written` is `None` without a shared file.
+    fn commit_shared_sidebar<T>(
+        &self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+    ) -> Result<(T, Option<Commit>), Box<dyn std::error::Error>> {
+        let local = HistorySidebar {
+            sidebar: self.sidebar.clone(),
+            user_messages: self.history.clone(),
+            composer_drafts: self.composer_drafts.clone(),
+        };
+        let Some(path) = self.sidebar_path.clone() else {
+            // No shared file (a test or a temporary state): there is nothing to merge.
+            let mut latest = local.clone();
+            let output = op(&mut latest)?;
+            super::thread_retention::prune_tombstoned(&mut latest, &self.tombstones);
+            let own = all_thread_ids(&latest);
+            let commit = Commit {
+                local,
+                latest,
+                own,
+                written: None,
+                stamp: None,
+            };
+            return Ok((output, Some(commit)));
+        };
+        let _lock = SidebarLock::acquire(&path)?;
+        let disk = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut latest = local.clone();
+        let mut disk_threads = BTreeMap::new();
+        if let Some(bytes) = &disk {
+            // An unreadable file is not "no file": the pins and archives in it are
+            // unknown, so the edit is refused and the file stays as it is.
+            let parsed = parse(bytes)?;
+            let base = self
+                .shared_sidebar
+                .borrow()
+                .base
+                .as_deref()
+                .map(parse)
+                .transpose()?
+                .unwrap_or_default();
+            latest = merge_saved(&base, &local, &parsed, &self.tombstones);
+            disk_threads = parsed
+                .sidebar
+                .threads
+                .into_iter()
+                .map(|thread| (thread.id.to_string(), thread))
+                .collect();
+        }
+        let merged = latest.clone();
+        let output = op(&mut latest)?;
+        if latest.sidebar == merged.sidebar
+            && latest.user_messages == merged.user_messages
+            && latest.composer_drafts == merged.composer_drafts
+        {
+            // Nothing to write, but the merge may still have brought in what another
+            // process saved: take that in too, so a no-op edit does not leave this
+            // window on an older view than the one the edit was checked against.
+            let stale = merged.sidebar != local.sidebar
+                || merged.user_messages != local.user_messages
+                || merged.composer_drafts != local.composer_drafts;
+            let commit = stale.then(|| Commit {
+                local,
+                latest: merged,
+                own: BTreeSet::new(),
+                written: None,
+                stamp: None,
+            });
+            return Ok((output, commit));
+        }
+        latest.sidebar.validate()?;
+        let bytes = serde_json::to_vec_pretty(&HistorySidebarRef {
+            sidebar: &latest.sidebar,
+            user_messages: &latest.user_messages,
+            composer_drafts: &latest.composer_drafts,
+        })?;
+        write_atomically(&path, &bytes)?;
+        #[cfg(test)]
+        self.sidebar_write_count
+            .set(self.sidebar_write_count.get() + 1);
+        let own: BTreeSet<String> = latest
+            .sidebar
+            .threads
+            .iter()
+            .filter(|thread| disk_threads.get(&thread.id.to_string()) != Some(*thread))
+            .map(|thread| thread.id.to_string())
+            .collect();
+        Ok((
+            output,
+            Some(Commit {
+                local,
+                latest,
+                own,
+                written: Some(bytes),
+                stamp: FileStamp::of(&path),
+            }),
+        ))
     }
 
     /// Takes over what other processes saved: merges the shared file into this
@@ -258,6 +474,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         let stamp = FileStamp::of(&path);
+        if stamp.is_some() && self.shared_sidebar.borrow().import_failed == stamp {
+            return;
+        }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -281,7 +500,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     user_messages: self.history.clone(),
                     composer_drafts: self.composer_drafts.clone(),
                 };
-                let merged = merge_saved(&base, &local, &disk);
+                let merged = merge_saved(&base, &local, &disk, &self.tombstones);
                 merged.sidebar.validate()?;
                 Ok((local, merged))
             })();
@@ -289,25 +508,36 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%error, "shared sidebar could not be merged; keeping this process's state");
-                let mut shared = self.shared_sidebar.borrow_mut();
-                shared.stamp = stamp;
-                shared.import_pending = false;
+                // The stamp is not taken over: this process has not seen this content,
+                // so a later save must not treat the file as already merged.
+                self.shared_sidebar.borrow_mut().import_failed = stamp;
                 return;
             }
         };
-        self.adopt_saved(&before, merged);
+        self.adopt_saved(&before, merged, &BTreeSet::new());
         // The base is what the file held, not what this process now holds:
         // changes of this process that were not saved yet (a deferred save)
         // stay differences from it and are written by the next save.
         let mut shared = self.shared_sidebar.borrow_mut();
+        if let Ok(disk) = parse(&bytes) {
+            shared.set_committed(disk.sidebar);
+        }
         shared.stamp = stamp;
         shared.import_pending = false;
+        shared.import_failed = None;
         shared.base = Some(bytes);
     }
 
     /// Replaces the shared state with `merged` and brings everything derived
-    /// from it up to date. `before` is the state it replaces.
-    fn adopt_saved(&mut self, before: &HistorySidebar, merged: HistorySidebar) {
+    /// from it up to date. `before` is the state it replaces. `own` names the
+    /// threads whose changes this process made itself: nobody else mirrored them,
+    /// so they stay to be mirrored by this process.
+    fn adopt_saved(
+        &mut self,
+        before: &HistorySidebar,
+        merged: HistorySidebar,
+        own: &BTreeSet<String>,
+    ) {
         let known: BTreeMap<&workspace_ui::ThreadId, &workspace_ui::ThreadRecord> = before
             .sidebar
             .threads
@@ -319,13 +549,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .threads
             .iter()
             .filter(|thread| !known.contains_key(&thread.id))
-            .map(|thread| thread.id.to_string())
-            .collect();
-        let changed_threads: Vec<String> = merged
-            .sidebar
-            .threads
-            .iter()
-            .filter(|thread| known.get(&thread.id).is_none_or(|old| *old != *thread))
             .map(|thread| thread.id.to_string())
             .collect();
         let bound_before: BTreeSet<&String> = before
@@ -385,7 +608,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
-        for thread in &new_threads {
+        for thread in new_threads.iter().filter(|thread| !own.contains(*thread)) {
             self.seed_imported_branch(thread);
         }
         for message in appeared {
@@ -397,6 +620,5 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.rebuild_delivery_rows();
         self.refresh_draft_banner();
         self.sync_project_trust();
-        self.note_threads_mirrored(&changed_threads);
     }
 }

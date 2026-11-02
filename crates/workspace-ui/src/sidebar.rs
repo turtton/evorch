@@ -9,7 +9,7 @@ use crate::{
     TrustState,
 };
 
-pub const SIDEBAR_SCHEMA_VERSION: u32 = 1;
+pub const SIDEBAR_SCHEMA_VERSION: u32 = crate::family::FAMILY_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarState {
@@ -18,6 +18,14 @@ pub struct SidebarState {
     pub selected_project: Option<ProjectId>,
     pub threads: Vec<ThreadRecord>,
     pub active_thread: Option<ThreadId>,
+    /// The archive and pin state of each conversation family; see [`crate::family`].
+    #[serde(default)]
+    pub families: Vec<crate::family::FamilyState>,
+    /// Threads two sidebars gave different parents (a thread's parent never changes, so
+    /// this is a conflict in the input, not an edit). They and their descendants have no
+    /// resolvable family until the file is repaired by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_conflicts: Vec<ThreadId>,
 }
 
 impl Default for SidebarState {
@@ -28,6 +36,8 @@ impl Default for SidebarState {
             selected_project: None,
             threads: Vec::new(),
             active_thread: None,
+            families: Vec::new(),
+            parent_conflicts: Vec::new(),
         }
     }
 }
@@ -167,9 +177,9 @@ impl SidebarState {
         Ok(())
     }
 
+    /// Pins or unpins the whole family of `id`.
     pub fn set_pinned(&mut self, id: &ThreadId, pinned: bool) -> Result<(), ThreadError> {
-        self.thread_mut(id)?.pinned = pinned;
-        Ok(())
+        self.set_family_pinned(id, pinned).map(|_| ())
     }
 
     pub fn set_thread_extra_read_dirs(
@@ -246,6 +256,15 @@ impl SidebarState {
                 validated_project
                     .allowed_directories
                     .push(directory.clone());
+            }
+        }
+        let mut family_keys = BTreeSet::new();
+        for family in &self.families {
+            if !family_keys.insert(&family.key) {
+                return Err(SidebarError::Validation(format!(
+                    "duplicate family state '{}'",
+                    family.key
+                )));
             }
         }
         if self

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::StorageError;
+use crate::migrations::backfill::backfill_pending;
 use crate::thread_retention::{
     BlockReason, LegacyArchivedPolicy, NANOS_PER_DAY, RetentionInput, RetentionStatus,
     SidebarThread, ThreadRetentionPolicy,
@@ -85,12 +86,14 @@ pub(crate) fn schedule(
             RetentionStatus::Blocked(BlockReason::Pinned)
         } else if let Some(reason) = overrides.get(&thread.thread_id) {
             RetentionStatus::Blocked(reason.clone())
+        } else if let Some(reason) = unresolved_reason(conn, &thread.thread_id)? {
+            RetentionStatus::Blocked(BlockReason::FamilyUnresolved(reason))
         } else if has_eval_sample(conn, &thread.thread_id)? {
             RetentionStatus::Blocked(BlockReason::EvalSample)
         } else {
             let activity = thread_activity_ns(conn, thread)?
                 .max(bound_runs_activity_ns(conn, &thread.thread_id)?);
-            match due_at_ns(thread, activity, policy) {
+            let own = match due_at_ns(thread, activity, policy) {
                 Some(due) if due > input.now_ns => {
                     let days = (due - input.now_ns + NANOS_PER_DAY - 1) / NANOS_PER_DAY;
                     RetentionStatus::DueIn {
@@ -98,11 +101,77 @@ pub(crate) fn schedule(
                     }
                 }
                 _ => RetentionStatus::DueNextStartup,
+            };
+            // Nothing can be confirmed while the event backfill is unfinished: the start
+            // is still preparing, which is not the same as "due".
+            let preparing = own == RetentionStatus::DueNextStartup && backfill_pending(conn)?;
+            // A thread is deleted with its family, so the family's state decides.
+            if preparing {
+                RetentionStatus::Blocked(BlockReason::Exploring)
+            } else {
+                match family_hold(conn, &thread.thread_id, input, policy, overrides)? {
+                    Some(reason) => RetentionStatus::Blocked(reason),
+                    None => own,
+                }
             }
         };
         statuses.push((thread.thread_id.clone(), status));
     }
     Ok(statuses)
+}
+
+/// The identity an exploration could not resolve in the thread's family, if the last
+/// exploration found one.
+fn unresolved_reason(conn: &Connection, thread_id: &str) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT reason_id FROM retention_unresolved WHERE thread_id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Why the family a thread was already found to belong to would not be confirmed
+/// now, as far as the stored exploration shows. `None` for a thread no exploration
+/// has reached yet (nothing is known about its family), and for a family that would
+/// be confirmed.
+fn family_hold(
+    conn: &Connection,
+    thread_id: &str,
+    input: &RetentionInput,
+    policy: &ThreadRetentionPolicy,
+    overrides: &BTreeMap<String, BlockReason>,
+) -> Result<Option<BlockReason>, StorageError> {
+    let key: Option<String> = conn
+        .query_row(
+            "SELECT family_key FROM retention_staging WHERE kind = 'thread' AND id = ?1 \
+             ORDER BY family_key LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let unfinished: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM retention_staging \
+         WHERE family_key = ?1 AND kind IN ('frontier_thread', 'frontier_run'))",
+        [&key],
+        |row| row.get(0),
+    )?;
+    if unfinished {
+        return Ok(Some(BlockReason::Exploring));
+    }
+    let members = super::closure::members(conn, &key, "thread")?;
+    let owners: BTreeMap<String, String> = overrides
+        .iter()
+        .filter_map(|(thread, reason)| match reason {
+            BlockReason::Owner(text) => Some((thread.clone(), text.clone())),
+            _ => None,
+        })
+        .collect();
+    family_blocked(conn, &key, &members, input, policy, &owners)
 }
 
 /// Why a fully explored family cannot be confirmed now, if it cannot.

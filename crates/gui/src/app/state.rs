@@ -153,6 +153,9 @@ pub struct WorkbenchState<S> {
     pub(super) idle_turns: std::collections::BTreeSet<String>,
     pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
     pub(super) thread_mirror: Option<super::thread_mirror::ThreadMirrorLink>,
+    /// Threads a confirmed deletion removed; the sidebar never holds them again.
+    pub(super) tombstones: storage::thread_retention::TombstoneSet,
+    pub(super) retention: super::thread_retention::RetentionState,
     pub(super) agent_browser: super::agent_browser::AgentBrowserTabs,
 }
 
@@ -278,6 +281,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             idle_turns: std::collections::BTreeSet::new(),
             usage_ledger: None,
             thread_mirror: None,
+            tombstones: Default::default(),
+            retention: Default::default(),
             agent_browser: super::agent_browser::AgentBrowserTabs::default(),
         };
         // Older saved layouts can contain Arena tabs; the Arena pane no longer exists.
@@ -385,7 +390,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
-    pub fn with_sidebar(mut self, sidebar: SidebarState) -> Self {
+    pub fn with_sidebar(mut self, mut sidebar: SidebarState) -> Self {
+        // The records' archive and pin state is derived from the family states.
+        sidebar.refresh_derived();
         if let Some(thread) = sidebar
             .threads
             .iter()
@@ -401,6 +408,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 self.transcripts.bind_run(run, &thread.id.to_string());
             }
         }
+        self.shared_sidebar
+            .borrow_mut()
+            .set_committed(sidebar.clone());
         self.shared_sidebar_baseline(
             serde_json::to_vec_pretty(&super::history::HistorySidebarRef {
                 sidebar: &sidebar,
