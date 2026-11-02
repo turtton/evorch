@@ -167,6 +167,8 @@ impl ResponsesReplayState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
     pub(crate) provenance: crate::restore::provenance::ConversationProvenance,
+    /// Revision of this run's last committed (or read) snapshot; the next save's CAS precondition.
+    pub(crate) snapshot_revision: crate::restore::revision::SnapshotRevision,
     /// 所有する run の ID。
     pub run_id: RunId,
     /// この run を実行するロール。
@@ -194,6 +196,7 @@ impl AgentContext {
             Vec::new(),
             Vec::new(),
             ResponsesReplayState::default(),
+            crate::restore::revision::SnapshotRevision::fresh(),
         );
         context.provenance = Default::default();
         context
@@ -205,9 +208,11 @@ impl AgentContext {
         messages: Vec<Message>,
         checkpoints: Vec<CompactionCheckpoint>,
         responses_replay: ResponsesReplayState,
+        snapshot_revision: crate::restore::revision::SnapshotRevision,
     ) -> Self {
         Self {
             provenance: crate::restore::provenance::ConversationProvenance::unknown(),
+            snapshot_revision,
             run_id,
             role,
             messages,
@@ -680,6 +685,7 @@ mod tests {
             raw.clone(),
             vec![first.clone()],
             ResponsesReplayState::default(),
+            crate::restore::revision::SnapshotRevision::fresh(),
         );
         assert_eq!(
             restored.visible_messages(),

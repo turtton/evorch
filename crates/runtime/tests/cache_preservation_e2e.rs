@@ -3279,8 +3279,9 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 
 #[tokio::test]
 async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
-    let review_storage = support::ReviewStorage::new();
     for expedite in [false, true] {
+        // Each iteration runs "run-1" in a new runtime, so it needs an empty database.
+        let review_storage = support::ReviewStorage::new();
         let read = Arc::new(GatedRead {
             started: Notify::new(),
             release: Notify::new(),

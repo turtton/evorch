@@ -59,6 +59,8 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 
 #[cfg(test)]
 mod host_input_tests;
+#[cfg(test)]
+mod snapshot_conflict_tests;
 pub(crate) mod user_inbox;
 use user_inbox::UserInbox;
 pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
@@ -1825,7 +1827,7 @@ impl AgentRuntime {
             .persist_pending_reference(source_run_id)
             .map_err(|error| error.to_string())?
             .map(|pending| pending.reference_id);
-        crate::restore::persist_escalation_seed(
+        let seed_revision = crate::restore::persist_escalation_seed(
             self,
             run_id,
             source_run_id,
@@ -1889,6 +1891,7 @@ impl AgentRuntime {
                 pending_reference_id,
                 source_run_id,
                 restored: None,
+                seed_revision,
             }),
             None,
         ))

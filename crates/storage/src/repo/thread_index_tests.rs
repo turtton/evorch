@@ -347,6 +347,39 @@ fn verified_map_that_does_not_match_is_saved_as_unknown() {
 }
 
 #[test]
+fn snapshot_receipt_describes_the_redacted_bytes_without_a_read_back() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    let messages = json!([
+        text("user", &format!("日本語 🦀 key {secret}")),
+        text("assistant", "ok")
+    ]);
+    let mut write = verified("run-a", &messages, 1, 10);
+    write.record.checkpoints_json =
+        json!([{"id": "c1", "range": [0, 1], "summary": text("user", secret)}]).to_string();
+    let receipt = save(&conn, &write);
+    let stored = bundle(&conn, "run-a");
+    assert!(
+        stored.record.messages_json.contains("[REDACTED"),
+        "the fixture must exercise redaction: {}",
+        stored.record.messages_json
+    );
+    assert!(!stored.record.messages_json.contains(secret));
+    assert_ne!(stored.record.messages_json, write.record.messages_json);
+    assert!(receipt.run_context_receipt.matches(&stored.record));
+    assert_eq!(receipt.run_context_receipt.messages_end, 2);
+    assert_eq!(receipt.snapshot_revision, stored.snapshot_revision);
+    assert_eq!(
+        receipt.snapshot_sha256,
+        snapshot_sha256(
+            &stored.record.messages_json,
+            &stored.record.checkpoints_json
+        )
+    );
+}
+
+#[test]
 fn revision_conflict_and_invalid_json_change_nothing() {
     let dir = TempDir::new().unwrap();
     let conn = open(&dir);

@@ -10,11 +10,26 @@ async fn stored_fixture() -> (
     crate::AgentRuntime,
     LoopState,
 ) {
+    stored_fixture_in("continuity.db", true).await
+}
+
+/// `thread_index` off keeps the background indexer from reading snapshots, so
+/// a test can count every read of the database it names.
+pub(super) async fn stored_fixture_in(
+    db_name: &str,
+    thread_index: bool,
+) -> (
+    tempfile::TempDir,
+    storage::Storage,
+    crate::AgentRuntime,
+    LoopState,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let config = storage::StorageConfig {
-        db_path: dir.path().join("continuity.db"),
+    let mut config = storage::StorageConfig {
+        db_path: dir.path().join(db_name),
         ..Default::default()
     };
+    config.thread_index.enabled = thread_index;
     let storage = storage::Storage::open(config.clone()).unwrap();
     let (_, cancel_rx) = watch::channel(RunInterrupt::None);
     let (runtime, mut state) = super::delegate_cleanup_tests::started_fixture(cancel_rx).await;
@@ -1154,21 +1169,22 @@ async fn assert_readable_d3_recovery(model_switch: bool, structural: bool) {
     }
     // Exercise the exact persisted layout: old readable checkpoints must survive
     // native replacements so a later process can recover their safe evidence.
-    let record = runtime
+    let bundle = runtime
         .shared
         .run_store
         .get()
         .unwrap()
-        .restore_record(run)
+        .restore_bundle(run)
         .unwrap()
         .unwrap();
-    let restored = RestoredState::from_record(&record).unwrap();
+    let restored = RestoredState::from_bundle(&bundle).unwrap();
     state.context = AgentContext::from_restored(
         run,
         state.run_role(),
         restored.messages,
         restored.checkpoints,
         restored.responses_replay,
+        restored.snapshot_revision,
     );
     let capture = Arc::new(NativeCheckpointRecoveryModel::default());
     state.shared.model = capture.clone();

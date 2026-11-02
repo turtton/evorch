@@ -484,7 +484,7 @@ fn stage(
     expected_snapshot_revision: Option<u64>,
     binding: Option<&ThreadRunRow>,
     provenance: ProvenanceInput<'_>,
-) -> Result<(SnapshotReceipt, RunContextReceipt), SnapshotApiError> {
+) -> Result<SnapshotReceipt, SnapshotApiError> {
     atomic(conn, || {
         let current: u64 = conn
             .query_row(
@@ -574,18 +574,16 @@ fn stage(
             },
             floor,
         )?;
-        Ok((
-            SnapshotReceipt {
-                snapshot_revision,
-                source_revision,
-                snapshot_sha256: sha256,
-            },
-            RunContextReceipt {
+        Ok(SnapshotReceipt {
+            snapshot_revision,
+            source_revision,
+            snapshot_sha256: sha256,
+            run_context_receipt: RunContextReceipt {
                 updated_at_ns: record.updated_at_ns,
                 messages_end: redacted.messages_end(),
                 sha256: format!("{:x}", Sha256::digest(redacted.messages_json.as_bytes())),
             },
-        ))
+        })
     })
 }
 
@@ -593,7 +591,8 @@ pub(crate) fn stage_legacy_snapshot(
     conn: &Connection,
     record: &RunContextRecord,
 ) -> Result<(SnapshotReceipt, RunContextReceipt), SnapshotApiError> {
-    stage(conn, record, None, None, ProvenanceInput::Legacy)
+    let receipt = stage(conn, record, None, None, ProvenanceInput::Legacy)?;
+    Ok((receipt.clone(), receipt.run_context_receipt))
 }
 
 pub(crate) fn stage_snapshot(
@@ -610,7 +609,6 @@ pub(crate) fn stage_snapshot(
             map: &write.map,
         },
     )
-    .map(|(receipt, _)| receipt)
 }
 
 fn write_sidecar(conn: &Connection, sidecar: &SnapshotProvenance) -> Result<(), StorageError> {

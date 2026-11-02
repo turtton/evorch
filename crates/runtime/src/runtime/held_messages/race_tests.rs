@@ -124,13 +124,23 @@ async fn race(boundary: Boundary, observation: Observation) {
         .unwrap();
     if observation == Observation::PreviousGeneration {
         runtime.observe_completion(&old);
+        // The child ID already has a snapshot, so its next generation continues
+        // from it instead of starting at revision 0.
+        let bundle = runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_bundle(child)
+            .unwrap()
+            .unwrap();
         runtime.spawn_run_with_handoff(
             child,
             Some(parent),
             Role::Worker,
             "CHILD".into(),
             RunConfig::default(),
-            RunContinuation::Fresh,
+            RunContinuation::Restored(crate::restore::RestoredState::from_bundle(&bundle).unwrap()),
             None,
         );
         assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);

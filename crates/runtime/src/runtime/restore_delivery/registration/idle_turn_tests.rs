@@ -51,8 +51,18 @@ impl Fixture {
         // Model a saved, completed assistant turn. Registration must resume only
         // this history: the synthetic trigger is not new input, and the blocked
         // model cannot supply the output asserted by these tests.
+        // The cancelled child may have saved before it stopped; resume from that revision.
+        let revision = runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_bundle(child)
+            .unwrap()
+            .map_or(0, |bundle| bundle.snapshot_revision);
         let restored = RestoredState {
             provenance: Default::default(),
+            snapshot_revision: crate::restore::revision::SnapshotRevision::known(revision),
             admission_reservation: None,
             turn: None,
             messages: vec![
