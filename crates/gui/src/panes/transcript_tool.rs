@@ -280,7 +280,7 @@ pub fn tool_card_group(
     let last = &group[folded - 1];
     let job = resolved_shell_job_key(last, context.jobs).and_then(|key| context.jobs.get_key(&key));
     if let Some(job) = job {
-        header::with_shell_job(&mut header, job, shell_control(last).is_some(), running);
+        header::with_shell_job(&mut header, job, shell_control(last).is_some());
     }
     if matches!(status, ToolStatus::Drafting { .. }) {
         header.meta = Some(
@@ -317,11 +317,7 @@ pub fn tool_card_group(
         .map(str::to_owned)
         .or_else(|| {
             let command = job?.command.as_deref()?;
-            Some(if running {
-                redacted_text_for_display(command)
-            } else {
-                command.to_owned()
-            })
+            Some(redacted_text_for_display(command))
         })
         .unwrap_or_else(|| header_text.clone());
     let live = match status {

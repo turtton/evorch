@@ -558,8 +558,13 @@ fn a_prompt_beyond_the_old_two_kib_limit_is_readable_and_bounded() {
 const BODY: &str = "Zx9Qw3Lm7Tb2Vc5Nk8Rd4Hf6Jg1Ps0YaEu";
 
 fn assert_hides_body(shown: &Shown, context: &str) {
+    assert_hides(shown, BODY, context);
+}
+
+/// No stretch of `secret` of six characters is displayed, in either view.
+fn assert_hides(shown: &Shown, secret: &str, context: &str) {
     const LEAK: usize = 6;
-    let chars: Vec<char> = BODY.chars().collect();
+    let chars: Vec<char> = secret.chars().collect();
     for window in chars.windows(LEAK) {
         let fragment: String = window.iter().collect();
         for (what, text) in [("text", &shown.text), ("arguments", &shown.arguments)] {
@@ -604,28 +609,28 @@ fn token_forms() -> Vec<(&'static str, String)> {
 }
 
 #[test]
-fn a_credential_with_an_escape_inside_it_is_hidden_at_every_fragment_boundary() {
-    // Given: the token `ghp_<6>L<28>` whose middle character is written `\u004c`,
-    // so the part before the escape alone already looks like a whole credential
-    // while the rest looks like ordinary text.
+fn a_credential_with_an_escape_after_a_complete_prefix_is_hidden_at_every_fragment_boundary() {
+    // Given: a token whose first 30 characters already make a complete credential
+    // in the raw JSON (the redaction count is the same either way), followed by
+    // `\u0042` and a long second half that looks like ordinary text in the raw JSON.
+    const FIRST: &str = "Qm4Xz8Kd2Wv6Ty0Hn3Bc7Lf9Pj5Rs1";
+    const SECOND: &str = "Ug8Ea2Ox6Nw4Mi0Vt7Yb3Cl5Dh9Fk1Jq";
     for tool in ["write", "shell", "delegate"] {
         let field = if tool == "delegate" {
             "prompt"
         } else {
             "command"
         };
-        let arguments = format!(
-            "{{\"{field}\":\"use ghp_{}\\u004c{} now\"}}",
-            &BODY[..6],
-            &BODY[7..]
-        );
+        let arguments = format!("{{\"{field}\":\"use ghp_{FIRST}\\u0042{SECOND} now\"}}");
         // When: the stream is cut after every character boundary.
         for end in (0..=arguments.len()).filter(|end| arguments.is_char_boundary(*end)) {
             let mut model = TranscriptModel::new();
             model.apply(&delta(0, Some("call-1"), Some(tool), &arguments[..end]));
 
-            // Then: no stretch of the token is displayed, in either view.
-            assert_hides_body(&views(&model)[0], &format!("{tool} at {end}"));
+            // Then: no stretch of either half is displayed, in either view.
+            let shown = &views(&model)[0];
+            assert_hides(shown, FIRST, &format!("{tool} at {end}"));
+            assert_hides(shown, SECOND, &format!("{tool} at {end}"));
         }
     }
 }

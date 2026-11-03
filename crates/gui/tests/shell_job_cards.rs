@@ -568,3 +568,59 @@ fn counter_handles_remain_distinct_in_control_cards_and_the_shell_jobs_pane() {
         assert!(h.query_by_label(&format!("job {handle}")).is_some());
     }
 }
+
+#[test]
+fn a_job_command_with_a_credential_is_never_displayed_by_its_polls() {
+    // Given: a job started by a command that carries a token, then polled.
+    const BODY: &str = "Zx9Qw3Lm7Tb2Vc5Nk8Rd4Hf6Jg1Ps0YaEu";
+    let mut model = TranscriptModel::new();
+    tool(
+        &mut model,
+        "start",
+        json!({"command": format!("curl -H 'Authorization: ghp_{BODY}' example.com"), "yield_ms": 0}),
+        &format!("shell job: {JOB}\nstatus: running\ncursor: 0\n"),
+        "running",
+    );
+    poll(&mut model, "poll-1", "");
+    // And: a poll that is still running when the transcript is drawn.
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "shell".into(),
+        call_id: "poll-2".into(),
+        input: Some(json!({"action": "poll", "job_id": JOB})),
+        run_id: None,
+        parent_call_id: None,
+    }));
+    let mut harness = Harness::new_ui(move |ui| {
+        gui::theme::install(ui.ctx());
+        ui.ctx()
+            .global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        gui::panes::agent::transcript_body(ui, &model);
+    });
+    harness.run_steps(3);
+
+    // When: each card is hovered, so its tooltip is shown.
+    let cards: Vec<_> = harness
+        .query_all_by_role(egui::accesskit::Role::Button)
+        .map(|button| button.rect().center())
+        .collect();
+    assert!(cards.len() >= 3, "start, folded poll and running poll");
+    for position in cards {
+        harness.event(egui::Event::PointerMoved(position));
+        harness.run_steps(3);
+
+        // Then: no stretch of the token appears in any label or tooltip.
+        for window in BODY.as_bytes().windows(6) {
+            let fragment = std::str::from_utf8(window).unwrap();
+            assert!(
+                harness.query_by_label_contains(fragment).is_none(),
+                "{fragment} is displayed"
+            );
+        }
+    }
+    assert!(
+        harness
+            .query_all_by_label_contains("[REDACTED:github-token]")
+            .count()
+            >= 1
+    );
+}

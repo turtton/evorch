@@ -199,30 +199,46 @@ fn bounded(text: &str) -> (&str, Omitted) {
     (&text[..cut], omitted)
 }
 
+/// Argument names that hold a file or directory path, which a header may show
+/// relative to the repository or shortened to its last components.
+const PATH_FIELDS: &[&str] = &[
+    "path",
+    "file_path",
+    "filePath",
+    "file",
+    "paths",
+    "cwd",
+    "dir",
+    "directory",
+    "workdir",
+];
+
 /// Whether some argument text cannot be read in `header`: it is missing from
-/// it, cut short in it, or spans lines. Arguments that are only numbers and
-/// flags, or all in the header, need no detail.
+/// it, or cut short in it. Only a path may be matched by its last component;
+/// any other text (a body, a query, a URL) must appear whole.
 fn needs_detail(input: &Value, header: &str) -> bool {
-    fn uncovered(value: &Value, header: &str) -> bool {
+    fn text_uncovered(text: &str, is_path: bool, header: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || header.contains(text) {
+            return false;
+        }
+        let name = text
+            .rsplit('/')
+            .next()
+            .filter(|name| is_path && !name.is_empty() && !text.contains(char::is_whitespace));
+        !name.is_some_and(|name| header.contains(name))
+    }
+    fn uncovered(value: &Value, is_path: bool, header: &str) -> bool {
         match value {
-            Value::String(text) => {
-                let text = text.trim();
-                if text.is_empty() || header.contains(text) {
-                    return false;
-                }
-                // A path may be shown relative to the repository or shortened.
-                let name = text
-                    .rsplit('/')
-                    .next()
-                    .filter(|_| !text.contains(char::is_whitespace));
-                !name.is_some_and(|name| !name.is_empty() && header.contains(name))
-            }
-            Value::Array(items) => items.iter().any(|item| uncovered(item, header)),
-            Value::Object(fields) => fields.values().any(|item| uncovered(item, header)),
+            Value::String(text) => text_uncovered(text, is_path, header),
+            Value::Array(items) => items.iter().any(|item| uncovered(item, is_path, header)),
+            Value::Object(fields) => fields
+                .iter()
+                .any(|(key, item)| uncovered(item, PATH_FIELDS.contains(&key.as_str()), header)),
             _ => false,
         }
     }
-    uncovered(input, header)
+    uncovered(input, false, header)
 }
 
 /// Scroll offset and furthest offset of the detail area of the card with `id`.
@@ -360,6 +376,9 @@ mod tests {
         let write = input(json!({"path": "a.txt", "content": "first\nsecond"}));
         let detail = running("write", &write, "Write a.txt").unwrap();
         assert!(detail.text.contains("first\\nsecond"), "{}", detail.text);
+        // A body that merely ends like a path is not the path.
+        let url = input(json!({"path": "out.txt", "content": "https://example.invalid/out.txt"}));
+        assert!(running("write", &url, "Write out.txt").is_some());
         // Arguments the header shows whole, even as a shortened path, add nothing.
         let read = input(json!({"path": "/repo/src/a.rs", "limit": 50}));
         assert!(running("read", &read, "Read src/a.rs").is_none());

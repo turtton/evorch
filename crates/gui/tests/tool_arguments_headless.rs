@@ -465,3 +465,103 @@ fn a_reader_who_scrolled_up_stays_put_and_state_survives_a_call_without_an_id() 
     let (started_at, _) = scroll_state(&harness);
     assert!((started_at - now).abs() < 2.0, "{started_at} vs {now}");
 }
+
+#[test]
+fn a_body_that_ends_like_a_path_is_still_shown_for_a_running_write() {
+    // Given: a write whose body is a URL ending in the file's own name.
+    let mut model = TranscriptModel::new();
+    model.apply(&started(
+        "write",
+        "call-1",
+        json!({"path": "out.txt", "content": "https://example.invalid/out.txt"}),
+    ));
+    let (harness, _) = card(only_entry(&model));
+
+    // Then: the body is readable, not mistaken for the path in the header.
+    harness.get_by_label_contains("https://example.invalid/out.txt");
+}
+
+struct Pane {
+    models: Vec<TranscriptModel>,
+    shown: usize,
+}
+
+fn started_in(run: &str, name: &str, input: serde_json::Value) -> Event {
+    Event::new(ToolEvent::ToolStarted {
+        tool_name: name.into(),
+        call_id: "call-1".into(),
+        input: Some(input),
+        run_id: Some(run.into()),
+        parent_call_id: None,
+    })
+}
+
+/// One pane that shows a different transcript at a time, like switching runs.
+fn pane(models: Vec<TranscriptModel>) -> Harness<'static, Pane> {
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 900.0))
+        .build_ui_state(
+            |ui, pane: &mut Pane| {
+                gui::theme::install(ui.ctx());
+                gui::panes::agent::transcript_body(ui, &pane.models[pane.shown]);
+            },
+            Pane { models, shown: 0 },
+        );
+    harness.run_steps(3);
+    harness
+}
+
+fn switch_to(harness: &mut Harness<'_, Pane>, shown: usize) {
+    harness.state_mut().shown = shown;
+    harness.run_steps(3);
+}
+
+#[test]
+fn a_card_keeps_its_state_per_transcript_when_one_pane_switches_between_them() {
+    // Given: two transcripts whose first entries both have entry ID 0 and carry
+    // a call taller than the collapsed view, and one of them is a run_js call.
+    let command = numbered_lines(60);
+    let program = numbered_lines(60);
+    for (kind, first, second, expanded_marker) in [
+        (
+            "tool",
+            started_in("run-a", "shell", json!({ "command": command })),
+            started_in("run-b", "shell", json!({ "command": command })),
+            None,
+        ),
+        (
+            "run_js",
+            started_in("run-a", "run_js", json!({ "code": program })),
+            started_in("run-b", "run_js", json!({ "code": program })),
+            Some("Code"),
+        ),
+    ] {
+        let mut a = TranscriptModel::new();
+        a.apply(&first);
+        let mut b = TranscriptModel::new();
+        b.apply(&second);
+        let mut harness = pane(vec![a, b]);
+        let is_open = |harness: &Harness<'_, Pane>| match expanded_marker {
+            Some(marker) => harness.query_by_label(marker).is_some(),
+            None => harness.query_by_label(MORE).is_none(),
+        };
+        assert!(!is_open(&harness), "{kind}: starts collapsed");
+
+        // When: A's card is expanded, then the pane shows B and then A again.
+        harness
+            .get_by_label_contains(if kind == "tool" {
+                "Shell Step 000"
+            } else {
+                "Run JS"
+            })
+            .click();
+        harness.run_steps(3);
+        assert!(is_open(&harness), "{kind}: A expanded");
+        switch_to(&mut harness, 1);
+
+        // Then: B's card has its own, collapsed state; A's is still expanded.
+        assert!(!is_open(&harness), "{kind}: B is independent of A");
+        switch_to(&mut harness, 0);
+        assert!(is_open(&harness), "{kind}: A kept its state");
+    }
+}
