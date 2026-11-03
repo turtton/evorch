@@ -35,6 +35,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(permit) => {
                 self.readonly_threads.remove(thread);
                 self.ownership_action_error = None;
+                self.external_work.invalidate();
                 Ok(Some(permit))
             }
             Err(RegistryError::Ownership(

@@ -397,3 +397,34 @@ fn taking_a_marked_thread_unmarks_it_as_soon_as_the_claim_is_seen() {
     // And: the probe that follows agrees
     assert!(c.external().is_empty());
 }
+
+#[test]
+fn sending_a_message_in_a_marked_thread_unmarks_it_before_the_claim_event_is_folded() {
+    // Given: a window that marks a thread nobody holds but whose run is active
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    let mut c = open_window(&shared, "evorch-gui:c");
+    c.state.switch_thread(thread.clone()).expect("C opens it");
+    assert_eq!(c.external(), BTreeSet::from([thread.clone()]));
+
+    // When: the composer sends a message, which takes the thread
+    c.state.composer_mut().input = "hello from c".into();
+    c.state.submit_composer();
+    assert!(
+        c.host.owned_permit(&thread.to_string()).is_ok(),
+        "the send took the thread"
+    );
+
+    // Then: no claim event has been folded, yet the mark is already gone
+    assert!(c.state.externally_working_threads().is_empty());
+
+    // And: the probe that follows agrees
+    assert!(c.external().is_empty());
+}

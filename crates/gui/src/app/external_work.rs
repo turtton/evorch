@@ -228,6 +228,16 @@ impl ExternalWork {
         }
     }
 
+    /// Asks again for the candidates of the last request, under the current
+    /// revision.
+    fn resend(&mut self) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let wanted = self.wanted.clone();
+        self.request(source, &wanted, None);
+    }
+
     fn collect(&mut self) {
         let Some(worker) = &self.worker else {
             return;
@@ -255,13 +265,30 @@ impl ExternalWork {
         }
     }
 
-    /// Whether a probe has been asked and not yet taken in.
-    pub(super) fn probing(&self) -> bool {
-        self.in_flight
+    /// Blocks until an answer to the current revision has been taken in,
+    /// asking again when the one in flight predates an ownership change. For
+    /// headless runs that have no frames to come back to; a frame never calls
+    /// it. Once it returns, no periodic refresh waits for another round.
+    pub(super) fn wait_current(&mut self) {
+        while self.in_flight {
+            let Some(answer) = self
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.answers.recv().ok())
+            else {
+                self.in_flight = false;
+                return;
+            };
+            let current = answer.revision == self.revision;
+            self.apply(answer);
+            if !current {
+                self.resend();
+            }
+        }
     }
 
-    /// Blocks until the probe in flight has answered. For headless runs that
-    /// have no frames to come back to; a frame never calls it.
+    /// Blocks until the probe in flight has answered, current or not.
+    #[cfg(test)]
     pub(super) fn wait_idle(&mut self) {
         if !self.in_flight {
             return;
@@ -491,6 +518,72 @@ mod tests {
         read_rx.recv().expect("the second probe read");
         release_tx.send(()).expect("release the second probe");
         work.wait_idle();
+        assert!(!work.not_owned_here("thread"));
+    }
+
+    #[test]
+    fn waiting_for_the_current_answer_ends_with_it_even_when_another_round_is_due() {
+        // Given: a recheck cadence so short that every refresh finds a round due
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let mut work = ExternalWork::default().with_recheck(Duration::ZERO);
+        work.set_source(Source {
+            owner_id: ME.into(),
+            read: Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(RegistryError::Absent)
+            }),
+        });
+
+        // When: one round is asked for and waited on
+        work.refresh(&set(&["thread"]), None);
+        work.wait_current();
+
+        // Then: it returned after that round's answer, not after a later one
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(work.not_owned_here("thread"));
+    }
+
+    #[test]
+    fn waiting_for_the_current_answer_asks_again_when_the_one_in_flight_is_stale() {
+        // Given: two probes that read first and then wait to be released
+        let (read_tx, read_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let read_tx = std::sync::Mutex::new(read_tx);
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&held);
+        let mut work = work_reading(move |_| {
+            let answer = if flag.load(Ordering::SeqCst) {
+                Ok(record(ME, OwnerState::Running))
+            } else {
+                Err(RegistryError::Absent)
+            };
+            read_tx
+                .lock()
+                .expect("read signal")
+                .send(())
+                .expect("test alive");
+            release_rx
+                .lock()
+                .expect("release")
+                .recv()
+                .expect("test alive");
+            answer
+        });
+        let candidates = set(&["thread"]);
+        work.refresh(&candidates, None);
+        read_rx.recv().expect("the first probe read");
+
+        // When: the thread is taken while that probe is out, and both are released
+        held.store(true, Ordering::SeqCst);
+        work.invalidate();
+        release_tx.send(()).expect("release the first probe");
+        release_tx.send(()).expect("release the second probe");
+        work.wait_current();
+
+        // Then: the wait ended on the answer to the new revision, which is ours
+        read_rx.recv().expect("the second probe read");
         assert!(!work.not_owned_here("thread"));
     }
 }
