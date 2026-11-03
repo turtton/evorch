@@ -10,6 +10,12 @@
 //! problem of that artifact, and the rest of the snapshot still stands, so
 //! polling a running evaluation is safe.
 //!
+//! The evaluation root is assumed to be owned by the user running the
+//! inspection. Reads go through directory descriptors, but SQLite, which
+//! prices finished trials from their databases, resolves the file's name
+//! itself; replacing a database on purpose while it is being opened is not
+//! defended against.
+//!
 //! The functions block on the file system; call them from a blocking task or a
 //! background thread.
 //!
@@ -580,12 +586,16 @@ impl EvaluationInspector {
 
     /// Reprice a finished trial's own requests from its database.
     ///
-    /// The database is opened through the descriptor that was checked (a
-    /// regular file in the trial directory, not a link), as an immutable
-    /// snapshot, so a path replaced meanwhile changes nothing and no `-wal`
-    /// or `-shm` file is created. A `-wal` or `-journal` with content, a file
-    /// over the byte budget and one with more rows than the row budget give no
-    /// cost at all rather than a partial one.
+    /// The file is checked through a directory-relative descriptor (a regular
+    /// file in the trial directory, not a link) and then handed to SQLite as
+    /// `/proc/self/fd/N`, as an immutable snapshot, so no `-wal` or `-shm`
+    /// file is created. This narrows the window for replacing the path but does
+    /// not close it: the bundled SQLite expands that name to an ordinary path
+    /// before it opens the file, so a concurrent, deliberate replacement of
+    /// the database inside that window is out of scope. The evaluation root is
+    /// assumed to be owned by the user running the inspection. A `-wal` or
+    /// `-journal` with content, a file over the byte budget and one with more
+    /// rows than the row budget give no cost at all rather than a partial one.
     fn estimate_cost(&self, dir: &Dir, prices: &PriceTable) -> TrialCost {
         let unavailable = |reason| TrialCost::Unavailable(reason);
         let (file, length) = match dir.open_regular(output::DATABASE_FILE) {
@@ -618,7 +628,8 @@ impl EvaluationInspector {
         let rows = storage::Database::open_read_only_immutable(&pinned).and_then(|opened| {
             opened.usage_requests_between_limited(i64::MIN, i64::MAX, self.limits.max_database_rows)
         });
-        // The descriptor stays open until the query is done: it pins the file.
+        // Kept open until the query is done so the name stays valid; SQLite
+        // still resolves it to a path itself (see the note above).
         drop(file);
         match rows {
             Ok((_, true)) => unavailable(CostUnavailable::OverBudget(DatabaseBudget::Rows {
@@ -639,8 +650,11 @@ impl EvaluationInspector {
 const DATABASE_WAL: &str = "evorch.db-wal";
 const DATABASE_JOURNAL: &str = "evorch.db-journal";
 
-/// Where the kernel exposes an open descriptor as a path, so a library that
-/// opens by path reaches the file the descriptor refers to.
+/// Where the kernel exposes an open descriptor as a path. A library that
+/// opens by path reaches the file the descriptor refers to unless that path
+/// is replaced while the library resolves it; bundled SQLite resolves it
+/// itself, so this is a best effort against a user-owned root, not a guarantee
+/// against concurrent tampering.
 fn pinned_path(file: &std::fs::File) -> PathBuf {
     use std::os::fd::AsRawFd;
     let prefix = if cfg!(target_os = "linux") {

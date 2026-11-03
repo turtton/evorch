@@ -74,8 +74,10 @@ impl Database {
     /// Opens an existing database as an immutable snapshot: no locks, no journal and no
     /// `-wal`/`-shm` files are used or created. Only correct for a file nothing writes, such
     /// as a finished evaluation run's database; the caller must make sure no `-wal` or
-    /// `-journal` file holds unapplied changes. `path` may be `/proc/self/fd/N`, which pins
-    /// the file an already verified descriptor refers to.
+    /// `-journal` file holds unapplied changes. `path` may be `/proc/self/fd/N` to reach the
+    /// file an already verified descriptor refers to; SQLite expands that name to an
+    /// ordinary path before opening it, so this does not protect against someone replacing
+    /// the file concurrently and on purpose (the directory is assumed to be the caller's).
     ///
     /// # Errors
     /// Fails like [`Database::open_read_only`].
