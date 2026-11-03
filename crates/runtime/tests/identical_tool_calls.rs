@@ -11,6 +11,14 @@ async fn run_script(
     script: Vec<ChatResponse>,
     config: config::Config,
 ) -> (AgentRunPhase, Vec<event_bus::Event>, usize) {
+    run_script_with(script, config, RunConfig::default()).await
+}
+
+async fn run_script_with(
+    script: Vec<ChatResponse>,
+    config: config::Config,
+    run_config: RunConfig,
+) -> (AgentRunPhase, Vec<event_bus::Event>, usize) {
     let bus = Arc::new(event_bus::EventBus::new(1024));
     let mut receiver = bus.subscribe();
     let dir = tempfile::tempdir().unwrap();
@@ -32,11 +40,9 @@ async fn run_script(
         workspace: None,
     })
     .unwrap();
-    let run = composed.runtime.delegate_background(
-        Role::Worker,
-        "repeat guard".into(),
-        RunConfig::default(),
-    );
+    let run = composed
+        .runtime
+        .delegate_background(Role::Worker, "repeat guard".into(), run_config);
     let phase = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         composed.runtime.wait(run),
@@ -295,6 +301,29 @@ async fn configured_limit_stops_at_two() {
     assert_eq!(phase, AgentRunPhase::Error);
     assert_eq!(requests, 2);
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls" && d.call_id.as_deref() == Some("1"))));
+}
+
+#[tokio::test]
+async fn identical_calls_still_stop_a_run_with_unlimited_resources() {
+    // Given: lane-scope settings (every quantity cap lifted) with a threshold of two.
+    let run_config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_identical_tool_call_repeats: 2,
+            ..runtime::budget_tracker::BudgetSettings::lane_scope()
+        },
+        ..Default::default()
+    };
+    // When: the model repeats one call.
+    let (phase, events, requests) =
+        run_script_with(calls(&[1; 3]), config::Config::default(), run_config).await;
+    // Then: the runaway diagnostic is not disabled by unlimited resources.
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(requests, 2);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls"))
+    );
 }
 
 #[tokio::test]

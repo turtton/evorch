@@ -767,11 +767,11 @@ impl LoopState {
                 .config
                 .budget
                 .max_tool_calls
-                .saturating_sub(self.escalation_detector.tool_calls());
-            for call in remaining
-                .by_ref()
-                .take(usize::try_from(capacity).unwrap_or(usize::MAX))
-            {
+                .remaining(self.escalation_detector.tool_calls())
+                .map_or(usize::MAX, |left| {
+                    usize::try_from(left).unwrap_or(usize::MAX)
+                });
+            for call in remaining.by_ref().take(capacity) {
                 let terminal = matches!(call.1.as_str(), "finish" | "escalate");
                 segment.push(call);
                 if terminal {

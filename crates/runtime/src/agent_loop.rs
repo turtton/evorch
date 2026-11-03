@@ -1148,7 +1148,7 @@ impl LoopState {
                 && !runtime.goal_model_request(
                     self.task.run_id,
                     self.task.config.purpose,
-                    self.task.config.budget.max_tokens,
+                    self.task.config.budget.max_tokens.bounded(),
                 )
             {
                 self.finish_error("Goal cumulative budget exhausted".into());

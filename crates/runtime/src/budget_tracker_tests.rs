@@ -12,7 +12,7 @@ async fn elapsed_budget_excludes_waiting_and_resumes_active_accounting() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_elapsed: Duration::from_millis(250),
+        max_elapsed: ResourceLimit::Bounded(Duration::from_millis(250)),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -52,7 +52,7 @@ async fn publishing_while_paused_excludes_current_and_previous_waits() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_elapsed: Duration::from_millis(250),
+        max_elapsed: ResourceLimit::Bounded(Duration::from_millis(250)),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -120,7 +120,7 @@ async fn token_warning_is_latched_without_stopping_execution() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_tokens: Some(100),
+        max_tokens: ResourceLimit::Bounded(100),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -160,7 +160,7 @@ async fn warning_is_suppressed_when_exhaustion_is_already_observed() {
     let bus = EventBus::new(16);
     let mut receiver = bus.subscribe();
     let settings = BudgetSettings {
-        max_tokens: Some(100),
+        max_tokens: ResourceLimit::Bounded(100),
         ..Default::default()
     };
     let context = BudgetContext {
@@ -375,4 +375,181 @@ async fn default_run_continues_past_two_million_cumulative_tokens() {
     assert!(counters.cumulative_input_tokens + counters.cumulative_output_tokens > 2_000_000);
     assert_eq!(counters.publish(65, &context), BudgetDecision::Continue);
     assert_no_event(&mut receiver);
+}
+
+fn context<'a>(bus: &'a EventBus, settings: &'a BudgetSettings) -> BudgetContext<'a> {
+    BudgetContext {
+        bus,
+        run_id: "run",
+        task_id: "task",
+        settings,
+    }
+}
+
+#[test]
+fn lane_scope_lifts_only_quantity_caps() {
+    // Given: the default settings and the lane-scope settings derived from them.
+    let default = BudgetSettings::default();
+    let lane = BudgetSettings::lane_scope();
+    // Then: time, tool-call and token caps are explicitly unlimited ...
+    assert_eq!(lane.max_tool_calls, ResourceLimit::Unlimited);
+    assert_eq!(lane.max_elapsed, ResourceLimit::Unlimited);
+    assert_eq!(lane.max_tokens, ResourceLimit::Unlimited);
+    // ... the runaway diagnostics are untouched ...
+    assert_eq!(lane.max_no_progress_rounds, default.max_no_progress_rounds);
+    assert_eq!(lane.max_file_rereads, default.max_file_rereads);
+    assert_eq!(
+        lane.max_identical_tool_call_repeats,
+        default.max_identical_tool_call_repeats
+    );
+    // ... and it cannot be mistaken for the "unspecified" default.
+    assert_ne!(lane, default);
+    // The same lifting applies to explicit non-default settings, keeping their diagnostics.
+    let custom = BudgetSettings {
+        max_no_progress_rounds: 3,
+        max_identical_tool_call_repeats: 2,
+        ..Default::default()
+    }
+    .with_unlimited_resources();
+    assert_eq!(custom.max_no_progress_rounds, 3);
+    assert_eq!(custom.max_identical_tool_call_repeats, 2);
+    assert_eq!(custom.max_tool_calls, ResourceLimit::Unlimited);
+}
+
+#[test]
+fn resource_limit_distinguishes_unlimited_from_any_bound() {
+    // Unlimited never trips, even for the largest usage.
+    assert!(!ResourceLimit::<u32>::Unlimited.is_reached_by(u32::MAX));
+    assert!(!ResourceLimit::<u64>::Unlimited.is_exceeded_by(u64::MAX));
+    assert_eq!(ResourceLimit::<u32>::Unlimited.remaining(7), None);
+    assert_eq!(ResourceLimit::<u32>::Unlimited.bounded(), None);
+    // A bound of zero is a real cap, not "no cap".
+    assert!(ResourceLimit::Bounded(0_u32).is_reached_by(0));
+    assert!(!ResourceLimit::Bounded(0_u32).is_exceeded_by(0));
+    assert!(ResourceLimit::Bounded(0_u32).is_exceeded_by(1));
+    assert_eq!(ResourceLimit::Bounded(10_u32).remaining(4), Some(6));
+    assert_eq!(ResourceLimit::Bounded(10_u64).remaining(40), Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unlimited_resources_never_stop_on_volume_alone() {
+    // Given: lane-scope settings, whose default counterpart would long since have stopped.
+    let bus = EventBus::new(16);
+    let mut receiver = bus.subscribe();
+    let settings = BudgetSettings::lane_scope();
+    let context = context(&bus, &settings);
+    let mut counters = BudgetCounters::default();
+    // When: virtual time, tokens and tool calls far exceed every default cap.
+    tokio::time::advance(Duration::from_secs(10 * 60 * 60)).await;
+    counters.usage(Usage {
+        input_tokens: u64::MAX / 2,
+        output_tokens: u64::MAX / 2,
+        ..Default::default()
+    });
+    // Then: no exhaustion and no warning, while usage is still metered.
+    for tool_calls in [399, 401, 10_001, u32::MAX] {
+        assert_eq!(
+            counters.publish(tool_calls, &context),
+            BudgetDecision::Continue
+        );
+    }
+    assert!(counters.cumulative_input_tokens > 0);
+    assert!(counters.active_elapsed() >= Duration::from_secs(10 * 60 * 60));
+    assert_no_event(&mut receiver);
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_settings_still_stop_at_the_existing_caps() {
+    // Given: the unchanged default settings (400 calls, 2 hours, no token cap).
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings::default();
+    let context = context(&bus, &settings);
+    let mut counters = BudgetCounters::default();
+    // Then: 399 calls continue and the 400th stops.
+    assert_eq!(counters.publish(399, &context), BudgetDecision::Continue);
+    assert!(matches!(
+        counters.publish(400, &context),
+        BudgetDecision::Exhausted(breach) if breach.detail.contains("max_tool_calls=400")
+    ));
+    // Given: a fresh run that has used exactly two hours, then a bit more.
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_secs(7_200)).await;
+    assert_eq!(counters.publish(0, &context), BudgetDecision::Continue);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(
+        counters.publish(0, &context),
+        BudgetDecision::Exhausted(breach) if breach.detail.contains("max_elapsed_ms=7200000")
+    ));
+    // Token usage alone never stops a default run.
+    let mut counters = BudgetCounters::default();
+    counters.usage(Usage {
+        input_tokens: u64::MAX,
+        output_tokens: u64::MAX,
+        ..Default::default()
+    });
+    assert_eq!(counters.publish(0, &context), BudgetDecision::Continue);
+}
+
+#[tokio::test]
+async fn unlimited_tool_calls_warn_only_on_the_token_axis() {
+    // Given: unlimited tool calls with a bounded token cap near its end.
+    let bus = EventBus::new(16);
+    let mut receiver = bus.subscribe();
+    let settings = BudgetSettings {
+        max_tokens: ResourceLimit::Bounded(100),
+        ..BudgetSettings::lane_scope()
+    };
+    let context = context(&bus, &settings);
+    let mut counters = BudgetCounters::default();
+    // When: tool calls are high but tokens are not near the cap.
+    assert_eq!(counters.publish(5_001, &context), BudgetDecision::Continue);
+    assert_no_event(&mut receiver);
+    counters.usage(Usage {
+        input_tokens: 90,
+        ..Default::default()
+    });
+    assert_eq!(counters.publish(5_001, &context), BudgetDecision::Continue);
+    // Then: the warning reports tool calls as unlimited.
+    let event = receiver.recv().await.expect("warning");
+    assert!(matches!(event.kind, event_bus::EventKind::Diagnostic(d)
+        if d.code == diagnostic_codes::BUDGET_WARNING
+            && d.detail.contains("remaining_tool_calls=unlimited")
+            && d.detail.contains("remaining_tokens=10")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runaway_diagnostics_still_fire_with_unlimited_resources() {
+    // Given: lane-scope settings with small diagnostic thresholds.
+    let bus = EventBus::new(16);
+    let settings = BudgetSettings {
+        max_no_progress_rounds: 2,
+        max_file_rereads: 1,
+        ..BudgetSettings::lane_scope()
+    };
+    let context = context(&bus, &settings);
+    // When: consecutive rounds make no progress.
+    let mut counters = BudgetCounters::default();
+    tokio::time::advance(Duration::from_secs(10 * 60 * 60)).await;
+    for _ in 0..3 {
+        counters.finish_round();
+    }
+    // Then: NoProgress stops the run despite unlimited resources.
+    assert!(matches!(
+        counters.publish(1_000, &context),
+        BudgetDecision::Exhausted(breach)
+            if breach.code == diagnostic_codes::NO_PROGRESS
+                && breach.detail.contains("max_no_progress_rounds=2")
+    ));
+    // When: the same file is reread more than allowed.
+    let mut counters = BudgetCounters::default();
+    for _ in 0..3 {
+        counters.read(Path::new("reread.txt"));
+    }
+    // Then: the reread guard stops the run.
+    assert!(matches!(
+        counters.publish(1_000, &context),
+        BudgetDecision::Exhausted(breach)
+            if breach.code == diagnostic_codes::BUDGET_EXHAUSTED
+                && breach.detail.contains("max_file_rereads=1")
+    ));
 }

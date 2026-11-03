@@ -5,7 +5,7 @@ async fn budget_overrun_emits_budget_exhausted_once() {
     // Given: a five-call budget, independent of reread and progress limits.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tool_calls: 5,
+            max_tool_calls: runtime::budget_tracker::ResourceLimit::Bounded(5),
             ..Default::default()
         },
         ..Default::default()
