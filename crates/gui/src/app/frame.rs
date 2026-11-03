@@ -470,23 +470,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         match from_dock_state(&self.dock, &self.panels) {
-            Ok(mut workspace) => {
-                let mut view = self.sidebar_view.clone();
-                view.retain_projects(&self.sidebar);
-                workspace.sidebar_view = view;
+            Ok(workspace) => {
                 if let Err(error) = workspace_ui::save_to(&workspace, path) {
                     tracing::warn!(path = %path.display(), %error, "failed to save layout");
                 }
             }
             Err(error) => tracing::warn!(%error, "failed to extract workspace"),
-        }
-    }
-
-    /// Saves the layout, with the new sidebar view, when a view setting changed.
-    pub(super) fn sidebar_view_changed(&mut self, changed: bool) {
-        if changed {
-            self.sidebar_view.retain_projects(&self.sidebar);
-            self.save_layout();
         }
     }
 

@@ -54,6 +54,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self
     }
 
+    /// Writes the UI settings file with the current sidebar view. `None` means no
+    /// settings path is configured; `Some(error)` is the failure of the write.
+    fn save_ui_settings(&mut self) -> Option<Option<String>> {
+        self.theme_settings.settings.sidebar_view = self.sidebar_view.clone();
+        let path = self.theme_settings.path.as_ref()?;
+        Some(
+            workspace_ui::save_settings(&self.theme_settings.settings, path)
+                .err()
+                .map(|error| {
+                    tracing::error!(%error, "UI settings save failed");
+                    error.to_string()
+                }),
+        )
+    }
+
+    /// Persists a sort or fold change to the UI settings file, which every normal
+    /// start reads back. Removed projects are dropped from the saved view.
+    pub(super) fn sidebar_view_changed(&mut self, changed: bool) {
+        if changed {
+            self.sidebar_view.retain_projects(&self.sidebar);
+            self.save_ui_settings();
+        }
+    }
+
     pub fn open_theme_settings(&mut self) {
         if self.settings_save_in_progress() {
             return;
@@ -105,15 +129,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(preset) = selected {
             self.reload_theme(ctx, preset);
             self.theme_settings.settings.theme_preset = preset.into();
-            self.theme_settings.error = match &self.theme_settings.path {
-                Some(path) => workspace_ui::save_settings(&self.theme_settings.settings, path)
-                    .err()
-                    .map(|error| {
-                        tracing::error!(%error, "UI settings save failed");
-                        error.to_string()
-                    }),
-                None => Some("No UI settings path is configured; theme is not saved".into()),
-            };
+            self.theme_settings.error = self.save_ui_settings().unwrap_or_else(|| {
+                Some("No UI settings path is configured; theme is not saved".into())
+            });
         }
         if close || modal.should_close() {
             self.close_theme_settings();

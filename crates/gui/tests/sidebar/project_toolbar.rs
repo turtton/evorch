@@ -2,7 +2,7 @@ use super::{MockSource, state};
 use gui::app::WorkbenchState;
 use gui::headless::HeadlessWorkbench;
 use gui::theme::tokens::ROW_DENSE;
-use workspace_ui::{ProjectId, ProjectSort, SidebarState, ThreadId, UiSettings, Workspace};
+use workspace_ui::{ProjectId, ProjectSort, SidebarState, ThreadId, UiSettings};
 
 const ADD: &str = "Add project";
 const SORT: &str = "Sort projects";
@@ -112,39 +112,56 @@ fn toolbar_stays_fixed_above_the_project_list_while_it_scrolls() {
 }
 
 #[test]
-fn a_narrow_sidebar_keeps_icon_only_controls_apart_and_clickable() {
-    // Given: a project and a window wide enough for the text button, and a narrow one.
+fn toolbar_controls_stay_apart_and_clickable_across_the_label_threshold() {
+    // Given: windows from narrow to wide, so the sidebar crosses the width at which the
+    // Add project text no longer fits beside the two right-hand buttons.
     let temp = tempfile::tempdir().expect("temp dir");
     let make = || sidebar_of(temp.path(), &[("demo", "demo")]);
-    let wide = harness(make(), [960.0, 700.0]);
-    let mut narrow = harness(make(), [480.0, 700.0]);
+    let (mut labelled, mut icon_only) = (0, 0);
+    for width in (400..=800).step_by(25) {
+        let size = [width as f32, 700.0];
+        let mut bar = harness(make(), size);
+        let add = bar.label_rects(ADD)[0];
+        let sort = bar.label_rects(SORT)[0];
+        let fold = bar.label_rects(COLLAPSE_ALL)[0];
 
-    // Then: the wide toolbar labels the button, the narrow one shrinks it to an icon.
-    let wide_add = wide.label_rects(ADD)[0];
-    let narrow_add = narrow.label_rects(ADD)[0];
-    assert!(
-        narrow_add.width() * 2.0 < wide_add.width(),
-        "narrow {narrow_add:?} should be an icon, wide {wide_add:?} a labelled button"
-    );
-
-    // Then: no control overlaps another and all stay inside one row.
-    let rects: Vec<_> = [ADD, SORT, COLLAPSE_ALL]
-        .iter()
-        .map(|label| narrow.label_rects(label)[0])
-        .collect();
-    for (index, rect) in rects.iter().enumerate() {
-        for other in &rects[index + 1..] {
-            assert!(!rect.intersects(*other), "{rect:?} overlaps {other:?}");
+        // Then: the controls never overlap, in whichever form the Add button takes.
+        assert!(
+            add.right() <= sort.left() + 0.5,
+            "{width}: {add:?} {sort:?}"
+        );
+        assert!(
+            sort.right() <= fold.left() + 0.5,
+            "{width}: {sort:?} {fold:?}"
+        );
+        for rect in [add, sort, fold] {
+            assert!(rect.height() <= ROW_DENSE, "{width}: {rect:?}");
         }
-        assert!(rect.height() <= ROW_DENSE);
+        if add.width() > 60.0 {
+            labelled += 1;
+        } else {
+            icon_only += 1;
+        }
+
+        // When: Add project is pressed.
+        bar.click_label(ADD);
+        bar.run();
+        // Then: it opens the dialog.
+        assert!(bar.state().project_dialog().is_open(), "{width}");
+
+        // When: the other two controls are pressed on a fresh window.
+        let mut other = harness(make(), size);
+        other.click_label(COLLAPSE_ALL);
+        other.run();
+        other.click_label(SORT);
+        other.run();
+        // Then: folding applied and the sort menu opened.
+        assert!(other.has_label(EXPAND_ALL), "{width}");
+        assert!(other.has_label("Name (A–Z)"), "{width}");
     }
 
-    // When: the icon is pressed.
-    narrow.click_label(ADD);
-    narrow.run();
-
-    // Then: it still opens the add-project dialog.
-    assert!(narrow.state().project_dialog().is_open());
+    // Then: the sweep covered both sides of the threshold.
+    assert!(labelled > 0 && icon_only > 0, "{labelled} / {icon_only}");
 }
 
 #[test]
@@ -328,10 +345,11 @@ fn bulk_fold_is_disabled_without_projects() {
 }
 
 #[test]
-fn sort_and_folds_survive_a_restart_through_the_saved_layout() {
-    // Given: a workbench with a layout path, one project gone since the layout was saved.
+fn sort_and_folds_survive_a_restart_through_the_ui_settings_file() {
+    // Given: a workbench with a UI settings path, saved earlier with a project that
+    // has since been removed.
     let temp = tempfile::tempdir().expect("temp dir");
-    let layout = temp.path().join("layout.json");
+    let settings_path = temp.path().join("ui.toml");
     let make_sidebar = || {
         let mut sidebar = sidebar_of(
             temp.path(),
@@ -341,21 +359,17 @@ fn sort_and_folds_survive_a_restart_through_the_saved_layout() {
         add_thread(&mut sidebar, "b", "thread-alpha", 1, false);
         sidebar
     };
-    let mut stale = Workspace::default();
+    let mut stale = UiSettings::default();
     stale
         .sidebar_view
         .collapsed_projects
         .insert(ProjectId::new("gone"));
-    let settings = UiSettings {
-        layout: workspace_ui::LayoutSettings {
-            workspace: Some(stale),
-        },
-        ..UiSettings::default()
-    };
-    let first = WorkbenchState::new(MockSource::default(), &settings)
+    workspace_ui::save_settings(&stale, &settings_path).expect("seed settings");
+    let load = || workspace_ui::load_settings(&settings_path).expect("settings");
+    let first = WorkbenchState::new(MockSource::default(), &load())
         .expect("state")
-        .with_sidebar(make_sidebar())
-        .with_save_path(&layout);
+        .with_ui_settings_path(&settings_path)
+        .with_sidebar(make_sidebar());
     let mut session = HeadlessWorkbench::new(first, [1280.0, 900.0]);
     session.run();
 
@@ -364,32 +378,22 @@ fn sort_and_folds_survive_a_restart_through_the_saved_layout() {
     session.click_label("Collapse threads of alpha");
     session.run();
 
-    // Then: the layout file records both, and the removed project is not carried along.
-    let saved = workspace_ui::load_workspace(&layout).expect("saved layout");
-    assert_eq!(saved.sidebar_view.project_sort, ProjectSort::Name);
+    // Then: the settings file records both, and the removed project is not carried along.
+    let saved = load().sidebar_view;
+    assert_eq!(saved.project_sort, ProjectSort::Name);
     assert_eq!(
-        saved
-            .sidebar_view
-            .collapsed_projects
-            .iter()
-            .collect::<Vec<_>>(),
+        saved.collapsed_projects.iter().collect::<Vec<_>>(),
         [&ProjectId::new("b")]
     );
 
-    // When: a new process starts from that layout.
-    let restored_settings = UiSettings {
-        layout: workspace_ui::LayoutSettings {
-            workspace: Some(saved),
-        },
-        ..UiSettings::default()
-    };
-    let second = WorkbenchState::new(MockSource::default(), &restored_settings)
+    // When: a new process starts from that file.
+    let second = WorkbenchState::new(MockSource::default(), &load())
         .expect("state")
         .with_sidebar(make_sidebar());
     let mut restarted = HeadlessWorkbench::new(second, [1280.0, 900.0]);
     restarted.run();
 
-    // Then: the order and folds are as they were left.
+    // Then: the order and folds are as they were left, and the stored order is not.
     let names = ["charlie", "alpha", "bravo"];
     assert_eq!(
         shown_order(&restarted, &names),

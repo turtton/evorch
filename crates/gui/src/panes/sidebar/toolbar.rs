@@ -4,7 +4,7 @@ use egui::{Align, Button, Layout, Sense, Stroke, Ui, UiBuilder, WidgetInfo, Widg
 use workspace_ui::{ProjectSort, SidebarState, SidebarView};
 
 use crate::theme::icons;
-use crate::theme::tokens::{ROW_DENSE, SP_1, SP_2, palette};
+use crate::theme::tokens::{FONT_ICON, ROW_DENSE, SP_1, SP_2, palette};
 use crate::theme::widgets::{accessible, ghost, icon_button, icon_text};
 
 use super::SidebarAction;
@@ -50,18 +50,14 @@ pub fn render(
     strip.spacing_mut().item_spacing.x = SP_1;
 
     let add_text = icons::with_icon(icons::PLUS, ADD_LABEL);
-    let text_width = ui
-        .painter()
-        .layout_no_wrap(
-            add_text.clone(),
-            egui::TextStyle::Button.resolve(ui.style()),
-            palette().TEXT,
-        )
-        .size()
-        .x;
-    let full_width = text_width + 2.0 * ui.spacing().button_padding.x;
-    // The text label only stays while it fits beside both icon buttons.
-    let wide = inner.width() >= full_width + 2.0 * ICON_BUTTON + 3.0 * SP_1;
+    let full_width = text_width(ui, &add_text, egui::TextStyle::Button.resolve(ui.style()))
+        + 2.0 * ui.spacing().button_padding.x;
+    // The text label only stays while it fits beside the two right-hand buttons, at
+    // the widths they actually take (a glyph plus padding can exceed `ICON_BUTTON`).
+    let right_width = icon_button_width(ui, icons::ARROWS_DOWN_UP)
+        + icon_button_width(ui, icons::ARROWS_IN_LINE_VERTICAL)
+            .max(icon_button_width(ui, icons::ARROWS_OUT_LINE_VERTICAL));
+    let wide = inner.width() >= full_width + right_width + 2.0 * SP_1;
 
     if wide {
         let response = strip.add(ghost(add_text).min_size(egui::vec2(0.0, ICON_BUTTON)));
@@ -78,6 +74,19 @@ pub fn render(
         fold_button(ui, sidebar, view, action);
         sort_button(ui, view, action);
     });
+}
+
+fn text_width(ui: &Ui, text: &str, font: egui::FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, palette().TEXT)
+        .size()
+        .x
+}
+
+/// Width an icon button takes: its glyph and padding, never below `ICON_BUTTON`.
+fn icon_button_width(ui: &Ui, icon: &str) -> f32 {
+    let glyph = text_width(ui, icon, egui::FontId::proportional(FONT_ICON));
+    (glyph + 2.0 * ui.spacing().button_padding.x).max(ICON_BUTTON)
 }
 
 /// Folds every project when any is open, otherwise unfolds them all.

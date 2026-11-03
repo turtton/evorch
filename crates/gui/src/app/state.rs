@@ -224,7 +224,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             keymap: Keymap::from_settings(&settings.keybinds),
             save_path: None,
             sidebar: SidebarState::default(),
-            sidebar_view: workspace.sidebar_view.clone(),
+            sidebar_view: settings.sidebar_view.clone(),
             sidebar_path: None,
             shared_sidebar: Default::default(),
             shared_feed: Default::default(),

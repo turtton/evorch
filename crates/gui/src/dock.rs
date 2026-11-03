@@ -160,7 +160,6 @@ pub fn from_dock_state(
             rect: None,
         },
         extra_windows: Vec::new(),
-        sidebar_view: Default::default(),
     })
 }
 
@@ -305,7 +304,6 @@ mod tests {
                 rect: None,
             },
             extra_windows: Vec::new(),
-            sidebar_view: Default::default(),
         };
         let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
 
@@ -344,7 +342,6 @@ mod tests {
                 rect: None,
             },
             extra_windows: Vec::new(),
-            sidebar_view: Default::default(),
         };
         let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
 
@@ -378,7 +375,6 @@ mod tests {
                 rect: None,
             },
             extra_windows: Vec::new(),
-            sidebar_view: Default::default(),
         };
         let mut dock = to_dock_state(&workspace).expect("workspace conversion succeeds");
 
