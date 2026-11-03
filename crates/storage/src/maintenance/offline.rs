@@ -477,6 +477,7 @@ pub fn strip_task_progress_cursor(
         }
         after = last;
     }
+    require_no_foreign_key_violations(&conn)?;
     if !options.no_vacuum {
         require_space(parent, space_basis.saturating_mul(2))?;
         conn.execute_batch("VACUUM;")?;
@@ -515,28 +516,23 @@ fn strip_batch_after(
     limit: usize,
 ) -> Result<(u64, i64), StorageError> {
     let tx = conn.unchecked_transaction()?;
-    let mut stmt = tx.prepare(&format!("SELECT id, session_id, OCTET_LENGTH(payload) - OCTET_LENGTH(json_remove(payload, '{CURSOR}')) FROM events WHERE id > ?1 AND id <= ?2 AND {FILTER} ORDER BY id LIMIT ?3"))?;
+    let mut stmt = tx.prepare(&format!(
+        "SELECT id FROM events WHERE id > ?1 AND id <= ?2 AND {FILTER} ORDER BY id LIMIT ?3"
+    ))?;
     let rows = stmt
         .query_map(params![after, through, limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
+            row.get::<_, i64>(0)
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
-    for (id, session, reduction) in &rows {
+    for id in &rows {
         tx.execute(
             &format!("UPDATE events SET payload = json_remove(payload, '{CURSOR}') WHERE id = ?1"),
             [id],
         )?;
-        if let Some(session) = session {
-            tx.execute("UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) WHERE id = ?2", params![reduction, session])?;
-        }
     }
     tx.commit()?;
-    Ok((rows.len() as u64, rows.last().map_or(after, |row| row.0)))
+    Ok((rows.len() as u64, rows.last().copied().unwrap_or(after)))
 }
 
 /// Free bytes for an unprivileged writer on the volume of `path`.

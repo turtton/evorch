@@ -203,7 +203,7 @@ pub(super) fn compress_events(
     loop {
         let batch = {
             let mut stmt = conn.prepare(
-                "SELECT id,kind,subkind,payload,session_id FROM events WHERE id>?1
+                "SELECT id,kind,subkind,payload FROM events WHERE id>?1
                  AND kind IN ('Tool','Message','compaction') AND typeof(payload)='text'
                  AND OCTET_LENGTH(payload)>=2048 ORDER BY id LIMIT ?2",
             )?;
@@ -218,7 +218,6 @@ pub(super) fn compress_events(
                     row.get::<_, String>(1)?,
                     subkind(row.get(2)?, row.get_ref(3)?),
                     payload,
-                    row.get::<_, Option<String>>(4)?,
                 ));
                 if batch_bytes >= 16 * 1024 * 1024 {
                     break;
@@ -233,7 +232,7 @@ pub(super) fn compress_events(
             .apply
             .then(|| conn.unchecked_transaction())
             .transpose()?;
-        for (id, kind, subkind, payload, session) in batch {
+        for (id, kind, subkind, payload) in batch {
             after = id;
             // Preview's planner already supplied the surviving deltas, including
             // aggregates that were too small to qualify in the original store.
@@ -269,12 +268,6 @@ pub(super) fn compress_events(
                 tx.execute(
                     "UPDATE events SET payload=?2 WHERE id=?1",
                     params![id, encoded],
-                )?;
-                super::adjust_session_bytes(
-                    tx,
-                    session.as_deref(),
-                    payload.len() as u64,
-                    encoded.stored_len() as u64,
                 )?;
                 converted += 1;
             }

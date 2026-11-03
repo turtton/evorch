@@ -48,16 +48,21 @@ pub(super) fn metadata_fingerprint(conn: &Connection) -> Result<(u64, [u8; 32]),
 }
 
 /// Everything must read back, and nothing of the old format may be left in a row.
-pub(super) fn verify_all(conn: &Connection) -> Result<(), StorageError> {
-    let unconverted: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM run_contexts WHERE messages_json != ''",
-        [],
-        |row| row.get(0),
-    )?;
-    if unconverted != 0 {
-        return Err(invalid(format!(
-            "{unconverted} runs still hold their conversation in the old column"
-        )));
+///
+/// `old_column` is whether the runs were converted by this call, so that `messages_json`
+/// still exists and must be empty in every row.
+pub(super) fn verify_all(conn: &Connection, old_column: bool) -> Result<(), StorageError> {
+    if old_column {
+        let unconverted: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_contexts WHERE messages_json != ''",
+            [],
+            |row| row.get(0),
+        )?;
+        if unconverted != 0 {
+            return Err(invalid(format!(
+                "{unconverted} runs still hold their conversation in the old column"
+            )));
+        }
     }
     let report = read_snapshot(conn, || {
         let mut report = check_bodies(conn, PRODUCTION_OWNERS, BodyScope::All, true)?;

@@ -93,6 +93,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "collected once no content_blob_refs_* table names the blob",
     ),
     (
+        "content_blob_refs_event",
+        CascadeOwner,
+        "follows its event row; the trigger queues the blob",
+    ),
+    (
         "content_blob_refs_header",
         CascadeOwner,
         "follows its run header; the trigger queues the blob",

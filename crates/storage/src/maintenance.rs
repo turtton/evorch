@@ -8,13 +8,12 @@ pub(crate) mod retention;
 pub(crate) mod retention_events;
 mod vacuum;
 
-pub(crate) use compact::adjust_session_bytes;
 pub use compact::{CompactOptions, CompactSummary, DeltaMode, backfill_events, compact_events};
 #[cfg(any(test, feature = "unchecked-open"))]
 pub use convert_bodies::testing::downgrade_to_v39;
 pub use convert_bodies::{
     Analysis, CanonicalizedRuns, ConvertBodiesFailure, ConvertBodiesOptions, ConvertBodiesSummary,
-    Problem, RetentionReport, convert_bodies,
+    EventProblem, EventsReport, KindFigure, Problem, RetentionReport, convert_bodies,
 };
 pub use offline::{StripOptions, StripSummary, strip_task_progress_cursor};
 pub use retention::{RetentionSummary, preview_task_progress_retention};

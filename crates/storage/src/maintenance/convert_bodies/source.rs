@@ -44,10 +44,11 @@ const REQUIRED_TABLES: [&str; 4] = [
 ];
 
 /// Tables migration v40 creates: none of them may exist before the conversion starts.
-const TARGET_TABLES: [&str; 3] = [
+const TARGET_TABLES: [&str; 4] = [
     "run_messages",
     "content_blob_refs_message",
     "content_blob_refs_header",
+    "content_blob_refs_event",
 ];
 
 /// The oldest schema version the conversion brings up to 39 itself (the migrations from
@@ -106,8 +107,11 @@ const MAX_LISTED_PROBLEMS: usize = 20;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Shape {
-    /// A regular v39 database: the conversion applies.
+    /// A regular v33 to v39 database: the conversion applies in full.
     Source,
+    /// A regular v40 database (the runs are in rows, the events are not in token form):
+    /// only the events are converted, and no run is touched.
+    EventsPending,
     /// Already in the current format: nothing to do.
     Converted,
 }
@@ -139,10 +143,12 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
+    if version == MESSAGE_ROWS_VERSION {
+        return classify_runs_converted(conn);
+    }
     if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {
         return Err(invalid(format!(
-            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {}; this one is version {version}",
-            MESSAGE_ROWS_VERSION - 1
+            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {MESSAGE_ROWS_VERSION}; this one is version {version}"
         )));
     }
     let columns: Vec<String> = conn
@@ -151,7 +157,8 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         .collect::<Result<_, _>>()?;
     let mut leftovers = columns
         .iter()
-        .any(|column| column == "body_format" || column == "header_rev");
+        .any(|column| column == "body_format" || column == "header_rev")
+        || super::events::has_any_format_column(conn)?;
     for table in TARGET_TABLES {
         leftovers |= table_exists(conn, table)?;
     }
@@ -175,6 +182,41 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         }
     }
     Ok(Shape::Source)
+}
+
+/// A version 40 database: the run tables are in the header format, and nothing of the event
+/// body format exists yet (a database that has some of it was stopped half way).
+fn classify_runs_converted(conn: &Connection) -> Result<Shape, StorageError> {
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has = |name: &str| columns.iter().any(|column| column == name);
+    if has("messages_json") || !has("body_format") || !has("header_rev") {
+        return Err(invalid(format!(
+            "run_contexts is not in the header format of a version {MESSAGE_ROWS_VERSION} database; {}",
+            restore_hint()
+        )));
+    }
+    for table in [
+        "run_messages",
+        "content_blob_refs_message",
+        "content_blob_refs_header",
+    ] {
+        if !table_exists(conn, table)? {
+            return Err(invalid(format!(
+                "the version {MESSAGE_ROWS_VERSION} table {table} is missing; the database is not a regular one"
+            )));
+        }
+    }
+    if super::events::has_any_format_column(conn)? || table_exists(conn, "content_blob_refs_event")?
+    {
+        return Err(invalid(format!(
+            "the database has the tables or columns of a conversion that did not finish; {}",
+            restore_hint()
+        )));
+    }
+    Ok(Shape::EventsPending)
 }
 
 /// A run as the old format stores it.
@@ -438,6 +480,8 @@ pub struct Analysis {
     /// not read, a deleted run with no job). `--apply` refuses while there is one.
     pub reclaim_blockers: Vec<String>,
     pub problems: Vec<Problem>,
+    /// The events step: what it would convert, and what it cannot.
+    pub events: super::events::EventsReport,
 }
 
 fn scalar(conn: &Connection, sql: &str) -> Result<u64, StorageError> {
@@ -505,6 +549,37 @@ pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
                 "SELECT COUNT(*) FROM run_contexts WHERE {RUN_BYTES_SQL} > {} \
                  AND {not_deleted}",
                 run_limit()
+            ),
+        )?,
+        reclaim_blockers: super::retention::blockers(conn)?,
+        ..Analysis::default()
+    })
+}
+
+/// The counts of a version 40 database that need no decoding: only the reclaim of deleted
+/// runs matters, since no run is converted.
+pub(super) fn measure_converted(conn: &Connection) -> Result<Analysis, StorageError> {
+    let reclaim = table_exists(conn, "reclaim_jobs")?;
+    Ok(Analysis {
+        deleted_runs_to_reclaim: scalar(
+            conn,
+            "SELECT COUNT(*) FROM run_contexts \
+             WHERE run_id IN (SELECT run_id FROM run_tombstones)",
+        )?,
+        reclaim_jobs_pending: scalar(
+            conn,
+            "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
+        )?,
+        reclaim_oversized_registered: if reclaim {
+            scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?
+        } else {
+            0
+        },
+        convertible_runs: scalar(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM run_contexts WHERE {}",
+                not_deleted(conn)?
             ),
         )?,
         reclaim_blockers: super::retention::blockers(conn)?,

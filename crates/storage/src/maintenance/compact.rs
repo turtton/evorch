@@ -98,7 +98,10 @@ pub fn backfill_events(
     check_schema(&conn, 30)?;
     check_current_format(&conn)?;
     offline::enable_foreign_keys(&conn)?;
-    Database { conn }.backfill_event_columns(options)
+    let db = Database { conn };
+    let summary = db.backfill_event_columns(options)?;
+    offline::require_no_foreign_key_violations(&db.conn)?;
+    Ok(summary)
 }
 
 fn validate_batch(rows: usize) -> Result<(), StorageError> {
@@ -418,7 +421,7 @@ fn delete_matching(
             "kind IN ('Fault','Lifecycle')"
         };
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, kind, subkind, payload, OCTET_LENGTH(payload),session_id FROM events WHERE id > ?1 AND {filter} ORDER BY id LIMIT ?2"
+            "SELECT id, kind, subkind, payload, OCTET_LENGTH(payload) FROM events WHERE id > ?1 AND {filter} ORDER BY id LIMIT ?2"
         ))?;
         let mut rows = stmt.query(rusqlite::params_from_iter(
             [after, options.batch_rows as i64].into_iter().chain(cutoff),
@@ -442,16 +445,15 @@ fn delete_matching(
             if matched {
                 let bytes = row.get::<_, u64>(4)?;
                 stage.deleted(&kind, &subkind, bytes);
-                ids.push((after, row.get::<_, Option<String>>(5)?, bytes));
+                ids.push(after);
             }
         }
         drop(rows);
         drop(stmt);
         if options.apply && !ids.is_empty() {
             let tx = conn.unchecked_transaction()?;
-            for (id, session, bytes) in ids {
+            for id in ids {
                 tx.execute("DELETE FROM events WHERE id=?1", [id])?;
-                adjust_session_bytes(&tx, session.as_deref(), bytes, 0)?;
             }
             tx.commit()?;
             checkpoint(conn)?;
@@ -468,37 +470,13 @@ fn checkpoint(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// events' triggers maintain the day/session indexes, but sessions' cached
-/// total is application-owned. Update it in the SAME transaction as each
-/// committed rewrite, not only in the final reconciliation.
-pub(crate) fn adjust_session_bytes(
-    conn: &Connection,
-    session: Option<&str>,
-    before: u64,
-    after: u64,
-) -> Result<(), StorageError> {
-    if let Some(session) = session {
-        conn.execute(
-            "UPDATE sessions SET total_event_bytes=MAX(0,total_event_bytes-?2+?3) WHERE id=?1",
-            rusqlite::params![
-                session,
-                i64::try_from(before)
-                    .map_err(|_| StorageError::OutOfRange("session payload bytes"))?,
-                i64::try_from(after)
-                    .map_err(|_| StorageError::OutOfRange("session payload bytes"))?
-            ],
-        )?;
-    }
-    Ok(())
-}
-
 fn recalculate_accounting(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DELETE FROM event_session_bytes;
-         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events WHERE session_id IS NOT NULL GROUP BY session_id;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload) + blob_bytes) FROM events WHERE session_id IS NOT NULL GROUP BY session_id;
          DELETE FROM event_day_bytes;
-         INSERT INTO event_day_bytes SELECT wall_clock_ns/86400000000000-(wall_clock_ns%86400000000000<0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns/86400000000000-(wall_clock_ns%86400000000000<0), SUM(OCTET_LENGTH(payload) + blob_bytes) FROM events GROUP BY 1;
          UPDATE sessions SET total_event_bytes=COALESCE((SELECT payload_bytes FROM event_session_bytes WHERE session_id=sessions.id),0);
          COMMIT;"
     )?;

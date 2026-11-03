@@ -57,7 +57,32 @@ pub struct InspectEvent {
     pub session_id: Option<String>,
     pub wall_clock_ns: i64,
     pub kind: String,
+    /// The event's JSON. A tokenized event shows its bodies resolved
+    /// ([`InspectBodies::Resolved`]) or its tokens ([`InspectBodies::Refs`]).
     pub payload: Value,
+    /// `events.body_format`: 0 inline, 1 tokenized.
+    pub body_format: i64,
+    /// Why a body could not be resolved (the tokens stay in `payload`); never body text.
+    pub body_error: Option<String>,
+}
+
+/// How `inspect events` shows the bodies of a tokenized event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectBodies {
+    /// Bodies are read and put where their tokens are (the default).
+    #[default]
+    Resolved,
+    /// Tokens (hash and length) stay as they are; no blob data is read to show them.
+    Refs,
+}
+
+/// Options of [`Database::inspect_events_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InspectEventsOptions<'a> {
+    pub bodies: InspectBodies,
+    /// Keep only events with a string value (a resolved body included) that contains this
+    /// text. It is matched against the resolved bodies whatever `bodies` shows.
+    pub contains: Option<&'a str>,
 }
 
 /// Which events to read.
@@ -112,6 +137,19 @@ impl Database {
         scope: EventScope<'_>,
         limit: usize,
     ) -> Result<(Vec<InspectEvent>, bool), StorageError> {
+        self.inspect_events_with(scope, limit, InspectEventsOptions::default())
+    }
+
+    /// [`Self::inspect_events`] with the way bodies are shown and a text filter.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn inspect_events_with(
+        &self,
+        scope: EventScope<'_>,
+        limit: usize,
+        options: InspectEventsOptions<'_>,
+    ) -> Result<(Vec<InspectEvent>, bool), StorageError> {
         let limit = limit.clamp(1, 10_000);
         let mut events = Vec::new();
         let mut truncated = false;
@@ -159,17 +197,20 @@ impl Database {
                     )?;
                 }
                 let mut statement = transaction.prepare(
-                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id FROM events \
-                     WHERE id = ?1",
+                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id, body_format \
+                     FROM events WHERE id = ?1",
                 )?;
                 for candidate in normalize(candidates).iter().rev() {
                     let mut rows = statement.query([candidate.id])?;
                     let Some(row) = rows.next()? else { continue };
-                    let event = event_row(row)?;
-                    if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
+                    let (event, resolved) = event_row(&transaction, row, options.bodies)?;
+                    if hidden(&tombstones, &resolved, row.get::<_, Option<String>>(5)?) {
                         continue;
                     }
-                    if candidate.confirm && !attributed_to_run(&event.payload, run_id) {
+                    if candidate.confirm && !attributed_to_run(&resolved, run_id) {
+                        continue;
+                    }
+                    if !contains_text(&resolved, options.contains) {
                         continue;
                     }
                     if events.len() == limit {
@@ -185,8 +226,8 @@ impl Database {
                 let page = i64::try_from(limit + 1).unwrap_or(i64::MAX);
                 let mut before = i64::MAX;
                 let mut statement = self.conn.prepare(
-                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id FROM events
-                     WHERE wall_clock_ns BETWEEN ?1 AND ?2 AND id < ?4
+                    "SELECT id, session_id, wall_clock_ns, kind, payload, run_id, body_format
+                     FROM events WHERE wall_clock_ns BETWEEN ?1 AND ?2 AND id < ?4
                      AND (run_id IS NULL OR run_id NOT IN (SELECT run_id FROM run_tombstones))
                      ORDER BY id DESC LIMIT ?3",
                 )?;
@@ -196,9 +237,12 @@ impl Database {
                     let mut read = 0_i64;
                     while let Some(row) = rows.next()? {
                         read += 1;
-                        let event = event_row(row)?;
+                        let (event, resolved) = event_row(&self.conn, row, options.bodies)?;
                         before = event.id;
-                        if hidden(&tombstones, &event, row.get::<_, Option<String>>(5)?) {
+                        if hidden(&tombstones, &resolved, row.get::<_, Option<String>>(5)?) {
+                            continue;
+                        }
+                        if !contains_text(&resolved, options.contains) {
                             continue;
                         }
                         if events.len() == limit {
@@ -597,13 +641,20 @@ impl Database {
 
 /// JSON form of an event, as `evorch inspect` prints it.
 pub fn event_json(event: &InspectEvent) -> Value {
-    json!({
+    let mut value = json!({
         "id": event.id,
         "session_id": event.session_id,
         "wall_clock_ns": event.wall_clock_ns,
         "kind": event.kind,
         "payload": event.payload,
-    })
+    });
+    if event.body_format != 0 {
+        value["body_format"] = json!(event.body_format);
+    }
+    if let Some(error) = &event.body_error {
+        value["body_error"] = json!(error);
+    }
+    value
 }
 
 /// Whether a stored diagnostic is a sandbox escalation review manifest.
@@ -612,24 +663,67 @@ fn is_review_manifest(payload: &Value) -> bool {
     diagnostic["source"] == "sandbox" && diagnostic["code"] == "escalation_review_manifest"
 }
 
-fn event_row(row: &rusqlite::Row<'_>) -> Result<InspectEvent, StorageError> {
-    Ok(InspectEvent {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
-        wall_clock_ns: row.get(2)?,
-        kind: row.get(3)?,
-        payload: column_json("payload", row.get_ref(4)?),
-    })
+/// An event row, and its JSON with the bodies resolved (what attribution and the text
+/// filter look at). The returned event shows `bodies`. A body that cannot be resolved does
+/// not fail the inspection: its tokens stay and `body_error` says why.
+fn event_row(
+    conn: &Connection,
+    row: &rusqlite::Row<'_>,
+    bodies: InspectBodies,
+) -> Result<(InspectEvent, Value), StorageError> {
+    let id: i64 = row.get(0)?;
+    let body_format: i64 = row.get(6)?;
+    let mut payload = column_json("payload", row.get_ref(4)?);
+    let mut resolved = payload.clone();
+    let mut body_error = None;
+    if body_format == 1 {
+        let label = format!("event {id}");
+        if let Err(error) = crate::body_store::resolve_container(conn, &label, &mut resolved) {
+            match error {
+                StorageError::BodyUnresolved { .. } => {
+                    body_error = Some(error.to_string());
+                    resolved = payload.clone();
+                }
+                other => return Err(other),
+            }
+        }
+        if bodies == InspectBodies::Resolved {
+            payload = resolved.clone();
+        }
+    }
+    Ok((
+        InspectEvent {
+            id,
+            session_id: row.get(1)?,
+            wall_clock_ns: row.get(2)?,
+            kind: row.get(3)?,
+            payload,
+            body_format,
+            body_error,
+        },
+        resolved,
+    ))
+}
+
+/// Whether some string value of `value` contains `needle` (`None` keeps everything).
+fn contains_text(value: &Value, needle: Option<&str>) -> bool {
+    let Some(needle) = needle else { return true };
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(items) => items.iter().any(|item| contains_text(item, Some(needle))),
+        Value::Object(map) => map.values().any(|item| contains_text(item, Some(needle))),
+        _ => false,
+    }
 }
 
 /// Whether the event belongs to a deleted run or thread.
 fn hidden(
     tombstones: &crate::thread_retention::TombstoneSet,
-    event: &InspectEvent,
+    payload: &Value,
     run_id: Option<String>,
 ) -> bool {
     run_id.is_some_and(|run| tombstones.contains_run(&run))
-        || serde_json::from_value::<event_bus::EventKind>(event.payload.clone())
+        || serde_json::from_value::<event_bus::EventKind>(payload.clone())
             .is_ok_and(|kind| tombstones.rejects(&kind).is_some())
 }
 

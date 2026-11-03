@@ -23,8 +23,12 @@ fn event_at(kind: impl Into<event_bus::EventKind>, nanos: u64) -> Event {
     }
 }
 
+/// A compressible text that stays below the token threshold, so that the payload is a
+/// zstd BLOB of one inline event (a longer string would become a blob of its own).
 fn big(seed: &str) -> String {
-    format!("{seed} compressible output line\n").repeat(400)
+    let mut text = format!("{seed} compressible output line\n").repeat(400);
+    text.truncate(1_990);
+    text
 }
 
 fn tool_completed(
@@ -153,7 +157,7 @@ fn bulky_kinds_are_compressed_and_everything_else_stays_text() {
         stored.iter().map(|row| &row.event).collect::<Vec<_>>(),
         expected
     );
-    let text = big("orchestrator");
+    let text = big("orchestrator").repeat(2);
     for (kind, subkind) in [
         ("Orchestrator", "TaskProgressed"),
         ("Lifecycle", "Started"),

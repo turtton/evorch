@@ -54,6 +54,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         include_str!("migrations/v40_drop.sql"),
         include_str!("migrations/v40_prepare.sql")
     ),
+    include_str!("migrations/event_bodies.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -64,6 +65,16 @@ pub(crate) const V40_PREPARE: &str = include_str!("migrations/v40_prepare.sql");
 /// The step of migration v40 that removes `run_contexts.messages_json`; the conversion
 /// command runs it once every run is converted.
 pub(crate) const V40_DROP: &str = include_str!("migrations/v40_drop.sql");
+
+/// Migration 41 (event bodies as tokens): the new `events` columns, the event reference
+/// table and the accounting triggers. The conversion command runs it as its "events
+/// prepare" step, after the runs are converted and before the events are.
+pub(crate) const EVENT_BODIES: &str = include_str!("migrations/event_bodies.sql");
+
+/// The first schema version whose `events` rows may hold their payload in token form
+/// (`body_format` 1). A database below it (and not empty) is converted by the
+/// conversion command, never by a normal start.
+pub(crate) const EVENT_BODIES_VERSION: u32 = 41;
 
 /// The first schema version that stores a run's messages in `run_messages`. A database
 /// below it (and not empty) holds them in `run_contexts.messages_json`: this build
@@ -93,6 +104,12 @@ pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageErr
             detail: "a run's messages are one column of run_contexts",
         });
     }
+    if found < EVENT_BODIES_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "the payloads of events are not in the token format",
+        });
+    }
     let columns: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
         .query_map([], |row| row.get(0))?
@@ -102,6 +119,17 @@ pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageErr
         return Err(StorageError::ConversionRequired {
             found,
             detail: "run_contexts is not in the header format (an interrupted conversion)",
+        });
+    }
+    let event_columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('events')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has_event = |name: &str| event_columns.iter().any(|column| column == name);
+    if !has_event("body_format") || !has_event("blob_bytes") {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "events is not in the token format (an interrupted conversion)",
         });
     }
     Ok(())

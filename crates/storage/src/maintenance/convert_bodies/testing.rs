@@ -46,9 +46,26 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
         )?
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
+    let accounting: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('events_accounting_insert', 'events_accounting_delete', \
+                          'events_accounting_update') ORDER BY name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    // Tokenized events are written back as plain ones while their blobs still exist.
+    resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
+         DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
+         DROP TABLE IF EXISTS content_blob_refs_event;
+         DROP TRIGGER events_accounting_insert;
+         DROP TRIGGER events_accounting_delete;
+         DROP TRIGGER events_accounting_update;
+         ALTER TABLE events DROP COLUMN body_format;
+         ALTER TABLE events DROP COLUMN blob_bytes;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;
          DROP TABLE content_blob_refs_message;
          DROP TABLE content_blob_refs_header;
@@ -60,6 +77,19 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     for definition in &definitions {
         conn.execute_batch(definition)?;
     }
+    for definition in &accounting {
+        conn.execute_batch(definition)?;
+    }
+    conn.execute_batch(
+        "DELETE FROM event_session_bytes;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events \
+             WHERE session_id IS NOT NULL GROUP BY session_id;
+         DELETE FROM event_day_bytes;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns / 86400000000000 \
+             - (wall_clock_ns % 86400000000000 < 0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         UPDATE sessions SET total_event_bytes = COALESCE( \
+             (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
+    )?;
     for (record, revision) in &rows {
         conn.execute(
             "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, \
@@ -89,5 +119,32 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     conn.pragma_update(None, "user_version", 39)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Writes every tokenized event back as a plain one (its bodies resolved), the form a
+/// database before the event body format holds.
+fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
+    let ids: Vec<(i64, String, Option<String>)> = conn
+        .prepare("SELECT id, kind, subkind FROM events WHERE body_format = 1 ORDER BY id")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (id, kind, subkind) in ids {
+        let plain = conn.query_row("SELECT payload FROM events WHERE id = ?1", [id], |row| {
+            crate::repo::event::resolved_payload_json(
+                conn,
+                row.get_ref(0)?,
+                crate::repo::event::StoredFormat::Tokenized,
+                "downgrade",
+            )
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })?;
+        let subkind = subkind.unwrap_or_default();
+        let encoded = crate::repo::event::encode_payload(&kind, &subkind, &plain);
+        conn.execute(
+            "UPDATE events SET payload = ?2, body_format = 0 WHERE id = ?1",
+            params![id, encoded],
+        )?;
+    }
     Ok(())
 }

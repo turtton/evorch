@@ -27,12 +27,12 @@ use crate::{Database, StorageError};
 /// Rows converted per transaction by default.
 pub const DEFAULT_BACKFILL_BATCH_ROWS: usize = 5_000;
 
-pub(crate) const BATCH_SELECT_SQL: &str = "SELECT id, payload FROM events \
+pub(crate) const BATCH_SELECT_SQL: &str = "SELECT id, payload, body_format FROM events \
      WHERE subkind IS NULL AND id > ?1 ORDER BY id LIMIT ?2";
 
 /// Orchestrator events stored without a run: the second backfill target. The
 /// rows already have a `subkind`, so the first target never revisits them.
-pub(crate) const REATTRIBUTE_SELECT_SQL: &str = "SELECT id, payload FROM events \
+pub(crate) const REATTRIBUTE_SELECT_SQL: &str = "SELECT id, payload, body_format FROM events \
      WHERE run_id IS NULL \
      AND subkind IN ('TaskProgressed', 'TaskCheckpoint', 'ThreadGoalUpdated') \
      AND id > ?1 ORDER BY id LIMIT ?2";
@@ -312,10 +312,7 @@ fn convert_batch(
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             // A payload that cannot even be read back is blank like one that no longer decodes.
-            let columns = match crate::codec::decode(row.get_ref(1)?) {
-                Ok(payload) => derive_columns(&payload),
-                Err(_) => derive_columns(""),
-            };
+            let columns = derive_row_columns(conn, row, id)?;
             derived.push((id, columns));
         }
         derived
@@ -361,10 +358,7 @@ fn reattribute_batch(
         let mut derived = Vec::new();
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let columns = match crate::codec::decode(row.get_ref(1)?) {
-                Ok(payload) => derive_columns(&payload),
-                Err(_) => derive_columns(""),
-            };
+            let columns = derive_row_columns(conn, row, id)?;
             derived.push((id, columns));
         }
         derived
@@ -389,6 +383,30 @@ fn reattribute_batch(
             .map_err(|_| StorageError::OutOfRange("backfill batch size"))?,
         undecodable,
     }))
+}
+
+/// The columns of a selected `id, payload, body_format` row. A payload that cannot even be
+/// read back (not text, not a frame, a token whose body is gone) is blank like one that no
+/// longer decodes; only a failure of the database itself is an error.
+fn derive_row_columns(
+    conn: &Connection,
+    row: &rusqlite::Row<'_>,
+    id: i64,
+) -> Result<Columns, StorageError> {
+    let format = crate::repo::event::StoredFormat::from_column(row.get(2)?);
+    let payload = format.and_then(|format| {
+        crate::repo::event::resolved_payload_json(
+            conn,
+            row.get_ref(1)?,
+            format,
+            &format!("event {id}"),
+        )
+    });
+    match payload {
+        Ok(payload) => Ok(derive_columns(&payload)),
+        Err(StorageError::Sqlite(error)) => Err(StorageError::Sqlite(error)),
+        Err(_) => Ok(derive_columns("")),
+    }
 }
 
 struct Columns {

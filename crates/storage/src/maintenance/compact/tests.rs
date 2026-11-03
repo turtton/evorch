@@ -380,7 +380,9 @@ fn preview_samples_surviving_aggregates_that_cross_the_compression_threshold() {
     let db = seed(&path);
     for reasoning in [false, true] {
         for _ in 0..5 {
-            let body = "考え".repeat(100);
+            // Five of them make a text just below the token threshold: the aggregate stays inline
+            // and is compressed, not tokenized.
+            let body = "考え".repeat(66);
             let event = if reasoning {
                 delta("a", &body)
             } else {

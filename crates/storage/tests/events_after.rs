@@ -202,7 +202,7 @@ fn big_tool_output(label: &str, run_id: &str) -> Event {
         tool_name: "shell".into(),
         call_id: format!("call-{label}"),
         is_error: false,
-        output: Some(format!("{label} output line\n").repeat(500)),
+        output: Some(format!("{label} output line\n").repeat(500)[..1_990].to_owned()),
         detail: None,
         run_id: Some(run_id.into()),
         parent_call_id: None,

@@ -8,7 +8,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 use crate::durable_tasks::DurableTasksModel;
 use crate::entity::TaskStatus;
-use crate::repo::event::{StoredEvent, row_to_event};
+use crate::repo::event::{StoredEvent, row_to_plain_event};
 use crate::{Database, StorageError};
 
 const MAX_ROWS: usize = 256;
@@ -170,9 +170,6 @@ fn step(
             if is_progress(stored) && !keep.contains(&stored.id) {
                 if delete {
                     conn.execute("DELETE FROM events WHERE id = ?1", [stored.id])?;
-                    if let Some(session) = &stored.session_id {
-                        conn.execute("UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) WHERE id = ?2", params![*bytes as i64, session])?;
-                    }
                 }
                 summary.event_count += 1;
                 summary.payload_bytes += bytes;
@@ -224,7 +221,7 @@ fn decode_history(
 ) -> Result<Option<History>, StorageError> {
     let mut events = Vec::new();
     for (id, _) in &sizes {
-        let decoded = conn.query_row("SELECT id,session_id,schema_version,monotonic_ns,wall_clock_ns,kind,payload FROM events WHERE id = ?1", [id], |row| Ok(row_to_event(row)))?;
+        let decoded = conn.query_row("SELECT id,session_id,schema_version,monotonic_ns,wall_clock_ns,kind,payload FROM events WHERE id = ?1", [id], |row| Ok(row_to_plain_event(row)))?;
         match decoded {
             Ok(event) => events.push(event),
             Err(_) => return Ok(None),

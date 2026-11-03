@@ -39,7 +39,7 @@ use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, P
 use rusqlite::{Connection, Row, types::ValueRef};
 use serde::{Deserialize, Deserializer, de};
 
-use super::{StoredEvent, row_to_event, select};
+use super::{StoredEvent, StoredFormat, row_to_event, select};
 use crate::StorageError;
 use crate::db::ns_to_system_time;
 use crate::thread_retention::TombstoneSet;
@@ -355,13 +355,14 @@ fn columns_sql(read_payloads: bool) -> String {
     };
     format!(
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
-         {payload}, subkind, run_id FROM events ORDER BY id ASC"
+         {payload}, body_format, subkind, run_id FROM events ORDER BY id ASC"
     )
 }
 
 const PAYLOAD: usize = 6;
-const SUBKIND: usize = 7;
-const RUN_ID: usize = 8;
+const BODY_FORMAT: usize = super::BODY_FORMAT_COLUMN;
+const SUBKIND: usize = 8;
+const RUN_ID: usize = 9;
 
 #[derive(Deserialize)]
 struct Wrapped<T> {
@@ -383,8 +384,28 @@ struct PartMetadata {
 }
 
 /// A JSON string read for its length alone: the decoded text is dropped as it
-/// is visited.
-struct TextLen(usize);
+/// is visited. A string in a token position also keeps what it parses as, because in a
+/// tokenized payload the length of the text is the token's, not the string's.
+struct TextLen {
+    raw: usize,
+    token: Option<Result<crate::body_ref::BodyToken, crate::body_ref::TokenError>>,
+}
+
+impl TextLen {
+    /// The byte length of the text the string stands for.
+    fn text_len(&self, format: StoredFormat) -> Result<usize, StorageError> {
+        match (format, &self.token) {
+            (StoredFormat::Tokenized, Some(Ok(token))) => usize::try_from(token.byte_len)
+                .map_err(|_| StorageError::OutOfRange("message part length")),
+            (StoredFormat::Tokenized, Some(Err(error))) => Err(StorageError::BodyUnresolved {
+                owner: "event".to_owned(),
+                hash: None,
+                reason: error.reason(),
+            }),
+            _ => Ok(self.raw),
+        }
+    }
+}
 
 impl<'de> Deserialize<'de> for TextLen {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -397,7 +418,12 @@ impl<'de> Deserialize<'de> for TextLen {
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<TextLen, E> {
-                Ok(TextLen(value.len()))
+                Ok(TextLen {
+                    raw: value.len(),
+                    token: value
+                        .starts_with(crate::body_ref::ESCAPE)
+                        .then(|| crate::body_ref::BodyToken::parse(value)),
+                })
             }
         }
         deserializer.deserialize_str(Visitor)
@@ -506,7 +532,7 @@ pub(crate) fn scan(
                     Decoding::ThreadProbe => metrics.thread_probe_decodes += 1,
                 }
             }
-            match row_to_event(row) {
+            match row_to_event(&transaction, row) {
                 // A row that cannot be read may still name a deleted run.
                 Err(_) if deleted => {}
                 Err(error) => isolate(&mut metrics, &mut on_failure, id, run_id, &error),
@@ -555,13 +581,13 @@ pub(crate) fn scan(
             Reading::Part => {
                 metrics.message_part_metadata_rows += 1;
                 match part_metadata(row, run_id, &mut metrics) {
-                    Ok((run, meta)) => reducer.part(
+                    Ok((run, meta, text_len)) => reducer.part(
                         wall_clock,
                         run,
                         &meta.response_id,
                         meta.index,
                         meta.total,
-                        meta.text.0,
+                        text_len,
                     ),
                     Err(error) => isolate(&mut metrics, &mut on_failure, id, run_id, &error),
                 }
@@ -620,7 +646,8 @@ fn part_metadata<'a>(
     row: &Row<'_>,
     run_id: Option<&'a str>,
     metrics: &mut FirstPassMetrics,
-) -> Result<(&'a str, PartMetadata), StorageError> {
+) -> Result<(&'a str, PartMetadata, usize), StorageError> {
+    let format = StoredFormat::from_column(row.get(BODY_FORMAT)?)?;
     let value = row.get_ref(PAYLOAD)?;
     metrics.message_part_stored_bytes += stored_len(value);
     let payload = crate::codec::decode(value)?;
@@ -630,7 +657,9 @@ fn part_metadata<'a>(
     })?;
     let meta: Wrapped<Wrapped<PartMetadata>> = serde_json::from_str(&payload)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
-    Ok((run, meta.payload.payload))
+    let meta = meta.payload.payload;
+    let text_len = meta.text.text_len(format)?;
+    Ok((run, meta, text_len))
 }
 
 /// Every event up to `through_id` in ID order, each reported as read or as failed. A row that
@@ -646,11 +675,11 @@ pub(crate) fn for_each_isolated(
     let tombstones = TombstoneSet::load(conn)?;
     let mut statement = conn.prepare(
         "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, \
-         subkind, run_id FROM events WHERE id <= ?1 ORDER BY id ASC",
+         body_format, subkind, run_id FROM events WHERE id <= ?1 ORDER BY id ASC",
     )?;
     let mut rows = statement.query([through_id])?;
     while let Some(row) = rows.next()? {
-        match row_to_event(row) {
+        match row_to_event(conn, row) {
             Ok(stored) if tombstones.rejects(&stored.event.kind).is_some() => {}
             Ok(stored) => visit(stored),
             Err(error) => {

@@ -11,11 +11,12 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 40;
+const LATEST_SCHEMA: u32 = 41;
 
-const EXPECTED_TABLES: [&str; 70] = [
+const EXPECTED_TABLES: [&str; 71] = [
     "content_blobs",
     "content_blob_gc_queue",
+    "content_blob_refs_event",
     "content_blob_refs_header",
     "content_blob_refs_message",
     "run_messages",
@@ -86,7 +87,8 @@ const EXPECTED_TABLES: [&str; 70] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 71] = [
+const EXPECTED_INDICES: [&str; 72] = [
+    "idx_content_blob_refs_event_blob",
     "idx_content_blob_refs_header_blob",
     "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",

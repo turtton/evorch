@@ -12,6 +12,10 @@ use crate::codec;
 use crate::migrations::MIGRATIONS;
 use crate::repo::run_messages;
 
+/// The version a conversion publishes.
+#[allow(clippy::cast_possible_truncation)]
+const LATEST: u32 = MIGRATIONS.len() as u32;
+
 const MIB: usize = 1024 * 1024;
 
 fn lease(path: &Path) {
@@ -147,6 +151,7 @@ fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
     )
 }
@@ -205,12 +210,12 @@ fn every_run_reads_back_as_the_bytes_the_old_column_held() {
 
     // Then: the format is current and every run reads back byte for byte.
     assert_eq!(summary.converted_runs, 4);
-    assert_eq!((summary.source_schema, summary.target_schema), (39, 40));
+    assert_eq!((summary.source_schema, summary.target_schema), (39, LATEST));
     assert_eq!(summary.unconverted_runs_remaining, 0);
     assert_eq!(summary.mismatched_runs, 0);
     assert_eq!(summary.events_tokenized, 0);
     assert!(summary.checkpoint_truncated && summary.vacuum);
-    assert_eq!(version(&path), 40);
+    assert_eq!(version(&path), LATEST);
     assert!(!columns(&path).contains(&"messages_json".to_owned()));
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
@@ -394,6 +399,7 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
             &ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
             &mut |at, _| {
                 if std::mem::discriminant(&at) == std::mem::discriminant(&point)
@@ -456,6 +462,7 @@ fn a_run_that_fails_leaves_nothing_of_itself_and_keeps_the_runs_before_it() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |at, conn| {
             match at {
@@ -507,6 +514,7 @@ fn a_blob_damaged_before_the_read_back_is_found_and_the_run_is_not_committed() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |at, conn| {
             if at == Point::Run(RunPoint::BeforeReadback) {
@@ -533,6 +541,7 @@ fn foreign_keys_stay_enabled_from_the_first_transaction_to_the_last() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |_, conn| {
             assert_eq!(single(conn, "PRAGMA foreign_keys"), 1);
@@ -745,6 +754,7 @@ fn one_run_writes_a_log_in_proportion_to_what_it_stores() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, conn| {
             if let Point::AfterRun { frames } = point {
@@ -823,6 +833,7 @@ fn an_existing_backup_path_is_never_overwritten() {
         &ConvertBodiesOptions {
             apply: true,
             backup: Some(target.clone()),
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -1267,6 +1278,7 @@ fn the_growth_estimate_is_not_below_what_the_conversion_adds() {
             &ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
             &mut |point, conn| {
                 if point == Point::BeforeVacuum {
@@ -1382,11 +1394,11 @@ fn a_version_33_database_is_migrated_and_converted_by_the_one_command() {
 
     // Then: migrations 34 to 39 ran after the backup, every run converted, and the result
     // is a current database that a normal start accepts.
-    assert_eq!((summary.source_schema, summary.target_schema), (33, 40));
+    assert_eq!((summary.source_schema, summary.target_schema), (33, LATEST));
     assert_eq!(summary.migrations_applied, 6);
     assert_eq!(summary.converted_runs, 4);
     assert!(summary.stage_elapsed_seconds.contains_key("migrate"));
-    assert_eq!(version(&path), 40);
+    assert_eq!(version(&path), LATEST);
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
         assert_eq!(
@@ -1423,6 +1435,7 @@ fn a_stop_after_the_migrations_is_recovered_from_the_backup_like_any_other() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, _| {
             if point == Point::AfterMigrate {
@@ -1474,7 +1487,7 @@ fn an_older_database_and_unconvertible_data_in_a_version_33_one_are_refused_unch
     // When/Then: both modes refuse it and nothing changes.
     for run in [preview(&path), apply(&path)] {
         let failure = run.unwrap_err();
-        assert!(failure.detail.contains("version 33 to 39"), "{failure}");
+        assert!(failure.detail.contains("version 33 to 40"), "{failure}");
         assert!(!failure.restore_required);
     }
     assert_eq!(files(&path), before);

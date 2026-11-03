@@ -157,6 +157,20 @@ pub(crate) fn needs_token(value: &str) -> bool {
     value.len() >= TOKEN_THRESHOLD_BYTES || value.starts_with(ESCAPE)
 }
 
+/// Whether any string value of `value` has to be stored as a blob (keys never do).
+pub(crate) fn any_needs_token(value: &Value) -> bool {
+    let mut stack: Vec<&Value> = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            Value::String(text) if needs_token(text) => return true,
+            Value::Array(items) => stack.extend(items.iter()),
+            Value::Object(map) => stack.extend(map.values()),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether a string value sits in a token position when read back.
 pub(crate) fn is_token_position(value: &str) -> bool {
     value.starts_with(ESCAPE)

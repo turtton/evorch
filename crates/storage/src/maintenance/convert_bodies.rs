@@ -33,12 +33,14 @@ use serde::Serialize;
 
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
-use crate::migrations::{MESSAGE_ROWS_VERSION, MIGRATIONS, V40_DROP, V40_PREPARE};
+use crate::migrations::{EVENT_BODIES, MESSAGE_ROWS_VERSION, MIGRATIONS, V40_DROP, V40_PREPARE};
 
 use super::compact::{create_backup, integrity_check, parent};
 use super::vacuum::rebuild_incremental;
 use super::{invalid, offline};
+use crate::repo::thread_retention::reclaim::Layout;
 
+mod events;
 mod retention;
 mod runs;
 mod source;
@@ -48,6 +50,7 @@ mod verify;
 #[cfg(any(test, feature = "unchecked-open"))]
 pub mod testing;
 
+pub use events::{EventProblem, EventsReport, KindFigure};
 pub use retention::RetentionReport;
 pub use source::{Analysis, Problem};
 pub use space::VolumeNeed;
@@ -56,6 +59,8 @@ pub(crate) use runs::RunPoint;
 use runs::{MISMATCH, convert_run};
 use source::{Shape, classify, next_run};
 
+pub(crate) use events::EventPoint;
+
 #[derive(Debug, Clone, Default)]
 pub struct ConvertBodiesOptions {
     /// Without it the command only reports what it would do.
@@ -63,12 +68,15 @@ pub struct ConvertBodiesOptions {
     /// Where the verified backup goes (a path that does not exist yet). The default is
     /// `<db>.before-convert-bodies-<unix-ns>.db`.
     pub backup: Option<PathBuf>,
+    /// Events converted per transaction (default 1,000; 1 to 100,000). A transaction
+    /// also never holds more than 16 MiB of decoded payload.
+    pub event_batch_rows: Option<usize>,
 }
 
 /// What the command did, or (preview) what it found.
 #[derive(Debug, Serialize)]
 pub struct ConvertBodiesSummary {
-    /// The data this command converts; events keep their payloads (`events_tokenized`).
+    /// The data this command converts.
     pub scope: &'static str,
     pub source_schema: u32,
     pub target_schema: u32,
@@ -87,6 +95,8 @@ pub struct ConvertBodiesSummary {
     pub mismatched_runs: u64,
     pub unconverted_runs_remaining: u64,
     pub events_tokenized: u64,
+    /// The events step: what it found (preview) or did (`--apply`).
+    pub events: EventsReport,
     pub messages_created: u64,
     pub blobs_created: u64,
     pub blob_bytes_created: u64,
@@ -188,7 +198,14 @@ pub(crate) enum Point {
     AfterMigrate,
     AfterPrepare,
     AfterRetention,
+    /// After the event columns, reference table and accounting triggers were created.
+    AfterEventsPrepare,
     Run(RunPoint),
+    Event(EventPoint),
+    /// After an events batch committed and the log was checkpointed.
+    AfterEventBatch {
+        frames: u64,
+    },
     /// After a run committed and the log was checkpointed; `frames` is how many frames the
     /// run's transaction wrote.
     AfterRun {
@@ -445,6 +462,37 @@ fn refusal(analysis: &Analysis) -> Option<String> {
             analysis.oversized_runs.join(", ")
         ));
     }
+    if analysis.events.unconvertible_events > 0 {
+        let first: Vec<String> = analysis
+            .events
+            .problems
+            .iter()
+            .filter(|problem| !problem.reason.contains("in-memory limit"))
+            .take(5)
+            .map(|problem| format!("event {}: {}", problem.id, problem.reason))
+            .collect();
+        reasons.push(format!(
+            "{} events cannot be converted (first: {})",
+            analysis.events.unconvertible_events,
+            first.join("; ")
+        ));
+    }
+    if analysis.events.oversized_events > 0 {
+        let first: Vec<String> = analysis
+            .events
+            .problems
+            .iter()
+            .filter(|problem| problem.reason.contains("in-memory limit"))
+            .take(5)
+            .map(|problem| problem.id.to_string())
+            .collect();
+        reasons.push(format!(
+            "{} events are above {} decoded payload bytes, the most one conversion batch holds (events {})",
+            analysis.events.oversized_events,
+            events::payload_limit(),
+            first.join(", ")
+        ));
+    }
     if !analysis.reclaim_blockers.is_empty() {
         reasons.push(format!(
             "the reclaim of deleted runs cannot finish ({})",
@@ -462,6 +510,14 @@ fn run(
 ) -> Result<ConvertBodiesSummary, StorageError> {
     if !path.is_file() {
         return Err(invalid("database does not exist"));
+    }
+    if let Some(rows) = options.event_batch_rows
+        && !(1..=events::MAX_BATCH_ROWS).contains(&rows)
+    {
+        return Err(invalid(format!(
+            "event_batch_rows must be 1..={}",
+            events::MAX_BATCH_ROWS
+        )));
     }
     progress.enter("lock");
     let _lease = if options.apply {
@@ -494,7 +550,7 @@ fn run(
     let sizes_before = file_sizes(path)?;
     let source_runs = count(&ro, "SELECT COUNT(*) FROM run_contexts")?;
     let mut summary = ConvertBodiesSummary {
-        scope: "run_contexts",
+        scope: "run_contexts,events",
         source_schema,
         target_schema,
         preview: !options.apply,
@@ -508,6 +564,7 @@ fn run(
         mismatched_runs: 0,
         unconverted_runs_remaining: 0,
         events_tokenized: 0,
+        events: EventsReport::default(),
         messages_created: 0,
         blobs_created: 0,
         blob_bytes_created: 0,
@@ -538,7 +595,14 @@ fn run(
         return Ok(summary);
     }
     progress.enter("analyze");
-    let analysis = source::analyze(&ro)?;
+    let mut analysis = match shape {
+        Shape::Source => source::analyze(&ro)?,
+        Shape::EventsPending | Shape::Converted => source::measure_converted(&ro)?,
+    };
+    analysis.events = events::analyze(&ro)?;
+    analysis.estimated_growth_bytes = analysis
+        .estimated_growth_bytes
+        .saturating_add(analysis.events.estimated_growth_bytes);
     let basis = basis(&ro, path)?;
     let backup_directory = options.backup.as_deref().map_or(parent(path), parent);
     let scratch_directory = space::scratch_directory();
@@ -575,7 +639,7 @@ fn run(
     progress.enter("lock");
     let conn = exclusive_connection(path)?;
     summary.foreign_keys_enabled = true;
-    if classify(&conn)? != Shape::Source {
+    if classify(&conn)? != shape {
         return Err(invalid("the database changed while the conversion started"));
     }
     let gauge = WalGauge {
@@ -600,73 +664,125 @@ fn run(
     summary.backup = Some(backup);
 
     progress.mutated = true;
-    if source_schema < MESSAGE_ROWS_VERSION - 1 {
-        // The database is older than version 39: the ordinary migrations, in their own
-        // transactions, after the backup, then the conversion proper. A stop in between
-        // leaves a schema that is valid at its own version, but the way back is the same:
-        // restore the backup.
-        progress.enter("migrate");
-        crate::migrations::apply_up_to(&conn, MESSAGE_ROWS_VERSION - 1)?;
-        summary.migrations_applied = MESSAGE_ROWS_VERSION - 1 - source_schema;
+    if shape == Shape::Source {
+        if source_schema < MESSAGE_ROWS_VERSION - 1 {
+            // The database is older than version 39: the ordinary migrations, in their own
+            // transactions, after the backup, then the conversion proper. A stop in between
+            // leaves a schema that is valid at its own version, but the way back is the same:
+            // restore the backup.
+            progress.enter("migrate");
+            crate::migrations::apply_up_to(&conn, MESSAGE_ROWS_VERSION - 1)?;
+            summary.migrations_applied = MESSAGE_ROWS_VERSION - 1 - source_schema;
+            checkpoint_passive(&conn)?;
+            gauge.sample();
+            if classify(&conn)? != Shape::Source {
+                return Err(invalid(
+                    "the database is not a regular version 39 database after its migrations",
+                ));
+            }
+            hook(Point::AfterMigrate, &conn)?;
+        }
+        progress.enter("prepare");
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(V40_PREPARE)?;
+        conn.execute_batch("COMMIT")?;
         checkpoint_passive(&conn)?;
         gauge.sample();
-        if classify(&conn)? != Shape::Source {
-            return Err(invalid(
-                "the database is not a regular version 39 database after its migrations",
-            ));
-        }
-        hook(Point::AfterMigrate, &conn)?;
+        hook(Point::AfterPrepare, &conn)?;
     }
-    progress.enter("prepare");
+    progress.enter("prepare_events");
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(V40_PREPARE)?;
+    conn.execute_batch(EVENT_BODIES)?;
     conn.execute_batch("COMMIT")?;
     checkpoint_passive(&conn)?;
     gauge.sample();
-    hook(Point::AfterPrepare, &conn)?;
+    hook(Point::AfterEventsPrepare, &conn)?;
 
     progress.enter("retention");
-    summary.retention = retention::reclaim_deleted(&conn, &mut || gauge.sample())?;
+    let layout = if shape == Shape::Source {
+        Layout::Converting
+    } else {
+        Layout::Current
+    };
+    summary.retention = retention::reclaim_deleted(&conn, layout, &mut || gauge.sample())?;
     checkpoint_passive(&conn)?;
     hook(Point::AfterRetention, &conn)?;
     let (blobs_before, blob_bytes_before, references_before) = blob_figures(&conn)?;
     let (kept_runs, fingerprint_before) = verify::metadata_fingerprint(&conn)?;
+    let mut peak_event_frames = 0_u64;
 
     progress.enter("convert");
-    let mut cursor: Option<String> = None;
-    while let Some(run_id) = next_run(&conn, cursor.as_deref(), false, false)? {
-        progress.run_id = Some(run_id.clone());
-        let converted = convert_run(&conn, &run_id, &mut |point, conn| {
-            hook(Point::Run(point), conn)
-        })?;
-        let frames = checkpoint_passive(&conn)?;
-        gauge.sample();
-        summary.peak_run_wal_frames = summary.peak_run_wal_frames.max(frames);
-        progress.converted_runs += 1;
-        summary.messages_created += converted.messages;
-        if converted.canonicalized {
-            summary.canonicalized_runs.count += 1;
-            summary.canonicalized_runs.run_ids.push(run_id.clone());
+    if shape == Shape::Source {
+        let mut cursor: Option<String> = None;
+        while let Some(run_id) = next_run(&conn, cursor.as_deref(), false, false)? {
+            progress.run_id = Some(run_id.clone());
+            let converted = convert_run(&conn, &run_id, &mut |point, conn| {
+                hook(Point::Run(point), conn)
+            })?;
+            let frames = checkpoint_passive(&conn)?;
+            gauge.sample();
+            summary.peak_run_wal_frames = summary.peak_run_wal_frames.max(frames);
+            progress.converted_runs += 1;
+            summary.messages_created += converted.messages;
+            if converted.canonicalized {
+                summary.canonicalized_runs.count += 1;
+                summary.canonicalized_runs.run_ids.push(run_id.clone());
+            }
+            hook(Point::AfterRun { frames }, &conn)?;
+            cursor = Some(run_id);
         }
-        hook(Point::AfterRun { frames }, &conn)?;
-        cursor = Some(run_id);
+        progress.run_id = None;
+        summary.converted_runs = progress.converted_runs;
+        if summary.converted_runs != kept_runs {
+            return Err(invalid(format!(
+                "{} runs were converted, {kept_runs} were expected",
+                summary.converted_runs
+            )));
+        }
     }
-    progress.run_id = None;
-    summary.converted_runs = progress.converted_runs;
-    if summary.converted_runs != kept_runs {
-        return Err(invalid(format!(
-            "{} runs were converted, {kept_runs} were expected",
-            summary.converted_runs
-        )));
-    }
+
+    progress.enter("convert_events");
+    let events_identity = events::identity_fingerprint(&conn)?;
+    let events_accounting = events::accounting(&conn)?;
+    summary.events.payload_stored_bytes_before =
+        count(&conn, "SELECT SUM(OCTET_LENGTH(payload)) FROM events")?;
+    summary.events.accounted_bytes_before = events_accounting.sessions;
+    let batch_rows = options
+        .event_batch_rows
+        .unwrap_or(events::DEFAULT_BATCH_ROWS);
+    events::convert_all(
+        &conn,
+        batch_rows,
+        &mut summary.events,
+        &mut |point, conn| match point {
+            EventPoint::AfterBatch { .. } => {
+                let frames = checkpoint_passive(conn)?;
+                gauge.sample();
+                peak_event_frames = peak_event_frames.max(frames);
+                hook(Point::AfterEventBatch { frames }, conn)
+            }
+            other => hook(Point::Event(other), conn),
+        },
+    )?;
+    summary.events.peak_batch_wal_frames = peak_event_frames;
+    summary.events_tokenized = summary.events.converted_events;
     let (blobs_after, blob_bytes_after, references_after) = blob_figures(&conn)?;
     summary.blobs_created = blobs_after.saturating_sub(blobs_before);
     summary.blob_bytes_created = blob_bytes_after.saturating_sub(blob_bytes_before);
     summary.references_created = references_after.saturating_sub(references_before);
+    summary.events.references_created = summary.references_created;
 
     progress.enter("verify");
     hook(Point::BeforeVerify, &conn)?;
-    verify::verify_all(&conn)?;
+    verify::verify_all(&conn, shape == Shape::Source)?;
+    events::verify(
+        &conn,
+        events_identity,
+        events_accounting,
+        &mut summary.events,
+    )?;
+    summary.events.payload_stored_bytes_after =
+        count(&conn, "SELECT SUM(OCTET_LENGTH(payload)) FROM events")?;
     summary.foreign_key_check = Some("ok");
     summary.unconverted_runs_remaining = 0;
     let (runs_after, fingerprint_after) = verify::metadata_fingerprint(&conn)?;
@@ -678,9 +794,11 @@ fn run(
 
     progress.enter("drop_column");
     hook(Point::BeforeDrop, &conn)?;
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(V40_DROP)?;
-    conn.execute_batch("COMMIT")?;
+    if shape == Shape::Source {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(V40_DROP)?;
+        conn.execute_batch("COMMIT")?;
+    }
     hook(Point::AfterDrop, &conn)?;
     compare_schema(&conn)?;
 

@@ -27,11 +27,9 @@
 //! through the same `(kind, subkind, id)` index, which stores NULL subkinds
 //! next to each other, and confirmed by the inner tag of their payload.
 //!
-//! Deletion relies on the v12 triggers for `event_session_bytes` and
-//! `event_day_bytes`; `sessions.total_event_bytes` is adjusted here like in the
-//! other retention paths.
+//! Deletion relies on the accounting triggers for `event_session_bytes`,
+//! `event_day_bytes` and `sessions.total_event_bytes`.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
@@ -137,7 +135,6 @@ pub(crate) struct Summary {
 
 struct Candidate {
     id: i64,
-    session_id: Option<String>,
     payload_bytes: i64,
     wall_clock_ns: i64,
     /// Inner tag taken from the payload; only selected for unconverted rows.
@@ -165,7 +162,6 @@ pub(crate) fn tick(
     };
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let mut summary = Summary::default();
-    let mut sessions: HashMap<String, i64> = HashMap::new();
     for (index, target) in TARGETS.iter().enumerate() {
         let budget = MAX_DELETIONS_PER_TICK.saturating_sub(summary.event_count as usize);
         if budget == 0 || out_of_time(summary.event_count, deadline) {
@@ -186,13 +182,6 @@ pub(crate) fn tick(
             budget,
             deadline,
             &mut summary,
-            &mut sessions,
-        )?;
-    }
-    for (session, bytes) in sessions {
-        tx.execute(
-            "UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) WHERE id = ?2",
-            params![bytes, session],
         )?;
     }
     tx.commit()?;
@@ -214,7 +203,6 @@ fn run_target(
     budget: usize,
     deadline: Option<Instant>,
     summary: &mut Summary,
-    sessions: &mut HashMap<String, i64>,
 ) -> Result<(), StorageError> {
     // Unconditional indexed rows are all deleted, so what is examined is
     // bounded by the deletion budget; filtering targets by their scan cap.
@@ -247,9 +235,6 @@ fn run_target(
             summary.payload_bytes = summary
                 .payload_bytes
                 .saturating_add(u64::try_from(candidate.payload_bytes).unwrap_or(0));
-            if let Some(session) = candidate.session_id {
-                *sessions.entry(session).or_default() += candidate.payload_bytes;
-            }
         }
         last_processed = Some(candidate.id);
     }
@@ -275,7 +260,7 @@ fn candidate_sql(unconverted: bool) -> String {
         ("subkind = ?4", "NULL")
     };
     format!(
-        "SELECT e.id, e.session_id, OCTET_LENGTH(e.payload), e.wall_clock_ns, {tag} \
+        "SELECT e.id, OCTET_LENGTH(e.payload), e.wall_clock_ns, {tag} \
          FROM (SELECT id FROM events INDEXED BY idx_events_kind_subkind_id \
                WHERE kind = ?1 AND {filter} AND id > ?2 ORDER BY id LIMIT ?3) s \
          JOIN events e ON e.id = s.id ORDER BY s.id"
@@ -294,10 +279,9 @@ fn candidates(
     let map = |row: &rusqlite::Row<'_>| {
         Ok(Candidate {
             id: row.get(0)?,
-            session_id: row.get(1)?,
-            payload_bytes: row.get(2)?,
-            wall_clock_ns: row.get(3)?,
-            tag: row.get(4)?,
+            payload_bytes: row.get(1)?,
+            wall_clock_ns: row.get(2)?,
+            tag: row.get(3)?,
         })
     };
     let rows = if target.unconverted {

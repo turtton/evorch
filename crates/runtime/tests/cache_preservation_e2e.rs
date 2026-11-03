@@ -1469,6 +1469,7 @@ async fn resume_unfinished_model_request(
             &storage::maintenance::ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
         )
         .unwrap();

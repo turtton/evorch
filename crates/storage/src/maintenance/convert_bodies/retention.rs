@@ -119,6 +119,7 @@ fn backfill(conn: &Connection, report: &mut RetentionReport) -> Result<(), Stora
 /// (the caller records the log size).
 pub(super) fn reclaim_deleted(
     conn: &Connection,
+    layout: Layout,
     sample: &mut dyn FnMut(),
 ) -> Result<RetentionReport, StorageError> {
     let mut report = RetentionReport::default();
@@ -146,7 +147,7 @@ pub(super) fn reclaim_deleted(
         }
         let before = fingerprint(conn)?;
         if jobs > 0 {
-            let step = reclaim_step_in(conn, budget, Layout::Converting)?;
+            let step = reclaim_step_in(conn, budget, layout)?;
             if let Some(error) = step.last_error {
                 return Err(invalid(format!("retention reclaim failed: {error}")));
             }
@@ -157,7 +158,7 @@ pub(super) fn reclaim_deleted(
         let mut progressed_oversized = false;
         let (_, oversized) = pending(conn)?;
         if oversized > 0 {
-            let step = reclaim_oversized_step_in(conn, OVERSIZED_STEP_BYTES, Layout::Converting)?;
+            let step = reclaim_oversized_step_in(conn, OVERSIZED_STEP_BYTES, layout)?;
             if let Some(error) = step.last_error {
                 return Err(invalid(format!("retention reclaim failed: {error}")));
             }
