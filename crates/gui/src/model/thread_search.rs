@@ -248,6 +248,18 @@ impl ThreadSearchModal {
         sidebar: &SidebarState,
     ) -> bool {
         let current = self.key(project);
+        // The project this session searches is gone. That is decided before
+        // waiting for a running request: it is dropped (its answer, if any,
+        // has nowhere to go) and the error shows at once. No other project is
+        // searched in its place.
+        if self.open && self.project.is_some() && current.project.is_none() {
+            self.in_flight = None;
+            self.outcome = Some(SearchOutcome {
+                key: current,
+                result: Err(PROJECT_UNAVAILABLE.into()),
+            });
+            return false;
+        }
         if let Some(running) = &self.in_flight {
             match running.receiver.try_recv() {
                 Err(TryRecvError::Empty) => return true,
@@ -279,7 +291,6 @@ impl ThreadSearchModal {
             _ => None,
         };
         let started = match &current.project {
-            None if self.project.is_some() => Err(PROJECT_UNAVAILABLE),
             None => Err(NO_PROJECT),
             Some(project) => sink
                 .search_threads(

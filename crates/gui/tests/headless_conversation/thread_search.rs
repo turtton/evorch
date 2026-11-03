@@ -410,6 +410,52 @@ fn a_search_for_a_project_that_is_gone_says_so_and_never_falls_back() {
 }
 
 #[test]
+fn losing_the_target_project_while_a_request_runs_reports_it_and_drops_the_request() {
+    use gui::model::thread_search::{PROJECT_UNAVAILABLE, ThreadSearchModal};
+    // Given: a search for a project with its first request waiting for an answer
+    // (the sink answers only when the test says so), and another project listed.
+    let temp = tempfile::tempdir().unwrap();
+    let other = temp.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let mut sidebar = state(temp.path()).sidebar().clone();
+    sidebar
+        .add_project(ProjectId::new("other"), "Other", &other)
+        .unwrap();
+    let requests = Requests::default();
+    let sink = ManualSink(requests.clone());
+    let mut modal = ThreadSearchModal::default();
+    modal.open(Some(ProjectId::new("project")));
+    let root = modal.root(&sidebar);
+    assert!(root.is_some());
+    assert!(modal.poll(&sink, root.as_deref(), &sidebar));
+    assert_eq!(requests.queries(), [""]);
+
+    // When: the project disappears while that request is still running.
+    sidebar
+        .projects
+        .retain(|project| project.id != ProjectId::new("project"));
+    let root = modal.root(&sidebar);
+    assert!(root.is_none());
+    let pending = modal.poll(&sink, root.as_deref(), &sidebar);
+
+    // Then: the error shows at once, nothing waits, and no other project is searched.
+    assert!(!pending);
+    let outcome = modal.outcome().expect("the error is shown immediately");
+    assert_eq!(outcome.result.as_ref().unwrap_err(), PROJECT_UNAVAILABLE);
+    assert!(!modal.is_searching(root.as_deref()));
+    assert_eq!(requests.queries(), [""]);
+
+    // And the old request's answer, arriving later, is not adopted.
+    assert!(!requests.answer(0, found(vec![hit("alpha", None)])));
+    assert!(!modal.poll(&sink, root.as_deref(), &sidebar));
+    assert_eq!(
+        modal.outcome().unwrap().result.as_ref().unwrap_err(),
+        PROJECT_UNAVAILABLE
+    );
+    assert_eq!(requests.queries(), [""]);
+}
+
+#[test]
 fn escape_closes_the_search_without_stopping_the_running_chat_behind_it() {
     // Given: a chat that is running, with a Stop control in the composer.
     let temp = tempfile::tempdir().unwrap();
