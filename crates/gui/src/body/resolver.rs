@@ -448,7 +448,6 @@ impl BodyResolver {
         let State {
             entries,
             ready_bytes,
-            stats,
             ..
         } = &mut *state;
         entries.retain(|_, entry| {
@@ -456,17 +455,13 @@ impl BodyResolver {
                 .origins
                 .retain(|origin| origin.run_id.as_deref() != Some(run_id));
             let keep = !entry.origins.is_empty();
-            if !keep {
-                if let Phase::Ready {
+            if !keep
+                && let Phase::Ready {
                     text,
                     oversize: false,
                 } = &entry.phase
-                {
-                    *ready_bytes -= text.len();
-                }
-                if matches!(entry.phase, Phase::InFlight { .. }) {
-                    stats.late_results_dropped += 1;
-                }
+            {
+                *ready_bytes -= text.len();
             }
             keep
         });

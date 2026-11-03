@@ -58,17 +58,16 @@ pub fn split_container(
     resolve_now: &mut dyn FnMut(&BodyRef) -> Result<Arc<str>, BodyError>,
 ) -> Result<Split, BodyError> {
     let mut body = None;
-    if let Some(slot) = primary_slot(&mut container) {
-        if let Some(parsed) = slot.as_str().and_then(BodyRef::parse_token) {
-            let key = parsed?;
-            let run = run_id_hint.map(str::to_owned).or_else(|| None);
-            body = Some(BodyText::deferred(DeferredBody::new(
-                key,
-                run.as_deref(),
-                Some(event_id),
-            )));
-            *slot = Value::String(String::new());
-        }
+    if let Some(slot) = primary_slot(&mut container)
+        && let Some(parsed) = slot.as_str().and_then(BodyRef::parse_token)
+    {
+        let key = parsed?;
+        body = Some(BodyText::deferred(DeferredBody::new(
+            key,
+            run_id_hint,
+            Some(event_id),
+        )));
+        *slot = Value::String(String::new());
     }
     resolve_nested(&mut container, resolve_now)?;
     let kind = serde_json::from_value::<EventKind>(container).map_err(|error| {

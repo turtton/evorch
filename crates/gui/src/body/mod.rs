@@ -11,6 +11,9 @@ pub mod parts;
 pub mod resolver;
 pub mod source;
 pub mod split;
+pub mod storage_backend;
+#[doc(hidden)]
+pub mod testing;
 pub mod text;
 pub mod types;
 pub mod ui;
@@ -26,5 +29,9 @@ pub use resolver::{
     ResolverConfig, ResolverStats,
 };
 pub use source::{HistorySource, StorageHistory};
+pub use storage_backend::StorageBodies;
 pub use text::{BodyText, Segment};
 pub use types::{BodyError, BodyErrorKind, BodyOrigin, BodyRef, DeferredBody, TOKEN_ESCAPE};
+
+#[cfg(test)]
+mod resolver_tests;

@@ -16,6 +16,14 @@ use crate::theme::icons;
 use crate::theme::tokens::{SP_1, SP_2, palette};
 
 const RESOLVER_ID: &str = "body-resolver";
+const TRANSITION_ID: &str = "body-transition";
+
+/// Whether a body changed between waiting and shown since the last call. The
+/// transcript asks after laying out its rows.
+pub fn take_transition(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(Id::new(TRANSITION_ID)))
+        .unwrap_or(false)
+}
 
 /// Makes `resolver` the one panes drawing in `ctx` use.
 pub fn install(ctx: &egui::Context, resolver: BodyResolver) {
@@ -97,10 +105,10 @@ pub fn poll_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> TextState<'a> {
         BodyView::Ready(text) => Some(text),
         _ => None,
     });
-    if let [Segment::Deferred(_)] = text.segments() {
-        if let Some(only) = ready.next() {
-            return TextState::Ready(Cow::Owned(only.to_string()));
-        }
+    if let [Segment::Deferred(_)] = text.segments()
+        && let Some(only) = ready.next()
+    {
+        return TextState::Ready(Cow::Owned(only.to_string()));
     }
     let mut joined = String::with_capacity(text.len());
     for segment in text.segments() {
@@ -171,10 +179,20 @@ pub fn show_state(
     render: impl FnOnce(&mut Ui, &str),
 ) {
     let height_id = id.with("body-height");
+    // A body that changes between waiting and shown resizes its row; the
+    // transcript keeps the entry the reader is looking at where it was.
+    let shown_id = id.with("body-shown");
+    let now_ready = matches!(state, TextState::Ready(_));
+    let was_ready: Option<bool> = ui.data(|data| data.get_temp(shown_id));
+    ui.data_mut(|data| data.insert_temp(shown_id, now_ready));
+    if was_ready.is_some_and(|was| was != now_ready) {
+        ui.data_mut(|data| data.insert_temp(Id::new(TRANSITION_ID), true));
+    }
     if let TextState::Ready(ready) = state {
         let top = ui.cursor().top();
         render(ui, ready);
-        let height = ui.cursor().top() - top;
+        // The extent of what was drawn, without the spacing that trails it.
+        let height = (ui.min_rect().bottom() - top).max(0.0);
         ui.data_mut(|data| data.insert_temp(height_id, height));
         return;
     }

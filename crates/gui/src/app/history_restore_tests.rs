@@ -13,6 +13,72 @@ fn state(sidebar: SidebarState) -> WorkbenchState<DemoSource> {
         .with_sidebar(sidebar)
 }
 
+/// The log as a store that keeps every big body apart would give it: each
+/// display body becomes a reference to the fake store, and the event holds an
+/// empty string where it was.
+struct DeferringSource<'a> {
+    inner: crate::body::StorageHistory<'a>,
+    backend: std::sync::Arc<crate::body::testing::FakeBackend>,
+}
+
+impl DeferringSource<'_> {
+    fn defer(&self, mut row: crate::body::DeferredEvent) -> crate::body::DeferredEvent {
+        use event_bus::{CompactionEvent, EventKind};
+        let run = row.event.primary_run_id().map(str::to_owned);
+        let slot: Option<&mut String> = match &mut row.event.kind {
+            EventKind::Message(
+                MessageEvent::MessageCompleted { text, .. }
+                | MessageEvent::MessagePart { text, .. }
+                | MessageEvent::FinalResultPublished { text, .. },
+            ) => Some(text),
+            EventKind::Message(
+                MessageEvent::MessageDelta { delta, .. }
+                | MessageEvent::ReasoningDelta { delta, .. },
+            ) => Some(delta),
+            EventKind::Compaction(CompactionEvent::Compacted { summary, .. }) => Some(summary),
+            EventKind::Tool(ToolEvent::ToolCompleted {
+                tool_name,
+                output: Some(output),
+                ..
+            }) if !matches!(tool_name.as_str(), "shell" | "bash") => Some(output),
+            _ => None,
+        };
+        if let Some(slot) = slot.filter(|slot| !slot.is_empty()) {
+            let text = std::mem::take(slot);
+            let body = self
+                .backend
+                .deferred(&text, run.as_deref().unwrap_or(""), row.id);
+            row.body = Some(crate::body::BodyText::deferred(body));
+        }
+        row
+    }
+}
+
+impl crate::body::HistorySource for DeferringSource<'_> {
+    fn scan(
+        &self,
+        through_id: i64,
+        visit: &mut dyn FnMut(crate::body::HistoryRow),
+    ) -> Result<(), storage::StorageError> {
+        self.inner.scan(through_id, &mut |row| {
+            visit(match row {
+                crate::body::HistoryRow::Event(row) => {
+                    crate::body::HistoryRow::Event(self.defer(row))
+                }
+                failure @ crate::body::HistoryRow::Failure(_) => failure,
+            });
+        })
+    }
+}
+
+/// Reads every deferred body of `state` through its resolver, in place.
+fn resolve_every_body(state: &mut WorkbenchState<DemoSource>) {
+    let resolver = state.body_resolver().expect("a resolver").clone();
+    state
+        .transcripts
+        .map_bodies(&mut |body| resolver.read_now(body).expect("readable").into());
+}
+
 fn phase(run: &str, to: AgentRunPhase) -> Event {
     Event::new(LifecycleEvent::AgentRunStateChanged {
         run_id: run.into(),
@@ -440,6 +506,40 @@ fn assert_restore_matches_legacy_inner(
             None => new.restore_history(&db).unwrap(),
         }
         assert_same(&old, &new);
+        // The same log with every body left in the store reads the same once
+        // the bodies are read: nothing was lost, reordered or merged wrongly.
+        let backend = crate::body::testing::FakeBackend::new();
+        let mut deferred =
+            state(sidebar.clone()).with_body_resolver(crate::body::BodyResolver::manual(
+                backend.clone(),
+                crate::body::ResolverConfig::default(),
+            ));
+        deferred.history.push(
+            serde_json::from_value(serde_json::json!({
+            "thread_id":"repair", "text":"user request", "at":{"secs_since_epoch":0,"nanos_since_epoch":0}
+        })).unwrap(),
+        );
+        let source = DeferringSource {
+            inner: crate::body::StorageHistory(&db),
+            backend: backend.clone(),
+        };
+        match registry_path {
+            Some(path) => deferred
+                .restore_history_with_ownership_from(&db, path, &source)
+                .unwrap(),
+            None => deferred.restore_history_from(&db, &source).unwrap(),
+        }
+        assert!(
+            deferred.transcripts.has_deferred_bodies(),
+            "the replay left bodies in the store"
+        );
+        assert_eq!(
+            deferred.body_resolver().unwrap().stats().bodies_read,
+            0,
+            "the replay opens no display body"
+        );
+        resolve_every_body(&mut deferred);
+        assert_same(&old, &deferred);
         assert_eq!(new.shown_through_event, db.last_event_id().unwrap());
         assert!(new.transcripts.run("run-1").unwrap().entries().iter().any(
         |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "repaired answer")
@@ -465,7 +565,7 @@ fn assert_restore_matches_legacy_inner(
             index: 1,
             total: 2,
         });
-        for state in [&mut old, &mut new] {
+        for state in [&mut old, &mut new, &mut deferred] {
             let assembled = state
                 .shared_feed
                 .parts
@@ -475,6 +575,7 @@ fn assert_restore_matches_legacy_inner(
             state.apply_conversation_event(&assembled);
         }
         assert_same(&old, &new);
+        assert_same(&old, &deferred);
         assert!(new.transcripts.run("run-3").unwrap().entries().iter().any(
             |entry| matches!(entry, TranscriptEntry::Message { text, .. } if text == "first second")
         ));

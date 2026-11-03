@@ -28,6 +28,9 @@ pub enum NotificationKind {
     RetentionDisabled {
         reason: String,
     },
+    /// Stored events that could not be read and name no run, so no
+    /// conversation shows a gap for them.
+    HistoryGap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,10 +146,35 @@ impl NotificationsModel {
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
             NotificationKind::QuestionPending { .. }
             | NotificationKind::ApprovalPending { .. }
-            | NotificationKind::RetentionDisabled { .. } => ThreadRunPhase::Waiting,
+            | NotificationKind::RetentionDisabled { .. }
+            | NotificationKind::HistoryGap => ThreadRunPhase::Waiting,
             NotificationKind::RetentionStartup => ThreadRunPhase::Done,
         };
         self.push(kind, run_id, summary, phase);
+    }
+
+    /// Adds a notice about stored events that could not be read and belong to
+    /// no conversation. `event_ids` are listed so they can be inspected.
+    pub fn push_history_gap(&mut self, event_ids: &[i64]) {
+        const SHOWN: usize = 5;
+        let listed: Vec<String> = event_ids.iter().take(SHOWN).map(i64::to_string).collect();
+        let more = event_ids.len().saturating_sub(SHOWN);
+        let summary = format!(
+            "{} stored event(s) could not be read and belong to no conversation (event {}{})",
+            event_ids.len(),
+            listed.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        );
+        self.push(
+            NotificationKind::HistoryGap,
+            None,
+            summary,
+            ThreadRunPhase::Waiting,
+        );
     }
 
     /// Adds a notice about the start-up maintenance of archived threads.

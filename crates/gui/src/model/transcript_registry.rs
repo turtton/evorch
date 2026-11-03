@@ -415,7 +415,7 @@ impl TranscriptRegistry {
     /// of a stored event that could not be read. Returns false when no
     /// transcript owns it (no run recorded): nothing is guessed, the caller
     /// reports it elsewhere.
-    pub(crate) fn push_unreadable(
+    pub fn push_unreadable(
         &mut self,
         event_id: i64,
         run_id: Option<&str>,
@@ -451,6 +451,22 @@ impl TranscriptRegistry {
         true
     }
 
+    /// Replaces every body in every transcript (tests only).
+    #[cfg(test)]
+    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
+        for model in self.models_mut() {
+            model.map_bodies(f);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deferred_bodies(&self) -> bool {
+        std::iter::once(&self.thread)
+            .chain(self.threads.values())
+            .chain(self.runs.values())
+            .any(TranscriptModel::has_deferred_bodies)
+    }
+
     fn models_mut(&mut self) -> impl Iterator<Item = &mut TranscriptModel> {
         std::iter::once(&mut self.thread)
             .chain(self.threads.values_mut())
@@ -460,7 +476,7 @@ impl TranscriptRegistry {
     /// Applies the outcome of reading an unreadable event again: a read event
     /// takes the gap's place in each transcript that shows it; a failure only
     /// updates the gap's reason.
-    pub(crate) fn apply_reread(&mut self, event_id: i64, outcome: &EventReread) {
+    pub fn apply_reread(&mut self, event_id: i64, outcome: &EventReread) {
         for model in self.models_mut() {
             if !model.has_unreadable(event_id) {
                 continue;
@@ -493,7 +509,7 @@ impl TranscriptRegistry {
     }
 
     /// Drops the transcript of a deleted thread (and of its runs).
-    pub(crate) fn drop_thread(&mut self, thread: &str) -> Vec<String> {
+    pub fn drop_thread(&mut self, thread: &str) -> Vec<String> {
         let runs: Vec<String> = self
             .run_threads
             .iter()

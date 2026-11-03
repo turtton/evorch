@@ -11,6 +11,8 @@ mod composer;
 mod composer_draft;
 mod conversation;
 mod deferred_bodies;
+#[cfg(test)]
+mod deferred_bodies_tests;
 mod delivery;
 #[cfg(test)]
 mod delivery_tests;

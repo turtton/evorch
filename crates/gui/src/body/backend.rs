@@ -43,6 +43,9 @@ pub struct EventFailure {
 
 /// One row of the stored event log, in id order.
 #[derive(Debug, Clone, PartialEq)]
+// A row is handed on once, by value, for every event of a replay: boxing the
+// common variant would add an allocation to each of them.
+#[allow(clippy::large_enum_variant)]
 pub enum HistoryRow {
     Event(DeferredEvent),
     Failure(EventFailure),
@@ -50,6 +53,7 @@ pub enum HistoryRow {
 
 /// The outcome of reading one event again.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum EventReread {
     Ready(DeferredEvent),
     Failed(EventFailure),

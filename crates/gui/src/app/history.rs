@@ -186,6 +186,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.restore_history_inner(db, None, source)
     }
 
+    /// [`Self::restore_history_from`] that also reconciles phases with the
+    /// owner registry, like a start-up.
+    pub fn restore_history_with_ownership_from(
+        &mut self,
+        db: &storage::Database,
+        registry_path: &std::path::Path,
+        source: &dyn crate::body::HistorySource,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, Some(registry_path), source)
+    }
+
     /// Reconcile orphaned phases only when the owner registry can be inspected.
     pub fn restore_history_with_ownership(
         &mut self,
@@ -451,6 +462,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .iter()
                 .map(|(id, event)| (*id, event.run_id.as_deref(), event.reason.as_str())),
         );
+        // An unreadable event that names no run has no transcript to show a gap
+        // in; it is never put in the open one by guess, so it is announced.
+        let orphans: Vec<i64> = unreadable
+            .iter()
+            .filter(|(_, event)| event.run_id.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        if !orphans.is_empty() {
+            self.notifications.push_history_gap(&orphans);
+        }
         self.unreadable_history_events = unreadable;
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");

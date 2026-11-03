@@ -48,6 +48,7 @@ pub fn notifications_pane(
                 NotificationKind::RunFailed { .. } => terminal(ThreadRunPhase::Error),
                 NotificationKind::RetentionStartup => ("Storage", terminal(ThreadRunPhase::Done).1),
                 NotificationKind::RetentionDisabled { .. } => ("Storage", attention_color()),
+                NotificationKind::HistoryGap => ("History", attention_color()),
             };
             let row = ui
                 .push_id(notification.id, |ui| {

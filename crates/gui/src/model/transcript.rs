@@ -16,6 +16,8 @@ mod unreadable;
 pub use reviews::ToolReview;
 
 #[cfg(test)]
+mod body_tests;
+#[cfg(test)]
 mod draft_tests;
 #[cfg(test)]
 mod tool_tests;
@@ -333,6 +335,40 @@ impl TranscriptModel {
         self.deferred_body = body;
         self.apply(event);
         self.deferred_body = None;
+    }
+
+    /// Replaces every body in the transcript, as a test would read them all.
+    #[cfg(test)]
+    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
+        for entry in &mut self.entries {
+            match entry {
+                TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
+                    *text = f(text);
+                }
+                TranscriptEntry::Compaction { summary, .. } => *summary = f(summary),
+                TranscriptEntry::Tool {
+                    output: Some(output),
+                    ..
+                } => *output = f(output),
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether any body is still in the store.
+    #[cfg(test)]
+    pub(crate) fn has_deferred_bodies(&self) -> bool {
+        self.entries.iter().any(|entry| match entry {
+            TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
+                text.has_deferred()
+            }
+            TranscriptEntry::Compaction { summary, .. } => summary.has_deferred(),
+            TranscriptEntry::Tool {
+                output: Some(output),
+                ..
+            } => output.has_deferred(),
+            _ => false,
+        })
     }
 
     pub(crate) fn set_deferred_body(&mut self, body: Option<BodyText>) {

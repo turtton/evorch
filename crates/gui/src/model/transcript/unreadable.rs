@@ -68,8 +68,7 @@ impl TranscriptModel {
         };
         self.entries[index] = first;
         self.entry_meta[index].revision += 1;
-        let mut at = index + 1;
-        for entry in replacements {
+        for (at, entry) in (index + 1..).zip(replacements) {
             self.entries.insert(at, entry);
             self.entry_meta.insert(
                 at,
@@ -82,7 +81,6 @@ impl TranscriptModel {
             if self.view_start >= at {
                 self.view_start += 1;
             }
-            at += 1;
         }
         true
     }
