@@ -258,7 +258,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             user_messages: self.history.clone(),
             composer_drafts: self.composer_drafts.clone(),
         };
+        let dead: Vec<(String, Vec<String>)> = self
+            .sidebar
+            .threads
+            .iter()
+            .filter(|thread| self.tombstones.contains_thread(&thread.id.to_string()))
+            .map(|thread| {
+                (
+                    thread.id.to_string(),
+                    thread.run_ids.iter().map(ToString::to_string).collect(),
+                )
+            })
+            .collect();
         let removed = prune_tombstoned(&mut history, &self.tombstones);
+        for (thread, runs) in &dead {
+            // A deleted thread shows nothing: not its transcript, not a body
+            // or a failure held for it, and a read finishing later is dropped.
+            let bound = self.transcripts.drop_thread(thread);
+            if let Some(resolver) = &self.body_resolver {
+                for run in runs.iter().chain(&bound) {
+                    resolver.forget_run(run);
+                }
+            }
+        }
         if removed > 0 {
             self.sidebar = history.sidebar;
             self.history = history.user_messages;

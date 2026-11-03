@@ -172,7 +172,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, None)
+        self.restore_history_inner(db, None, &crate::body::StorageHistory(db))
+    }
+
+    /// [`Self::restore_history`] reading the event log from `source` instead
+    /// of from `db` (which still supplies everything else). For tests of a
+    /// log whose bodies are not inline.
+    pub fn restore_history_from(
+        &mut self,
+        db: &storage::Database,
+        source: &dyn crate::body::HistorySource,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, None, source)
     }
 
     /// Reconcile orphaned phases only when the owner registry can be inspected.
@@ -181,13 +192,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db: &storage::Database,
         registry_path: &std::path::Path,
     ) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, Some(registry_path))
+        self.restore_history_inner(db, Some(registry_path), &crate::body::StorageHistory(db))
     }
 
     fn restore_history_inner(
         &mut self,
         db: &storage::Database,
         registry_path: Option<&std::path::Path>,
+        source: &dyn crate::body::HistorySource,
     ) -> Result<(), storage::StorageError> {
         let total = crate::restore_metrics::RestoreTimer::new("history_total");
         let stage = crate::restore_metrics::RestoreTimer::new("history_first_pass");
@@ -331,15 +343,29 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut replayed_to = scan_through;
         let mut completed_since_request = std::collections::BTreeMap::new();
         let mut snapshot_error = None;
-        let mut parts = event_bus::MessagePartAssembler::new();
-        db.for_each_event_isolated(
-            scan_through,
-            |stored| {
-                replayed_to = replayed_to.max(stored.id);
-                let Some(assembled) = parts.accept(&stored.event) else {
+        let mut parts = crate::body::DeferredPartAssembler::new();
+        source.scan(scan_through, &mut |row| {
+            let row = match row {
+                crate::body::HistoryRow::Failure(failure) => {
+                    // The gap stands where the event was; what the run was
+                    // streaming cannot continue across it.
+                    replayed_to = replayed_to.max(failure.id);
+                    parts.interrupt(failure.run_id.as_deref());
+                    self.show_unreadable_event(&failure, &mut unreadable);
                     return;
+                }
+                crate::body::HistoryRow::Event(row) => row,
+            };
+            {
+                replayed_to = replayed_to.max(row.id);
+                let accepted = parts.accept(&row);
+                let assembled = match &accepted {
+                    crate::body::Accepted::Event(row) => *row,
+                    crate::body::Accepted::Completed(done) => &**done,
+                    crate::body::Accepted::Nothing => return,
                 };
-                let event: &event_bus::Event = &assembled;
+                let deferred = assembled.body.as_ref();
+                let event: &event_bus::Event = &assembled.event;
                 while messages
                     .peek()
                     .is_some_and(|message| message.at <= event.meta.wall_clock)
@@ -352,9 +378,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .and_then(|end| end.duration_since(event.meta.wall_clock).ok())
                     .and_then(|age| replay_now.checked_sub(age))
                     .unwrap_or(replay_now);
-                self.telemetry.apply_event_at(event, at);
+                self.telemetry.apply_event_at_with(
+                    event,
+                    at,
+                    deferred.map_or(0, crate::body::BodyText::byte_len),
+                );
                 self.transcripts.select_thread(None);
-                self.apply_conversation_event(event);
+                self.apply_conversation_event_with_body(event, deferred);
                 self.seed_system_notification(event);
                 if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                     run_id,
@@ -392,7 +422,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if let event_bus::EventKind::Lifecycle(
                     event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
                 ) = &event.kind
-                    && last_waiting.get(run_id) == Some(&stored.id)
+                    && last_waiting.get(run_id) == Some(&assembled.id)
                     && !completed_since_request
                         .get(run_id)
                         .copied()
@@ -411,14 +441,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         },
                     ));
                 }
-            },
-            |id, run, reason| {
-                unreadable.entry(id).or_insert_with(|| UnreadableEvent {
-                    run_id: run.map(str::to_owned),
-                    reason: reason.to_owned(),
-                });
-            },
-        )?;
+            }
+        })?;
         if let Some(error) = snapshot_error {
             return Err(error);
         }
@@ -431,7 +455,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");
         // A response can finish after the replay cursor, in a later feed batch.
-        self.shared_feed.parts = parts;
+        self.shared_feed.parts = event_bus::MessagePartAssembler::new();
+        self.hand_over_open_parts(parts);
         self.note_replayed_event(replayed_to);
         self.note_restored_active_runs();
         self.reconcile_restored_phases(db, registry_path);

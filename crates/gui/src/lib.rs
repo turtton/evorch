@@ -3,6 +3,7 @@
 //! 層構造: `model` (egui 非依存 view model) -> `pty` / `terminal` / `events` (adapter) -> panes/app (Wave 3)。
 
 pub mod app;
+pub mod body;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod diff;

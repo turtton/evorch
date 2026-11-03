@@ -23,7 +23,12 @@ fn harness() -> Harness<'static, State> {
             tool_name: "shell".into(),
             call_id: "sticky-call".into(),
             input: Some(serde_json::json!({"command": "long-output"})),
-            output: Some((0..100).map(|i| format!("output line {i}\n")).collect()),
+            output: Some(
+                (0..100)
+                    .map(|i| format!("output line {i}\n"))
+                    .collect::<String>()
+                    .into(),
+            ),
             detail: None,
             is_error: false,
             status: ToolStatus::Succeeded,

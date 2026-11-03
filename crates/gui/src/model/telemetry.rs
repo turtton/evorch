@@ -202,6 +202,14 @@ impl TelemetryOverlay {
     }
 
     pub fn apply_event_at(&mut self, event: &Event, now: Instant) {
+        self.apply_event_at_with(event, now, 0);
+    }
+
+    /// [`Self::apply_event_at`] for an event whose streamed text is still in
+    /// the store: `deferred_chars` stands in for it, by its declared size in
+    /// bytes. Like the rest of the streamed count it is an estimate for
+    /// display, never billed and never used for cache decisions.
+    pub fn apply_event_at_with(&mut self, event: &Event, now: Instant, deferred_chars: u64) {
         match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::RunProgress {
                 run_id,
@@ -314,7 +322,7 @@ impl TelemetryOverlay {
                     // Deltas carry no token count: estimate across chunks, never bill this value.
                     let chars = delta
                         .chars()
-                        .fold(0_u64, |count, _| count.saturating_add(1));
+                        .fold(deferred_chars, |count, _| count.saturating_add(1));
                     row.streamed_chars = row.streamed_chars.saturating_add(chars);
                     if matches!(message, MessageEvent::ReasoningDelta { .. }) {
                         row.reasoning_chars = row.reasoning_chars.saturating_add(chars);

@@ -61,6 +61,22 @@ fn context(run: &str, thread: &str, messages: serde_json::Value) -> RunContextRe
     }
 }
 
+/// The entries the legacy restore also showed. The legacy replay dropped an
+/// unreadable event without a trace; the current one leaves a gap in its place
+/// (checked by its own tests), which is the only difference.
+fn readable(entries: &[crate::model::transcript::TranscriptEntry]) -> String {
+    let shown: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry,
+                crate::model::transcript::TranscriptEntry::Unreadable { .. }
+            )
+        })
+        .collect();
+    format!("{shown:?}")
+}
+
 fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource>) {
     assert_eq!(
         serde_json::to_value(&old.sidebar).unwrap(),
@@ -72,7 +88,7 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
             state
                 .transcripts
                 .thread_model(&id)
-                .map(|model| format!("{:?}", model.entries()))
+                .map(|model| readable(model.entries()))
         };
         assert_eq!(entries(old), entries(new), "thread {id}");
     }
@@ -80,7 +96,7 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
     assert_eq!(runs, new.transcripts.run_ids().collect::<Vec<_>>());
     for run in runs {
         let entries = |state: &WorkbenchState<DemoSource>| {
-            format!("{:?}", state.transcripts.run(run).unwrap().entries())
+            readable(state.transcripts.run(run).unwrap().entries())
         };
         assert_eq!(entries(old), entries(new), "run {run}");
     }
@@ -97,10 +113,16 @@ fn assert_same(old: &WorkbenchState<DemoSource>, new: &WorkbenchState<DemoSource
         .assert_same_seed(&new.system_notifications);
     assert_eq!(old.shown_through_event, new.shown_through_event);
     assert_eq!(old.shared_feed.foreign_runs, new.shared_feed.foreign_runs);
-    assert_eq!(
-        format!("{:?}", old.shared_feed.parts),
-        format!("{:?}", new.shared_feed.parts)
-    );
+    // The counter that orders unfinished runs only matters relative to the
+    // runs open at the same time; the replay no longer counts the sequences it
+    // completed before the hand-over.
+    let parts = |state: &WorkbenchState<DemoSource>| {
+        let text = format!("{:?}", state.shared_feed.parts);
+        let start = text.find("next_order: ").unwrap();
+        let end = start + text[start..].find(',').unwrap();
+        format!("{}{}", &text[..start], &text[end..])
+    };
+    assert_eq!(parts(old), parts(new));
     assert_eq!(
         serde_json::to_value(&old.history).unwrap(),
         serde_json::to_value(&new.history).unwrap()

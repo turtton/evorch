@@ -164,9 +164,8 @@ fn texts(state: &WorkbenchState<DemoSource>) -> Vec<String> {
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::UserMessage { text, .. } | TranscriptEntry::Message { text, .. } => {
-                Some(text.clone())
-            }
+            TranscriptEntry::UserMessage { text, .. } => Some(text.clone()),
+            TranscriptEntry::Message { text, .. } => Some(text.inline_or_empty().to_owned()),
             _ => None,
         })
         .collect()

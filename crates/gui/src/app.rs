@@ -10,6 +10,7 @@ mod branching;
 mod composer;
 mod composer_draft;
 mod conversation;
+mod deferred_bodies;
 mod delivery;
 #[cfg(test)]
 mod delivery_tests;

@@ -108,7 +108,7 @@ fn oversized_accepted_responses_restore_in_full_before_later_tools_and_responses
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            TranscriptEntry::Message { text, .. } => Some(text.as_str()),
+            TranscriptEntry::Message { text, .. } => Some(text.inline_or_empty()),
             _ => None,
         })
         .collect();
@@ -200,12 +200,12 @@ fn stopped_and_failed_streams_do_not_restore_unaccepted_answer_drafts() {
         }
         assert_eq!(reopened.entries(), durable_live.entries());
         assert!(!reopened.entries().iter().any(|entry| matches!(entry,
-            TranscriptEntry::Message { text, .. } if text.contains("unaccepted"))));
+            TranscriptEntry::Message { text, .. } if text.inline_or_empty().contains("unaccepted"))));
         let reasoning: Vec<_> = reopened
             .entries()
             .iter()
             .filter_map(|entry| match entry {
-                TranscriptEntry::Reasoning { text, .. } => Some(text.as_str()),
+                TranscriptEntry::Reasoning { text, .. } => Some(text.inline_or_empty()),
                 _ => None,
             })
             .collect();

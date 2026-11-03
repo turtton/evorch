@@ -1,6 +1,7 @@
 use event_bus::{AgentMessageKind, CompactionReason, Event};
 
 use super::scoped_call::parse_scoped_call_id;
+use crate::body::{BodyText, FailureKind};
 
 mod branch;
 mod compaction;
@@ -10,6 +11,7 @@ mod lifecycle;
 mod reviews;
 pub mod shell_jobs;
 mod thinking;
+mod unreadable;
 
 pub use reviews::ToolReview;
 
@@ -108,14 +110,14 @@ pub enum TranscriptEntry {
         compacted_range_start: usize,
         compacted_range_end: usize,
         checkpoint_id: String,
-        summary: String,
+        summary: BodyText,
     },
     Message {
-        text: String,
+        text: BodyText,
         run_id: Option<String>,
     },
     Reasoning {
-        text: String,
+        text: BodyText,
         run_id: Option<String>,
     },
     Tool {
@@ -123,7 +125,7 @@ pub enum TranscriptEntry {
         tool_name: String,
         call_id: String,
         input: Option<serde_json::Value>,
-        output: Option<String>,
+        output: Option<BodyText>,
         detail: Option<serde_json::Value>,
         is_error: bool,
         status: ToolStatus,
@@ -152,6 +154,14 @@ pub enum TranscriptEntry {
         kind: workspace_ui::LineageKind,
         source_thread_id: String,
     },
+    /// A stored event that could not be read, kept at the place it occupies in
+    /// the history so a gap is visible. It can be read again.
+    Unreadable {
+        event_id: i64,
+        run_id: Option<String>,
+        kind: FailureKind,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +184,9 @@ pub struct TranscriptModel {
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
     drafts: drafts::DraftIndex,
+    /// The display body of the event being applied, when it is still in the
+    /// store. Set only for the duration of [`Self::apply_with_body`].
+    deferred_body: Option<BodyText>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +227,7 @@ impl TranscriptModel {
             pending_reviews: std::collections::BTreeMap::new(),
             approvals_while_running: std::collections::BTreeSet::new(),
             drafts: drafts::DraftIndex::default(),
+            deferred_body: None,
         }
     }
 
@@ -250,9 +264,11 @@ impl TranscriptModel {
     }
 
     fn entry_index(&self, entry_id: usize) -> Option<usize> {
+        // Ids ascend except where a re-read event's entries replaced a gap.
         self.entry_meta
             .binary_search_by_key(&entry_id, |meta| meta.id)
             .ok()
+            .or_else(|| self.entry_meta.iter().position(|meta| meta.id == entry_id))
     }
 
     fn entry_mut(&mut self, index: usize) -> Option<&mut TranscriptEntry> {
@@ -267,7 +283,7 @@ impl TranscriptModel {
 
     pub fn push_message(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::Message {
-            text: text.into(),
+            text: text.into().into(),
             run_id: None,
         });
     }
@@ -286,7 +302,7 @@ impl TranscriptModel {
 
     pub fn push_reasoning(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::Reasoning {
-            text: text.into(),
+            text: text.into().into(),
             run_id: None,
         });
     }
@@ -309,6 +325,29 @@ impl TranscriptModel {
             reviews: Vec::new(),
             parent_call_id: None,
         });
+    }
+
+    /// Applies `event` whose display body is still in the store: `body` takes
+    /// the place of the (empty) string the event holds for it.
+    pub fn apply_with_body(&mut self, event: &Event, body: Option<BodyText>) {
+        self.deferred_body = body;
+        self.apply(event);
+        self.deferred_body = None;
+    }
+
+    pub(crate) fn set_deferred_body(&mut self, body: Option<BodyText>) {
+        self.deferred_body = body;
+    }
+
+    /// Whether a call with this id is shown here.
+    pub(crate) fn has_tool_call(&self, call_id: &str, run_id: Option<&str>) -> bool {
+        self.scoped_tool_index(call_id, run_id).is_some()
+    }
+
+    /// The body of the event being applied: the deferred one when there is
+    /// one, otherwise `text` as it came.
+    fn body_of(&mut self, text: &str) -> BodyText {
+        self.deferred_body.take().unwrap_or_else(|| text.into())
     }
 
     pub fn apply(&mut self, event: &Event) {
@@ -375,7 +414,13 @@ impl TranscriptModel {
                     }
                 }
             }
-            event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
+            event_bus::EventKind::Compaction(event) => {
+                let summary = match event {
+                    event_bus::CompactionEvent::Compacted { summary, .. } => summary,
+                };
+                let summary = self.body_of(summary);
+                self.push(compaction::entry(event, summary));
+            }
             event_bus::EventKind::Tool(event_bus::ToolEvent::ArtifactsPresented {
                 presentation, ..
             }) => self.push(TranscriptEntry::Artifacts {
@@ -415,7 +460,8 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
-                self.complete_message(run_id, text, &event.meta);
+                let body = self.body_of(text);
+                self.complete_message(run_id, body, &event.meta);
                 self.response_completed(run_id);
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::ToolCallDelta {
@@ -481,6 +527,10 @@ impl TranscriptModel {
                 },
                 );
                 let mut input = None;
+                let shown_output = match self.deferred_body.take() {
+                    Some(body) => Some(body),
+                    None => output.as_deref().map(BodyText::from),
+                };
                 if let Some(TranscriptEntry::Tool {
                     run_id: current_run,
                     input: current_input,
@@ -491,7 +541,7 @@ impl TranscriptModel {
                     ..
                 }) = self.find_scoped_tool_mut(call_id, run_id.as_deref()) {
                     current_run.clone_from(run_id);
-                    current_output.clone_from(output);
+                    *current_output = shown_output;
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
                     if parent_call_id.is_some() {
@@ -584,6 +634,7 @@ impl TranscriptModel {
             MessageEvent::FinalResultPublished { text, run_id } => {
                 self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
+                let body = self.body_of(text);
                 let last_message = self.entries.iter().rev().find_map(|entry| match entry {
                     TranscriptEntry::Message {
                         text,
@@ -591,16 +642,17 @@ impl TranscriptModel {
                     } if id == run_id => Some(text),
                     _ => None,
                 });
-                if !text.is_empty() && last_message != Some(text) {
+                if !body.is_empty() && last_message != Some(&body) {
                     // A finish result is a complete message, not another stream chunk.
                     self.push(TranscriptEntry::Message {
-                        text: text.clone(),
+                        text: body,
                         run_id: Some(run_id.clone()),
                     });
                 }
                 return;
             }
         };
+        let delta = self.body_of(delta);
         if delta.is_empty() {
             return;
         }
@@ -623,7 +675,7 @@ impl TranscriptModel {
             if let Some(entry) = self.entry_mut(self.entries.len() - 1) {
                 match entry {
                     TranscriptEntry::Message { text, .. }
-                    | TranscriptEntry::Reasoning { text, .. } => text.push_str(delta),
+                    | TranscriptEntry::Reasoning { text, .. } => text.push_body(delta),
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
@@ -634,6 +686,7 @@ impl TranscriptModel {
                     | TranscriptEntry::AgentMessage { .. }
                     | TranscriptEntry::TurnEnd { .. }
                     | TranscriptEntry::Artifacts { .. }
+                    | TranscriptEntry::Unreadable { .. }
                     | TranscriptEntry::Branch { .. } => {}
                 }
             }
@@ -645,11 +698,11 @@ impl TranscriptModel {
                 | MessageEvent::MessagePart { .. }
                 | MessageEvent::ToolCallDelta { .. }
                 | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {
-                    text: delta.clone(),
+                    text: delta,
                     run_id: run_id.clone(),
                 },
                 MessageEvent::ReasoningDelta { .. } => TranscriptEntry::Reasoning {
-                    text: delta.clone(),
+                    text: delta,
                     run_id: run_id.clone(),
                 },
             });
@@ -669,7 +722,7 @@ impl TranscriptModel {
         }
     }
 
-    fn complete_message(&mut self, run_id: &str, text: &str, meta: &event_bus::EventMeta) {
+    fn complete_message(&mut self, run_id: &str, text: BodyText, meta: &event_bus::EventMeta) {
         if self.completed_messages.get(run_id) == Some(meta) {
             return;
         }
@@ -686,14 +739,11 @@ impl TranscriptModel {
             if let Some(&index) = indices.first() {
                 if let Some(TranscriptEntry::Message { text: current, .. }) = self.entry_mut(index)
                 {
-                    text.clone_into(current);
+                    *current = text;
                 }
                 indices.remove(0);
             } else {
-                self.push(TranscriptEntry::Message {
-                    text: text.into(),
-                    run_id: key,
-                });
+                self.push(TranscriptEntry::Message { text, run_id: key });
             }
         }
         // Reasoning or diagnostics may split one response into several display

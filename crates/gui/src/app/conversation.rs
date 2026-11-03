@@ -14,6 +14,16 @@ use crate::model::tasks::AgentRunSource;
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Returns whether sidebar conversation identity or its run index changed. Never performs I/O.
     pub(super) fn apply_conversation_event(&mut self, event: &Event) -> bool {
+        self.apply_conversation_event_with_body(event, None)
+    }
+
+    /// [`Self::apply_conversation_event`] for an event whose display body is
+    /// still in the store.
+    pub(super) fn apply_conversation_event_with_body(
+        &mut self,
+        event: &Event,
+        body: Option<&crate::body::BodyText>,
+    ) -> bool {
         if let EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) =
             &event.kind
         {
@@ -82,7 +92,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => {}
         }
         let touched = self.touch_thread_activity(event);
-        self.transcripts.apply(event);
+        self.transcripts.apply_with_body(event, body);
         changed || role_changed || touched
     }
 

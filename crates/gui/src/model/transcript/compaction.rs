@@ -2,7 +2,7 @@ use event_bus::CompactionEvent;
 
 use super::TranscriptEntry;
 
-pub(super) fn entry(event: &CompactionEvent) -> TranscriptEntry {
+pub(super) fn entry(event: &CompactionEvent, summary: crate::body::BodyText) -> TranscriptEntry {
     match event {
         CompactionEvent::Compacted {
             reason,
@@ -13,7 +13,6 @@ pub(super) fn entry(event: &CompactionEvent) -> TranscriptEntry {
             compacted_range_start,
             compacted_range_end,
             checkpoint_id,
-            summary,
             ..
         } => TranscriptEntry::Compaction {
             reason: *reason,
@@ -24,7 +23,7 @@ pub(super) fn entry(event: &CompactionEvent) -> TranscriptEntry {
             compacted_range_start: *compacted_range_start,
             compacted_range_end: *compacted_range_end,
             checkpoint_id: checkpoint_id.clone(),
-            summary: summary.clone(),
+            summary,
         },
     }
 }

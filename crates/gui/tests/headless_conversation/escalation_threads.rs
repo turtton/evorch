@@ -316,8 +316,10 @@ fn assert_projection(state: &mut WorkbenchState<DemoSource>) {
     let entries = state.transcript().entries();
     assert!(entries.iter().any(|entry| matches!(entry,
         TranscriptEntry::Message { text, .. } if text == "early output and later output")));
-    assert!(!entries.iter().any(|entry| matches!(entry,
-        TranscriptEntry::Message { text, .. } if text.contains("private child"))));
+    assert!(
+        !entries.iter().any(|entry| matches!(entry,
+        TranscriptEntry::Message { text, .. } if text.inline_or_empty().contains("private child")))
+    );
     assert!(entries.iter().any(|entry| matches!(entry,
         TranscriptEntry::Message { text, run_id: Some(run) } if text == &final_report() && run == "run-2")));
     state.switch_thread(ThreadId::new("parent")).unwrap();

@@ -26,6 +26,7 @@ pub(crate) mod async_layout;
 mod queue;
 mod sandbox_review;
 mod thinking;
+mod unreadable;
 mod virtual_list;
 pub(crate) use virtual_list::mark_async_layout;
 #[doc(hidden)]
@@ -445,6 +446,25 @@ fn run_detail_body(
                         agent_message::show(ui, *direction, peer_run_id, content, task_rows);
                         return;
                     }
+                    if let TranscriptEntry::Unreadable {
+                        event_id,
+                        run_id,
+                        kind,
+                        reason,
+                    } = entry
+                    {
+                        unreadable::show(
+                            ui,
+                            pane_id.with(("unreadable", entry_id)),
+                            &unreadable::Gap {
+                                event_id: *event_id,
+                                run_id: run_id.as_deref(),
+                                kind,
+                                reason,
+                            },
+                        );
+                        return;
+                    }
                     if let Some((icon, color)) = event_icon(entry) {
                         let hover = match entry {
                             TranscriptEntry::Diagnostic { hover, .. } => Some(hover.as_str()),
@@ -474,15 +494,23 @@ fn run_detail_body(
                             | TranscriptEntry::AgentMessage { .. }
                             | TranscriptEntry::TurnEnd { .. }
                             | TranscriptEntry::Artifacts { .. }
+                            | TranscriptEntry::Unreadable { .. }
                             | TranscriptEntry::Branch { .. } => {}
                         }
                         if let TranscriptEntry::Message { text, .. } = entry {
-                            crate::panes::markdown_render::render_markdown_with_base(
+                            crate::body::ui::show_text(
                                 ui,
+                                pane_id.with(("message-body", entry_id)),
                                 text,
-                                &format!("msg-{entry_id}"),
-                                repo_root,
-                                repo_root,
+                                |ui, text| {
+                                    crate::panes::markdown_render::render_markdown_with_base(
+                                        ui,
+                                        text,
+                                        &format!("msg-{entry_id}"),
+                                        repo_root,
+                                        repo_root,
+                                    );
+                                },
                             );
                             return;
                         }
@@ -552,6 +580,7 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::Tool { .. }
         | TranscriptEntry::TurnEnd { .. }
         | TranscriptEntry::Artifacts { .. }
+        | TranscriptEntry::Unreadable { .. }
         | TranscriptEntry::Branch { .. } => None,
     }
 }
@@ -651,8 +680,12 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         | TranscriptEntry::Diagnostic { text, .. }
         | TranscriptEntry::SandboxReview { text, .. }
         | TranscriptEntry::Error { text } => text.clone(),
-        TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
-        TranscriptEntry::Reasoning { text, .. } => text.clone(),
+        // Bodies are drawn through `show_text`; this label never sees a deferred one.
+        TranscriptEntry::Message { text, .. } => format!("Message: {}", text.inline_or_empty()),
+        TranscriptEntry::Reasoning { text, .. } => text.inline_or_empty().to_owned(),
+        TranscriptEntry::Unreadable { event_id, .. } => {
+            format!("Event {event_id} could not be read")
+        }
         TranscriptEntry::Compaction { .. } => compaction::summary(entry).unwrap_or_default(),
         TranscriptEntry::Tool {
             tool_name,
