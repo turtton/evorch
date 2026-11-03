@@ -129,6 +129,8 @@ impl AgentRuntime {
         {
             return Err("answer saved, but the finished child context does not match its identity or terminal phase".into());
         }
+        self.reject_nested_orchestrator(&record, &descriptor)
+            .map_err(|error| format!("answer saved, but {error}"))?;
         let history =
             RestoredState::for_conversation(&record).map_err(|error| error.to_string())?;
         if Self::answer_is_in_history(&history.messages, question) {

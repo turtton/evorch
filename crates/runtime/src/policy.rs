@@ -14,6 +14,25 @@ pub fn is_meta_op(name: &str) -> bool {
     MetaOp::from_name(name).is_some()
 }
 
+/// Whether a run may be started with `role` under `parent` (ADR 0044 §2).
+///
+/// Orchestrator is root-only: schema, parser and every spawn path share this one
+/// rule. A root start (`parent == None`) is unaffected.
+///
+/// # Errors
+/// [`RuntimeError::OrchestratorChildDenied`] for an Orchestrator with a parent.
+pub(crate) fn authorize_child_role(
+    parent: Option<crate::RunId>,
+    role: Role,
+) -> Result<(), RuntimeError> {
+    match parent {
+        Some(parent) if role == Role::Orchestrator => Err(RuntimeError::OrchestratorChildDenied {
+            parent: parent.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// ロールの capability boundary を実行時に強制するポリシー。
 ///
 /// ADR 0002 の行列 ([`Role::capabilities`]) を消費し、ツール実行の可否判定と

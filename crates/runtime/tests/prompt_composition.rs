@@ -203,19 +203,16 @@ fn availability_triggers_flow_into_intent_gate() {
         .expect("登録済みの部品のみを参照するはずです");
 
     let block = key_triggers_block(&prompt);
-    for name in [
-        "Orchestrator",
-        "Explorer",
-        "Worker",
-        "Reviewer",
-        "TestAgent",
-        "TestSkill",
-    ] {
+    for name in ["Explorer", "Worker", "Reviewer", "TestAgent", "TestSkill"] {
         assert!(
             block.contains(&format!("- {name}:")),
             "keyTriggers ブロックに {name} が載るはずです"
         );
     }
+    assert!(
+        !block.contains("- Orchestrator:"),
+        "Orchestrator は root 専用で委譲先として案内しません"
+    );
 }
 
 /// プロンプトから keyTriggers ブロック (マーカー間) を取り出す。

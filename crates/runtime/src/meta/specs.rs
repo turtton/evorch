@@ -362,7 +362,6 @@ fn delegate_target_schema() -> Value {
             .filter(|category| category.role == *role)
             .collect();
         let guidance = match *role {
-            "orchestrator" => "Coordinate agents and execution.".to_owned(),
             "explorer" => "Read-only local code investigation.".to_owned(),
             "worker" => "Implement, fix, run commands or commit; choose a category by the task's primary difficulty.".to_owned(),
             "reviewer" => format!("Independently compare implementation results or plans against requirements and give an acceptance verdict; consultation belongs to Advisor, in a separate context; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
@@ -439,6 +438,13 @@ mod tests {
             branches.len(),
             super::super::delegation::DELEGATE_ROLES.len()
         );
+        // Orchestrator is root-only: no branch offers it under any spelling.
+        assert!(
+            !branches
+                .iter()
+                .any(|branch| branch["properties"]["role"]["const"] == "orchestrator")
+        );
+        assert!(!validator.is_valid(&json!({"target":{"role":"orchestrator"}, "prompt":"task"})));
         for (branch, role) in branches
             .iter()
             .zip(super::super::delegation::DELEGATE_ROLES)
