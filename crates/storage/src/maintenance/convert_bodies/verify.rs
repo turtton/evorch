@@ -48,17 +48,20 @@ pub(super) fn metadata_fingerprint(conn: &Connection) -> Result<(u64, [u8; 32]),
 }
 
 /// Everything must read back, and nothing of the old format may be left in a row.
-pub(super) fn verify_all(conn: &Connection) -> Result<(), StorageError> {
-    let unconverted: u64 = conn.query_row(
-        "SELECT COUNT(*) FROM run_contexts WHERE messages_json != ''",
-        [],
-        |row| row.get(0),
-    )?;
-    if unconverted != 0 {
-        return Err(invalid(format!(
-            "{unconverted} runs still hold their conversation in the old column"
-        )));
+pub(super) fn verify_all(conn: &Connection, runs_converted_here: bool) -> Result<(), StorageError> {
+    if runs_converted_here {
+        let unconverted: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_contexts WHERE messages_json != ''",
+            [],
+            |row| row.get(0),
+        )?;
+        if unconverted != 0 {
+            return Err(invalid(format!(
+                "{unconverted} runs still hold their conversation in the old column"
+            )));
+        }
     }
+    super::provenance::verify_all(conn)?;
     let report = read_snapshot(conn, || {
         let mut report = check_bodies(conn, PRODUCTION_OWNERS, BodyScope::All, true)?;
         check_runs(conn, BodyScope::All, true, &mut report)?;

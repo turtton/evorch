@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 40;
+const LATEST_SCHEMA: u32 = 41;
 
-const EXPECTED_TABLES: [&str; 70] = [
+const EXPECTED_TABLES: [&str; 71] = [
     "content_blobs",
     "content_blob_gc_queue",
     "content_blob_refs_header",
@@ -37,6 +37,7 @@ const EXPECTED_TABLES: [&str; 70] = [
     "learning_claims",
     "learning_claim_roots",
     "run_context_provenance",
+    "run_message_provenance",
     "thread_index_runs",
     "conversation_blocks",
     "conversation_fts",

@@ -14,6 +14,7 @@ use storage::{Database, RunContextRecord, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 const UNDO_V40: &str = include_str!("support/undo_v40.sql");
+const UNDO_V41: &str = include_str!("support/undo_v41.sql");
 
 fn config(dir: &TempDir) -> StorageConfig {
     StorageConfig {
@@ -117,7 +118,7 @@ fn dump(path: &std::path::Path, tables: &[&str]) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-const CONVERSATION_TABLES: [&str; 8] = [
+const CONVERSATION_TABLES: [&str; 9] = [
     "run_contexts",
     "run_messages",
     "content_blobs",
@@ -125,6 +126,7 @@ const CONVERSATION_TABLES: [&str; 8] = [
     "content_blob_refs_header",
     "content_blob_gc_queue",
     "run_context_provenance",
+    "run_message_provenance",
     "thread_index_runs",
 ];
 
@@ -884,6 +886,7 @@ fn old_format_database(path: &std::path::Path, version: u32) {
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(path).unwrap();
+    connection.execute_batch(UNDO_V41).unwrap();
     connection.execute_batch(UNDO_V40).unwrap();
     connection
         .execute(
@@ -956,6 +959,42 @@ fn an_old_format_database_is_refused_by_every_entry_without_being_touched() {
             "the old column is still there"
         );
     }
+}
+
+#[test]
+fn a_version_40_database_whose_maps_are_a_column_is_refused_by_every_entry_untouched() {
+    // Given: a database of version 40 (messages are rows) whose provenance maps are still
+    // one column: the form the first conversion left.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("v40.db");
+    let config = StorageConfig {
+        db_path: path.clone(),
+        ..StorageConfig::default()
+    };
+    drop(Database::open(&config).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(UNDO_V41).unwrap();
+    connection.pragma_update(None, "user_version", 40).unwrap();
+    connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(connection);
+    let before = file_bytes(&path);
+
+    // When/Then: every way to open it points at the conversion command, and the file
+    // is byte for byte what it was.
+    let refused = |error: StorageError| {
+        assert!(
+            matches!(&error, StorageError::ConversionRequired { found: 40, .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("conversion command"));
+    };
+    refused(Database::open(&config).unwrap_err());
+    refused(Database::open_read_only(&path).unwrap_err());
+    refused(Database::open_for_inspection(&path).unwrap_err());
+    refused(Storage::open(config.clone()).err().unwrap());
+    assert_eq!(file_bytes(&path), before);
 }
 
 #[test]

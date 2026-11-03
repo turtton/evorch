@@ -47,6 +47,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;

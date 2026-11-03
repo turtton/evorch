@@ -43,11 +43,21 @@ const REQUIRED_TABLES: [&str; 4] = [
     "reclaim_jobs",
 ];
 
-/// Tables migration v40 creates: none of them may exist before the conversion starts.
-const TARGET_TABLES: [&str; 3] = [
+/// Tables migrations v40 and v41 create: none of them may exist before the conversion
+/// starts.
+const TARGET_TABLES: [&str; 4] = [
     "run_messages",
     "content_blob_refs_message",
     "content_blob_refs_header",
+    "run_message_provenance",
+];
+
+/// The columns migration v41 adds to `run_context_provenance`.
+const PROVENANCE_HEADER_COLUMNS: [&str; 4] = [
+    "map_version",
+    "raw_message_count",
+    "checkpoint_count",
+    "map_message_count",
 ];
 
 /// The oldest schema version the conversion brings up to 39 itself (the migrations from
@@ -106,8 +116,11 @@ const MAX_LISTED_PROBLEMS: usize = 20;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Shape {
-    /// A regular v39 database: the conversion applies.
+    /// A regular database of version 33 to 39: the whole conversion applies.
     Source,
+    /// A regular version 40 database: the runs are already rows, only the provenance
+    /// maps are converted. (Explicit conversion only; no running build reads version 40.)
+    RunsConverted,
     /// Already in the current format: nothing to do.
     Converted,
 }
@@ -122,6 +135,39 @@ pub(super) fn table_exists(conn: &Connection, name: &str) -> Result<bool, Storag
 
 pub(super) fn restore_hint() -> &'static str {
     "restore the verified backup taken before the conversion and run it again from the start"
+}
+
+fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>, StorageError> {
+    Ok(conn
+        .prepare("SELECT name FROM pragma_table_info(?1)")?
+        .query_map([table], |row| row.get(0))?
+        .collect::<Result<_, _>>()?)
+}
+
+/// A version 40 database: `run_contexts` is a header and `run_messages` holds the
+/// messages, the provenance map is still one column. Anything else (a half converted
+/// database of either step) is refused with the way back.
+fn classify_runs_converted(conn: &Connection) -> Result<Shape, StorageError> {
+    let runs = column_names(conn, "run_contexts")?;
+    let provenance = column_names(conn, "run_context_provenance")?;
+    let has = |columns: &[String], name: &str| columns.iter().any(|column| column == name);
+    if has(&runs, "messages_json") || !has(&runs, "body_format") || !has(&runs, "header_rev") {
+        return Err(invalid(format!(
+            "run_contexts is not in the version 40 header format; {}",
+            restore_hint()
+        )));
+    }
+    let started = provenance
+        .iter()
+        .any(|column| PROVENANCE_HEADER_COLUMNS.contains(&column.as_str()))
+        || table_exists(conn, "run_message_provenance")?;
+    if started || !has(&provenance, "map_json") {
+        return Err(invalid(format!(
+            "the database has the tables or columns of a conversion that did not finish; {}",
+            restore_hint()
+        )));
+    }
+    Ok(Shape::RunsConverted)
 }
 
 /// Decides what the database is, reading nothing but the schema.
@@ -139,9 +185,12 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
+    if version == MESSAGE_ROWS_VERSION {
+        return classify_runs_converted(conn);
+    }
     if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {
         return Err(invalid(format!(
-            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {}; this one is version {version}",
+            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {} (and a version {MESSAGE_ROWS_VERSION} one, for its provenance maps); this one is version {version}",
             MESSAGE_ROWS_VERSION - 1
         )));
     }
@@ -149,9 +198,13 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
+    let provenance_columns = column_names(conn, "run_context_provenance")?;
     let mut leftovers = columns
         .iter()
         .any(|column| column == "body_format" || column == "header_rev");
+    leftovers |= provenance_columns
+        .iter()
+        .any(|column| PROVENANCE_HEADER_COLUMNS.contains(&column.as_str()));
     for table in TARGET_TABLES {
         leftovers |= table_exists(conn, table)?;
     }
@@ -434,6 +487,14 @@ pub struct Analysis {
     /// allowance per row, per blob or reference, and per run for the columns, indexes and
     /// page waste around them.
     pub estimated_growth_bytes: u64,
+    /// Provenance maps (one per run that has a sidecar) and their entries.
+    pub provenance_maps: u64,
+    pub provenance_entries: u64,
+    /// Bytes of the old `map_json` column.
+    pub provenance_map_bytes: u64,
+    /// Maps that are not a typed `ProvenanceMap`: `--apply` stops before changing
+    /// anything, and a map is never replaced by an empty one.
+    pub unconvertible_provenance: u64,
     /// Reasons a reclaim of deleted runs cannot be completed (a cursor this build does
     /// not read, a deleted run with no job). `--apply` refuses while there is one.
     pub reclaim_blockers: Vec<String>,
@@ -551,6 +612,7 @@ pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis
         }
         cursor = Some(run_id);
     }
+    analyze_provenance(conn, &mut analysis)?;
     analysis.estimated_distinct_blobs = bodies.len() as u64;
     analysis.estimated_blob_plain_bytes = bodies.iter().map(|token| token.byte_len).sum();
     // Everything that is stored as text (blob candidates, skeletons, headers) is counted
@@ -569,12 +631,84 @@ pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis
                 .saturating_mul(GROWTH_PER_BLOB),
         )
         .saturating_add(analysis.convertible_runs.saturating_mul(GROWTH_PER_RUN))
+        .saturating_add(provenance_growth(&analysis))
         .saturating_add(GROWTH_FIXED)
         .saturating_add(if analysis.pending_migrations > 0 {
             GROWTH_MIGRATIONS
         } else {
             0
         });
+    Ok(analysis)
+}
+
+/// What the provenance rows add before the VACUUM: every entry's text and the row around
+/// it (the old column stays until it is dropped), a quarter more for the unused room of
+/// the pages.
+fn provenance_growth(analysis: &Analysis) -> u64 {
+    let text = analysis.provenance_map_bytes;
+    text.saturating_add(text / 4)
+        .saturating_add(
+            analysis
+                .provenance_entries
+                .saturating_mul(GROWTH_PER_PROVENANCE_ENTRY),
+        )
+        .saturating_add(
+            analysis
+                .provenance_maps
+                .saturating_mul(GROWTH_PER_PROVENANCE_MAP),
+        )
+}
+
+/// A provenance entry row (columns, hash, the unique index) and a map's header update.
+const GROWTH_PER_PROVENANCE_ENTRY: u64 = 192;
+const GROWTH_PER_PROVENANCE_MAP: u64 = 256;
+
+/// The reason listed for a provenance map that cannot be converted.
+pub(super) const PROVENANCE_PROBLEM: &str = "the provenance map is not a typed provenance map";
+
+/// Reads every provenance map that will be converted (one at a time, so the memory is
+/// one map) and counts those that are not a typed map.
+pub(super) fn analyze_provenance(
+    conn: &Connection,
+    analysis: &mut Analysis,
+) -> Result<(), StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT run_id, map_json FROM run_context_provenance WHERE {} ORDER BY run_id",
+        not_deleted(conn)?
+    ))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let run_id: String = row.get(0)?;
+        let map = row.get_ref(1)?.as_str().map_err(|_| {
+            StorageError::Serialization("a provenance map column is not text".into())
+        })?;
+        analysis.provenance_maps += 1;
+        analysis.provenance_map_bytes += map.len() as u64;
+        match serde_json::from_str::<crate::thread_index::ProvenanceMap>(map) {
+            Ok(map) => analysis.provenance_entries += map.messages.len() as u64,
+            Err(_) => {
+                analysis.unconvertible_provenance += 1;
+                if analysis.problems.len() < MAX_LISTED_PROBLEMS {
+                    analysis.problems.push(Problem {
+                        run_id,
+                        reason: PROVENANCE_PROBLEM,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The analysis of a version 40 database: the runs are converted already, so only the
+/// reclaim blockers and the provenance maps are looked at.
+pub(super) fn analyze_runs_converted(conn: &Connection) -> Result<Analysis, StorageError> {
+    let mut analysis = Analysis {
+        reclaim_blockers: super::retention::blockers(conn)?,
+        ..Analysis::default()
+    };
+    analyze_provenance(conn, &mut analysis)?;
+    analysis.estimated_growth_bytes = provenance_growth(&analysis).saturating_add(GROWTH_FIXED);
     Ok(analysis)
 }
 
