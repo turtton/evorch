@@ -96,9 +96,9 @@ impl World {
         .unwrap();
         conn.execute(
             "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, \
-             messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns, \
-             messages_len, checkpoints_len) VALUES (?1, 'Worker', ?2, NULL, '{}', '[]', '[]', \
-             'Done', 1, 1, 2, 2)",
+             checkpoints_json, terminal_phase, restorable, updated_at_ns, \
+             messages_len, checkpoints_len, config_len) VALUES (?1, 'Worker', ?2, NULL, '{}', '[]', \
+             'Done', 1, 1, 2, 2, 2)",
             params![run, format!("chat:Worker:{thread}")],
         )
         .unwrap();

@@ -137,6 +137,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         AGENT_RUN_PANICKED => HarnessImprovement,
         // storage bridge (spooled): the writer stopped accepting events entirely.
         STORAGE_WRITER_HALTED => HarnessImprovement,
+        // restore: a legacy child Orchestrator was refused (ADR 0044); a one-time
+        // migration notice, not a harness fault.
+        NESTED_ORCHESTRATOR_REJECTED => Ignored,
         // admission: the provider refused or could not admit the handoff run (quota,
         // credentials, availability); user cancellation is not reported.
         ESCALATION_ADMISSION_FAILED => TransientOrExternal,

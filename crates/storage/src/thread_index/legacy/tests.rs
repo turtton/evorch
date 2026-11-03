@@ -25,11 +25,7 @@ fn seed(conn: &Connection, run: &str, continuity: Option<Value>) -> RunContextRe
         updated_at_ns: 1,
         host_inputs_json: "[]".into(),
     };
-    conn.execute(
-        "INSERT INTO run_contexts (run_id,role,name,parent_run_id,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,snapshot_revision) VALUES (?1,'worker','worker',NULL,?2,?3,'[]','Done',1,1,0)",
-        rusqlite::params![run, record.config_json, record.messages_json],
-    )
-    .unwrap();
+    crate::repo::run_messages::fixtures::insert(conn, &record, 0);
     conn.execute("INSERT INTO threads(thread_id,root_run_id,created_at_ns,updated_at_ns,source) VALUES (?1,?1,1,1,'runtime')", [run]).unwrap();
     conn.execute("INSERT INTO thread_runs VALUES (?1,?1,?1,0)", [run])
         .unwrap();

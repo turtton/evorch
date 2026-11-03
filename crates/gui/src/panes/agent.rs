@@ -385,7 +385,7 @@ fn run_detail_body(
                             ui,
                             entry,
                             &children,
-                            pane_id.with(("tool-entry", entry_id)),
+                            model_id.with(("tool-entry", entry_id)),
                             crate::panes::transcript_tool::ToolCardContext {
                                 repo_root,
                                 jobs: model.shell_jobs(),
@@ -409,7 +409,7 @@ fn run_detail_body(
                         tool_card_group(
                             ui,
                             group,
-                            pane_id.with(("tool-entry", entry_id)),
+                            model_id.with(("tool-entry", entry_id)),
                             crate::panes::transcript_tool::ToolCardContext {
                                 repo_root,
                                 jobs: model.shell_jobs(),

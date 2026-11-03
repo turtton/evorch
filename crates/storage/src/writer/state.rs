@@ -37,6 +37,13 @@ struct WriterState {
     event_retention_cursor: crate::maintenance::retention_events::Cursor,
 }
 
+/// The transaction every snapshot-writing path of the writer runs in. It is `IMMEDIATE`
+/// because content blobs are only written by a connection that already holds the write
+/// lock (`body_store`): a deferred transaction would read first and lock later.
+fn immediate_transaction(conn: &Connection) -> Result<rusqlite::Transaction<'_>, rusqlite::Error> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 /// All review mutations share the same suspension gate and rollback boundary.
 fn review_transaction<T>(
     state: &WriterState,
@@ -47,7 +54,7 @@ fn review_transaction<T>(
             "review writes suspended by storage limit".into(),
         ));
     }
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let value = operation(&transaction)?;
     transaction.commit()?;
     Ok(value)
@@ -65,7 +72,7 @@ fn upsert_run_context_with_receipts(
         ));
     }
     let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let receipt = crate::repo::run_context::upsert(&transaction, record)?;
     let applied =
         crate::repo::host_input_receipt::apply(&transaction, Some(record), write, now_ns)?;
@@ -86,7 +93,7 @@ fn snapshot_transaction<T>(
         ))
         .into());
     }
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let value = operation(&transaction)?;
     transaction.commit()?;
     Ok(value)
@@ -680,7 +687,7 @@ fn upsert_run_context(
     conn: &Connection,
     record: &crate::RunContextRecord,
 ) -> Result<crate::RunContextReceipt, StorageError> {
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(conn)?;
     let receipt = crate::repo::run_context::upsert(&transaction, record)?;
     transaction.commit()?;
     Ok(receipt)
@@ -757,6 +764,7 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
         Ok(progress) => removed += progress.rows as u64,
         Err(error) => tracing::warn!(error = %error, "archived thread index purge failed"),
     }
+    removed += collect_content_blobs(state);
     roll_up_usage(state, now)?;
     let mut vacuum_config = state.config.clone();
     if removed > 0 || state.writes_suspended || state.reclaim_wal_pending {
@@ -771,6 +779,30 @@ fn maintenance(state: &mut WriterState) -> Result<(), StorageError> {
     check_temp(state)?;
     state.statistics.maintenance_runs = state.statistics.maintenance_runs.saturating_add(1);
     Ok(())
+}
+
+/// One bounded step of the content blob collector. It runs on every tick, whether or
+/// not a retention job or the archive purge exists: the blobs it collects are freed by
+/// rewrites, not only by deletions. With nothing queued it only reads. A failure is
+/// logged and retried on the next tick; it never stops the rest of the tick.
+fn collect_content_blobs(state: &WriterState) -> u64 {
+    match crate::repo::content_blobs::gc_step(&state.conn) {
+        Ok(progress) => {
+            if progress.deleted > 0 || progress.registered_oversized > 0 {
+                tracing::debug!(
+                    deleted = progress.deleted,
+                    deleted_bytes = progress.deleted_bytes,
+                    oversized = progress.registered_oversized,
+                    "content blobs collected"
+                );
+            }
+            progress.deleted as u64
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "content blob collection failed");
+            0
+        }
+    }
 }
 
 /// Delete one bounded batch of observational events: leftover

@@ -26,8 +26,8 @@ pub(super) struct DelegateArgs {
 }
 
 /// Stable public role order shared by the schema and runtime validation.
+/// Orchestrator is root-only and is never a delegate target (ADR 0044 §2).
 pub(super) const DELEGATE_ROLES: &[&str] = &[
-    "orchestrator",
     "explorer",
     "worker",
     "reviewer",
@@ -56,6 +56,15 @@ fn present_category<'de, D: serde::Deserializer<'de>>(
 
 impl DelegateTarget {
     fn resolve(self) -> Result<(agents::Role, Option<String>), String> {
+        // Reject Orchestrator under any spelling before the registry lookup, so the
+        // caller learns why, rather than that the role is unknown.
+        if parse_role(&self.role).is_ok_and(|role| role == agents::Role::Orchestrator) {
+            return Err(serde_json::json!({
+                "code":"role_not_delegable", "role":self.role,
+                "message":"target.role=orchestrator cannot be delegated; Orchestrator is root-only. Delegate single-role work to another role."
+            })
+            .to_string());
+        }
         if !DELEGATE_ROLES.contains(&self.role.as_str()) {
             return Err(serde_json::json!({
                 "code":"unknown_role", "role":self.role,
@@ -168,6 +177,17 @@ pub(super) async fn delegate(
     if result.result.is_error && state.interrupted() != Some(InterruptKind::Stop) {
         cleanup_delegates(runtime, std::iter::once(child)).await;
     }
+    // Direct dispatch goes through this handler rather than wait_delegates;
+    // both paths return the same output-bearing idle-turn snapshot.
+    if !result.result.is_error
+        && let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&result.result.content)
+        && let Some(run) = snapshot["runs"].as_array().and_then(|runs| runs.first())
+        && run["status"] == "turn_completed"
+    {
+        let mut dispatch = super::serialize(run);
+        dispatch.result.progress = result.result.progress;
+        return dispatch;
+    }
     result
 }
 
@@ -186,11 +206,6 @@ pub(crate) fn spawn_delegate(
         Ok(args) => args,
         Err(message) => return Err(error(message)),
     };
-    if args.interactive && !args.background {
-        return Err(error(
-            "invalid arguments: interactive=true requires background=true",
-        ));
-    }
     let target = format!(
         "role={} category={}",
         args.target.role,
@@ -311,6 +326,7 @@ pub(crate) async fn wait_delegates(
                     {
                         success(run["phase"].as_str().unwrap_or("Error"))
                     }
+                    Some(run) if run["status"] == "turn_completed" => super::serialize(run),
                     Some(run) => super::serialize(&serde_json::json!({
                         "run_id": run_id.to_string(),
                         "phase": run["phase"],

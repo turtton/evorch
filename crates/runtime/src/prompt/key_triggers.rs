@@ -49,12 +49,12 @@ pub fn render_key_triggers(sources: &[TriggerSource]) -> String {
     rendered
 }
 
-/// ADR 0002 の 9 ロールからデフォルトの keyTriggers を構築する。
+/// delegate できるロール (ADR 0002 の 9 ロールから root 専用の Orchestrator を除く
+/// 8 ロール、ADR 0044 §2) からデフォルトの keyTriggers を構築する。
 ///
 /// 各エントリはロール名と担当目的だけを持ち、ツール定義は含めない。
 pub fn default_role_triggers() -> Vec<TriggerSource> {
-    const ROLES: [agents::Role; 9] = [
-        agents::Role::Orchestrator,
+    const ROLES: [agents::Role; 8] = [
         agents::Role::Explorer,
         agents::Role::Worker,
         agents::Role::Reviewer,
@@ -74,11 +74,10 @@ pub fn default_role_triggers() -> Vec<TriggerSource> {
 }
 
 /// Role の用途・起用条件を示す。ツールの仕様と可用性は各 ToolSpec に任せる。
+/// Orchestrator は root 専用で起用先ではないため、用途を持たない。
 fn role_purpose(role: agents::Role) -> &'static str {
     match role {
-        agents::Role::Orchestrator => {
-            "複数ロールの委譲・調整が必要なときに使う。目的・優先順位・依存関係・受け入れを管理し、詳細調査・計画・実装は担当ロールへ委譲する"
-        }
+        agents::Role::Orchestrator => unreachable!("Orchestrator is never a keyTrigger target"),
         agents::Role::Explorer => {
             "ローカルのコードや資料の事実確認・影響範囲の特定が必要なときに使う。調査と根拠の報告を担当し、実装は Worker、調査結果からの詳細計画は Planner に任せる"
         }
@@ -220,9 +219,9 @@ mod tests {
         assert_eq!(render_key_triggers(&sources), render_key_triggers(&sources));
     }
 
-    // Given: ADR 0002 の 9 ロール
+    // Given: delegate できる 8 ロール (Orchestrator は root 専用)
     // When: default_role_triggers を構築する
-    // Then: 全ロール分のエントリがツール一覧なしの用途説明で固定順に並ぶ
+    // Then: Orchestrator を除く全ロール分のエントリがツール一覧なしの用途説明で固定順に並ぶ
     #[test]
     fn default_role_triggers_lists_fixed_roles_with_purposes() {
         let triggers = default_role_triggers();
@@ -231,7 +230,6 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "Orchestrator",
                 "Explorer",
                 "Worker",
                 "Reviewer",

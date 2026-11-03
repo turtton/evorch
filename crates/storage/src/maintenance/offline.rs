@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::invalid;
 use crate::StorageError;
@@ -300,6 +300,37 @@ pub(super) fn preview_lease(path: &Path) -> Result<File, StorageError> {
     Ok(lease)
 }
 
+/// Turns `foreign_keys` on for a connection opened with raw `rusqlite` (not through
+/// `Database::open`) and checks that it took effect. It must run before the first
+/// transaction: the pragma does nothing inside one. Every maintenance writer calls it,
+/// so a row of a table with a foreign key (`run_messages`, the reference tables) is
+/// never deleted behind its children's back.
+pub(super) fn enable_foreign_keys(conn: &Connection) -> Result<(), StorageError> {
+    conn.pragma_update(None, "foreign_keys", true)?;
+    let on: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    if on != 1 {
+        return Err(invalid("foreign_keys could not be enabled for maintenance"));
+    }
+    Ok(())
+}
+
+/// Fails if any foreign key is violated: maintenance ends with this check.
+pub(super) fn require_no_foreign_key_violations(conn: &Connection) -> Result<(), StorageError> {
+    let violated: Option<String> = conn
+        .query_row(
+            "SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match violated {
+        None => Ok(()),
+        Some(table) => Err(invalid(format!(
+            "foreign key check failed after maintenance (a row of {table} has no parent)"
+        ))),
+    }
+}
+
 /// Preview opens the source read-only; even its lease is opened read-only and
 /// only if already present (otherwise refuses). No sidecar, backup, migration
 /// or checkpoint is made. A nonempty WAL also refuses before SQLite is opened.
@@ -334,7 +365,9 @@ pub fn strip_task_progress_cursor(
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
     let (conn, preview_files) = if options.apply {
-        (Connection::open_with_flags(path, flags)?, None)
+        let conn = Connection::open_with_flags(path, flags)?;
+        enable_foreign_keys(&conn)?;
+        (conn, None)
     } else {
         let (conn, files) = read_only_preview_connection(path)?;
         (conn, Some(files))
@@ -375,9 +408,10 @@ pub fn strip_task_progress_cursor(
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < 23 || version as usize > crate::migrations::MIGRATIONS.len() {
         return Err(invalid(
-            "unsupported maintenance schema; use current evorch to migrate first",
+            "unsupported maintenance schema; a database in the old conversation format needs the conversion command first (a normal start never converts it)",
         ));
     }
+    super::compact::check_current_format(&conn)?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -505,26 +539,31 @@ fn strip_batch_after(
     Ok((rows.len() as u64, rows.last().map_or(after, |row| row.0)))
 }
 
-pub(super) fn require_space(path: &Path, required: u64) -> Result<(), StorageError> {
+/// Free bytes for an unprivileged writer on the volume of `path`.
+pub(super) fn available_space(path: &Path) -> Result<u64, StorageError> {
     #[cfg(unix)]
     {
         let info =
             rustix::fs::statvfs(path).map_err(|error| StorageError::Io(error.to_string()))?;
-        let available = info.f_bavail.saturating_mul(info.f_frsize);
-        if available < required {
-            return Err(invalid(format!(
-                "insufficient free space: need {required} bytes, available {available}; free-space checks cannot reserve space"
-            )));
-        }
-        Ok(())
+        Ok(info.f_bavail.saturating_mul(info.f_frsize))
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, required);
+        let _ = path;
         Err(invalid(
             "free-space checking is not supported on this platform; refusing apply",
         ))
     }
+}
+
+pub(super) fn require_space(path: &Path, required: u64) -> Result<(), StorageError> {
+    let available = available_space(path)?;
+    if available < required {
+        return Err(invalid(format!(
+            "insufficient free space: need {required} bytes, available {available}; free-space checks cannot reserve space"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]

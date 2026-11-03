@@ -3,6 +3,7 @@
 use super::{InterruptedToolCall, RestoredState, RunRestoreDescriptor};
 use providers::{ContentBlock, Message, Role};
 use storage::RunContextRecord;
+use storage::thread_index::SnapshotBundle;
 
 pub(super) const UNRESOLVED_TOOL_CALLS_REASON: &str =
     "unresolved_tool_calls: inspect actual effects before starting a new run";
@@ -13,6 +14,34 @@ const OUTCOME_UNKNOWN_NOTICE: &str = "The execution result was not retained in t
     Continue responding to the user. If further work depends on this outcome, inspect the current state before deciding whether to retry; do not blindly repeat the operation.";
 
 impl RestoredState {
+    /// The bundle's body, provenance and revision all come from one read, so a
+    /// later save is conditioned on exactly the snapshot this state was built from.
+    pub(crate) fn from_bundle(bundle: &SnapshotBundle) -> Result<Self, crate::RuntimeError> {
+        let mut restored = Self::from_record(&bundle.record)?;
+        restored.attach_bundle(bundle);
+        Ok(restored)
+    }
+
+    /// [`Self::for_conversation`] over one bundle read; see [`Self::from_bundle`].
+    pub(crate) fn for_conversation_bundle(
+        bundle: &SnapshotBundle,
+    ) -> Result<Self, crate::RuntimeError> {
+        let mut restored = Self::for_conversation(&bundle.record)?;
+        restored.attach_bundle(bundle);
+        let saved_messages: Vec<serde_json::Value> =
+            serde_json::from_str(&bundle.record.messages_json)
+                .expect("conversation restore validated JSON");
+        restored
+            .provenance
+            .generated_since(&restored.messages, saved_messages.len());
+        Ok(restored)
+    }
+
+    fn attach_bundle(&mut self, bundle: &SnapshotBundle) {
+        self.provenance = super::provenance::ConversationProvenance::from_bundle(bundle);
+        self.snapshot_revision = super::revision::SnapshotRevision::known(bundle.snapshot_revision);
+    }
+
     /// Only chat entrances with freshly validated authority may use this path.
     /// Missing batches were omitted at checkpoint time: do not fabricate ToolUse
     /// arguments or orphan ToolResult blocks for them. Existing results (including

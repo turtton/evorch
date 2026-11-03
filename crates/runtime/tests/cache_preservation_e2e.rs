@@ -777,6 +777,124 @@ async fn invalid_delegate_target_then_planner_recovery_preserves_the_wire_prefix
 }
 
 #[tokio::test]
+async fn root_orchestrator_worker_delegates_keep_the_delegate_schema_and_wire_prefix() {
+    // Given: a root Orchestrator that delegates to a Worker twice, then answers.
+    let call = |id: &str, prompt: &str| {
+        ScriptedResponse::tool_call(
+            id,
+            MODEL,
+            0,
+            id,
+            "delegate",
+            [json!({"target":{"role":"worker"},"prompt":prompt}).to_string()],
+        )
+    };
+    let mut harness = harness(
+        vec![
+            call("first", "First change"),
+            text_response("First done"),
+            call("second", "Second change"),
+            text_response("Second done"),
+            text_response("All done"),
+        ],
+        1_000_000,
+    );
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate two changes".into(),
+        RunConfig::default(),
+    );
+
+    // When: the root runs to its terminal event.
+    let mut events = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let done = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to:AgentRunPhase::Done, ..})
+                if run_id == &parent.to_string());
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+
+    // Then: the provider saw five requests; three are the root's turns.
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect();
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run.clone(), *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(usage.len(), 5);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let root_turns = [0, 2, 4];
+    for index in root_turns {
+        assert_eq!(usage[index].0, parent.to_string(), "request {index}");
+    }
+    for index in [1, 3] {
+        assert_ne!(usage[index].0, parent.to_string(), "request {index}");
+    }
+
+    // And: every root turn sends the same tools in the same order, and the
+    // delegate's role branches are exactly the public set without Orchestrator.
+    for index in root_turns {
+        assert_eq!(requests[index]["tools"], requests[0]["tools"], "{index}");
+    }
+    let delegate = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "delegate")
+        .unwrap();
+    let roles: Vec<_> = delegate["function"]["parameters"]["properties"]["target"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| branch["properties"]["role"]["const"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "explorer",
+            "worker",
+            "reviewer",
+            "web_researcher",
+            "planner",
+            "advisor",
+            "oracle",
+            "multimodal_looker",
+            "multimodallooker",
+            "evaluator",
+        ]
+    );
+
+    // And: each root turn only appends to the previous one, and the mock cache
+    // (derived from the input it received) reuses the whole earlier input.
+    for (previous, next) in [(0, 2), (2, 4)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+}
+
+#[tokio::test]
 async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalation() {
     let call = |id: &str, name: &str, input: Value| {
         ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
@@ -1181,7 +1299,7 @@ async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
 async fn continue_unfinished_model_request_reuses_identical_wire_input_without_working_note() {
     for compacted in [false, true] {
         for restart in [false, true] {
-            resume_unfinished_model_request(compacted, restart, false).await;
+            resume_unfinished_model_request(compacted, restart, false, false).await;
         }
     }
 }
@@ -1189,11 +1307,68 @@ async fn continue_unfinished_model_request_reuses_identical_wire_input_without_w
 #[tokio::test]
 async fn above_threshold_unfinished_retry_preserves_wire_input_without_recompaction() {
     for restart in [false, true] {
-        resume_unfinished_model_request(true, restart, true).await;
+        resume_unfinished_model_request(true, restart, true, false).await;
     }
 }
 
-async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_threshold: bool) {
+#[tokio::test]
+async fn converted_database_resumes_with_the_interrupted_wire_input() {
+    // The run is saved by the running build, taken back to the version 39 shape, converted
+    // by `convert-bodies`, and only then restored by a new runtime on the converted
+    // database: the request it sends must be the interrupted one, byte for byte, and
+    // the cache must still be read from it.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, true).await;
+    }
+}
+
+/// A runtime composed again on the same project, as a new process would. With `storage`
+/// it restores from that store; without, it holds no connection to the database.
+fn recompose_runtime(
+    harness: &mut Harness,
+    config: &storage::StorageConfig,
+    storage: Option<&storage::Storage>,
+) {
+    let root = harness._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_compaction(current.compaction.clone());
+    harness.runtime = match storage {
+        Some(storage) => {
+            runtime.with_run_store(runtime::RunStore::open(config, storage.handle()).unwrap())
+        }
+        None => runtime,
+    };
+}
+
+async fn resume_unfinished_model_request(
+    compacted: bool,
+    restart: bool,
+    above_threshold: bool,
+    convert: bool,
+) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
     if compacted {
@@ -1283,38 +1458,32 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
     storage.handle().promote_lesson(&lesson.id).unwrap();
     let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
     assert_eq!(memory.entries().len(), 1);
-    if restart {
-        let root = harness._directory.path();
-        let current = Config::load(&LoadOptions {
-            project_dir: Some(root.into()),
-            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
-            read_env: false,
-            ..Default::default()
-        })
+    let (storage, restart) = if convert {
+        // The first runtime's run store reads the file: drop it, then stop the writer, so
+        // that no process holds the database, as the command requires.
+        recompose_runtime(&mut harness, &config, None);
+        storage.close();
+        storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
+        let summary = storage::maintenance::convert_bodies(
+            &config.db_path,
+            &storage::maintenance::ConvertBodiesOptions {
+                apply: true,
+                backup: None,
+            },
+        )
         .unwrap();
-        let bus = Arc::new(EventBus::new(1024));
-        harness.receiver = bus.subscribe();
-        let mut executor = ToolExecutor::new(bus.clone());
-        executor.register(Arc::new(BulkRead)).unwrap();
-        harness.runtime = compose_runtime(RuntimeComposition {
-            model_catalog_dir: Some(test_support::model_catalog_dir()),
-            user_config_dir: Some(root.join("empty-user-config")),
-            config: &current,
-            bus,
-            executor: Arc::new(executor),
-            credential_store: Arc::new(
-                FileCredentialStore::open(root.join("credentials")).unwrap(),
-            ),
-            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-            model_source: ModelSource::Configured,
-            workspace: None,
-        })
-        .unwrap()
-        .runtime
-        .with_compaction(current.compaction.clone())
-        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        assert_eq!(summary.converted_runs, 1);
+        assert_eq!(summary.canonicalized_runs.count, 0);
+        (storage::Storage::open(config.clone()).unwrap(), true)
+    } else {
+        (storage, restart)
+    };
+    if restart {
+        recompose_runtime(&mut harness, &config, Some(&storage));
         assert!(harness.runtime.list_agents().is_empty());
     }
+    // Only what happens after the restore may vouch for the cache read below.
+    let restored_from = events.len();
     harness
         .runtime
         .resume_chat(
@@ -1343,7 +1512,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
         "resume must send exactly the interrupted request input"
     );
     assert_append_only(CacheProtocol::OpenAi, previous, resumed).unwrap();
-    assert!(events.iter().any(|event| matches!(&event.kind,
+    assert!(events[restored_from..].iter().any(|event| matches!(&event.kind,
         EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
         if id == &run.to_string() && *cache_read_tokens > 0)));
 }
@@ -3279,8 +3448,9 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 
 #[tokio::test]
 async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
-    let review_storage = support::ReviewStorage::new();
     for expedite in [false, true] {
+        // Each iteration runs "run-1" in a new runtime, so it needs an empty database.
+        let review_storage = support::ReviewStorage::new();
         let read = Arc::new(GatedRead {
             started: Notify::new(),
             release: Notify::new(),
@@ -5811,5 +5981,72 @@ fn verify_official_compaction_trace(harness: &Harness, run: RunId, events: &[Eve
                 "request {index}: cached={cached}, previous input={previous_input}"
             );
         }
+    }
+}
+
+// Completing an interactive child changes only the newly appended ToolResult;
+// the parent's sent input, tools, instructions and affinity must remain intact.
+#[tokio::test]
+async fn interactive_delegate_turn_output_preserves_parent_wire_prefix() {
+    let mut harness = harness_with_read(vec![
+        ScriptedResponse::tool_call("delegate", MODEL, 0, "delegate", "delegate", [json!({"target":{"role":"worker"},"prompt":"Review the change","interactive":true}).to_string()]),
+        text_response("review complete"),
+        read_response(3),
+        text_response("parent complete"),
+    ], 1_000_000, Arc::new(BulkRead));
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate review".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    let mut usage = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => usage.push((run.clone(), *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done,
+                ..
+            }) if run_id == &parent.to_string() => break,
+            _ => {}
+        }
+    }
+    assert_eq!(usage.len(), requests.len());
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let text: String = serde_json::from_str(&tool_result_text(&requests[2], "delegate")).unwrap();
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(result["phase"], "Waiting", "{result}");
+    assert_eq!(result["status"], "turn_completed");
+    assert_eq!(result["output"], "review complete");
+    for (previous, next) in [(0, 2), (2, 3)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert_eq!(usage[previous].0, parent.to_string());
+        assert_eq!(usage[next].0, parent.to_string());
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+    for child in harness
+        .runtime
+        .list_agents()
+        .into_iter()
+        .filter(|run| run.run_id != parent)
+    {
+        harness.runtime.cancel(child.run_id).unwrap();
+        harness.runtime.wait(child.run_id).await.unwrap();
     }
 }

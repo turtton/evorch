@@ -298,18 +298,10 @@ async fn a_continued_chat_expands_once_and_leaves_history_untouched() {
         .run_store
         .get()
         .unwrap()
-        .restore_conversation(
-            &skills
-                .runtime()
-                .shared
-                .run_store
-                .get()
-                .unwrap()
-                .restore_record(run)
-                .unwrap()
-                .unwrap(),
-        )
+        .restore_bundle(run)
+        .unwrap()
         .unwrap();
+    let restored = RestoredState::for_conversation_bundle(&restored).unwrap();
     let blocks = restored
         .messages
         .iter()

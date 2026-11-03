@@ -20,6 +20,11 @@ pub enum RuntimeError {
     /// recorded or sent for the message.
     #[error("skill @{name} could not be attached: {reason}")]
     SkillAttachment { name: String, reason: String },
+    /// Orchestrator is a root-only role: a run with a parent may not hold it (ADR 0044 §2).
+    #[error(
+        "Orchestrator cannot be started as a child run (parent {parent}); it is root-only. Delegate single-role work to another role instead"
+    )]
+    OrchestratorChildDenied { parent: String },
     #[error("run ownership generation is stale: {run_id}")]
     StaleOwnership { run_id: String },
     /// 存在しない AgentRun が参照された。
@@ -170,6 +175,12 @@ pub enum RunRestoreFailure {
     CorruptContext(String),
     #[error("復元できない実行設定です: {0}")]
     UnsupportedConfig(String),
+    /// A saved Orchestrator with a parent predates ADR 0044 §2 and is never revived.
+    /// The original snapshot is left untouched as evidence.
+    #[error(
+        "保存済みの子 Orchestrator run（親 {parent}、thread {thread}）は ADR 0044 により復元しません。元の snapshot は保持されます。必要な作業は brief にまとめて新しい run で再開してください"
+    )]
+    NestedOrchestrator { parent: String, thread: String },
     /// The operator stopped the run; only resuming its thread root lifts the stop.
     #[error(
         "ユーザーが停止した実行のため継続しません。作業がまだ必要なら新しい run に委譲するか、ユーザーに確認してください"

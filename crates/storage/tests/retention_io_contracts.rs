@@ -118,9 +118,9 @@ impl Db {
     fn unrelated_runs(&self, count: i64) {
         self.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {count})
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             SELECT printf('other-%07d', x), 'Worker', 'other', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('other-%07d', x), 'Worker', 'other', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
     }
 
@@ -129,16 +129,16 @@ impl Db {
         self.sql(
             "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns,
                  updated_at_ns, source) VALUES ('A', '/p', 'ra', 1, 1, 1, 'host');
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             VALUES ('ra', 'Worker', 'chat:Worker:A', '{}', '[]', '[]', 'Done', 1, 1);
+             VALUES ('ra', 'Worker', 'chat:Worker:A', '{}', '[]', 'Done', 1, 1);
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('ra', 'A', 'ra', 0);",
         );
         self.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {children})
-             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns)
-             SELECT printf('child-%05d', x), 'Worker', 'child', 'ra', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('child-%05d', x), 'Worker', 'child', 'ra', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
     }
 }
@@ -283,6 +283,153 @@ fn set_cursor(db: &Db, cursor: &str) {
 
 fn pages(bytes: u64, page: u64) -> u64 {
     bytes.div_ceil(page)
+}
+
+/// `count` message rows of `skeleton_bytes` stored bytes for run `ra`, naming `refs_per`
+/// distinct one-byte blobs each (so a delete cascades `count * refs_per` reference rows
+/// and queues as many blobs for the collector).
+fn messages(db: &Db, count: i64, refs_per: i64, skeleton_bytes: i64) {
+    if refs_per == 0 {
+        db.sql(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {count} - 1)
+             INSERT INTO run_messages(run_id, ordinal, msg_sha256, plain_len, codec, skeleton)
+             SELECT 'ra', x, zeroblob(32), {skeleton_bytes}, 0, zeroblob({skeleton_bytes}) FROM n;"
+        ));
+        return;
+    }
+    db.sql(&format!(
+        "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {count} - 1)
+         INSERT INTO run_messages(run_id, ordinal, msg_sha256, plain_len, codec, skeleton)
+         SELECT 'ra', x, zeroblob(32), {skeleton_bytes}, 0, zeroblob({skeleton_bytes}) FROM n;
+         WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {count} * {refs_per})
+         INSERT INTO content_blobs(hash, byte_len, codec, data) SELECT randomblob(32), 1, 0, x'41' FROM n;
+         INSERT INTO content_blob_refs_message(message_id, blob_id)
+         SELECT (SELECT MIN(id) FROM run_messages) + (b.id - 1) / {refs_per}, b.id FROM content_blobs b;"
+    ));
+}
+
+/// WAL frames and VM steps of the bounded `run_messages` step of run `ra`, and its progress.
+fn message_step(db: &Db) -> (u64, u64, storage::thread_retention::ReclaimProgress) {
+    confirm(db);
+    set_cursor(db, r#"{"phase":"run_messages","run":"ra"}"#);
+    let storage = Storage::open(config(&db.path)).unwrap();
+    let result = one_step(db, &storage);
+    storage.close();
+    result
+}
+
+/// Frames one bounded message transaction may write for `rows` messages of `stored`
+/// skeleton bytes that name `refs` references: a frame per page the skeletons occupy, the
+/// pages of the message rows, and per reference the reference row, its reverse index
+/// entry and the queue entry, which share pages with their neighbours. First measured on
+/// 4 KiB pages: 39 frames for 500 messages with 4 references each and 100-byte
+/// skeletons, 107 with 1,000-byte skeletons, 19 for one message with 2,000 references.
+fn message_frame_bound(stored: u64, rows: u64, refs: u64, page: u64) -> u64 {
+    pages(stored, page) + rows / 16 + refs / 64 + 16
+}
+
+/// VM steps of the same transaction: constant work per row and per cascaded reference
+/// (about 70 per reference when first measured: 141,260 steps for 2,000 references).
+fn message_step_bound(rows: u64, refs: u64) -> u64 {
+    100 * (rows + refs) + 5_000
+}
+
+/// The bounded reclaim of messages: what one transaction writes (the rows, the cascade
+/// over their reference rows with the reverse index, and the queue entries of the
+/// collector) is bounded by constants whatever the run holds, and a message the step
+/// may not take is registered for the exclusive phase at a cost that does not follow
+/// its number of references.
+fn message_reclaim_is_bounded() {
+    // The limits of one transaction: 500 rows, 4 MiB, 2,000 references.
+    const ROWS: i64 = 500;
+    const REFS: i64 = 2_000;
+
+    // Batches at the limits, each deleting its rows, the cascaded references and queueing
+    // every blob, within the fixed bounds. (rows, references per row, skeleton bytes)
+    for (rows, refs_per, skeleton) in [
+        (ROWS, REFS / ROWS, 100),
+        (ROWS, REFS / ROWS, 1_000),
+        (ROWS, 0, 100),
+        (1, REFS, 100),
+        (100, 4, 20_000),
+    ] {
+        let db = Db::new();
+        db.family(1);
+        messages(&db, rows, refs_per, skeleton);
+        let (frames, steps, progress) = message_step(&db);
+        let refs = rows * refs_per;
+        println!(
+            "message reclaim, {rows} rows x {refs_per} refs x {skeleton} B: {frames} frames, {steps} VM steps"
+        );
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM run_messages"),
+            0,
+            "{rows}x{refs_per}"
+        );
+        assert_eq!(db.int("SELECT COUNT(*) FROM content_blob_refs_message"), 0);
+        assert_eq!(db.int("SELECT COUNT(*) FROM content_blob_gc_queue"), refs);
+        assert_eq!(db.int("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        let stored = (rows * skeleton) as u64;
+        let bound = message_frame_bound(stored, rows as u64, refs as u64, db.page_size());
+        assert!(
+            frames <= bound,
+            "{rows} rows x {refs_per} refs x {skeleton} B: {frames} frames (bound {bound}), {progress:?}"
+        );
+        let bound = message_step_bound(rows as u64, refs as u64);
+        assert!(
+            steps <= bound,
+            "{rows} rows x {refs_per} refs: {steps} VM steps (bound {bound})"
+        );
+    }
+
+    // Rows beyond the row limit stay for the next transaction.
+    let db = Db::new();
+    db.family(1);
+    messages(&db, 2 * ROWS, 0, 100);
+    message_step(&db);
+    assert_eq!(db.int("SELECT COUNT(*) FROM run_messages"), ROWS);
+
+    // References beyond the limit stop the batch before the message that would exceed it.
+    let db = Db::new();
+    db.family(1);
+    messages(&db, 600, 5, 100);
+    message_step(&db);
+    assert_eq!(db.int("SELECT COUNT(*) FROM run_messages"), 200);
+
+    // One message above the reference limit is registered, not deleted, and the
+    // registration reads at most one reference past the limit: the same cost for a
+    // thousand references above it as for one.
+    let over = |refs: i64| {
+        let db = Db::new();
+        db.family(1);
+        messages(&db, 1, refs, 100);
+        let (frames, steps, _) = message_step(&db);
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_messages'"),
+            1,
+            "{refs} refs"
+        );
+        assert_eq!(
+            db.int("SELECT COUNT(*) FROM run_messages"),
+            1,
+            "{refs} refs"
+        );
+        assert_eq!(db.int("SELECT COUNT(*) FROM content_blob_gc_queue"), 0);
+        (frames, steps)
+    };
+    let (small_frames, small_steps) = over(REFS + 1);
+    let (large_frames, large_steps) = over(REFS + 1_000);
+    println!(
+        "message registration: {small_frames}/{large_frames} frames, {small_steps}/{large_steps} VM steps for 2,001/3,000 references"
+    );
+    assert!(
+        small_frames <= 32 && large_frames <= 32,
+        "{small_frames}/{large_frames} frames"
+    );
+    assert!(
+        large_steps <= small_steps + small_steps / 8,
+        "registering followed the reference count: {small_steps} -> {large_steps} steps"
+    );
 }
 
 #[test]
@@ -610,7 +757,7 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         let db = Db::new();
         db.family(1);
         db.sql(&format!(
-            "UPDATE run_contexts SET messages_json = zeroblob({}) WHERE run_id = 'ra'",
+            "UPDATE run_contexts SET checkpoints_json = zeroblob({}) WHERE run_id = 'ra'",
             stored_bytes - 2
         ));
         confirm(&db);
@@ -628,7 +775,7 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
     // One run context is one transaction, bounded by its stored size.
     let db = Db::new();
     db.family(1);
-    db.sql("UPDATE run_contexts SET messages_json = zeroblob(1500000) WHERE run_id = 'ra'");
+    db.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(1500000) WHERE run_id = 'ra'");
     confirm(&db);
     set_cursor(&db, r#"{"phase":"run_contexts","run":"ra"}"#);
     let storage = Storage::open(config(&db.path)).unwrap();
@@ -845,9 +992,9 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         db.family(1);
         db.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             SELECT printf('big-%06d', x), 'Worker', 'big', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;
+             SELECT printf('big-%06d', x), 'Worker', 'big', '{{}}', '[]', 'Done', 1, 1 FROM n;
              WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
              INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
              SELECT 'A', 'run_contexts', printf('big-%06d', x), 10000000 + x FROM n;"
@@ -973,14 +1120,14 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
             "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns, updated_at_ns, source)
              VALUES ('Z', '/p', 'rz', 1, 1, 1, 'host'), ('A', '/p', NULL, 1, 1, 1, 'host');
              UPDATE threads SET escalation_source_run_id = 'c-000001' WHERE thread_id = 'A';
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             VALUES ('rz', 'Worker', 'chat:Worker:Z', '{{}}', '[]', '[]', 'Done', 1, 1);
+             VALUES ('rz', 'Worker', 'chat:Worker:Z', '{{}}', '[]', 'Done', 1, 1);
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('rz', 'Z', 'rz', 0);
              WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {children})
-             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns)
-             SELECT printf('c-%06d', x), 'Worker', 'child', 'rz', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('c-%06d', x), 'Worker', 'child', 'rz', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
         let thread = |id: &str| SidebarThread {
             thread_id: id.into(),
@@ -1065,6 +1212,8 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
             "backfill: {frames} frames for {payload}-byte payloads (bound {bound})"
         );
     }
+
+    message_reclaim_is_bounded();
 
     rusqlite::auto_extension::cancel_auto_extension(instrument);
 }

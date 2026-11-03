@@ -1,5 +1,6 @@
 //! Event-driven observation of directly related runs. A wait has no deadline:
-//! it returns when a target finishes (per mode), a target asks a question this
+//! it returns when a target finishes or an interactive child completes a turn
+//! (per mode), a target asks a question this
 //! caller has not been told about, an agent message or user input arrives, or
 //! the caller is cancelled. Waiting never restores or cancels the observed work.
 
@@ -53,6 +54,7 @@ pub(crate) fn drop_ignored_arguments(name: &str, input: &mut Value) {
 struct Snapshots {
     values: Vec<Value>,
     notices: Vec<Arc<CompletionNotice>>,
+    ready_turns: HashSet<String>,
 }
 
 impl Deref for Snapshots {
@@ -209,7 +211,10 @@ async fn wait_with(
             .is_some_and(Vec::is_empty)
         && result["completed_run_ids"]
             .as_array()
-            .is_some_and(|runs| !runs.is_empty());
+            .is_some_and(|runs| !runs.is_empty())
+        && result["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().all(terminal));
     let mut dispatch = if phase_only {
         // A phase-only legacy response does not deliver the child's output.
         success(result["runs"][0]["phase"].as_str().unwrap_or("Error"))
@@ -258,7 +263,15 @@ fn record_observations(
         .flatten()
         .filter_map(Value::as_str)
     {
-        advanced |= state.budget.mark_child_completed(run_id);
+        let generation = result["runs"]
+            .as_array()
+            .and_then(|runs| runs.iter().find(|run| run["run_id"] == run_id))
+            .and_then(|run| run["turn_generation"].as_u64());
+        let key = generation.map_or_else(
+            || run_id.to_owned(),
+            |generation| format!("{run_id}:turn-{generation}"),
+        );
+        advanced |= state.budget.mark_child_completed(&key);
     }
     let questions = unanswered_questions(runtime, &request.runs);
     let asked = questions.iter().any(|id| !request.reported.contains(id));
@@ -298,6 +311,7 @@ async fn observe(
         return Err("wait cancelled".into());
     }
     let mut questions = runtime.shared.question_version.subscribe();
+    let mut turns = runtime.shared.turn_version.subscribe();
     let initial = snapshots(runtime, caller, &request.runs)?;
     let mailbox = runtime
         .run_mailbox(caller)
@@ -367,6 +381,15 @@ async fn observe(
                     }
                 }
             }
+            changed = turns.changed() => {
+                if changed.is_ok() {
+                    let runs = snapshots(runtime, caller, &request.runs)?;
+                    let attention = new_question_runs(runtime, &request.runs, &request.reported);
+                    if satisfied(&runs, request.mode) || !attention.is_empty() {
+                        return answer(runs, attention, mailbox.has_interrupting_message(), false);
+                    }
+                }
+            }
             completed = pending.next() => {
                 // Admission failures also become terminal snapshots; they are
                 // outcomes of the target run rather than failures of this wait.
@@ -388,10 +411,16 @@ pub(in crate::meta) fn terminal(run: &Value) -> bool {
     )
 }
 
-fn satisfied(runs: &[Value], mode: WaitMode) -> bool {
+fn satisfied(runs: &Snapshots, mode: WaitMode) -> bool {
+    let ready = |run: &Value| {
+        terminal(run)
+            || run["run_id"]
+                .as_str()
+                .is_some_and(|id| runs.ready_turns.contains(id))
+    };
     match mode {
-        WaitMode::Any => runs.iter().any(terminal),
-        WaitMode::All => runs.iter().all(terminal),
+        WaitMode::Any => runs.iter().any(ready),
+        WaitMode::All => runs.iter().all(ready),
     }
 }
 
@@ -432,12 +461,13 @@ fn response(
     let Snapshots {
         values: runs,
         notices,
+        ready_turns,
     } = runs;
     let mut result = json!({
         "inbox_ready": inbox_ready,
         "user_input_ready": false,
         "attention_run_ids": attention.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "completed_run_ids": runs.iter().filter(|run| terminal(run)).map(|run| &run["run_id"]).collect::<Vec<_>>(),
+        "completed_run_ids": runs.iter().filter(|run| terminal(run) || run["run_id"].as_str().is_some_and(|id| ready_turns.contains(id))).map(|run| &run["run_id"]).collect::<Vec<_>>(),
         "runs": runs,
     });
     if let Some(timed_out) = timed_out {
@@ -451,6 +481,7 @@ fn response(
 
 fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Snapshots, String> {
     let mut notices = Vec::new();
+    let mut ready_turns = HashSet::new();
     let values = runs.iter()
         .map(|run| {
             let output = runtime.run_output(caller, *run).map_err(|error| {
@@ -463,7 +494,11 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Sn
             if let Some(notice) = &output.completion_notice {
                 notices.push(notice.clone());
             }
+            let ready_turn = output.completion_notice.as_ref().is_some_and(|notice| !notice.observed());
             let mut value = serde_json::to_value(output).map_err(|error| error.to_string())?;
+            if ready_turn && value["status"] == "turn_completed" {
+                ready_turns.insert(run.to_string());
+            }
             value["needs_user_input"] = Value::Bool(!terminal(&value) && runtime.has_pending_user_questions(*run));
             value["has_pending_question"] =
                 Value::Bool(runtime.has_unanswered_questions(*run));
@@ -482,7 +517,11 @@ fn snapshots(runtime: &AgentRuntime, caller: RunId, runs: &[RunId]) -> Result<Sn
             Ok(value)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(Snapshots { values, notices })
+    Ok(Snapshots {
+        values,
+        notices,
+        ready_turns,
+    })
 }
 
 #[cfg(test)]

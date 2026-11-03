@@ -169,3 +169,94 @@ fn backfill_cli_outputs_progress_without_starting_runtime() {
     );
     drop(db);
 }
+
+#[test]
+fn convert_bodies_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
+    let options = parse(&["maintenance", "convert-bodies"])
+        .unwrap()
+        .convert_bodies
+        .unwrap();
+    assert!(!options.apply && options.backup.is_none());
+    let options = parse(&[
+        "maintenance",
+        "convert-bodies",
+        "--apply",
+        "--backup",
+        "saved.db",
+    ])
+    .unwrap()
+    .convert_bodies
+    .unwrap();
+    assert!(options.apply);
+    assert_eq!(options.backup, Some("saved.db".into()));
+    for args in [
+        vec!["convert-bodies", "--resume"],
+        vec!["convert-bodies", "--no-backup"],
+        vec!["convert-bodies", "--batch-rows", "1"],
+        vec!["convert-bodies", "--apply", "--apply"],
+        vec!["vacuum", "--resume"],
+    ] {
+        let full = [vec!["maintenance"], args].concat();
+        assert!(parse(&full).is_err(), "{full:?}");
+    }
+}
+
+#[test]
+fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = storage::Database::open(&storage::StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    drop(db);
+    std::fs::File::create(dir.path().join("events.db.maintenance-lock")).unwrap();
+    let run = |extra: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_evorch"))
+            .args([
+                "maintenance",
+                "convert-bodies",
+                "--db",
+                path.to_str().unwrap(),
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    // Given/When: a database already in the current format, previewed and applied.
+    for extra in [&[][..], &["--apply"][..]] {
+        let result = run(extra);
+
+        // Then: the JSON report says so, and no backup is made.
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(summary["already_converted"], true);
+        assert_eq!(summary["scope"], "run_contexts");
+        assert!(summary["backup"].is_null());
+    }
+
+    // Given: a log that holds a committed write.
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    writer
+        .execute(
+            "INSERT INTO retention_identity(id, db_id) VALUES (1, 'x')",
+            [],
+        )
+        .unwrap();
+
+    // When/Then: both modes fail with the refusal and say that the database is unchanged.
+    for extra in [&[][..], &["--apply"][..]] {
+        let result = run(extra);
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("non-empty WAL"), "{stderr}");
+        assert!(stderr.contains("the database was not changed"), "{stderr}");
+    }
+}

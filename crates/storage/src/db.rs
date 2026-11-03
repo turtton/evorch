@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, types::FromSql};
 
-use crate::migrations::apply_migrations;
+use crate::migrations::{apply_migrations, require_current_format};
 use crate::repo::catalog;
 use crate::{CatalogUpdateRecord, StorageConfig, StorageError};
 
@@ -32,8 +32,23 @@ impl Database {
     pub fn open(config: &StorageConfig) -> Result<Self, StorageError> {
         let conn = Connection::open(&config.db_path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
+        // Before any pragma that writes: an old-format database is refused untouched.
+        require_current_format(&conn)?;
         pragma_init(&conn)?;
         apply_migrations(&conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Opens a file as [`Database::open`] does but without the conversation format gate,
+    /// migrating an old schema all the way up (which drops the old message column). Tests
+    /// of the old migrations use it; no production path may.
+    #[cfg(any(test, feature = "unchecked-open"))]
+    #[doc(hidden)]
+    pub fn open_unchecked(config: &StorageConfig) -> Result<Self, StorageError> {
+        let conn = Connection::open(&config.db_path)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        pragma_init(&conn)?;
+        crate::migrations::apply_migrations_unchecked(&conn)?;
         Ok(Self { conn })
     }
 

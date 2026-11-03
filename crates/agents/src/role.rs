@@ -56,6 +56,7 @@ pub const EVALUATOR_TOOLS: [&str; 7] = [
 /// # 設計上の決定
 ///
 /// - Reviewer のツールセットはワークスペースの決定であり、intents では未定義。
+/// - Orchestrator は root 専用で、delegate の対象にならない (ADR 0044 §2)。
 /// - web_search は WebResearcher 専用であり、Orchestrator は web_fetch のみを持つ。
 /// - apply_patch はファイルを書き換えるため、edit / write と同じく Worker だけが持つ。
 /// - run_js (ADR 0039) は Orchestrator / Evaluator / MultimodalLooker 以外が持つ。

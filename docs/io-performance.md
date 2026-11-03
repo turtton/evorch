@@ -132,7 +132,8 @@ writer の保守 tick（`maintenance::retention_events`）が、1 transaction �
 2 KiB 以上の値を zstd（level 3）の BLOB で保存し、それ未満や縮まない値は TEXT のまま。
 読み取りは両方の形式を受け入れる。対象は次のとおり。
 
-- `run_contexts` の `messages_json` / `checkpoints_json`。
+- `run_messages.skeleton`（メッセージ単位の骨組み。圧縮は縮む場合だけ採用）。2 KiB 以上の文字列値は
+  `content_blobs` に zstd で置かれ、骨組みにはトークンだけが残る。
 - イベントのうち Tool（承認系を除く）、Message、compaction の payload。
 
 `AgentMessage` と承認系の Tool は、payload 内の文字列で run に帰属させるため

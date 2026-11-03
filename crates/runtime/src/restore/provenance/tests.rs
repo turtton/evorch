@@ -51,7 +51,9 @@ fn continuity_positions_exclude_only_the_inserted_copy_not_identical_native_text
     provenance.continuity(&messages, &continuity);
     messages.push(message(Role::User, "same utterance"));
     messages.insert(0, message(Role::System, "restored workspace"));
-    let write = provenance.write(record("run-1", &messages, "[]")).unwrap();
+    let write = provenance
+        .write(record("run-1", &messages, "[]"), 0)
+        .unwrap();
     assert!(matches!(
         write.map.messages[1].blocks[1].origin,
         BlockOrigin::ContinuityCopy { .. }
@@ -77,7 +79,7 @@ fn fork_compaction_restart_and_failed_save_keep_native_duplicate_positions() {
     let native = ConversationProvenance::default();
     store
         .handle()
-        .save_snapshot_bundle(&native.write(record("run-1", &messages, "[]")).unwrap())
+        .save_snapshot_bundle(&native.write(record("run-1", &messages, "[]"), 0).unwrap())
         .unwrap();
     let reader = storage::Database::open(&config).unwrap();
     let source = reader.snapshot_bundle("run-1").unwrap().unwrap();
@@ -87,17 +89,19 @@ fn fork_compaction_restart_and_failed_save_keep_native_duplicate_positions() {
     messages.push(message(Role::Assistant, "done"));
     let checkpoint = r#"[{"id":"compacted","summary":{"role":"user","content":[{"type":"text","text":"generated summary"}]},"range":[1,3],"protects_history":false}]"#;
     let write = copied
-        .write(record("run-2", &messages, checkpoint))
+        .write(record("run-2", &messages, checkpoint), 0)
         .unwrap();
     let receipt = store.handle().save_snapshot_bundle(&write).unwrap();
     drop(reader);
     let reopened = storage::Database::open(&config).unwrap();
     let bundle = reopened.snapshot_bundle("run-2").unwrap().unwrap();
     let restored = ConversationProvenance::from_bundle(&bundle);
-    let mut stale = restored
-        .write(record("run-2", &messages, checkpoint))
+    let stale = restored
+        .write(
+            record("run-2", &messages, checkpoint),
+            receipt.snapshot_revision + 1,
+        )
         .unwrap();
-    stale.expected_snapshot_revision = Some(receipt.snapshot_revision + 1);
     assert!(store.handle().save_snapshot_bundle(&stale).is_err());
     assert_eq!(reopened.snapshot_bundle("run-2").unwrap().unwrap(), bundle);
     let injection = rusqlite::Connection::open(&config.db_path).unwrap();
@@ -127,7 +131,10 @@ fn fork_compaction_restart_and_failed_save_keep_native_duplicate_positions() {
     assert_eq!(input.blocks[0].text, "duplicate");
     messages.push(message(Role::User, "duplicate"));
     let resaved = restored
-        .write(record("run-2", &messages, checkpoint))
+        .write(
+            record("run-2", &messages, checkpoint),
+            bundle.snapshot_revision,
+        )
         .unwrap();
     assert!(matches!(
         resaved.map.messages[0].blocks[0].origin,
@@ -171,7 +178,7 @@ fn restore_preserves_the_unknown_reason_and_never_upgrades_after_append() {
     let restored = ConversationProvenance::from_bundle(&bundle);
     let mut appended = messages;
     appended.push(message(Role::User, "new native"));
-    let write = restored.write(record("run-1", &appended, "[]")).unwrap();
+    let write = restored.write(record("run-1", &appended, "[]"), 1).unwrap();
     assert_eq!(
         write.status,
         ProvenanceStatus::Unknown {

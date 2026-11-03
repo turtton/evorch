@@ -14,6 +14,7 @@ mod escalation;
 mod fork_seed;
 pub(crate) mod provenance;
 mod recovery;
+pub(crate) mod revision;
 pub use diagnostics::RunRestoreDiagnostics;
 pub use escalation::PendingEscalation;
 pub(crate) use escalation::persist_escalation_seed;
@@ -21,6 +22,9 @@ pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
     pub(crate) provenance: provenance::ConversationProvenance,
+    /// Revision of the snapshot this state was read from, or last saved. A
+    /// state built from a bare record has none and cannot be saved.
+    pub(crate) snapshot_revision: revision::SnapshotRevision,
     /// Admission owns this reservation until registration commits consumption.
     pub(crate) admission_reservation: Option<crate::runtime::SnapshotReservation>,
     pub(crate) turn: Option<providers::RequestTurnContext>,
@@ -94,6 +98,7 @@ impl RestoredState {
             });
         Ok(Self {
             provenance: provenance::ConversationProvenance::unknown(),
+            snapshot_revision: revision::SnapshotRevision::unknown(),
             admission_reservation: None,
             turn: descriptor.turn,
             continuity: descriptor.continuity,
@@ -265,6 +270,8 @@ pub(crate) enum SnapshotError {
     Serialization(#[from] serde_json::Error),
     #[error("復元コンテキストを保存できません: {0}")]
     Storage(#[from] StorageError),
+    #[error("保存済みスナップショットの revision が不明なため上書きできません")]
+    RevisionUnknown,
     #[error("保存時刻を取得できません: {0}")]
     Clock(#[from] std::time::SystemTimeError),
     #[error("保存時刻が範囲外です: {0}")]
@@ -593,33 +600,28 @@ fn write_snapshot_with_context(
             .collect(),
         ..Default::default()
     };
-    let write = context.provenance.write(record)?;
+    // `context` may be a candidate cloned from the run's context earlier (a
+    // compaction or model switch). The run's own context holds the latest
+    // commit, so it is the precondition and is the one kept current.
+    let expected = state
+        .context
+        .snapshot_revision
+        .get()
+        .ok_or(SnapshotError::RevisionUnknown)?;
+    let write = context.provenance.write(record, expected)?;
     let (saved, applied) = store
         .handle
         .save_snapshot_bundle_with_host_inputs(&write, &host_write)
         .map_err(provenance::storage_error)?;
-    // Ownership's existing advisory receipt covers the redacted committed
-    // messages. A concurrent replacement must not be acknowledged as ours.
-    let committed = store
-        .restore_bundle(state.caller_run_id())?
-        .ok_or_else(|| StorageError::Serialization("saved snapshot disappeared".into()))?;
-    if committed.snapshot_revision != saved.snapshot_revision
-        || storage::thread_index::snapshot_sha256(
-            &committed.record.messages_json,
-            &committed.record.checkpoints_json,
-        ) != saved.snapshot_sha256
-    {
-        return Err(StorageError::Serialization("saved snapshot replaced".into()).into());
-    }
-    use sha2::{Digest, Sha256};
-    let receipt = storage::RunContextReceipt {
-        updated_at_ns: committed.record.updated_at_ns,
-        messages_end: end,
-        sha256: format!(
-            "{:x}",
-            Sha256::digest(committed.record.messages_json.as_bytes())
-        ),
-    };
+    // The transaction that committed our revision also computed the receipt
+    // from the redacted bytes it wrote; a concurrent replacement would have
+    // failed the compare-and-swap above, so nothing is read back.
+    state
+        .context
+        .snapshot_revision
+        .commit(saved.snapshot_revision);
+    context.snapshot_revision.commit(saved.snapshot_revision);
+    let receipt = saved.run_context_receipt;
     // Committed: later snapshots keep these IDs without delivering them again.
     state.host_inputs().committed(&host_inputs.delivered);
     runtime.emit_host_input_transitions(state.caller_run_id(), &applied);
