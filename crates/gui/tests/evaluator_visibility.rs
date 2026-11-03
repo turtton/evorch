@@ -158,10 +158,25 @@ fn project(
     h.state_mut().apply_events(events);
 }
 
+fn observer(
+    root: &std::path::Path,
+    config: &storage::StorageConfig,
+    stream: &str,
+) -> HeadlessWorkbench<gui::fixture::DemoSource> {
+    let mut s = state(gui::fixture::DemoSource(Vec::new()), root);
+    s.restore_history(&storage::Database::open(config).unwrap())
+        .unwrap();
+    let s = s
+        .with_manual_shared_feed(config.db_path.clone(), stream.into())
+        .unwrap();
+    HeadlessWorkbench::new(s, [1400.0, 1000.0])
+}
+
 fn pane(run: RunId) -> PanelId {
     PanelId::new(format!("agent-{run}"))
 }
 
+#[track_caller]
 fn assert_content<S: AgentRunSource + 'static>(
     h: &mut HeadlessWorkbench<S>,
     child: RunId,
@@ -221,7 +236,7 @@ fn assert_parked<S: AgentRunSource + 'static>(h: &HeadlessWorkbench<S>, child: R
 }
 
 #[test]
-fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore() {
+fn delegated_evaluator_is_readable_in_local_shared_and_restored_windows() {
     let temp = tempfile::tempdir().unwrap();
     let config = storage::StorageConfig {
         db_path: temp.path().join("events.db"),
@@ -242,6 +257,8 @@ fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore()
         .with_sequential_run_ids()
         .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
     let mut h = HeadlessWorkbench::new(state(runtime.clone(), temp.path()), [1400.0, 1000.0]);
+    // Independent display state follows the same DB, with no prebound run IDs.
+    let mut b = observer(temp.path(), &config, "observer");
     let mut children = Vec::new();
     for thread in ["one", "two"] {
         let root = {
@@ -272,6 +289,7 @@ fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore()
             })
             .expect("real Evaluator delegate emitted its parent link");
         project(&mut h, &storage, started);
+        assert!(b.state_mut().poll_shared_feed() > 0);
         let owner = h
             .state()
             .sidebar()
@@ -285,11 +303,21 @@ fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore()
         );
         if thread == "one" {
             assert_content(&mut h, child, thread);
+            assert_content(&mut b, child, thread);
         } else {
             assert!(
                 h.state().dock().find_tab(&pane(child)).is_none(),
                 "inactive thread must not leak a pane"
             );
+            assert!(b.state().dock().find_tab(&pane(child)).is_none());
+        }
+        // A restarted observer restores a running pane, then follows its
+        // completion rather than relying on another cold replay to park it.
+        let mut c = observer(temp.path(), &config, "restarted-observer");
+        if thread == "one" {
+            assert_content(&mut c, child, thread);
+        } else {
+            assert!(c.state().dock().find_tab(&pane(child)).is_none());
         }
         model.finish.add_permits(1);
         assert_eq!(
@@ -304,6 +332,47 @@ fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore()
         let finished = rt.block_on(through(&mut events, |event| matches!(&event.kind,
             EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to: AgentRunPhase::Done, .. }) if run_id == &root.to_string())));
         project(&mut h, &storage, finished);
+        assert!(b.state_mut().poll_shared_feed() > 0);
+        assert!(c.state_mut().poll_shared_feed() > 0);
+        if thread == "one" {
+            assert_parked(&b, child);
+            assert_parked(&c, child);
+            // Display-only lifecycle projection must also unpark a resumed ID.
+            for to in [AgentRunPhase::Running, AgentRunPhase::Done] {
+                let from = if to == AgentRunPhase::Running {
+                    AgentRunPhase::Done
+                } else {
+                    AgentRunPhase::Running
+                };
+                project(
+                    &mut h,
+                    &storage,
+                    vec![Event::new(LifecycleEvent::AgentRunStateChanged {
+                        run_id: child.to_string(),
+                        from,
+                        to,
+                        reason: None,
+                    })],
+                );
+                assert!(b.state_mut().poll_shared_feed() > 0);
+                assert!(c.state_mut().poll_shared_feed() > 0);
+                for window in [&b, &c] {
+                    if to == AgentRunPhase::Done {
+                        assert_parked(window, child);
+                    } else {
+                        let path = window.state().dock().find_tab(&pane(child)).unwrap();
+                        assert_eq!(
+                            window.state().dock().leaf(path.node_path()).unwrap().active,
+                            path.tab,
+                            "resumed run gets its own active pane"
+                        );
+                    }
+                }
+            }
+        } else {
+            assert!(b.state().dock().find_tab(&pane(child)).is_none());
+            assert!(c.state().dock().find_tab(&pane(child)).is_none());
+        }
         children.push(child);
     }
     assert_parked(&h, children[0]);
@@ -314,6 +383,23 @@ fn delegated_evaluator_is_readable_live_after_switch_and_after_history_restore()
     h.state_mut().switch_thread(ThreadId::new("one")).unwrap();
     assert!(h.state().dock().find_tab(&pane(children[1])).is_none());
     assert_content(&mut h, children[0], "one");
+    for index in [1, 0] {
+        b.state_mut()
+            .switch_thread(ThreadId::new(if index == 0 { "one" } else { "two" }))
+            .unwrap();
+        assert!(
+            b.state()
+                .dock()
+                .find_tab(&pane(children[1 - index]))
+                .is_none()
+        );
+        assert_parked(&b, children[index]);
+        assert_content(
+            &mut b,
+            children[index],
+            if index == 0 { "one" } else { "two" },
+        );
+    }
 
     // Cold restoration: no saved pane registry or prepopulated child run IDs.
     let mut restored = state(gui::fixture::DemoSource(Vec::new()), temp.path());
