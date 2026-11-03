@@ -582,6 +582,9 @@ fn a_job_command_with_a_credential_is_never_displayed_by_its_polls() {
         "running",
     );
     poll(&mut model, "poll-1", "");
+    // Other activity keeps that finished poll a card of its own, not folded
+    // into the running poll that follows.
+    model.push_notice("between");
     // And: a poll that is still running when the transcript is drawn.
     model.apply(&Event::new(ToolEvent::ToolStarted {
         tool_name: "shell".into(),
@@ -603,7 +606,9 @@ fn a_job_command_with_a_credential_is_never_displayed_by_its_polls() {
         .query_all_by_role(egui::accesskit::Role::Button)
         .map(|button| button.rect().center())
         .collect();
-    assert!(cards.len() >= 3, "start, folded poll and running poll");
+    assert!(cards.len() >= 3, "start, finished poll and running poll");
+    // Both polls name the job by its command, redacted.
+    assert_eq!(harness.query_all_by_label_contains("Poll curl").count(), 2);
     for position in cards {
         harness.event(egui::Event::PointerMoved(position));
         harness.run_steps(3);
