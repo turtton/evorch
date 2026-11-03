@@ -103,7 +103,14 @@ fn spawn_storage_bridge(bus: &EventBus, handle: StorageHandle) -> JoinHandle<()>
     tokio::spawn(async move {
         loop {
             match subscriber.recv().await {
-                Ok(event) if matches!(event.kind, EventKind::Usage(_)) => {}
+                Ok(event)
+                    if matches!(
+                        event.kind,
+                        EventKind::Usage(_)
+                            | EventKind::Compaction(
+                                CompactionEvent::Progress { .. } | CompactionEvent::Aborted { .. }
+                            )
+                    ) => {}
                 Ok(event) => handle
                     .append_event(Some(TEST_SESSION), &event)
                     .expect("bridge persists appendable event"),
@@ -206,10 +213,12 @@ async fn wait_for_compaction_row(config: &StorageConfig) -> Vec<StoredEvent> {
                 .expect("reader opens")
                 .events_by_session(TEST_SESSION)
                 .expect("events read");
-            if events
-                .iter()
-                .any(|stored| matches!(stored.event.kind, EventKind::Compaction(_)))
-            {
+            if events.iter().any(|stored| {
+                matches!(
+                    stored.event.kind,
+                    EventKind::Compaction(CompactionEvent::Compacted { .. })
+                )
+            }) {
                 return events;
             }
             tokio::task::yield_now().await;
@@ -368,7 +377,12 @@ async fn compaction_is_auditable_in_storage() {
     );
     let compacted = events_after
         .iter()
-        .filter(|stored| matches!(stored.event.kind, EventKind::Compaction(_)))
+        .filter(|stored| {
+            matches!(
+                stored.event.kind,
+                EventKind::Compaction(CompactionEvent::Compacted { .. })
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(compacted.len(), 1);
     let stored = compacted[0];
@@ -378,6 +392,7 @@ async fn compaction_is_auditable_in_storage() {
         stored.event.kind
     );
     let EventKind::Compaction(CompactionEvent::Compacted {
+        operation_id: _,
         run_id: event_run_id,
         reason,
         threshold,
@@ -514,11 +529,10 @@ async fn summarizer_failure_is_atomic_end_to_end() {
     );
     // 全行（prefix 込み）に compaction 行が 1 行も無いこと。要約失敗時は
     // CompactionEvent が一切永続化されていなければならない。
-    assert!(
-        events_after
-            .iter()
-            .all(|stored| !matches!(stored.event.kind, EventKind::Compaction(_)))
-    );
+    assert!(events_after.iter().all(|stored| !matches!(
+        stored.event.kind,
+        EventKind::Compaction(CompactionEvent::Compacted { .. })
+    )));
     let checkpoint_rows = payload_row_multiplicity(&events_after);
     let reader = Database::open(&config).expect("reader reopens");
     assert_eq!(

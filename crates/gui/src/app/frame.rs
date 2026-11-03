@@ -279,6 +279,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Diagnostic { .. }
                         | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
+                        | TranscriptEntry::CompactionProgress { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }
                         | TranscriptEntry::AgentMessage { .. }
