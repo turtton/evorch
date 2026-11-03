@@ -47,13 +47,15 @@ async fn breaker_only_host_answers_not_delegation_or_parent_answers_lift_suspens
             RunConfig::default(),
         )
         .unwrap();
-    let child = runtime.spawn_reserved_child(
-        root,
-        runtime.reserve_run_id(),
-        Role::Worker,
-        "Delegated authorization is not user input",
-        RunConfig::default(),
-    );
+    let child = runtime
+        .spawn_reserved_child(
+            root,
+            runtime.reserve_run_id(),
+            Role::Worker,
+            "Delegated authorization is not user input",
+            RunConfig::default(),
+        )
+        .expect("a non-Orchestrator child is admitted");
     let review = runtime.shared.review_runs.lock().unwrap()[&child].clone();
     let generation = review.visible_request_count();
     assert_eq!(generation, 1, "delegated prompt is not real-user input");
@@ -171,13 +173,15 @@ async fn multiple_recipients_resync_after_commit_without_duplicate_evidence() {
             RunConfig::default(),
         )
         .unwrap();
-    let child = runtime.spawn_reserved_child(
-        root,
-        runtime.reserve_run_id(),
-        Role::Worker,
-        "subtask",
-        RunConfig::default(),
-    );
+    let child = runtime
+        .spawn_reserved_child(
+            root,
+            runtime.reserve_run_id(),
+            Role::Worker,
+            "subtask",
+            RunConfig::default(),
+        )
+        .expect("a non-Orchestrator child is admitted");
     let question = runtime
         .request_user_question(root, "Continue?".into(), vec![], false)
         .unwrap();

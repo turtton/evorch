@@ -653,13 +653,15 @@ async fn child_cannot_create_or_bind_a_thread_goal() {
     let root = start(&runtime, Role::Worker, false);
     started.notified().await;
     let child = runtime.reserve_child_run_id(root).unwrap();
-    runtime.spawn_reserved_child(
-        root,
-        child,
-        Role::Explorer,
-        "Attempt goal creation",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved_child(
+            root,
+            child,
+            Role::Explorer,
+            "Attempt goal creation",
+            RunConfig::default(),
+        )
+        .expect("a non-Orchestrator child is admitted");
     assert_eq!(runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
     assert!(runtime.bind_thread_root("other-thread", child).is_err());
     assert!(runtime.thread_goal("thread").is_none());
@@ -707,13 +709,15 @@ async fn unsettled_children_delay_review_and_their_requests_count_toward_goal_bu
         .set_goal_review("thread", &goal.goal_id, true)
         .unwrap();
     let child = runtime.reserve_child_run_id(root).unwrap();
-    runtime.spawn_reserved_child(
-        root,
-        child,
-        Role::Explorer,
-        "Read evidence",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved_child(
+            root,
+            child,
+            Role::Explorer,
+            "Read evidence",
+            RunConfig::default(),
+        )
+        .expect("a non-Orchestrator child is admitted");
     child_started.notified().await;
     root_release.notify_one();
     held_started.notified().await;
@@ -1095,13 +1099,15 @@ async fn surviving_old_root_child_remains_accounted_and_fenced_after_handoff() {
     let source = start(&runtime, Role::Worker, false);
     root_started.notified().await;
     let child = runtime.reserve_child_run_id(source).unwrap();
-    runtime.spawn_reserved_child(
-        source,
-        child,
-        Role::Explorer,
-        "Background evidence",
-        RunConfig::default(),
-    );
+    runtime
+        .spawn_reserved_child(
+            source,
+            child,
+            Role::Explorer,
+            "Background evidence",
+            RunConfig::default(),
+        )
+        .expect("a non-Orchestrator child is admitted");
     child_started.notified().await;
     let target = runtime.reserve_run_id();
     runtime.transfer_thread_goal_root(source, target).unwrap();

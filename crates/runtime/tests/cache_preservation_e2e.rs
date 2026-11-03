@@ -777,6 +777,124 @@ async fn invalid_delegate_target_then_planner_recovery_preserves_the_wire_prefix
 }
 
 #[tokio::test]
+async fn root_orchestrator_worker_delegates_keep_the_delegate_schema_and_wire_prefix() {
+    // Given: a root Orchestrator that delegates to a Worker twice, then answers.
+    let call = |id: &str, prompt: &str| {
+        ScriptedResponse::tool_call(
+            id,
+            MODEL,
+            0,
+            id,
+            "delegate",
+            [json!({"target":{"role":"worker"},"prompt":prompt}).to_string()],
+        )
+    };
+    let mut harness = harness(
+        vec![
+            call("first", "First change"),
+            text_response("First done"),
+            call("second", "Second change"),
+            text_response("Second done"),
+            text_response("All done"),
+        ],
+        1_000_000,
+    );
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate two changes".into(),
+        RunConfig::default(),
+    );
+
+    // When: the root runs to its terminal event.
+    let mut events = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        let done = matches!(&event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {run_id, to:AgentRunPhase::Done, ..})
+                if run_id == &parent.to_string());
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+
+    // Then: the provider saw five requests; three are the root's turns.
+    let requests: Vec<_> = harness
+        .mock
+        .recorded_requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/chat/completions")
+        .map(|request| request.body)
+        .collect();
+    let usage: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => Some((run.clone(), *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(usage.len(), 5);
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let root_turns = [0, 2, 4];
+    for index in root_turns {
+        assert_eq!(usage[index].0, parent.to_string(), "request {index}");
+    }
+    for index in [1, 3] {
+        assert_ne!(usage[index].0, parent.to_string(), "request {index}");
+    }
+
+    // And: every root turn sends the same tools in the same order, and the
+    // delegate's role branches are exactly the public set without Orchestrator.
+    for index in root_turns {
+        assert_eq!(requests[index]["tools"], requests[0]["tools"], "{index}");
+    }
+    let delegate = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "delegate")
+        .unwrap();
+    let roles: Vec<_> = delegate["function"]["parameters"]["properties"]["target"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|branch| branch["properties"]["role"]["const"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "explorer",
+            "worker",
+            "reviewer",
+            "web_researcher",
+            "planner",
+            "advisor",
+            "oracle",
+            "multimodal_looker",
+            "multimodallooker",
+            "evaluator",
+        ]
+    );
+
+    // And: each root turn only appends to the previous one, and the mock cache
+    // (derived from the input it received) reuses the whole earlier input.
+    for (previous, next) in [(0, 2), (2, 4)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+}
+
+#[tokio::test]
 async fn inherited_question_answer_preserves_each_runs_wire_prefix_after_escalation() {
     let call = |id: &str, name: &str, input: Value| {
         ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])

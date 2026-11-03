@@ -147,7 +147,9 @@ async fn failed_awaited_child_does_not_prevent_sibling_result() {
 }
 
 #[tokio::test]
-async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives() {
+async fn awaited_child_keeps_attention_snapshot_when_user_input_arrives() {
+    // Given: a root Orchestrator awaiting its direct Worker child. The child stays
+    // actively working: an idle interactive turn would end the wait by itself.
     let review_storage = support::ReviewStorage::new();
     let model = Arc::new(ScriptedModel::new([]));
     model
@@ -157,7 +159,7 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
                 Ok(tool_response(
                     "foreground",
                     "delegate",
-                    json!({"target":{"role":"orchestrator"}, "prompt":"CHILD"}),
+                    json!({"target":{"role":"worker"}, "prompt":"CHILD"}),
                 )),
                 Ok(text_response("Parent handled input", FinishReason::Stop)),
             ],
@@ -166,45 +168,36 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
     model
         .add_keyed(
             "CHILD",
-            [
-                Ok(tool_response(
-                    "background",
-                    "delegate",
-                    json!({"target":{"role":"worker"}, "prompt":"GRANDCHILD", "background":true, "interactive":true}),
-                )),
-                Ok(tool_response("wait", "wait", json!({"run_id":"run-3"}))),
-            ],
+            [Ok(text_response("child finished", FinishReason::Stop))],
         )
         .await;
-    // Keep the grandchild actively working. An idle interactive turn now ends
-    // wait; this scenario specifically checks a nested wait, not turn completion.
-    model.gate_key("GRANDCHILD", Arc::new(Notify::new())).await;
+    model.gate_key("CHILD", Arc::new(Notify::new())).await;
     let bus = Arc::new(EventBus::new(256));
     let mut events = bus.subscribe();
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_sequential_run_ids();
     let parent =
         runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
+    // The parent enters Waiting only while blocked in the awaited delegate.
     loop {
         if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
             run_id,
             to: AgentRunPhase::Waiting,
             ..
         }) = events.recv().await.unwrap().kind
-            && run_id == "run-2"
+            && run_id == parent.to_string()
         {
             break;
         }
     }
     review_storage.attach(&runtime);
+    // When: user input arrives while the child is still running.
     runtime
         .send_message(parent, "New instruction".into())
         .unwrap();
     assert_eq!(runtime.wait(parent).await.unwrap(), AgentRunPhase::Done);
-    for child in [RunId::new(2), RunId::new(3)] {
-        runtime.cancel(child).unwrap();
-        runtime.wait(child).await.unwrap();
-    }
+    runtime.cancel(RunId::new(2)).unwrap();
+    runtime.wait(RunId::new(2)).await.unwrap();
 
     let observed = model.observed().await;
     let result = observed
@@ -230,8 +223,9 @@ async fn awaited_waiting_child_keeps_attention_snapshot_when_user_input_arrives(
             _ => None,
         })
         .unwrap();
+    // Then: the delegate returns the still-running child's snapshot, not an error.
     assert_eq!(result["run_id"], "run-2");
-    assert_eq!(result["phase"], "Waiting");
+    assert_eq!(result["phase"], "Running");
     assert_eq!(result["user_input_ready"], true);
     assert_eq!(result["needs_user_input"], false);
     assert_eq!(result["has_pending_question"], false);

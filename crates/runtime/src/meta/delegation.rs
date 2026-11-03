@@ -26,8 +26,8 @@ pub(super) struct DelegateArgs {
 }
 
 /// Stable public role order shared by the schema and runtime validation.
+/// Orchestrator is root-only and is never a delegate target (ADR 0044 §2).
 pub(super) const DELEGATE_ROLES: &[&str] = &[
-    "orchestrator",
     "explorer",
     "worker",
     "reviewer",
@@ -56,6 +56,15 @@ fn present_category<'de, D: serde::Deserializer<'de>>(
 
 impl DelegateTarget {
     fn resolve(self) -> Result<(agents::Role, Option<String>), String> {
+        // Reject Orchestrator under any spelling before the registry lookup, so the
+        // caller learns why, rather than that the role is unknown.
+        if parse_role(&self.role).is_ok_and(|role| role == agents::Role::Orchestrator) {
+            return Err(serde_json::json!({
+                "code":"role_not_delegable", "role":self.role,
+                "message":"target.role=orchestrator cannot be delegated; Orchestrator is root-only. Delegate single-role work to another role."
+            })
+            .to_string());
+        }
         if !DELEGATE_ROLES.contains(&self.role.as_str()) {
             return Err(serde_json::json!({
                 "code":"unknown_role", "role":self.role,

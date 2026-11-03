@@ -162,6 +162,7 @@ impl AgentRuntime {
             }
             let role = Role::from_name(&descriptor.role)
                 .map_err(|error| fail(RunRestoreFailure::UnsupportedConfig(error.to_string())))?;
+            self.reject_nested_orchestrator(&record, &descriptor)?;
             // Only a direct parent renews execution authority, with its own
             // current permit. Any other sender restores strictly from disk.
             let parent_authority = (parent == Some(sender)).then(|| {
