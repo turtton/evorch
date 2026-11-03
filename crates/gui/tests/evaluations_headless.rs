@@ -405,3 +405,34 @@ fn the_ui_keeps_working_while_a_reader_is_stopped() {
     // Then: the list appears.
     assert!(harness.has_label("g-main"));
 }
+
+#[test]
+fn an_overdue_read_waiting_for_a_free_slot_does_not_spin_the_repaint_loop() {
+    // Given: a listing that was read once, and then every read slot taken by reads
+    // of groups that were selected one after another and have not finished.
+    let reader = FakeReader::new(listing(Vec::new()));
+    let reads = ManualSpawner::default();
+    let mut model = EvaluationsModel::new(Some(reader), reads.spawner(), Arc::new(|| {}));
+    let t0 = Instant::now();
+    model.poll_once(t0, true);
+    reads.run_all();
+    model.poll_once(t0, true);
+    for round in 0..MAX_IN_FLIGHT {
+        model.select_group(&format!("g-{round}"));
+        model.poll_once(t0, true);
+    }
+    assert_eq!(model.in_flight(), MAX_IN_FLIGHT);
+
+    // When: the listing falls due while no slot is free.
+    let later = t0 + Duration::from_secs(60);
+    let poll = model.poll_once(later, true);
+
+    // Then: nothing starts and no immediate repaint is requested.
+    assert_eq!(model.in_flight(), MAX_IN_FLIGHT);
+    assert_eq!(poll.repaint_after, None);
+
+    // And: once a read finishes, the overdue listing is started.
+    assert!(reads.run_next());
+    model.poll_once(later, true);
+    assert_eq!(reads.pending(), MAX_IN_FLIGHT);
+}

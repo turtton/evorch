@@ -26,7 +26,9 @@ pub mod present;
 mod replay;
 
 pub use replay::{
-    MAX_EVENTS as REPLAY_MAX_EVENTS, ReplayData, ReplayLoad, ReplayRun, ReplayTarget,
+    Limits as ReplayLimits, MAX_EVENTS as REPLAY_MAX_EVENTS,
+    MAX_SCANNED_ROWS as REPLAY_MAX_SCANNED_ROWS, ReplayData, ReplayLoad, ReplayRun, ReplayTarget,
+    load_with as load_replay_with,
 };
 
 /// Reads started and not yet drained, at most (stale ones included).
@@ -789,6 +791,12 @@ impl EvaluationsModel {
     }
 
     fn next_due(&self, now: Instant) -> Option<Duration> {
+        // With every read slot taken nothing can start, so no timer helps: a
+        // finishing read wakes the UI and the next poll starts what is due. A
+        // zero delay here would repaint in a loop until a slot frees.
+        if self.in_flight.len() >= MAX_IN_FLIGHT {
+            return None;
+        }
         [
             (Kind::List, 0, self.list_due),
             (Kind::Group, self.group_generation, self.group_due),

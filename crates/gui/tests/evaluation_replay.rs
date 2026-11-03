@@ -41,7 +41,20 @@ fn answered(run_id: &str, text: &str) -> Event {
 
 /// Records a finished trial's database the way an evaluation run leaves it: a
 /// root run that called a tool and a Reviewer it delegated to.
+fn presented(id: &str, path: &Path) -> event_bus::PresentedArtifact {
+    event_bus::PresentedArtifact {
+        artifact_id: id.into(),
+        title: format!("{id} title"),
+        caption: None,
+        media_type: "text/html".into(),
+        path: path.to_string_lossy().into_owned(),
+        byte_len: 6,
+        sha256: "0".into(),
+    }
+}
+
 fn record_trial_database(path: &Path) {
+    std::fs::write(path.with_file_name("there.html"), "<html>").expect("artifact file");
     let storage = Storage::open(StorageConfig {
         db_path: path.to_path_buf(),
         ..StorageConfig::default()
@@ -69,6 +82,18 @@ fn record_trial_database(path: &Path) {
         }),
         answered("run-1", "the root answer"),
         answered("run-2", "the reviewer verdict"),
+        Event::new(ToolEvent::ArtifactsPresented {
+            run_id: "run-1".into(),
+            presentation: event_bus::ArtifactPresentation {
+                presentation_id: "presentation-1".into(),
+                title: Some("Result page".into()),
+                caption: None,
+                artifacts: vec![
+                    presented("artifact-there", &path.with_file_name("there.html")),
+                    presented("artifact-gone", &path.with_file_name("gone.html")),
+                ],
+            },
+        }),
         Event::new(LifecycleEvent::AgentRunStateChanged {
             run_id: "run-1".into(),
             from: AgentRunPhase::Running,
@@ -234,6 +259,63 @@ fn a_database_on_an_older_schema_is_refused_and_conversation_json_stands_in() {
     assert_eq!(entries.len(), 2);
 }
 
+#[test]
+fn a_database_with_a_pending_wal_is_not_opened_and_nothing_beside_it_changes() {
+    // Given: a finished trial's database with a leftover -wal file next to it.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let database = dir.path().join("evorch.db");
+    record_trial_database(&database);
+    std::fs::write(
+        dir.path().join("evorch.db-wal"),
+        b"frames the file alone misses",
+    )
+    .expect("leftover wal");
+    let before = (
+        std::fs::read(&database).expect("database bytes"),
+        std::fs::read(dir.path().join("evorch.db-wal")).expect("wal bytes"),
+        directory_listing(dir.path()),
+    );
+
+    // When: it is replayed.
+    let load = reader_for(dir.path()).replay(&ReplayTarget {
+        database: Some(database.clone()),
+        conversation: None,
+    });
+
+    // Then: the replay says why it cannot be shown, and no file was created or changed.
+    let ReplayLoad::Fallback { reason, .. } = load else {
+        panic!("a database with a pending -wal must not be replayed: {load:?}");
+    };
+    assert!(reason.contains("-wal"), "{reason}");
+    let after = (
+        std::fs::read(&database).expect("database bytes"),
+        std::fs::read(dir.path().join("evorch.db-wal")).expect("wal bytes"),
+        directory_listing(dir.path()),
+    );
+    assert_eq!(before, after);
+}
+
+#[test]
+fn an_empty_leftover_wal_does_not_prevent_the_replay_or_change_the_directory() {
+    // Given: a database with an empty -wal and -journal file beside it (nothing pending).
+    let dir = tempfile::tempdir().expect("temp dir");
+    let database = dir.path().join("evorch.db");
+    record_trial_database(&database);
+    std::fs::write(dir.path().join("evorch.db-wal"), b"").expect("empty wal");
+    std::fs::write(dir.path().join("evorch.db-journal"), b"").expect("empty journal");
+    let before = directory_listing(dir.path());
+
+    // When: it is replayed.
+    let load = reader_for(dir.path()).replay(&ReplayTarget {
+        database: Some(database),
+        conversation: None,
+    });
+
+    // Then: it replays and the directory is as it was (no -shm appeared).
+    assert!(matches!(load, ReplayLoad::Ready(_)), "{load:?}");
+    assert_eq!(before, directory_listing(dir.path()));
+}
+
 #[derive(Default)]
 struct Mutations {
     commands: AtomicUsize,
@@ -389,4 +471,73 @@ fn a_replayed_trial_is_served_from_the_cache_when_opened_again() {
     let (_, view) = model.replay().expect("a replay");
     assert!(matches!(view, ReplayView::Ready(_)));
     assert_eq!(reader.replay_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn artifacts_in_a_replay_are_listed_without_asking_the_file_system() {
+    // Given: a replay of a run that presented one artifact whose file exists and one whose file does not.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let database = dir.path().join("evorch.db");
+    record_trial_database(&database);
+    let load = reader_for(dir.path()).replay(&ReplayTarget {
+        database: Some(database.clone()),
+        conversation: None,
+    });
+    let snapshot = finished_group(database);
+    let reader = FakeReader::new(listing(vec![entry(snapshot.clone())])).with_group(snapshot);
+    *reader.replay.lock().expect("replay") = Some(load);
+    let reads = ManualSpawner::default();
+    let mut model = EvaluationsModel::new(Some(reader), reads.spawner(), Arc::new(|| {}));
+    let now = std::time::Instant::now();
+    let drain = |model: &mut EvaluationsModel| {
+        for _ in 0..4 {
+            model.poll_once(now, true);
+            reads.run_all();
+        }
+        model.poll_once(now, true);
+    };
+    drain(&mut model);
+    model.select_group("g-replay");
+    drain(&mut model);
+    model.select_member(0);
+    assert!(model.select_trial("baseline-1"));
+    drain(&mut model);
+
+    // When: the replay of the root run is drawn.
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 3000.0))
+        .build_ui_state(
+            |ui, model: &mut EvaluationsModel| {
+                gui::theme::install(ui.ctx());
+                gui::panes::evaluations::evaluations_pane(ui, model);
+            },
+            model,
+        );
+    harness.run_steps(4);
+
+    // Then: both artifacts are listed by title, with a note instead of Open buttons, and
+    // neither the present nor the missing file changed what is shown.
+    use egui_kittest::kittest::Queryable;
+    assert!(harness.query_by_label_contains("Result page").is_some());
+    assert!(
+        harness
+            .query_by_label_contains("artifact-there title")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label_contains("artifact-gone title")
+            .is_some()
+    );
+    assert!(
+        harness
+            .query_by_label("Artifacts of a replayed run are not opened here.")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Open").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("Artifact unavailable")
+            .is_none()
+    );
 }

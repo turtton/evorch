@@ -483,7 +483,7 @@ fn replay_page(ui: &mut Ui, model: &mut EvaluationsModel) {
                 "{} events{}",
                 data.events(),
                 if data.truncated() {
-                    " (the trial has more; this is the beginning)"
+                    " (the trial has more records; this is the beginning)"
                 } else {
                     ""
                 }
@@ -499,7 +499,12 @@ fn replay_page(ui: &mut Ui, model: &mut EvaluationsModel) {
                     ui.push_id(
                         (&key.group, key.member, &key.member_dir, &key.trial, &run),
                         |ui| {
-                            super::agent::transcript_body_with_agents(ui, transcript, None, &rows);
+                            let ctx = ui.ctx().clone();
+                            super::artifact_card::passive(&ctx, || {
+                                super::agent::transcript_body_with_agents(
+                                    ui, transcript, None, &rows,
+                                );
+                            });
                         },
                     );
                 }
