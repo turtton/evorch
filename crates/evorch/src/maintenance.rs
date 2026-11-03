@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use storage::EventBackfillOptions;
 use storage::maintenance::{
-    CompactOptions, DeltaMode, StripOptions, VacuumOptions, backfill_events, compact_events,
-    preview_task_progress_retention, strip_task_progress_cursor, vacuum_database,
+    CompactOptions, ConvertBodiesOptions, DeltaMode, StripOptions, VacuumOptions, backfill_events,
+    compact_events, convert_bodies, preview_task_progress_retention, strip_task_progress_cursor,
+    vacuum_database,
 };
 
 pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
@@ -13,8 +14,16 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
                  [--provider-retention-days <N>] [--delta-mode <preserve|delete>] [--sidebar <path>]
   backfill-events [--batch-rows <1..100000>] [--max-rows <N>]
   vacuum [--apply] [--backup <new-path>]
+  convert-bodies [--apply] [--backup <new-path>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
+convert-bodies: one-time conversion of a version 39 database (conversations in run_contexts.messages_json) to
+  the current format (run_messages and content_blobs), removing the old column. Stop ALL evorch processes first.
+  Default is a read-only preview (needs the .maintenance-lease file next to the database and an empty WAL; a
+  non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
+  run in its own transaction after comparing it byte for byte, then drops the column, vacuums and publishes
+  version 40. If it stops half way there is no resume: restore the backup and start over (the failure report
+  lists the steps). A converted database is left untouched by a rerun.
 backfill-events: safe next to live writers; converts legacy subkind/run_id columns only.
 vacuum: one-time switch of a legacy auto_vacuum=NONE database to INCREMENTAL (compact-events --apply does it too).
   Default is a read-only preview. --apply takes a verified backup, runs one full VACUUM and checks integrity.
@@ -40,6 +49,7 @@ pub struct MaintenanceArgs {
     pub compact: Option<CompactOptions>,
     pub backfill: Option<EventBackfillOptions>,
     pub vacuum: Option<VacuumOptions>,
+    pub convert_bodies: Option<ConvertBodiesOptions>,
 }
 
 pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs, String> {
@@ -49,7 +59,11 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
     }
     let command = argv.next().ok_or(USAGE)?;
     let retention_preview = match command.as_str() {
-        "strip-task-progress-cursor" | "compact-events" | "backfill-events" | "vacuum" => false,
+        "strip-task-progress-cursor"
+        | "compact-events"
+        | "backfill-events"
+        | "vacuum"
+        | "convert-bodies" => false,
         "preview-task-progress-retention" => true,
         _ => return Err(USAGE.into()),
     };
@@ -60,6 +74,7 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
         compact: (command == "compact-events").then(CompactOptions::default),
         backfill: (command == "backfill-events").then(EventBackfillOptions::default),
         vacuum: (command == "vacuum").then(VacuumOptions::default),
+        convert_bodies: (command == "convert-bodies").then(ConvertBodiesOptions::default),
     };
     let mut seen = std::collections::BTreeSet::new();
     while let Some(arg) = argv.next() {
@@ -75,6 +90,13 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
             "--apply" if args.vacuum.is_some() => args.vacuum.as_mut().unwrap().apply = true,
             "--backup" if args.vacuum.is_some() => {
                 args.vacuum.as_mut().unwrap().backup = Some(argv.next().ok_or(USAGE)?.into());
+            }
+            "--apply" if args.convert_bodies.is_some() => {
+                args.convert_bodies.as_mut().unwrap().apply = true;
+            }
+            "--backup" if args.convert_bodies.is_some() => {
+                args.convert_bodies.as_mut().unwrap().backup =
+                    Some(argv.next().ok_or(USAGE)?.into());
             }
             "--sidebar" if args.compact.is_some() => {
                 args.compact.as_mut().unwrap().sidebar = Some(argv.next().ok_or(USAGE)?.into());
@@ -145,6 +167,17 @@ pub fn run(args: MaintenanceArgs) -> Result<Value, String> {
         return backfill_events(&path, &options)
             .map(|summary| json!(summary))
             .map_err(|error| error.to_string());
+    }
+    if let Some(options) = args.convert_bodies {
+        if options.apply {
+            eprintln!(
+                "Offline conversion: stop ALL evorch processes. Mandatory verified backup; reserve four times the database size. \
+                 A stop half way has no resume: restore the backup and start over. Backup, per-run checks and VACUUM can take minutes or longer."
+            );
+        }
+        let summary = convert_bodies(&path, &options).map_err(|error| error.to_string())?;
+        eprintln!("{}", summary.message);
+        return Ok(json!(summary));
     }
     if let Some(options) = args.vacuum {
         if options.apply {

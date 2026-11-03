@@ -91,15 +91,15 @@ impl HeaderRow {
     }
 }
 
-fn corrupt(run_id: &str, what: impl std::fmt::Display) -> StorageError {
+pub(crate) fn corrupt(run_id: &str, what: impl std::fmt::Display) -> StorageError {
     StorageError::Serialization(format!("run context {run_id} is inconsistent: {what}"))
 }
 
-fn to_json(value: &Value) -> Result<String, StorageError> {
+pub(crate) fn to_json(value: &Value) -> Result<String, StorageError> {
     serde_json::to_string(value).map_err(|error| StorageError::Serialization(error.to_string()))
 }
 
-fn len_i64(len: usize, what: &'static str) -> Result<i64, StorageError> {
+pub(crate) fn len_i64(len: usize, what: &'static str) -> Result<i64, StorageError> {
     i64::try_from(len).map_err(|_| StorageError::OutOfRange(what))
 }
 
@@ -125,14 +125,14 @@ pub(crate) fn read_snapshot<T>(
 
 /// The stored header's configuration as a document: parsed, so that the saved text is
 /// the canonical serialization of the same JSON.
-fn parse_config(config_json: &str) -> Result<Value, StorageError> {
+pub(crate) fn parse_config(config_json: &str) -> Result<Value, StorageError> {
     serde_json::from_str(config_json).map_err(|_| {
         StorageError::Serialization("run context configuration is not valid JSON".into())
     })
 }
 
 /// `non_restorable_reason` of a configuration document, when it is a string.
-fn reason_of(config: &Value) -> Option<String> {
+pub(crate) fn reason_of(config: &Value) -> Option<String> {
     config
         .get("non_restorable_reason")
         .and_then(Value::as_str)
@@ -271,46 +271,15 @@ fn write_messages(
             Some(stored) => stored.id,
             None => next_message_id(conn)?,
         };
-        let plain_len = len_i64(text.len(), "message length")?;
-        let mut container = [message.clone()];
-        let inserting = stored.is_none();
-        put_owner(
+        put_message(
             conn,
-            &MESSAGE_OWNER,
-            &[SqlValue::Integer(id)],
-            &mut container,
-            |conn, documents| {
-                let skeleton = to_json(&documents[0])?;
-                let (codec, bytes) = encode_text(&skeleton)?;
-                if inserting {
-                    conn.prepare_cached(
-                        "INSERT INTO run_messages(id, run_id, ordinal, msg_sha256, plain_len, \
-                         codec, skeleton) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    )?
-                    .execute(params![
-                        id,
-                        run_id,
-                        ordinal,
-                        sha.as_slice(),
-                        plain_len,
-                        codec,
-                        bytes
-                    ])?;
-                } else {
-                    conn.prepare_cached(
-                        "UPDATE run_messages SET msg_sha256 = ?2, plain_len = ?3, codec = ?4, \
-                         skeleton = ?5 WHERE id = ?1",
-                    )?
-                    .execute(params![
-                        id,
-                        sha.as_slice(),
-                        plain_len,
-                        codec,
-                        bytes
-                    ])?;
-                }
-                Ok(())
-            },
+            run_id,
+            ordinal,
+            id,
+            stored.is_none(),
+            message,
+            text,
+            sha.as_slice(),
         )?;
     }
     // Rows past the new end: a shortened conversation (rewind, compaction).
@@ -320,9 +289,52 @@ fn write_messages(
     Ok(())
 }
 
+/// Stores one message: its long strings as blobs, the row with the skeleton, and the
+/// row's references, in the caller's write transaction. `text` is the message's
+/// serialization and `sha` its SHA-256. Shared by the normal writer and the conversion
+/// command, so both produce the same bytes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn put_message(
+    conn: &Connection,
+    run_id: &str,
+    ordinal: i64,
+    id: i64,
+    inserting: bool,
+    message: &Value,
+    text: &str,
+    sha: &[u8],
+) -> Result<(), StorageError> {
+    let plain_len = len_i64(text.len(), "message length")?;
+    let mut container = [message.clone()];
+    put_owner(
+        conn,
+        &MESSAGE_OWNER,
+        &[SqlValue::Integer(id)],
+        &mut container,
+        |conn, documents| {
+            let skeleton = to_json(&documents[0])?;
+            let (codec, bytes) = encode_text(&skeleton)?;
+            if inserting {
+                conn.prepare_cached(
+                    "INSERT INTO run_messages(id, run_id, ordinal, msg_sha256, plain_len, \
+                     codec, skeleton) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )?
+                .execute(params![id, run_id, ordinal, sha, plain_len, codec, bytes])?;
+            } else {
+                conn.prepare_cached(
+                    "UPDATE run_messages SET msg_sha256 = ?2, plain_len = ?3, codec = ?4, \
+                     skeleton = ?5 WHERE id = ?1",
+                )?
+                .execute(params![id, sha, plain_len, codec, bytes])?;
+            }
+            Ok(())
+        },
+    )
+}
+
 /// The id a new message row takes. The write transaction is held, so nobody else can
 /// take it before the insert.
-fn next_message_id(conn: &Connection) -> Result<i64, StorageError> {
+pub(crate) fn next_message_id(conn: &Connection) -> Result<i64, StorageError> {
     let max: i64 = conn
         .prepare_cached("SELECT COALESCE(MAX(id), 0) FROM run_messages")?
         .query_row([], |row| row.get(0))?;

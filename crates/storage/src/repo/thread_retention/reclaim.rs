@@ -19,6 +19,27 @@ use crate::thread_retention::{
     ReclaimProgress, ReclaimSummary,
 };
 
+/// The shape of `run_contexts` a reclaim works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// The running format: a header holds its configuration and checkpoint list only.
+    Current,
+    /// A database the conversion command is converting: the new tables exist, and a
+    /// header row still holds the whole conversation in `messages_json`, so its stored
+    /// size (and the budget it spends) includes that column.
+    Converting,
+}
+
+impl Layout {
+    /// SQL added to a header's stored-size expression.
+    const fn header_extra_bytes(self) -> &'static str {
+        match self {
+            Self::Current => "",
+            Self::Converting => " + OCTET_LENGTH(messages_json)",
+        }
+    }
+}
+
 /// Empty cursor advances (a run without rows in a table) one transaction may make.
 const MAX_EMPTY_ADVANCES: u32 = 256;
 
@@ -221,14 +242,19 @@ fn register_oversized(
 
 /// One unit of work of the cursor's phase. Returns what it deleted; an empty
 /// result means the cursor only advanced.
-fn do_phase(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work, StorageError> {
+fn do_phase(
+    tx: &Transaction<'_>,
+    family: &str,
+    cursor: &mut Cursor,
+    layout: Layout,
+) -> Result<Work, StorageError> {
     match cursor.phase {
         Phase::EventsRun => events_run(tx, family, cursor),
         Phase::EventsThread => events_thread(tx, family, cursor),
         Phase::RunTables => run_tables(tx, family, cursor),
         Phase::Index => index(tx, family, cursor),
         Phase::RunMessages => run_messages(tx, family, cursor),
-        Phase::RunContexts => run_contexts(tx, family, cursor),
+        Phase::RunContexts => run_contexts(tx, family, cursor, layout),
         Phase::Tasks => tasks(tx, family, cursor),
         Phase::ThreadTables => thread_tables(tx, family, cursor),
         Phase::Finished => Ok(Work::default()),
@@ -512,6 +538,7 @@ fn run_contexts(
     tx: &Transaction<'_>,
     family: &str,
     cursor: &mut Cursor,
+    layout: Layout,
 ) -> Result<Work, StorageError> {
     let Some(run) = cursor.run.clone() else {
         enter(tx, family, cursor, Phase::Tasks)?;
@@ -519,8 +546,11 @@ fn run_contexts(
     };
     let stored: Option<u64> = tx
         .query_row(
-            "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json) \
-             FROM run_contexts WHERE run_id = ?1",
+            &format!(
+                "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json){} \
+                 FROM run_contexts WHERE run_id = ?1",
+                layout.header_extra_bytes()
+            ),
             [&run],
             |row| row.get(0),
         )
@@ -822,7 +852,7 @@ fn thread_tables(
 }
 
 /// One transaction of one job. Returns what it deleted.
-fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageError> {
+fn step_job(conn: &Connection, family: &str, layout: Layout) -> Result<(Work, bool), StorageError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let state: Option<(String, String)> = tx
         .query_row(
@@ -846,7 +876,7 @@ fn step_job(conn: &Connection, family: &str) -> Result<(Work, bool), StorageErro
     while cursor.phase != Phase::Finished {
         // A scan reads up to RECLAIM_SCAN_ROWS rows: never more than one per transaction.
         let scanning = matches!(cursor.phase, Phase::EventsThread | Phase::Tasks);
-        let step = do_phase(&tx, family, &mut cursor)?;
+        let step = do_phase(&tx, family, &mut cursor, layout)?;
         work.rows += step.rows;
         work.bytes += step.bytes;
         if scanning || step.rows > 0 || step.bytes > 0 || step.updated > 0 {
@@ -912,6 +942,15 @@ pub(crate) fn reclaim_step(
     conn: &Connection,
     budget: ReclaimBudget,
 ) -> Result<ReclaimProgress, StorageError> {
+    reclaim_step_in(conn, budget, Layout::Current)
+}
+
+/// [`reclaim_step`] for a database in either run layout.
+pub(crate) fn reclaim_step_in(
+    conn: &Connection,
+    budget: ReclaimBudget,
+    layout: Layout,
+) -> Result<ReclaimProgress, StorageError> {
     let mut progress = ReclaimProgress::default();
     let families: Vec<String> = {
         // Every job takes at least one transaction, so the budget bounds the list.
@@ -931,7 +970,7 @@ pub(crate) fn reclaim_step(
             if progress.transactions >= budget.max_transactions {
                 break 'jobs;
             }
-            let (work, finished) = match step_job(conn, family) {
+            let (work, finished) = match step_job(conn, family, layout) {
                 Ok(result) => result,
                 Err(error) => {
                     progress.last_error = Some(error.to_string());
@@ -981,6 +1020,15 @@ pub(crate) fn reclaim_oversized_step(
     conn: &Connection,
     budget_bytes: u64,
 ) -> Result<OversizedProgress, StorageError> {
+    reclaim_oversized_step_in(conn, budget_bytes, Layout::Current)
+}
+
+/// [`reclaim_oversized_step`] for a database in either run layout.
+pub(crate) fn reclaim_oversized_step_in(
+    conn: &Connection,
+    budget_bytes: u64,
+    layout: Layout,
+) -> Result<OversizedProgress, StorageError> {
     let mut progress = OversizedProgress::default();
     let mut worked = false;
     // Registrations whose rows are already gone delete nothing; the cap keeps a call
@@ -1012,7 +1060,7 @@ pub(crate) fn reclaim_oversized_step(
         if worked && progress.stored_bytes.saturating_add(bytes) > budget_bytes {
             break;
         }
-        match delete_oversized(conn, &family, &table, &key) {
+        match delete_oversized(conn, &family, &table, &key, layout) {
             Ok(work) => {
                 worked |= work.rows > 0 || work.updated > 0;
                 progress.rows += work.rows;
@@ -1035,6 +1083,7 @@ fn delete_oversized(
     family: &str,
     table: &str,
     key: &str,
+    layout: Layout,
 ) -> Result<Work, StorageError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let (work, finished) = match table {
@@ -1164,8 +1213,11 @@ fn delete_oversized(
             } else {
                 let size: Option<u64> = tx
                     .query_row(
-                        "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json) \
-                         FROM run_contexts WHERE run_id = ?1",
+                        &format!(
+                            "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json){} \
+                             FROM run_contexts WHERE run_id = ?1",
+                            layout.header_extra_bytes()
+                        ),
                         [key],
                         |row| row.get(0),
                     )

@@ -1,4 +1,5 @@
--- Message-level conversation storage (PR A2b).
+-- Message-level conversation storage (PR A2b): everything of migration v40 except the
+-- removal of the old column (`v40_drop.sql`).
 --
 -- `run_contexts` becomes the header of a run: its configuration, checkpoint list and the
 -- projections readers need without reading a message. The messages move to `run_messages`,
@@ -8,8 +9,6 @@
 -- in the old shape is never migrated here: `Database::open` refuses it
 -- (`StorageError::ConversionRequired`) and the conversion command rewrites it.
 
--- The old whole-conversation column. No reader or writer of this build names it.
-ALTER TABLE run_contexts DROP COLUMN messages_json;
 
 -- `body_format`: 1 is the only value a running build accepts.
 -- `header_rev`: incremented in SQL by every header write (never computed by a client).
