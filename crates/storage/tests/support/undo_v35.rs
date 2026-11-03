@@ -13,8 +13,16 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Removes the content blob tables migration v39 added.
+/// Restores the whole-conversation `run_contexts` shape migration v40 replaced.
+pub fn undo_v40(connection: &Connection) {
+    connection
+        .execute_batch(include_str!("undo_v40.sql"))
+        .unwrap();
+}
+
+/// Removes the content blob tables migration v39 added, after undoing v40.
 pub fn undo_v39(connection: &Connection) {
+    undo_v40(connection);
     connection
         .execute_batch(
             "DROP TABLE IF EXISTS content_blob_gc_queue; DROP TABLE IF EXISTS content_blobs;",

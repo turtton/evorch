@@ -27,7 +27,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionState, params, params_f
 use serde_json::Value;
 
 use crate::StorageError;
-use crate::body_ref::{BodyToken, resolve_in_place, tokenize_in_place};
+use crate::body_ref::{BodyToken, collect_tokens, resolve_in_place, tokenize_in_place};
 use crate::error::BodyUnresolvedReason;
 
 /// The largest body a blob may hold: SQLite's own default limit for one value.
@@ -145,6 +145,10 @@ fn find_existing(conn: &Connection, token: &BodyToken) -> Result<Option<i64>, St
 }
 
 /// `(codec, stored bytes)`: zstd only when it is smaller.
+pub(crate) fn encode_text(text: &str) -> Result<(i64, Vec<u8>), StorageError> {
+    encode(text)
+}
+
 fn encode(text: &str) -> Result<(i64, Vec<u8>), StorageError> {
     let compressed = zstd::bulk::compress(text.as_bytes(), ZSTD_LEVEL)
         .map_err(|error| StorageError::Serialization(format!("zstd: {error}")))?;
@@ -216,6 +220,44 @@ pub(crate) fn decode_blob(
     String::from_utf8(bytes).map_err(|_| fail(BodyUnresolvedReason::InvalidUtf8))
 }
 
+/// The text of a `run_messages.skeleton` (or any codec-tagged column that does not
+/// record its plain length): a plain value, or one zstd frame whose declared content size
+/// is the only thing the allocation follows, and is bounded by [`MAX_BLOB_BYTES`].
+pub(crate) fn decode_skeleton(
+    codec: i64,
+    data: &[u8],
+    owner: &str,
+) -> Result<String, StorageError> {
+    let fail = |reason| unresolved(owner, None, reason);
+    let bytes = match codec {
+        CODEC_PLAIN => data.to_vec(),
+        CODEC_ZSTD => {
+            let declared = zstd::zstd_safe::get_frame_content_size(data)
+                .ok()
+                .flatten()
+                .ok_or_else(|| fail(BodyUnresolvedReason::DecompressFailed))?;
+            if declared > MAX_BLOB_BYTES {
+                return Err(fail(BodyUnresolvedReason::DeclaredLengthTooLarge {
+                    declared,
+                }));
+            }
+            let capacity = usize::try_from(declared)
+                .map_err(|_| fail(BodyUnresolvedReason::DecompressFailed))?;
+            let bytes = zstd::bulk::decompress(data, capacity)
+                .map_err(|_| fail(BodyUnresolvedReason::DecompressFailed))?;
+            if bytes.len() as u64 != declared {
+                return Err(fail(BodyUnresolvedReason::LengthMismatch {
+                    expected: declared,
+                    actual: bytes.len() as u64,
+                }));
+            }
+            bytes
+        }
+        other => return Err(fail(BodyUnresolvedReason::UnknownCodec(other))),
+    };
+    String::from_utf8(bytes).map_err(|_| fail(BodyUnresolvedReason::InvalidUtf8))
+}
+
 /// Fails with `HashMismatch` unless `text` hashes to `hash`.
 pub(crate) fn verify_decoded(text: &str, hash: &[u8], owner: &str) -> Result<(), StorageError> {
     let token = BodyToken::of(text);
@@ -274,7 +316,7 @@ pub(crate) fn load_blob(
 
 /// Replaces every token of `container` with its body, reading blobs through `conn`.
 /// `owner` labels errors. Any unresolvable token fails the whole call.
-#[allow(dead_code)] // The readers of the owners (A2b/B1) call this; A2a's tests do.
+#[allow(dead_code)] // B1's readers call this; the header and message readers resolve per token.
 pub(crate) fn resolve_container(
     conn: &Connection,
     owner: &str,
@@ -304,6 +346,10 @@ pub(crate) struct OwnerSpec {
     pub keys: &'static [KeyColumn],
     /// Columns of the owner table that hold JSON with tokens.
     pub container_columns: &'static [&'static str],
+    /// Column holding the codec (0 plain, 1 zstd) of the container column, when the
+    /// container is a codec-tagged BLOB instead of JSON text. Such an owner has exactly
+    /// one container column.
+    pub codec_column: Option<&'static str>,
     /// Condition selecting owner rows in token form (for a table where only some rows
     /// are), or `None` when every row is.
     pub filter: Option<&'static str>,
@@ -314,7 +360,39 @@ pub(crate) struct OwnerSpec {
 /// The owners registered in production. A2b and B1 add theirs; the collector does not
 /// depend on this list (it honours every `content_blob_refs_*` table), the integrity
 /// check does.
-pub(crate) const PRODUCTION_OWNERS: &[OwnerSpec] = &[];
+pub(crate) const PRODUCTION_OWNERS: &[OwnerSpec] = &[MESSAGE_OWNER, HEADER_OWNER];
+
+/// One provider message of a run: `run_messages.skeleton`, a codec-tagged BLOB.
+pub(crate) const MESSAGE_OWNER: OwnerSpec = OwnerSpec {
+    name: "message",
+    ref_table: "content_blob_refs_message",
+    owner_table: "run_messages",
+    keys: &[KeyColumn {
+        ref_column: "message_id",
+        owner_column: "id",
+        sql_type: "INTEGER",
+    }],
+    container_columns: &["skeleton"],
+    codec_column: Some("codec"),
+    filter: None,
+    run_column: Some("run_id"),
+};
+
+/// The header of a run: configuration and checkpoint list, JSON text in `run_contexts`.
+pub(crate) const HEADER_OWNER: OwnerSpec = OwnerSpec {
+    name: "run_header",
+    ref_table: "content_blob_refs_header",
+    owner_table: "run_contexts",
+    keys: &[KeyColumn {
+        ref_column: "run_id",
+        owner_column: "run_id",
+        sql_type: "TEXT",
+    }],
+    container_columns: &["config_json", "checkpoints_json"],
+    codec_column: None,
+    filter: None,
+    run_column: Some("run_id"),
+};
 
 impl OwnerSpec {
     /// The statements that create this owner's reference table: owner FK with CASCADE,
@@ -391,12 +469,30 @@ impl OwnerSpec {
 /// Header-like owners that carry a revision counter must increment it in SQL
 /// (`header_rev = header_rev + 1`) inside `write_row`, never from a value computed by
 /// the client.
-#[allow(dead_code)] // Called by the owners (A2b/B1); A2a exercises it with a test owner.
 pub(crate) fn put_owner<R>(
     conn: &Connection,
     owner: &OwnerSpec,
     key: &[SqlValue],
     containers: &mut [Value],
+    write_row: impl FnOnce(&Connection, &[Value]) -> Result<R, StorageError>,
+) -> Result<R, StorageError> {
+    put_owner_with_stored(conn, owner, key, containers, &[], write_row)
+}
+
+/// [`put_owner`] for a row that also keeps documents which are **already** in token form
+/// (the stored checkpoint list that a header update leaves as it is). `stored` documents
+/// are not tokenized again (that would store the tokens themselves as bodies): each token
+/// in them must name a blob that exists now, in this transaction, with the declared
+/// length, and joins the reference set. An unknown token or a missing blob is a hard
+/// error, never a skipped reference. Only code inside this crate can reach this: a
+/// document is never trusted because the caller says it holds tokens, the blobs have to
+/// be there.
+pub(crate) fn put_owner_with_stored<R>(
+    conn: &Connection,
+    owner: &OwnerSpec,
+    key: &[SqlValue],
+    containers: &mut [Value],
+    stored: &[&Value],
     write_row: impl FnOnce(&Connection, &[Value]) -> Result<R, StorageError>,
 ) -> Result<R, StorageError> {
     require_write_transaction(conn)?;
@@ -412,6 +508,11 @@ pub(crate) fn put_owner<R>(
                 blob_ids.insert(stored.id);
                 Ok(stored.token)
             })?;
+        }
+        for document in stored {
+            for token in collect_tokens(document, owner.name)? {
+                blob_ids.insert(existing_blob_id(conn, &token, owner.name)?);
+            }
         }
         let result = write_row(conn, containers)?;
         sync_refs(conn, owner, key, &blob_ids)?;
@@ -429,6 +530,21 @@ pub(crate) fn put_owner<R>(
             Err(error)
         }
     }
+}
+
+/// The id of the blob a token names; it must exist with the token's length.
+fn existing_blob_id(
+    conn: &Connection,
+    token: &BodyToken,
+    owner: &str,
+) -> Result<i64, StorageError> {
+    find_existing(conn, token)?.ok_or_else(|| {
+        unresolved(
+            owner,
+            Some(token.hash_hex()),
+            BodyUnresolvedReason::BlobMissing,
+        )
+    })
 }
 
 /// Makes the reference rows of `key` equal `blob_ids`.

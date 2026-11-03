@@ -193,11 +193,10 @@ fn inspection_never_creates_or_migrates_a_store() {
         .pragma_update(None, "user_version", current - 1)
         .unwrap();
     drop(connection);
+    // The previous schema keeps a run's messages in one column: inspection refuses it
+    // (and says how to convert it) instead of reading it, and changes nothing.
     let error = inspect(&db, &["candidates"]).unwrap_err();
-    assert!(
-        error.contains("open it once with the current evorch"),
-        "{error}"
-    );
+    assert!(error.contains("conversion command"), "{error}");
     let version: u32 = rusqlite::Connection::open(&db)
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))

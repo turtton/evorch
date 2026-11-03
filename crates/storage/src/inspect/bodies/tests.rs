@@ -226,3 +226,78 @@ fn a_widely_shared_blob_lists_its_owners_a_page_at_a_time() {
     let (default, _, next) = page(0, DEFAULT_REFERENCES_LISTED);
     assert_eq!((default.len(), next), (20, json!(20)));
 }
+
+/// A run of `count` messages, some of them blob-backed.
+fn run_record(count: usize) -> crate::RunContextRecord {
+    let messages: Vec<serde_json::Value> = (0..count)
+        .map(|index| {
+            json!({"role": "user", "content": [{"type": "text", "text":
+                if index % 2 == 0 { text("m", 3_000 + index) } else { format!("short {index}") }}]})
+        })
+        .collect();
+    let mut record = crate::repo::run_messages::fixtures::record("run-a");
+    record.messages_json = serde_json::to_string(&messages).unwrap();
+    record
+}
+
+#[test]
+fn a_save_committed_between_the_reference_check_and_the_run_check_is_not_an_inconsistency() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // One run of the check with a save by another connection injected when the
+    // progress handler is called for the `inject_at`-th time (a count of VM
+    // instructions, so the point is the same on every run). Returns the report and how
+    // many times the handler was called.
+    let run = |inject_at: usize| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("check.db");
+        let config = crate::StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        };
+        let writer = Database::open(&config).unwrap();
+        crate::repo::run_messages::fixtures::insert(&writer.conn, &run_record(6), 1);
+        let reader = Database::open_read_only(&path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let mut writer = Some(writer);
+        reader
+            .conn
+            .progress_handler(
+                1,
+                Some(move || {
+                    if seen.fetch_add(1, Ordering::Relaxed) + 1 == inject_at
+                        && let Some(writer) = writer.take()
+                    {
+                        crate::repo::run_messages::fixtures::insert(
+                            &writer.conn,
+                            &run_record(9),
+                            2,
+                        );
+                    }
+                    false
+                }),
+            )
+            .unwrap();
+        let report = reader
+            .inspect_check_bodies(&BodyCheckScope::All, true)
+            .unwrap();
+        reader
+            .conn
+            .progress_handler(1, None::<fn() -> bool>)
+            .unwrap();
+        (report, calls.load(Ordering::Relaxed), dir)
+    };
+    let (baseline, total, _dir) = run(usize::MAX);
+    assert_eq!(baseline["ok"], true, "{baseline}");
+    assert!(total > 100, "the handler must see the whole check: {total}");
+
+    // When: the save lands at 40 different points of the check.
+    for step in 1..=40 {
+        let (report, _, _dir) = run(total * step / 41);
+
+        // Then: the check reads one snapshot, so it never reports the half-seen save.
+        assert_eq!(report["ok"], true, "injected at {step}/41: {report}");
+    }
+}

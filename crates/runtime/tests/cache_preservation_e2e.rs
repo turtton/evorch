@@ -1181,7 +1181,7 @@ async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
 async fn continue_unfinished_model_request_reuses_identical_wire_input_without_working_note() {
     for compacted in [false, true] {
         for restart in [false, true] {
-            resume_unfinished_model_request(compacted, restart, false).await;
+            resume_unfinished_model_request(compacted, restart, false, false).await;
         }
     }
 }
@@ -1189,11 +1189,68 @@ async fn continue_unfinished_model_request_reuses_identical_wire_input_without_w
 #[tokio::test]
 async fn above_threshold_unfinished_retry_preserves_wire_input_without_recompaction() {
     for restart in [false, true] {
-        resume_unfinished_model_request(true, restart, true).await;
+        resume_unfinished_model_request(true, restart, true, false).await;
     }
 }
 
-async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_threshold: bool) {
+#[tokio::test]
+async fn converted_database_resumes_with_the_interrupted_wire_input() {
+    // The run is saved by the running build, taken back to the version 39 shape, converted
+    // by `convert-bodies`, and only then restored by a new runtime on the converted
+    // database: the request it sends must be the interrupted one, byte for byte, and
+    // the cache must still be read from it.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, true).await;
+    }
+}
+
+/// A runtime composed again on the same project, as a new process would. With `storage`
+/// it restores from that store; without, it holds no connection to the database.
+fn recompose_runtime(
+    harness: &mut Harness,
+    config: &storage::StorageConfig,
+    storage: Option<&storage::Storage>,
+) {
+    let root = harness._directory.path();
+    let current = Config::load(&LoadOptions {
+        project_dir: Some(root.into()),
+        user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
+        read_env: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    harness.receiver = bus.subscribe();
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(BulkRead)).unwrap();
+    let runtime = compose_runtime(RuntimeComposition {
+        model_catalog_dir: Some(test_support::model_catalog_dir()),
+        user_config_dir: Some(root.join("empty-user-config")),
+        config: &current,
+        bus,
+        executor: Arc::new(executor),
+        credential_store: Arc::new(FileCredentialStore::open(root.join("credentials")).unwrap()),
+        env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
+        model_source: ModelSource::Configured,
+        workspace: None,
+    })
+    .unwrap()
+    .runtime
+    .with_compaction(current.compaction.clone());
+    harness.runtime = match storage {
+        Some(storage) => {
+            runtime.with_run_store(runtime::RunStore::open(config, storage.handle()).unwrap())
+        }
+        None => runtime,
+    };
+}
+
+async fn resume_unfinished_model_request(
+    compacted: bool,
+    restart: bool,
+    above_threshold: bool,
+    convert: bool,
+) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
     if compacted {
@@ -1283,38 +1340,32 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
     storage.handle().promote_lesson(&lesson.id).unwrap();
     let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
     assert_eq!(memory.entries().len(), 1);
-    if restart {
-        let root = harness._directory.path();
-        let current = Config::load(&LoadOptions {
-            project_dir: Some(root.into()),
-            user_config_dir: Some(root.join(config::PROJECT_CONFIG_DIR)),
-            read_env: false,
-            ..Default::default()
-        })
+    let (storage, restart) = if convert {
+        // The first runtime's run store reads the file: drop it, then stop the writer, so
+        // that no process holds the database, as the command requires.
+        recompose_runtime(&mut harness, &config, None);
+        storage.close();
+        storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
+        let summary = storage::maintenance::convert_bodies(
+            &config.db_path,
+            &storage::maintenance::ConvertBodiesOptions {
+                apply: true,
+                backup: None,
+            },
+        )
         .unwrap();
-        let bus = Arc::new(EventBus::new(1024));
-        harness.receiver = bus.subscribe();
-        let mut executor = ToolExecutor::new(bus.clone());
-        executor.register(Arc::new(BulkRead)).unwrap();
-        harness.runtime = compose_runtime(RuntimeComposition {
-            model_catalog_dir: Some(test_support::model_catalog_dir()),
-            user_config_dir: Some(root.join("empty-user-config")),
-            config: &current,
-            bus,
-            executor: Arc::new(executor),
-            credential_store: Arc::new(
-                FileCredentialStore::open(root.join("credentials")).unwrap(),
-            ),
-            env: Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")])),
-            model_source: ModelSource::Configured,
-            workspace: None,
-        })
-        .unwrap()
-        .runtime
-        .with_compaction(current.compaction.clone())
-        .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
+        assert_eq!(summary.converted_runs, 1);
+        assert_eq!(summary.canonicalized_runs.count, 0);
+        (storage::Storage::open(config.clone()).unwrap(), true)
+    } else {
+        (storage, restart)
+    };
+    if restart {
+        recompose_runtime(&mut harness, &config, Some(&storage));
         assert!(harness.runtime.list_agents().is_empty());
     }
+    // Only what happens after the restore may vouch for the cache read below.
+    let restored_from = events.len();
     harness
         .runtime
         .resume_chat(
@@ -1343,7 +1394,7 @@ async fn resume_unfinished_model_request(compacted: bool, restart: bool, above_t
         "resume must send exactly the interrupted request input"
     );
     assert_append_only(CacheProtocol::OpenAi, previous, resumed).unwrap();
-    assert!(events.iter().any(|event| matches!(&event.kind,
+    assert!(events[restored_from..].iter().any(|event| matches!(&event.kind,
         EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
         if id == &run.to_string() && *cache_read_tokens > 0)));
 }

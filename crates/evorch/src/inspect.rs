@@ -15,7 +15,7 @@ use storage::inspect::{
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   candidates [--project <slug>] [--status new|reviewed|dismissed] [--limit <n>]
   candidate <candidate-id>
-  run <run-id> [--full]
+  run <run-id> [--full | --messages <from>..<to>]   (ordinals count System messages)
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
   storage [--physical] [--top <n>]
   blob <hash-prefix, 12+ hex digits> [--content] [--ref-offset <n>] [--ref-limit <n>]
@@ -36,6 +36,8 @@ pub enum InspectCommand {
     Run {
         run_id: String,
         full: bool,
+        /// Only these messages (stored ordinals, System messages included).
+        messages: Option<std::ops::Range<usize>>,
     },
     Events {
         scope: Scope,
@@ -134,10 +136,25 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
             limit: limit(take("--limit"))?,
         },
         ("candidate", [id], false) => InspectCommand::Candidate(id.clone()),
-        ("run", [run_id], full) => InspectCommand::Run {
-            run_id: run_id.clone(),
-            full,
-        },
+        ("run", [run_id], full) => {
+            let messages = take("--messages")
+                .map(|range| {
+                    let parsed = range.split_once("..").and_then(|(from, to)| {
+                        Some(from.parse::<usize>().ok()?..to.parse::<usize>().ok()?)
+                    });
+                    parsed
+                        .filter(|range| range.start < range.end && !full)
+                        .ok_or_else(|| {
+                            format!("--messages must be <from>..<to> (from < to), not with --full\n{USAGE}")
+                        })
+                })
+                .transpose()?;
+            InspectCommand::Run {
+                run_id: run_id.clone(),
+                full,
+                messages,
+            }
+        }
         ("events", [], false) => {
             let scope = match (take("--run"), take("--around")) {
                 (Some(run_id), None) => Scope::Run(run_id),
@@ -242,9 +259,19 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
             value["next"] = json!(next_steps(&candidate));
             value
         }
-        InspectCommand::Run { run_id, full } => db
-            .inspect_run(&run_id, full)
-            .map_err(|error| error.to_string())?,
+        InspectCommand::Run {
+            run_id,
+            full,
+            messages,
+        } => {
+            let detail = match messages {
+                Some(range) => storage::inspect::RunDetail::Messages(range),
+                None if full => storage::inspect::RunDetail::Full,
+                None => storage::inspect::RunDetail::Summary,
+            };
+            db.inspect_run_detail(&run_id, detail)
+                .map_err(|error| error.to_string())?
+        }
         InspectCommand::Events { scope, limit } => {
             let scope_value;
             let (events, truncated) = match &scope {

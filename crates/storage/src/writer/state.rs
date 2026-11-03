@@ -37,6 +37,13 @@ struct WriterState {
     event_retention_cursor: crate::maintenance::retention_events::Cursor,
 }
 
+/// The transaction every snapshot-writing path of the writer runs in. It is `IMMEDIATE`
+/// because content blobs are only written by a connection that already holds the write
+/// lock (`body_store`): a deferred transaction would read first and lock later.
+fn immediate_transaction(conn: &Connection) -> Result<rusqlite::Transaction<'_>, rusqlite::Error> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 /// All review mutations share the same suspension gate and rollback boundary.
 fn review_transaction<T>(
     state: &WriterState,
@@ -47,7 +54,7 @@ fn review_transaction<T>(
             "review writes suspended by storage limit".into(),
         ));
     }
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let value = operation(&transaction)?;
     transaction.commit()?;
     Ok(value)
@@ -65,7 +72,7 @@ fn upsert_run_context_with_receipts(
         ));
     }
     let now_ns = crate::system_time_to_ns(std::time::SystemTime::now())?;
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let receipt = crate::repo::run_context::upsert(&transaction, record)?;
     let applied =
         crate::repo::host_input_receipt::apply(&transaction, Some(record), write, now_ns)?;
@@ -86,7 +93,7 @@ fn snapshot_transaction<T>(
         ))
         .into());
     }
-    let transaction = state.conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(&state.conn)?;
     let value = operation(&transaction)?;
     transaction.commit()?;
     Ok(value)
@@ -680,7 +687,7 @@ fn upsert_run_context(
     conn: &Connection,
     record: &crate::RunContextRecord,
 ) -> Result<crate::RunContextReceipt, StorageError> {
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = immediate_transaction(conn)?;
     let receipt = crate::repo::run_context::upsert(&transaction, record)?;
     transaction.commit()?;
     Ok(receipt)

@@ -18,6 +18,7 @@ pub(crate) mod review_evidence;
 pub(crate) mod review_lineage;
 pub mod run_context;
 pub mod run_ledger;
+pub(crate) mod run_messages;
 pub mod session;
 pub mod task;
 pub(crate) mod thread_index;

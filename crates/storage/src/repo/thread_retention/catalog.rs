@@ -19,8 +19,6 @@ pub(crate) enum Treatment {
     GcUnreferenced,
     /// A content blob reference table: follows its owner row through `ON DELETE
     /// CASCADE`, and its AFTER DELETE trigger queues the blob for the collector.
-    /// No such table exists yet; the owners' PRs (A2b, B1) add entries.
-    #[allow(dead_code)]
     CascadeOwner,
     /// Kept on purpose; the reason is the second field of the catalog entry.
     Keep,
@@ -29,7 +27,8 @@ pub(crate) enum Treatment {
 }
 
 use Treatment::{
-    ConfirmDelete, Derived, GcUnreferenced, Keep, ReclaimRun, ReclaimTask, ReclaimThread, Tombstone,
+    CascadeOwner, ConfirmDelete, Derived, GcUnreferenced, Keep, ReclaimRun, ReclaimTask,
+    ReclaimThread, Tombstone,
 };
 
 /// `(table, treatment, why)`. FTS shadow tables and `sqlite_*` are excluded by the test.
@@ -46,7 +45,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "removed when the family is confirmed",
     ),
     ("events", ReclaimRun, "by run_id; unattributable rows stay"),
-    ("run_contexts", ReclaimRun, "conversation snapshots"),
+    (
+        "run_messages",
+        ReclaimRun,
+        "one row per message; reclaimed before the header it points at",
+    ),
+    (
+        "run_contexts",
+        ReclaimRun,
+        "run header: configuration and checkpoint list",
+    ),
     (
         "run_context_provenance",
         ReclaimRun,
@@ -83,6 +91,16 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "content_blobs",
         GcUnreferenced,
         "collected once no content_blob_refs_* table names the blob",
+    ),
+    (
+        "content_blob_refs_header",
+        CascadeOwner,
+        "follows its run header; the trigger queues the blob",
+    ),
+    (
+        "content_blob_refs_message",
+        CascadeOwner,
+        "follows its message row; the trigger queues the blob",
     ),
     (
         "content_blob_gc_queue",

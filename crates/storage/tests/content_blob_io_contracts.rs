@@ -60,11 +60,13 @@ const STEP_CANDIDATES: i64 = 64;
 /// level of b-tree and a further freelist trunk page.
 const C_GC: u64 = 24;
 
-/// Frames the migration may write: the two new tables, the hash index, the schema page,
-/// page 1 and the pointer-map pages that account for the new pages (6 frames with 10 rows
-/// and 12 with 100,000 when first measured: pointer-map pages sit apart in a larger
-/// file), whatever the number of rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 16;
+/// Frames the migrations may write: v39's two new tables and hash index, v40's message
+/// table, reference tables, indexes and header columns (all on empty tables here), the
+/// schema page, page 1 and the pointer-map pages that account for the new pages (6 frames
+/// with 10 rows and 12 with 100,000 when v39 alone was first measured; 19 and 34 with
+/// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema),
+/// whatever the number of rows it leaves alone.
+const MIGRATION_FRAMES: u64 = 40;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -288,12 +290,14 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     let observer = Connection::open(&path).unwrap();
     observer
         .execute_batch(&format!(
-            "DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
+            "{undo_v40}
+             DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
              PRAGMA user_version = 38;
              WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {rows} - 1)
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
-             PRAGMA wal_checkpoint(TRUNCATE);"
+             PRAGMA wal_checkpoint(TRUNCATE);",
+            undo_v40 = include_str!("support/undo_v40.sql"),
         ))
         .unwrap();
     let page = page_size(&observer);
@@ -303,7 +307,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
         .unwrap();
     let before = wal_bytes(&path);
     VM_STEPS.store(0, Ordering::Relaxed);
-    drop(Database::open(&config(&path)).unwrap());
+    drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
     println!("migration v39 with {rows} rows: {frames} frames, {scanned} VM steps");

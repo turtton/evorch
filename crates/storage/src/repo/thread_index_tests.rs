@@ -490,7 +490,7 @@ fn staged_snapshot_participates_in_the_callers_transaction() {
         &verified("run-a", &json!([text("user", "old")]), 0, 10),
     );
     let before = bundle(&conn, "run-a");
-    conn.execute_batch("BEGIN").unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
     let receipt = StagedSnapshot(&conn)
         .stage_snapshot_bundle(&verified("run-a", &json!([text("user", "new")]), 0, 20))
         .unwrap();
@@ -498,6 +498,31 @@ fn staged_snapshot_participates_in_the_callers_transaction() {
     // The caller's evidence write fails after staging: everything rolls back.
     conn.execute_batch("ROLLBACK").unwrap();
     assert_eq!(bundle(&conn, "run-a"), before);
+}
+
+#[test]
+fn a_snapshot_is_not_staged_in_a_transaction_that_has_not_taken_the_write_lock() {
+    // Content blobs are only written by the connection that holds the write lock, so a
+    // deferred transaction (which locks at its first write, after reads the save
+    // depends on) is refused instead of silently weakening that rule.
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let before_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM run_messages", [], |row| row.get(0))
+        .unwrap();
+    conn.execute_batch("BEGIN").unwrap();
+    let error = StagedSnapshot(&conn)
+        .stage_snapshot_bundle(&verified("run-a", &json!([text("user", "x")]), 0, 20))
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("IMMEDIATE"),
+        "the refusal names the rule: {error:?}"
+    );
+    conn.execute_batch("ROLLBACK").unwrap();
+    let after_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM run_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(before_rows, after_rows);
 }
 
 #[test]
@@ -956,13 +981,9 @@ fn discovery_scans_headers_newest_first_and_resumes_after_restart() {
     let dir = TempDir::new().unwrap();
     let conn = open(&dir);
     for (run_id, at) in [("run-old", 10), ("run-mid", 20)] {
-        conn.execute(
-            "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, \
-             messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns) \
-             VALUES (?1, 'worker', 'worker', NULL, '{}', '[]', '[]', 'Done', 1, ?2)",
-            params![run_id, at],
-        )
-        .unwrap();
+        let mut record = crate::repo::run_messages::fixtures::record(run_id);
+        record.updated_at_ns = at;
+        crate::repo::run_messages::fixtures::insert(&conn, &record, 0);
     }
     conn.execute(
         "INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('run-note', 'only a note', 30)",

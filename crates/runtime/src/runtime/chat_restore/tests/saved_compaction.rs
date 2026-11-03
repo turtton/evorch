@@ -287,7 +287,7 @@ async fn missing_disabled_live_and_unsafe_saved_contexts_fail_closed() {
             .await
             .is_err()
     );
-    assert_eq!(snapshot(&fixture, run).record, record);
+    assert_eq!(snapshot(&fixture, run).record, normalized(record.clone()));
     descriptor.restorable = true;
     descriptor.non_restorable_reason = None;
     descriptor
@@ -312,7 +312,7 @@ async fn missing_disabled_live_and_unsafe_saved_contexts_fail_closed() {
             .await
             .is_err()
     );
-    assert_eq!(snapshot(&fixture, run).record, record);
+    assert_eq!(snapshot(&fixture, run).record, normalized(record.clone()));
     assert!(
         fixture
             .runtime

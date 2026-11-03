@@ -96,6 +96,16 @@ pub enum StorageError {
         /// このクレートがサポートする最大バージョンです。
         supported: u32,
     },
+    /// The database still has the format that stored a run's messages as one
+    /// column of `run_contexts` (or a conversion stopped half way). This build never
+    /// opens it: every evorch process must be stopped and the conversion command
+    /// run. Never retryable; the database is left untouched.
+    ConversionRequired {
+        /// `PRAGMA user_version` found, or 0 when the shape (not the version) is old.
+        found: u32,
+        /// What is old.
+        detail: &'static str,
+    },
     /// 容量上限を超過しました。
     LimitExceeded {
         /// 超過した上限の種別です。
@@ -170,6 +180,13 @@ impl fmt::Display for StorageError {
                 formatter,
                 "schema version {found} is newer than supported version {supported}"
             ),
+            Self::ConversionRequired { found, detail } => write!(
+                formatter,
+                "the database (schema version {found}) uses the old conversation storage \
+                 ({detail}); stop every evorch process and run the conversion command \
+                 (`evorch maintenance convert-bodies`, shipped with the release that \
+                 includes this storage format) before starting this build. Nothing was changed"
+            ),
             Self::LimitExceeded { limit, actual, max } => {
                 write!(
                     formatter,
@@ -233,6 +250,7 @@ impl std::error::Error for StorageError {
             Self::Migration { .. }
             | Self::StaleMutation
             | Self::SchemaTooNew { .. }
+            | Self::ConversionRequired { .. }
             | Self::LimitExceeded { .. }
             | Self::WriterClosed
             | Self::RawUsageEventNotPersisted

@@ -50,9 +50,85 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v37.sql"),
     include_str!("migrations/v38.sql"),
     include_str!("migrations/v39.sql"),
+    concat!(
+        include_str!("migrations/v40_drop.sql"),
+        include_str!("migrations/v40_prepare.sql")
+    ),
 ];
 
+/// Migration v40 without its last step: the new tables, the header columns and the
+/// triggers. The conversion command runs it on a v39 database that still has
+/// `messages_json`, while it moves the messages.
+pub(crate) const V40_PREPARE: &str = include_str!("migrations/v40_prepare.sql");
+
+/// The step of migration v40 that removes `run_contexts.messages_json`; the conversion
+/// command runs it once every run is converted.
+pub(crate) const V40_DROP: &str = include_str!("migrations/v40_drop.sql");
+
+/// The first schema version that stores a run's messages in `run_messages`. A database
+/// below it (and not empty) holds them in `run_contexts.messages_json`: this build
+/// never opens it. Only the conversion command may turn one into the current format.
+pub(crate) const MESSAGE_ROWS_VERSION: u32 = 40;
+
+/// Refuses a database that is not in the current conversation format, before anything
+/// writes to it (no pragma, no migration, no row). A new (empty) database passes: it is
+/// created in the current format by [`apply_migrations`].
+///
+/// A database whose `user_version` is current but whose `run_contexts` still has the old
+/// column, or lacks the header columns, is a conversion that stopped half way, and is
+/// refused the same way.
+pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageError> {
+    let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+    let supported =
+        u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
+    if found == 0 {
+        return Ok(());
+    }
+    if found > supported {
+        return Err(StorageError::SchemaTooNew { found, supported });
+    }
+    if found < MESSAGE_ROWS_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "a run's messages are one column of run_contexts",
+        });
+    }
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has = |name: &str| columns.iter().any(|column| column == name);
+    if has("messages_json") || !has("body_format") || !has("header_rev") {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "run_contexts is not in the header format (an interrupted conversion)",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
+    require_current_format(conn)?;
+    apply_pending(conn)
+}
+
+/// Applies every migration above the database's `user_version`, with no format check.
+/// Tests use it to build the old shapes by hand and then migrate them.
+#[cfg(any(test, feature = "unchecked-open"))]
+pub(crate) fn apply_migrations_unchecked(conn: &Connection) -> Result<(), StorageError> {
+    apply_pending(conn)
+}
+
+fn apply_pending(conn: &Connection) -> Result<(), StorageError> {
+    let supported =
+        u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
+    apply_up_to(conn, supported)
+}
+
+/// Applies the migrations above the database's `user_version` up to and including
+/// `target`, each in its own transaction, with no format check. The conversion command
+/// uses it to bring an older database to version 39 before it converts the messages.
+pub(crate) fn apply_up_to(conn: &Connection, target: u32) -> Result<(), StorageError> {
     let current = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
     let supported =
         u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
@@ -62,10 +138,16 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
             supported,
         });
     }
-
+    let target_index =
+        usize::try_from(target).map_err(|_| StorageError::OutOfRange("target migration"))?;
     let current_index = usize::try_from(current)
         .map_err(|_| StorageError::OutOfRange("current migration version"))?;
-    for (index, migration) in MIGRATIONS.iter().enumerate().skip(current_index) {
+    for (index, migration) in MIGRATIONS
+        .iter()
+        .enumerate()
+        .take(target_index)
+        .skip(current_index)
+    {
         let version =
             u32::try_from(index + 1).map_err(|_| StorageError::OutOfRange("migration version"))?;
         let transaction = conn
@@ -91,6 +173,10 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
         message: error.to_string(),
     }
 }
+
+/// Reverts migration v40 (see `tests/support/undo_v40.sql`); apply it before [`UNDO_V35`].
+#[cfg(test)]
+pub(crate) const UNDO_V40: &str = include_str!("../tests/support/undo_v40.sql");
 
 /// Reverts migration v35 on a database whose `threads` table is kept, for tests
 /// that rebuild an older schema by hand. `thread_index_runs` is not restored:

@@ -173,7 +173,7 @@ async fn authz_violation_on_restore_path_returns_message_denied() {
     // Corruption bypasses the writer: valid writer input is now parsed before redaction.
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET messages_json = 'invalid' WHERE run_id = ?1",
+        "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = ?1",
         [child.to_string()],
     )
     .unwrap();
@@ -194,7 +194,7 @@ async fn restore_of_corrupt_context_returns_typed_error() {
     // Corruption bypasses the writer: valid writer input is now parsed before redaction.
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET messages_json = 'invalid' WHERE run_id = ?1",
+        "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = ?1",
         [child.to_string()],
     )
     .unwrap();
@@ -269,7 +269,7 @@ async fn legacy_oracle_snapshot_restores_as_advisor_after_restart() {
         drop(first);
         let conn = rusqlite::Connection::open(&config.db_path).unwrap();
         conn.execute(
-            "UPDATE run_contexts SET role = ?2, config_json = ?3 WHERE run_id = ?1",
+            "UPDATE run_contexts SET role = ?2, config_json = ?3, config_len = length(CAST(?3 AS BLOB)) WHERE run_id = ?1",
             rusqlite::params![child.to_string(), legacy, descriptor.to_string()],
         )
         .unwrap();

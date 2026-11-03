@@ -12,7 +12,7 @@
 - `evorch maintenance backfill-events` は、既存イベントの `subkind` / `run_id` 列だけを埋める軽量コマンド。GUI/runtime の稼働中にも使用できる。DB の物理サイズ縮小や delta の集約は行わない。
 - `evorch maintenance compact-events` は、既定で読み取り専用 preview。実際の変換には `--apply` が必要。preview と apply の両方で、対象 DB を使うすべての GUI/runtime/reader を停止する。
 - `evorch maintenance vacuum` は、旧 DB の `auto_vacuum` を INCREMENTAL に一度だけ切り替える軽量コマンド（[auto_vacuum の一回限りの移行](#auto_vacuum-の一回限りの移行)）。イベントの変換は行わない。
-- いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない。compact は schema 31 以上、backfill は schema 30 以上が必要。古い DB は、まず停止中のバックアップを別途取得し、現行 evorch の通常起動による migration 後に正常終了してから保守する。
+- いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない。compact・backfill・`strip-task-progress-cursor` は、会話を `run_messages` に持つ現行の形式（schema 40）の DB だけを受け付ける。会話を `run_contexts.messages_json` に持つ旧形式の DB は `ConversionRequired` で拒否し、何も変更しない（`vacuum` はファイルの再構築だけで会話を解釈しないため対象外）。旧形式の DB は、すべての GUI/runtime を停止したうえで、変換コマンドを含むリリースの `evorch maintenance convert-bodies` で変換する。このコマンドは別の変更で追加する。
 
 以下の `$DB` は対象を確認した DB の絶対パスに置き換える。既定パスはユーザー設定ディレクトリ内の `evorch-events.db`。
 
@@ -37,7 +37,7 @@ JSON の `converted` / `reattributed`（run 帰属のなかった Orchestrator �
 
    `--batch-rows` は 1～100,000、既定 1,000（バックフィルとは既定値が異なる）。`sidebar.json` は GUI と同じユーザー設定ディレクトリから読み取り専用で参照する。別の GUI state を使っている場合や DB コピーを検証する場合は、preview と apply に同じ `--sidebar "/secure/path/sidebar.json"` を指定する。DB 外の送信済みユーザー入力も履歴の表示順に影響するため、その時刻を集約境界として使う。sidebar を特定・読み取り・parse できない場合（64 MiB 上限超過を含む）は、時刻差の推測をせず、delta 集約を無効化して stderr と JSON に警告する。他の削除・codec 圧縮・会計修復は続行できる。`delta_aggregation_enabled` / `sidebar_boundary_count` / `warnings` で状態を確認する。
 
-   `before` / `after` は実在する snapshot なので、preview では同一のまま。変換後の種別別行数は `projected_event_rows` を参照する。各工程の `input_rows` / `output_rows` / payload bytes、圧縮サンプル、`backfill.remaining`、`oversized_rows`、`required_free_space_bytes` を確認する。events の圧縮サンプルは、削除・集約を仮想的に適用した後に生存する平文 payload が対象（小さい delta の集約で 2 KiB を超える値も含む）。events と run_contexts それぞれ最大 1,000 値からの推定であり、DB の最終物理サイズを保証しない。
+   `before` / `after` は実在する snapshot なので、preview では同一のまま。変換後の種別別行数は `projected_event_rows` を参照する。各工程の `input_rows` / `output_rows` / payload bytes、圧縮サンプル、`backfill.remaining`、`oversized_rows`、`required_free_space_bytes` を確認する。events の圧縮サンプルは、削除・集約を仮想的に適用した後に生存する平文 payload が対象（小さい delta の集約で 2 KiB を超える値も含む）。events は最大 1,000 値からの推定であり、DB の最終物理サイズを保証しない。会話（`run_messages`）は保存時に圧縮済みなので、compact は書き換えない（JSON の `context_compression` / `compressed_context_values` は廃止した）。
 3. DB とバックアップの保存先に、少なくとも preview の `required_free_space_bytes`（元 DB・論理ページ・sidecar サイズを考慮した最大値の 4 倍）の空きを用意する。別 volume のバックアップ先にも保守的な 4 倍検査を行う。検査は容量を予約しないため、保守中に他の処理が空きを使い切らないようにする。
 4. 新規のバックアップ先を指定して apply する。
 
@@ -116,9 +116,31 @@ Provider retention の既定は 90 日。`--provider-retention-days N` で変更
 - **GUI の起動を妨げない。** リースは共有で取るので、稼働中の evorch とも、これから起動する evorch とも共存する。
 - **オフライン保守とは共存しない。** 保守がリースを排他で持っていると、`database is under offline maintenance` で何も読まずに拒否する。逆に、検査の実行中は保守を開始できない（保守側が「使用中」で失敗する）。
 
-- 既定（論理集計）は大きな DB でも数秒で終わる。`files`（DB/WAL/SHM のバイト数）、`tables`（表ごとの行数と文字列・BLOB 列の長さ合計）、`events`（kind/subkind 別の行数と payload バイト数。`subkind` 未補完の行は `(unbackfilled)`）、`run_contexts`（`messages`/`checkpoints` の平文バイト数と格納バイト数、圧縮済み行数）、`conversation_index`（状態別の `charged_bytes`）、`threads`（active/archived 数）を返す。
+- 既定（論理集計）は大きな DB でも数秒で終わる。`files`（DB/WAL/SHM のバイト数）、`tables`（表ごとの行数と文字列・BLOB 列の長さ合計）、`events`（kind/subkind 別の行数と payload バイト数。`subkind` 未補完の行は `(unbackfilled)`）、`run_contexts`（`messages` は header の平文バイト数と `run_messages.skeleton` の格納バイト数・圧縮済みメッセージ行数、`checkpoints` は header の値）、`conversation_index`（状態別の `charged_bytes`）、`threads`（active/archived 数）を返す。
 - `attribution` は events・run_contexts・会話索引を `active` / `archived` / `orphan`（run がどのスレッドにも解決されない、または解決先の `threads` 行が無い）/ `unattributed`（`run_id` なし）に分ける。run の帰属は GUI のスレッド表示と同じ規則（`thread_runs` の束縛、`chat:<Role>:<thread>` の run 名、スレッドが記録する root run、保存済み context と usage ledger の親リンクをたどる）で解決し、各行はちょうど 1 つのスレッドに数える。`top_threads` は events・run_contexts・索引の合計バイト数が大きい上位 `--top` 件（既定 10）のスレッドを `thread_id` で示す。
 - `--physical` は opt-in で遅い。`dbstat` による表・索引別のページサイズ（FTS の shadow 表は仮想表に集約）、`page_size`、`page_count`、`freelist_count`/`freelist_bytes`、`auto_vacuum`、`user_version` を加える。`freelist_bytes` と `unused_bytes` は縮小で回収できる余地の目安。
+
+## 会話の保存形式（`run_messages`）
+
+run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種の射影列）と、provider の
+メッセージ 1 件ごとの `run_messages` 行に保存する。2 KiB 以上の文字列値は内容アドレスの
+`content_blobs`（zstd、縮む場合だけ採用）に置き、骨組みにはトークンだけが残る。保存は
+変更のあったメッセージだけを書き、変わらないメッセージは metadata（`id`・`ordinal`・
+`msg_sha256`）の読み取りだけで済む。読み出しは、トークンを本文に戻して同じ直列化で
+連結するため、保存した JSON とバイト単位で一致する。
+
+- **旧形式は開かない。** `schema 40` 未満の DB（会話が `messages_json` 列にある）と、旧列が
+  残ったまま止まった変換の途中状態は、`Database::open`・読み取り専用接続・
+  `evorch inspect`・保守コマンドのいずれも `ConversionRequired` で拒否し、ファイルを変更しない。
+- **`config_json` は正規化して保存する。** JSON として同じ内容で、キーは辞書順になる。
+  メッセージと checkpoint 一覧のバイト一致の契約は変わらない。
+- **調査。** `evorch inspect run <run-id> --full` は本文を解決して返す。
+  `--messages <from>..<to>` は保存順の番号（System メッセージを含む。provenance の番号とは別）で
+  範囲だけを復元する。`evorch inspect check-bodies [--verify]` は、参照表と token の一致に加え、
+  メッセージの連番・件数・長さ・hash と header の射影列を検査する。
+- **削除。** アーカイブ削除の回収は `run_messages` を header より先に消す。1 回の transaction は
+  最大 500 行・skeleton 4 MiB・参照 2,000 行で、超える 1 件は排他フェーズへ送り、その run の
+  header も排他フェーズで子の後に消す。
 
 ## スレッドの期限削除（storage 基盤）
 

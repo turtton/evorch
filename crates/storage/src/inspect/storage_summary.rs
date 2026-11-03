@@ -146,12 +146,17 @@ impl Queries {
             "SELECT kind, subkind, run_id, OCTET_LENGTH(payload), {} FROM events",
             take("events")
         );
+        // The header row carries the lengths of the resolved documents; the stored size
+        // of the messages is the skeleton rows of the run, summed from the row headers.
         let run_contexts = format!(
-            "SELECT run_id, messages_len, OCTET_LENGTH(messages_json),
-                    typeof(messages_json) = 'blob', checkpoints_len,
-                    OCTET_LENGTH(checkpoints_json), typeof(checkpoints_json) = 'blob',
-                    OCTET_LENGTH(config_json), OCTET_LENGTH(host_inputs_json), {}
-             FROM run_contexts",
+            "SELECT c.run_id, c.messages_len,
+                    COALESCE((SELECT SUM(OCTET_LENGTH(m.skeleton)) FROM run_messages m
+                              WHERE m.run_id = c.run_id), 0),
+                    COALESCE((SELECT SUM(m.codec) FROM run_messages m
+                              WHERE m.run_id = c.run_id), 0),
+                    c.checkpoints_len, OCTET_LENGTH(c.checkpoints_json), 0,
+                    OCTET_LENGTH(c.config_json), OCTET_LENGTH(c.host_inputs_json), {}
+             FROM run_contexts c",
             take("run_contexts")
         );
         let index = format!(
