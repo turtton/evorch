@@ -1355,7 +1355,9 @@ fn a_database_replaced_after_it_was_checked_is_not_the_one_that_is_priced() {
         replace_with_link(path, &target);
     });
 
-    // When: the path is swapped for a link between the check and the read.
+    // When: the path is swapped for a link between the check and the read. The
+    // original is renamed, not deleted, so SQLite's own expansion of the
+    // descriptor's name still reaches it; a hostile in-window swap is out of scope.
     let cost = first_cost(&fixture.inspector().with_prices(prices()));
 
     // Then: the original database is priced (1M tokens at $2), not the planted one.
