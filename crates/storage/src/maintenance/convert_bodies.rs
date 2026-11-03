@@ -1,5 +1,6 @@
-//! `evorch maintenance convert-bodies`: the one-time offline conversion of a version 39
-//! database (a run's whole conversation in `run_contexts.messages_json`) to the current
+//! `evorch maintenance convert-bodies`: the one-time offline conversion of a database of
+//! version 33 to 39 (a run's whole conversation in `run_contexts.messages_json`; the
+//! migrations up to 39 are applied first, after the backup) to the current
 //! format (`run_messages` rows and `content_blobs`), including the removal of the old
 //! column.
 //!
@@ -15,9 +16,11 @@
 //!   reclaim must finish or the command stops.
 //! * Each run is converted in its own transaction, read back through the normal reader
 //!   and compared byte for byte with what the old column held before it commits.
-//! * `user_version` stays 39 until everything is converted, verified, the old column is
-//!   dropped and the database is vacuumed; only the last write publishes 40. A database
-//!   stopped half way is refused by a normal start and by this command alike.
+//! * A database older than 39 (33 at the oldest) gets migrations 34 to 39 first, one
+//!   transaction each, after the backup. `user_version` then stays 39 until everything is
+//!   converted, verified, the old column is dropped and the database is vacuumed; only
+//!   the last write publishes 40. A database stopped half way is refused by a normal start
+//!   and, once the conversion's own tables exist, by this command alike.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -30,7 +33,7 @@ use serde::Serialize;
 
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
-use crate::migrations::{MIGRATIONS, V40_DROP, V40_PREPARE};
+use crate::migrations::{MESSAGE_ROWS_VERSION, MIGRATIONS, V40_DROP, V40_PREPARE};
 
 use super::compact::{create_backup, integrity_check, parent};
 use super::vacuum::rebuild_incremental;
@@ -74,6 +77,8 @@ pub struct ConvertBodiesSummary {
     pub backup: Option<PathBuf>,
     /// `run_contexts` rows when the command started.
     pub source_runs: u64,
+    /// Migrations applied first to bring the database to version 39.
+    pub migrations_applied: u32,
     pub converted_runs: u64,
     pub retention: RetentionReport,
     /// Runs that cannot be restored and were stored in the serializer's key order, not
@@ -180,6 +185,7 @@ impl std::error::Error for ConvertBodiesFailure {}
 /// Test seams: the points of the command where a test may fail it or damage the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Point {
+    AfterMigrate,
     AfterPrepare,
     AfterRetention,
     Run(RunPoint),
@@ -495,6 +501,7 @@ fn run(
         already_converted: shape == Shape::Converted,
         backup: None,
         source_runs,
+        migrations_applied: 0,
         converted_runs: 0,
         retention: RetentionReport::default(),
         canonicalized_runs: CanonicalizedRuns::default(),
@@ -592,8 +599,25 @@ fn run(
     progress.backup = Some(backup.clone());
     summary.backup = Some(backup);
 
-    progress.enter("prepare");
     progress.mutated = true;
+    if source_schema < MESSAGE_ROWS_VERSION - 1 {
+        // The database is older than version 39: the ordinary migrations, in their own
+        // transactions, after the backup, then the conversion proper. A stop in between
+        // leaves a schema that is valid at its own version, but the way back is the same:
+        // restore the backup.
+        progress.enter("migrate");
+        crate::migrations::apply_up_to(&conn, MESSAGE_ROWS_VERSION - 1)?;
+        summary.migrations_applied = MESSAGE_ROWS_VERSION - 1 - source_schema;
+        checkpoint_passive(&conn)?;
+        gauge.sample();
+        if classify(&conn)? != Shape::Source {
+            return Err(invalid(
+                "the database is not a regular version 39 database after its migrations",
+            ));
+        }
+        hook(Point::AfterMigrate, &conn)?;
+    }
+    progress.enter("prepare");
     conn.execute_batch("BEGIN IMMEDIATE")?;
     conn.execute_batch(V40_PREPARE)?;
     conn.execute_batch("COMMIT")?;

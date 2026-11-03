@@ -14,6 +14,7 @@ use crate::repo::thread_retention::reclaim::{
 use crate::thread_retention::ReclaimBudget;
 
 use super::super::invalid;
+use super::source::table_exists;
 
 /// Transactions of one bounded reclaim call.
 const STEP_TRANSACTIONS: u32 = 64;
@@ -66,6 +67,10 @@ fn fingerprint(conn: &Connection) -> Result<String, StorageError> {
 /// job whose cursor this build does not read, and a deleted run that still has its row
 /// with no pending job to remove it. Nothing is repaired; the conversion does not start.
 pub(super) fn blockers(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    // A database older than version 35 has no deletions to reclaim.
+    if !table_exists(conn, "reclaim_jobs")? || !table_exists(conn, "run_tombstones")? {
+        return Ok(Vec::new());
+    }
     let mut found: Vec<String> = invalid_cursor_families(conn)?
         .into_iter()
         .map(|family| format!("family {family}: its reclaim cursor is not one this build reads"))

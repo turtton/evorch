@@ -17,8 +17,8 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   convert-bodies [--apply] [--backup <new-path>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
-convert-bodies: one-time conversion of a version 39 database (conversations in run_contexts.messages_json) to
-  the current format (run_messages and content_blobs), removing the old column. Stop ALL evorch processes first.
+convert-bodies: one-time conversion of a database of version 33 to 39 (conversations in run_contexts.messages_json;
+  migrations 34 to 39 are applied first, after the backup) to the current format (run_messages and content_blobs), removing the old column. Stop ALL evorch processes first.
   Default is a read-only preview (needs the .maintenance-lease file next to the database and an empty WAL; a
   non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
   run in its own transaction after comparing it byte for byte, then drops the column, vacuums and publishes

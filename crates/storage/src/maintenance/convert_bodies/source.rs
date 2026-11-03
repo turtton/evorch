@@ -50,6 +50,25 @@ const TARGET_TABLES: [&str; 3] = [
     "content_blob_refs_header",
 ];
 
+/// The oldest schema version the conversion brings up to 39 itself (the migrations from
+/// there are plain SQL). An older database is refused: it is not covered by a test.
+pub(super) const MIN_SOURCE_VERSION: u32 = 33;
+
+/// `user_version` of the database.
+pub(super) fn user_version(conn: &Connection) -> Result<u32, StorageError> {
+    Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
+}
+
+/// The condition that keeps out the runs a retention deleted. Before version 35 there are
+/// no tombstones, so there is nothing to keep out.
+pub(super) fn not_deleted(conn: &Connection) -> Result<&'static str, StorageError> {
+    Ok(if table_exists(conn, "run_tombstones")? {
+        "run_id NOT IN (SELECT run_id FROM run_tombstones)"
+    } else {
+        "1 = 1"
+    })
+}
+
 /// The most plain bytes (messages, checkpoints and configuration) of one run the
 /// conversion holds in memory. A run above it is reported by `preview` and refused by
 /// `--apply`; the limit is not raised to make a conversion pass.
@@ -93,7 +112,7 @@ pub(super) enum Shape {
     Converted,
 }
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
+pub(super) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StorageError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
         [name],
@@ -120,9 +139,9 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
-    if version + 1 != MESSAGE_ROWS_VERSION {
+    if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {
         return Err(invalid(format!(
-            "convert-bodies converts a version {} database; this one is version {version}",
+            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {}; this one is version {version}",
             MESSAGE_ROWS_VERSION - 1
         )));
     }
@@ -147,8 +166,9 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
             "run_contexts does not have the columns of a version 39 database",
         ));
     }
+    // An older database gets these tables from the migrations the conversion applies.
     for table in REQUIRED_TABLES {
-        if !table_exists(conn, table)? {
+        if version == MESSAGE_ROWS_VERSION - 1 && !table_exists(conn, table)? {
             return Err(invalid(format!(
                 "the version 39 table {table} is missing; the database is not a regular one"
             )));
@@ -261,7 +281,8 @@ pub(super) fn next_run(
 ) -> Result<Option<String>, StorageError> {
     let mut filter = String::new();
     if skip_deleted {
-        filter.push_str(" AND run_id NOT IN (SELECT run_id FROM run_tombstones)");
+        filter.push_str(" AND ");
+        filter.push_str(not_deleted(conn)?);
     }
     if within_limit {
         filter.push_str(&format!(" AND {RUN_BYTES_SQL} <= {}", run_limit()));
@@ -282,7 +303,8 @@ const RUN_BYTES_SQL: &str = "messages_len + checkpoints_len + length(CAST(config
 pub(super) fn oversized_runs(conn: &Connection) -> Result<Vec<String>, StorageError> {
     let mut statement = conn.prepare(&format!(
         "SELECT run_id FROM run_contexts WHERE {RUN_BYTES_SQL} > ?1 \
-         AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY run_id LIMIT 20"
+         AND {} ORDER BY run_id LIMIT 20",
+        not_deleted(conn)?
     ))?;
     let ids = statement.query_map([run_limit()], |row| row.get(0))?;
     Ok(ids.collect::<Result<_, _>>()?)
@@ -371,6 +393,8 @@ pub struct Analysis {
     pub deleted_runs_to_reclaim: u64,
     pub reclaim_jobs_pending: u64,
     pub reclaim_oversized_registered: u64,
+    /// Migrations the conversion applies first to bring the database to version 39.
+    pub pending_migrations: u32,
     /// Stored bytes of the old messages and checkpoints of the convertible runs.
     pub old_payload_stored_bytes: u64,
     /// Their plain bytes.
@@ -424,22 +448,39 @@ fn scalar(conn: &Connection, sql: &str) -> Result<u64, StorageError> {
 
 /// The counts that need no decoding.
 pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
-    let not_deleted = "run_id NOT IN (SELECT run_id FROM run_tombstones)";
+    let not_deleted = not_deleted(conn)?;
+    let reclaim = table_exists(conn, "reclaim_jobs")?;
+    let deleted_rows = if reclaim {
+        scalar(
+            conn,
+            "SELECT COUNT(*) FROM run_contexts \
+             WHERE run_id IN (SELECT run_id FROM run_tombstones)",
+        )?
+    } else {
+        0
+    };
     Ok(Analysis {
         convertible_runs: scalar(
             conn,
             &format!("SELECT COUNT(*) FROM run_contexts WHERE {not_deleted}"),
         )?,
-        deleted_runs_to_reclaim: scalar(
-            conn,
-            "SELECT COUNT(*) FROM run_contexts \
-             WHERE run_id IN (SELECT run_id FROM run_tombstones)",
-        )?,
-        reclaim_jobs_pending: scalar(
-            conn,
-            "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
-        )?,
-        reclaim_oversized_registered: scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?,
+        deleted_runs_to_reclaim: deleted_rows,
+        reclaim_jobs_pending: if reclaim {
+            scalar(
+                conn,
+                "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
+            )?
+        } else {
+            0
+        },
+        reclaim_oversized_registered: if reclaim {
+            scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?
+        } else {
+            0
+        },
+        pending_migrations: MESSAGE_ROWS_VERSION
+            - 1
+            - user_version(conn)?.min(MESSAGE_ROWS_VERSION - 1),
         old_payload_stored_bytes: scalar(
             conn,
             &format!(
@@ -528,7 +569,12 @@ pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis
                 .saturating_mul(GROWTH_PER_BLOB),
         )
         .saturating_add(analysis.convertible_runs.saturating_mul(GROWTH_PER_RUN))
-        .saturating_add(GROWTH_FIXED);
+        .saturating_add(GROWTH_FIXED)
+        .saturating_add(if analysis.pending_migrations > 0 {
+            GROWTH_MIGRATIONS
+        } else {
+            0
+        });
     Ok(analysis)
 }
 
@@ -539,6 +585,8 @@ const GROWTH_PER_BLOB: u64 = 160;
 const GROWTH_PER_RUN: u64 = 2_048;
 /// The tables and indexes the conversion creates, whatever the data.
 const GROWTH_FIXED: u64 = 512 * 1024;
+/// What migrations 34 to 39 add (new tables, one rebuilt index table), when they run first.
+const GROWTH_MIGRATIONS: u64 = 32 * 1024 * 1024;
 
 fn count_bodies(
     run: &OldRun,

@@ -18,19 +18,23 @@ fn lease(path: &Path) {
     drop(offline::lease_file(path).unwrap());
 }
 
-/// A database exactly as migration v39 leaves it, built by replaying the real migrations.
-fn v39(dir: &Path) -> PathBuf {
+/// A database exactly as migration `version` leaves it, built by replaying the real migrations.
+fn database_at(dir: &Path, version: usize) -> PathBuf {
     let path = dir.join("events.db");
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "auto_vacuum", 2).unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-    for migration in &MIGRATIONS[..39] {
+    for migration in &MIGRATIONS[..version] {
         conn.execute_batch(migration).unwrap();
     }
-    conn.pragma_update(None, "user_version", 39).unwrap();
+    conn.pragma_update(None, "user_version", version).unwrap();
     drop(conn);
     lease(&path);
     path
+}
+
+fn v39(dir: &Path) -> PathBuf {
+    database_at(dir, 39)
 }
 
 struct Run {
@@ -104,8 +108,12 @@ fn conversation(tag: &str) -> Value {
 }
 
 fn seeded() -> (tempfile::TempDir, PathBuf, Vec<Run>) {
+    seeded_at(39)
+}
+
+fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     let dir = tempfile::tempdir().unwrap();
-    let path = v39(dir.path());
+    let path = database_at(dir.path(), version);
     let mut big = plain_run("run-big", &conversation("big"), 7);
     big.checkpoints = serde_json::to_string(&json!([
         {"summary": {"role": "assistant", "content": [{"type": "text", "text": long("summary", 4_000)}]}, "end": 3}
@@ -1342,4 +1350,147 @@ fn an_estimate_the_free_space_cannot_cover_refuses_before_any_change() {
 
     // Then: the conversion goes through, so the refusal came from the estimate alone.
     assert_eq!(converted.unwrap().converted_runs, 1);
+}
+
+#[test]
+fn a_version_33_database_is_migrated_and_converted_by_the_one_command() {
+    // Given: a database at version 33, as the user's is.
+    let (_dir, path, runs) = seeded_at(33);
+    let before = files(&path);
+
+    // Then: a normal start refuses it without touching it (it does not migrate it first).
+    let error = Database::open(&StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .err()
+    .unwrap();
+    assert!(
+        matches!(error, StorageError::ConversionRequired { found: 33, .. }),
+        "{error}"
+    );
+    assert_eq!(files(&path), before);
+
+    // When: previewed (it reads the old schema as it is) and applied.
+    let analysis = preview(&path).unwrap().analysis.unwrap();
+    assert_eq!(
+        (analysis.pending_migrations, analysis.convertible_runs),
+        (6, 4)
+    );
+    assert_eq!(files(&path), before);
+    let summary = apply(&path).unwrap();
+
+    // Then: migrations 34 to 39 ran after the backup, every run converted, and the result
+    // is a current database that a normal start accepts.
+    assert_eq!((summary.source_schema, summary.target_schema), (33, 40));
+    assert_eq!(summary.migrations_applied, 6);
+    assert_eq!(summary.converted_runs, 4);
+    assert!(summary.stage_elapsed_seconds.contains_key("migrate"));
+    assert_eq!(version(&path), 40);
+    let conn = Connection::open(&path).unwrap();
+    for run in &runs {
+        assert_eq!(
+            read(&conn, run.id).messages_json,
+            run.messages,
+            "{}",
+            run.id
+        );
+    }
+    assert_eq!(single(&conn, "SELECT COUNT(*) FROM run_tombstones"), 0);
+    drop(conn);
+    Database::open(&StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    // The backup is the database as it was: version 33, the old column, no new table.
+    let backup = summary.backup.unwrap();
+    assert_eq!(version(&backup), 33);
+    assert!(columns(&backup).contains(&"messages_json".to_owned()));
+    let backup_tables: i64 = single(
+        &Connection::open(&backup).unwrap(),
+        "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('run_tombstones', 'content_blobs')",
+    );
+    assert_eq!(backup_tables, 0);
+}
+
+#[test]
+fn a_stop_after_the_migrations_is_recovered_from_the_backup_like_any_other() {
+    // Given: a version 33 database whose conversion is stopped right after migration 39.
+    let (_dir, path, runs) = seeded_at(33);
+    let failure = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+        },
+        &mut |point, _| {
+            if point == Point::AfterMigrate {
+                return Err(StorageError::Serialization("injected".into()));
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
+    // Then: the report says the database changed, the backup is the version 33 database,
+    // and a normal start still refuses what is left.
+    assert_eq!(failure.stage, "migrate");
+    assert!(failure.restore_required);
+    let backup = failure.backup.clone().unwrap();
+    assert_eq!(version(&backup), 33);
+    assert!(
+        Database::open(&StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .is_err()
+    );
+
+    // When: the backup is restored and the command run again.
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    fs::copy(&backup, &path).unwrap();
+    let summary = apply(&path).unwrap();
+
+    // Then: it converts from the start.
+    assert_eq!((summary.source_schema, summary.converted_runs), (33, 4));
+    let conn = Connection::open(&path).unwrap();
+    for run in &runs {
+        assert_eq!(read(&conn, run.id).messages_json, run.messages);
+    }
+}
+
+#[test]
+fn an_older_database_and_unconvertible_data_in_a_version_33_one_are_refused_unchanged() {
+    // Given: a database one version below the oldest the command takes.
+    let (_dir, path, _) = seeded_at(33);
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", 32).unwrap();
+    drop(conn);
+    let before = files(&path);
+
+    // When/Then: both modes refuse it and nothing changes.
+    for run in [preview(&path), apply(&path)] {
+        let failure = run.unwrap_err();
+        assert!(failure.detail.contains("version 33 to 39"), "{failure}");
+        assert!(!failure.restore_required);
+    }
+    assert_eq!(files(&path), before);
+
+    // Given: a version 33 database with a restorable run that is not in the serializer's
+    // form.
+    let (_dir, path, _) = seeded_at(33);
+    let conn = Connection::open(&path).unwrap();
+    insert(&conn, &old_key_order_run("run-old-order", true));
+    drop(conn);
+    let before = files(&path);
+
+    // When/Then: apply refuses on the analysis of the old schema, before the backup and
+    // before any migration.
+    let failure = apply(&path).unwrap_err();
+    assert_eq!(failure.stage, "analyze");
+    assert!(failure.backup.is_none() && !failure.restore_required);
+    assert_eq!(files(&path), before);
 }
