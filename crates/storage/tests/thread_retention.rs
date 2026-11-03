@@ -3171,3 +3171,232 @@ fn a_job_waiting_for_the_exclusive_phase_never_starves_the_jobs_behind_it() {
         1
     );
 }
+
+const MESSAGE_ROW: &str = "INSERT INTO run_messages(run_id, ordinal, msg_sha256, plain_len, codec, skeleton) \
+     VALUES ('{run}', {ordinal}, zeroblob(32), {len}, 0, zeroblob({len}))";
+
+fn message(f: &Fixture, run: &str, ordinal: usize, len: usize) {
+    f.sql(
+        &MESSAGE_ROW
+            .replace("{run}", run)
+            .replace("{ordinal}", &ordinal.to_string())
+            .replace("{len}", &len.to_string()),
+    );
+}
+
+/// Runs bounded reclaim steps until every job has either finished or waits for the
+/// exclusive phase; returns the last progress.
+fn bounded_steps(storage: &Storage) -> storage::thread_retention::ReclaimProgress {
+    let mut last = None;
+    for _ in 0..100 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        let finished = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if finished {
+            break;
+        }
+    }
+    last.unwrap()
+}
+
+fn confirm_all(f: &Fixture, threads: &[&str]) {
+    let database = f.database();
+    let input = sidebar(threads, &[]);
+    settle(&database, &input, &policy(), BIG);
+    for thread in threads {
+        assert!(matches!(
+            finalize(&database, thread, &input),
+            FinalizeOutcome::Confirmed(_)
+        ));
+    }
+}
+
+#[test]
+fn a_small_header_with_a_huge_message_is_worked_off_child_first_and_never_stops_at_the_foreign_key()
+{
+    // Given: family A whose header is small but one of whose messages is 5 MiB, and
+    // family Z whose header alone is 5 MiB; both are confirmed.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    message(&f, "ra", 0, 100);
+    message(&f, "ra", 1, 5 * 1024 * 1024);
+    message(&f, "ra", 2, 100);
+    f.thread("Z", None, Some("rz"), None);
+    f.run("rz", None, Some("Z"), "chat:Worker:Z");
+    f.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(5242880) WHERE run_id = 'rz'");
+    confirm_all(&f, &["A", "Z"]);
+    let storage = Storage::open(config(&f.path)).unwrap();
+
+    // When: the bounded steps run until no job has bounded work left.
+    let progress = bounded_steps(&storage);
+    storage.close();
+
+    // Then: the small messages went, the 5 MiB one is registered, and A's header is
+    // registered behind it instead of being deleted into the foreign key.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_messages WHERE run_id = 'ra'"),
+        1
+    );
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM reclaim_oversized WHERE family_key IN (SELECT family_key FROM run_tombstones WHERE run_id = 'ra') \
+             AND tbl = 'run_messages'"
+        ),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_contexts'"),
+        2
+    );
+    assert_eq!(progress.jobs_waiting_exclusive, 2);
+
+    // When: the exclusive phase runs with a zero budget, one registration per call.
+    let database = f.database();
+    let first = database.reclaim_oversized_step(0).unwrap();
+
+    // Then: the first call made progress by deleting the huge child; A's header waits.
+    assert!(first.rows > 0, "{first:?}");
+    assert!(first.last_error.is_none(), "{first:?}");
+    let mut calls = 1;
+    let mut last = first;
+    while last.remaining > 0 {
+        assert!(calls < 20, "the exclusive phase must converge: {last:?}");
+        last = database.reclaim_oversized_step(0).unwrap();
+        assert!(last.last_error.is_none(), "{last:?}");
+        assert!(
+            last.rows > 0,
+            "every call with work waiting makes progress: {last:?}"
+        );
+        calls += 1;
+    }
+
+    // And: everything of both families is gone, nothing dangles, both jobs are done.
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_messages"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_contexts"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+    assert_eq!(database.reclaim_summary().unwrap().jobs_db_done, 2);
+}
+
+#[test]
+fn an_interrupted_exclusive_phase_resumes_where_it_stopped() {
+    // Given: a confirmed family with two huge messages and a trigger that fails the
+    // header's delete.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    message(&f, "ra", 0, 5 * 1024 * 1024);
+    message(&f, "ra", 1, 5 * 1024 * 1024);
+    confirm_all(&f, &["A"]);
+    let storage = Storage::open(config(&f.path)).unwrap();
+    bounded_steps(&storage);
+    storage.close();
+    let database = f.database();
+    f.sql(
+        "CREATE TRIGGER inject BEFORE DELETE ON run_contexts BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    );
+
+    // When: the phase runs until the failing header delete.
+    let mut failure = None;
+    for _ in 0..10 {
+        let progress = database.reclaim_oversized_step(0).unwrap();
+        if progress.last_error.is_some() {
+            failure = progress.last_error;
+            break;
+        }
+    }
+
+    // Then: both messages are already gone and only the header is left to retry.
+    assert!(failure.is_some_and(|error| error.contains("injected")));
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_messages"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_contexts"), 1);
+    f.sql("DROP TRIGGER inject;");
+    let done = database.reclaim_oversized_step(0).unwrap();
+    assert_eq!((done.remaining, done.last_error), (0, None));
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_contexts"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[test]
+fn a_message_naming_more_blobs_than_one_step_may_cascade_waits_for_the_exclusive_phase() {
+    // Given: a confirmed family whose only message is tiny but names 2,001 blobs.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    message(&f, "ra", 0, 100);
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 2001)
+         INSERT INTO content_blobs(hash, byte_len, codec, data) SELECT randomblob(32), 1, 0, x'41' FROM n;
+         INSERT INTO content_blob_refs_message(message_id, blob_id)
+         SELECT (SELECT id FROM run_messages WHERE run_id = 'ra'), id FROM content_blobs;",
+    );
+    confirm_all(&f, &["A"]);
+    let storage = Storage::open(config(&f.path)).unwrap();
+
+    // When: the bounded steps run until no job has bounded work left.
+    bounded_steps(&storage);
+    storage.close();
+
+    // Then: the message and its header wait; the exclusive phase then removes them and
+    // the cascade queues every blob for the collector.
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_messages'"),
+        1
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_messages"), 1);
+    let database = f.database();
+    let mut last = database.reclaim_oversized_step(0).unwrap();
+    for _ in 0..10 {
+        if last.remaining == 0 {
+            break;
+        }
+        last = database.reclaim_oversized_step(0).unwrap();
+    }
+    assert_eq!(last.remaining, 0, "{last:?}");
+    assert_eq!(f.count("SELECT COUNT(*) FROM run_messages"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM content_blob_refs_message"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM content_blob_gc_queue"), 2001);
+    assert_eq!(f.count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[test]
+fn the_fence_covers_message_rows_and_a_deleted_runs_conversation_stays_hidden() {
+    // Given: a confirmed family whose run has a message row, not yet reclaimed.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    message(&f, "ra", 0, 100);
+    f.run("live", None, None, "other");
+    confirm_all(&f, &["A"]);
+    let reject = |sql: &str| {
+        let error = f.conn.execute_batch(sql).unwrap_err().to_string();
+        assert!(error.contains("tombstoned"), "{sql}: {error}");
+    };
+
+    // When/Then: nothing can be added to, rewritten in, or moved out of the deleted run.
+    reject(
+        "INSERT INTO run_messages(run_id, ordinal, msg_sha256, plain_len, codec, skeleton) \
+         VALUES ('ra', 5, zeroblob(32), 1, 0, x'7b7d')",
+    );
+    reject("UPDATE run_messages SET skeleton = x'7b7d' WHERE run_id = 'ra'");
+    reject("UPDATE run_messages SET run_id = 'live' WHERE run_id = 'ra'");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_messages WHERE run_id = 'live'"),
+        0
+    );
+
+    // And: readers see no conversation of it before any row is reclaimed.
+    let database = f.database();
+    assert!(database.run_context("ra").unwrap().is_none());
+    assert!(database.checkpoint_run_messages("ra").unwrap().is_none());
+    assert!(
+        database
+            .run_contexts_for(&["ra".to_owned()])
+            .unwrap()
+            .is_empty()
+    );
+}

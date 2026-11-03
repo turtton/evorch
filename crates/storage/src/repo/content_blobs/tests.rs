@@ -702,3 +702,19 @@ mod check {
         assert_eq!(rows, 3);
     }
 }
+
+#[test]
+fn the_migration_creates_each_production_reference_table_in_the_shape_of_the_template() {
+    // The migration text is written by hand; the template is what the collector and
+    // the check rely on, so the two must say the same thing.
+    let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let migration = squash(include_str!("../../migrations/v40.sql"));
+    for owner in crate::body_store::PRODUCTION_OWNERS {
+        let template = squash(&owner.ref_table_ddl());
+        assert!(
+            migration.contains(&template),
+            "{} differs from its template:\n{template}",
+            owner.ref_table
+        );
+    }
+}

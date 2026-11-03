@@ -127,7 +127,7 @@ pub(super) fn check_schema(conn: &Connection, minimum: u32) -> Result<(), Storag
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < minimum || version as usize > crate::migrations::MIGRATIONS.len() {
         return Err(invalid(
-            "unsupported maintenance schema; use current evorch to migrate first",
+            "unsupported maintenance schema; a database in the old conversation format needs the conversion command first (a normal start never converts it)",
         ));
     }
     Ok(())

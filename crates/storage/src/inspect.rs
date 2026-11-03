@@ -96,7 +96,7 @@ impl Database {
         crate::migrations::require_current_format(&conn)?;
         if found < supported {
             return Err(StorageError::Serialization(format!(
-                "schema version {found} is older than {supported}; open it once with the current evorch to migrate"
+                "schema version {found} is older than {supported}; stop every evorch process and run the conversion command before inspecting it"
             )));
         }
         Ok(Self { conn })

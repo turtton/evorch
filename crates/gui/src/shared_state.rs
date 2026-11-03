@@ -241,14 +241,22 @@ impl FeedPoller {
                         return None;
                     }
                 };
-                let summaries = self.db.terminal_summaries(&run_ids).unwrap_or_default();
+                // Only the phase is shown, so the header is enough: no message is read, and
+                // a failure is reported instead of looking like "no run has a phase".
+                let headers = match self.db.run_context_headers(&run_ids) {
+                    Ok(headers) => headers,
+                    Err(error) => {
+                        tracing::warn!(%error, thread_id, "released thread run headers unreadable");
+                        return None;
+                    }
+                };
                 let runs = run_ids
                     .into_iter()
                     .map(|run_id| ReleasedRun {
-                        terminal_phase: summaries
+                        terminal_phase: headers
                             .iter()
-                            .find(|summary| summary.run_id == run_id)
-                            .map(|summary| summary.terminal_phase.clone()),
+                            .find(|header| header.run_id == run_id)
+                            .map(|header| header.terminal_phase.clone()),
                         run_id,
                     })
                     .collect();

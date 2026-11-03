@@ -445,7 +445,7 @@ fn message_cost(tx: &Connection, id: i64, size: u64) -> Result<(u64, u64), Stora
     Ok((size, refs))
 }
 
-/// Deletes the run's messages in bounded batches: at most [`RECLAIM_MESSAGE_ROWS`] rows,
+/// Deletes the run's messages in bounded batches (`cursor.after` is the next ordinal to look at): at most [`RECLAIM_MESSAGE_ROWS`] rows,
 /// [`RECLAIM_ROW_BUDGET`] stored bytes and [`RECLAIM_MESSAGE_REFS`] reference rows (which
 /// the cascade deletes and queues) per transaction. A message above either limit alone
 /// is registered for the exclusive phase and skipped; the header then waits for it.
@@ -461,7 +461,7 @@ fn run_messages(
     let rows: Vec<(i64, i64, u64)> = {
         let mut statement = tx.prepare_cached(
             "SELECT id, ordinal, OCTET_LENGTH(skeleton) FROM run_messages \
-             WHERE run_id = ?1 AND ordinal > ?2 ORDER BY ordinal LIMIT ?3",
+             WHERE run_id = ?1 AND ordinal >= ?2 ORDER BY ordinal LIMIT ?3",
         )?;
         let limit = i64::try_from(RECLAIM_MESSAGE_ROWS).unwrap_or(i64::MAX);
         let rows = statement.query_map(params![run, cursor.after, limit], |row| {
@@ -476,13 +476,13 @@ fn run_messages(
     let mut ids = Vec::new();
     let mut bytes = 0_u64;
     let mut refs = 0_u64;
-    let mut last = cursor.after;
+    let mut next = cursor.after;
     for (id, ordinal, size) in rows {
         let (size, count) = message_cost(tx, id, size)?;
         let too_big = size > RECLAIM_ROW_BUDGET || count > RECLAIM_MESSAGE_REFS;
         if ids.is_empty() && too_big {
             register_oversized(tx, family, "run_messages", &id.to_string(), size)?;
-            cursor.after = ordinal;
+            cursor.after = ordinal + 1;
             return Ok(Work::default());
         }
         if too_big
@@ -494,13 +494,13 @@ fn run_messages(
         ids.push(id);
         bytes += size;
         refs += count;
-        last = ordinal;
+        next = ordinal + 1;
     }
     tx.execute(
         "DELETE FROM run_messages WHERE id IN (SELECT value FROM json_each(?1))",
         [json_ids(&ids)?],
     )?;
-    cursor.after = last;
+    cursor.after = next;
     Ok(Work {
         rows: ids.len() as u64,
         bytes,
