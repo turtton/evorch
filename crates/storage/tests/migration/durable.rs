@@ -27,7 +27,7 @@ fn v8_upgrade_preserves_task_links_and_defaults() {
     connection.execute_batch("INSERT INTO sessions(id,status,created_at_ns,updated_at_ns) VALUES('s','running',1,2); INSERT INTO tasks VALUES('a','s','running',10,20),('b','s','blocked',30,40); INSERT INTO task_links VALUES('a','b');").unwrap();
     drop(connection);
     // When: opening upgrades with foreign keys enabled.
-    let db = Database::open(&config_for(&path)).unwrap();
+    let db = Database::open_unchecked(&config_for(&path)).unwrap();
     // Then: records, links and constraints survive, and new fields have defaults.
     let task = db.task("a").unwrap().unwrap();
     assert_eq!(task.session_id.as_deref(), Some("s"));

@@ -74,7 +74,7 @@ async fn delegate_uses_explicit_worker_target() {
 }
 
 #[tokio::test]
-async fn delegate_rejects_interactive_without_background() {
+async fn delegate_accepts_interactive_without_background() {
     // Given: both absent and explicitly false background flags.
     let model = Arc::new(ScriptedModel::new([]));
     model.add_keyed("ROOT", [
@@ -92,24 +92,31 @@ async fn delegate_rejects_interactive_without_background() {
         )
         .await;
     let runtime = runtime_with(Arc::clone(&model));
-    // When: both invalid requests cross the argument boundary.
+    // When: foreground interactive delegates finish their initial turns.
     let parent =
         runtime.delegate_background(Role::Orchestrator, "ROOT".into(), RunConfig::default());
     assert_eq!(runtime.wait(parent).await, Ok(AgentRunPhase::Done));
-    // Then: no child is created and both errors identify the invalid combination.
-    assert_eq!(runtime.list_agents().len(), 1);
+    // Then: omitted and explicitly false background both return idle-turn output.
+    assert_eq!(runtime.list_agents().len(), 3);
     let observed = model.observed().await;
     for id in ["absent", "false"] {
         let (content, failed) = observed
             .iter()
             .find_map(|turn| tool_result(turn, id))
-            .expect("invalid result");
-        assert!(failed, "{content}");
-        assert!(content.starts_with("invalid arguments:"), "{content}");
-        assert!(
-            content.contains("interactive") && content.contains("background"),
-            "{content}"
-        );
+            .expect("interactive delegate result");
+        assert!(!failed, "{content}");
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(result["phase"], "Waiting");
+        assert_eq!(result["status"], "turn_completed");
+        assert_eq!(result["output"], "child");
+    }
+    for child in runtime
+        .list_agents()
+        .into_iter()
+        .filter(|run| run.run_id != parent)
+    {
+        runtime.cancel(child.run_id).unwrap();
+        runtime.wait(child.run_id).await.unwrap();
     }
 }
 

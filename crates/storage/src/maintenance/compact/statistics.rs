@@ -52,17 +52,6 @@ pub struct CompressionSample {
 }
 
 impl CompressionSample {
-    fn add(&mut self, plain_bytes: usize, stored_bytes: Option<usize>) {
-        self.eligible_values += 1;
-        self.eligible_bytes += plain_bytes as u64;
-        if let Some(stored) = stored_bytes {
-            self.sampled_values += 1;
-            self.sampled_plain_bytes += plain_bytes as u64;
-            self.sampled_stored_bytes += stored as u64;
-            self.sampled_compressed_values += u64::from(stored < plain_bytes);
-        }
-    }
-
     fn finish(&mut self) {
         if self.sampled_values > 0 {
             self.estimated_compressed_values =
@@ -167,10 +156,22 @@ pub(super) fn snapshot(conn: &Connection, path: &Path) -> Result<Snapshot, Stora
         count.rows += 1;
         count.payload_bytes += row.get::<_, u64>(2)?;
     }
-    let (run_context_values, run_context_stored_bytes) = conn.query_row(
-        "SELECT COUNT(*)*2, COALESCE(SUM(OCTET_LENGTH(messages_json)+OCTET_LENGTH(checkpoints_json)),0) FROM run_contexts",
-        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    // Message skeletons are compressed when they are written and the header documents
+    // hold tokens, so the compaction has nothing to rewrite here; the figures only
+    // show how much the conversation rows occupy.
+    let (messages, message_bytes): (u64, u64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let (headers, header_bytes): (u64, u64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json)), 0) \
+         FROM run_contexts",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (run_context_values, run_context_stored_bytes) =
+        (messages + headers, message_bytes + header_bytes);
     Ok(Snapshot {
         file_bytes: crate::db::file_sizes(path)?,
         events: counts,
@@ -284,79 +285,4 @@ pub(super) fn compress_events(
         }
     }
     Ok((sample.finish(), converted))
-}
-
-pub(super) fn compress_contexts(
-    conn: &Connection,
-    options: &CompactOptions,
-) -> Result<(CompressionSample, u64), StorageError> {
-    let mut sample = CompressionSample::default();
-    let mut converted = 0;
-    // TEXT keys also keep the cursor stable for WITHOUT ROWID stores.
-    let mut after: Option<String> = None;
-    loop {
-        let batch = {
-            let mut stmt = conn.prepare(
-                "SELECT run_id,messages_json,checkpoints_json FROM run_contexts
-                 WHERE (?1 IS NULL OR run_id>?1) ORDER BY run_id LIMIT ?2",
-            )?;
-            let mut rows = stmt.query(params![after, options.batch_rows as i64])?;
-            let mut batch = Vec::new();
-            let mut batch_bytes = 0;
-            while let Some(row) = rows.next()? {
-                let plain = |index| -> rusqlite::Result<Option<String>> {
-                    match row.get_ref(index)? {
-                        ValueRef::Text(text) if text.len() >= codec::MIN_COMPRESSED_BYTES => {
-                            row.get(index).map(Some)
-                        }
-                        _ => Ok(None),
-                    }
-                };
-                let messages = plain(1)?;
-                let checkpoints = plain(2)?;
-                batch_bytes += messages.as_ref().map_or(0, String::len)
-                    + checkpoints.as_ref().map_or(0, String::len);
-                batch.push((row.get::<_, String>(0)?, messages, checkpoints));
-                if batch_bytes >= 16 * 1024 * 1024 {
-                    break;
-                }
-            }
-            batch
-        };
-        if batch.is_empty() {
-            break;
-        }
-        let tx = options
-            .apply
-            .then(|| conn.unchecked_transaction())
-            .transpose()?;
-        for (run, messages, checkpoints) in batch {
-            after = Some(run.clone());
-            for (column, length, plain) in [
-                ("messages_json", "messages_len", messages),
-                ("checkpoints_json", "checkpoints_len", checkpoints),
-            ] {
-                let Some(plain) = plain else { continue };
-                let should_sample = sample.sampled_values < 1_000;
-                let encoded = (options.apply || should_sample).then(|| codec::encode(&plain));
-                sample.add(
-                    plain.len(),
-                    should_sample.then(|| encoded.as_ref().unwrap().stored_len()),
-                );
-                if let (Some(tx), Some(codec::Encoded::Compressed(_))) = (&tx, &encoded) {
-                    tx.execute(
-                        &format!("UPDATE run_contexts SET {column}=?2,{length}=?3 WHERE run_id=?1"),
-                        params![run, encoded.as_ref().unwrap(), plain.len() as i64],
-                    )?;
-                    converted += 1;
-                }
-            }
-        }
-        if let Some(tx) = tx {
-            tx.commit()?;
-            checkpoint(conn)?;
-        }
-    }
-    sample.finish();
-    Ok((sample, converted))
 }

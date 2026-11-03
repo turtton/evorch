@@ -54,6 +54,8 @@
 //! ```
 
 pub mod artifact_refs;
+mod body_ref;
+mod body_store;
 mod codec;
 pub mod config;
 mod db;

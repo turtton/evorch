@@ -1,4 +1,5 @@
-//! Large run snapshots are stored compressed; reads, receipts and limits still see plaintext.
+//! Large run snapshots keep their long strings as compressed content blobs; reads, receipts
+//! and limits still see plaintext.
 
 use serde_json::json;
 use storage::thread_index::snapshot_sha256;
@@ -49,20 +50,23 @@ fn open(temp: &TempDir) -> (Storage, StorageConfig) {
     (Storage::open(config.clone()).unwrap(), config)
 }
 
-fn column(config: &StorageConfig, run_id: &str, sql: &str) -> rusqlite::types::Value {
+fn scalar(config: &StorageConfig, sql: &str) -> i64 {
     rusqlite::Connection::open(&config.db_path)
         .unwrap()
-        .query_row(sql, [run_id], |row| row.get(0))
+        .query_row(sql, [], |row| row.get(0))
         .unwrap()
 }
 
 #[test]
-fn nine_mebibyte_snapshot_is_compressed_and_comes_back_byte_identical() {
+fn nine_mebibyte_snapshot_is_stored_as_small_blobs_and_comes_back_byte_identical() {
     // Given: a snapshot of more than 9 MiB.
     let temp = TempDir::new().unwrap();
     let (storage, config) = open(&temp);
     let input = record("run-big", messages(9 * 1024 * 1024));
     assert!(input.messages_json.len() > 9 * 1024 * 1024);
+    let message_count = serde_json::from_str::<Vec<serde_json::Value>>(&input.messages_json)
+        .unwrap()
+        .len();
 
     // When: it is saved and reloaded.
     let receipt = storage.handle().upsert_run_context_receipt(&input).unwrap();
@@ -72,35 +76,24 @@ fn nine_mebibyte_snapshot_is_compressed_and_comes_back_byte_identical() {
         .unwrap()
         .unwrap();
 
-    // Then: the stored column is a much smaller BLOB, the plaintext length is recorded,
-    // and the snapshot, its digest and its receipt are unchanged.
-    let class = column(
-        &config,
-        "run-big",
-        "SELECT typeof(messages_json) FROM run_contexts WHERE run_id = ?1",
+    // Then: one row per message, whose long strings are blobs far smaller than the
+    // text, the plaintext length is recorded in the header, and the snapshot, its digest
+    // and its receipt are unchanged.
+    assert_eq!(
+        scalar(&config, "SELECT COUNT(*) FROM run_messages"),
+        i64::try_from(message_count).unwrap()
     );
-    assert_eq!(class, rusqlite::types::Value::Text("blob".into()));
-    let stored: i64 = match column(
-        &config,
-        "run-big",
-        "SELECT length(messages_json) FROM run_contexts WHERE run_id = ?1",
-    ) {
-        rusqlite::types::Value::Integer(length) => length,
-        other => panic!("{other:?}"),
-    };
-    let recorded: i64 = match column(
-        &config,
-        "run-big",
-        "SELECT messages_len FROM run_contexts WHERE run_id = ?1",
-    ) {
-        rusqlite::types::Value::Integer(length) => length,
-        other => panic!("{other:?}"),
-    };
+    let recorded = scalar(&config, "SELECT messages_len FROM run_contexts");
     assert_eq!(
         usize::try_from(recorded).unwrap(),
         input.messages_json.len()
     );
-    assert!(stored < recorded / 10, "{stored} vs {recorded}");
+    let blobs = scalar(&config, "SELECT SUM(length(data)) FROM content_blobs");
+    let skeletons = scalar(&config, "SELECT SUM(length(skeleton)) FROM run_messages");
+    assert!(
+        blobs + skeletons < recorded / 10,
+        "{blobs}+{skeletons} vs {recorded}"
+    );
     assert_eq!(saved, input);
     assert!(receipt.matches(&saved));
     assert_eq!(
@@ -110,9 +103,9 @@ fn nine_mebibyte_snapshot_is_compressed_and_comes_back_byte_identical() {
 }
 
 #[test]
-fn plain_and_compressed_snapshots_read_through_every_entry_point() {
-    // Given: a compressed snapshot, a small plain one and a large one written as plain
-    // TEXT before compression existed.
+fn small_large_and_empty_snapshots_read_through_every_entry_point() {
+    // Given: a snapshot with blob-backed messages, a small one that needs no blob, and an
+    // empty one.
     let temp = TempDir::new().unwrap();
     let (storage, config) = open(&temp);
     let large = messages(64 * 1024);
@@ -127,28 +120,25 @@ fn plain_and_compressed_snapshots_read_through_every_entry_point() {
         ))
         .unwrap();
     handle
-        .upsert_run_context(&record("run-legacy", "[]".into()))
+        .upsert_run_context(&record("run-empty", "[]".into()))
         .unwrap();
     storage.close();
-    rusqlite::Connection::open(&config.db_path)
-        .unwrap()
-        .execute(
-            "UPDATE run_contexts SET messages_json = ?1 WHERE run_id = 'run-legacy'",
-            [&large],
-        )
-        .unwrap();
-    let ids = ["run-compressed", "run-small", "run-legacy"].map(str::to_owned);
+    let ids = ["run-compressed", "run-small", "run-empty"].map(str::to_owned);
 
     // When/Then: full reads decode all of them.
     let db = Database::open(&config).unwrap();
     for id in &ids {
         let loaded = db.run_context(id).unwrap().unwrap();
-        assert!(loaded.messages_json == large || id == "run-small", "{id}");
+        match id.as_str() {
+            "run-compressed" => assert_eq!(loaded.messages_json, large),
+            "run-empty" => assert_eq!(loaded.messages_json, "[]"),
+            _ => assert!(loaded.messages_json.contains("\"hi\"")),
+        }
     }
     let contexts = db.run_contexts_for(&ids).unwrap();
     assert_eq!(contexts.len(), 3);
 
-    // And: the terminal summary reads the last message the same way for both storage forms.
+    // And: the terminal summary reads the count from the header and only the last message.
     let summaries = db.terminal_summaries(&ids).unwrap();
     let expected_count = u64::try_from(
         serde_json::from_str::<Vec<serde_json::Value>>(&large)
@@ -159,10 +149,10 @@ fn plain_and_compressed_snapshots_read_through_every_entry_point() {
     assert_eq!(summaries[0].message_count, expected_count);
     assert_eq!(summaries[1].message_count, 1);
     assert_eq!(summaries[1].final_text.as_deref(), Some("hi"));
-    assert_eq!(summaries[2].message_count, expected_count);
-    assert_eq!(summaries[0].final_text, summaries[2].final_text);
+    assert_eq!(summaries[2].message_count, 0);
+    assert_eq!(summaries[2].final_text, None);
 
-    // And: inspection expands the compressed snapshot into JSON.
+    // And: inspection expands the conversation into JSON.
     let inspected = db.inspect_run("run-compressed", true).unwrap();
     assert_eq!(
         inspected["context"]["messages_json"]

@@ -434,7 +434,8 @@ fn foreground(conn: &Connection, path: &Path) -> Result<Value> {
     let mut inserted = bundle.record.clone();
     inserted.run_id = "gate-foreground-insert".into();
     let insert = measured_write("snapshot insert", conn, path, |conn| {
-        let tx = conn.unchecked_transaction()?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
         crate::repo::thread_index::stage_legacy_snapshot(&tx, &inserted).map_err(debug)?;
         tx.commit()?;
         Ok(())
@@ -442,7 +443,8 @@ fn foreground(conn: &Connection, path: &Path) -> Result<Value> {
     let mut updated = bundle.record.clone();
     updated.updated_at_ns += 1;
     let update = measured_write("snapshot update", conn, path, |conn| {
-        let tx = conn.unchecked_transaction()?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
         crate::repo::thread_index::stage_legacy_snapshot(&tx, &updated).map_err(debug)?;
         tx.commit()?;
         Ok(())

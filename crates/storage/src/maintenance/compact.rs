@@ -62,9 +62,7 @@ pub struct CompactSummary {
     pub reasoning_deltas: Stage,
     pub provider_observations: Stage,
     pub event_compression: CompressionSample,
-    pub context_compression: CompressionSample,
     pub compressed_event_rows: u64,
-    pub compressed_context_values: u64,
     /// Existing individual rows over 64 KiB cannot be split without changing IDs.
     pub oversized_rows: u64,
     pub backup: Option<PathBuf>,
@@ -98,6 +96,8 @@ pub fn backfill_events(
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     check_schema(&conn, 30)?;
+    check_current_format(&conn)?;
+    offline::enable_foreign_keys(&conn)?;
     Database { conn }.backfill_event_columns(options)
 }
 
@@ -108,11 +108,26 @@ fn validate_batch(rows: usize) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Refuses a database that is not in the current conversation format (nothing is read
+/// or written by that check): maintenance never operates on one that still needs the
+/// conversion command.
+pub(super) fn check_current_format(conn: &Connection) -> Result<(), StorageError> {
+    crate::migrations::require_current_format(conn)?;
+    let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < crate::migrations::MESSAGE_ROWS_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found: version,
+            detail: "maintenance needs the current conversation format",
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn check_schema(conn: &Connection, minimum: u32) -> Result<(), StorageError> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < minimum || version as usize > crate::migrations::MIGRATIONS.len() {
         return Err(invalid(
-            "unsupported maintenance schema; use current evorch to migrate first",
+            "unsupported maintenance schema; a database in the old conversation format needs the conversion command first (a normal start never converts it)",
         ));
     }
     Ok(())
@@ -158,6 +173,10 @@ pub fn compact_events(
         (conn, Some(files))
     };
     check_schema(&conn, 31)?;
+    check_current_format(&conn)?;
+    if options.apply {
+        offline::enable_foreign_keys(&conn)?;
+    }
     let db = Database { conn };
     let before = statistics::snapshot(&db.conn, path)?;
     let logical: u64 = db
@@ -195,9 +214,7 @@ pub fn compact_events(
         reasoning_deltas: Stage::default(),
         provider_observations: Stage::default(),
         event_compression: CompressionSample::default(),
-        context_compression: CompressionSample::default(),
         compressed_event_rows: 0,
-        compressed_context_values: 0,
         oversized_rows: 0,
         backup: None,
         required_free_space_bytes: basis.saturating_mul(4),
@@ -258,9 +275,6 @@ pub fn compact_events(
     let (sample, rows) = statistics::compress_events(&db.conn, options, virtual_deltas)?;
     summary.event_compression = sample;
     summary.compressed_event_rows = rows;
-    let (sample, values) = statistics::compress_contexts(&db.conn, options)?;
-    summary.context_compression = sample;
-    summary.compressed_context_values = values;
     if options.apply {
         recalculate_accounting(&db.conn)?;
         offline::require_space(parent(path), basis.saturating_mul(2))?;
@@ -278,6 +292,7 @@ pub fn compact_events(
         }
         summary.checkpoint_truncated = true;
         integrity_check(&db.conn)?;
+        offline::require_no_foreign_key_violations(&db.conn)?;
         summary.integrity_check = Some("ok".into());
         summary.after = statistics::snapshot(&db.conn, path)?;
         summary.projected_event_rows = summary

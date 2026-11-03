@@ -14,6 +14,7 @@ mod completion_relay;
 mod held_messages;
 mod host_prompt;
 pub(crate) use host_prompt::HostPrompt;
+mod nested_orchestrator;
 mod output;
 mod project;
 mod questions;
@@ -59,6 +60,10 @@ use crate::{AgentInspection, AgentModel, AgentSummary, ExecutionPolicy, RunId, R
 
 #[cfg(test)]
 mod host_input_tests;
+#[cfg(test)]
+mod root_only_orchestrator_tests;
+#[cfg(test)]
+mod snapshot_conflict_tests;
 pub(crate) mod user_inbox;
 use user_inbox::UserInbox;
 pub use user_inbox::{FollowUpStatus, FollowUpWithdrawalError};
@@ -94,6 +99,7 @@ pub(crate) struct Shared {
     pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
     pub(crate) question_version: watch::Sender<u64>,
+    pub(crate) turn_version: watch::Sender<u64>,
     pub(crate) lesson_staging: Mutex<crate::learning::LearningStaging>,
     admissions: admission::Admissions,
     #[cfg(test)]
@@ -107,7 +113,7 @@ pub(crate) struct Shared {
     /// Runs the operator stopped. Neither agent messages nor answers continue them
     /// until the operator resumes their thread root, which lifts the whole tree.
     pub(crate) operator_stops: Mutex<HashSet<RunId>>,
-    /// Monotonic incarnation IDs, including same-run-ID restores.
+    /// Monotonic receipt IDs, including same-run-ID restores and idle turns.
     next_completion_generation: AtomicU64,
     /// Messages for finished or stopped runs, released when the run is registered again.
     pub(crate) held_messages: Mutex<HashMap<RunId, Vec<crate::mailbox::QueuedMessage>>>,
@@ -283,6 +289,7 @@ pub(crate) struct RunEntry {
     completion_relayed: bool,
     completion_notice: Arc<crate::mailbox::CompletionNotice>,
     terminal_reason: Option<String>,
+    idle_turn: Option<output::IdleTurn>,
     phase_tx: watch::Sender<AgentRunPhase>,
     phase_rx: watch::Receiver<AgentRunPhase>,
     message_count_rx: watch::Receiver<usize>,
@@ -705,6 +712,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
+                turn_version: watch::channel(0).0,
                 lesson_staging: Mutex::new(crate::learning::LearningStaging::default()),
                 admissions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -1029,6 +1037,7 @@ impl AgentRuntime {
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
                 question_version: watch::channel(0).0,
+                turn_version: watch::channel(0).0,
                 admissions: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 admission_registration_hook: Mutex::new(None),
@@ -1137,8 +1146,9 @@ impl AgentRuntime {
         prompt: impl Into<String>,
         config: RunConfig,
     ) -> Result<RunId, RuntimeError> {
+        crate::policy::authorize_child_role(Some(parent), role)?;
         let run_id = self.reserve_child_run_id(parent)?;
-        Ok(self.spawn_reserved_child(parent, run_id, role, prompt, config))
+        self.spawn_reserved_child(parent, run_id, role, prompt, config)
     }
 
     /// 親 run の存在を検証したうえで、次の run ID を事前採番する。
@@ -1197,6 +1207,10 @@ impl AgentRuntime {
     /// [`AgentRuntime::reserve_child_run_id`] で事前採番した ID を使って
     /// child run を登録し、バックグラウンド実行を開始する。
     /// parent の存在検証は reserve 時に済んでいる前提。
+    ///
+    /// # Errors
+    /// Orchestrator は root 専用のため、[`RuntimeError::OrchestratorChildDenied`] を返す
+    /// (ADR 0044 §2)。この場合 run は登録されず、採番済みの ID は未使用のまま残る。
     pub fn spawn_reserved_child(
         &self,
         parent: RunId,
@@ -1204,8 +1218,9 @@ impl AgentRuntime {
         role: Role,
         prompt: impl Into<String>,
         config: RunConfig,
-    ) -> RunId {
-        self.spawn_reserved(run_id, Some(parent), role, prompt, config)
+    ) -> Result<RunId, RuntimeError> {
+        crate::policy::authorize_child_role(Some(parent), role)?;
+        Ok(self.spawn_reserved(run_id, Some(parent), role, prompt, config))
     }
 
     fn spawn_run(
@@ -1239,6 +1254,12 @@ impl AgentRuntime {
         continuation: RunContinuation,
         review_seed: Option<ReviewSeed>,
     ) -> RunId {
+        // Every spawn path ends here: an infallible entry point (`spawn_reserved`)
+        // still cannot start a child Orchestrator. Its admission fails instead.
+        if let Err(error) = crate::policy::authorize_child_role(parent, role) {
+            self.fail_admission(run_id, parent, &config, error);
+            return run_id;
+        }
         let escalated_from = match &continuation {
             RunContinuation::Handoff(handoff) => Some(handoff.source_run_id),
             RunContinuation::Resume {
@@ -1602,6 +1623,7 @@ impl AgentRuntime {
                 run_id,
                 RunEntry {
                     terminal_reason: None,
+                    idle_turn: None,
                     role,
                     name: name.clone(),
                     model,
@@ -1820,7 +1842,7 @@ impl AgentRuntime {
             .persist_pending_reference(source_run_id)
             .map_err(|error| error.to_string())?
             .map(|pending| pending.reference_id);
-        crate::restore::persist_escalation_seed(
+        let seed_revision = crate::restore::persist_escalation_seed(
             self,
             run_id,
             source_run_id,
@@ -1884,6 +1906,7 @@ impl AgentRuntime {
                 pending_reference_id,
                 source_run_id,
                 restored: None,
+                seed_revision,
             }),
             None,
         ))
@@ -3537,13 +3560,15 @@ mod review_provenance_tests {
         let root = runtime
             .delegate_chat("fresh", Role::Worker, "first".into(), RunConfig::default())
             .unwrap();
-        let child = runtime.spawn_reserved_child(
-            root,
-            runtime.reserve_run_id(),
-            Role::Worker,
-            "delegated",
-            RunConfig::default(),
-        );
+        let child = runtime
+            .spawn_reserved_child(
+                root,
+                runtime.reserve_run_id(),
+                Role::Worker,
+                "delegated",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
         // register_restored deliberately leaves no review entry: model that state here.
         runtime.shared.review_runs.lock().unwrap().remove(&child);
         runtime.send_message(child, "child only".into()).unwrap();
@@ -3653,13 +3678,15 @@ mod review_provenance_tests {
             RunConfig::default(),
         );
         let worker = runtime.reserve_run_id();
-        runtime.spawn_reserved_child(
-            root,
-            worker,
-            Role::Worker,
-            "Run the validation command",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved_child(
+                root,
+                worker,
+                Role::Worker,
+                "Run the validation command",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
 
         let question = runtime
             .request_user_question(
@@ -3736,30 +3763,36 @@ mod review_provenance_tests {
             )
             .unwrap();
         let child = runtime.reserve_run_id();
-        runtime.spawn_reserved_child(
-            root,
-            child,
-            Role::Worker,
-            "git push origin main",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved_child(
+                root,
+                child,
+                Role::Worker,
+                "git push origin main",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
 
         let grandchild = runtime.reserve_run_id();
-        runtime.spawn_reserved_child(
-            child,
-            grandchild,
-            Role::Worker,
-            "Verify and push",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved_child(
+                child,
+                grandchild,
+                Role::Worker,
+                "Verify and push",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
 
-        let sibling = runtime.spawn_reserved_child(
-            root,
-            runtime.reserve_run_id(),
-            Role::Worker,
-            "Sibling",
-            RunConfig::default(),
-        );
+        let sibling = runtime
+            .spawn_reserved_child(
+                root,
+                runtime.reserve_run_id(),
+                Role::Worker,
+                "Sibling",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
         runtime
             .send_internal_message(root, "Team leases expired".into())
             .expect("internal message");
@@ -3900,13 +3933,15 @@ mod stop_cancel_tests {
             RunInterrupt::None
         );
         // Both pre-recorded intents and children spawned after cancellation are fenced.
-        runtime.spawn_reserved_child(
-            grandchild,
-            reserved,
-            Role::Worker,
-            "reserved",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved_child(
+                grandchild,
+                reserved,
+                Role::Worker,
+                "reserved",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
         let late = spawn(&runtime, Some(reserved));
         for id in [root, child, grandchild, reserved, late] {
             assert_eq!(
@@ -3955,13 +3990,15 @@ mod stop_cancel_tests {
         assert!(!runtime.spawn_cancelled(root));
         assert!(runtime.spawn_cancelled(child));
         assert!(runtime.spawn_cancelled(reserved));
-        runtime.spawn_reserved_child(
-            root,
-            reserved,
-            Role::Worker,
-            "old generation",
-            RunConfig::default(),
-        );
+        runtime
+            .spawn_reserved_child(
+                root,
+                reserved,
+                Role::Worker,
+                "old generation",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
         assert_eq!(runtime.wait(reserved).await.unwrap(), AgentRunPhase::Error);
         let fresh = spawn(&runtime, Some(root));
         assert!(!runtime.spawn_cancelled(fresh));
@@ -4107,13 +4144,15 @@ mod review_registration_tests {
             RunConfig::default(),
         );
         assert!(matches!(rejected, Err(RuntimeError::ReviewEvidence { .. })));
-        let child = runtime.spawn_reserved_child(
-            run,
-            runtime.reserve_run_id(),
-            Role::Worker,
-            "no edge",
-            RunConfig::default(),
-        );
+        let child = runtime
+            .spawn_reserved_child(
+                run,
+                runtime.reserve_run_id(),
+                Role::Worker,
+                "no edge",
+                RunConfig::default(),
+            )
+            .expect("a non-Orchestrator child is admitted");
         assert!(matches!(
             runtime.wait_admission(child).await,
             Err(RuntimeError::ReviewEvidence { .. })

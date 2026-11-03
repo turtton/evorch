@@ -5,12 +5,14 @@ use super::scoped_call::parse_scoped_call_id;
 mod branch;
 mod compaction;
 mod diagnostics;
+mod draft_text;
 mod drafts;
 mod lifecycle;
 mod reviews;
 pub mod shell_jobs;
 mod thinking;
 
+pub use drafts::{redacted_for_display, redacted_text_for_display};
 pub use reviews::ToolReview;
 
 #[cfg(test)]
@@ -33,12 +35,19 @@ pub enum ToolStatus {
     /// The run ended before the call reported a result, for example because
     /// the process exited mid-call. A late completion still replaces it.
     Interrupted,
-    /// The model is still composing the call; `arguments` is the raw text
-    /// streamed so far. `ToolStarted` turns the card into a running call.
+    /// The model is still composing the call. `ToolStarted` turns the card into
+    /// a running call. Both texts are redacted and bounded; see `drafts.rs`.
     Drafting {
         /// Position of the call within the streamed response.
         index: usize,
+        /// The newest part of the argument JSON streamed so far.
         arguments: String,
+        /// The string a card reads best as text (a delegate's `prompt`, a
+        /// shell's `command`), decoded with its line breaks; empty when the
+        /// tool has none or it has not started.
+        text: String,
+        /// Older streamed text no longer fits in `arguments` / `text`.
+        omitted: bool,
         /// The response finished, so the call is waiting for its start event.
         sealed: bool,
     },

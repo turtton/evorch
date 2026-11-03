@@ -12,7 +12,7 @@ use support::{ScriptedModel, text_response, tool_response};
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
-async fn read_related(siblings: bool) -> (Value, bool) {
+async fn read_foreign() -> (Value, bool) {
     let model = Arc::new(ScriptedModel::new([]));
     model.gate_key("ROOT", Arc::new(Notify::new())).await;
     model
@@ -45,13 +45,8 @@ async fn read_related(siblings: bool) -> (Value, bool) {
             ],
         )
         .await;
-    let reader = if siblings {
-        runtime
-            .delegate_background_as_child(root, Role::Orchestrator, "READER", RunConfig::default())
-            .unwrap()
-    } else {
-        runtime.delegate_background(Role::Orchestrator, "READER".into(), RunConfig::default())
-    };
+    let reader =
+        runtime.delegate_background(Role::Orchestrator, "READER".into(), RunConfig::default());
     assert_eq!(runtime.wait(reader).await.unwrap(), AgentRunPhase::Done);
     runtime.cancel(root).unwrap();
     runtime.wait(root).await.unwrap();
@@ -85,18 +80,8 @@ async fn read_related(siblings: bool) -> (Value, bool) {
 async fn denied_when_target_is_foreign_run() {
     // Given: two unrelated run trees with a completed private result.
     // When: a foreign reader calls the real meta-tool.
-    let (result, is_error) = read_related(false).await;
+    let (result, is_error) = read_foreign().await;
     // Then: no final text is disclosed.
-    assert!(is_error);
-    assert_eq!(result["code"], "run_output_denied");
-}
-
-#[tokio::test]
-async fn denied_when_target_is_sibling_run() {
-    // Given: a reader sharing the target's parent, but not its direct relationship.
-    // When: the reader calls the real meta-tool.
-    let (result, is_error) = read_related(true).await;
-    // Then: sibling outputs remain private, like send_message.
     assert!(is_error);
     assert_eq!(result["code"], "run_output_denied");
 }

@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod idle_turn_tests;
+
 impl AgentRuntime {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::runtime) fn register_restored(
@@ -132,6 +135,7 @@ impl AgentRuntime {
             run_id,
             RunEntry {
                 terminal_reason: None,
+                idle_turn: None,
                 role,
                 name,
                 model,
@@ -244,6 +248,7 @@ mod review_tests {
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
                         provenance: Default::default(),
+                        snapshot_revision: crate::restore::revision::SnapshotRevision::fresh(),
                         responses_replay: Default::default(),
                         host_inputs: Vec::new(),
                         admission_reservation: None,

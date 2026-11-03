@@ -85,6 +85,11 @@ pub struct WorkbenchState<S> {
     /// replay, then through events followed from other processes. Events
     /// after it are still to be shown; events up to it never are again.
     pub(super) shown_through_event: i64,
+    /// Stored events the history restore could not read, by event ID: the run
+    /// the `run_id` column named and why. Complete, however many there are;
+    /// the log shows only the first few.
+    pub(super) unreadable_history_events:
+        std::collections::BTreeMap<i64, super::history::UnreadableEvent>,
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) receipt_reconciliation: super::delivery::ReceiptReconciliation,
     pub(super) draft_dirty_at: std::cell::Cell<Option<std::time::Instant>>,
@@ -229,6 +234,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             shared_sidebar: Default::default(),
             shared_feed: Default::default(),
             shown_through_event: 0,
+            unreadable_history_events: std::collections::BTreeMap::new(),
             history: Vec::new(),
             receipt_reconciliation: Default::default(),
             draft_dirty_at: Default::default(),

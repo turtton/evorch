@@ -44,6 +44,17 @@ impl AgentRuntime {
         config: &RunConfig,
         reason: String,
     ) {
+        self.fail_admission(run_id, parent, config, Self::review_error(run_id, reason));
+    }
+
+    /// Complete a reserved admission with `error` instead of registering the run.
+    pub(super) fn fail_admission(
+        &self,
+        run_id: RunId,
+        parent: Option<RunId>,
+        config: &RunConfig,
+        error: RuntimeError,
+    ) {
         self.drop_unstarted_host_input(run_id, config.initial_prompt_id.as_deref());
         let execution = self.reserve_admission(run_id, parent, config.ownership.clone());
         let mut admissions = self
@@ -56,7 +67,7 @@ impl AgentRuntime {
             .filter(|admission| Arc::ptr_eq(&admission.execution, &execution))
             .and_then(|admission| admission.completion.take())
         {
-            completion.send_replace(Some(Err(Self::review_error(run_id, reason))));
+            completion.send_replace(Some(Err(error)));
         }
     }
 

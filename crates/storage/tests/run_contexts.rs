@@ -41,11 +41,12 @@ fn headers_preserve_order_and_state_without_decoding_payloads() {
     // Corrupt/legacy payloads must not affect a header-only read.
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET config_json = x'ff', messages_json = x'ff', \
-         checkpoints_json = x'ff'",
+        "UPDATE run_contexts SET config_json = x'ff', checkpoints_json = x'ff'",
         [],
     )
     .unwrap();
+    conn.execute("UPDATE run_messages SET codec = 0, skeleton = x'ff'", [])
+        .unwrap();
     let db = Database::open_read_only(&config.db_path).unwrap();
     let ids = ["run-headers-b", "missing", "run-headers-a", "run-headers-b"].map(str::to_owned);
     assert_eq!(
@@ -276,26 +277,33 @@ fn snapshot_redacts_secret_payload_keys_without_losing_their_values() {
 }
 
 #[test]
-fn invalidation_updates_only_restore_metadata_when_legacy_history_contains_secrets() {
-    // Given: two legacy snapshots with secrets in both history payloads.
+fn invalidation_updates_only_restore_metadata_and_never_reads_the_history() {
+    // Given: two saved snapshots whose history payloads carry redaction markers.
     let temp = TempDir::new().unwrap();
     let config = StorageConfig {
         db_path: temp.path().join("legacy.db"),
         ..StorageConfig::default()
     };
     let storage = Storage::open(config.clone()).unwrap();
-    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
-    let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+    let secret = "[REDACTED:openai-style-key]";
     for id in ["run", "other"] {
-        conn.execute(
-            "INSERT INTO run_contexts \
-             (run_id, role, name, parent_run_id, config_json, messages_json, \
-             checkpoints_json, terminal_phase, updated_at_ns, restorable) \
-             VALUES (?1, 'Worker', 'legacy', NULL, \
-             '{\"restorable\":true}', ?2, ?2, 'Done', 10, 1)",
-            rusqlite::params![id, format!(r#"[{{"text":"{secret}"}}]"#)],
-        )
-        .unwrap();
+        let payload = format!(r#"[{{"text":"{secret}"}}]"#);
+        storage
+            .handle()
+            .upsert_run_context(&RunContextRecord {
+                run_id: id.into(),
+                role: "Worker".into(),
+                name: "legacy".into(),
+                parent_run_id: None,
+                config_json: r#"{"restorable":true}"#.into(),
+                messages_json: payload.clone(),
+                checkpoints_json: payload,
+                terminal_phase: "Done".into(),
+                restorable: true,
+                updated_at_ns: 10,
+                host_inputs_json: "[]".into(),
+            })
+            .unwrap();
     }
     let db = Database::open(&config).unwrap();
     let before = db.run_context("run").unwrap().unwrap();

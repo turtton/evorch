@@ -18,10 +18,17 @@ tracing = { workspace = true }
 zstd = "0.13"
 event-bus = { path = "../event-bus" }
 
+[features]
+# `Database::open_unchecked`: opens an old-format database without the conversion gate.
+# Only the tests of the historical migrations enable it (through the dev-dependency on
+# this crate below); no product crate does.
+unchecked-open = []
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+storage = { path = ".", features = ["unchecked-open"] }
 # Contract tests serialize canonical provider messages so the JSON shape storage keys on cannot drift.
 providers = { path = "../providers" }
 rusqlite = { workspace = true, features = ["hooks"] }

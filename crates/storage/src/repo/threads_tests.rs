@@ -36,13 +36,30 @@ fn context(
     config: &str,
     at: i64,
 ) {
-    conn.execute(
-        "INSERT INTO run_contexts (run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns) \
-         VALUES (?1, 'worker', ?2, ?3, ?4, '[]', '[]', 'Done', 1, ?5)",
-        params![run_id, name, parent, config, at],
-    )
-    .unwrap();
+    // The v23 fixture databases still keep the whole conversation in `messages_json`.
+    let legacy: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('run_contexts') WHERE name = 'messages_json'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if legacy {
+        conn.execute(
+            "INSERT INTO run_contexts (run_id, role, name, parent_run_id, config_json, messages_json, \
+             checkpoints_json, terminal_phase, restorable, updated_at_ns) \
+             VALUES (?1, 'worker', ?2, ?3, ?4, '[]', '[]', 'Done', 1, ?5)",
+            params![run_id, name, parent, config, at],
+        )
+        .unwrap();
+        return;
+    }
+    let mut record = crate::repo::run_messages::fixtures::record(run_id);
+    record.name = name.into();
+    record.parent_run_id = parent.map(str::to_owned);
+    record.config_json = config.into();
+    record.updated_at_ns = at;
+    crate::repo::run_messages::fixtures::insert(conn, &record, 0);
 }
 
 fn request(conn: &Connection, id: &str, run_id: &str, parent: Option<&str>) {
@@ -145,7 +162,7 @@ fn v23_database_migrates_backfills_and_opens_read_only() {
 
     // When: the current schema opens it, twice.
     for _ in 0..2 {
-        drop(Database::open(&config(&path)).unwrap());
+        drop(Database::open_unchecked(&config(&path)).unwrap());
     }
     let database = Database::open_read_only(&path).unwrap();
 
@@ -242,7 +259,7 @@ fn v23_database_without_runs_migrates_to_empty_tables() {
     let path = dir.path().join("empty.db");
     drop(v23_database(&path));
 
-    let database = Database::open(&config(&path)).unwrap();
+    let database = Database::open_unchecked(&config(&path)).unwrap();
 
     assert!(bindings(&database.conn).is_empty());
     assert!(

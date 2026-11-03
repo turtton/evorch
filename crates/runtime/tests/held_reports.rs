@@ -591,8 +591,8 @@ async fn operator_stopped_root_keeps_the_report_until_the_operator_resumes() {
 
 #[tokio::test]
 async fn finished_subagent_is_woken_under_its_live_parents_authority() {
-    // Given: a live root, and a middle orchestrator that finished while its
-    // own background child was still working.
+    // Given: a live root, and a middle child that finished while its own
+    // background child was still working.
     let fixture = fixture().await;
     let _root_gate = fixture.gate("ROOT").await;
     fixture
@@ -609,7 +609,7 @@ async fn finished_subagent_is_woken_under_its_live_parents_authority() {
     fixture.model.wait_for_request(0).await;
     let middle = fixture
         .runtime
-        .delegate_background_as_child(root, Role::Orchestrator, "MIDDLE", RunConfig::default())
+        .delegate_background_as_child(root, Role::Worker, "MIDDLE", RunConfig::default())
         .unwrap();
     fixture.model.wait_for_request(1).await;
     let grandchild = fixture
@@ -629,7 +629,7 @@ async fn finished_subagent_is_woken_under_its_live_parents_authority() {
         fixture.runtime.wait(grandchild).await.unwrap(),
         AgentRunPhase::Done
     );
-    // Then: the middle orchestrator continues with the report.
+    // Then: the middle child continues with the report.
     let request = fixture.request_text(3).await;
     assert!(request.contains("grandchild result"), "{request}");
     assert_eq!(

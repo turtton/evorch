@@ -191,6 +191,9 @@ pub struct SnapshotReceipt {
     pub snapshot_revision: u64,
     pub source_revision: u64,
     pub snapshot_sha256: String,
+    /// Identity of the redacted messages the transaction committed, computed
+    /// from the bytes it wrote. Callers never re-read the snapshot to get it.
+    pub run_context_receipt: crate::RunContextReceipt,
 }
 
 /// The input identity comes from the same read transaction as the JSON and map.
