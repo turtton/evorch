@@ -423,6 +423,10 @@ pub mod diagnostic_codes {
     /// A background evaluation an Evaluator started has ended (ADR 0036).
     pub const EVALUATION_FINISHED: &str = "EvaluationFinished";
 
+    /// A saved child Orchestrator run was refused at restore (ADR 0044 §2/§17).
+    /// The original snapshot is kept untouched as evidence.
+    pub const NESTED_ORCHESTRATOR_REJECTED: &str = "NestedOrchestratorRejected";
+
     /// Every code above.
     pub const ALL: &[&str] = &[
         BUDGET_WARNING,
@@ -462,6 +466,7 @@ pub mod diagnostic_codes {
         BROWSER_DOM_DIFF,
         BROWSER_SCREENSHOT,
         EVALUATION_FINISHED,
+        NESTED_ORCHESTRATOR_REJECTED,
     ];
 }
 

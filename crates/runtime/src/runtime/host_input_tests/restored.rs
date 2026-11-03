@@ -21,12 +21,8 @@ async fn restored_delivery_panic_seals_followup_before_error() {
         reply_to: None,
     };
     let store = runtime.shared.run_store.get().unwrap();
-    let record = store
-        .run_contexts_for(&[fixture.run.to_string()])
-        .unwrap()
-        .pop()
-        .unwrap();
-    let restored = RestoredState::for_conversation(&record).unwrap();
+    let bundle = store.restore_bundle(fixture.run).unwrap().unwrap();
+    let restored = RestoredState::for_conversation_bundle(&bundle).unwrap();
     {
         let mut intents = runtime.shared.spawn_intents.lock().unwrap();
         // An explicit restored registration starts a new execution.

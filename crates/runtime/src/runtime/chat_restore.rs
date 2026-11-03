@@ -168,10 +168,11 @@ impl AgentRuntime {
             return Ok(run_id);
         }
         let store = store.ok_or_else(|| fail(RunRestoreFailure::StorageNotConfigured))?;
-        let mut record = store
-            .restore_record(run_id)
+        let bundle = store
+            .restore_bundle(run_id)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
+        let mut record = bundle.record.clone();
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         self.validate_history_restore(&record, &descriptor, &authority)?;
@@ -226,7 +227,7 @@ impl AgentRuntime {
             self.validate_new_thread_goal(thread, objective, criteria)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
         }
-        let mut restored = store.restore_conversation(&record)?;
+        let mut restored = RestoredState::for_conversation_bundle(&bundle)?;
         let mut host_input = storage::HostInputWrite {
             reconcile_reason: Some("restored".into()),
             ..Default::default()
@@ -367,12 +368,20 @@ impl AgentRuntime {
                 .user_requests
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (_, reconciled) = store
+            let expected = restored.snapshot_revision.get().ok_or_else(|| {
+                fail(RunRestoreFailure::CorruptContext(
+                    "snapshot revision is unknown".into(),
+                ))
+            })?;
+            let (saved, reconciled) = store
                 .handle
                 .save_snapshot_bundle_with_evidence_and_host_inputs(
-                    &restored.provenance.write(record.clone()).map_err(|error| {
-                        fail(RunRestoreFailure::CorruptContext(error.to_string()))
-                    })?,
+                    &restored
+                        .provenance
+                        .write(record.clone(), expected)
+                        .map_err(|error| {
+                            fail(RunRestoreFailure::CorruptContext(error.to_string()))
+                        })?,
                     &evidence,
                     &[],
                     prompt
@@ -383,6 +392,7 @@ impl AgentRuntime {
                 .map_err(|error| {
                     Self::review_error(run_id, crate::restore::provenance::storage_error(error))
                 })?;
+            restored.snapshot_revision.commit(saved.snapshot_revision);
             for row in evidence {
                 shared.add_request(crate::run_store::request_from_evidence(row));
             }
@@ -429,6 +439,8 @@ impl AgentRuntime {
             pending_reference_id: descriptor.pending_reference_id.clone(),
             source_run_id: pending.source_run_id,
             restored: None,
+            // The restored state below carries its own revision.
+            seed_revision: 0,
         });
         let continuation = if prompt.is_none() {
             RunContinuation::Resume {
@@ -620,7 +632,11 @@ impl AgentRuntime {
                             Some(crate::meta::parse_run_id(&record.run_id).map_err(|reason| {
                                 fail(RunRestoreFailure::CorruptContext(reason))
                             })?);
-                        let mut restored = store.restore_conversation(&record)?;
+                        let mut restored = RestoredState::for_conversation(&record)?;
+                        // The history continues under a new run ID, whose first
+                        // snapshot is revision 1; the source's revision is not carried.
+                        restored.snapshot_revision =
+                            crate::restore::revision::SnapshotRevision::fresh();
                         let source = crate::meta::parse_run_id(&record.run_id)
                             .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
                         if let Some(bundle) = store.restore_bundle(source).map_err(|error| {
@@ -629,6 +645,10 @@ impl AgentRuntime {
                             if bundle.record.messages_json == record.messages_json
                                 && bundle.record.checkpoints_json == record.checkpoints_json
                             {
+                                restored.provenance =
+                                    crate::restore::provenance::ConversationProvenance::from_bundle(
+                                        &bundle,
+                                    );
                                 let messages: Vec<providers::Message> = serde_json::from_str(
                                     &record.messages_json,
                                 )

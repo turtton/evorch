@@ -48,6 +48,8 @@ rustix = { version = "1", features = ["fs"] }
 socket2 = "0.6"
 
 [dev-dependencies]
+# The conversion tests take a database the runtime wrote back to version 39 and convert it.
+storage = { path = "../storage", features = ["unchecked-open"] }
 # S8 copies only the approved backup, using SQLite's online backup API.
 rusqlite = { workspace = true, features = ["backup"] }
 test-support = { path = "../test-support" }

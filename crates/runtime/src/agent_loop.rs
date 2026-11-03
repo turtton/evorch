@@ -8,7 +8,7 @@ mod budget;
 #[cfg(test)]
 mod continuity_tests;
 #[cfg(test)]
-mod delegate_cleanup_tests;
+pub(crate) mod delegate_cleanup_tests;
 mod durable;
 mod finalization;
 mod host_inputs;
@@ -24,6 +24,8 @@ mod review_evidence_tests;
 mod review_skills;
 #[cfg(test)]
 mod review_skills_tests;
+#[cfg(test)]
+mod revision_tests;
 mod run_js_accounting;
 mod run_js_host;
 mod stop_context;
@@ -88,6 +90,9 @@ pub(crate) struct RunHandoff {
     pub(crate) pending_reference_id: Option<String>,
     pub(crate) source_run_id: RunId,
     pub(crate) restored: Option<crate::restore::RestoredState>,
+    /// Revision of the seed snapshot already saved for this run (0: none).
+    /// Used when `restored` is absent; a restored state carries its own.
+    pub(crate) seed_revision: u64,
 }
 
 pub(crate) struct LoopChannels {
@@ -401,6 +406,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             checkpoint.messages.clone(),
             Vec::new(),
             crate::ResponsesReplayState::reset(checkpoint.messages.len()),
+            crate::restore::revision::SnapshotRevision::fresh(),
         )
     } else {
         match restored {
@@ -411,6 +417,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.messages,
                     restored.checkpoints,
                     restored.responses_replay,
+                    restored.snapshot_revision,
                 );
                 context.provenance = restored.provenance;
                 match restored.trigger {
@@ -433,7 +440,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                 }
                 context
             }
-            None => AgentContext::new(task.run_id, task.role),
+            None => {
+                let mut context = AgentContext::new(task.run_id, task.role);
+                // A handoff seed was saved before the run started.
+                if let Some(handoff) = &task.handoff {
+                    context.snapshot_revision =
+                        crate::restore::revision::SnapshotRevision::known(handoff.seed_revision);
+                }
+                context
+            }
         }
     };
     let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
@@ -781,7 +796,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_error(format!("Cannot persist prepared context: {error}"));
             return;
         }
-        if completed_turn_end.is_some() && !state.wait_for_input().await {
+        if completed_turn_end.is_some() && !state.wait_for_input_boundary(true).await {
             return;
         }
         state.execute().await;
@@ -1474,7 +1489,7 @@ impl LoopState {
                         }
                         continue;
                     }
-                    if !self.wait_for_input().await {
+                    if !self.wait_for_input_boundary(true).await {
                         return;
                     }
                 }
@@ -1495,6 +1510,10 @@ impl LoopState {
     }
 
     async fn wait_for_input(&mut self) -> bool {
+        self.wait_for_input_boundary(false).await
+    }
+
+    async fn wait_for_input_boundary(&mut self, completed_turn: bool) -> bool {
         if let Some(kind) = self.interrupted() {
             self.finish_interrupted(kind);
             return false;
@@ -1526,7 +1545,13 @@ impl LoopState {
             }
         }
         let turn_end = self.persist_turn_boundary();
-        if self.transition(AgentRunPhase::Waiting, None).is_err() {
+        let completed_turn = (completed_turn
+            && !runtime.has_unanswered_questions(self.task.run_id))
+        .then(|| self.final_assistant_text());
+        if self
+            .transition_with_turn(AgentRunPhase::Waiting, None, completed_turn)
+            .is_err()
+        {
             return false;
         }
         if let Some(context_len) = turn_end {
@@ -1596,6 +1621,15 @@ impl LoopState {
         phase: AgentRunPhase,
         reason: Option<String>,
     ) -> Result<(), ()> {
+        self.transition_with_turn(phase, reason, None)
+    }
+
+    fn transition_with_turn(
+        &mut self,
+        phase: AgentRunPhase,
+        reason: Option<String>,
+        completed_turn: Option<Option<String>>,
+    ) -> Result<(), ()> {
         let previous = self.run_state;
         let event = self
             .run_state
@@ -1627,8 +1661,17 @@ impl LoopState {
             self.pending_terminal = Some((previous, event));
         } else {
             self.publish_durable_task(phase, reason);
-            self.channels.phase_tx.send_replace(phase);
-            self.shared.bus.emit(Event::new(event));
+            if let Some(runtime) = self.runtime() {
+                runtime.publish_live_phase(
+                    self.task.run_id,
+                    event,
+                    completed_turn,
+                    &self.channels.phase_tx,
+                );
+            } else {
+                self.channels.phase_tx.send_replace(phase);
+                self.shared.bus.emit(Event::new(event));
+            }
         }
         Ok(())
     }

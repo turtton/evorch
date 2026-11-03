@@ -13,10 +13,10 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Rebuilds the lesson tables as they were before migration v39: no favorite flag, and a
+/// Rebuilds the lesson tables as they were before migration v41: no favorite flag, and a
 /// ledger that only knows the 'lesson', 'finding' and 'eval_trace' kinds. The tables are
 /// left empty.
-pub fn undo_v39(connection: &Connection) {
+pub fn undo_v41(connection: &Connection) {
     connection
         .execute_batch(
             "DROP TABLE memory_entries;
@@ -63,8 +63,27 @@ pub fn undo_v39(connection: &Connection) {
         .unwrap();
 }
 
+/// Restores the whole-conversation `run_contexts` shape migration v40 replaced, after
+/// undoing v41.
+pub fn undo_v40(connection: &Connection) {
+    undo_v41(connection);
+    connection
+        .execute_batch(include_str!("undo_v40.sql"))
+        .unwrap();
+}
+
+/// Removes the content blob tables migration v39 added, after undoing v40.
+pub fn undo_v39(connection: &Connection) {
+    undo_v40(connection);
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS content_blob_gc_queue; DROP TABLE IF EXISTS content_blobs;",
+        )
+        .unwrap();
+}
+
 /// Restores what migration v38 dropped (the unnumbered-writer markers) and removes what it
-/// added (the table of unresolved families).
+/// added (the table of unresolved families), after undoing v39.
 pub fn undo_v38(connection: &Connection) {
     undo_v39(connection);
     connection

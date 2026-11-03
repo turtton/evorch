@@ -164,7 +164,7 @@ fn v14_backfills_requests_from_persisted_provider_events() {
     );
 
     // When: the database is opened by the current schema.
-    let database = Database::open(&config).unwrap();
+    let database = Database::open_unchecked(&config).unwrap();
     let rows = database.usage_requests_between(0, i64::MAX).unwrap();
 
     // Then: every terminal attempt becomes one row with what legacy events know.
@@ -219,7 +219,7 @@ fn recorded_requests_join_attribution_bound_later() {
     storage.close();
 
     // Then: the original row is kept and reads carry the late attribution.
-    let rows = Database::open(&config)
+    let rows = Database::open_unchecked(&config)
         .unwrap()
         .usage_requests_between(0, i64::MAX)
         .unwrap();
@@ -259,7 +259,7 @@ fn maintenance_rolls_expired_requests_into_daily_totals() {
     storage.close();
 
     // Then: expired rows move to one daily bucket and the recent row stays.
-    let database = Database::open(&config).unwrap();
+    let database = Database::open_unchecked(&config).unwrap();
     let remaining = database.usage_requests_between(0, i64::MAX).unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].record.request_id, "recent");
@@ -301,7 +301,7 @@ fn local_day_reads_bound_requests_by_the_ledger_clock() {
         ])
         .unwrap();
     storage.close();
-    let database = Database::open(&config).unwrap();
+    let database = Database::open_unchecked(&config).unwrap();
 
     // When: only today's local day is read.
     let today = database.usage_local_today().unwrap();
@@ -347,6 +347,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     drop(conn);
 
     // When: opening applies v19 and a fast request is recorded.
+    drop(Database::open_unchecked(&config).unwrap());
     let storage = Storage::open(config.clone()).unwrap();
     let fast = UsageRequestRecord {
         service_tier: Some("priority".into()),
@@ -359,7 +360,7 @@ fn v19_records_service_tier_and_keeps_earlier_requests_standard() {
     storage.close();
 
     // Then: the earlier request reads as standard and the fast one keeps its tier.
-    let rows = Database::open(&config)
+    let rows = Database::open_unchecked(&config)
         .unwrap()
         .usage_requests_between(0, i64::MAX)
         .unwrap();
@@ -401,7 +402,7 @@ fn unreported_usage_is_persisted_and_survives_the_daily_rollup() {
     storage.close();
 
     // Then: the surviving row keeps its flag, and the bucket counts the unreported request.
-    let database = Database::open(&config).unwrap();
+    let database = Database::open_unchecked(&config).unwrap();
     let remaining = database.usage_requests_between(0, i64::MAX).unwrap();
     assert_eq!(remaining.len(), 1);
     assert!(!remaining[0].record.usage_reported);
@@ -426,7 +427,7 @@ fn reported_requests_read_back_as_reported() {
         .record_usage_requests(vec![record("reported", SystemTime::now(), Some(0.1))])
         .unwrap();
     storage.close();
-    let rows = Database::open(&config)
+    let rows = Database::open_unchecked(&config)
         .unwrap()
         .usage_requests_between(0, i64::MAX)
         .unwrap();

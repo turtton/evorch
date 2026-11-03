@@ -162,7 +162,7 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     let before_sessions = rows(&conn, "SELECT * FROM sessions ORDER BY id");
     drop(conn);
 
-    let db = Database::open(&config_for(&path)).unwrap();
+    let db = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         db.pragma_i64("user_version").unwrap(),
         i64::from(LATEST_SCHEMA)
@@ -194,7 +194,7 @@ fn upgrade(version: u32, already_allows_stopped: bool) {
     // A normal reopen is guarded by user_version and does not rebuild anything.
     let schema_version = db.pragma_i64("schema_version").unwrap();
     drop(db);
-    let reopened = Database::open(&config_for(&path)).unwrap();
+    let reopened = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         reopened.pragma_i64("schema_version").unwrap(),
         schema_version
@@ -221,7 +221,7 @@ fn edited_v8_at_version_9_preserves_existing_stopped_tasks() {
 fn fresh_open_accepts_stopped_and_rejects_invalid_status() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    let db = Database::open(&config_for(&path)).unwrap();
+    let db = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         db.pragma_i64("user_version").unwrap(),
         i64::from(LATEST_SCHEMA)
@@ -274,7 +274,7 @@ fn failed_rebuild_rolls_back_schema_data_and_version() {
     let before = rows(&conn, "SELECT * FROM tasks ORDER BY id");
     let schema = rows(&conn, "SELECT * FROM sqlite_master ORDER BY name");
     assert!(matches!(
-        Database::open(&config_for(&path)),
+        Database::open_unchecked(&config_for(&path)),
         Err(StorageError::Migration { version: 10, .. })
     ));
     assert_eq!(rows(&conn, "SELECT * FROM tasks ORDER BY id"), before);

@@ -31,7 +31,7 @@ use storage::thread_index::{
     ProvenanceStatus, SnapshotBundle, SnapshotProvenance, extract_snapshot_bundle,
     parse_index_snapshot, snapshot_sha256,
 };
-use storage::{RunContextRecord, RunLedgerEntry};
+use storage::{Database, RunContextRecord, RunLedgerEntry};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -975,23 +975,16 @@ fn main() -> Result<()> {
         };
 
         {
-            let mut statement = store.prepare(
-            "SELECT run_id, role, name, parent_run_id, config_json, messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns FROM run_contexts ORDER BY run_id",
-        )?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let record = RunContextRecord {
-                    run_id: row.get(0)?,
-                    role: row.get(1)?,
-                    name: row.get(2)?,
-                    parent_run_id: row.get(3)?,
-                    config_json: row.get(4)?,
-                    messages_json: stored_text(row, 5)?,
-                    checkpoints_json: stored_text(row, 6)?,
-                    terminal_phase: row.get(7)?,
-                    restorable: row.get(8)?,
-                    updated_at_ns: row.get(9)?,
-                    host_inputs_json: "[]".into(),
+            // The conversation is read through the storage API: it lives in message rows
+            // and content blobs, and this tool measures a converted copy.
+            let database = Database::open_read_only(&options.copy)?;
+            let mut statement = store.prepare("SELECT run_id FROM run_contexts ORDER BY run_id")?;
+            let run_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for run_id in run_ids {
+                let Some(record) = database.run_context(&run_id)? else {
+                    continue;
                 };
                 seen.insert(record.run_id.clone());
                 let note = latest_notes.get(&record.run_id).cloned();
@@ -1086,14 +1079,4 @@ fn main() -> Result<()> {
     });
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
-}
-
-/// A snapshot column that may be plain TEXT or a zstd BLOB (large snapshots are compressed).
-fn stored_text(row: &rusqlite::Row<'_>, index: usize) -> Result<String> {
-    Ok(match row.get_ref(index)? {
-        rusqlite::types::ValueRef::Blob(bytes) => {
-            String::from_utf8(zstd::stream::decode_all(bytes)?)?
-        }
-        value => String::from_utf8(value.as_str()?.as_bytes().to_vec())?,
-    })
 }

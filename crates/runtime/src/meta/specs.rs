@@ -13,14 +13,14 @@ pub(crate) fn tool_spec(name: &str) -> ToolSpec {
 pub(super) fn delegate(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Start a child agent with the selected role and task. By default, wait without a deadline and return its terminal phase, or a snapshot when it asks a question or an agent message or user input arrives. Resolve questions with subagent_questions and answer_subagent_question; read messages with inbox; retrieve completed results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
+        description: "Start a child agent with the selected role and task. By default, wait without a deadline and return its terminal phase, or an output-bearing snapshot when an interactive child completes a turn and idles in Waiting (status=turn_completed), asks a question, or an agent message or user input arrives. Resolve questions with subagent_questions and answer_subagent_question; read messages with inbox; retrieve terminal or completed-turn results with run_output. To follow up on a finished child's work, message it instead of delegating again when run_output or wait reports continuable: it resumes with its saved context.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "target": delegate_target_schema(),
                 "prompt": {"type": "string", "description": "Self-contained task instructions and relevant context."},
                 "background": {"type": "boolean", "default": false, "description": "Return the child run_id immediately instead of waiting."},
-                "interactive": {"type": "boolean", "default": false, "description": "Keep the child available for messages; requires background=true."},
+                "interactive": {"type": "boolean", "default": false, "description": "Keep the child available for messages after its initial turn. With background=false (default), return that turn's output when it idles; background=true returns its run_id immediately."},
                 "name": {"type": "string", "description": "Human-readable child name."},
                 "load_skills": {"type": "array", "items": {"type": "string"}, "description": "Registered skills to load into the child."},
                 "task": {
@@ -44,7 +44,7 @@ pub(super) fn delegate(name: &str) -> ToolSpec {
 pub(super) fn run_output(name: &str) -> ToolSpec {
     ToolSpec {
         name: name.into(),
-        description: "Read a direct child's or parent's phase/status, completed output, or failure/cancellation/stop reason without waiting or restoring terminal runs. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
+        description: "Read a direct child's or parent's phase/status, terminal or idle-turn output, or failure/cancellation/stop reason without waiting or restoring terminal runs. An interactive turn that successfully ends without unanswered questions has phase=Waiting, status=turn_completed, output and turn_generation. Returning a direct child's idle-turn output acknowledges that generation, so wait will not wake again for it; snapshots remain readable. Ordinary Waiting (nested waits, questions or reviews) is not a completed turn. Returning a terminal child's result acknowledges that completion and removes its still-queued automatic notice; explicit agent messages and other completion generations are not consumed. For a finished direct child, continuable tells whether a message resumes it with its saved context, and continuation_blocked explains why not. Waiting is nonterminal and need not indicate a question; use has_pending_question from wait and subagent_questions to identify unanswered questions.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {"run_id": run_id()},
@@ -56,7 +56,7 @@ pub(super) fn run_output(name: &str) -> ToolSpec {
 pub(super) fn wait(name: &str) -> ToolSpec {
     let mut spec = object_spec(
         name,
-        "Wait for direct children or a parent to terminate. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives. Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are explicit agent messages that arrived, consumed as by inbox; automatic completion notices are not included as messages. Returning terminal child output in runs acknowledges that completion and removes its still-queued automatic notice; unobserved and other-generation notices remain; attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal; needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error/Stopped on completion with nothing else to report, otherwise the object. A phase-only response does not acknowledge the output and leaves its automatic notice queued. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
+        "Wait for direct children or a parent to terminate, or for interactive direct children to complete a turn and idle. Supply exactly one of run_id or run_ids; invalid or unrelated IDs fail before waiting. There is no deadline: besides terminal or previously unobserved idle-turn completion per mode, it returns when a target asks a question not yet reported to you (including nonblocking questions), an agent message arrives, or user input arrives. Returns {messages, user_input_ready, completed_run_ids, attention_run_ids, runs}: messages are explicit agent messages that arrived, consumed as by inbox; automatic completion notices are not included as messages. Returning terminal or idle-turn child output in runs acknowledges that completion and removes its still-queued automatic notice; unobserved and other-generation notices remain; attention_run_ids are the targets with newly reported questions. User input, including images, arrives automatically in the next model input. Each run includes phase/status/output/reason, continuable/continuation_blocked for finished direct children, and truncation flags (output 4096 bytes, reason 1024 bytes). Waiting is nonterminal: a successfully completed interactive turn without unanswered questions has status=turn_completed, output and turn_generation and is included in completed_run_ids once per generation. Output-bearing wait, delegate or run_output acknowledges that idle generation; repeating wait then waits for a new turn or other event instead of spinning. Ordinary Waiting (including nested wait, question or review waits) alone does not wake wait. needs_user_input marks a required answer, has_pending_question any unanswered question. A call with only run_id returns Done/Error/Stopped on completion with nothing else to report, otherwise the object (always for an idle-turn result). A phase-only response does not acknowledge the output and leaves its automatic notice queued. A target that already finished returns at once, so leave finished targets out. For a snapshot without waiting, use run_output. Does not cancel targets. Caller cancellation interrupts immediately.",
         json!({
             "run_id": run_id(),
             "run_ids": {"type":"array", "items":run_id(), "minItems":1, "maxItems":super::runs::waiting::MAX_WAIT_RUNS, "uniqueItems":true},
@@ -362,7 +362,6 @@ fn delegate_target_schema() -> Value {
             .filter(|category| category.role == *role)
             .collect();
         let guidance = match *role {
-            "orchestrator" => "Coordinate agents and execution.".to_owned(),
             "explorer" => "Read-only local code investigation.".to_owned(),
             "worker" => "Implement, fix, run commands or commit; choose a category by the task's primary difficulty.".to_owned(),
             "reviewer" => format!("Independently compare implementation results or plans against requirements and give an acceptance verdict; consultation belongs to Advisor, in a separate context; {} reviews a planner-produced plan before execution.", CategoryId::PlanReview),
@@ -439,6 +438,13 @@ mod tests {
             branches.len(),
             super::super::delegation::DELEGATE_ROLES.len()
         );
+        // Orchestrator is root-only: no branch offers it under any spelling.
+        assert!(
+            !branches
+                .iter()
+                .any(|branch| branch["properties"]["role"]["const"] == "orchestrator")
+        );
+        assert!(!validator.is_valid(&json!({"target":{"role":"orchestrator"}, "prompt":"task"})));
         for (branch, role) in branches
             .iter()
             .zip(super::super::delegation::DELEGATE_ROLES)

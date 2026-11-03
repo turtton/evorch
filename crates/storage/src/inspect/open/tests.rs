@@ -11,9 +11,10 @@ use crate::{Storage, StorageConfig};
 const PROBE_DB: &str = "EVORCH_TEST_INSPECT_LOCK_PROBE_DB";
 const INSERT_EVENT: &str = "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, subkind)
                             VALUES ('s', 1, 0, 0, 'Raw', '{}', 'Raw')";
-const INSERT_CONTEXT: &str = "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
-                                  checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json)
-                              VALUES (lower(hex(randomblob(8))), 'worker', 'n', NULL, '{}', '[]', '[]', 'Done', 0, 0, '[]')";
+const INSERT_CONTEXT: &str = "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
+                                  checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json,
+                                  messages_len, checkpoints_len, config_len)
+                              VALUES (lower(hex(randomblob(8))), 'worker', 'n', NULL, '{}', '[]', 'Done', 0, 0, '[]', 2, 2, 2)";
 const INSERT_INDEX_RUN: &str = "INSERT INTO thread_index_runs(run_id, state, source_revision, snapshot_revision,
                                     source_context_sha256, extractor_version, accounting_version,
                                     source_updated_at_ns, retention_at_ns)

@@ -2,6 +2,8 @@
 mod blockers;
 #[path = "restore/concurrent.rs"]
 mod concurrent;
+#[path = "restore/nested_orchestrator.rs"]
+mod nested_orchestrator;
 #[path = "restore/send.rs"]
 mod send;
 mod support;

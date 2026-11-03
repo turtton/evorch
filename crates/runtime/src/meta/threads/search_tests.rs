@@ -26,13 +26,12 @@ impl Fixture {
         messages: Vec<Message>,
     ) {
         self.run(run, thread, parent, messages);
-        let record = self
+        let bundle = self
             .store()
-            .with_database(|db| db.run_context(run))
-            .unwrap()
+            .with_database(|db| Ok(db.snapshot_bundle(run).unwrap().unwrap()))
             .unwrap();
         let write = crate::restore::provenance::ConversationProvenance::default()
-            .write(record)
+            .write(bundle.record, bundle.snapshot_revision)
             .unwrap();
         self.store().handle.save_snapshot_bundle(&write).unwrap();
     }
@@ -663,8 +662,13 @@ fn header_only_search_does_not_decode_saved_payloads() {
     );
     let conn = Connection::open(&f.store().db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET messages_json = x'ff', config_json = x'ff', \
-         checkpoints_json = x'ff' WHERE run_id = 'run-201'",
+        "UPDATE run_contexts SET config_json = x'ff', checkpoints_json = x'ff' \
+         WHERE run_id = 'run-201'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = 'run-201'",
         [],
     )
     .unwrap();

@@ -46,6 +46,15 @@ impl AgentModel for CompletingModel {
     }
 }
 
+/// A record with its configuration in the form storage keeps: parsed and serialized
+/// again (keys in sorted order), which is what any reader gets back whatever order the
+/// writer's struct used.
+fn normalized(mut record: storage::RunContextRecord) -> storage::RunContextRecord {
+    let config: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+    record.config_json = serde_json::to_string(&config).unwrap();
+    record
+}
+
 struct Fixture {
     runtime: AgentRuntime,
     storage: storage::Storage,

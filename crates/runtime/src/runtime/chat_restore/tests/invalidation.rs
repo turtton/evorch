@@ -17,14 +17,9 @@ async fn legacy_secret_snapshot_is_redacted_on_save_and_restores_after_store_res
         }],
     }])
     .unwrap();
-    let conn = rusqlite::Connection::open(&config.db_path).unwrap();
-    conn.execute(
-        "UPDATE run_contexts SET messages_json = ?1 WHERE run_id = ?2",
-        rusqlite::params![messages, run.to_string()],
-    )
-    .unwrap();
     let store = fixture.runtime.shared.run_store.get().unwrap();
-    let legacy = store.restore_record(run).unwrap().unwrap();
+    let mut legacy = store.restore_record(run).unwrap().unwrap();
+    legacy.messages_json = messages;
     assert!(legacy.restorable);
     fixture
         .storage

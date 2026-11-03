@@ -48,7 +48,8 @@ cargo run -q -p evorch -- inspect candidate <candidate-id>
 
 ```sh
 cargo run -q -p evorch -- inspect run <run-id>          # 下表の項目に加え、この run を指す候補
-cargo run -q -p evorch -- inspect run <run-id> --full   # 上に加えて messages_json / checkpoints_json の全文
+cargo run -q -p evorch -- inspect run <run-id> --full   # 上に加えて messages_json / checkpoints_json の全文（本文は解決済み）
+cargo run -q -p evorch -- inspect run <run-id> --messages 12..15   # 保存順 12〜14 番のメッセージだけ（System を含む番号）
 cargo run -q -p evorch -- inspect events --run <run-id> [--limit N]
 cargo run -q -p evorch -- inspect events --around <unix-ns> [--window-ms 5000]
 ```
