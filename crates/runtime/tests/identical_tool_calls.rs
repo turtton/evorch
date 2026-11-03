@@ -5,7 +5,7 @@ use providers::{ChatResponse, ContentBlock, FinishReason, ToolResultContent};
 use runtime::{AgentRuntime, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
 use serde_json::json;
 use std::sync::Arc;
-use support::{ScriptedModel, drain_events, text_response, tool_response};
+use support::{ScriptedModel, text_response, tool_response};
 
 async fn run_script(
     script: Vec<ChatResponse>,
@@ -43,18 +43,32 @@ async fn run_script_with(
     let run = composed
         .runtime
         .delegate_background(Role::Worker, "repeat guard".into(), run_config);
-    let phase = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        composed.runtime.wait(run),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // Completion is the lifecycle wait; hang detection belongs to the nextest runner.
+    let phase = composed.runtime.wait(run).await.unwrap();
     (
         phase,
-        drain_events(&mut receiver).await,
+        events_until_terminal(&mut receiver).await,
         model.observed().await.len(),
     )
+}
+
+/// Collects events up to and including the run's terminal state change.
+async fn events_until_terminal(receiver: &mut event_bus::EventReceiver) -> Vec<event_bus::Event> {
+    let mut events = Vec::new();
+    loop {
+        let event = receiver.recv().await.expect("terminal event");
+        let terminal = matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Done | AgentRunPhase::Error,
+                ..
+            })
+        );
+        events.push(event);
+        if terminal {
+            return events;
+        }
+    }
 }
 
 /// The reason of the run's terminal `Error` transition.
@@ -192,10 +206,7 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
     // When: the child stops and the parent's wait returns its terminal snapshot.
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
-    let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(parent))
-        .await
-        .unwrap()
-        .unwrap();
+    let phase = runtime.wait(parent).await.unwrap();
     assert_eq!(phase, AgentRunPhase::Done);
     let wait_result = model
         .observed()
