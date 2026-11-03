@@ -1,4 +1,5 @@
 use egui_dock::{Node, NodeIndex, NodePath, SurfaceIndex, TabIndex};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use workspace_ui::{Panel, PanelId, PanelKind};
 
 use super::WorkbenchState;
@@ -7,6 +8,79 @@ use crate::model::tasks::AgentRunSource;
 const REGION_HOME: &str = "subagents-home";
 
 impl<S: AgentRunSource> WorkbenchState<S> {
+    /// The display-only lifecycle projection is shared with other GUI windows;
+    /// following their events must not execute runtime actions or approvals.
+    pub(super) fn apply_run_display_event(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
+                run_id, agent_name, ..
+            }) => {
+                self.open_subagent_pane(run_id);
+                self.unpark_subagent(run_id);
+                if let Some(panel) = self
+                    .panels
+                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
+                    && !agent_name.trim().is_empty()
+                {
+                    panel.title = format!("Transcript: {agent_name}");
+                }
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
+                self.phases.insert(run_id.clone(), super::frame::phase(*to));
+                match to {
+                    AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
+                        let has_pane = self
+                            .dock
+                            .find_tab(&PanelId::new(format!("agent-{run_id}")))
+                            .is_some();
+                        let known_conversation = self.is_conversation_run(run_id);
+                        if has_pane || !known_conversation {
+                            self.park_completed_subagent(run_id);
+                        }
+                    }
+                    AgentRunPhase::Pending | AgentRunPhase::Running => {
+                        self.unpark_subagent(run_id);
+                    }
+                    AgentRunPhase::Waiting => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// History rebuilds transcripts and the delegated-run index without live UI
+    /// effects. Recreate their panes once ownership and final phases are known,
+    /// even when no workspace layout was saved before the GUI closed.
+    pub(super) fn restore_subagent_panes(&mut self) {
+        let rows = self.tasks.rows().to_vec();
+        for row in rows {
+            let run_id = row.run_id.to_string();
+            if self.thread_for_run(&run_id).is_none() || self.is_conversation_run(&run_id) {
+                continue;
+            }
+            self.open_subagent_pane(&run_id);
+            if !row.name.trim().is_empty()
+                && let Some(panel) = self
+                    .panels
+                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
+            {
+                panel.title = format!("Transcript: {}", row.name);
+            }
+            let phase = self
+                .phases
+                .get(&run_id)
+                .copied()
+                .unwrap_or_else(|| super::frame::phase(row.status));
+            match phase {
+                workspace_ui::ThreadRunPhase::Done
+                | workspace_ui::ThreadRunPhase::Error
+                | workspace_ui::ThreadRunPhase::Stopped => self.park_completed_subagent(&run_id),
+                _ => self.unpark_subagent(&run_id),
+            }
+        }
+        self.sync_subagent_thread_panes();
+    }
+
     pub fn open_subagent_pane(&mut self, run_id: &str) {
         if self.is_conversation_run(run_id) {
             return;

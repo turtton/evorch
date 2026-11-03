@@ -451,6 +451,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.ledger.load_all(db.run_ledger_all()?);
         self.transcripts
             .select_thread(self.sidebar.active_thread.as_ref().map(ToString::to_string));
+        self.restore_subagent_panes();
         self.refresh_active_thread_workspace();
         self.refresh_draft_banner();
         stage.finish();
