@@ -204,6 +204,21 @@ fn verify_run(
     ] {
         match resolved_document(conn, &header.run_id, text) {
             Ok(value) => {
+                if what == "configuration" {
+                    // The projection is compared with the resolved reason, so a reason
+                    // that is a blob is checked too (the plain check skips it).
+                    let reason = value
+                        .get("non_restorable_reason")
+                        .and_then(serde_json::Value::as_str);
+                    if reason != header.reason.as_deref() {
+                        report.add(
+                            "non_restorable_reason",
+                            Some(label),
+                            None,
+                            "the projection differs from the resolved configuration",
+                        );
+                    }
+                }
                 let len = serde_json::to_string(&value).map_or(0, |text| text.len());
                 if i64::try_from(len).ok() != Some(expected) {
                     report.add(

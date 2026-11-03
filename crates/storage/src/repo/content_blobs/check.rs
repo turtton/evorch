@@ -84,9 +84,19 @@ pub(crate) fn check_bodies(
     scope: BodyScope<'_>,
     verify: bool,
 ) -> Result<CheckReport, StorageError> {
-    // One read snapshot for the whole check, so a writer cannot make it disagree with itself.
-    let tx = conn.unchecked_transaction()?;
-    let conn: &Connection = &tx;
+    // One read snapshot for the whole check (a caller that checks more in the same
+    // snapshot has already opened it), so a writer cannot make it disagree with itself.
+    crate::repo::run_messages::read_snapshot(conn, || {
+        check_bodies_in_snapshot(conn, owners, scope, verify)
+    })
+}
+
+fn check_bodies_in_snapshot(
+    conn: &Connection,
+    owners: &[OwnerSpec],
+    scope: BodyScope<'_>,
+    verify: bool,
+) -> Result<CheckReport, StorageError> {
     let mut report = CheckReport::default();
     let tables = ref_tables(conn)?;
     check_schema(conn, owners, &tables, &mut report)?;

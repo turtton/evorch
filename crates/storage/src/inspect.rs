@@ -468,30 +468,49 @@ impl Database {
         let Some(Value::Object(object)) = context.as_mut() else {
             return Ok(None);
         };
-        // `json_rows` read the tokenized text; the documents are shown resolved.
-        for column in ["config_json", "checkpoints_json"] {
-            let stored = self.conn.query_row(
-                &format!("SELECT {column} FROM run_contexts WHERE run_id = ?1"),
-                [run_id],
-                |row| row.get::<_, String>(0),
-            )?;
-            object.insert(
-                column.to_owned(),
-                crate::repo::run_messages::resolved_document(&self.conn, run_id, &stored)?,
-            );
-        }
+        // `json_rows` parsed the stored (tokenized) text. The configuration is shown
+        // resolved in every view; the checkpoint list only when message text is asked for,
+        // because its bodies are conversation text.
+        let stored_config = self.conn.query_row(
+            "SELECT config_json FROM run_contexts WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        object.insert(
+            "config_json".to_owned(),
+            crate::repo::run_messages::resolved_document(&self.conn, run_id, &stored_config)?,
+        );
         match detail {
             RunDetail::Summary => {
-                if let Some(value) = object.remove("checkpoints_json") {
-                    object.insert(
-                        "checkpoints_count".into(),
-                        json!(value.as_array().map_or(0, Vec::len)),
-                    );
+                // The list is an array whose elements are objects: tokens replace only
+                // string values, so the stored form has the element count without
+                // resolving one body.
+                if let Some(list) = object.remove("checkpoints_json") {
+                    let count = list.as_array().map(Vec::len).ok_or_else(|| {
+                        StorageError::Serialization(
+                            "the stored checkpoint list is not an array".into(),
+                        )
+                    })?;
+                    object.insert("checkpoints_count".into(), json!(count));
                 }
                 let count = object.get("message_count").cloned().unwrap_or(json!(0));
                 object.insert("messages_count".into(), count);
+                object.insert("bodies".into(), self.run_body_stats(run_id)?);
             }
             RunDetail::Full | RunDetail::Messages(_) => {
+                let stored_checkpoints = self.conn.query_row(
+                    "SELECT checkpoints_json FROM run_contexts WHERE run_id = ?1",
+                    [run_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                object.insert(
+                    "checkpoints_json".to_owned(),
+                    crate::repo::run_messages::resolved_document(
+                        &self.conn,
+                        run_id,
+                        &stored_checkpoints,
+                    )?,
+                );
                 let range = match detail {
                     RunDetail::Messages(range) => Some(range.clone()),
                     _ => None,
@@ -516,6 +535,44 @@ impl Database {
             }
         }
         Ok(context)
+    }
+
+    /// What the run keeps in content blobs, from the reference tables and the blob rows'
+    /// metadata only (`byte_len`, `length(data)`: no body is read or decompressed).
+    /// `messages` and `header` count references; a blob two of them name is counted in
+    /// each, and `distinct_blobs` counts it once.
+    fn run_body_stats(&self, run_id: &str) -> Result<Value, StorageError> {
+        let stats = |sql: &str| -> Result<Value, StorageError> {
+            self.conn
+                .query_row(sql, [run_id], |row| {
+                    Ok(json!({
+                        "references": row.get::<_, i64>(0)?,
+                        "distinct_blobs": row.get::<_, i64>(1)?,
+                        "plain_bytes": row.get::<_, i64>(2)?,
+                        "stored_bytes": row.get::<_, i64>(3)?,
+                    }))
+                })
+                .map_err(StorageError::from)
+        };
+        let skeletons: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        Ok(json!({
+            "message_skeleton_bytes": skeletons,
+            "message_blobs": stats(
+                "SELECT COUNT(*), COUNT(DISTINCT r.blob_id), COALESCE(SUM(b.byte_len), 0), \
+                 COALESCE(SUM(OCTET_LENGTH(b.data)), 0) FROM run_messages m \
+                 JOIN content_blob_refs_message r ON r.message_id = m.id \
+                 JOIN content_blobs b ON b.id = r.blob_id WHERE m.run_id = ?1",
+            )?,
+            "header_blobs": stats(
+                "SELECT COUNT(*), COUNT(DISTINCT r.blob_id), COALESCE(SUM(b.byte_len), 0), \
+                 COALESCE(SUM(OCTET_LENGTH(b.data)), 0) FROM content_blob_refs_header r \
+                 JOIN content_blobs b ON b.id = r.blob_id WHERE r.run_id = ?1",
+            )?,
+        }))
     }
 
     fn json_rows(&self, sql: &str, params: &[&str]) -> Result<Vec<Value>, StorageError> {

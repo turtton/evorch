@@ -146,8 +146,14 @@ impl Database {
             BodyCheckScope::Run(run) => BodyScope::Run(run),
             BodyCheckScope::Thread(thread) => BodyScope::Thread(thread),
         };
-        let mut report = check_bodies(&self.conn, PRODUCTION_OWNERS, scope_ref, verify)?;
-        check_runs(&self.conn, scope_ref, verify, &mut report)?;
+        // The reference check and the structural check of the run rows are one read
+        // snapshot: a save committed by another process between them must not look like
+        // an inconsistency.
+        let report = crate::repo::run_messages::read_snapshot(&self.conn, || {
+            let mut report = check_bodies(&self.conn, PRODUCTION_OWNERS, scope_ref, verify)?;
+            check_runs(&self.conn, scope_ref, verify, &mut report)?;
+            Ok(report)
+        })?;
         Ok(json!({
             "ok": report.is_ok(),
             "scope": match scope {

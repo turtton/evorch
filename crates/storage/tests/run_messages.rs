@@ -1124,3 +1124,141 @@ fn a_terminal_summary_restores_only_the_last_message() {
         .unwrap();
     assert!(database.terminal_summaries(&["run-a".to_owned()]).is_err());
 }
+
+#[test]
+fn verification_compares_the_projection_with_a_reason_that_is_a_blob() {
+    // Given: a run whose non-restorable reason is long enough to be a blob.
+    let dir = TempDir::new().unwrap();
+    let config = config(&dir);
+    let storage = Storage::open(config.clone()).unwrap();
+    storage
+        .handle()
+        .upsert_run_context(&with_header_bodies("run-a"))
+        .unwrap();
+    storage.close();
+    assert_consistent(&config.db_path, "after the save");
+    let connection = Connection::open(&config.db_path).unwrap();
+    let in_config: String = connection
+        .query_row(
+            "SELECT config_json FROM run_contexts WHERE run_id = 'run-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        in_config.contains('\u{e000}') && in_config.contains("non_restorable_reason"),
+        "the reason is stored as a token"
+    );
+
+    // When: only the projection of the reason is damaged.
+    connection
+        .execute(
+            "UPDATE run_contexts SET non_restorable_reason = 'something else'",
+            [],
+        )
+        .unwrap();
+
+    // Then: the plain check (which does not resolve bodies) cannot see it, and the
+    // verifying check reports it.
+    let kinds = |report: &Value| -> Vec<String> {
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|problem| problem["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let inspected = Database::open_for_inspection(&config.db_path).unwrap();
+    let plain = inspected
+        .inspect_check_bodies(&BodyCheckScope::All, false)
+        .unwrap();
+    assert_eq!(plain["ok"], true, "{plain}");
+    let verified = inspected
+        .inspect_check_bodies(&BodyCheckScope::All, true)
+        .unwrap();
+    assert_eq!(verified["ok"], false);
+    assert_eq!(kinds(&verified), ["non_restorable_reason"], "{verified}");
+
+    // And: restoring the value clears the finding.
+    let reason = long_reason();
+    connection
+        .execute(
+            "UPDATE run_contexts SET non_restorable_reason = ?1",
+            [&reason],
+        )
+        .unwrap();
+    assert_consistent(&config.db_path, "after the repair");
+}
+
+#[test]
+fn a_normal_inspection_reports_counts_and_body_statistics_without_resolving_a_body() {
+    // Given: a run whose messages and checkpoint summary are blob-backed, and whose
+    // configuration is small. Then every blob is damaged: any resolution would fail.
+    let dir = TempDir::new().unwrap();
+    let config = config(&dir);
+    let storage = Storage::open(config.clone()).unwrap();
+    let mut input = record(
+        "run-a",
+        &[
+            user(&compressible(3_000, "one")),
+            assistant(&compressible(4_000, "two")),
+        ],
+    );
+    input.checkpoints_json = json!([
+        {"id": "c1", "summary": user(&compressible(3_500, "summary")), "range": [0, 1]},
+        {"id": "c2", "summary": user("short"), "range": [0, 2]},
+    ])
+    .to_string();
+    storage.handle().upsert_run_context(&input).unwrap();
+    storage.close();
+    let connection = Connection::open(&config.db_path).unwrap();
+    let plain_bytes: i64 = connection
+        .query_row("SELECT SUM(byte_len) FROM content_blobs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute("UPDATE content_blobs SET codec = 0, data = x'ff'", [])
+        .unwrap();
+    let inspected = Database::open_for_inspection(&config.db_path).unwrap();
+
+    // When: the normal view is read.
+    let summary = inspected
+        .inspect_run_detail("run-a", RunDetail::Summary)
+        .unwrap();
+
+    // Then: counts come from the header and the stored list structure, and the body
+    // statistics from the reference tables and blob metadata.
+    let context = &summary["context"];
+    assert_eq!(context["messages_count"], 2, "{summary}");
+    assert_eq!(context["checkpoints_count"], 2, "{summary}");
+    assert!(context.get("checkpoints_json").is_none());
+    assert!(context.get("messages_json").is_none());
+    let bodies = &context["bodies"];
+    assert_eq!(bodies["message_blobs"]["references"], 2);
+    assert_eq!(bodies["message_blobs"]["distinct_blobs"], 2);
+    assert_eq!(bodies["header_blobs"]["references"], 1);
+    assert_eq!(
+        bodies["message_blobs"]["plain_bytes"].as_i64().unwrap()
+            + bodies["header_blobs"]["plain_bytes"].as_i64().unwrap(),
+        plain_bytes
+    );
+    assert_eq!(
+        bodies["message_blobs"]["stored_bytes"], 2,
+        "damaged: 1 byte each"
+    );
+    assert!(bodies["message_skeleton_bytes"].as_i64().unwrap() > 0);
+
+    // And: asking for text does resolve, and refuses the damaged bodies instead of
+    // showing a placeholder.
+    assert!(
+        inspected
+            .inspect_run_detail("run-a", RunDetail::Full)
+            .is_err()
+    );
+    assert!(
+        inspected
+            .inspect_run_detail("run-a", RunDetail::Messages(0..1))
+            .is_err()
+    );
+}
