@@ -50,8 +50,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v37.sql"),
     include_str!("migrations/v38.sql"),
     include_str!("migrations/v39.sql"),
-    include_str!("migrations/v40.sql"),
+    concat!(
+        include_str!("migrations/v40_drop.sql"),
+        include_str!("migrations/v40_prepare.sql")
+    ),
 ];
+
+/// Migration v40 without its last step: the new tables, the header columns and the
+/// triggers. The conversion command runs it on a v39 database that still has
+/// `messages_json`, while it moves the messages.
+pub(crate) const V40_PREPARE: &str = include_str!("migrations/v40_prepare.sql");
+
+/// The step of migration v40 that removes `run_contexts.messages_json`; the conversion
+/// command runs it once every run is converted.
+pub(crate) const V40_DROP: &str = include_str!("migrations/v40_drop.sql");
 
 /// The first schema version that stores a run's messages in `run_messages`. A database
 /// below it (and not empty) holds them in `run_contexts.messages_json`: this build
@@ -108,6 +120,15 @@ pub(crate) fn apply_migrations_unchecked(conn: &Connection) -> Result<(), Storag
 }
 
 fn apply_pending(conn: &Connection) -> Result<(), StorageError> {
+    let supported =
+        u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
+    apply_up_to(conn, supported)
+}
+
+/// Applies the migrations above the database's `user_version` up to and including
+/// `target`, each in its own transaction, with no format check. The conversion command
+/// uses it to bring an older database to version 39 before it converts the messages.
+pub(crate) fn apply_up_to(conn: &Connection, target: u32) -> Result<(), StorageError> {
     let current = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
     let supported =
         u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
@@ -117,10 +138,16 @@ fn apply_pending(conn: &Connection) -> Result<(), StorageError> {
             supported,
         });
     }
-
+    let target_index =
+        usize::try_from(target).map_err(|_| StorageError::OutOfRange("target migration"))?;
     let current_index = usize::try_from(current)
         .map_err(|_| StorageError::OutOfRange("current migration version"))?;
-    for (index, migration) in MIGRATIONS.iter().enumerate().skip(current_index) {
+    for (index, migration) in MIGRATIONS
+        .iter()
+        .enumerate()
+        .take(target_index)
+        .skip(current_index)
+    {
         let version =
             u32::try_from(index + 1).map_err(|_| StorageError::OutOfRange("migration version"))?;
         let transaction = conn

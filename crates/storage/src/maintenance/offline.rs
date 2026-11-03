@@ -539,26 +539,31 @@ fn strip_batch_after(
     Ok((rows.len() as u64, rows.last().map_or(after, |row| row.0)))
 }
 
-pub(super) fn require_space(path: &Path, required: u64) -> Result<(), StorageError> {
+/// Free bytes for an unprivileged writer on the volume of `path`.
+pub(super) fn available_space(path: &Path) -> Result<u64, StorageError> {
     #[cfg(unix)]
     {
         let info =
             rustix::fs::statvfs(path).map_err(|error| StorageError::Io(error.to_string()))?;
-        let available = info.f_bavail.saturating_mul(info.f_frsize);
-        if available < required {
-            return Err(invalid(format!(
-                "insufficient free space: need {required} bytes, available {available}; free-space checks cannot reserve space"
-            )));
-        }
-        Ok(())
+        Ok(info.f_bavail.saturating_mul(info.f_frsize))
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, required);
+        let _ = path;
         Err(invalid(
             "free-space checking is not supported on this platform; refusing apply",
         ))
     }
+}
+
+pub(super) fn require_space(path: &Path, required: u64) -> Result<(), StorageError> {
+    let available = available_space(path)?;
+    if available < required {
+        return Err(invalid(format!(
+            "insufficient free space: need {required} bytes, available {available}; free-space checks cannot reserve space"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]

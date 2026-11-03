@@ -708,7 +708,7 @@ fn the_migration_creates_each_production_reference_table_in_the_shape_of_the_tem
     // The migration text is written by hand; the template is what the collector and
     // the check rely on, so the two must say the same thing.
     let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let migration = squash(include_str!("../../migrations/v40.sql"));
+    let migration = squash(include_str!("../../migrations/v40_prepare.sql"));
     for owner in crate::body_store::PRODUCTION_OWNERS {
         let template = squash(&owner.ref_table_ddl());
         assert!(
