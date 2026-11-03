@@ -386,6 +386,12 @@ pub struct Analysis {
     /// Bytes of every candidate string, shared ones counted each time: the upper bound
     /// of what the blobs can take, and the figure the growth estimate uses.
     pub estimated_candidate_plain_bytes: u64,
+    /// Bytes of every message once its long strings are tokens, as text: what the rows
+    /// hold of everything that is not a blob (short strings, keys, numbers), counted
+    /// uncompressed.
+    pub estimated_skeleton_bytes: u64,
+    /// The same for the configuration and the checkpoint list of every run.
+    pub estimated_header_bytes: u64,
     /// Distinct bodies seen; a lower bound once `distinct_tracking_capped` is set.
     pub estimated_distinct_blobs: u64,
     pub estimated_blob_plain_bytes: u64,
@@ -399,8 +405,10 @@ pub struct Analysis {
     /// value. Their conversation index no longer matches their snapshot hash, so it is
     /// built again.
     pub canonicalizable_runs: u64,
-    /// Upper bound of how much the database grows before the VACUUM (new rows, indexes
-    /// and blobs, every candidate stored without compression).
+    /// Upper bound of how much the database grows before the VACUUM: every blob candidate,
+    /// every skeleton and every header document stored without compression, plus an
+    /// allowance per row, per blob or reference, and per run for the columns, indexes and
+    /// page waste around them.
     pub estimated_growth_bytes: u64,
     /// Reasons a reclaim of deleted runs cannot be completed (a cursor this build does
     /// not read, a deleted run with no job). `--apply` refuses while there is one.
@@ -504,15 +512,23 @@ pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis
     }
     analysis.estimated_distinct_blobs = bodies.len() as u64;
     analysis.estimated_blob_plain_bytes = bodies.iter().map(|token| token.byte_len).sum();
-    analysis.estimated_growth_bytes = analysis
+    // Everything that is stored as text (blob candidates, skeletons, headers) is counted
+    // uncompressed, with a quarter more for the unused room of the pages it fills; the
+    // columns, indexes and references of the rows and the new tables come on top.
+    let stored_text = analysis
         .estimated_candidate_plain_bytes
+        .saturating_add(analysis.estimated_skeleton_bytes)
+        .saturating_add(analysis.estimated_header_bytes);
+    analysis.estimated_growth_bytes = stored_text
+        .saturating_add(stored_text / 4)
         .saturating_add(analysis.messages.saturating_mul(GROWTH_PER_MESSAGE))
         .saturating_add(
             analysis
                 .estimated_blob_candidates
                 .saturating_mul(GROWTH_PER_BLOB),
         )
-        .saturating_add(analysis.convertible_runs.saturating_mul(GROWTH_PER_RUN));
+        .saturating_add(analysis.convertible_runs.saturating_mul(GROWTH_PER_RUN))
+        .saturating_add(GROWTH_FIXED);
     Ok(analysis)
 }
 
@@ -521,6 +537,8 @@ pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis
 const GROWTH_PER_MESSAGE: u64 = 384;
 const GROWTH_PER_BLOB: u64 = 160;
 const GROWTH_PER_RUN: u64 = 2_048;
+/// The tables and indexes the conversion creates, whatever the data.
+const GROWTH_FIXED: u64 = 512 * 1024;
 
 fn count_bodies(
     run: &OldRun,
@@ -547,9 +565,11 @@ fn count_bodies(
     };
     let mut messages: Value = serde_json::from_str(&run.messages).map_err(serde_error)?;
     let mut count = 0_u64;
+    let mut skeleton_bytes = 0_u64;
     if let Some(array) = messages.as_array_mut() {
         for message in array {
             visit(message)?;
+            skeleton_bytes += to_json(message)?.len() as u64;
             count += 1;
         }
     }
@@ -557,7 +577,10 @@ fn count_bodies(
     visit(&mut checkpoints)?;
     let mut config: Value = serde_json::from_str(&run.config).map_err(serde_error)?;
     visit(&mut config)?;
+    let header_bytes = (to_json(&checkpoints)?.len() + to_json(&config)?.len()) as u64;
     analysis.messages += count;
+    analysis.estimated_skeleton_bytes += skeleton_bytes;
+    analysis.estimated_header_bytes += header_bytes;
     analysis.estimated_blob_candidates += candidates;
     analysis.estimated_candidate_plain_bytes += candidate_bytes;
     analysis.distinct_tracking_capped = capped;

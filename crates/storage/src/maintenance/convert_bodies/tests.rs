@@ -1182,3 +1182,164 @@ fn a_database_the_running_build_wrote_converts_after_it_is_taken_back_to_version
         assert_eq!(read.checkpoints_json, record.checkpoints_json);
     }
 }
+
+/// Characters that zstd shrinks little (six random bits each), deterministic per seed.
+fn noise(seed: u64, len: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut x = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ALPHABET[(x >> 58) as usize] as char
+        })
+        .collect()
+}
+
+/// Runs whose growth is not in their blobs, one fixture per kind the review named.
+fn growth_fixtures() -> Vec<(&'static str, Run)> {
+    // Many messages repeating one text just under the token threshold: no blob at all, and
+    // the old column compresses the repetition away while every skeleton keeps its copy.
+    let repeated = noise(1, 1_900);
+    let messages: Vec<Value> = (0..300)
+        .map(|_| json!({"role": "assistant", "content": [{"type": "text", "text": repeated}]}))
+        .collect();
+    let duplicated = plain_run("run-duplicated", &Value::Array(messages), 1);
+
+    // Large JSON made of short values and numbers.
+    let messages: Vec<Value> = (0..6u64)
+        .map(|message| {
+            let values: Vec<f64> = (0..4_000u64)
+                .map(|n| ((message * 7_919 + n * 104_729) % 1_000_003) as f64 / 8.0)
+                .collect();
+            json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t", "name": "shell", "input": {"values": values}}
+            ]})
+        })
+        .collect();
+    let numbers = plain_run("run-numbers", &Value::Array(messages), 1);
+
+    // A configuration and checkpoint list that are large without any long string.
+    let mut header = plain_run("run-header", &json!([]), 1);
+    let config: serde_json::Map<String, Value> = (0..2_000u64)
+        .map(|n| (format!("setting_{n}"), Value::String(noise(n, 120))))
+        .collect();
+    header.config = serde_json::to_string(&config).unwrap();
+    let checkpoints: Vec<Value> = (0..400u64)
+        .map(|n| json!({"summary": noise(n + 9, 1_500), "end": n}))
+        .collect();
+    header.checkpoints = serde_json::to_string(&checkpoints).unwrap();
+
+    vec![
+        ("duplicated short text", duplicated),
+        ("short values and numbers", numbers),
+        ("large configuration and checkpoints", header),
+    ]
+}
+
+#[test]
+fn the_growth_estimate_is_not_below_what_the_conversion_adds() {
+    for (name, run) in growth_fixtures() {
+        // Given: a database with a small run and the fixture's run.
+        let dir = tempfile::tempdir().unwrap();
+        let path = v39(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        insert(&conn, &plain_run("run-0-small", &json!([]), 1));
+        insert(&conn, &run);
+        drop(conn);
+        let basis = fs::metadata(&path).unwrap().len();
+        let analysis = preview(&path).unwrap().analysis.unwrap();
+
+        // When: converted, with the size the file has when the rows are converted and
+        // before the VACUUM gives pages back.
+        let mut before_vacuum = 0;
+        convert_with(
+            &path,
+            &ConvertBodiesOptions {
+                apply: true,
+                backup: None,
+            },
+            &mut |point, conn| {
+                if point == Point::BeforeVacuum {
+                    let page: u64 = single(conn, "PRAGMA page_size").try_into().unwrap();
+                    let count: u64 = single(conn, "PRAGMA page_count").try_into().unwrap();
+                    before_vacuum = page * count;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        // Then: the estimate covers what the file grew by, and each part of it covers what
+        // was stored for that part (a skeleton or a header is stored compressed or as is,
+        // never larger than its text).
+        let conn = Connection::open(&path).unwrap();
+        let stored = |sql: &str| u64::try_from(single(&conn, sql)).unwrap();
+        let skeletons = stored("SELECT COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages");
+        let blobs = stored("SELECT COALESCE(SUM(OCTET_LENGTH(data)), 0) FROM content_blobs");
+        let headers = stored(
+            "SELECT SUM(OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json)) FROM run_contexts",
+        );
+        assert!(
+            analysis.estimated_growth_bytes >= before_vacuum.saturating_sub(basis),
+            "{name}: estimated {}, the file grew by {}",
+            analysis.estimated_growth_bytes,
+            before_vacuum.saturating_sub(basis)
+        );
+        assert!(
+            analysis.estimated_growth_bytes >= skeletons + blobs + headers,
+            "{name}: estimated {}, stored {}",
+            analysis.estimated_growth_bytes,
+            skeletons + blobs + headers
+        );
+        assert!(analysis.estimated_skeleton_bytes >= skeletons, "{name}");
+        assert!(analysis.estimated_header_bytes >= headers, "{name}");
+        // The estimate is what the old per-message allowance could not give: here the
+        // skeletons and headers alone are more than 384 bytes per message and 2 KiB per run.
+        let old_allowance = analysis.messages * 384 + analysis.convertible_runs * 2_048;
+        assert!(
+            skeletons + headers > old_allowance + analysis.estimated_blob_candidates * 160,
+            "{name}: the fixture must be one the allowance alone would under-count"
+        );
+    }
+}
+
+#[test]
+fn an_estimate_the_free_space_cannot_cover_refuses_before_any_change() {
+    // Given: the fixture whose growth is all skeleton (no blob), and what preview says
+    // every volume must have free.
+    let (_, run) = growth_fixtures().remove(0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = v39(dir.path());
+    let conn = Connection::open(&path).unwrap();
+    insert(&conn, &run);
+    drop(conn);
+    let summary = preview(&path).unwrap();
+    let required = summary.required_free_space_bytes;
+    let analysis = summary.analysis.unwrap();
+    assert_eq!(analysis.estimated_blob_candidates, 0);
+    assert!(analysis.estimated_skeleton_bytes >= 300 * 1_900);
+    let before = files(&path);
+
+    // When: one byte less than that is free.
+    space::tests_override::set(Some(required - 1));
+    let failure = apply(&path).unwrap_err();
+
+    // Then: apply refuses before the backup, and the database is as it was.
+    assert_eq!(failure.stage, "analyze");
+    assert!(
+        failure.detail.contains("insufficient free space"),
+        "{failure}"
+    );
+    assert!(failure.backup.is_none() && !failure.restore_required);
+    assert_eq!(files(&path), before);
+
+    // When: exactly that much is free.
+    space::tests_override::set(Some(required));
+    let converted = apply(&path);
+    space::tests_override::set(None);
+
+    // Then: the conversion goes through, so the refusal came from the estimate alone.
+    assert_eq!(converted.unwrap().converted_runs, 1);
+}

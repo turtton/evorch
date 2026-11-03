@@ -1364,6 +1364,8 @@ async fn resume_unfinished_model_request(
         recompose_runtime(&mut harness, &config, Some(&storage));
         assert!(harness.runtime.list_agents().is_empty());
     }
+    // Only what happens after the restore may vouch for the cache read below.
+    let restored_from = events.len();
     harness
         .runtime
         .resume_chat(
@@ -1392,7 +1394,7 @@ async fn resume_unfinished_model_request(
         "resume must send exactly the interrupted request input"
     );
     assert_append_only(CacheProtocol::OpenAi, previous, resumed).unwrap();
-    assert!(events.iter().any(|event| matches!(&event.kind,
+    assert!(events[restored_from..].iter().any(|event| matches!(&event.kind,
         EventKind::Provider(ProviderEvent::RequestCompleted { cache_read_tokens, run_id: Some(id), .. })
         if id == &run.to_string() && *cache_read_tokens > 0)));
 }
