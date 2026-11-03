@@ -557,7 +557,7 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
     let total = kinds.len() as u64 + 2;
 
     // When: the current migrations are applied.
-    crate::migrations::apply_migrations(&conn).unwrap();
+    crate::migrations::apply_migrations_unchecked(&conn).unwrap();
     let database = Database { conn };
 
     // Then: no row has been converted yet, and opening did not convert any.

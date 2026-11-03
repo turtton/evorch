@@ -92,9 +92,9 @@ impl Fixture {
         let c = &self.conn;
         c.execute(
             "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, \
-             messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns, \
-             messages_len, checkpoints_len) VALUES (?1, 'Worker', ?2, ?3, '{}', '[]', '[]', \
-             'Done', 1, 1, 2, 2)",
+             checkpoints_json, terminal_phase, restorable, updated_at_ns, \
+             messages_len, checkpoints_len, config_len) VALUES (?1, 'Worker', ?2, ?3, '{}', '[]', \
+             'Done', 1, 1, 2, 2, 2)",
             params![id, name, parent],
         )
         .unwrap();
@@ -1158,10 +1158,10 @@ fn the_fence_rejects_writers_but_not_deletes_after_confirmation() {
 
     // When/Then: inserting or reviving rows of a tombstoned identity fails.
     reject(
-        "INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns) VALUES ('rp', 'W', 'n', '{}', '[]', '[]', 'Done', 1, 1);",
+        "INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json, terminal_phase, restorable, updated_at_ns) VALUES ('rp', 'W', 'n', '{}', '[]', 'Done', 1, 1);",
     );
     reject(
-        "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, checkpoints_json, terminal_phase, restorable, updated_at_ns) VALUES ('fresh', 'W', 'n', 'rp', '{}', '[]', '[]', 'Done', 1, 1);",
+        "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, checkpoints_json, terminal_phase, restorable, updated_at_ns) VALUES ('fresh', 'W', 'n', 'rp', '{}', '[]', 'Done', 1, 1);",
     );
     reject("INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('rp', 'b', 1);");
     reject(
@@ -1374,7 +1374,7 @@ fn oversized_rows_wait_for_the_exclusive_step_which_deletes_at_least_one() {
     f.thread("A", None, Some("ra"), None);
     f.run("ra", None, Some("A"), "chat:Worker:A");
     f.run("rb", Some("ra"), Some("A"), "child");
-    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'ra'");
+    f.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(5242880) WHERE run_id = 'ra'");
     let database = f.database();
     let input = sidebar(&["A"], &[]);
     settle(&database, &input, &policy(), BIG);
@@ -2245,9 +2245,10 @@ fn a_huge_single_family_is_explored_and_confirmed_within_budgets_that_never_over
     f.run("root", None, Some("A"), "chat:Worker:A");
     f.sql(
         "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1500)
-         INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
-             checkpoints_json, terminal_phase, restorable, updated_at_ns)
-         SELECT printf('child-%05d', x), 'Worker', 'child', 'root', '{}', '[]', '[]', 'Done', 1, 1 FROM n;",
+         INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
+             checkpoints_json, terminal_phase, restorable, updated_at_ns,
+             messages_len, checkpoints_len, config_len)
+         SELECT printf('child-%05d', x), 'Worker', 'child', 'root', '{}', '[]', 'Done', 1, 1, 2, 2, 2 FROM n;",
     );
     let database = f.database();
     let input = sidebar(&["A"], &[]);
@@ -2897,7 +2898,7 @@ fn an_oversized_registration_whose_row_is_already_gone_counts_nothing() {
     let f = Fixture::new();
     f.thread("A", None, Some("ra"), None);
     f.run("ra", None, Some("A"), "chat:Worker:A");
-    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'ra'");
+    f.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(5242880) WHERE run_id = 'ra'");
     let database = f.database();
     let input = sidebar(&["A"], &[]);
     settle(&database, &input, &policy(), BIG);
@@ -3064,7 +3065,7 @@ fn stale_registrations_do_not_stop_the_exclusive_phase_from_reaching_a_real_one(
     // Given: 300 registrations whose rows are gone, sorting before one real 5 MiB row.
     let f = Fixture::new();
     f.run("big-real", None, None, "big");
-    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'big-real'");
+    f.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(5242880) WHERE run_id = 'big-real'");
     f.sql(
         "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 300)
          INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
@@ -3113,7 +3114,7 @@ fn a_job_waiting_for_the_exclusive_phase_never_starves_the_jobs_behind_it() {
     let f = Fixture::new();
     f.thread("A", None, Some("ra"), None);
     f.run("ra", None, Some("A"), "chat:Worker:A");
-    f.sql("UPDATE run_contexts SET messages_json = zeroblob(5242880) WHERE run_id = 'ra'");
+    f.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(5242880) WHERE run_id = 'ra'");
     f.thread("Z", None, Some("rz"), None);
     f.run("rz", None, Some("Z"), "chat:Worker:Z");
     f.run_payload("rz", "session-z");

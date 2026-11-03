@@ -327,7 +327,7 @@ impl Database {
                  AND run_id NOT IN (SELECT run_id FROM run_tombstones) \
                  UNION SELECT child.run_id FROM run_contexts child JOIN tree ON child.parent_run_id = tree.run_id \
                  WHERE child.run_id NOT IN (SELECT run_id FROM run_tombstones)) \
-                 SELECT context.run_id, (context.messages_len + context.checkpoints_len + length(CAST(context.config_json AS BLOB))) FROM run_contexts context JOIN tree USING(run_id) \
+                 SELECT context.run_id, (context.messages_len + context.checkpoints_len + context.config_len) FROM run_contexts context JOIN tree USING(run_id) \
                  ORDER BY CAST(substr(context.run_id, 5) AS INTEGER) LIMIT ?2",
             )?;
             statement

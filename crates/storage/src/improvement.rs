@@ -1662,7 +1662,7 @@ mod tests {
             )
             .unwrap();
         }
-        let db = Database::open(&config).unwrap();
+        let db = Database::open_unchecked(&config).unwrap();
         assert_eq!(
             db.pragma_i64("user_version").unwrap(),
             i64::try_from(crate::migrations::MIGRATIONS.len()).unwrap()

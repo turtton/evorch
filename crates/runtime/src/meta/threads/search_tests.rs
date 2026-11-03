@@ -662,8 +662,13 @@ fn header_only_search_does_not_decode_saved_payloads() {
     );
     let conn = Connection::open(&f.store().db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET messages_json = x'ff', config_json = x'ff', \
-         checkpoints_json = x'ff' WHERE run_id = 'run-201'",
+        "UPDATE run_contexts SET config_json = x'ff', checkpoints_json = x'ff' \
+         WHERE run_id = 'run-201'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = 'run-201'",
         [],
     )
     .unwrap();

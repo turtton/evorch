@@ -194,13 +194,17 @@ fn estimate(conn: &Connection, runs: &[String]) -> Result<u64, StorageError> {
     let mut events = conn
         .prepare("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE run_id = ?1")?;
     let mut contexts = conn.prepare(
-        "SELECT COALESCE(SUM(OCTET_LENGTH(messages_json) + OCTET_LENGTH(checkpoints_json)), 0) \
+        "SELECT COALESCE(SUM(OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json)), 0) \
          FROM run_contexts WHERE run_id = ?1",
+    )?;
+    let mut messages = conn.prepare(
+        "SELECT COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages WHERE run_id = ?1",
     )?;
     for run in runs {
         total = total
             .saturating_add(events.query_row([run], |row| row.get::<_, u64>(0))?)
-            .saturating_add(contexts.query_row([run], |row| row.get::<_, u64>(0))?);
+            .saturating_add(contexts.query_row([run], |row| row.get::<_, u64>(0))?)
+            .saturating_add(messages.query_row([run], |row| row.get::<_, u64>(0))?);
     }
     Ok(total)
 }

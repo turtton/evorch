@@ -29,14 +29,26 @@ pub use open::InspectedDatabase;
 pub use storage_summary::{DEFAULT_TOP_THREADS, StorageSummaryOptions};
 
 /// Columns holding JSON text that are expanded in inspection output.
-const JSON_COLUMNS: [&str; 6] = [
+const JSON_COLUMNS: [&str; 5] = [
     "payload",
     "config_json",
     "checkpoints_json",
-    "messages_json",
     "recent_run_ids",
     "body",
 ];
+
+/// How much of a run's conversation `inspect run` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunDetail {
+    /// Counts only: no message text and no checkpoint list.
+    Summary,
+    /// Every message and the checkpoint list, bodies resolved.
+    Full,
+    /// Messages `from..to` only (ordinals of the stored array, System messages included,
+    /// not the provenance ordinals), plus the checkpoint list. Messages outside the range
+    /// are not read.
+    Messages(std::ops::Range<usize>),
+}
 
 /// A stored event with its payload kept as raw JSON.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +92,8 @@ impl Database {
         if found > supported {
             return Err(StorageError::SchemaTooNew { found, supported });
         }
+        // An old conversation format (or a half-converted file) is refused, not read.
+        crate::migrations::require_current_format(&conn)?;
         if found < supported {
             return Err(StorageError::Serialization(format!(
                 "schema version {found} is older than {supported}; open it once with the current evorch to migrate"
@@ -210,28 +224,31 @@ impl Database {
     /// # Errors
     /// Returns an error if SQLite access fails.
     pub fn inspect_run(&self, run_id: &str, full: bool) -> Result<Value, StorageError> {
+        self.inspect_run_detail(
+            run_id,
+            if full {
+                RunDetail::Full
+            } else {
+                RunDetail::Summary
+            },
+        )
+    }
+
+    /// [`Database::inspect_run`] with a choice of how much of the conversation to read.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails, if a body of the conversation cannot be
+    /// resolved (never replaced by a placeholder), or if the range is outside the run.
+    pub fn inspect_run_detail(
+        &self,
+        run_id: &str,
+        detail: RunDetail,
+    ) -> Result<Value, StorageError> {
         // A confirmed deletion hides the run's rows until they are reclaimed; the
         // usage ledger and learning records are kept on purpose and still show.
-        let mut context = self
-            .json_rows(
-                "SELECT run_id, role, name, parent_run_id, config_json, messages_json, \
-                 checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, \
-                 host_inputs_json FROM run_contexts WHERE run_id = ?1 \
-                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
-                &[run_id],
-            )?
-            .into_iter()
-            .next();
-        if let Some(Value::Object(object)) = context.as_mut()
-            && !full
-        {
-            for column in ["messages_json", "checkpoints_json"] {
-                if let Some(value) = object.remove(column) {
-                    let count = value.as_array().map_or(0, Vec::len);
-                    object.insert(column.replace("_json", "_count"), json!(count));
-                }
-            }
-        }
+        let context = crate::repo::run_messages::read_snapshot(&self.conn, || {
+            self.inspect_context(run_id, &detail)
+        })?;
         let children: Vec<Value> = self
             .json_rows(
                 "SELECT run_id, role, name, terminal_phase, updated_at_ns FROM run_contexts
@@ -428,6 +445,77 @@ impl Database {
         candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.created_at_ns));
         candidates.truncate(limit.min(1000));
         Ok(candidates)
+    }
+
+    /// The run header as inspection output: configuration and checkpoint list with their
+    /// bodies resolved, the stored projections, and the messages `detail` asks for.
+    fn inspect_context(
+        &self,
+        run_id: &str,
+        detail: &RunDetail,
+    ) -> Result<Option<Value>, StorageError> {
+        let mut context = self
+            .json_rows(
+                "SELECT run_id, role, name, parent_run_id, config_json, checkpoints_json, \
+                 terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json, \
+                 body_format, header_rev, message_count, messages_len, checkpoints_len, \
+                 config_len, non_restorable_reason FROM run_contexts WHERE run_id = ?1 \
+                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
+                &[run_id],
+            )?
+            .into_iter()
+            .next();
+        let Some(Value::Object(object)) = context.as_mut() else {
+            return Ok(None);
+        };
+        // `json_rows` read the tokenized text; the documents are shown resolved.
+        for column in ["config_json", "checkpoints_json"] {
+            let stored = self.conn.query_row(
+                &format!("SELECT {column} FROM run_contexts WHERE run_id = ?1"),
+                [run_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            object.insert(
+                column.to_owned(),
+                crate::repo::run_messages::resolved_document(&self.conn, run_id, &stored)?,
+            );
+        }
+        match detail {
+            RunDetail::Summary => {
+                if let Some(value) = object.remove("checkpoints_json") {
+                    object.insert(
+                        "checkpoints_count".into(),
+                        json!(value.as_array().map_or(0, Vec::len)),
+                    );
+                }
+                let count = object.get("message_count").cloned().unwrap_or(json!(0));
+                object.insert("messages_count".into(), count);
+            }
+            RunDetail::Full | RunDetail::Messages(_) => {
+                let range = match detail {
+                    RunDetail::Messages(range) => Some(range.clone()),
+                    _ => None,
+                };
+                let (_, messages) =
+                    crate::repo::run_messages::message_range(&self.conn, run_id, range.clone())?
+                        .ok_or_else(|| {
+                            StorageError::Serialization("run context vanished".into())
+                        })?;
+                let parsed = messages
+                    .iter()
+                    .map(|text| serde_json::from_str::<Value>(text))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                if let Some(range) = range {
+                    object.insert(
+                        "messages_range".into(),
+                        json!({ "from": range.start, "to": range.end }),
+                    );
+                }
+                object.insert("messages_json".into(), Value::Array(parsed));
+            }
+        }
+        Ok(context)
     }
 
     fn json_rows(&self, sql: &str, params: &[&str]) -> Result<Vec<Value>, StorageError> {

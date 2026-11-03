@@ -339,7 +339,7 @@ fn an_empty_step_takes_no_write_lock_and_writes_nothing() {
 fn the_deleting_statement_and_the_checks_probe_by_index_only() {
     let conn = &database().conn;
     let tables = ref_tables(conn).unwrap();
-    assert_eq!(tables.len(), 2);
+    assert_eq!(tables.len(), OWNERS.len());
     for sql in [
         format!(
             "DELETE FROM content_blobs WHERE id = ?1{}",
@@ -406,7 +406,7 @@ mod check {
             assert!(report.is_ok());
             assert_eq!(
                 (report.owners_checked, report.owner_rows, report.tokens),
-                (2, 2, 3)
+                (OWNERS.len(), 2, 3)
             );
             assert_eq!(report.blobs_verified, if verify { 2 } else { 0 });
         }
@@ -603,7 +603,14 @@ mod check {
             kinds(&run(BodyScope::Thread("t-bad"))),
             vec!["missing_reference"]
         );
-        assert_eq!(run(BodyScope::Run("run-good")).owners_checked, 1);
+        // Only owners that can say which run a row belongs to take part in a scoped check.
+        assert_eq!(
+            run(BodyScope::Run("run-good")).owners_checked,
+            OWNERS
+                .iter()
+                .filter(|owner| owner.run_column.is_some())
+                .count()
+        );
         assert_eq!(kinds(&run(BodyScope::All)), vec!["missing_reference"]);
     }
 

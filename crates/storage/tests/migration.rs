@@ -11,11 +11,14 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 39;
+const LATEST_SCHEMA: u32 = 40;
 
-const EXPECTED_TABLES: [&str; 67] = [
+const EXPECTED_TABLES: [&str; 70] = [
     "content_blobs",
     "content_blob_gc_queue",
+    "content_blob_refs_header",
+    "content_blob_refs_message",
+    "run_messages",
     "artifact_refs",
     "gc_state",
     "gc_unknown_meta",
@@ -83,7 +86,9 @@ const EXPECTED_TABLES: [&str; 67] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 69] = [
+const EXPECTED_INDICES: [&str; 71] = [
+    "idx_content_blob_refs_header_blob",
+    "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",
     "idx_assistant_references_source",
     "idx_events_orchestrator_unattributed",
@@ -246,7 +251,7 @@ fn newer_schema_version_is_rejected() {
     drop(connection);
 
     // When: ストレージ層から開く
-    let error = Database::open(&config_for(&path)).expect_err("newer schema must fail");
+    let error = Database::open_unchecked(&config_for(&path)).expect_err("newer schema must fail");
 
     // Then: 検出値と対応可能値を含むエラーになる
     assert_eq!(
@@ -265,7 +270,7 @@ fn open_initializes_required_pragmas() {
     let path = database_path(&temp_dir);
 
     // When: ストレージ接続を開く
-    let database = Database::open(&config_for(&path)).expect("database must open");
+    let database = Database::open_unchecked(&config_for(&path)).expect("database must open");
 
     // Then: 接続単位の必須 PRAGMA が設定される
     assert_eq!(database.pragma_string("journal_mode").unwrap(), "wal");
@@ -293,7 +298,7 @@ fn v2_upgrade_preserves_existing_tasks_and_events() {
         )
         .unwrap();
     drop(connection);
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         database.task("existing").unwrap().unwrap().status,
         storage::entity::TaskStatus::Running
@@ -335,7 +340,7 @@ fn v6_upgrade_protects_existing_ledger_rows_from_replace() {
     drop(connection);
 
     // When: opening the existing database applies the remaining migrations.
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
     // Then: the migrated row is protected even without recursive triggers.
     assert_eq!(
@@ -371,7 +376,7 @@ fn v8_extends_tasks_with_durable_columns_and_widened_check() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
     // When: opening migrates to the latest schema.
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
     let connection = Connection::open(&path).unwrap();
     // Then: all durable columns and statuses are supported.
     assert_eq!(
@@ -435,7 +440,7 @@ fn v16_backfills_candidate_occurrence_tracking() {
     // Given: a v15 database holding candidates with and without a run.
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("v15.db");
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -467,7 +472,7 @@ fn v16_backfills_candidate_occurrence_tracking() {
     drop(connection);
 
     // When: the current schema opens it.
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
     // Then: each candidate counts once, was last seen at creation and lists its run.
     let with_run = database.improvement_candidate("with-run").unwrap().unwrap();
@@ -495,7 +500,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
     // Given: a v16 database with existing data and no review tables.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -521,17 +526,24 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
 
     // When: opening applies v17 and reopening is idempotent.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
         assert_eq!(
             database.pragma_i64("user_version").unwrap(),
             i64::from(LATEST_SCHEMA)
         );
         assert_eq!(database.run_ledger("existing").unwrap()[0].body, "keep me");
+        let connection = Connection::open(&path).unwrap();
+        // The row survives with its header (the old conversation column is gone).
         assert_eq!(
-            database.run_context("existing").unwrap().unwrap().name,
+            connection
+                .query_row(
+                    "SELECT name FROM run_contexts WHERE run_id = 'existing'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
             "name"
         );
-        let connection = Connection::open(&path).unwrap();
         assert_eq!(
             schema_objects(&connection, "table"),
             EXPECTED_TABLES.into_iter().map(String::from).collect()
@@ -547,7 +559,7 @@ fn v17_adds_review_storage_to_v16_without_changing_existing_data() {
 fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -567,7 +579,7 @@ fn v18_adds_assistant_references_without_rewriting_note_revisions() {
     ).unwrap();
     connection.pragma_update(None, "user_version", 17).unwrap();
     drop(connection);
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         database.pragma_i64("user_version").unwrap(),
         i64::from(LATEST_SCHEMA)
@@ -588,7 +600,7 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
     // Given: a v19 database with existing data and no thread start tables.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -610,7 +622,7 @@ fn v20_adds_thread_start_storage_without_changing_existing_data() {
 
     // When: opening applies v20 and reopening is idempotent.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
         // Then: earlier data stays and the thread start schema is complete.
         assert_eq!(
@@ -636,7 +648,7 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
     // Given: a v20 database holding a replayable thread start without the head ref column.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -659,7 +671,7 @@ fn v21_adds_head_ref_and_keeps_earlier_thread_starts_without_one() {
 
     // When: opening applies v21 and reopening is idempotent.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
         // Then: the earlier start reads back with an unknown head ref.
         assert_eq!(
@@ -680,7 +692,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
     // Given: a v21 database holding a replayable thread start and no sample table.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -702,7 +714,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
 
     // When: opening applies v22 and reopening is idempotent.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
         // Then: the start stays and the sample schema is complete.
         assert_eq!(
@@ -724,7 +736,7 @@ fn v22_adds_eval_samples_without_changing_thread_starts() {
 fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -744,7 +756,7 @@ fn v23_adds_reopening_metadata_and_drops_task_resume_cursor() {
     connection.pragma_update(None, "user_version", 22).unwrap();
     drop(connection);
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
         assert_eq!(
             database.pragma_i64("user_version").unwrap(),
             i64::from(LATEST_SCHEMA)
@@ -786,7 +798,7 @@ fn v24_adds_threads_backfilled_from_v23_runs_and_read_only_needs_the_upgrade() {
     // Given: a v23 database holding a named conversation root and its child.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -805,15 +817,15 @@ fn v24_adds_threads_backfilled_from_v23_runs_and_read_only_needs_the_upgrade() {
 
     // When: a read-only open is attempted before the upgrade.
     let error = Database::open_read_only(&path).unwrap_err();
-    // Then: it refuses the older schema without migrating it.
+    // Then: it refuses the old conversation format without migrating it.
     assert!(
-        matches!(&error, StorageError::Serialization(message) if message.contains(&format!("older than {LATEST_SCHEMA}"))),
+        matches!(&error, StorageError::ConversionRequired { found: 23, .. }),
         "{error:?}"
     );
 
     // When: the current schema opens it, twice.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
         assert_eq!(
             database.pragma_i64("user_version").unwrap(),
             i64::from(LATEST_SCHEMA)
@@ -853,7 +865,7 @@ fn v25_adds_host_input_receipts_and_keeps_v24_run_contexts() {
     // Given: a v24 database holding a saved run context.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection.execute_batch(
@@ -869,14 +881,21 @@ fn v25_adds_host_input_receipts_and_keeps_v24_run_contexts() {
 
     // When: the current schema opens it, twice.
     for _ in 0..2 {
-        let database = Database::open(&config_for(&path)).unwrap();
+        let database = Database::open_unchecked(&config_for(&path)).unwrap();
         assert_eq!(
             database.pragma_i64("user_version").unwrap(),
             i64::from(LATEST_SCHEMA)
         );
-        // Then: the old snapshot reads with no host inputs and no receipts.
-        let record = database.run_context("run-1").unwrap().unwrap();
-        assert_eq!(record.host_inputs_json, "[]");
+        // Then: the old snapshot has no host inputs and no receipts.
+        let host_inputs: String = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT host_inputs_json FROM run_contexts WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(host_inputs, "[]");
         assert!(
             database
                 .host_input_receipts_for_run("run-1")
@@ -901,7 +920,7 @@ fn failed_v25_migration_rolls_back_its_ddl_and_keeps_the_version() {
     // the migration's last statement fails after creating the receipt table.
     let dir = TempDir::new().unwrap();
     let path = database_path(&dir);
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch("DROP TABLE host_input_receipts;")
@@ -910,7 +929,7 @@ fn failed_v25_migration_rolls_back_its_ddl_and_keeps_the_version() {
     drop(connection);
 
     // When: opening applies v25.
-    let Err(error) = Database::open(&config_for(&path)) else {
+    let Err(error) = Database::open_unchecked(&config_for(&path)) else {
         panic!("v25 must fail");
     };
 
@@ -935,7 +954,7 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
     // Given: a v30 database holding a plain snapshot with multibyte text.
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("v30.db");
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v35(&connection);
     connection
@@ -957,7 +976,7 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
     drop(connection);
 
     // When: the current schema opens it.
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
 
     // Then: the recorded lengths are byte lengths, and the row still reads as before.
     let connection = Connection::open(&path).unwrap();
@@ -972,9 +991,6 @@ fn v31_records_plaintext_lengths_of_existing_snapshots() {
         lengths,
         (i64::try_from("[\"こんにちは\"]".len()).unwrap(), 2)
     );
-    let database = Database::open(&config_for(&path)).unwrap();
-    let record = database.run_context("run-old").unwrap().unwrap();
-    assert_eq!(record.messages_json, "[\"こんにちは\"]");
 }
 
 #[test]
@@ -983,7 +999,7 @@ fn v36_leaves_the_archive_backfill_to_do_only_when_a_thread_is_already_archived(
         // Given: a v35 database with one thread, archived or not.
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("v35.db");
-        drop(Database::open(&config_for(&path)).unwrap());
+        drop(Database::open_unchecked(&config_for(&path)).unwrap());
         let connection = Connection::open(&path).unwrap();
         undo_v36(&connection);
         connection
@@ -997,7 +1013,7 @@ fn v36_leaves_the_archive_backfill_to_do_only_when_a_thread_is_already_archived(
         drop(connection);
 
         // When: the current schema opens it.
-        drop(Database::open(&config_for(&path)).unwrap());
+        drop(Database::open_unchecked(&config_for(&path)).unwrap());
 
         // Then: the backfill is pending exactly when a thread was archived.
         let connection = Connection::open(&path).unwrap();
@@ -1017,7 +1033,7 @@ fn v38_drops_the_unnumbered_writer_markers_and_keeps_the_series() {
     // Given: a v37 database whose archived thread carries the old markers.
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("v37.db");
-    drop(Database::open(&config_for(&path)).unwrap());
+    drop(Database::open_unchecked(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
     undo_v38(&connection);
     connection
@@ -1031,7 +1047,7 @@ fn v38_drops_the_unnumbered_writer_markers_and_keeps_the_series() {
     drop(connection);
 
     // When: the current schema opens it.
-    let database = Database::open(&config_for(&path)).unwrap();
+    let database = Database::open_unchecked(&config_for(&path)).unwrap();
 
     // Then: the markers are gone and the series is unchanged.
     let row = database.thread("t").unwrap().unwrap();

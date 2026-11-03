@@ -242,7 +242,10 @@ unsafe extern "C" fn trace(
         return 0;
     }
     STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    if sql.trim_start().starts_with("SELECT") && sql.contains("messages_json") {
+    // A read of a body: a message skeleton or a blob's data.
+    if sql.trim_start().starts_with("SELECT")
+        && (sql.contains("skeleton") || sql.contains("data FROM content_blobs"))
+    {
         BODY_SELECTS.fetch_add(1, Ordering::Relaxed);
     }
     0
@@ -305,6 +308,8 @@ async fn a_successful_save_reads_no_body_and_costs_the_same_for_any_body_size() 
             STATEMENTS.load(Ordering::Relaxed) - statements,
         )
     };
+    // Both saves add one message whose body is stored as a blob; only its size differs.
+    state.context.push_user(&"medium body ".repeat(500));
     let small = measure(&state);
     state.context.push_user(&"large body ".repeat(200_000));
     let large = measure(&state);
@@ -320,8 +325,8 @@ async fn a_successful_save_reads_no_body_and_costs_the_same_for_any_body_size() 
         stored.messages_json.len() > 2_000_000,
         "the large body was really saved"
     );
-    assert_eq!(small.0, 0, "saving must not select run_contexts bodies");
-    assert_eq!(large.0, 0, "saving must not select run_contexts bodies");
+    assert_eq!(small.0, 0, "saving must not select message or blob bodies");
+    assert_eq!(large.0, 0, "saving must not select message or blob bodies");
     assert!(small.1 > 0, "the trace must see the save's statements");
     assert_eq!(
         small.1, large.1,

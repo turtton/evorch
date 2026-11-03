@@ -118,9 +118,9 @@ impl Db {
     fn unrelated_runs(&self, count: i64) {
         self.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {count})
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             SELECT printf('other-%07d', x), 'Worker', 'other', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('other-%07d', x), 'Worker', 'other', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
     }
 
@@ -129,16 +129,16 @@ impl Db {
         self.sql(
             "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns,
                  updated_at_ns, source) VALUES ('A', '/p', 'ra', 1, 1, 1, 'host');
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             VALUES ('ra', 'Worker', 'chat:Worker:A', '{}', '[]', '[]', 'Done', 1, 1);
+             VALUES ('ra', 'Worker', 'chat:Worker:A', '{}', '[]', 'Done', 1, 1);
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('ra', 'A', 'ra', 0);",
         );
         self.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {children})
-             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns)
-             SELECT printf('child-%05d', x), 'Worker', 'child', 'ra', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('child-%05d', x), 'Worker', 'child', 'ra', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
     }
 }
@@ -610,7 +610,7 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         let db = Db::new();
         db.family(1);
         db.sql(&format!(
-            "UPDATE run_contexts SET messages_json = zeroblob({}) WHERE run_id = 'ra'",
+            "UPDATE run_contexts SET checkpoints_json = zeroblob({}) WHERE run_id = 'ra'",
             stored_bytes - 2
         ));
         confirm(&db);
@@ -628,7 +628,7 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
     // One run context is one transaction, bounded by its stored size.
     let db = Db::new();
     db.family(1);
-    db.sql("UPDATE run_contexts SET messages_json = zeroblob(1500000) WHERE run_id = 'ra'");
+    db.sql("UPDATE run_contexts SET checkpoints_json = zeroblob(1500000) WHERE run_id = 'ra'");
     confirm(&db);
     set_cursor(&db, r#"{"phase":"run_contexts","run":"ra"}"#);
     let storage = Storage::open(config(&db.path)).unwrap();
@@ -845,9 +845,9 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
         db.family(1);
         db.sql(&format!(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             SELECT printf('big-%06d', x), 'Worker', 'big', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;
+             SELECT printf('big-%06d', x), 'Worker', 'big', '{{}}', '[]', 'Done', 1, 1 FROM n;
              WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {registered})
              INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes)
              SELECT 'A', 'run_contexts', printf('big-%06d', x), 10000000 + x FROM n;"
@@ -973,14 +973,14 @@ fn retention_work_is_bounded_in_wal_frames_and_vm_steps() {
             "INSERT INTO threads(thread_id, project_root, root_run_id, archived, created_at_ns, updated_at_ns, source)
              VALUES ('Z', '/p', 'rz', 1, 1, 1, 'host'), ('A', '/p', NULL, 1, 1, 1, 'host');
              UPDATE threads SET escalation_source_run_id = 'c-000001' WHERE thread_id = 'A';
-             INSERT INTO run_contexts(run_id, role, name, config_json, messages_json, checkpoints_json,
+             INSERT INTO run_contexts(run_id, role, name, config_json, checkpoints_json,
                  terminal_phase, restorable, updated_at_ns)
-             VALUES ('rz', 'Worker', 'chat:Worker:Z', '{{}}', '[]', '[]', 'Done', 1, 1);
+             VALUES ('rz', 'Worker', 'chat:Worker:Z', '{{}}', '[]', 'Done', 1, 1);
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth) VALUES ('rz', 'Z', 'rz', 0);
              WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {children})
-             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+             INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns)
-             SELECT printf('c-%06d', x), 'Worker', 'child', 'rz', '{{}}', '[]', '[]', 'Done', 1, 1 FROM n;"
+             SELECT printf('c-%06d', x), 'Worker', 'child', 'rz', '{{}}', '[]', 'Done', 1, 1 FROM n;"
         ));
         let thread = |id: &str| SidebarThread {
             thread_id: id.into(),

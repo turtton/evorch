@@ -26,11 +26,13 @@ use crate::StorageError;
 use crate::body_store::REF_TABLE_PREFIX;
 
 mod check;
+mod check_runs;
 
 pub(crate) use check::{
     BlobReferences, BodyScope, blob_references, blob_state, blob_text, body_stats, check_bodies,
     find_blobs,
 };
+pub(crate) use check_runs::check_runs;
 
 /// Queue entries one step looks at.
 pub(crate) const GC_CANDIDATES_PER_STEP: usize = 64;

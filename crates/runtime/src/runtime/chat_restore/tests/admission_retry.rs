@@ -701,7 +701,7 @@ async fn failed_attempt_does_not_replace_a_newer_snapshot_or_its_reservation() {
         fixture.storage.handle().upsert_run_context(&newer).unwrap();
         model.release.notify_one();
         assert!(fixture.runtime.wait_admission(run).await.is_err());
-        assert_eq!(saved(&fixture, run), newer);
+        assert_eq!(saved(&fixture, run), normalized(newer));
     }
 }
 
@@ -764,7 +764,7 @@ async fn committed_reservation_drop_does_not_restore_consumed_snapshot() {
     let mut reservation = reservation.arm(&config);
     reservation.commit();
     drop(reservation);
-    assert_eq!(saved(&fixture, run), record);
+    assert_eq!(saved(&fixture, run), normalized(record));
 }
 
 #[tokio::test]
@@ -814,7 +814,7 @@ async fn failed_renewable_restore_retains_its_original_authority_gate() {
         .resume_chat(run, RunConfig::default())
         .unwrap();
     assert!(fixture.runtime.wait_admission(run).await.is_err());
-    assert_eq!(saved(&fixture, run), before);
+    assert_eq!(saved(&fixture, run), normalized(before));
     // Retry still goes through renewed root authority, rather than becoming disk-restorable.
     fixture
         .runtime

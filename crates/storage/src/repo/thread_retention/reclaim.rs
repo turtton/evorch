@@ -14,8 +14,9 @@ use crate::repo::thread_index::{OversizedBlock, purge_index_rows, purge_index_ro
 use crate::thread_index::PurgeTarget;
 use crate::thread_retention::{
     FilesOutcome, OversizedProgress, RECLAIM_EVENT_BYTES, RECLAIM_EVENT_ROWS, RECLAIM_INDEX_ROWS,
-    RECLAIM_INDEX_TEXT_BYTES, RECLAIM_ROW_BUDGET, RECLAIM_ROWS, RECLAIM_SCAN_ROWS, ReclaimBudget,
-    ReclaimJobMembers, ReclaimJobState, ReclaimProgress, ReclaimSummary,
+    RECLAIM_INDEX_TEXT_BYTES, RECLAIM_MESSAGE_REFS, RECLAIM_MESSAGE_ROWS, RECLAIM_ROW_BUDGET,
+    RECLAIM_ROWS, RECLAIM_SCAN_ROWS, ReclaimBudget, ReclaimJobMembers, ReclaimJobState,
+    ReclaimProgress, ReclaimSummary,
 };
 
 /// Empty cursor advances (a run without rows in a table) one transaction may make.
@@ -29,6 +30,7 @@ enum Phase {
     EventsThread,
     RunTables,
     Index,
+    RunMessages,
     RunContexts,
     Tasks,
     ThreadTables,
@@ -137,7 +139,11 @@ fn enter(
             ..Cursor::default()
         };
         match phase {
-            Phase::EventsRun | Phase::RunTables | Phase::Index | Phase::RunContexts => {
+            Phase::EventsRun
+            | Phase::RunTables
+            | Phase::Index
+            | Phase::RunMessages
+            | Phase::RunContexts => {
                 cursor.run = next_run(conn, family, "")?;
                 if cursor.run.is_some() {
                     return Ok(());
@@ -155,7 +161,8 @@ fn enter(
             Phase::EventsRun => Phase::EventsThread,
             Phase::EventsThread => Phase::RunTables,
             Phase::RunTables => Phase::Index,
-            Phase::Index => Phase::RunContexts,
+            Phase::Index => Phase::RunMessages,
+            Phase::RunMessages => Phase::RunContexts,
             Phase::RunContexts => Phase::Tasks,
             Phase::Tasks => Phase::ThreadTables,
             Phase::ThreadTables | Phase::Finished => Phase::Finished,
@@ -168,7 +175,8 @@ fn next_phase(phase: Phase) -> Phase {
         Phase::EventsRun => Phase::EventsThread,
         Phase::EventsThread => Phase::RunTables,
         Phase::RunTables => Phase::Index,
-        Phase::Index => Phase::RunContexts,
+        Phase::Index => Phase::RunMessages,
+        Phase::RunMessages => Phase::RunContexts,
         Phase::RunContexts => Phase::Tasks,
         Phase::Tasks => Phase::ThreadTables,
         Phase::ThreadTables | Phase::Finished => Phase::Finished,
@@ -219,6 +227,7 @@ fn do_phase(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<W
         Phase::EventsThread => events_thread(tx, family, cursor),
         Phase::RunTables => run_tables(tx, family, cursor),
         Phase::Index => index(tx, family, cursor),
+        Phase::RunMessages => run_messages(tx, family, cursor),
         Phase::RunContexts => run_contexts(tx, family, cursor),
         Phase::Tasks => tasks(tx, family, cursor),
         Phase::ThreadTables => thread_tables(tx, family, cursor),
@@ -394,7 +403,7 @@ fn run_tables(
 
 fn index(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work, StorageError> {
     let Some(run) = cursor.run.clone() else {
-        enter(tx, family, cursor, Phase::RunContexts)?;
+        enter(tx, family, cursor, Phase::RunMessages)?;
         return Ok(Work::default());
     };
     let progress = purge_index_rows(
@@ -425,6 +434,80 @@ fn index(tx: &Transaction<'_>, family: &str, cursor: &mut Cursor) -> Result<Work
     })
 }
 
+/// Stored skeleton bytes and referenced blobs (capped just above `limit`) of a message.
+fn message_cost(tx: &Connection, id: i64, size: u64) -> Result<(u64, u64), StorageError> {
+    let refs: u64 = tx
+        .prepare_cached(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM content_blob_refs_message \
+             WHERE message_id = ?1 LIMIT ?2)",
+        )?
+        .query_row(params![id, RECLAIM_MESSAGE_REFS + 1], |row| row.get(0))?;
+    Ok((size, refs))
+}
+
+/// Deletes the run's messages in bounded batches: at most [`RECLAIM_MESSAGE_ROWS`] rows,
+/// [`RECLAIM_ROW_BUDGET`] stored bytes and [`RECLAIM_MESSAGE_REFS`] reference rows (which
+/// the cascade deletes and queues) per transaction. A message above either limit alone
+/// is registered for the exclusive phase and skipped; the header then waits for it.
+fn run_messages(
+    tx: &Transaction<'_>,
+    family: &str,
+    cursor: &mut Cursor,
+) -> Result<Work, StorageError> {
+    let Some(run) = cursor.run.clone() else {
+        enter(tx, family, cursor, Phase::RunContexts)?;
+        return Ok(Work::default());
+    };
+    let rows: Vec<(i64, i64, u64)> = {
+        let mut statement = tx.prepare_cached(
+            "SELECT id, ordinal, OCTET_LENGTH(skeleton) FROM run_messages \
+             WHERE run_id = ?1 AND ordinal > ?2 ORDER BY ordinal LIMIT ?3",
+        )?;
+        let limit = i64::try_from(RECLAIM_MESSAGE_ROWS).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![run, cursor.after, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if rows.is_empty() {
+        advance_run(tx, family, cursor)?;
+        return Ok(Work::default());
+    }
+    let mut ids = Vec::new();
+    let mut bytes = 0_u64;
+    let mut refs = 0_u64;
+    let mut last = cursor.after;
+    for (id, ordinal, size) in rows {
+        let (size, count) = message_cost(tx, id, size)?;
+        let too_big = size > RECLAIM_ROW_BUDGET || count > RECLAIM_MESSAGE_REFS;
+        if ids.is_empty() && too_big {
+            register_oversized(tx, family, "run_messages", &id.to_string(), size)?;
+            cursor.after = ordinal;
+            return Ok(Work::default());
+        }
+        if too_big
+            || bytes.saturating_add(size) > RECLAIM_ROW_BUDGET
+            || refs.saturating_add(count) > RECLAIM_MESSAGE_REFS
+        {
+            break;
+        }
+        ids.push(id);
+        bytes += size;
+        refs += count;
+        last = ordinal;
+    }
+    tx.execute(
+        "DELETE FROM run_messages WHERE id IN (SELECT value FROM json_each(?1))",
+        [json_ids(&ids)?],
+    )?;
+    cursor.after = last;
+    Ok(Work {
+        rows: ids.len() as u64,
+        bytes,
+        ..Work::default()
+    })
+}
+
 fn run_contexts(
     tx: &Transaction<'_>,
     family: &str,
@@ -436,16 +519,33 @@ fn run_contexts(
     };
     let stored: Option<u64> = tx
         .query_row(
-            "SELECT OCTET_LENGTH(messages_json) + OCTET_LENGTH(checkpoints_json) \
+            "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json) \
              FROM run_contexts WHERE run_id = ?1",
             [&run],
             |row| row.get(0),
         )
         .optional()?;
+    // A message that was left for the exclusive phase keeps its header: deleting the
+    // header first would stop at the foreign key, and a header that is skipped here
+    // is registered, so the exclusive phase works the messages off before it.
+    let children_left: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_messages WHERE run_id = ?1)",
+        [&run],
+        |row| row.get(0),
+    )?;
+    let header_refs: u64 = tx.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM content_blob_refs_header WHERE run_id = ?1 LIMIT ?2)",
+        params![run, RECLAIM_MESSAGE_REFS + 1],
+        |row| row.get(0),
+    )?;
     let mut work = Work::default();
     match stored {
         None => {}
-        Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
+        Some(bytes)
+            if bytes > RECLAIM_ROW_BUDGET
+                || children_left
+                || header_refs > RECLAIM_MESSAGE_REFS =>
+        {
             register_oversized(tx, family, "run_contexts", &run, bytes)?;
         }
         Some(bytes) => {
@@ -894,9 +994,21 @@ pub(crate) fn reclaim_oversized_step(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((family, table, key, bytes)) = next else {
+        let Some((family, table, key, mut bytes)) = next else {
             break;
         };
+        if table == "run_contexts" {
+            // A header with messages left spends the size of the next message, not its own.
+            let child: Option<u64> = conn
+                .query_row(
+                    "SELECT OCTET_LENGTH(skeleton) FROM run_messages \
+                     WHERE run_id = ?1 ORDER BY ordinal LIMIT 1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            bytes = child.unwrap_or(bytes);
+        }
         if worked && progress.stored_bytes.saturating_add(bytes) > budget_bytes {
             break;
         }
@@ -1001,16 +1113,18 @@ fn delete_oversized(
                 true,
             )
         }
-        "run_contexts" => {
+        "run_messages" => {
+            let id: i64 = key.parse().map_err(|_| {
+                StorageError::Serialization(format!("bad oversized message id {key}"))
+            })?;
             let size: Option<u64> = tx
                 .query_row(
-                    "SELECT OCTET_LENGTH(messages_json) + OCTET_LENGTH(checkpoints_json) \
-                     FROM run_contexts WHERE run_id = ?1",
-                    [key],
+                    "SELECT OCTET_LENGTH(skeleton) FROM run_messages WHERE id = ?1",
+                    [id],
                     |row| row.get(0),
                 )
                 .optional()?;
-            let deleted = tx.execute("DELETE FROM run_contexts WHERE run_id = ?1", [key])?;
+            let deleted = tx.execute("DELETE FROM run_messages WHERE id = ?1", [id])?;
             (
                 Work {
                     rows: deleted as u64,
@@ -1019,6 +1133,53 @@ fn delete_oversized(
                 },
                 true,
             )
+        }
+        "run_contexts" => {
+            // The header goes last: while a message of the run is left, one of them is
+            // deleted by this step (the header's registration stays), so the
+            // foreign key never stops it and each step makes progress.
+            let child: Option<(i64, u64)> = tx
+                .query_row(
+                    "SELECT id, OCTET_LENGTH(skeleton) FROM run_messages \
+                     WHERE run_id = ?1 ORDER BY ordinal LIMIT 1",
+                    [key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((id, size)) = child {
+                tx.execute("DELETE FROM run_messages WHERE id = ?1", [id])?;
+                tx.execute(
+                    "DELETE FROM reclaim_oversized WHERE family_key = ?1 \
+                     AND tbl = 'run_messages' AND key = ?2",
+                    params![family, id.to_string()],
+                )?;
+                (
+                    Work {
+                        rows: 1,
+                        bytes: size,
+                        ..Work::default()
+                    },
+                    false,
+                )
+            } else {
+                let size: Option<u64> = tx
+                    .query_row(
+                        "SELECT OCTET_LENGTH(config_json) + OCTET_LENGTH(checkpoints_json) \
+                         FROM run_contexts WHERE run_id = ?1",
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let deleted = tx.execute("DELETE FROM run_contexts WHERE run_id = ?1", [key])?;
+                (
+                    Work {
+                        rows: deleted as u64,
+                        bytes: size.unwrap_or(0),
+                        ..Work::default()
+                    },
+                    true,
+                )
+            }
         }
         "thread_start_states" => match take_untracked(&tx, key, true)? {
             Untracked::Taken(work) => (work, false),

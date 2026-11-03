@@ -448,19 +448,7 @@ pub(crate) fn run_contexts_for(
     conn: &Connection,
     run_ids: &[String],
 ) -> Result<Vec<RunContextRecord>, StorageError> {
-    // No json_each column shares a name with a run_contexts column.
-    let mut statement = conn.prepare(&format!(
-        "SELECT {} FROM json_each(?1) AS requested \
-         JOIN run_contexts ON run_contexts.run_id = requested.value \
-         WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
-         ORDER BY requested.key",
-        crate::repo::run_context::COLUMNS
-    ))?;
-    let rows = statement.query_map(
-        [distinct_json(run_ids)?],
-        crate::repo::run_context::from_row,
-    )?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    crate::repo::run_messages::records_for(conn, &distinct_json(run_ids)?)
 }
 
 pub(crate) fn latest_ledgers(
@@ -482,47 +470,69 @@ pub(crate) fn terminal_summaries(
     conn: &Connection,
     run_ids: &[String],
 ) -> Result<Vec<RunTerminalSummary>, StorageError> {
-    // JSON is decoded inside SQLite so only the last message leaves it. A
-    // compressed snapshot cannot be, so its bytes are returned and decoded here.
-    let mut statement = conn.prepare(
-        "SELECT c.run_id, c.role, c.name, c.parent_run_id, c.terminal_phase, c.restorable, \
-         c.updated_at_ns, \
-         CASE WHEN json_valid(c.config_json) THEN \
-             CASE WHEN json_type(c.config_json, '$.non_restorable_reason') = 'text' \
-             THEN json_extract(c.config_json, '$.non_restorable_reason') END END, \
-         CASE WHEN typeof(c.messages_json) = 'text' AND json_valid(c.messages_json) \
-             THEN json_array_length(c.messages_json) END, \
-         CASE WHEN typeof(c.messages_json) = 'text' AND json_valid(c.messages_json) \
-             THEN json_extract(c.messages_json, '$[#-1]') END, \
-         CASE WHEN typeof(c.messages_json) = 'blob' THEN c.messages_json END \
-         FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
-         WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
-         ORDER BY requested.key",
-    )?;
-    let rows = statement.query_map([distinct_json(run_ids)?], |row| {
-        let mut message_count: Option<i64> = row.get(8)?;
-        let mut last_message: Option<String> = row.get(9)?;
-        if let rusqlite::types::ValueRef::Blob(_) = row.get_ref(10)? {
-            let messages = crate::codec::text_column(row, 10)?;
-            if let Ok(serde_json::Value::Array(messages)) = serde_json::from_str(&messages) {
-                message_count = i64::try_from(messages.len()).ok();
-                last_message = messages.last().map(serde_json::Value::to_string);
-            }
+    // The header carries the count and the reason; only the last message of each run is
+    // read, never the history.
+    crate::repo::run_messages::read_snapshot(conn, || {
+        struct Row {
+            summary: RunTerminalSummary,
+            body_format: i64,
         }
-        Ok(RunTerminalSummary {
-            run_id: row.get(0)?,
-            role: row.get(1)?,
-            name: row.get(2)?,
-            parent_run_id: row.get(3)?,
-            terminal_phase: row.get(4)?,
-            restorable: row.get(5)?,
-            updated_at_ns: row.get(6)?,
-            non_restorable_reason: row.get(7)?,
-            message_count: message_count.map_or(0, |count| count.max(0).unsigned_abs()),
-            final_text: last_message.as_deref().and_then(assistant_text),
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+        let rows: Vec<Row> = {
+            let mut statement = conn.prepare(
+                "SELECT c.run_id, c.role, c.name, c.parent_run_id, c.terminal_phase, c.restorable, \
+                 c.updated_at_ns, c.non_restorable_reason, c.message_count, c.body_format \
+                 FROM json_each(?1) AS requested JOIN run_contexts c ON c.run_id = requested.value \
+                 WHERE requested.value NOT IN (SELECT run_id FROM run_tombstones) \
+                 ORDER BY requested.key",
+            )?;
+            let rows = statement.query_map([distinct_json(run_ids)?], |row| {
+                Ok(Row {
+                    summary: RunTerminalSummary {
+                        run_id: row.get(0)?,
+                        role: row.get(1)?,
+                        name: row.get(2)?,
+                        parent_run_id: row.get(3)?,
+                        terminal_phase: row.get(4)?,
+                        restorable: row.get(5)?,
+                        updated_at_ns: row.get(6)?,
+                        non_restorable_reason: row.get(7)?,
+                        message_count: row.get::<_, i64>(8)?.max(0).unsigned_abs(),
+                        final_text: None,
+                    },
+                    body_format: row.get(9)?,
+                })
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut summaries = Vec::with_capacity(rows.len());
+        for Row {
+            mut summary,
+            body_format,
+        } in rows
+        {
+            if body_format != crate::repo::run_messages::BODY_FORMAT {
+                return Err(StorageError::ConversionRequired {
+                    found: 0,
+                    detail: "a run header is not in the current body format",
+                });
+            }
+            if let Some(last) = summary.message_count.checked_sub(1) {
+                let last =
+                    usize::try_from(last).map_err(|_| StorageError::OutOfRange("message count"))?;
+                let count = usize::try_from(summary.message_count)
+                    .map_err(|_| StorageError::OutOfRange("message count"))?;
+                let message = crate::repo::run_messages::load_messages(
+                    conn,
+                    &summary.run_id,
+                    count,
+                    last..count,
+                )?;
+                summary.final_text = message.first().map(String::as_str).and_then(assistant_text);
+            }
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    })
 }
 
 /// Keep `thread_runs` current when a context is saved. An explicit

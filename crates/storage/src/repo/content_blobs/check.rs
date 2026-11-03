@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use super::{OVERSIZED_FAMILY, OVERSIZED_TABLE, ref_tables, unreferenced_clause};
 use crate::StorageError;
 use crate::body_ref::{collect_tokens, hex};
-use crate::body_store::{OwnerSpec, blob_bytes, decode_blob, unresolved, verify_decoded};
+use crate::body_store::{
+    OwnerSpec, blob_bytes, decode_blob, decode_skeleton, unresolved, verify_decoded,
+};
 use crate::error::BodyUnresolvedReason;
 
 /// Problems kept in a report; the count goes on.
@@ -50,7 +52,7 @@ pub(crate) struct CheckReport {
 }
 
 impl CheckReport {
-    fn add(
+    pub(super) fn add(
         &mut self,
         kind: &'static str,
         owner: Option<&str>,
@@ -223,6 +225,7 @@ fn check_owner(
     let select: Vec<&str> = key_columns
         .iter()
         .chain(owner.container_columns)
+        .chain(owner.codec_column.iter())
         .copied()
         .collect();
     let mut sql = format!("SELECT {} FROM {}", select.join(", "), owner.owner_table);
@@ -258,13 +261,51 @@ fn check_owner(
         let mut expected: BTreeMap<[u8; 32], BTreeSet<u64>> = BTreeMap::new();
         let mut readable = true;
         for index in 0..owner.container_columns.len() {
-            let Some(text) = row
-                .get_ref(owner.keys.len() + index)?
-                .as_str_or_null()
-                .map_err(rusqlite::Error::from)?
-            else {
-                continue;
+            let slot = owner.keys.len() + index;
+            let text: String = match owner.codec_column {
+                // A codec-tagged BLOB container: decode it with the row's own codec.
+                Some(_) => {
+                    let codec: i64 = row.get(owner.keys.len() + owner.container_columns.len())?;
+                    match row.get_ref(slot)? {
+                        rusqlite::types::ValueRef::Blob(data) => {
+                            match decode_skeleton(codec, data, &label) {
+                                Ok(text) => text,
+                                Err(error) => {
+                                    report.add(
+                                        "container_decode",
+                                        Some(&label),
+                                        None,
+                                        format!("{}: {error}", owner.container_columns[index]),
+                                    );
+                                    readable = false;
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            report.add(
+                                "container_decode",
+                                Some(&label),
+                                None,
+                                format!("{} is not a BLOB", owner.container_columns[index]),
+                            );
+                            readable = false;
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    let Some(text) = row
+                        .get_ref(slot)?
+                        .as_str_or_null()
+                        .map_err(rusqlite::Error::from)?
+                    else {
+                        continue;
+                    };
+                    text.to_owned()
+                }
             };
+            let text = text.as_str();
             let parsed: Value = match serde_json::from_str(text) {
                 Ok(parsed) => parsed,
                 Err(error) => {

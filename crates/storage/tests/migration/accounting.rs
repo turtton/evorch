@@ -40,7 +40,7 @@ fn v12_backfills_bytes_once_including_streams_null_sessions_and_utc_boundaries()
         .unwrap();
     drop(conn);
 
-    let db = Database::open(&config_for(&path)).unwrap();
+    let db = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         db.pragma_i64("user_version").unwrap(),
         i64::from(LATEST_SCHEMA)
@@ -77,7 +77,7 @@ fn v12_backfills_bytes_once_including_streams_null_sessions_and_utc_boundaries()
     assert_eq!(day_rows(), vec![(-1, 3), (0, 12), (1, 6)]);
     let before_schema = db.pragma_i64("schema_version").unwrap();
     drop(db);
-    let reopened = Database::open(&config_for(&path)).unwrap();
+    let reopened = Database::open_unchecked(&config_for(&path)).unwrap();
     assert_eq!(
         reopened.pragma_i64("schema_version").unwrap(),
         before_schema

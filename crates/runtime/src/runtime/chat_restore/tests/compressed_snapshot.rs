@@ -76,17 +76,21 @@ async fn wait_for_waiting(runtime: &AgentRuntime, run: RunId) {
     }
 }
 
-/// How `messages_json` and `checkpoints_json` of the run are stored.
-fn storage_classes(fixture: &Fixture, run: RunId) -> (String, String) {
-    rusqlite::Connection::open(fixture._dir.path().join("goal.sqlite3"))
-        .unwrap()
-        .query_row(
-            "SELECT typeof(messages_json), typeof(checkpoints_json) FROM run_contexts \
-             WHERE run_id = ?1",
-            [run.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap()
+/// Whether the run's messages, and its header (the checkpoint list), keep long strings as
+/// content blobs.
+fn blob_backed(fixture: &Fixture, run: RunId) -> (bool, bool) {
+    let conn = rusqlite::Connection::open(fixture._dir.path().join("goal.sqlite3")).unwrap();
+    let count = |sql: &str| -> i64 {
+        conn.query_row(sql, [run.to_string()], |row| row.get(0))
+            .unwrap()
+    };
+    (
+        count(
+            "SELECT COUNT(*) FROM content_blob_refs_message r \
+             JOIN run_messages m ON m.id = r.message_id WHERE m.run_id = ?1",
+        ) > 0,
+        count("SELECT COUNT(*) FROM content_blob_refs_header WHERE run_id = ?1") > 0,
+    )
 }
 
 #[tokio::test]
@@ -122,7 +126,7 @@ async fn compressed_snapshots_resume_compact_and_resume_again_with_an_exact_wire
     );
 
     // Then: the restore of the compressed history sent the saved turns byte for byte.
-    assert_eq!(storage_classes(&fixture, run).0, "blob");
+    assert!(blob_backed(&fixture, run).0);
     {
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -142,11 +146,8 @@ async fn compressed_snapshots_resume_compact_and_resume_again_with_an_exact_wire
         .await
         .unwrap();
 
-    // Then: both columns are compressed and the checkpoint summary reads back exactly.
-    assert_eq!(
-        storage_classes(&fixture, run),
-        ("blob".into(), "blob".into())
-    );
+    // Then: messages and checkpoint list are blob-backed and the checkpoint summary reads back exactly.
+    assert_eq!(blob_backed(&fixture, run), (true, true));
     let store = fixture.runtime.shared.run_store.get().unwrap();
     let bundle = store.restore_bundle(run).unwrap().unwrap();
     assert!(
@@ -218,7 +219,7 @@ async fn a_fork_reads_and_indexes_the_compressed_snapshot_of_its_source() {
         .unwrap();
     let second = next_turn(&mut events, source).await;
     assert!(first < second);
-    assert_eq!(storage_classes(&fixture, source).0, "blob");
+    assert!(blob_backed(&fixture, source).0);
 
     // When: a new thread starts from the first turn boundary.
     let fork = fixture

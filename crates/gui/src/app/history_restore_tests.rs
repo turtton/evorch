@@ -240,14 +240,16 @@ fn assert_restore_matches_legacy(
         ("run-6", "blob"),
         ("run-7", "blob"),
     ] {
-        let kind: String = connection
+        // The long strings of the large snapshots are content blobs; small ones have none.
+        let blobs: i64 = connection
             .query_row(
-                "SELECT typeof(messages_json) FROM run_contexts WHERE run_id=?1",
+                "SELECT COUNT(*) FROM content_blob_refs_message r \
+                 JOIN run_messages m ON m.id = r.message_id WHERE m.run_id=?1",
                 [run],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(kind, expected);
+        assert_eq!(blobs > 0, expected == "blob", "{run}");
     }
     let mut events = vec![
         started("run-1", None, "chat:Worker:repair"),
@@ -441,7 +443,11 @@ fn non_repair_candidates_never_decode_their_conversation_payloads() {
             .create_thread(ThreadId::new(run), project.clone(), run)
             .unwrap();
         sidebar.threads.last_mut().unwrap().run_ids.push(run.into());
-        let mut record = context(run, run, serde_json::json!([]));
+        let mut record = context(
+            run,
+            run,
+            serde_json::json!([{"role": "user", "content": [{"type": "text", "text": "payload"}]}]),
+        );
         if run == "error" {
             record.terminal_phase = "Error".into();
         }
@@ -462,7 +468,7 @@ fn non_repair_candidates_never_decode_their_conversation_payloads() {
         storage.handle().append_event(Some("gui"), &event).unwrap();
     }
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
-    conn.execute("UPDATE run_contexts SET messages_json=x'00'", [])
+    conn.execute("UPDATE run_messages SET codec=0, skeleton=x'00'", [])
         .unwrap();
     let db = Database::open(&config).unwrap();
     // This codec poison fails on every attempted payload decode. All three

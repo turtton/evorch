@@ -1,7 +1,7 @@
 //! Transparent zstd compression of large JSON text columns.
 //!
-//! `run_contexts.messages_json` / `checkpoints_json` and the payloads of the
-//! bulky event kinds dominate the database size. A value of at least
+//! The payloads of the bulky event kinds dominate the database size. (A run's messages
+//! are `run_messages` rows with their own codec column, see `body_store`.) A value of at least
 //! [`MIN_COMPRESSED_BYTES`] is stored as a zstd frame in a BLOB; anything
 //! smaller, or anything zstd cannot shrink, stays plain TEXT. Readers accept
 //! both forms in the same column, so a database written before this codec
@@ -118,6 +118,7 @@ pub(crate) fn decode(value: ValueRef<'_>) -> Result<Cow<'_, str>, DecodeError> {
 }
 
 /// Reads column `index` of `row` as decoded text, for `query_map` closures.
+#[cfg(test)]
 pub(crate) fn text_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
     let value = row.get_ref(index)?;
     let data_type = value.data_type();

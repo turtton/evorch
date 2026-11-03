@@ -50,9 +50,64 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v37.sql"),
     include_str!("migrations/v38.sql"),
     include_str!("migrations/v39.sql"),
+    include_str!("migrations/v40.sql"),
 ];
 
+/// The first schema version that stores a run's messages in `run_messages`. A database
+/// below it (and not empty) holds them in `run_contexts.messages_json`: this build
+/// never opens it. Only the conversion command may turn one into the current format.
+pub(crate) const MESSAGE_ROWS_VERSION: u32 = 40;
+
+/// Refuses a database that is not in the current conversation format, before anything
+/// writes to it (no pragma, no migration, no row). A new (empty) database passes: it is
+/// created in the current format by [`apply_migrations`].
+///
+/// A database whose `user_version` is current but whose `run_contexts` still has the old
+/// column, or lacks the header columns, is a conversion that stopped half way, and is
+/// refused the same way.
+pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageError> {
+    let found = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
+    let supported =
+        u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
+    if found == 0 {
+        return Ok(());
+    }
+    if found > supported {
+        return Err(StorageError::SchemaTooNew { found, supported });
+    }
+    if found < MESSAGE_ROWS_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "a run's messages are one column of run_contexts",
+        });
+    }
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has = |name: &str| columns.iter().any(|column| column == name);
+    if has("messages_json") || !has("body_format") || !has("header_rev") {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "run_contexts is not in the header format (an interrupted conversion)",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), StorageError> {
+    require_current_format(conn)?;
+    apply_pending(conn)
+}
+
+/// Applies every migration above the database's `user_version`, with no format check.
+/// Tests use it to build the old shapes by hand and then migrate them.
+#[cfg(any(test, feature = "unchecked-open"))]
+pub(crate) fn apply_migrations_unchecked(conn: &Connection) -> Result<(), StorageError> {
+    apply_pending(conn)
+}
+
+fn apply_pending(conn: &Connection) -> Result<(), StorageError> {
     let current = conn.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?;
     let supported =
         u32::try_from(MIGRATIONS.len()).map_err(|_| StorageError::OutOfRange("migration count"))?;
@@ -91,6 +146,10 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
         message: error.to_string(),
     }
 }
+
+/// Reverts migration v40 (see `tests/support/undo_v40.sql`); apply it before [`UNDO_V35`].
+#[cfg(test)]
+pub(crate) const UNDO_V40: &str = include_str!("../tests/support/undo_v40.sql");
 
 /// Reverts migration v35 on a database whose `threads` table is kept, for tests
 /// that rebuild an older schema by hand. `thread_index_runs` is not restored:

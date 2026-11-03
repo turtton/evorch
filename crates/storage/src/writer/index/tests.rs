@@ -1748,12 +1748,11 @@ fn paused_and_disabled_jobs_do_not_wake_and_canonical_writes_continue() {
 #[test]
 fn legacy_proof_supersedes_a_frozen_request_and_a_new_request_completes() {
     let mut fx = Fixture::new(512 * MIB);
-    fx.conn().execute(
-        "INSERT INTO run_contexts (run_id,role,name,parent_run_id,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,snapshot_revision) VALUES ('legacy','worker','worker',NULL, \
-         '{\"thread_id\":\"legacy\",\"parent_run_id\":null,\"continuity\":{\"inherited_note\":null,\"sources\":[]}}', \
-         '[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"legacy native\"}]}]', \
-         '[]','Done',1,1,0)", [],
-    ).unwrap();
+    let mut legacy = crate::repo::run_messages::fixtures::record("legacy");
+    legacy.config_json = "{\"thread_id\":\"legacy\",\"parent_run_id\":null,\"continuity\":{\"inherited_note\":null,\"sources\":[]}}".into();
+    legacy.messages_json =
+        "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"legacy native\"}]}]".into();
+    crate::repo::run_messages::fixtures::insert(fx.conn(), &legacy, 0);
     fx.conn().execute("INSERT INTO threads(thread_id,root_run_id,created_at_ns,updated_at_ns,source) VALUES('legacy','legacy',1,1,'runtime')",[]).unwrap();
     fx.conn()
         .execute(

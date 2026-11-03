@@ -170,6 +170,9 @@ const ARCHIVE_ROWS: &str = "UPDATE thread_index_runs SET state = 'evicted', \
 
 /// Runs `body` in a savepoint: it composes with a caller's transaction, and
 /// outside one it is a deferred transaction committed on success.
+/// Runs `body` as one unit that is rolled back as a whole on error. Without a
+/// transaction of the caller's it is a deferred one (a savepoint), which is right for
+/// reads and for index bookkeeping; whatever writes content blobs uses [`atomic_write`].
 fn atomic<T, E: From<rusqlite::Error>>(
     conn: &Connection,
     body: impl FnOnce() -> Result<T, E>,
@@ -188,6 +191,52 @@ fn atomic<T, E: From<rusqlite::Error>>(
         }
     }
     released?;
+    result
+}
+
+/// [`atomic`] for a unit that writes content blobs (every snapshot save and header
+/// update).
+///
+/// A caller without a transaction gets `BEGIN IMMEDIATE`: the write lock is taken before
+/// the first read, which is what the content blob writers require (a blob is only ever
+/// inserted by the connection that holds the write lock, so the collector cannot delete
+/// it between the check and the insert). A caller that already has a transaction gets a
+/// savepoint, and that transaction must be a write transaction already: a deferred one
+/// that has not written yet would take the lock only at the first write, after reads this
+/// unit depends on, so it is refused instead of silently weakening the invariant.
+pub(crate) fn atomic_write<T, E: From<rusqlite::Error> + From<StorageError>>(
+    conn: &Connection,
+    body: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let outermost = conn.is_autocommit();
+    if outermost {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+    } else {
+        if conn.transaction_state(Some("main"))? != rusqlite::TransactionState::Write {
+            return Err(StorageError::Serialization(
+                "run contexts are written only inside an IMMEDIATE write transaction".into(),
+            )
+            .into());
+        }
+        conn.execute_batch("SAVEPOINT thread_index_write")?;
+    }
+    let result = body();
+    let finished = match (&result, outermost) {
+        (Ok(_), true) => conn.execute_batch("COMMIT"),
+        (Ok(_), false) => conn.execute_batch("RELEASE thread_index_write"),
+        (Err(_), _) => Ok(()),
+    };
+    if result.is_err() || finished.is_err() {
+        if outermost {
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        } else {
+            let _ =
+                conn.execute_batch("ROLLBACK TO thread_index_write; RELEASE thread_index_write");
+        }
+    }
+    finished?;
     result
 }
 
@@ -485,7 +534,7 @@ fn stage(
     binding: Option<&ThreadRunRow>,
     provenance: ProvenanceInput<'_>,
 ) -> Result<SnapshotReceipt, SnapshotApiError> {
-    atomic(conn, || {
+    atomic_write(conn, || {
         let current: u64 = conn
             .query_row(
                 "SELECT snapshot_revision FROM run_context_provenance WHERE run_id = ?1",
@@ -498,6 +547,9 @@ fn stage(
             return Err(SnapshotApiError::RevisionConflict);
         }
         let redacted = run_context::redact(record)?.ok_or(SnapshotApiError::InvalidSnapshot)?;
+        if !redacted.messages.is_array() {
+            return Err(SnapshotApiError::InvalidSnapshot);
+        }
         let snapshot_revision = current
             .checked_add(1)
             .ok_or(StorageError::OutOfRange("snapshot revision"))?;
@@ -724,21 +776,7 @@ fn load_bundle(conn: &Connection, run_id: &str) -> Result<Option<SnapshotBundle>
     if run_tombstoned(conn, run_id)? {
         return Ok(None);
     }
-    let row = conn
-        .query_row(
-            &format!(
-                "SELECT {}, snapshot_revision FROM run_contexts WHERE run_id = ?1",
-                run_context::COLUMNS
-            ),
-            [run_id],
-            |row| {
-                Ok((
-                    run_context::from_row(row)?,
-                    row.get::<_, u64>("snapshot_revision")?,
-                ))
-            },
-        )
-        .optional()?;
+    let row = crate::repo::run_messages::get_with_revision(conn, run_id)?;
     let Some((record, snapshot_revision)) = row else {
         return Ok(None);
     };

@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use crate::body_ref::hex;
 use crate::body_store::PRODUCTION_OWNERS;
 use crate::repo::content_blobs::{
-    BlobReferences, BodyScope, blob_references, blob_state, blob_text, check_bodies, find_blobs,
+    BlobReferences, BodyScope, blob_references, blob_state, blob_text, check_bodies, check_runs,
+    find_blobs,
 };
 use crate::{Database, StorageError};
 
@@ -145,7 +146,8 @@ impl Database {
             BodyCheckScope::Run(run) => BodyScope::Run(run),
             BodyCheckScope::Thread(thread) => BodyScope::Thread(thread),
         };
-        let report = check_bodies(&self.conn, PRODUCTION_OWNERS, scope_ref, verify)?;
+        let mut report = check_bodies(&self.conn, PRODUCTION_OWNERS, scope_ref, verify)?;
+        check_runs(&self.conn, scope_ref, verify, &mut report)?;
         Ok(json!({
             "ok": report.is_ok(),
             "scope": match scope {
