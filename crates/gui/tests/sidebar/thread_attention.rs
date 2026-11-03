@@ -101,7 +101,9 @@ impl Window {
         self.state.create_thread(title).expect("thread")
     }
 
-    fn external(&self) -> BTreeSet<ThreadId> {
+    /// What the sidebar would mark once the background probe has answered.
+    fn external(&mut self) -> BTreeSet<ThreadId> {
+        self.state.observe_external_work_now();
         self.state.externally_working_threads()
     }
 }
@@ -151,10 +153,10 @@ fn owner_running_and_follower(shared: &Shared) -> (Window, Window, ThreadId) {
 }
 
 /// The sidebar as the workbench draws it, with `unread` marked.
-fn render(window: &Window, unread: &[&ThreadId]) -> Harness<'static> {
+fn render(window: &mut Window, unread: &[&ThreadId]) -> Harness<'static> {
+    let external = window.external();
     let sidebar = window.state.sidebar().clone();
     let phases: BTreeMap<String, ThreadRunPhase> = window.state.thread_phases().clone();
-    let external = window.external();
     let unread: BTreeSet<ThreadId> = unread.iter().map(|id| (*id).clone()).collect();
     let none = BTreeSet::new();
     let retention = BTreeMap::new();
@@ -175,19 +177,19 @@ fn render(window: &Window, unread: &[&ThreadId]) -> Harness<'static> {
 fn a_run_another_process_executes_marks_only_the_thread_it_does_not_own() {
     // Given: A owns a thread and runs in it, B follows the shared log
     let shared = Shared::new();
-    let (a, b, thread) = owner_running_and_follower(&shared);
+    let (mut a, mut b, thread) = owner_running_and_follower(&shared);
 
     // Then: B marks the thread as worked on elsewhere, A (the owner) does not
     assert_eq!(b.external(), BTreeSet::from([thread.clone()]));
     assert!(a.external().is_empty());
 
     // And: B's row says so in words and with the running spinner's name
-    let rendered = render(&b, &[]);
+    let rendered = render(&mut b, &[]);
     assert!(rendered.query_by_label(EXTERNAL_ROW).is_some());
     assert!(rendered.query_by_label(EXTERNAL_SPINNER).is_some());
 
     // And: the owner's own row neither claims "another process" nor loses its spinner
-    let owner = render(&a, &[]);
+    let owner = render(&mut a, &[]);
     assert!(owner.query_by_label(EXTERNAL_ROW).is_none());
     assert!(owner.query_by_label(EXTERNAL_SPINNER).is_none());
     assert!(owner.query_by_label(OWN_SPINNER).is_some());
@@ -206,7 +208,7 @@ fn the_mark_goes_when_the_run_ends() {
 
     // Then: nothing marks the thread any more
     assert!(b.external().is_empty());
-    assert!(render(&b, &[]).query_by_label(EXTERNAL_ROW).is_none());
+    assert!(render(&mut b, &[]).query_by_label(EXTERNAL_ROW).is_none());
 }
 
 #[test]
@@ -267,44 +269,91 @@ fn runs_restored_as_active_after_a_restart_are_marked_before_any_event_arrives()
     let (_a, _b, thread) = owner_running_and_follower(&shared);
 
     // When: a window opens afresh and replays history, without polling the feed
-    let c = open_window(&shared, "evorch-gui:c");
+    let mut c = open_window(&shared, "evorch-gui:c");
 
     // Then: the restored active run counts as another process's
     assert_eq!(c.external(), BTreeSet::from([thread]));
 }
 
+/// The facts of an owner record that only a claim, handoff or release changes.
+/// The lease expiry is left out: the owner's own heartbeat renews it.
+fn holder(window: &Window, thread: &ThreadId) -> (String, u64, String) {
+    let owner = window
+        .host
+        .attach(&thread.to_string())
+        .expect("owner record");
+    (
+        owner.lease.owner_id,
+        owner.lease.generation,
+        format!("{:?}", owner.state),
+    )
+}
+
 #[test]
-fn looking_claims_renews_and_writes_nothing() {
+fn looking_claims_nothing_and_writes_no_event() {
     // Given: A owns the thread; B marks it
     let shared = Shared::new();
     let (a, mut b, thread) = owner_running_and_follower(&shared);
-    let id = thread.to_string();
-    let owner_before = a.host.attach(&id).expect("owner record");
+    let holder_before = holder(&a, &thread);
     let events_before = event_count(&shared);
 
     // When: B computes and draws the marks repeatedly
     for _ in 0..3 {
         assert_eq!(b.external().len(), 1);
-        let _ = render(&b, &[]);
+        let _ = render(&mut b, &[]);
         b.state.poll_shared_feed();
     }
 
-    // Then: the lease, its holder and the event log are as they were
-    let owner_after = b.host.attach(&id).expect("owner record");
-    assert_eq!(owner_after, owner_before);
-    assert_eq!(owner_after.lease.owner_id, a.host.owner_id());
-    assert!(b.host.owned_permit(&id).is_err(), "B must not own it");
+    // Then: the holder, its generation and state, and the event log are as they were
+    assert_eq!(holder(&b, &thread), holder_before);
+    assert_eq!(holder_before.0, a.host.owner_id());
+    assert!(
+        b.host.owned_permit(&thread.to_string()).is_err(),
+        "B must not own it"
+    );
     assert_eq!(event_count(&shared), events_before);
+}
+
+#[test]
+fn a_thread_this_window_holds_is_never_marked_even_when_its_run_was_restored() {
+    // Given: a run left active in the log, in a thread nobody holds yet
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+
+    // When: a window restores that run as another process's, then holds the thread
+    let mut c = open_window(&shared, "evorch-gui:c");
+    c.host
+        .start(&thread.to_string())
+        .expect("C takes the thread");
+    c.state.observe_external_work_now();
+
+    // Then: the restored run is a candidate, but the thread is C's own
+    assert_eq!(
+        c.state.thread_phases().get("run-a"),
+        Some(&ThreadRunPhase::Running)
+    );
+    assert!(c.external().is_empty());
+
+    // And: a window that does not hold it still marks it
+    let mut d = open_window(&shared, "evorch-gui:d");
+    assert_eq!(d.external(), BTreeSet::from([thread]));
 }
 
 #[test]
 fn an_unread_report_outranks_external_work_in_the_row() {
     // Given: B marks a thread as worked on elsewhere
     let shared = Shared::new();
-    let (_a, b, thread) = owner_running_and_follower(&shared);
+    let (_a, mut b, thread) = owner_running_and_follower(&shared);
 
     // When: the same thread also has an unread report
-    let rendered = render(&b, &[&thread]);
+    let rendered = render(&mut b, &[&thread]);
 
     // Then: the row names the stronger state only
     assert!(

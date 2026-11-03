@@ -45,6 +45,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn with_ownership(mut self, host: Arc<OwnerHost>) -> Self {
+        self.external_work
+            .set_source(super::external_work::Source::of_host(&host));
         self.ownership = Some(host);
         self
     }
@@ -273,6 +275,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         result: Result<T, RegistryError>,
     ) {
         self.ownership_status.invalidate();
+        self.external_work.invalidate();
         self.ownership_action_error = result.err().map(|error| OwnershipActionError {
             operation,
             detail: error.to_string(),

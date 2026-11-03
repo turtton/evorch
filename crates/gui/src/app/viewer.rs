@@ -131,6 +131,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             enabled: !self.settings_save_in_progress(),
         };
         self.sync_agent_browser(&ctx);
+        self.refresh_external_work(Some(&ctx));
         let externally_working_threads = self.externally_working_threads();
         {
             let rewind_block = self

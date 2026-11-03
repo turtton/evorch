@@ -1835,6 +1835,14 @@ mod tests {
         assert_eq!((kept.len(), hidden), (rows.len(), 0));
     }
 
+    /// The palette is process-wide; tests that install one take turns.
+    fn palette_lock() -> std::sync::MutexGuard<'static, ()> {
+        static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        PALETTE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn flags(question: bool, approval: bool, unread: bool, external: bool) -> Attention {
         Attention {
             question,
@@ -1905,6 +1913,7 @@ mod tests {
     fn a_tinted_row_stays_distinct_resting_hovered_and_selected() {
         use crate::theme::tokens::Palette;
         use crate::theme::widgets::toned_row_target;
+        let _guard = palette_lock();
         for p in [Palette::tokyo_night(), Palette::graphite()] {
             crate::theme::tokens::install_palette(p);
             for state in [
@@ -2113,5 +2122,133 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    /// What one thread row paints: fills, outlines, and the color of its title.
+    #[derive(Default)]
+    struct Painted {
+        fills: Vec<egui::Color32>,
+        strokes: Vec<egui::Color32>,
+        title: Option<egui::Color32>,
+    }
+
+    fn collect_shapes(shape: &egui::Shape, title: &str, painted: &mut Painted) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .for_each(|shape| collect_shapes(shape, title, painted)),
+            egui::Shape::Rect(rect) => {
+                painted.fills.push(rect.fill);
+                painted.strokes.push(rect.stroke.color);
+            }
+            egui::Shape::Text(text) if text.galley.job.text == title => {
+                painted.title = text.galley.job.sections.first().map(|s| s.format.color);
+            }
+            _ => {}
+        }
+    }
+
+    fn paint_row(
+        preset: crate::theme::style::ThemePreset,
+        question: bool,
+        selected: bool,
+    ) -> Painted {
+        let project = ProjectId::new("demo");
+        let mut sidebar = workspace_ui::SidebarState {
+            threads: vec![ThreadRecord::new(
+                ThreadId::new("row"),
+                project,
+                "row-title",
+            )],
+            ..Default::default()
+        };
+        if selected {
+            sidebar.active_thread = Some(ThreadId::new("row"));
+        }
+        let asking = if question {
+            BTreeSet::from([ThreadId::new("row")])
+        } else {
+            BTreeSet::new()
+        };
+        let (phases, none, active) = (BTreeMap::new(), BTreeSet::new(), HashSet::new());
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                crate::theme::style::install_preset(ui.ctx(), preset);
+                let lineage = LineageIndex::new(&sidebar.threads);
+                let section: Vec<&ThreadRecord> = sidebar.threads.iter().collect();
+                let rows = nested_threads(&section, &lineage);
+                let indicators = ThreadIndicators {
+                    phases: &phases,
+                    question_threads: &asking,
+                    approval_threads: &none,
+                    unread_threads: &none,
+                    externally_working: &none,
+                    active_runs: &active,
+                    retention: &BTreeMap::new(),
+                };
+                let mut action = None;
+                super::render_tree(
+                    ui,
+                    &sidebar,
+                    &lineage,
+                    &rows,
+                    &indicators,
+                    false,
+                    &mut action,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let mut painted = Painted::default();
+        for clipped in &output.shapes {
+            collect_shapes(&clipped.shape, "row-title", &mut painted);
+        }
+        painted
+    }
+
+    #[test]
+    fn a_tinted_row_paints_its_tint_stripe_and_title_and_a_selected_one_keeps_its_outline() {
+        use crate::theme::style::ThemePreset;
+        use crate::theme::widgets::toned_row_target;
+        let _guard = palette_lock();
+        for preset in [ThemePreset::TokyoNight, ThemePreset::Graphite] {
+            let p = preset.palette();
+
+            // Given: a row with an unanswered question, resting
+            let resting = paint_row(preset, true, false);
+            // Then: its tint, stripe and title color are the question's, with no selection outline
+            assert!(resting.fills.contains(&p.QUESTION_SURFACE));
+            assert!(resting.fills.contains(&p.QUESTION_FG));
+            assert_eq!(resting.title, Some(p.QUESTION_FG));
+            assert!(!resting.strokes.contains(&p.ACCENT));
+
+            // Given: the same row, selected
+            let selected = paint_row(preset, true, true);
+            // Then: the tint now mixes in the selection, the stripe and title stay,
+            // and the accent outline marks the selection
+            assert!(
+                selected
+                    .fills
+                    .contains(&toned_row_target(p.QUESTION_SURFACE, true))
+            );
+            assert!(selected.fills.contains(&p.QUESTION_FG));
+            assert_eq!(selected.title, Some(p.QUESTION_FG));
+            assert!(selected.strokes.contains(&p.ACCENT));
+
+            // Given: an ordinary row
+            let ordinary = paint_row(preset, false, false);
+            // Then: nothing of the question's colors is painted
+            assert!(!ordinary.fills.contains(&p.QUESTION_SURFACE));
+            assert!(!ordinary.fills.contains(&p.QUESTION_FG));
+            assert_ne!(ordinary.title, Some(p.QUESTION_FG));
+        }
     }
 }

@@ -361,8 +361,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .as_ref()
                 .is_some_and(|host| host.owner_id() == owner_id) =>
             {
+                self.external_work.invalidate();
                 self.settle_claimed_receipts(thread_id, receipts);
             }
+            EventKind::Ownership(_) => self.external_work.invalidate(),
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
                 self.wake_conversation_root(run_id);
             }
@@ -379,7 +381,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::Orchestrator(_) => {}
         }
     }
