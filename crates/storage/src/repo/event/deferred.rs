@@ -108,7 +108,7 @@ pub struct StoredEventFailure {
 /// One row of the log, in `id` order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeferredRow {
-    Event(DeferredStoredEvent),
+    Event(Box<DeferredStoredEvent>),
     Failed(StoredEventFailure),
 }
 
@@ -133,7 +133,7 @@ pub fn for_each_event_ordered_deferred(
         let run_id: Option<String> = row.get(9).ok().flatten();
         match deferred_row(row) {
             Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
-            Ok(event) => visit(DeferredRow::Event(event)),
+            Ok(event) => visit(DeferredRow::Event(Box::new(event))),
             Err(reason) => {
                 if run_id
                     .as_deref()

@@ -18,12 +18,12 @@ const LATEST: u32 = MIGRATIONS.len() as u32;
 
 const MIB: usize = 1024 * 1024;
 
-fn lease(path: &Path) {
+pub(super) fn lease(path: &Path) {
     drop(offline::lease_file(path).unwrap());
 }
 
 /// A database exactly as migration `version` leaves it, built by replaying the real migrations.
-fn database_at(dir: &Path, version: usize) -> PathBuf {
+pub(super) fn database_at(dir: &Path, version: usize) -> PathBuf {
     let path = dir.join("events.db");
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "auto_vacuum", 2).unwrap();
@@ -37,11 +37,11 @@ fn database_at(dir: &Path, version: usize) -> PathBuf {
     path
 }
 
-fn v39(dir: &Path) -> PathBuf {
+pub(super) fn v39(dir: &Path) -> PathBuf {
     database_at(dir, 39)
 }
 
-struct Run {
+pub(super) struct Run {
     id: &'static str,
     messages: String,
     checkpoints: String,
@@ -51,12 +51,12 @@ struct Run {
     restorable: bool,
 }
 
-fn long(tag: &str, size: usize) -> String {
+pub(super) fn long(tag: &str, size: usize) -> String {
     let unit = format!("{tag} こんにちは \"quoted\" \\ line\n");
     unit.repeat(size / unit.len() + 1)
 }
 
-fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
+pub(super) fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
     Run {
         id,
         messages: serde_json::to_string(messages).unwrap(),
@@ -68,7 +68,7 @@ fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
     }
 }
 
-fn insert(conn: &Connection, run: &Run) {
+pub(super) fn insert(conn: &Connection, run: &Run) {
     let messages = codec::encode(&run.messages);
     let checkpoints = codec::encode(&run.checkpoints);
     conn.execute(
@@ -92,7 +92,7 @@ fn insert(conn: &Connection, run: &Run) {
     .unwrap();
 }
 
-fn conversation(tag: &str) -> Value {
+pub(super) fn conversation(tag: &str) -> Value {
     let shared = long("shared tool output", 5_000);
     json!([
         {"role": "system", "content": [{"type": "text", "text": format!("system {tag}")}]},
@@ -111,11 +111,11 @@ fn conversation(tag: &str) -> Value {
     ])
 }
 
-fn seeded() -> (tempfile::TempDir, PathBuf, Vec<Run>) {
+pub(super) fn seeded() -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     seeded_at(39)
 }
 
-fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
+pub(super) fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     let dir = tempfile::tempdir().unwrap();
     let path = database_at(dir.path(), version);
     let mut big = plain_run("run-big", &conversation("big"), 7);
@@ -145,7 +145,7 @@ fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     (dir, path, runs)
 }
 
-fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
+pub(super) fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
     convert_bodies(
         path,
         &ConvertBodiesOptions {
@@ -156,7 +156,7 @@ fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
     )
 }
 
-fn preview(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
+pub(super) fn preview(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
     convert_bodies(path, &ConvertBodiesOptions::default())
 }
 
@@ -170,7 +170,7 @@ fn columns(path: &Path) -> Vec<String> {
         .unwrap()
 }
 
-fn version(path: &Path) -> u32 {
+pub(super) fn version(path: &Path) -> u32 {
     Connection::open(path)
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -181,7 +181,7 @@ fn read(conn: &Connection, id: &str) -> crate::RunContextRecord {
     run_messages::get(conn, id).unwrap().unwrap()
 }
 
-fn files(path: &Path) -> Vec<(String, Vec<u8>)> {
+pub(super) fn files(path: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for entry in fs::read_dir(path.parent().unwrap()).unwrap() {
         let entry = entry.unwrap().path();

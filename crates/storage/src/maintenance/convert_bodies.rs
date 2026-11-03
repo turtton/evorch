@@ -806,6 +806,7 @@ fn run(
     gauge.peak.set(0);
     progress.enter("vacuum");
     hook(Point::BeforeVacuum, &conn)?;
+    super::compact::collect_unreferenced_blobs(&conn)?;
     space::require(&space::plan_vacuum(
         &space::place(parent(path))?,
         &space::place(&scratch_directory)?,
@@ -835,5 +836,7 @@ fn run(
     Ok(summary)
 }
 
+#[cfg(test)]
+mod events_tests;
 #[cfg(test)]
 mod tests;

@@ -1299,7 +1299,7 @@ async fn interrupted_tool_recovery(prompt: Option<&str>, stopped: bool) {
 async fn continue_unfinished_model_request_reuses_identical_wire_input_without_working_note() {
     for compacted in [false, true] {
         for restart in [false, true] {
-            resume_unfinished_model_request(compacted, restart, false, false).await;
+            resume_unfinished_model_request(compacted, restart, false, None).await;
         }
     }
 }
@@ -1307,7 +1307,7 @@ async fn continue_unfinished_model_request_reuses_identical_wire_input_without_w
 #[tokio::test]
 async fn above_threshold_unfinished_retry_preserves_wire_input_without_recompaction() {
     for restart in [false, true] {
-        resume_unfinished_model_request(true, restart, true, false).await;
+        resume_unfinished_model_request(true, restart, true, None).await;
     }
 }
 
@@ -1318,7 +1318,18 @@ async fn converted_database_resumes_with_the_interrupted_wire_input() {
     // database: the request it sends must be the interrupted one, byte for byte, and
     // the cache must still be read from it.
     for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
-        resume_unfinished_model_request(compacted, true, above_threshold, true).await;
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(39)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_version_40_database_converted_for_its_events_resumes_with_the_interrupted_wire_input() {
+    // A database whose runs are already rows (version 40) holds its events as plain
+    // payloads. The same command converts only the events and no run; a normal start
+    // refuses the file before, and accepts it after, and the restore must still send the
+    // interrupted request byte for byte and read the cache from it.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(40)).await;
     }
 }
 
@@ -1367,7 +1378,7 @@ async fn resume_unfinished_model_request(
     compacted: bool,
     restart: bool,
     above_threshold: bool,
-    convert: bool,
+    convert: Option<u32>,
 ) {
     let (gate, arrived) = mock_openai::ResponseGate::new();
     let mut script = vec![read_response(2)];
@@ -1458,12 +1469,22 @@ async fn resume_unfinished_model_request(
     storage.handle().promote_lesson(&lesson.id).unwrap();
     let memory = runtime::memory::MemoryBoundary::capture(&config, "project").unwrap();
     assert_eq!(memory.entries().len(), 1);
-    let (storage, restart) = if convert {
+    let (storage, restart) = if let Some(source) = convert {
         // The first runtime's run store reads the file: drop it, then stop the writer, so
         // that no process holds the database, as the command requires.
         recompose_runtime(&mut harness, &config, None);
         storage.close();
-        storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
+        if source == 39 {
+            storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
+        } else {
+            storage::maintenance::downgrade_to_v40(&config.db_path).unwrap();
+        }
+        // A normal start refuses the file and says to convert it, until it is converted.
+        let refused = storage::Database::open(&config).unwrap_err();
+        assert!(
+            matches!(refused, storage::StorageError::ConversionRequired { .. }),
+            "{refused:?}"
+        );
         let summary = storage::maintenance::convert_bodies(
             &config.db_path,
             &storage::maintenance::ConvertBodiesOptions {
@@ -1473,8 +1494,10 @@ async fn resume_unfinished_model_request(
             },
         )
         .unwrap();
-        assert_eq!(summary.converted_runs, 1);
+        assert_eq!(summary.converted_runs, u64::from(source == 39));
         assert_eq!(summary.canonicalized_runs.count, 0);
+        assert_eq!(summary.events.mismatched_events, 0);
+        assert_eq!(summary.events.unconverted_remaining, 0);
         (storage::Storage::open(config.clone()).unwrap(), true)
     } else {
         (storage, restart)

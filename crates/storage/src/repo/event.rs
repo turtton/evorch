@@ -662,7 +662,7 @@ pub(crate) fn compressible_payload(kind: &str, subkind: &str) -> bool {
     }
 }
 
-const fn kind_name(kind: &EventKind) -> &'static str {
+pub(crate) const fn kind_name(kind: &EventKind) -> &'static str {
     match kind {
         EventKind::Lifecycle(_) => "Lifecycle",
         EventKind::Message(_) => "Message",
@@ -680,6 +680,8 @@ const fn kind_name(kind: &EventKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod body_tests;
 #[cfg(test)]
 mod columns_tests;
 #[cfg(test)]

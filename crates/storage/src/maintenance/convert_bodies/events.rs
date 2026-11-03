@@ -371,14 +371,14 @@ const GROWTH_PER_BLOB: u64 = 192;
 /// The table, indexes and triggers the step creates, whatever the data.
 const GROWTH_FIXED: u64 = 256 * 1024;
 
-/// `(session sum, day sum)` of the persistent aggregates, and the sum over `sessions`
-/// that exist, to compare before and after.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// The persistent aggregates before the step.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Accounting {
     pub sessions: u64,
     pub days: u64,
-    pub existing_sessions_aggregate: u64,
-    pub session_totals: u64,
+    /// Sessions whose `total_event_bytes` equalled their aggregate: they must still, after
+    /// the step. (A session whose total was already off is not the step's to explain.)
+    pub consistent_sessions: Vec<String>,
 }
 
 pub(super) fn accounting(conn: &Connection) -> Result<Accounting, StorageError> {
@@ -387,14 +387,17 @@ pub(super) fn accounting(conn: &Connection) -> Result<Accounting, StorageError> 
             .query_row(sql, [], |row| row.get::<_, Option<u64>>(0))?
             .unwrap_or(0))
     };
+    let consistent_sessions = conn
+        .prepare(
+            "SELECT s.id FROM sessions s WHERE s.total_event_bytes = COALESCE( \
+             (SELECT payload_bytes FROM event_session_bytes WHERE session_id = s.id), 0)",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
     Ok(Accounting {
         sessions: scalar("SELECT SUM(payload_bytes) FROM event_session_bytes")?,
         days: scalar("SELECT SUM(payload_bytes) FROM event_day_bytes")?,
-        existing_sessions_aggregate: scalar(
-            "SELECT SUM(payload_bytes) FROM event_session_bytes \
-             WHERE session_id IN (SELECT id FROM sessions)",
-        )?,
-        session_totals: scalar("SELECT SUM(total_event_bytes) FROM sessions")?,
+        consistent_sessions,
     })
 }
 
@@ -569,19 +572,19 @@ pub(super) fn verify(
             "the event accounting aggregates differ from the rows after the conversion",
         ));
     }
-    let aggregate_delta = after
-        .existing_sessions_aggregate
-        .abs_diff(accounting_before.existing_sessions_aggregate);
-    let total_delta = after
-        .session_totals
-        .abs_diff(accounting_before.session_totals);
-    let same_direction = (after.existing_sessions_aggregate
-        >= accounting_before.existing_sessions_aggregate)
-        == (after.session_totals >= accounting_before.session_totals);
-    if aggregate_delta != total_delta || (aggregate_delta != 0 && !same_direction) {
-        return Err(invalid(
-            "the session totals did not follow the event accounting during the conversion",
-        ));
+    for session in &accounting_before.consistent_sessions {
+        let (total, aggregate): (u64, u64) = conn.query_row(
+            "SELECT total_event_bytes, COALESCE( \
+                 (SELECT payload_bytes FROM event_session_bytes WHERE session_id = ?1), 0) \
+                 FROM sessions WHERE id = ?1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if total != aggregate {
+            return Err(invalid(format!(
+                "the total of session {session} did not follow the event accounting during the conversion"
+            )));
+        }
     }
     Ok(())
 }

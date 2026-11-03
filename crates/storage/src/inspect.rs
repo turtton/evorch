@@ -203,7 +203,7 @@ impl Database {
                 for candidate in normalize(candidates).iter().rev() {
                     let mut rows = statement.query([candidate.id])?;
                     let Some(row) = rows.next()? else { continue };
-                    let (event, resolved) = event_row(&transaction, row, options.bodies)?;
+                    let (event, resolved) = event_row(&transaction, row, options)?;
                     if hidden(&tombstones, &resolved, row.get::<_, Option<String>>(5)?) {
                         continue;
                     }
@@ -237,7 +237,7 @@ impl Database {
                     let mut read = 0_i64;
                     while let Some(row) = rows.next()? {
                         read += 1;
-                        let (event, resolved) = event_row(&self.conn, row, options.bodies)?;
+                        let (event, resolved) = event_row(&self.conn, row, options)?;
                         before = event.id;
                         if hidden(&tombstones, &resolved, row.get::<_, Option<String>>(5)?) {
                             continue;
@@ -663,32 +663,35 @@ fn is_review_manifest(payload: &Value) -> bool {
     diagnostic["source"] == "sandbox" && diagnostic["code"] == "escalation_review_manifest"
 }
 
-/// An event row, and its JSON with the bodies resolved (what attribution and the text
-/// filter look at). The returned event shows `bodies`. A body that cannot be resolved does
-/// not fail the inspection: its tokens stay and `body_error` says why.
+/// An event row, and its JSON for attribution and the text filter. The returned event
+/// shows `bodies`. Bodies are read only when they are shown or searched: attribution looks
+/// at `run_id` fields and the event variant, which a token never replaces, so `refs` without
+/// a filter reads no blob. A body that cannot be resolved does not fail the inspection: its
+/// tokens stay and `body_error` says why.
 fn event_row(
     conn: &Connection,
     row: &rusqlite::Row<'_>,
-    bodies: InspectBodies,
+    options: InspectEventsOptions<'_>,
 ) -> Result<(InspectEvent, Value), StorageError> {
     let id: i64 = row.get(0)?;
     let body_format: i64 = row.get(6)?;
     let mut payload = column_json("payload", row.get_ref(4)?);
     let mut resolved = payload.clone();
     let mut body_error = None;
-    if body_format == 1 {
+    let needs_bodies = options.bodies == InspectBodies::Resolved || options.contains.is_some();
+    if body_format == 1 && needs_bodies {
         let label = format!("event {id}");
-        if let Err(error) = crate::body_store::resolve_container(conn, &label, &mut resolved) {
-            match error {
-                StorageError::BodyUnresolved { .. } => {
-                    body_error = Some(error.to_string());
-                    resolved = payload.clone();
+        match crate::body_store::resolve_container(conn, &label, &mut resolved) {
+            Ok(()) => {
+                if options.bodies == InspectBodies::Resolved {
+                    payload = resolved.clone();
                 }
-                other => return Err(other),
             }
-        }
-        if bodies == InspectBodies::Resolved {
-            payload = resolved.clone();
+            Err(error @ StorageError::BodyUnresolved { .. }) => {
+                body_error = Some(error.to_string());
+                resolved = payload.clone();
+            }
+            Err(other) => return Err(other),
         }
     }
     Ok((

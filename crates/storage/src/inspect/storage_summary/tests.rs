@@ -133,6 +133,8 @@ fn logical_summary_matches_a_fixed_fixture() {
         json!({
             "rows": 7,
             "payload_bytes": 4267,
+            "tokenized_rows": 0,
+            "accounted_blob_bytes": 0,
             "unbackfilled_rows": 1,
             "by_kind": [
                 { "kind": "Message", "subkind": "Assistant", "rows": 2, "payload_bytes": 4000 },

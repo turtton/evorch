@@ -280,6 +280,7 @@ pub fn compact_events(
     summary.compressed_event_rows = rows;
     if options.apply {
         recalculate_accounting(&db.conn)?;
+        collect_unreferenced_blobs(&db.conn)?;
         offline::require_space(parent(path), basis.saturating_mul(2))?;
         // Existing databases stay auto_vacuum=NONE unless the rebuild also
         // switches the mode; this is the only place that is safe to do so.
@@ -467,6 +468,39 @@ fn delete_matching(
 
 fn checkpoint(conn: &Connection) -> Result<(), StorageError> {
     conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Deletes the blobs nothing refers to any more, before a VACUUM: the collector's bounded
+/// steps until its queue is empty, then the exclusive phase for the blobs it registered as
+/// too large for a step. A blob a row still names is never deleted for the sake of space.
+pub(super) fn collect_unreferenced_blobs(conn: &Connection) -> Result<(), StorageError> {
+    use crate::repo::content_blobs::gc_step;
+    use crate::repo::thread_retention::reclaim::{Layout, reclaim_oversized_step_in};
+    loop {
+        let step = gc_step(conn)?;
+        if step.candidates == 0 && !step.deferred {
+            break;
+        }
+    }
+    loop {
+        let step = reclaim_oversized_step_in(conn, 64 * 1024 * 1024, Layout::Current)?;
+        if let Some(error) = step.last_error {
+            return Err(invalid(format!("blob collection failed: {error}")));
+        }
+        if step.remaining == 0 {
+            break;
+        }
+        if step.rows == 0 && step.stored_bytes == 0 {
+            return Err(invalid("blob collection made no progress"));
+        }
+    }
+    loop {
+        let step = gc_step(conn)?;
+        if step.candidates == 0 && !step.deferred {
+            break;
+        }
+    }
     Ok(())
 }
 

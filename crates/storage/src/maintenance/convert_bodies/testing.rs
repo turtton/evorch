@@ -148,3 +148,56 @@ fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+/// Rewrites `path` as a version 40 database: what a build before the event body format
+/// wrote. Tokenized events are written back as plain ones, and the event columns, the
+/// reference table and the accounting triggers of the format are removed; the runs stay
+/// as they are.
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v40(path: &Path) -> Result<(), StorageError> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let fresh = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..40] {
+        fresh.execute_batch(migration)?;
+    }
+    let accounting: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('events_accounting_insert', 'events_accounting_delete', \
+                          'events_accounting_update') ORDER BY name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    resolve_tokenized_events(&conn)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
+         DROP TABLE IF EXISTS content_blob_refs_event;
+         DROP TRIGGER events_accounting_insert;
+         DROP TRIGGER events_accounting_delete;
+         DROP TRIGGER events_accounting_update;
+         ALTER TABLE events DROP COLUMN body_format;
+         ALTER TABLE events DROP COLUMN blob_bytes;",
+    )?;
+    for definition in &accounting {
+        conn.execute_batch(definition)?;
+    }
+    conn.execute_batch(
+        "DELETE FROM event_session_bytes;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events \
+             WHERE session_id IS NOT NULL GROUP BY session_id;
+         DELETE FROM event_day_bytes;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns / 86400000000000 \
+             - (wall_clock_ns % 86400000000000 < 0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         UPDATE sessions SET total_event_bytes = COALESCE( \
+             (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
+    )?;
+    conn.pragma_update(None, "user_version", 40)?;
+    conn.execute_batch("COMMIT")?;
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
