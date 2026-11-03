@@ -2,14 +2,15 @@
 //! analysis that `preview` reports and `--apply` partly repeats (the size limit).
 
 use std::collections::HashSet;
+use std::io::Read;
 
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::StorageError;
 use crate::body_ref::{BodyToken, tokenize_in_place};
-use crate::codec::text_column;
 use crate::migrations::{MESSAGE_ROWS_VERSION, MIGRATIONS, require_current_format};
 use crate::repo::run_messages::to_json;
 
@@ -53,6 +54,33 @@ const TARGET_TABLES: [&str; 3] = [
 /// conversion holds in memory. A run above it is reported by `preview` and refused by
 /// `--apply`; the limit is not raised to make a conversion pass.
 pub(crate) const MAX_RUN_BYTES: u64 = 1_000_000_000;
+
+/// The limit in force: [`MAX_RUN_BYTES`], or a smaller one a test sets so that the
+/// boundary can be exercised with small data.
+pub(super) fn run_limit() -> u64 {
+    #[cfg(test)]
+    if let Some(limit) = limit_override::get() {
+        return limit;
+    }
+    MAX_RUN_BYTES
+}
+
+#[cfg(test)]
+pub(super) mod limit_override {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    pub(in crate::maintenance::convert_bodies) fn get() -> Option<u64> {
+        LIMIT.with(Cell::get)
+    }
+
+    pub(in crate::maintenance::convert_bodies) fn set(limit: Option<u64>) {
+        LIMIT.with(|cell| cell.set(limit));
+    }
+}
 
 /// Problems `preview` lists; the count goes on.
 const MAX_LISTED_PROBLEMS: usize = 20;
@@ -139,38 +167,105 @@ pub(super) struct OldRun {
     pub checkpoints: String,
 }
 
-/// Reads one run's documents, decoding the TEXT or zstd BLOB columns.
-pub(super) fn read_old_run(conn: &Connection, run_id: &str) -> Result<OldRun, StorageError> {
-    let run = conn
-        .prepare_cached(
-            "SELECT run_id, restorable, config_json, messages_json, checkpoints_json \
-             FROM run_contexts WHERE run_id = ?1",
-        )?
-        .query_row([run_id], |row| {
-            Ok(OldRun {
-                run_id: row.get(0)?,
-                restorable: row.get(1)?,
-                config: row.get(2)?,
-                messages: text_column(row, 3)?,
-                checkpoints: text_column(row, 4)?,
-            })
-        })
-        .optional()?;
-    run.ok_or_else(|| invalid(format!("run {run_id} disappeared during the conversion")))
+/// A run read from the old columns, or the reason it cannot be (never any of its text).
+pub(super) enum OldRead {
+    Run(OldRun),
+    Fault(&'static str),
+}
+
+/// The text of a stored value, never holding more than `remaining` bytes: a TEXT value is
+/// measured, a zstd frame is checked against its declared size and decompressed through a
+/// reader that stops one byte past the limit (a frame may lie about its size).
+pub(super) fn decode_bounded(value: ValueRef<'_>, remaining: u64) -> Result<String, &'static str> {
+    const TOO_BIG: &str = "a document is larger than the in-memory limit";
+    let bytes = match value {
+        ValueRef::Text(bytes) => {
+            if bytes.len() as u64 > remaining {
+                return Err(TOO_BIG);
+            }
+            bytes.to_vec()
+        }
+        ValueRef::Blob(bytes) => {
+            if let Ok(Some(declared)) = zstd::zstd_safe::get_frame_content_size(bytes)
+                && declared > remaining
+            {
+                return Err(TOO_BIG);
+            }
+            let decoder = zstd::stream::read::Decoder::new(bytes)
+                .map_err(|_| "a stored document is not a zstd frame")?;
+            let mut plain = Vec::new();
+            decoder
+                .take(remaining.saturating_add(1))
+                .read_to_end(&mut plain)
+                .map_err(|_| "a stored document does not decompress")?;
+            if plain.len() as u64 > remaining {
+                return Err(TOO_BIG);
+            }
+            plain
+        }
+        _ => return Err("a stored document is neither TEXT nor a BLOB"),
+    };
+    String::from_utf8(bytes).map_err(|_| "a stored document is not UTF-8")
+}
+
+/// Reads one run's documents. Their plain size together may not pass [`MAX_RUN_BYTES`]:
+/// the limit is applied while decompressing, not after.
+pub(super) fn read_old_run(conn: &Connection, run_id: &str) -> Result<OldRead, StorageError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT run_id, restorable, config_json, messages_json, checkpoints_json \
+         FROM run_contexts WHERE run_id = ?1",
+    )?;
+    let mut rows = statement.query([run_id])?;
+    let Some(row) = rows.next()? else {
+        return Err(invalid(format!(
+            "run {run_id} disappeared during the conversion"
+        )));
+    };
+    let mut remaining = run_limit();
+    let mut document = |index: usize| -> Result<Result<String, &'static str>, StorageError> {
+        let decoded = decode_bounded(row.get_ref(index)?, remaining);
+        if let Ok(text) = &decoded {
+            remaining -= text.len() as u64;
+        }
+        Ok(decoded)
+    };
+    let config = match document(2)? {
+        Ok(text) => text,
+        Err(reason) => return Ok(OldRead::Fault(reason)),
+    };
+    let messages = match document(3)? {
+        Ok(text) => text,
+        Err(reason) => return Ok(OldRead::Fault(reason)),
+    };
+    let checkpoints = match document(4)? {
+        Ok(text) => text,
+        Err(reason) => return Ok(OldRead::Fault(reason)),
+    };
+    Ok(OldRead::Run(OldRun {
+        run_id: row.get(0)?,
+        restorable: row.get(1)?,
+        config,
+        messages,
+        checkpoints,
+    }))
 }
 
 /// The next run after `after` (`None` starts), in `run_id` order. With `skip_deleted`
-/// the runs a retention deleted (tombstoned, rows not yet reclaimed) are not visited.
+/// the runs a retention deleted (tombstoned, rows not yet reclaimed) are not visited;
+/// with `within_limit` neither are the runs whose recorded size is above [`MAX_RUN_BYTES`].
 pub(super) fn next_run(
     conn: &Connection,
     after: Option<&str>,
     skip_deleted: bool,
+    within_limit: bool,
 ) -> Result<Option<String>, StorageError> {
-    let filter = if skip_deleted {
-        " AND run_id NOT IN (SELECT run_id FROM run_tombstones)"
-    } else {
-        ""
-    };
+    let mut filter = String::new();
+    if skip_deleted {
+        filter.push_str(" AND run_id NOT IN (SELECT run_id FROM run_tombstones)");
+    }
+    if within_limit {
+        filter.push_str(&format!(" AND {RUN_BYTES_SQL} <= {}", run_limit()));
+    }
     Ok(conn
         .prepare_cached(&format!(
             "SELECT run_id FROM run_contexts WHERE (?1 IS NULL OR run_id > ?1){filter} \
@@ -189,7 +284,7 @@ pub(super) fn oversized_runs(conn: &Connection) -> Result<Vec<String>, StorageEr
         "SELECT run_id FROM run_contexts WHERE {RUN_BYTES_SQL} > ?1 \
          AND run_id NOT IN (SELECT run_id FROM run_tombstones) ORDER BY run_id LIMIT 20"
     ))?;
-    let ids = statement.query_map([MAX_RUN_BYTES], |row| row.get(0))?;
+    let ids = statement.query_map([run_limit()], |row| row.get(0))?;
     Ok(ids.collect::<Result<_, _>>()?)
 }
 
@@ -281,13 +376,21 @@ pub struct Analysis {
     /// Their plain bytes.
     pub old_payload_plain_bytes: u64,
     pub largest_run_plain_bytes: u64,
-    /// Runs above the in-memory limit: `--apply` refuses while there is one.
+    /// Runs above the in-memory limit (the first few ids): `--apply` refuses while there
+    /// is one, and neither this pass nor the conversion reads them.
     pub oversized_runs: Vec<String>,
+    pub oversized_run_count: u64,
     /// Filled by the full pass only.
     pub messages: u64,
     pub estimated_blob_candidates: u64,
+    /// Bytes of every candidate string, shared ones counted each time: the upper bound
+    /// of what the blobs can take, and the figure the growth estimate uses.
+    pub estimated_candidate_plain_bytes: u64,
+    /// Distinct bodies seen; a lower bound once `distinct_tracking_capped` is set.
     pub estimated_distinct_blobs: u64,
     pub estimated_blob_plain_bytes: u64,
+    /// The set of distinct bodies reached its limit and stopped growing.
+    pub distinct_tracking_capped: bool,
     /// Runs whose documents are not JSON, or do not survive the byte round trip while the
     /// run is restorable: `--apply` stops at the first.
     pub unconvertible_runs: u64,
@@ -296,6 +399,12 @@ pub struct Analysis {
     /// value. Their conversation index no longer matches their snapshot hash, so it is
     /// built again.
     pub canonicalizable_runs: u64,
+    /// Upper bound of how much the database grows before the VACUUM (new rows, indexes
+    /// and blobs, every candidate stored without compression).
+    pub estimated_growth_bytes: u64,
+    /// Reasons a reclaim of deleted runs cannot be completed (a cursor this build does
+    /// not read, a deleted run with no job). `--apply` refuses while there is one.
+    pub reclaim_blockers: Vec<String>,
     pub problems: Vec<Problem>,
 }
 
@@ -341,53 +450,98 @@ pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
             &format!("SELECT MAX({RUN_BYTES_SQL}) FROM run_contexts WHERE {not_deleted}"),
         )?,
         oversized_runs: oversized_runs(conn)?,
+        oversized_run_count: scalar(
+            conn,
+            &format!(
+                "SELECT COUNT(*) FROM run_contexts WHERE {RUN_BYTES_SQL} > {} \
+                 AND {not_deleted}",
+                run_limit()
+            ),
+        )?,
+        reclaim_blockers: super::retention::blockers(conn)?,
         ..Analysis::default()
     })
 }
 
-/// The full read-only pass of `preview`: every convertible run is decoded, round-tripped
-/// and tokenized without storing anything. One run is in memory at a time; the only state
-/// kept across runs is the hash and length of each distinct body.
+/// Distinct bodies [`analyze`] remembers (40 bytes each). Past it the count of distinct
+/// bodies is a lower bound; the growth estimate does not depend on it.
+const MAX_TRACKED_BODIES: usize = 2_000_000;
+
+/// The full read-only pass of `preview` and of `--apply`'s check before anything changes:
+/// every convertible run within the size limit is decoded (bounded), round-tripped and
+/// tokenized without storing anything. One run is in memory at a time; the only state
+/// kept across runs is the hash and length of each distinct body, up to a limit.
 pub(super) fn analyze(conn: &Connection) -> Result<Analysis, StorageError> {
+    analyze_with_cap(conn, MAX_TRACKED_BODIES)
+}
+
+pub(super) fn analyze_with_cap(conn: &Connection, cap: usize) -> Result<Analysis, StorageError> {
     let mut analysis = measure(conn)?;
     let mut bodies: HashSet<BodyToken> = HashSet::new();
     let mut cursor: Option<String> = None;
-    while let Some(run_id) = next_run(conn, cursor.as_deref(), true)? {
-        let run = read_old_run(conn, &run_id)?;
-        match documents(&run) {
-            Err(reason) => {
-                analysis.unconvertible_runs += 1;
-                if analysis.problems.len() < MAX_LISTED_PROBLEMS {
-                    analysis.problems.push(Problem {
-                        run_id: run_id.clone(),
-                        reason,
-                    });
+    while let Some(run_id) = next_run(conn, cursor.as_deref(), true, true)? {
+        let problem = match read_old_run(conn, &run_id)? {
+            OldRead::Fault(reason) => Some(reason),
+            OldRead::Run(run) => match documents(&run) {
+                Err(reason) => Some(reason),
+                Ok(documents) => {
+                    analysis.canonicalizable_runs += u64::from(documents.canonicalized);
+                    count_bodies(&run, &mut analysis, &mut bodies, cap)?;
+                    None
                 }
-            }
-            Ok(documents) => {
-                analysis.canonicalizable_runs += u64::from(documents.canonicalized);
-                count_bodies(&run, &mut analysis, &mut bodies)?;
+            },
+        };
+        if let Some(reason) = problem {
+            analysis.unconvertible_runs += 1;
+            if analysis.problems.len() < MAX_LISTED_PROBLEMS {
+                analysis.problems.push(Problem {
+                    run_id: run_id.clone(),
+                    reason,
+                });
             }
         }
         cursor = Some(run_id);
     }
     analysis.estimated_distinct_blobs = bodies.len() as u64;
     analysis.estimated_blob_plain_bytes = bodies.iter().map(|token| token.byte_len).sum();
+    analysis.estimated_growth_bytes = analysis
+        .estimated_candidate_plain_bytes
+        .saturating_add(analysis.messages.saturating_mul(GROWTH_PER_MESSAGE))
+        .saturating_add(
+            analysis
+                .estimated_blob_candidates
+                .saturating_mul(GROWTH_PER_BLOB),
+        )
+        .saturating_add(analysis.convertible_runs.saturating_mul(GROWTH_PER_RUN));
     Ok(analysis)
 }
+
+/// Bytes a message row (columns, skeleton overhead and its two indexes), a blob or
+/// reference row, and a header add beyond the strings: deliberately generous.
+const GROWTH_PER_MESSAGE: u64 = 384;
+const GROWTH_PER_BLOB: u64 = 160;
+const GROWTH_PER_RUN: u64 = 2_048;
 
 fn count_bodies(
     run: &OldRun,
     analysis: &mut Analysis,
     bodies: &mut HashSet<BodyToken>,
+    cap: usize,
 ) -> Result<(), StorageError> {
     let serde_error = |error: serde_json::Error| StorageError::Serialization(error.to_string());
     let mut candidates = 0_u64;
+    let mut candidate_bytes = 0_u64;
+    let mut capped = analysis.distinct_tracking_capped;
     let mut visit = |value: &mut Value| {
         tokenize_in_place(value, &mut |text| {
             let token = BodyToken::of(text);
             candidates += 1;
-            bodies.insert(token);
+            candidate_bytes += token.byte_len;
+            if bodies.len() < cap {
+                bodies.insert(token);
+            } else if !bodies.contains(&token) {
+                capped = true;
+            }
             Ok(token)
         })
     };
@@ -405,5 +559,7 @@ fn count_bodies(
     visit(&mut config)?;
     analysis.messages += count;
     analysis.estimated_blob_candidates += candidates;
+    analysis.estimated_candidate_plain_bytes += candidate_bytes;
+    analysis.distinct_tracking_capped = capped;
     Ok(())
 }

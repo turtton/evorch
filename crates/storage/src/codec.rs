@@ -118,6 +118,7 @@ pub(crate) fn decode(value: ValueRef<'_>) -> Result<Cow<'_, str>, DecodeError> {
 }
 
 /// Reads column `index` of `row` as decoded text, for `query_map` closures.
+#[cfg(test)]
 pub(crate) fn text_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
     let value = row.get_ref(index)?;
     let data_type = value.data_type();

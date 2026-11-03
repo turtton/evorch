@@ -19,6 +19,30 @@ use crate::thread_retention::{
     ReclaimProgress, ReclaimSummary,
 };
 
+/// Families whose pending reclaim job holds a cursor this build does not read (not valid
+/// JSON, an unknown phase). `step_job` would start such a job over without saying so; the
+/// conversion refuses them instead.
+pub(crate) fn invalid_cursor_families(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT family_key, cursor_json FROM reclaim_jobs WHERE state = 'db_pending' \
+         ORDER BY family_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut invalid = Vec::new();
+    for row in rows {
+        let (family, cursor) = row?;
+        let readable = serde_json::from_str::<serde_json::Value>(&cursor).is_ok_and(|value| {
+            value.is_object() && serde_json::from_value::<Cursor>(value).is_ok()
+        });
+        if cursor != "{}" && !readable {
+            invalid.push(family);
+        }
+    }
+    Ok(invalid)
+}
+
 /// The shape of `run_contexts` a reclaim works on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Layout {

@@ -151,8 +151,22 @@ fn restore_skips_unreadable_events_like_legacy() {
     });
 }
 
+/// What the user sees must not change when the database the history was saved in goes
+/// through `convert-bodies`: the same threads, transcripts, repairs and feed parts.
+#[test]
+fn restore_after_the_database_was_converted_shows_the_same_history() {
+    assert_restore_matches_legacy_inner(|_| {}, true);
+}
+
 fn assert_restore_matches_legacy(
     damage: impl FnOnce(&rusqlite::Connection),
+) -> WorkbenchState<DemoSource> {
+    assert_restore_matches_legacy_inner(damage, false)
+}
+
+fn assert_restore_matches_legacy_inner(
+    damage: impl FnOnce(&rusqlite::Connection),
+    convert: bool,
 ) -> WorkbenchState<DemoSource> {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
@@ -353,6 +367,40 @@ fn assert_restore_matches_legacy(
         storage.handle().append_event(Some("gui"), event).unwrap();
     }
     damage(&rusqlite::Connection::open(&config.db_path).unwrap());
+    let (storage, db) = if convert {
+        let restore = |db: &Database| {
+            let mut restored = state(sidebar.clone());
+            restored.history.push(
+                serde_json::from_value(serde_json::json!({
+                    "thread_id":"repair", "text":"user request",
+                    "at":{"secs_since_epoch":0,"nanos_since_epoch":0}
+                }))
+                .unwrap(),
+            );
+            restored.restore_history(db).unwrap();
+            restored
+        };
+        let before = restore(&db);
+        drop(connection);
+        drop(db);
+        storage.close();
+        storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
+        let summary = storage::maintenance::convert_bodies(
+            &config.db_path,
+            &storage::maintenance::ConvertBodiesOptions {
+                apply: true,
+                backup: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.converted_runs, 6);
+        let storage = Storage::open(config.clone()).unwrap();
+        let db = Database::open(&config).unwrap();
+        assert_same(&before, &restore(&db));
+        (storage, db)
+    } else {
+        (storage, db)
+    };
     let registry_path = dir.path().join("owners.db");
     drop(runtime::ownership::Registry::open(&registry_path).unwrap());
     let mut restored = None;

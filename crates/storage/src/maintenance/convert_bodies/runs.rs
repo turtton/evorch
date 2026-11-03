@@ -15,7 +15,7 @@ use crate::repo::run_messages::{
 };
 
 use super::super::invalid;
-use super::source::{Documents, MAX_RUN_BYTES, OldRun, documents, read_old_run};
+use super::source::{Documents, OldRead, OldRun, documents, read_old_run};
 
 /// Prefix of the errors that mean the stored form is not the old bytes.
 pub(super) const MISMATCH: &str = "conversion mismatch";
@@ -47,14 +47,10 @@ pub(super) fn convert_run(
     hook: &mut dyn FnMut(RunPoint, &Connection) -> Result<(), StorageError>,
 ) -> Result<Converted, StorageError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let old = read_old_run(&tx, run_id)?;
-    let plain_bytes =
-        old.messages.len() as u64 + old.checkpoints.len() as u64 + old.config.len() as u64;
-    if plain_bytes > MAX_RUN_BYTES {
-        return Err(invalid(format!(
-            "run {run_id} holds {plain_bytes} plain bytes, above the {MAX_RUN_BYTES} the conversion handles"
-        )));
-    }
+    let old = match read_old_run(&tx, run_id)? {
+        OldRead::Run(old) => old,
+        OldRead::Fault(reason) => return Err(mismatch(run_id, reason)),
+    };
     let documents = documents(&old).map_err(|reason| mismatch(run_id, reason))?;
     let array = documents
         .messages

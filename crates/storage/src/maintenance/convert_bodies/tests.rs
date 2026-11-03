@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
@@ -327,8 +328,9 @@ fn a_non_empty_wal_is_refused_by_preview_and_apply_alike() {
 }
 
 #[test]
-fn a_run_that_does_not_round_trip_stops_the_conversion_and_names_the_run() {
-    // Given: a run whose saved messages carry whitespace the serializer does not produce.
+fn data_that_cannot_be_converted_is_refused_before_anything_is_changed() {
+    // Given: a restorable run whose saved messages carry whitespace the serializer does
+    // not produce.
     let (_dir, path, _) = seeded();
     let conn = Connection::open(&path).unwrap();
     insert(
@@ -344,35 +346,21 @@ fn a_run_that_does_not_round_trip_stops_the_conversion_and_names_the_run() {
         },
     );
     drop(conn);
+    let before = files(&path);
 
     // When: previewed and applied.
     let analysis = preview(&path).unwrap().analysis.unwrap();
     let failure = apply(&path).unwrap_err();
 
-    // Then: preview lists the run; apply stops at it, with the backup and the way back.
+    // Then: preview lists the run, and apply refuses on the same finding before the
+    // backup or any change: no file differs and no run is converted.
     assert_eq!(analysis.unconvertible_runs, 1);
     assert_eq!(analysis.problems[0].run_id, "run-c-spaced");
-    assert_eq!(failure.reason, "mismatch");
-    assert_eq!(failure.stage, "convert");
-    assert_eq!(failure.run_id.as_deref(), Some("run-c-spaced"));
-    assert_eq!(failure.converted_runs, 3);
-    assert!(failure.restore_required);
-    assert!(failure.backup.as_ref().unwrap().is_file());
-    assert!(failure.to_string().contains("verified backup"));
-    // The half-converted database is refused by a normal start.
-    let error = Database::open(&StorageConfig {
-        db_path: path.clone(),
-        ..Default::default()
-    })
-    .err()
-    .unwrap();
-    assert!(
-        matches!(error, StorageError::ConversionRequired { .. }),
-        "{error}"
-    );
-    // And by this command: it does not guess where to continue.
-    let again = apply(&path).unwrap_err();
-    assert!(again.detail.contains("did not finish"), "{again}");
+    assert_eq!(failure.stage, "analyze");
+    assert!(failure.detail.contains("run-c-spaced"), "{failure}");
+    assert_eq!(failure.converted_runs, 0);
+    assert!(failure.backup.is_none() && !failure.restore_required);
+    assert_eq!(files(&path), before);
 }
 
 #[test]
@@ -383,7 +371,7 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
         Point::AfterRetention,
         Point::Run(RunPoint::BeforeReadback),
         Point::Run(RunPoint::BeforeCommit),
-        Point::AfterRun,
+        Point::AfterRun { frames: 0 },
         Point::BeforeVerify,
         Point::BeforeDrop,
         Point::AfterDrop,
@@ -400,9 +388,12 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
                 backup: None,
             },
             &mut |at, _| {
-                if at == point {
+                if std::mem::discriminant(&at) == std::mem::discriminant(&point)
+                    && (matches!(at, Point::Run(_)) == matches!(point, Point::Run(_)))
+                    && (!matches!(at, Point::Run(_)) || at == point)
+                {
                     seen += 1;
-                    if seen == 2 || !matches!(point, Point::Run(_) | Point::AfterRun) {
+                    if seen == 2 || !matches!(point, Point::Run(_) | Point::AfterRun { .. }) {
                         return Err(StorageError::Serialization("injected".into()));
                     }
                 }
@@ -422,6 +413,12 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
                 ..Default::default()
             })
             .is_err()
+        );
+        // The command does not guess where to continue either.
+        let again = apply(&path).unwrap_err();
+        assert!(
+            again.detail.contains("did not finish"),
+            "{point:?}: {again}"
         );
 
         // When: the backup is restored over the database (no stale log) and converted again.
@@ -460,7 +457,7 @@ fn a_run_that_fails_leaves_nothing_of_itself_and_keeps_the_runs_before_it() {
                         return Err(StorageError::Serialization("injected".into()));
                     }
                 }
-                Point::AfterRun if seen == 2 => {
+                Point::AfterRun { .. } if seen == 2 => {
                     state = Some((
                         single(conn, "SELECT COUNT(*) FROM run_messages"),
                         single(conn, "SELECT COUNT(*) FROM content_blobs"),
@@ -610,40 +607,169 @@ fn a_deleted_run_without_a_reclaim_job_stops_the_conversion_before_any_run() {
     .unwrap();
     drop(conn);
 
-    // When/Then: the conversion stops in the retention step with no run converted.
+    // When/Then: preview names the blocker and apply refuses before the backup, with
+    // no run converted and no file changed.
+    let before = files(&path);
+    let analysis = preview(&path).unwrap().analysis.unwrap();
+    assert_eq!(analysis.reclaim_blockers.len(), 1);
     let failure = apply(&path).unwrap_err();
-    assert_eq!(failure.stage, "retention");
+    assert_eq!(failure.stage, "analyze");
     assert_eq!(failure.converted_runs, 0);
-    assert!(failure.restore_required);
+    assert!(failure.backup.is_none() && !failure.restore_required);
+    assert!(failure.detail.contains("no reclaim job"), "{failure}");
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn a_reclaim_cursor_this_build_does_not_read_is_refused_not_started_over() {
+    for cursor in ["{not json", "{\"phase\": \"no_such_phase\"}", "[]"] {
+        // Given: a deleted run whose pending job holds a cursor the reclaim cannot read.
+        let (_dir, path, _) = seeded();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) \
+             VALUES ('run-b-small', 't', 'fam')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reclaim_jobs(family_key, state, cursor_json, created_at_ns, updated_at_ns) \
+             VALUES ('fam', 'db_pending', ?1, 1, 1)",
+            [cursor],
+        )
+        .unwrap();
+        drop(conn);
+        let before = files(&path);
+
+        // When/Then: preview reports it, apply refuses with no run converted and no
+        // change, and the job's cursor is not rewritten.
+        let analysis = preview(&path).unwrap().analysis.unwrap();
+        assert!(
+            analysis.reclaim_blockers[0].contains("cursor"),
+            "{cursor}: {:?}",
+            analysis.reclaim_blockers
+        );
+        let failure = apply(&path).unwrap_err();
+        assert_eq!(failure.stage, "analyze", "{cursor}");
+        assert_eq!(failure.converted_runs, 0);
+        assert!(!failure.restore_required);
+        assert_eq!(files(&path), before, "{cursor}");
+    }
+}
+
+/// Runs of the log-size test: fillers that make the B-trees large, then one run of each
+/// kind the contract names. Run ids sort in this order, which is the conversion order.
+fn io_runs() -> Vec<Run> {
+    let message =
+        |text: String| json!({"role": "assistant", "content": [{"type": "text", "text": text}]});
+    let mut runs = Vec::new();
+    for index in 0..300 {
+        let id: &'static str = Box::leak(format!("a-fill-{index:03}").into_boxed_str());
+        let messages: Vec<Value> = (0..3)
+            .map(|n| message(format!("filler {index} message {n} with some words")))
+            .collect();
+        runs.push(plain_run(id, &Value::Array(messages), 1));
+    }
+    runs.push(plain_run("z1-small", &json!([message("hi".into())]), 1));
+    let short: Vec<Value> = (0..2_500)
+        .map(|n| message(format!("short message {n}")))
+        .collect();
+    runs.push(plain_run("z2-many-short", &Value::Array(short), 1));
+    let with_refs: Vec<Value> = (0..100)
+        .map(|n| {
+            json!({"role": "assistant", "content": (0..3)
+                .map(|k| json!({"type": "text", "text": long(&format!("body {n}-{k}"), 2_100)}))
+                .collect::<Vec<_>>()})
+        })
+        .collect();
+    runs.push(plain_run(
+        "z3-many-refs",
+        &Value::Array(with_refs.clone()),
+        1,
+    ));
+    runs.push(plain_run("z4-reuses-blobs", &Value::Array(with_refs), 1));
+    runs.push(plain_run(
+        "z5-one-big",
+        &json!([message(long("big body", 300_000))]),
+        1,
+    ));
+    runs
 }
 
 #[test]
 fn one_run_writes_a_log_in_proportion_to_what_it_stores() {
-    // Given: a conversion of the seeded runs.
-    let (_dir, path, _) = seeded();
-    let summary = apply(&path).unwrap();
-
-    // Then: the largest log the transactions left stays within the budget
-    // ceil(2 * S / page) + 256 frames, with S the bytes the run's rows and blobs occupy
-    // (here bounded by the old payload, the new blobs and a generous skeleton allowance).
+    // Given: a database of 300 small runs and one run of each kind the contract names
+    // (small, many short messages, many references, bodies shared with an earlier run,
+    // one large body).
+    let dir = tempfile::tempdir().unwrap();
+    let path = v39(dir.path());
+    let runs = io_runs();
     let conn = Connection::open(&path).unwrap();
+    for run in &runs {
+        insert(&conn, run);
+    }
     let page: u64 = conn
         .pragma_query_value(None, "page_size", |row| row.get(0))
         .unwrap();
-    let stored: u64 = single(
-        &conn,
-        "SELECT COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages",
+    drop(conn);
+    let old_stored: Vec<u64> = runs
+        .iter()
+        .map(|run| {
+            (codec::encode(&run.messages).stored_len()
+                + codec::encode(&run.checkpoints).stored_len()) as u64
+        })
+        .collect();
+
+    // When: converted, with the figures of each table read after every run commits.
+    let totals = |conn: &Connection| -> [u64; 4] {
+        let sum = |sql: &str| u64::try_from(single(conn, sql)).unwrap();
+        [
+            sum("SELECT COALESCE(SUM(OCTET_LENGTH(data)), 0) FROM content_blobs"),
+            sum("SELECT COALESCE(SUM(OCTET_LENGTH(skeleton)), 0) FROM run_messages"),
+            sum("SELECT COUNT(*) FROM run_messages"),
+            sum("SELECT (SELECT COUNT(*) FROM content_blob_refs_message) \
+                 + (SELECT COUNT(*) FROM content_blob_refs_header)"),
+        ]
+    };
+    let mut seen: Vec<(u64, [u64; 4])> = Vec::new();
+    let summary = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+        },
+        &mut |point, conn| {
+            if let Point::AfterRun { frames } = point {
+                seen.push((frames, totals(conn)));
+            }
+            Ok(())
+        },
     )
-    .try_into()
     .unwrap();
-    let analysis_stored = summary.blob_bytes_created + stored;
-    let budget_frames = (2 * analysis_stored).div_ceil(page) + 256;
-    let frame = page + 24;
-    assert!(
-        summary.peak_wal_bytes <= 32 + budget_frames * frame,
-        "peak log {} bytes exceeds {} frames of {frame}",
-        summary.peak_wal_bytes,
-        budget_frames
+
+    // Then: every run's transaction wrote at most ceil(2 * S / page) + 256 frames, with S
+    // the bytes it changed: new blobs, skeletons, rows and references (a generous
+    // allowance each) and the old payload it removed.
+    assert_eq!(seen.len(), runs.len());
+    let mut previous = [0_u64; 4];
+    for (index, (frames, now)) in seen.iter().enumerate() {
+        let delta = |slot: usize| now[slot] - previous[slot];
+        let changed = delta(0) + delta(1) + 160 * (delta(2) + delta(3)) + old_stored[index] + 2_048;
+        let budget = (2 * changed).div_ceil(page) + 256;
+        assert!(
+            *frames <= budget,
+            "run {} wrote {frames} frames, the budget is {budget} (S = {changed})",
+            runs[index].id
+        );
+        if runs[index].id == "z4-reuses-blobs" {
+            assert_eq!(delta(0), 0, "a run that shares every body stores no blob");
+            assert!(delta(3) >= 300, "but it still takes its own references");
+        }
+        previous = *now;
+    }
+    assert_eq!(
+        summary.peak_run_wal_frames,
+        seen.iter().map(|(frames, _)| *frames).max().unwrap()
     );
 }
 
@@ -776,12 +902,283 @@ fn a_restorable_run_that_is_not_in_the_serializers_form_stops_the_conversion() {
     let analysis = preview(&path).unwrap().analysis.unwrap();
     let failure = apply(&path).unwrap_err();
 
-    // Then: both refuse it, and apply names the run; nothing is canonicalized.
+    // Then: both refuse it; apply does so before anything changes and names the run.
     assert_eq!(
         (analysis.canonicalizable_runs, analysis.unconvertible_runs),
         (0, 1)
     );
-    assert_eq!(failure.reason, "mismatch");
-    assert_eq!(failure.run_id.as_deref(), Some("run-old-order"));
+    assert_eq!(failure.stage, "analyze");
+    assert!(!failure.restore_required);
+    assert!(failure.detail.contains("run-old-order"), "{failure}");
     assert!(failure.detail.contains("restorable"), "{failure}");
+}
+
+struct LimitGuard;
+
+impl LimitGuard {
+    fn new(limit: u64) -> Self {
+        source::limit_override::set(Some(limit));
+        Self
+    }
+}
+
+impl Drop for LimitGuard {
+    fn drop(&mut self) {
+        source::limit_override::set(None);
+    }
+}
+
+fn insert_raw(
+    conn: &Connection,
+    id: &str,
+    messages: SqlValue,
+    messages_len: i64,
+    restorable: bool,
+) {
+    conn.execute(
+        "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
+         checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json, \
+         snapshot_revision, messages_len, checkpoints_len) \
+         VALUES (?1, 'worker', 'n', NULL, '{}', ?2, '[]', 'Done', ?3, 1, '[]', 1, ?4, 2)",
+        params![id, messages, restorable, messages_len],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_run_recorded_above_the_limit_is_reported_without_being_read() {
+    // Given: a limit of 64 KiB and a run whose length columns say it is far above it; its
+    // stored bytes are not a valid frame, so reading it would be a finding of its own.
+    let _limit = LimitGuard::new(64 * 1024);
+    let (_dir, path, _) = seeded();
+    let conn = Connection::open(&path).unwrap();
+    insert_raw(
+        &conn,
+        "run-huge",
+        SqlValue::Blob(vec![1, 2, 3]),
+        200_000,
+        true,
+    );
+    drop(conn);
+    let before = files(&path);
+
+    // When: previewed and applied.
+    let analysis = preview(&path).unwrap().analysis.unwrap();
+    let failure = apply(&path).unwrap_err();
+
+    // Then: it is counted as oversized and never decoded; apply refuses unchanged.
+    assert_eq!(analysis.oversized_run_count, 1);
+    assert_eq!(analysis.oversized_runs, ["run-huge"]);
+    assert_eq!(analysis.unconvertible_runs, 0);
+    assert_eq!(failure.stage, "analyze");
+    assert!(failure.detail.contains("run-huge"), "{failure}");
+    assert!(!failure.restore_required);
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn a_frame_that_lies_about_its_size_is_stopped_while_it_decompresses() {
+    // Given: a limit of 64 KiB and runs whose length columns are small but whose frames
+    // expand past it: one declares its size, one (streamed) declares none.
+    let _limit = LimitGuard::new(64 * 1024);
+    let plain = vec![b'a'; MIB];
+    let declared = zstd::bulk::compress(&plain, 3).unwrap();
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    std::io::Write::write_all(&mut encoder, &plain).unwrap();
+    let undeclared = encoder.finish().unwrap();
+    assert!(
+        zstd::zstd_safe::get_frame_content_size(&undeclared)
+            .unwrap()
+            .is_none()
+    );
+    for (name, frame) in [("declared", declared), ("undeclared", undeclared)] {
+        let (_dir, path, _) = seeded();
+        let conn = Connection::open(&path).unwrap();
+        insert_raw(&conn, "run-liar", SqlValue::Blob(frame), 10, true);
+        drop(conn);
+        let before = files(&path);
+
+        // When/Then: preview reports it unconvertible, and apply refuses unchanged.
+        let analysis = preview(&path).unwrap().analysis.unwrap();
+        assert_eq!(analysis.unconvertible_runs, 1, "{name}");
+        assert!(
+            analysis.problems[0].reason.contains("larger than"),
+            "{name}"
+        );
+        let failure = apply(&path).unwrap_err();
+        assert_eq!(failure.stage, "analyze", "{name}");
+        assert!(!failure.restore_required, "{name}");
+        assert_eq!(files(&path), before, "{name}");
+    }
+}
+
+#[test]
+fn the_decompression_limit_is_exact() {
+    // Given: a frame of 1,000 bytes without a declared size, and a text of 1,000 bytes.
+    let plain = vec![b'x'; 1_000];
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    std::io::Write::write_all(&mut encoder, &plain).unwrap();
+    let frame = encoder.finish().unwrap();
+    let text = "y".repeat(1_000);
+
+    // When/Then: exactly the limit is read; one byte less is refused; nothing is guessed.
+    use rusqlite::types::ValueRef;
+    assert_eq!(
+        source::decode_bounded(ValueRef::Blob(&frame), 1_000)
+            .unwrap()
+            .len(),
+        1_000
+    );
+    assert!(source::decode_bounded(ValueRef::Blob(&frame), 999).is_err());
+    assert_eq!(
+        source::decode_bounded(ValueRef::Text(text.as_bytes()), 1_000).unwrap(),
+        text
+    );
+    assert!(source::decode_bounded(ValueRef::Text(text.as_bytes()), 999).is_err());
+    assert!(source::decode_bounded(ValueRef::Blob(b"not a frame"), 1_000).is_err());
+}
+
+#[test]
+fn the_set_of_distinct_bodies_stops_growing_at_its_cap_and_the_estimate_stays_an_upper_bound() {
+    // Given: the seeded runs analyzed once without and once with a cap of one body.
+    let (_dir, path, _) = seeded();
+    let conn = Connection::open(&path).unwrap();
+    let full = source::analyze_with_cap(&conn, usize::MAX).unwrap();
+    let capped = source::analyze_with_cap(&conn, 1).unwrap();
+
+    // Then: the capped pass says its distinct count is a lower bound; what bounds the
+    // growth (every candidate's bytes) does not depend on the cap.
+    assert!(!full.distinct_tracking_capped && full.estimated_distinct_blobs > 1);
+    assert!(capped.distinct_tracking_capped);
+    assert_eq!(capped.estimated_distinct_blobs, 1);
+    assert_eq!(
+        capped.estimated_candidate_plain_bytes,
+        full.estimated_candidate_plain_bytes
+    );
+    assert_eq!(capped.estimated_growth_bytes, full.estimated_growth_bytes);
+    assert!(full.estimated_candidate_plain_bytes >= full.estimated_blob_plain_bytes);
+}
+
+#[test]
+fn free_space_is_planned_per_volume_from_the_growth_and_checked_before_any_change() {
+    use std::path::Path;
+    let place = |directory: &'static str, volume| space::Place {
+        directory: Path::new(directory),
+        volume,
+    };
+
+    // Given/When: one volume holding everything, and the three on separate volumes.
+    let together = space::plan(
+        &place("/db", 1),
+        &place("/db", 1),
+        &place("/db", 1),
+        100,
+        1_000,
+    );
+    let apart = space::plan(
+        &place("/db", 1),
+        &place("/bk", 2),
+        &place("/tmp", 3),
+        100,
+        1_000,
+    );
+
+    // Then: one volume sums growth + log (1,000 + 1,100), the backup (100) and the
+    // scratch file (1,100); apart, each volume needs only its own part, and the volumes
+    // of the database and the backup keep the old floor of four databases.
+    assert_eq!(together.len(), 1);
+    assert_eq!(together[0].bytes, 3_300);
+    let bytes: Vec<u64> = apart.iter().map(|need| need.bytes).collect();
+    assert_eq!(bytes, [2_100, 400, 1_100]);
+    assert_eq!(apart[2].purposes, ["SQLite scratch of the VACUUM"]);
+    let vacuum_together = space::plan_vacuum(&place("/db", 1), &place("/db", 1), 500);
+    let vacuum_apart = space::plan_vacuum(&place("/db", 1), &place("/tmp", 3), 500);
+    assert_eq!(
+        vacuum_together
+            .iter()
+            .map(|need| need.bytes)
+            .collect::<Vec<_>>(),
+        [1_000]
+    );
+    assert_eq!(
+        vacuum_apart
+            .iter()
+            .map(|need| need.bytes)
+            .collect::<Vec<_>>(),
+        [500, 500]
+    );
+
+    // Given: a database and free space reported as one byte.
+    let (_dir, path, _) = seeded();
+    let before = files(&path);
+    space::tests_override::set(Some(1));
+    let preview_summary = preview(&path).unwrap();
+    let failure = apply(&path).unwrap_err();
+    space::tests_override::set(None);
+
+    // Then: preview reports what each volume needs, and apply refuses before the backup
+    // with nothing changed.
+    assert!(preview_summary.estimated_growth_bytes > 0);
+    assert!(!preview_summary.space_requirements.is_empty());
+    assert_eq!(
+        preview_summary.required_free_space_bytes,
+        preview_summary
+            .space_requirements
+            .iter()
+            .map(|need| need.bytes)
+            .max()
+            .unwrap()
+    );
+    assert_eq!(failure.stage, "analyze");
+    assert!(
+        failure.detail.contains("insufficient free space"),
+        "{failure}"
+    );
+    assert!(failure.backup.is_none() && !failure.restore_required);
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn a_database_the_running_build_wrote_converts_after_it_is_taken_back_to_version_39() {
+    // Given: runs written through the current writer (long bodies, a shared body, an
+    // empty run), then rewritten in the version 39 shape.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = Database::open(&StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut records = Vec::new();
+    for (index, id) in ["run-1", "run-2", "run-3"].into_iter().enumerate() {
+        let mut record = run_messages::fixtures::record(id);
+        if index > 0 {
+            record.messages_json = serde_json::to_string(&conversation("shared")).unwrap();
+            record.checkpoints_json = serde_json::to_string(
+                &json!([{"summary": {"role": "assistant", "content": [{"type": "text", "text": long("s", 3_000)}]}, "end": 2}]),
+            )
+            .unwrap();
+        }
+        run_messages::fixtures::insert(&db.conn, &record, 3);
+        records.push(record);
+    }
+    drop(db);
+    super::testing::downgrade_to_v39(&path).unwrap();
+    lease(&path);
+    assert_eq!(version(&path), 39);
+    assert!(columns(&path).contains(&"messages_json".to_owned()));
+
+    // When: converted.
+    let summary = apply(&path).unwrap();
+
+    // Then: the schema is that of a new database (the comparison inside the command
+    // passed) and every run reads back as the runtime saved it.
+    assert_eq!(summary.converted_runs, 3);
+    assert_eq!(summary.canonicalized_runs.count, 0);
+    let conn = Connection::open(&path).unwrap();
+    for record in &records {
+        let read = read(&conn, &record.run_id);
+        assert_eq!(read.messages_json, record.messages_json);
+        assert_eq!(read.checkpoints_json, record.checkpoints_json);
+    }
 }

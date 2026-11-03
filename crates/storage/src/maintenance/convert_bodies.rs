@@ -39,14 +39,19 @@ use super::{invalid, offline};
 mod retention;
 mod runs;
 mod source;
+mod space;
 mod verify;
+
+#[cfg(any(test, feature = "unchecked-open"))]
+pub mod testing;
 
 pub use retention::RetentionReport;
 pub use source::{Analysis, Problem};
+pub use space::VolumeNeed;
 
 pub(crate) use runs::RunPoint;
 use runs::{MISMATCH, convert_run};
-use source::{Shape, classify, next_run, oversized_runs};
+use source::{Shape, classify, next_run};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConvertBodiesOptions {
@@ -81,7 +86,12 @@ pub struct ConvertBodiesSummary {
     pub blobs_created: u64,
     pub blob_bytes_created: u64,
     pub references_created: u64,
+    /// The most any one volume must have free; see `space_requirements`.
     pub required_free_space_bytes: u64,
+    /// What each volume (database, backup, SQLite scratch) must have free.
+    pub space_requirements: Vec<VolumeNeed>,
+    /// Upper bound of the growth of the database before the VACUUM.
+    pub estimated_growth_bytes: u64,
     pub file_bytes_before: FileSizes,
     pub file_bytes_after: FileSizes,
     /// The largest log file after any commit of the preparation, the reclaim and the run
@@ -89,6 +99,9 @@ pub struct ConvertBodiesSummary {
     pub peak_wal_bytes: u64,
     /// The log file after the full VACUUM, which writes the whole database through it.
     pub vacuum_wal_bytes: u64,
+    /// Most log frames one run's transaction left, read after its commit (the log
+    /// restarts from the start after each checkpoint, so its length is the transaction's).
+    pub peak_run_wal_frames: u64,
     pub foreign_keys_enabled: bool,
     pub foreign_key_check: Option<&'static str>,
     pub integrity_check: Option<&'static str>,
@@ -170,7 +183,11 @@ pub(crate) enum Point {
     AfterPrepare,
     AfterRetention,
     Run(RunPoint),
-    AfterRun,
+    /// After a run committed and the log was checkpointed; `frames` is how many frames the
+    /// run's transaction wrote.
+    AfterRun {
+        frames: u64,
+    },
     BeforeVerify,
     BeforeDrop,
     AfterDrop,
@@ -375,7 +392,9 @@ fn compare_schema(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn checkpoint_passive(conn: &Connection) -> Result<(), StorageError> {
+/// Checkpoints what is committed and returns the frames the log held (those of the
+/// transactions since the last full checkpoint).
+fn checkpoint_passive(conn: &Connection) -> Result<u64, StorageError> {
     let (busy, log, done): (i64, i64, i64) =
         conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -385,7 +404,7 @@ fn checkpoint_passive(conn: &Connection) -> Result<(), StorageError> {
             "the WAL was not fully checkpointed after a commit; a reader may be open",
         ));
     }
-    Ok(())
+    Ok(u64::try_from(log).unwrap_or(0))
 }
 
 fn checkpoint_truncate(conn: &Connection) -> Result<(), StorageError> {
@@ -394,6 +413,39 @@ fn checkpoint_truncate(conn: &Connection) -> Result<(), StorageError> {
         return Err(invalid("the WAL could not be truncated; a reader is open"));
     }
     Ok(())
+}
+
+/// What `--apply` refuses before it changes anything, from the full read-only analysis.
+fn refusal(analysis: &Analysis) -> Option<String> {
+    let mut reasons = Vec::new();
+    if analysis.unconvertible_runs > 0 {
+        let first: Vec<String> = analysis
+            .problems
+            .iter()
+            .take(5)
+            .map(|problem| format!("run {}: {}", problem.run_id, problem.reason))
+            .collect();
+        reasons.push(format!(
+            "{} runs cannot be converted (first: {})",
+            analysis.unconvertible_runs,
+            first.join("; ")
+        ));
+    }
+    if analysis.oversized_run_count > 0 {
+        reasons.push(format!(
+            "{} runs are above {} plain bytes, the most the conversion holds in memory ({})",
+            analysis.oversized_run_count,
+            source::run_limit(),
+            analysis.oversized_runs.join(", ")
+        ));
+    }
+    if !analysis.reclaim_blockers.is_empty() {
+        reasons.push(format!(
+            "the reclaim of deleted runs cannot finish ({})",
+            analysis.reclaim_blockers.join("; ")
+        ));
+    }
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
 fn run(
@@ -454,10 +506,13 @@ fn run(
         blob_bytes_created: 0,
         references_created: 0,
         required_free_space_bytes: basis(&ro, path)?.saturating_mul(4),
+        space_requirements: Vec::new(),
+        estimated_growth_bytes: 0,
         file_bytes_before: sizes_before,
         file_bytes_after: sizes_before,
         peak_wal_bytes: 0,
         vacuum_wal_bytes: 0,
+        peak_run_wal_frames: 0,
         foreign_keys_enabled: false,
         foreign_key_check: None,
         integrity_check: None,
@@ -475,33 +530,42 @@ fn run(
             "the database is already in the current format; nothing was written".into();
         return Ok(summary);
     }
-    let too_big = oversized_runs(&ro)?;
+    progress.enter("analyze");
+    let analysis = source::analyze(&ro)?;
+    let basis = basis(&ro, path)?;
+    let backup_directory = options.backup.as_deref().map_or(parent(path), parent);
+    let scratch_directory = space::scratch_directory();
+    let needs = space::plan(
+        &space::place(parent(path))?,
+        &space::place(backup_directory)?,
+        &space::place(&scratch_directory)?,
+        basis,
+        analysis.estimated_growth_bytes,
+    );
+    summary.estimated_growth_bytes = analysis.estimated_growth_bytes;
+    summary.required_free_space_bytes = needs.iter().map(|need| need.bytes).max().unwrap_or(0);
+    summary.space_requirements = needs.clone();
+    files.verify()?;
+    let refusal = refusal(&analysis);
     if !options.apply {
-        progress.enter("analyze");
-        let analysis = source::analyze(&ro)?;
-        files.verify()?;
-        summary.message = if analysis.unconvertible_runs > 0 || !analysis.oversized_runs.is_empty()
-        {
-            "preview found runs that cannot be converted; --apply would refuse".into()
-        } else {
-            "preview only; rerun with --apply to convert (a verified backup is made first)".into()
+        summary.message = match refusal {
+            Some(_) => "preview found data that cannot be converted; --apply would refuse".into(),
+            None => "preview only; rerun with --apply to convert (a verified backup is made first)"
+                .into(),
         };
         summary.analysis = Some(analysis);
         return Ok(summary);
     }
-    if !too_big.is_empty() {
+    if let Some(reason) = refusal {
         return Err(invalid(format!(
-            "runs above {} plain bytes cannot be converted in memory: {}",
-            source::MAX_RUN_BYTES,
-            too_big.join(", ")
+            "nothing was converted and nothing was changed: {reason}"
         )));
     }
-    files.verify()?;
-    let basis = basis(&ro, path)?;
+    space::require(&needs)?;
+    summary.analysis = Some(analysis);
     drop(ro);
 
     progress.enter("lock");
-    offline::require_space(parent(path), basis.saturating_mul(4))?;
     let conn = exclusive_connection(path)?;
     summary.foreign_keys_enabled = true;
     if classify(&conn)? != Shape::Source {
@@ -533,31 +597,34 @@ fn run(
     conn.execute_batch("BEGIN IMMEDIATE")?;
     conn.execute_batch(V40_PREPARE)?;
     conn.execute_batch("COMMIT")?;
+    checkpoint_passive(&conn)?;
     gauge.sample();
     hook(Point::AfterPrepare, &conn)?;
 
     progress.enter("retention");
     summary.retention = retention::reclaim_deleted(&conn, &mut || gauge.sample())?;
+    checkpoint_passive(&conn)?;
     hook(Point::AfterRetention, &conn)?;
     let (blobs_before, blob_bytes_before, references_before) = blob_figures(&conn)?;
     let (kept_runs, fingerprint_before) = verify::metadata_fingerprint(&conn)?;
 
     progress.enter("convert");
     let mut cursor: Option<String> = None;
-    while let Some(run_id) = next_run(&conn, cursor.as_deref(), false)? {
+    while let Some(run_id) = next_run(&conn, cursor.as_deref(), false, false)? {
         progress.run_id = Some(run_id.clone());
         let converted = convert_run(&conn, &run_id, &mut |point, conn| {
             hook(Point::Run(point), conn)
         })?;
-        checkpoint_passive(&conn)?;
+        let frames = checkpoint_passive(&conn)?;
         gauge.sample();
+        summary.peak_run_wal_frames = summary.peak_run_wal_frames.max(frames);
         progress.converted_runs += 1;
         summary.messages_created += converted.messages;
         if converted.canonicalized {
             summary.canonicalized_runs.count += 1;
             summary.canonicalized_runs.run_ids.push(run_id.clone());
         }
-        hook(Point::AfterRun, &conn)?;
+        hook(Point::AfterRun { frames }, &conn)?;
         cursor = Some(run_id);
     }
     progress.run_id = None;
@@ -597,7 +664,11 @@ fn run(
     gauge.peak.set(0);
     progress.enter("vacuum");
     hook(Point::BeforeVacuum, &conn)?;
-    offline::require_space(parent(path), basis.saturating_mul(2))?;
+    space::require(&space::plan_vacuum(
+        &space::place(parent(path))?,
+        &space::place(&scratch_directory)?,
+        self::basis(&conn, path)?,
+    ))?;
     summary.auto_vacuum_after = Some(rebuild_incremental(&conn)?);
     summary.vacuum = true;
     gauge.sample();

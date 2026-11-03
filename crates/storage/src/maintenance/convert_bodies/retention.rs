@@ -8,7 +8,9 @@ use serde::Serialize;
 
 use crate::StorageError;
 use crate::migrations::backfill::backfill_step;
-use crate::repo::thread_retention::reclaim::{Layout, reclaim_oversized_step_in, reclaim_step_in};
+use crate::repo::thread_retention::reclaim::{
+    Layout, invalid_cursor_families, reclaim_oversized_step_in, reclaim_step_in,
+};
 use crate::thread_retention::ReclaimBudget;
 
 use super::super::invalid;
@@ -60,6 +62,31 @@ fn fingerprint(conn: &Connection) -> Result<String, StorageError> {
     )?)
 }
 
+/// Why the reclaim of deleted runs cannot be completed, found by reading only: a pending
+/// job whose cursor this build does not read, and a deleted run that still has its row
+/// with no pending job to remove it. Nothing is repaired; the conversion does not start.
+pub(super) fn blockers(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let mut found: Vec<String> = invalid_cursor_families(conn)?
+        .into_iter()
+        .map(|family| format!("family {family}: its reclaim cursor is not one this build reads"))
+        .collect();
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT t.family_key FROM run_tombstones t \
+         JOIN run_contexts c ON c.run_id = t.run_id \
+         WHERE NOT EXISTS (SELECT 1 FROM reclaim_jobs j \
+             WHERE j.family_key = t.family_key AND j.state = 'db_pending') \
+         ORDER BY t.family_key",
+    )?;
+    let families = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for family in families {
+        found.push(format!(
+            "family {}: deleted runs still have rows and no reclaim job is pending",
+            family?
+        ));
+    }
+    Ok(found)
+}
+
 fn pending(conn: &Connection) -> Result<(u64, u64), StorageError> {
     Ok((
         count(
@@ -90,6 +117,11 @@ pub(super) fn reclaim_deleted(
     sample: &mut dyn FnMut(),
 ) -> Result<RetentionReport, StorageError> {
     let mut report = RetentionReport::default();
+    if let Some(blocker) = blockers(conn)?.first() {
+        return Err(invalid(format!(
+            "retention reclaim cannot finish: {blocker}"
+        )));
+    }
     let runs_before = deleted_runs(conn)?;
     let (jobs, oversized) = pending(conn)?;
     if runs_before == 0 && jobs == 0 && oversized == 0 {
