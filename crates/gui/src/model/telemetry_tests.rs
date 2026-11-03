@@ -109,6 +109,7 @@ fn ending_a_run_clears_its_tool_but_waiting_keeps_it() {
         // Given: a run executing a call.
         let mut overlay = TelemetryOverlay::new();
         overlay.apply_event(&Event::new(LifecycleEvent::RunProgress {
+            compaction_operation_id: None,
             run_id: "run-1".into(),
             activity: event_bus::RunActivity::Tools,
             context: None,
@@ -433,6 +434,7 @@ fn history_completion_preserves_context_but_never_revives_live_activity() {
     overlay.apply_event_at(&request_started(Some("run-1")), start);
     overlay.apply_event_at(
         &Event::new(LifecycleEvent::RunProgress {
+            compaction_operation_id: None,
             run_id: "run-1".into(),
             activity: event_bus::RunActivity::Model,
             context: Some(event_bus::ContextComposition {

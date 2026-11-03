@@ -99,6 +99,9 @@ pub enum TranscriptEntry {
         run_id: Option<String>,
         call_id: Option<String>,
     },
+    CompactionProgress {
+        progress: compaction::CompactionProgressModel,
+    },
     Compaction {
         reason: CompactionReason,
         threshold: f64,
@@ -174,6 +177,7 @@ pub struct TranscriptModel {
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
     drafts: drafts::DraftIndex,
+    closed_compactions: std::collections::VecDeque<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +218,7 @@ impl TranscriptModel {
             pending_reviews: std::collections::BTreeMap::new(),
             approvals_while_running: std::collections::BTreeSet::new(),
             drafts: drafts::DraftIndex::default(),
+            closed_compactions: Default::default(),
         }
     }
 
@@ -312,6 +317,9 @@ impl TranscriptModel {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        if self.apply_compaction(event) {
+            return;
+        }
         self.finish_thinking(event);
         self.finish_drafts(event);
         if let event_bus::EventKind::Diagnostic(diagnostic) = &event.kind
@@ -375,7 +383,7 @@ impl TranscriptModel {
                     }
                 }
             }
-            event_bus::EventKind::Compaction(event) => self.push(compaction::entry(event)),
+            event_bus::EventKind::Compaction(_) => {},
             event_bus::EventKind::Tool(event_bus::ToolEvent::ArtifactsPresented {
                 presentation, ..
             }) => self.push(TranscriptEntry::Artifacts {
@@ -630,6 +638,7 @@ impl TranscriptModel {
                     | TranscriptEntry::Diagnostic { .. }
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
+                    | TranscriptEntry::CompactionProgress { .. }
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. }
                     | TranscriptEntry::TurnEnd { .. }
@@ -1157,6 +1166,7 @@ mod tests {
         let mut model = TranscriptModel::new();
         model.push_message("before");
         let event = Event::new(CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-1".into(),
             reason: CompactionReason::Automatic,
             threshold: 0.8,

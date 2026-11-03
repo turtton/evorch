@@ -189,6 +189,7 @@ mod tests {
                 sink.bind_goal_context("thread", "project", &run.to_string());
                 let before = model.0.load(Ordering::SeqCst);
                 let count = runtime.list_agents().len();
+                events.drain_pending_snapshot();
                 assert!(
                     matches!(sink.submit(WorkbenchCommand::CompactChat { thread_id: "thread".into() }).as_slice(),
                     [LoopEvent::ChatNotice { text, .. }] if text.starts_with("Compacting saved"))
@@ -233,6 +234,34 @@ mod tests {
                 (&mut sink.compaction_jobs.get_mut("thread").unwrap().task)
                     .await
                     .unwrap();
+                let progress = events.drain_pending_snapshot();
+                let starts: Vec<_> = progress
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::Lifecycle(LifecycleEvent::RunProgress {
+                            compaction_operation_id: Some(id),
+                            activity: event_bus::RunActivity::Compaction,
+                            ..
+                        }) => Some(id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(starts.len(), 1);
+                let terminals: Vec<_> = progress
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::Compaction(event_bus::CompactionEvent::Compacted {
+                            operation_id,
+                            ..
+                        }) if max_bytes > 0 => Some(operation_id),
+                        EventKind::Compaction(event_bus::CompactionEvent::Aborted {
+                            operation_id,
+                            ..
+                        }) if max_bytes == 0 => Some(operation_id),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(starts, terminals);
                 let result = sink.poll();
                 assert!(
                     matches!(result.as_slice(), [LoopEvent::ChatNotice { thread_id, text }]

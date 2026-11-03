@@ -176,7 +176,10 @@ async fn compaction_events_until_done(
     timeout(Duration::from_secs(5), async {
         loop {
             let event = receiver.recv().await.expect("event receiver remains open");
-            if matches!(&event.kind, EventKind::Compaction(_)) {
+            if matches!(
+                &event.kind,
+                EventKind::Compaction(CompactionEvent::Compacted { .. })
+            ) {
                 compacted.push(event.clone());
             }
             if matches!(

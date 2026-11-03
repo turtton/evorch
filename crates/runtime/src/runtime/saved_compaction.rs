@@ -152,12 +152,15 @@ impl AgentRuntime {
         .await;
         let mut context = state.context.clone();
         let mut events = Vec::new();
+        let mut operation =
+            crate::compaction::progress::Operation::new(self.shared.bus.clone(), run.to_string());
         crate::compaction::compact_candidate(
             &mut state,
             &mut context,
             event_bus::CompactionReason::Manual,
             None,
             &mut events,
+            &mut operation,
         )
         .await
         .map_err(|error| fail(error.to_string()))?;
@@ -195,8 +198,12 @@ impl AgentRuntime {
                 .save_snapshot_bundle(&write)
                 .map_err(|error| fail(format!("{error:?}")))?;
         }
+        let mut published = false;
         for event in events {
-            self.shared.bus.emit(event);
+            published |= self.shared.bus.emit(event) > 0;
+        }
+        if published {
+            operation.committed();
         }
         drop(reservation);
         Ok(())

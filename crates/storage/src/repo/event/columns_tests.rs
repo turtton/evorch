@@ -376,7 +376,7 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
         (
             "Compaction",
             "Compacted",
-            json!({"run_id": "run-a", "reason": "automatic", "threshold": 0.8, "context_window_tokens": 1, "estimated_tokens_before": 2, "estimated_tokens_after": 1, "compacted_range_start": 0, "compacted_range_end": 1, "checkpoint_id": "c", "summary": "s"}),
+            json!({"operation_id": "op-1", "run_id": "run-a", "reason": "automatic", "threshold": 0.8, "context_window_tokens": 1, "estimated_tokens_before": 2, "estimated_tokens_after": 1, "compacted_range_start": 0, "compacted_range_end": 1, "checkpoint_id": "c", "summary": "s"}),
             Some("run-a"),
         ),
         (
