@@ -56,12 +56,17 @@ fn classify(owner_id: &str, record: Result<ThreadOwner, RegistryError>) -> Optio
 }
 
 struct Request {
+    revision: u64,
     source: Source,
     threads: Vec<String>,
     repaint: Option<egui::Context>,
 }
 
-type Answer = Vec<(String, Option<Verdict>)>;
+/// What a probe found, tagged with the revision it was asked under.
+struct Answer {
+    revision: u64,
+    verdicts: Vec<(String, Option<Verdict>)>,
+}
 
 struct Worker {
     requests: mpsc::SyncSender<Request>,
@@ -76,7 +81,7 @@ impl Worker {
             .name("external-work-display".into())
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
-                    let answer = request
+                    let verdicts = request
                         .threads
                         .into_iter()
                         .map(|thread| {
@@ -85,6 +90,10 @@ impl Worker {
                             (thread, verdict)
                         })
                         .collect();
+                    let answer = Answer {
+                        revision: request.revision,
+                        verdicts,
+                    };
                     if sender.send(answer).is_err() {
                         break;
                     }
@@ -104,6 +113,9 @@ pub(super) struct ExternalWork {
     verdicts: BTreeMap<String, Verdict>,
     /// The candidates the last request asked about.
     wanted: BTreeSet<String>,
+    /// Bumped by every ownership change; an answer asked under an older one
+    /// describes a registry that no longer exists and is dropped.
+    revision: u64,
     in_flight: bool,
     last_request: Option<Instant>,
     invalidated: bool,
@@ -117,6 +129,7 @@ impl Default for ExternalWork {
             worker: None,
             verdicts: BTreeMap::new(),
             wanted: BTreeSet::new(),
+            revision: 0,
             in_flight: false,
             last_request: None,
             invalidated: false,
@@ -136,9 +149,13 @@ impl ExternalWork {
         self
     }
 
-    /// Ownership changed somewhere: probe again at the next frame.
+    /// Ownership changed somewhere. Every earlier answer, here or still on its
+    /// way, stops counting at once, so a thread this process just took is
+    /// never shown as another process's while the next probe runs.
     pub(super) fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.invalidated = true;
+        self.verdicts.clear();
     }
 
     /// Whether the last answer says another party holds `thread`, or nobody does.
@@ -201,6 +218,7 @@ impl ExternalWork {
             source,
             threads: candidates.iter().cloned().collect(),
             repaint: repaint.cloned(),
+            revision: self.revision,
         };
         if worker.requests.try_send(request).is_ok() {
             self.in_flight = true;
@@ -214,19 +232,32 @@ impl ExternalWork {
         let Some(worker) = &self.worker else {
             return;
         };
-        while let Ok(answer) = worker.answers.try_recv() {
-            self.in_flight = false;
-            for (thread, verdict) in answer {
-                match verdict {
-                    Some(verdict) => {
-                        self.verdicts.insert(thread, verdict);
-                    }
-                    None => {
-                        self.verdicts.remove(&thread);
-                    }
+        let answers: Vec<Answer> = std::iter::from_fn(|| worker.answers.try_recv().ok()).collect();
+        for answer in answers {
+            self.apply(answer);
+        }
+    }
+
+    fn apply(&mut self, answer: Answer) {
+        self.in_flight = false;
+        if answer.revision != self.revision {
+            return;
+        }
+        for (thread, verdict) in answer.verdicts {
+            match verdict {
+                Some(verdict) => {
+                    self.verdicts.insert(thread, verdict);
+                }
+                None => {
+                    self.verdicts.remove(&thread);
                 }
             }
         }
+    }
+
+    /// Whether a probe has been asked and not yet taken in.
+    pub(super) fn probing(&self) -> bool {
+        self.in_flight
     }
 
     /// Blocks until the probe in flight has answered. For headless runs that
@@ -235,20 +266,13 @@ impl ExternalWork {
         if !self.in_flight {
             return;
         }
-        if let Some(worker) = &self.worker
-            && let Ok(answer) = worker.answers.recv()
-        {
-            self.in_flight = false;
-            for (thread, verdict) in answer {
-                match verdict {
-                    Some(verdict) => {
-                        self.verdicts.insert(thread, verdict);
-                    }
-                    None => {
-                        self.verdicts.remove(&thread);
-                    }
-                }
-            }
+        let answer = self
+            .worker
+            .as_ref()
+            .and_then(|worker| worker.answers.recv().ok());
+        match answer {
+            Some(answer) => self.apply(answer),
+            None => self.in_flight = false,
         }
     }
 }
@@ -256,6 +280,7 @@ impl ExternalWork {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
 
     use runtime::ownership::{Lease, OwnerState};
 
@@ -387,6 +412,85 @@ mod tests {
 
         work.refresh(&set(&[]), None);
 
+        assert!(!work.not_owned_here("thread"));
+    }
+
+    #[test]
+    fn taking_the_thread_unmarks_it_at_once_without_waiting_for_a_probe() {
+        // Given: the thread was probed and is another process's
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&held);
+        let mut work = work_reading(move |_| {
+            if flag.load(Ordering::SeqCst) {
+                Ok(record(ME, OwnerState::Running))
+            } else {
+                Err(RegistryError::Absent)
+            }
+        });
+        let candidates = set(&["thread"]);
+        settled(&mut work, &candidates);
+        assert!(work.not_owned_here("thread"));
+
+        // When: this process takes the thread and learns of it
+        held.store(true, Ordering::SeqCst);
+        work.invalidate();
+
+        // Then: the old verdict is gone before any new probe has answered
+        assert!(!work.not_owned_here("thread"));
+
+        // And: the probe that follows confirms the thread as its own
+        settled(&mut work, &candidates);
+        assert!(!work.not_owned_here("thread"));
+    }
+
+    #[test]
+    fn an_answer_asked_before_the_thread_was_taken_does_not_mark_it_afterwards() {
+        // Given: a probe that reads the registry, then waits to be released;
+        // the test is told when each probe has read
+        let (read_tx, read_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&held);
+        let read_tx = std::sync::Mutex::new(read_tx);
+        let mut work = work_reading(move |_| {
+            let answer = if flag.load(Ordering::SeqCst) {
+                Ok(record(ME, OwnerState::Running))
+            } else {
+                Err(RegistryError::Absent)
+            };
+            read_tx
+                .lock()
+                .expect("read signal")
+                .send(())
+                .expect("test alive");
+            release_rx
+                .lock()
+                .expect("release")
+                .recv()
+                .expect("test alive");
+            answer
+        });
+        let candidates = set(&["thread"]);
+
+        // When: a probe has read "nobody holds it" but not yet answered
+        work.refresh(&candidates, None);
+        read_rx.recv().expect("the probe read");
+
+        // And: this process takes the thread, then the old probe answers
+        held.store(true, Ordering::SeqCst);
+        work.invalidate();
+        release_tx.send(()).expect("release the stale probe");
+        work.wait_idle();
+
+        // Then: the stale answer is dropped, not shown as another process's
+        assert!(!work.not_owned_here("thread"));
+
+        // And: the probe asked after the change decides, and says it is ours
+        work.refresh(&candidates, None);
+        read_rx.recv().expect("the second probe read");
+        release_tx.send(()).expect("release the second probe");
+        work.wait_idle();
         assert!(!work.not_owned_here("thread"));
     }
 }

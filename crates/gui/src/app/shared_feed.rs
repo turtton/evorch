@@ -458,8 +458,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// no frames.
     pub fn observe_external_work_now(&mut self) {
         self.refresh_external_work(None);
-        self.external_work.wait_idle();
-        self.refresh_external_work(None);
+        while self.external_work.probing() {
+            self.external_work.wait_idle();
+            self.refresh_external_work(None);
+        }
     }
 
     /// Threads another process is working on, shown from what the shared feed

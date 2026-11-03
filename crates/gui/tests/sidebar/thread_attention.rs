@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use egui_kittest::{Harness, kittest::Queryable};
-use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent};
+use event_bus::{AgentRunPhase, Event, EventBus, LifecycleEvent, OwnershipAction, OwnershipEvent};
 use gui::app::WorkbenchState;
 use gui::fixture::DemoSource;
 use gui::model::composer::ProviderStatus;
@@ -362,4 +362,38 @@ fn an_unread_report_outranks_external_work_in_the_row() {
             .is_some()
     );
     assert!(rendered.query_by_label(EXTERNAL_ROW).is_none());
+}
+
+#[test]
+fn taking_a_marked_thread_unmarks_it_as_soon_as_the_claim_is_seen() {
+    // Given: a window that marks a thread nobody holds but whose run is active
+    let shared = Shared::new();
+    let mut a = open_window(&shared, "evorch-gui:a");
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    let mut c = open_window(&shared, "evorch-gui:c");
+    assert_eq!(c.external(), BTreeSet::from([thread.clone()]));
+
+    // When: the window takes the thread and sees its own claim
+    let permit = c
+        .host
+        .start(&thread.to_string())
+        .expect("C takes the thread");
+    c.state.apply_events([Event::new(OwnershipEvent {
+        thread_id: thread.to_string(),
+        owner_id: c.host.owner_id().into(),
+        generation: permit.lease.generation,
+        action: OwnershipAction::Claimed,
+    })]);
+
+    // Then: the mark is gone before any further probe has run
+    assert!(c.state.externally_working_threads().is_empty());
+
+    // And: the probe that follows agrees
+    assert!(c.external().is_empty());
 }
