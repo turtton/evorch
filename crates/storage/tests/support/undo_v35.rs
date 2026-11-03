@@ -13,9 +13,19 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
+/// Removes the content blob tables migration v39 added.
+pub fn undo_v39(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS content_blob_gc_queue; DROP TABLE IF EXISTS content_blobs;",
+        )
+        .unwrap();
+}
+
 /// Restores what migration v38 dropped (the unnumbered-writer markers) and removes what it
-/// added (the table of unresolved families).
+/// added (the table of unresolved families), after undoing v39.
 pub fn undo_v38(connection: &Connection) {
+    undo_v39(connection);
     connection
         .execute_batch(
             "DROP TABLE IF EXISTS retention_unresolved;

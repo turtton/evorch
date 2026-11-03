@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use storage::Database;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
-use storage::inspect::{DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json};
+use storage::inspect::{
+    BlobOptions, BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json,
+};
 
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   candidates [--project <slug>] [--status new|reviewed|dismissed] [--limit <n>]
@@ -16,6 +18,8 @@ pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   run <run-id> [--full]
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
   storage [--physical] [--top <n>]
+  blob <hash-prefix, 12+ hex digits> [--content] [--ref-offset <n>] [--ref-limit <n>]
+  check-bodies [--run <run-id> | --thread <thread-id>] [--verify]
 The default database is <user-config-dir>/evorch-events.db, the GUI's store.";
 
 const DEFAULT_WINDOW_MS: i64 = 5_000;
@@ -41,6 +45,16 @@ pub enum InspectCommand {
     Storage {
         physical: bool,
         top: usize,
+    },
+    /// One content blob by hash prefix; `content` shows the whole body.
+    Blob {
+        prefix: String,
+        options: BlobOptions,
+    },
+    /// Integrity of content blobs against their owners; exit status 1 when it fails.
+    CheckBodies {
+        scope: BodyCheckScope,
+        verify: bool,
     },
 }
 
@@ -72,11 +86,17 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
     let mut flags = std::collections::BTreeMap::new();
     let mut full = false;
     let mut physical = false;
+    let mut content = false;
+    let mut verify = false;
     while let Some(arg) = argv.next() {
         if arg == "--full" {
             full = true;
         } else if arg == "--physical" {
             physical = true;
+        } else if arg == "--content" {
+            content = true;
+        } else if arg == "--verify" {
+            verify = true;
         } else if arg.starts_with("--") {
             let value = argv.next().ok_or(USAGE)?;
             if flags.insert(arg, value).is_some() {
@@ -96,7 +116,10 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
                 .ok_or_else(|| format!("--limit must be a positive integer\n{USAGE}"))
         })
     };
-    if physical && command != "storage" {
+    if physical && command != "storage"
+        || content && command != "blob"
+        || verify && command != "check-bodies"
+    {
         return Err(USAGE.into());
     }
     let command = match (command.as_str(), positional.as_slice(), full) {
@@ -145,6 +168,39 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
                     .filter(|top| *top > 0)
                     .ok_or_else(|| format!("--top must be a positive integer\n{USAGE}"))
             })?,
+        },
+        ("blob", [prefix], false) => {
+            let number = |flag: &str, value: Option<String>, default: usize, min: usize| {
+                value.map_or(Ok(default), |value| {
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|number| *number >= min)
+                        .ok_or_else(|| format!("{flag} must be an integer >= {min}\n{USAGE}"))
+                })
+            };
+            InspectCommand::Blob {
+                prefix: prefix.clone(),
+                options: BlobOptions {
+                    full_content: content,
+                    reference_offset: number("--ref-offset", take("--ref-offset"), 0, 0)?,
+                    reference_limit: number(
+                        "--ref-limit",
+                        take("--ref-limit"),
+                        storage::inspect::DEFAULT_REFERENCES_LISTED,
+                        1,
+                    )?,
+                },
+            }
+        }
+        ("check-bodies", [], false) => InspectCommand::CheckBodies {
+            scope: match (take("--run"), take("--thread")) {
+                (None, None) => BodyCheckScope::All,
+                (Some(run), None) => BodyCheckScope::Run(run),
+                (None, Some(thread)) => BodyCheckScope::Thread(thread),
+                (Some(_), Some(_)) => return Err(USAGE.into()),
+            },
+            verify,
         },
         _ => return Err(USAGE.into()),
     };
@@ -216,8 +272,20 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
         InspectCommand::Storage { physical, top } => db
             .storage_summary(&path, StorageSummaryOptions { top, physical })
             .map_err(|error| error.to_string())?,
+        InspectCommand::Blob { prefix, options } => db
+            .inspect_blob(&prefix, options)
+            .map_err(|error| error.to_string())?,
+        InspectCommand::CheckBodies { scope, verify } => db
+            .inspect_check_bodies(&scope, verify)
+            .map_err(|error| error.to_string())?,
     };
     Ok(json!({ "db": path.display().to_string(), "result": result }))
+}
+
+/// Whether a finished command reports a failure in its result (`check-bodies` finding
+/// a problem): the document is still printed, and the process exits with status 1.
+pub fn reports_failure(document: &Value) -> bool {
+    document["result"]["ok"] == Value::Bool(false)
 }
 
 fn candidate_json(candidate: &ImprovementCandidate) -> Value {

@@ -988,6 +988,19 @@ fn delete_oversized(
                 None => (Work::default(), true),
             }
         }
+        "content_blobs" => {
+            // A blob a tick handed over because of its size. It is deleted only if no
+            // reference table names it now.
+            let (rows, bytes) = crate::repo::content_blobs::delete_oversized(&tx, key)?;
+            (
+                Work {
+                    rows,
+                    bytes,
+                    ..Work::default()
+                },
+                true,
+            )
+        }
         "run_contexts" => {
             let size: Option<u64> = tx
                 .query_row(

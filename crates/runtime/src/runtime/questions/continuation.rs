@@ -106,10 +106,11 @@ impl AgentRuntime {
             .map(|permit| permit.mutation_guard())
             .transpose()
             .map_err(|error| error.to_string())?;
-        let mut record = store
-            .restore_record(child)
+        let bundle = store
+            .restore_bundle(child)
             .map_err(|error| error.to_string())?
             .ok_or("answer saved, but the finished child has no saved context")?;
+        let mut record = bundle.record.clone();
         let mut descriptor: RunRestoreDescriptor =
             serde_json::from_str(&record.config_json).map_err(|error| error.to_string())?;
         // A failed terminal snapshot leaves the last completed tool round.
@@ -134,7 +135,7 @@ impl AgentRuntime {
             return Ok(None);
         }
         let restored = self
-            .renewed_child_state(&record, &descriptor, ownership.as_ref())
+            .renewed_child_state(&bundle, &descriptor, ownership.as_ref())
             .map_err(|error| {
                 format!("answer saved, but child continuation is unavailable: {error}")
             })?;
@@ -183,14 +184,24 @@ impl AgentRuntime {
         record.restorable = false;
         record.config_json =
             serde_json::to_string(&descriptor).map_err(|error| error.to_string())?;
+        let expected = restored
+            .snapshot_revision
+            .get()
+            .ok_or("answer saved, but the child snapshot revision is unknown")?;
         let write = restored
             .provenance
-            .write(record.clone())
+            .write(record.clone(), expected)
             .map_err(|error| error.to_string())?;
-        store
+        #[cfg(test)]
+        self.execution_hook(
+            super::super::cancellation::HookPoint::ContinuationSnapshotPrepared,
+            &std::sync::Arc::clone(&runs[&child].execution),
+        );
+        let saved = store
             .handle
             .save_snapshot_bundle(&write)
-            .map_err(|error| format!("{error:?}"))?;
+            .map_err(crate::restore::provenance::save_failure_reason)?;
+        restored.snapshot_revision.commit(saved.snapshot_revision);
         Self::install_restored_execution(
             child,
             Some(caller),

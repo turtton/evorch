@@ -3314,8 +3314,9 @@ async fn wait_interrupted_by_ui_text_and_images_reuses_the_wire_prefix() {
 
 #[tokio::test]
 async fn queued_and_expedited_follow_ups_preserve_fifo_images_and_wire_prefix() {
-    let review_storage = support::ReviewStorage::new();
     for expedite in [false, true] {
+        // Each iteration runs "run-1" in a new runtime, so it needs an empty database.
+        let review_storage = support::ReviewStorage::new();
         let read = Arc::new(GatedRead {
             started: Notify::new(),
             release: Notify::new(),
@@ -5846,5 +5847,72 @@ fn verify_official_compaction_trace(harness: &Harness, run: RunId, events: &[Eve
                 "request {index}: cached={cached}, previous input={previous_input}"
             );
         }
+    }
+}
+
+// Completing an interactive child changes only the newly appended ToolResult;
+// the parent's sent input, tools, instructions and affinity must remain intact.
+#[tokio::test]
+async fn interactive_delegate_turn_output_preserves_parent_wire_prefix() {
+    let mut harness = harness_with_read(vec![
+        ScriptedResponse::tool_call("delegate", MODEL, 0, "delegate", "delegate", [json!({"target":{"role":"worker"},"prompt":"Review the change","interactive":true}).to_string()]),
+        text_response("review complete"),
+        read_response(3),
+        text_response("parent complete"),
+    ], 1_000_000, Arc::new(BulkRead));
+    let parent = harness.runtime.delegate_background(
+        Role::Orchestrator,
+        "Coordinate review".into(),
+        RunConfig::default(),
+    );
+    assert_eq!(
+        harness.runtime.wait(parent).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    let requests = chat_requests(&harness);
+    assert_eq!(requests.len(), 4);
+    let mut usage = Vec::new();
+    loop {
+        let event = harness.receiver.recv().await.unwrap();
+        match &event.kind {
+            EventKind::Provider(ProviderEvent::RequestCompleted {
+                run_id: Some(run),
+                input_tokens,
+                cache_read_tokens,
+                ..
+            }) => usage.push((run.clone(), *input_tokens, *cache_read_tokens)),
+            EventKind::Diagnostic(diagnostic) if diagnostic.code == "CacheRegression" => {
+                panic!("{diagnostic:?}")
+            }
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done,
+                ..
+            }) if run_id == &parent.to_string() => break,
+            _ => {}
+        }
+    }
+    assert_eq!(usage.len(), requests.len());
+    assert_eq!(harness.mock.remaining_scripts(), 0);
+    let text: String = serde_json::from_str(&tool_result_text(&requests[2], "delegate")).unwrap();
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(result["phase"], "Waiting", "{result}");
+    assert_eq!(result["status"], "turn_completed");
+    assert_eq!(result["output"], "review complete");
+    for (previous, next) in [(0, 2), (2, 3)] {
+        assert_append_only(CacheProtocol::OpenAi, &requests[previous], &requests[next]).unwrap();
+        assert_eq!(usage[previous].0, parent.to_string());
+        assert_eq!(usage[next].0, parent.to_string());
+        assert!(usage[previous].1 > 0);
+        assert!(usage[next].2 >= usage[previous].1);
+    }
+    for child in harness
+        .runtime
+        .list_agents()
+        .into_iter()
+        .filter(|run| run.run_id != parent)
+    {
+        harness.runtime.cancel(child.run_id).unwrap();
+        harness.runtime.wait(child.run_id).await.unwrap();
     }
 }

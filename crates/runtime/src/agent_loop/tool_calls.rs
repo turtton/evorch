@@ -712,7 +712,7 @@ impl LoopState {
                 return true;
             }
             if self.task.config.keep_alive {
-                return self.wait_for_input().await;
+                return self.wait_for_input_boundary(true).await;
             }
         }
         !self.finish_success()

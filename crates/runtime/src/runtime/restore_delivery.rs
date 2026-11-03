@@ -148,10 +148,11 @@ impl AgentRuntime {
                             _ => None,
                         })
                 });
-            let mut record = store
-                .restore_record(recipient)
+            let bundle = store
+                .restore_bundle(recipient)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
                 .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
+            let mut record = bundle.record.clone();
             let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
             if descriptor.parent_run_id != parent || descriptor.role != record.role {
@@ -171,7 +172,7 @@ impl AgentRuntime {
             let (mut restored, ownership) = match parent_authority {
                 Some(permit) => {
                     let restored =
-                        self.renewed_child_state(&record, &descriptor, permit.as_ref())?;
+                        self.renewed_child_state(&bundle, &descriptor, permit.as_ref())?;
                     let renewed = !(record.restorable && descriptor.restorable);
                     (restored, permit.filter(|_| renewed))
                 }
@@ -184,13 +185,7 @@ impl AgentRuntime {
                                 .unwrap_or_else(|| "実行設定".into()),
                         )))
                     } else {
-                        RestoredState::from_record(&record).map(|mut restored| {
-                            restored.provenance =
-                                store.restore_provenance(&record).unwrap_or_else(|_| {
-                                    crate::restore::provenance::ConversationProvenance::unknown()
-                                });
-                            restored
-                        })
+                        RestoredState::from_bundle(&bundle)
                     };
                     match disk {
                         Ok(restored) => (restored, None),
@@ -276,14 +271,23 @@ impl AgentRuntime {
                 .restore_route_pins(&recipient.to_string(), &descriptor.route_pins);
             let execution = Self::prepare_restored_execution(recipient, parent, &intents)?;
             // The writer only upserts the already-read record; no storage read holds runs.
-            let write = restored.provenance.write(record.clone()).map_err(|error| {
-                fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
+            let expected = restored.snapshot_revision.get().ok_or_else(|| {
+                fail(RunRestoreFailure::SnapshotConsumeFailed(
+                    "snapshot revision is unknown".into(),
+                ))
             })?;
-            store.handle.save_snapshot_bundle(&write).map_err(|error| {
-                fail(RunRestoreFailure::SnapshotConsumeFailed(format!(
-                    "{error:?}"
-                )))
+            let write = restored
+                .provenance
+                .write(record.clone(), expected)
+                .map_err(|error| {
+                    fail(RunRestoreFailure::SnapshotConsumeFailed(error.to_string()))
+                })?;
+            let saved = store.handle.save_snapshot_bundle(&write).map_err(|error| {
+                fail(RunRestoreFailure::SnapshotConsumeFailed(
+                    crate::restore::provenance::save_failure_reason(error),
+                ))
             })?;
+            restored.snapshot_revision.commit(saved.snapshot_revision);
             Self::install_restored_execution(
                 recipient,
                 parent,

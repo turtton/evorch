@@ -306,6 +306,13 @@ fn malformed_arguments_print_usage() {
         &["storage", "--top"],
         &["storage", "--full"],
         &["candidates", "--physical"],
+        &["blob"],
+        &["blob", "abcdef123456", "--verify"],
+        &["blob", "abcdef123456", "--ref-limit", "0"],
+        &["blob", "abcdef123456", "--ref-offset", "x"],
+        &["storage", "--content"],
+        &["check-bodies", "--run", "a", "--thread", "b"],
+        &["check-bodies", "--content"],
     ] {
         assert!(
             inspect(&db, args)
@@ -588,4 +595,108 @@ fn a_split_user_request_list_is_complete_only_when_every_part_is_there_exactly_o
         false,
         "part of another review"
     );
+}
+
+/// SHA-256 of "hello": the hash a blob of that text must carry.
+const HELLO_HASH: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+fn blob_store(dir: &Path) -> (PathBuf, rusqlite::Connection) {
+    let (db, _) = fixture(dir);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO content_blobs(hash, byte_len, codec, data) VALUES (unhex(?1), 5, 0, 'hello')",
+        [HELLO_HASH],
+    )
+    .unwrap();
+    (db, conn)
+}
+
+/// Runs `evorch inspect` and returns its exit code with the document it printed.
+fn inspect_status(db: &Path, args: &[&str]) -> (i32, Value) {
+    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+        .arg("inspect")
+        .arg("--db")
+        .arg(db)
+        .args(args)
+        .output()
+        .unwrap();
+    let document = serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null);
+    (output.status.code().unwrap(), document["result"].clone())
+}
+
+#[test]
+fn blob_shows_a_body_by_hash_prefix_and_what_waits_for_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, conn) = blob_store(dir.path());
+    conn.execute(
+        "INSERT INTO content_blob_gc_queue SELECT id FROM content_blobs",
+        [],
+    )
+    .unwrap();
+
+    let (code, blob) = inspect_status(&db, &["blob", &HELLO_HASH[..12]]);
+
+    assert_eq!(code, 0);
+    assert_eq!(blob["hash"], HELLO_HASH);
+    assert_eq!(blob["byte_len"], 5);
+    assert_eq!(blob["codec"], "plain");
+    assert_eq!(blob["content"]["text"], "hello");
+    assert_eq!(blob["waiting_for_collection"], true);
+    assert_eq!(blob["referenced_by"], serde_json::json!([]));
+
+    // A prefix that is too short, or names nothing, is an error with no document.
+    for prefix in ["2cf24d", "000000000000"] {
+        let (code, document) = inspect_status(&db, &["blob", prefix]);
+        assert_eq!((code, document), (1, Value::Null), "{prefix}");
+    }
+}
+
+#[test]
+fn check_bodies_exits_nonzero_exactly_when_it_finds_a_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, conn) = blob_store(dir.path());
+
+    // A blob nothing refers to and nothing will collect is an orphan.
+    let (code, report) = inspect_status(&db, &["check-bodies"]);
+    assert_eq!(code, 1);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["problems"][0]["kind"], "orphan_blob");
+    assert_eq!(report["problems"][0]["hash"], HELLO_HASH);
+
+    // Queued for collection it is merely waiting, and verification passes.
+    conn.execute(
+        "INSERT INTO content_blob_gc_queue SELECT id FROM content_blobs",
+        [],
+    )
+    .unwrap();
+    let (code, report) = inspect_status(&db, &["check-bodies", "--verify"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["waiting_for_collection"], 1);
+    assert_eq!(report["verified"], true);
+
+    // Bytes that no longer match the hash are found by verification only.
+    conn.execute("UPDATE content_blobs SET data = 'hellp'", [])
+        .unwrap();
+    assert_eq!(inspect_status(&db, &["check-bodies"]).0, 0);
+    let (code, report) = inspect_status(&db, &["check-bodies", "--verify"]);
+    assert_eq!(code, 1);
+    assert_eq!(report["problems"][0]["kind"], "blob_unreadable");
+
+    // A scope without owners to look at has nothing to report.
+    assert_eq!(
+        inspect_status(&db, &["check-bodies", "--run", "run-7"]).0,
+        0
+    );
+}
+
+#[test]
+fn storage_reports_the_bodies_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, _conn) = blob_store(dir.path());
+    let storage = inspect(&db, &["storage"]).unwrap();
+    assert_eq!(storage["bodies"]["blobs"], 1);
+    assert_eq!(storage["bodies"]["plain_bytes"], 5);
+    assert_eq!(storage["bodies"]["by_codec"][0]["codec"], "plain");
+    assert_eq!(storage["bodies"]["unreferenced"]["unregistered_orphans"], 1);
 }

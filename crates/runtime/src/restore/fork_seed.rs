@@ -97,6 +97,8 @@ impl RestoredState {
             serde_json::to_string(&descriptor).map_err(|error| corrupt(error.to_string()))?;
         // Updates appended after the boundary were cut off with it.
         let mut restored = Self::from_record(&truncated)?;
+        // A fork runs under a new run ID: its first snapshot is revision 1.
+        restored.snapshot_revision = super::revision::SnapshotRevision::fresh();
         restored.allowed_directories.rewrite_pending = true;
         restored.allowed_instructions.forget_history();
         Ok(restored)

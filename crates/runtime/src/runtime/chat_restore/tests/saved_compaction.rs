@@ -582,3 +582,50 @@ async fn saved_progress_follows_the_actual_official_summary_or_structural_path()
         assert!(!format!("{events:?}").contains("opaque-never-display"));
     }
 }
+
+#[tokio::test]
+async fn saved_compaction_that_lost_to_a_newer_save_reports_it_and_publishes_nothing() {
+    let model = Arc::new(Model::default());
+    let fixture = configured(model.clone(), 16_384);
+    let run = seed(&fixture).await;
+    let before = snapshot(&fixture, run);
+    let bus = fixture.runtime.shared.bus.clone();
+    let mut subscriber = bus.subscribe();
+    let job = compact(&fixture.runtime, run);
+    model.summarizing.notified().await;
+    crate::restore::revision::conflict_support::replace_snapshot(
+        &fixture.storage.handle(),
+        &before,
+    );
+    model.release.notify_one();
+    let Err(RuntimeError::SavedCompactionFailed { reason, .. }) = job.await.unwrap() else {
+        panic!("a compaction against a replaced snapshot must fail");
+    };
+    assert!(reason.contains("replaced"), "{reason}");
+    let after = snapshot(&fixture, run);
+    assert_eq!(after.snapshot_revision, before.snapshot_revision + 1);
+    assert_eq!(
+        after.record.checkpoints_json,
+        before.record.checkpoints_json
+    );
+    assert_eq!(after.record.updated_at_ns, before.record.updated_at_ns + 1);
+    let events = crate::restore::revision::conflict_support::drain(&bus, &mut subscriber).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event.kind,
+            event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
+        )),
+        "{events:?}"
+    );
+    assert_eq!(
+        fixture.runtime.inspect_agent(run).unwrap().phase,
+        AgentRunPhase::Stopped
+    );
+}
