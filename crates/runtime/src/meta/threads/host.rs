@@ -9,6 +9,7 @@
 //! thread titles with a fuzzy (subsequence) match; the model-facing tool keeps
 //! its literal meaning.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use secret_guard::SecretRedactor;
@@ -123,9 +124,12 @@ impl AgentRuntime {
                 .transpose()?,
             _ => None,
         };
+        // Lowercased and split once; every title of every scan is scored against it.
+        let title_query = TitleQuery::new(query);
         let mut titles = None;
         if let Some(offset) = title_offset {
-            let scan = scan_titles(&scope, query, offset, limit)?;
+            let scan = scan_titles(&scope, &title_query, offset, limit)?;
+            tracing::debug!(stats = ?scan.stats, "thread search title scan");
             let end = offset + scan.page.len();
             if end < scan.total || scan.page.len() >= limit {
                 // More titles are left, or they filled the page; bodies follow them.
@@ -155,14 +159,16 @@ impl AgentRuntime {
         )?;
         let mut search = parse(&output, enabled);
         if let Some(titles) = titles {
-            rank_titles(&mut search, titles, query);
+            rank_titles(&mut search, titles, &title_query);
         } else if !query.is_empty() {
             // A body page after the title pages: threads already listed as
-            // title matches are not listed again.
-            let titles = scan_titles(&scope, query, 0, 0)?;
+            // title matches are not listed again. Only which threads match
+            // is needed, so no hit is built and nothing is ranked.
+            let titles = title_match_ids(&scope, &title_query)?;
+            tracing::debug!(stats = ?titles.stats, "thread search title dedup scan");
             search
                 .hits
-                .retain(|hit| !titles.all.contains(&hit.thread_id));
+                .retain(|hit| !titles.ids.contains(&hit.thread_id));
             search.title_scan_limited = titles.limited;
         }
         Ok(search)
@@ -170,49 +176,120 @@ impl AgentRuntime {
 }
 
 /// The ranked title matches of a project and one page of them.
-struct TitleScan {
+pub(super) struct TitleScan {
     /// This page, best first.
-    page: Vec<(u32, HostThreadHit)>,
+    pub(super) page: Vec<(u32, HostThreadHit)>,
     /// Thread IDs of every title match, on this page or not.
-    all: Vec<String>,
-    total: usize,
+    pub(super) all: HashSet<String>,
+    pub(super) total: usize,
     /// The project has threads the scan did not read.
-    limited: bool,
+    pub(super) limited: bool,
+    pub(super) stats: TitleScanStats,
 }
 
-fn scan_titles(
+/// The threads whose titles match, without the hits or their ranking: what a
+/// body page needs to skip threads already listed as title matches.
+pub(super) struct TitleMatchIds {
+    pub(super) ids: HashSet<String>,
+    pub(super) limited: bool,
+    pub(super) stats: TitleScanStats,
+}
+
+/// What one title scan did, for tests and debug logs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TitleScanStats {
+    /// Store pages read.
+    pub(super) pages_read: usize,
+    /// Visible threads read, whether their title matched or not.
+    pub(super) threads_read: usize,
+    /// Titles that matched.
+    pub(super) matched: usize,
+    /// `HostThreadHit`s built.
+    pub(super) hits_built: usize,
+    /// Matches put through the ranking sort.
+    pub(super) ranked: usize,
+}
+
+/// The words of a title query, lowercased once for a whole scan.
+pub(super) struct TitleQuery {
+    words: Vec<String>,
+}
+
+impl TitleQuery {
+    pub(super) fn new(query: &str) -> Self {
+        Self {
+            words: query.split_whitespace().map(str::to_lowercase).collect(),
+        }
+    }
+
+    /// Fuzzy score of `title`, or `None` when some word of the query is not
+    /// even a subsequence of the title, or the query has no word. Case-insensitive.
+    /// A literal occurrence (best at the start, then at a word start) always
+    /// outranks a scattered subsequence, which scores higher the fewer
+    /// characters it skips.
+    pub(super) fn score(&self, title: &str) -> Option<u32> {
+        if self.words.is_empty() {
+            return None;
+        }
+        let title = title.to_lowercase();
+        let mut total = 0;
+        for word in &self.words {
+            total += word_score(&title, word)?;
+        }
+        Some(total)
+    }
+}
+
+/// Reads the project's visible threads, newest first, up to the scan limit,
+/// and calls `matched` with each row, its redacted title and its score when
+/// the title matches. Both scans below walk the threads here, so they share
+/// the visibility, the redaction, the matcher and the limit. Returns whether
+/// the project has threads the walk did not read.
+fn walk_titles(
     scope: &Scope<'_>,
-    query: &str,
+    query: &TitleQuery,
+    stats: &mut TitleScanStats,
+    mut matched: impl FnMut(&ThreadRow, Option<String>, u32),
+) -> Result<bool, String> {
+    let Some(root) = scope.caller.project_root.as_deref() else {
+        return Ok(false);
+    };
+    let mut cursor = None;
+    loop {
+        let page = scope
+            .store
+            .threads_in_project_visible(root, cursor.as_ref(), FUZZY_PAGE)
+            .map_err(|_| super::STORE_ERROR.to_owned())?;
+        stats.pages_read += 1;
+        stats.threads_read += page.threads.len();
+        for row in &page.threads {
+            let title = row.title.as_deref().map(|title| scope.redact(title));
+            if let Some(score) = title.as_deref().and_then(|title| query.score(title)) {
+                stats.matched += 1;
+                matched(row, title, score);
+            }
+        }
+        match page.next_cursor {
+            Some(next) if stats.threads_read < FUZZY_MAX_THREADS => cursor = Some(next),
+            Some(_) => return Ok(true),
+            None => return Ok(false),
+        }
+    }
+}
+
+pub(super) fn scan_titles(
+    scope: &Scope<'_>,
+    query: &TitleQuery,
     offset: usize,
     limit: usize,
 ) -> Result<TitleScan, String> {
+    let mut stats = TitleScanStats::default();
     let mut matches: Vec<(u32, HostThreadHit)> = Vec::new();
-    let mut limited = false;
-    if let Some(root) = scope.caller.project_root.as_deref() {
-        let mut cursor = None;
-        let mut seen = 0;
-        loop {
-            let page = scope
-                .store
-                .threads_in_project_visible(root, cursor.as_ref(), FUZZY_PAGE)
-                .map_err(|_| super::STORE_ERROR.to_owned())?;
-            seen += page.threads.len();
-            for row in &page.threads {
-                let title = row.title.as_deref().map(|title| scope.redact(title));
-                if let Some(score) = title.as_deref().and_then(|title| title_score(title, query)) {
-                    matches.push((score, title_hit(row, title)));
-                }
-            }
-            match page.next_cursor {
-                Some(next) if seen < FUZZY_MAX_THREADS => cursor = Some(next),
-                Some(_) => {
-                    limited = true;
-                    break;
-                }
-                None => break,
-            }
-        }
-    }
+    let limited = walk_titles(scope, query, &mut stats, |row, title, score| {
+        matches.push((score, title_hit(row, title)));
+    })?;
+    stats.hits_built = matches.len();
+    stats.ranked = matches.len();
     sort_ranked(&mut matches);
     let all = matches
         .iter()
@@ -225,6 +302,26 @@ fn scan_titles(
         all,
         total,
         limited,
+        stats,
+    })
+}
+
+/// The IDs of every title match and whether the scan stopped at its limit:
+/// what [`scan_titles`] reports in `all` and `limited`, without building or
+/// sorting a hit.
+pub(super) fn title_match_ids(
+    scope: &Scope<'_>,
+    query: &TitleQuery,
+) -> Result<TitleMatchIds, String> {
+    let mut stats = TitleScanStats::default();
+    let mut ids = HashSet::new();
+    let limited = walk_titles(scope, query, &mut stats, |row, _, _| {
+        ids.insert(row.thread_id.clone());
+    })?;
+    Ok(TitleMatchIds {
+        ids,
+        limited,
+        stats,
     })
 }
 
@@ -242,7 +339,7 @@ fn sort_ranked(hits: &mut [(u32, HostThreadHit)]) {
 /// Puts every thread whose title matches ahead of body-only hits, best title
 /// first. The result never exceeds the page the literal search was sized for,
 /// and a thread already listed on another title page is not listed again.
-fn rank_titles(search: &mut HostThreadSearch, titles: TitleScan, query: &str) {
+fn rank_titles(search: &mut HostThreadSearch, titles: TitleScan, query: &TitleQuery) {
     search.title_scan_limited = titles.limited;
     let mut ranked = titles.page;
     let mut body_only = Vec::new();
@@ -258,11 +355,7 @@ fn rank_titles(search: &mut HostThreadSearch, titles: TitleScan, query: &str) {
         if titles.all.contains(&hit.thread_id) {
             continue;
         }
-        match hit
-            .title
-            .as_deref()
-            .and_then(|title| title_score(title, query))
-        {
+        match hit.title.as_deref().and_then(|title| query.score(title)) {
             Some(score) => ranked.push((score, hit)),
             None => body_only.push(hit),
         }
@@ -284,21 +377,6 @@ fn title_hit(row: &ThreadRow, title: Option<String>) -> HostThreadHit {
         archived: row.archived,
         updated_at_ns: row.updated_at_ns,
     }
-}
-
-/// Fuzzy score of `title` for `query`, or `None` when some word of the query
-/// is not even a subsequence of the title. Case-insensitive. A literal
-/// occurrence (best at the start, then at a word start) always outranks a
-/// scattered subsequence, which scores higher the fewer characters it skips.
-fn title_score(title: &str, query: &str) -> Option<u32> {
-    let title = title.to_lowercase();
-    let mut total = 0;
-    let mut words = 0;
-    for word in query.split_whitespace() {
-        total += word_score(&title, &word.to_lowercase())?;
-        words += 1;
-    }
-    (words > 0).then_some(total)
 }
 
 fn word_score(title: &str, word: &str) -> Option<u32> {
