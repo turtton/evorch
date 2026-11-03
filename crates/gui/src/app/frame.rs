@@ -52,6 +52,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let sink_time = sink_started.elapsed();
         self.diff.poll();
+        self.poll_evaluations(&ctx);
         self.drain_pty(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
@@ -289,6 +290,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .flatten()
             },
         );
+        self.note_evaluation_event(event);
         self.notifications.apply_event_named(
             event,
             |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
