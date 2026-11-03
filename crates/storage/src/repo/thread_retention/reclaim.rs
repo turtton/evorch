@@ -839,7 +839,7 @@ fn thread_tables(
             }
             Untracked::None => cursor.table_idx = 1,
         }
-    } else {
+    } else if cursor.table_idx == 1 {
         let stored: Option<u64> = tx
             .query_row(
                 "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
@@ -864,15 +864,55 @@ fn thread_tables(
                 };
             }
         }
-        match next_thread(tx, family, &thread)? {
-            Some(next) => {
-                cursor.thread = Some(next);
-                cursor.table_idx = 0;
+        cursor.table_idx = 2;
+    } else {
+        // The lane ledger rows of the thread: reports in bounded batches, then the
+        // lane row (its delivery keys cascade). Nothing is left for a later family.
+        work = take_lane_rows(tx, &thread)?;
+        if work.rows == 0 {
+            match next_thread(tx, family, &thread)? {
+                Some(next) => {
+                    cursor.thread = Some(next);
+                    cursor.table_idx = 0;
+                }
+                None => enter(tx, family, cursor, Phase::Finished)?,
             }
-            None => enter(tx, family, cursor, Phase::Finished)?,
         }
     }
     Ok(work)
+}
+
+/// Deletes up to [`RECLAIM_ROWS`] report rows of the lane of `thread`; once none is
+/// left, deletes the lane row itself. Reports are immutable but never fenced against
+/// DELETE, so reclaim always progresses.
+fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    let (rows, bytes): (u64, u64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(summary) + OCTET_LENGTH(artifact_refs_json) \
+            + OCTET_LENGTH(question_refs_json)), 0) FROM \
+         (SELECT summary, artifact_refs_json, question_refs_json FROM lane_reports \
+          WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+        params![thread, limit],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rows > 0 {
+        tx.execute(
+            "DELETE FROM lane_reports WHERE (lane_id, report_seq) IN \
+             (SELECT lane_id, report_seq FROM lane_reports \
+             WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+            params![thread, limit],
+        )?;
+        return Ok(Work {
+            rows,
+            bytes,
+            ..Work::default()
+        });
+    }
+    let deleted = tx.execute("DELETE FROM lanes WHERE thread_id = ?1", [thread])?;
+    Ok(Work {
+        rows: deleted as u64,
+        ..Work::default()
+    })
 }
 
 /// One transaction of one job. Returns what it deleted.

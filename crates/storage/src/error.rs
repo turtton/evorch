@@ -75,6 +75,28 @@ impl fmt::Display for BodyUnresolvedReason {
     }
 }
 
+/// Why a lane request collides with what the ledger already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneConflictReason {
+    /// The creation key was used before for a different request.
+    CreationKeyReused,
+    /// The lane ID or its thread ID belongs to another lane.
+    IdentityTaken,
+    /// The thread already exists with a lineage that is not a lane.
+    ThreadNotLane,
+}
+
+/// Why a `lane_list` cursor cannot continue a listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneCursorError {
+    /// The snapshot the cursor names is no longer kept. List again from the start.
+    Stale,
+    /// The cursor was issued for another filter.
+    FilterMismatch,
+    /// Not a cursor this ledger issued.
+    Malformed,
+}
+
 /// ストレージ操作で発生するエラーです。
 // `rusqlite::Error` が `Eq` を実装しないため、ワークスペースの慣例に反して `Eq` は導出しません。
 #[derive(Debug, PartialEq)]
@@ -150,6 +172,23 @@ pub enum StorageError {
         hash: Option<String>,
         reason: BodyUnresolvedReason,
     },
+    /// The lane request was refused: empty or oversized input. Never silently cut.
+    LaneInvalid(event_bus::LaneValidationError),
+    /// The lane does not exist (or its thread was deleted by retention).
+    LaneNotFound {
+        lane_id: String,
+    },
+    /// The caller worked from an older state: re-read and retry. `kind` names the
+    /// counter (`management`, `brief` or `generation`).
+    StaleRevision {
+        kind: &'static str,
+        expected: u64,
+        current: u64,
+    },
+    /// The lane request collides with existing lane data.
+    LaneConflict(LaneConflictReason),
+    /// The `lane_list` cursor cannot be used (`stale_cursor` and its relatives).
+    LaneCursor(LaneCursorError),
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -228,6 +267,38 @@ impl fmt::Display for StorageError {
                 "body unresolved at {owner} (hash {}): {reason}",
                 hash.as_deref().unwrap_or("unknown")
             ),
+            Self::LaneInvalid(error) => write!(formatter, "invalid lane input: {error}"),
+            Self::LaneNotFound { lane_id } => write!(formatter, "lane {lane_id} was not found"),
+            Self::StaleRevision {
+                kind,
+                expected,
+                current,
+            } => write!(
+                formatter,
+                "stale_revision: {kind} revision {expected} was expected but the lane is at {current}"
+            ),
+            Self::LaneConflict(reason) => match reason {
+                LaneConflictReason::CreationKeyReused => write!(
+                    formatter,
+                    "the creation key was already used for a different lane request"
+                ),
+                LaneConflictReason::IdentityTaken => {
+                    write!(formatter, "the lane or thread ID belongs to another lane")
+                }
+                LaneConflictReason::ThreadNotLane => {
+                    write!(formatter, "the thread already exists and is not a lane")
+                }
+            },
+            Self::LaneCursor(reason) => match reason {
+                LaneCursorError::Stale => write!(
+                    formatter,
+                    "stale_cursor: the listing it continues is no longer kept; list again"
+                ),
+                LaneCursorError::FilterMismatch => {
+                    write!(formatter, "the cursor was issued for a different filter")
+                }
+                LaneCursorError::Malformed => write!(formatter, "the cursor is not valid"),
+            },
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -262,6 +333,11 @@ impl std::error::Error for StorageError {
             | Self::QuestionAlreadyAnswered
             | Self::Tombstoned { .. }
             | Self::BodyUnresolved { .. }
+            | Self::LaneInvalid(_)
+            | Self::LaneNotFound { .. }
+            | Self::StaleRevision { .. }
+            | Self::LaneConflict(_)
+            | Self::LaneCursor(_)
             | Self::SecretDetected { .. } => None,
         }
     }

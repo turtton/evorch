@@ -682,6 +682,15 @@ fn run(
     conn.execute_batch(V40_DROP)?;
     conn.execute_batch("COMMIT")?;
     hook(Point::AfterDrop, &conn)?;
+    // Migrations after v40 are written for a database that already has the converted
+    // shape, so they run now; `user_version` is set once, at publish.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    for migration in &MIGRATIONS[usize::try_from(MESSAGE_ROWS_VERSION)
+        .map_err(|_| StorageError::OutOfRange("migration version"))?..]
+    {
+        conn.execute_batch(migration)?;
+    }
+    conn.execute_batch("COMMIT")?;
     compare_schema(&conn)?;
 
     summary.peak_wal_bytes = gauge.peak.get();

@@ -409,6 +409,36 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
             json!({"run_id": "run-a", "seq": 1, "body": "b"}),
             Some("run-a"),
         ),
+        (
+            "Ledger",
+            "LaneCreated",
+            json!({"lane_id": "l", "thread_id": "t", "origin_run_id": "run-a", "origin_thread_id": "lead", "lead_thread_id": "lead", "policy": "attached", "management_revision": 1}),
+            Some("run-a"),
+        ),
+        (
+            "Ledger",
+            "LaneReportAppended",
+            json!({"lane_id": "l", "thread_id": "t", "run_id": "run-a", "report_seq": 1, "status": "ready", "needs_human": false}),
+            Some("run-a"),
+        ),
+        (
+            "Ledger",
+            "LaneReportAppended",
+            json!({"lane_id": "l", "thread_id": "t", "run_id": null, "report_seq": 2, "status": "working", "needs_human": false}),
+            None,
+        ),
+        (
+            "Ledger",
+            "LaneManagementChanged",
+            json!({"lane_id": "l", "thread_id": "t", "run_id": "run-a", "lead_thread_id": null, "policy": "detached", "management_revision": 2}),
+            Some("run-a"),
+        ),
+        (
+            "Ledger",
+            "LaneBriefRevised",
+            json!({"lane_id": "l", "thread_id": "t", "run_id": "run-a", "brief_revision": 2}),
+            Some("run-a"),
+        ),
     ]
 }
 
@@ -477,7 +507,7 @@ fn every_variant_is_stored_with_the_columns_its_helpers_and_payload_give() {
             "{variant}"
         );
     }
-    assert_eq!(cases.len(), 57);
+    assert_eq!(cases.len(), 62);
 }
 
 #[test]

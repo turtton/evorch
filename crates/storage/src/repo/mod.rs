@@ -11,6 +11,7 @@ pub(crate) mod content_blobs;
 pub(crate) mod eval_sample;
 pub mod event;
 pub(crate) mod host_input_receipt;
+pub(crate) mod lanes;
 pub(crate) mod memory;
 pub mod message;
 pub mod metrics;

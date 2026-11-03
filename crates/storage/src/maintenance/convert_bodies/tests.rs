@@ -205,12 +205,12 @@ fn every_run_reads_back_as_the_bytes_the_old_column_held() {
 
     // Then: the format is current and every run reads back byte for byte.
     assert_eq!(summary.converted_runs, 4);
-    assert_eq!((summary.source_schema, summary.target_schema), (39, 40));
+    assert_eq!((summary.source_schema, summary.target_schema), (39, 41));
     assert_eq!(summary.unconverted_runs_remaining, 0);
     assert_eq!(summary.mismatched_runs, 0);
     assert_eq!(summary.events_tokenized, 0);
     assert!(summary.checkpoint_truncated && summary.vacuum);
-    assert_eq!(version(&path), 40);
+    assert_eq!(version(&path), 41);
     assert!(!columns(&path).contains(&"messages_json".to_owned()));
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
@@ -1382,11 +1382,11 @@ fn a_version_33_database_is_migrated_and_converted_by_the_one_command() {
 
     // Then: migrations 34 to 39 ran after the backup, every run converted, and the result
     // is a current database that a normal start accepts.
-    assert_eq!((summary.source_schema, summary.target_schema), (33, 40));
+    assert_eq!((summary.source_schema, summary.target_schema), (33, 41));
     assert_eq!(summary.migrations_applied, 6);
     assert_eq!(summary.converted_runs, 4);
     assert!(summary.stage_elapsed_seconds.contains_key("migrate"));
-    assert_eq!(version(&path), 40);
+    assert_eq!(version(&path), 41);
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
         assert_eq!(

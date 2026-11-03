@@ -135,7 +135,9 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
             supported: current,
         });
     }
-    if version == current {
+    if version >= MESSAGE_ROWS_VERSION {
+        // Already in the converted format; a version below the latest only lacks the
+        // later migrations, which an ordinary open applies.
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
