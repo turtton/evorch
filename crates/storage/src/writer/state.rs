@@ -589,6 +589,7 @@ pub(super) fn run_writer_with_index(
                 let result = maintenance(&mut state);
                 let _ = reply.send(result);
             }
+            Ok(Command::Lane(job)) => job(&state.conn, state.writes_suspended),
             Ok(Command::Statistics(reply)) => {
                 let _ = reply.send(Ok(state.statistics.clone()));
             }

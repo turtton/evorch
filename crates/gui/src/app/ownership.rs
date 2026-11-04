@@ -132,6 +132,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             {
                 self.open_usage_tab();
             }
+            if crate::theme::widgets::ghost_icon_button(
+                ui,
+                crate::theme::icons::FLASK,
+                "Evaluations",
+            )
+            .on_hover_text("Evaluations the Evaluator started")
+            .clicked()
+            {
+                self.open_evaluations_tab();
+            }
             let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
             if self.telemetry.quota.configured() {
                 crate::panes::quota_footer::quota_footer(ui, &self.telemetry.quota, now);

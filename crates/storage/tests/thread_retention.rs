@@ -87,6 +87,44 @@ impl Fixture {
             .unwrap();
     }
 
+    /// A lane whose root lives in `thread`, with `reports` reports and one delivery key.
+    fn lane(&self, lane_id: &str, thread: &str, reports: u32) {
+        self.conn
+            .execute(
+                "INSERT INTO lanes(lane_id, thread_id, origin_thread_id, origin_run_id, creation_key, \
+                 request_hash, scope, lead_thread_id, policy, management_revision, brief_json, \
+                 brief_revision, start_seed, created_at_ns, updated_at_ns, last_activity_at_ns) \
+                 VALUES (?1, ?2, 'lead', 'lead-run', ?1, 'h', 'lane', 'lead', 'attached', 1, '{}', 1, \
+                 '', 1, 1, 1)",
+                params![lane_id, thread],
+            )
+            .unwrap();
+        for seq in 1..=reports {
+            self.conn
+                .execute(
+                    "INSERT INTO lane_reports(lane_id, report_seq, status, summary, artifact_refs_json, \
+                     needs_human, question_refs_json, reason_code, producer, management_revision, \
+                     brief_revision, created_at_ns) \
+                     VALUES (?1, ?2, 'working', 'summary', '[]', 0, '[]', NULL, 'harness', 1, 1, 1)",
+                    params![lane_id, seq],
+                )
+                .unwrap();
+            self.conn
+                .execute(
+                    "UPDATE lanes SET latest_report_seq = ?2 WHERE lane_id = ?1",
+                    params![lane_id, seq],
+                )
+                .unwrap();
+        }
+        self.conn
+            .execute(
+                "INSERT INTO lane_delivery_keys(lane_id, management_revision, event_kind, dedupe_key, \
+                 ledger_revision, created_at_ns) VALUES (?1, 1, 'ready', 'k', 0, 1)",
+                [lane_id],
+            )
+            .unwrap();
+    }
+
     /// A saved run with a binding to `thread`, plus a row in every run-keyed table.
     fn run(&self, id: &str, parent: Option<&str>, thread: Option<&str>, name: &str) {
         let c = &self.conn;
@@ -383,6 +421,8 @@ fn build_family(f: &Fixture) {
     f.sql("INSERT INTO task_links(blocker_id, blocked_id) VALUES ('task-1', 'task-2');");
     f.start_state("P", "rp");
     f.start_state("C", "rc");
+    // More reports than one reclaim batch holds, so the lane is worked off in steps.
+    f.lane("lane-c", "C", 1200);
     // An unrelated live thread with the same kinds of rows.
     f.thread("X", None, Some("rx"), None);
     f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'X'");
@@ -391,6 +431,7 @@ fn build_family(f: &Fixture) {
     f.todo_event("session-1", "X");
     f.task("task-x", "rx");
     f.start_state("X", "rx");
+    f.lane("lane-x", "X", 3);
 }
 
 fn confirm_family(f: &Fixture) -> Database {
@@ -473,6 +514,9 @@ fn family_residue(f: &Fixture) -> Vec<(String, i64)> {
         ("task_queue_ledger", "SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') IN ('task-1','task-2')".to_owned()),
         ("thread_start_states", "SELECT COUNT(*) FROM thread_start_states WHERE thread_id IN ('P','C','E')".to_owned()),
         ("thread_start_untracked", "SELECT COUNT(*) FROM thread_start_untracked WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("lanes", "SELECT COUNT(*) FROM lanes WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("lane_reports", "SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-c'".to_owned()),
+        ("lane_delivery_keys", "SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-c'".to_owned()),
         ("todo events", "SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') IN ('P','C','E')".to_owned()),
     ] {
         checks.push((label.to_owned(), sql));
@@ -499,6 +543,9 @@ fn survivor_rows(f: &Fixture) -> Vec<i64> {
         f.count("SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') = 'task-x'"),
         f.count("SELECT COUNT(*) FROM thread_start_states WHERE thread_id = 'X'"),
         f.count("SELECT COUNT(*) FROM run_ledger WHERE run_id = 'rx'"),
+        f.count("SELECT COUNT(*) FROM lanes WHERE lane_id = 'lane-x'"),
+        f.count("SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-x'"),
+        f.count("SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-x'"),
     ]
 }
 
@@ -3399,4 +3446,71 @@ fn the_fence_covers_message_rows_and_a_deleted_runs_conversation_stays_hidden() 
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn a_capture_above_the_step_budget_does_not_keep_the_lane_rows_of_its_thread() {
+    // Given: a confirmed family whose thread has a 5 MiB captured file (left to the
+    // exclusive phase) and a lane with reports and a delivery key.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    untracked_capture(&f, "A", "ra", true);
+    f.lane("lane-a", "A", 3);
+    f.sql("INSERT INTO lane_delivery_keys(lane_id, management_revision, event_kind, dedupe_key, ledger_revision, created_at_ns) VALUES ('lane-a', 1, 'question', 'q2', 0, 1)");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: only the oversized capture waits; no lane row was left behind.
+    assert_eq!(last.unwrap().oversized_pending, 1);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_start_untracked WHERE LENGTH(content) > 4194304"),
+        1
+    );
+
+    // And: after the exclusive phase nothing of the family remains.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 10);
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_start_untracked"), 0);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
 }

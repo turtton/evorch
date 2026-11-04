@@ -161,6 +161,10 @@ impl EventKind {
             },
             Self::Ledger(event) => match event {
                 LedgerEvent::RunLedgerAppended { .. } => "RunLedgerAppended",
+                LedgerEvent::LaneCreated { .. } => "LaneCreated",
+                LedgerEvent::LaneReportAppended { .. } => "LaneReportAppended",
+                LedgerEvent::LaneManagementChanged { .. } => "LaneManagementChanged",
+                LedgerEvent::LaneBriefRevised { .. } => "LaneBriefRevised",
             },
             Self::Diagnostic(_) | Self::Ownership(_) => "",
         }
@@ -229,6 +233,12 @@ impl EventKind {
                 | CompactionEvent::Aborted { run_id, .. },
             )
             | Self::Ledger(LedgerEvent::RunLedgerAppended { run_id, .. }) => Some(run_id),
+            Self::Ledger(LedgerEvent::LaneCreated { origin_run_id, .. }) => Some(origin_run_id),
+            Self::Ledger(
+                LedgerEvent::LaneReportAppended { run_id, .. }
+                | LedgerEvent::LaneManagementChanged { run_id, .. }
+                | LedgerEvent::LaneBriefRevised { run_id, .. },
+            ) => run_id.as_deref(),
             Self::Diagnostic(event) => event.run_id.as_deref(),
             Self::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
                 Some(&message.recipient_run_id)
@@ -288,6 +298,52 @@ pub enum LedgerEvent {
         seq: u64,
         /// 追記した記録の本文。
         body: String,
+    },
+    /// A lane was created in the lane ledger (ADR 0044 §15). Published only after
+    /// the creation committed; an idempotent replay of the same request publishes
+    /// nothing.
+    LaneCreated {
+        lane_id: String,
+        thread_id: String,
+        /// The lead run that opened the lane; the event is fenced by it.
+        origin_run_id: String,
+        origin_thread_id: String,
+        lead_thread_id: Option<String>,
+        policy: crate::lane::LanePolicy,
+        management_revision: u64,
+    },
+    /// A report was appended to a lane (ADR 0044 §6). The report itself is read
+    /// from the ledger; the event only names it.
+    LaneReportAppended {
+        lane_id: String,
+        thread_id: String,
+        /// The run that produced the report, when a run did; the event is fenced
+        /// by it. `None` for a harness report.
+        run_id: Option<String>,
+        report_seq: u64,
+        status: crate::lane::LaneStatus,
+        needs_human: bool,
+    },
+    /// The lead relation or the policy of a lane changed (ADR 0044 §15). Detach is
+    /// a change to `policy = detached`; the origin never changes.
+    LaneManagementChanged {
+        lane_id: String,
+        thread_id: String,
+        /// The run that requested the change, when a run did; the event is fenced
+        /// by it.
+        run_id: Option<String>,
+        lead_thread_id: Option<String>,
+        policy: crate::lane::LanePolicy,
+        management_revision: u64,
+    },
+    /// The brief of a lane was revised (ADR 0044 §5).
+    LaneBriefRevised {
+        lane_id: String,
+        thread_id: String,
+        /// The run that requested the revision, when a run did; the event is
+        /// fenced by it.
+        run_id: Option<String>,
+        brief_revision: u64,
     },
 }
 

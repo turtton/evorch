@@ -64,9 +64,11 @@ const C_GC: u64 = 24;
 /// table, reference tables, indexes and header columns (all on empty tables here), the
 /// schema page, page 1 and the pointer-map pages that account for the new pages (6 frames
 /// with 10 rows and 12 with 100,000 when v39 alone was first measured; 19 and 34 with
-/// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema),
-/// whatever the number of rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 40;
+/// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema), and
+/// v41's lane tables and indexes plus the rebuilt `threads` table (53 and 86 frames with v41
+/// added; the threads copy of this empty table costs no rows), whatever the number of
+/// `thread_runs` rows it leaves alone.
+const MIGRATION_FRAMES: u64 = 96;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
