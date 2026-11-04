@@ -67,9 +67,10 @@ const C_GC: u64 = 24;
 /// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema), and
 /// v41's lane tables and indexes plus the rebuilt `threads` table (53 and 86 frames with v41
 /// added; the threads copy of this empty table costs no rows), and v42 (the empty lesson
-/// tables and their full-text triggers are rebuilt: 86 and 120 frames with v42 added),
+/// tables and their full-text triggers are rebuilt: 86 and 120 frames with v42 added), and
+/// v43 (the provenance header columns and message table: 97 and 133 frames with v43 added),
 /// whatever the number of `thread_runs` rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 132;
+const MIGRATION_FRAMES: u64 = 146;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -293,13 +294,15 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     let observer = Connection::open(&path).unwrap();
     observer
         .execute_batch(&format!(
-            "{undo_v40}
+            "{undo_v42}
+             {undo_v40}
              DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
              PRAGMA user_version = 38;
              WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {rows} - 1)
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
+            undo_v42 = include_str!("support/undo_v43.sql"),
             undo_v40 = include_str!("support/undo_v40.sql"),
         ))
         .unwrap();

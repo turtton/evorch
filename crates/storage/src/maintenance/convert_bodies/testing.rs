@@ -52,6 +52,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     // The lesson tables v42 rebuilt (favorite flag, two more ledger kinds), as v39 had them.
     let lesson_definitions = definitions_of("'memory_ledger', 'memory_entries'")?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;
@@ -103,6 +104,27 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
+}
+
+#[cfg(test)]
+/// Takes the lesson tables of a database in the current format back to their version 41
+/// shape (what migration v42 found), for a test that rebuilds an older database by hand.
+///
+/// # Errors
+/// Fails when the tables cannot be rebuilt.
+pub(crate) fn take_lessons_back_to_v41(conn: &Connection) -> Result<(), StorageError> {
+    let fresh = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..39] {
+        fresh.execute_batch(migration)?;
+    }
+    let definitions: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE tbl_name IN ('memory_ledger', 'memory_entries') \
+             AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    take_lessons_back(conn, &definitions)
 }
 
 /// Rebuilds the lesson tables as migration v42 found them, keeping every lesson in its

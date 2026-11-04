@@ -20,6 +20,10 @@ use storage::{RunContextRecord, Storage, StorageConfig};
 static VM_STEPS: AtomicU64 = AtomicU64::new(0);
 static STATEMENTS: AtomicU64 = AtomicU64::new(0);
 static BODY_SELECTS: AtomicU64 = AtomicU64::new(0);
+static PROV_INSERTS: AtomicU64 = AtomicU64::new(0);
+static PROV_UPDATES: AtomicU64 = AtomicU64::new(0);
+static PROV_DELETES: AtomicU64 = AtomicU64::new(0);
+static PROV_JSON_SELECTS: AtomicU64 = AtomicU64::new(0);
 
 // SQLite invokes the trace while the statement pointer and SQL text are valid; the
 // callback only reads them and bumps static atomics, and never re-enters SQLite.
@@ -47,6 +51,19 @@ unsafe extern "C" fn trace(
             && (sql.contains("skeleton") || sql.contains("data FROM content_blobs"))
         {
             BODY_SELECTS.fetch_add(1, Ordering::Relaxed);
+        }
+        // Statements on the provenance rows: one execution touches one row (the deletion
+        // of the entries beyond the end of the map may touch several, and is counted as
+        // one statement; no test below deletes more than it counts).
+        let text = sql.trim_start();
+        if text.starts_with("INSERT INTO run_message_provenance") {
+            PROV_INSERTS.fetch_add(1, Ordering::Relaxed);
+        } else if text.starts_with("UPDATE run_message_provenance") {
+            PROV_UPDATES.fetch_add(1, Ordering::Relaxed);
+        } else if text.starts_with("DELETE FROM run_message_provenance") {
+            PROV_DELETES.fetch_add(1, Ordering::Relaxed);
+        } else if text.starts_with("SELECT") && text.contains("entry_json") {
+            PROV_JSON_SELECTS.fetch_add(1, Ordering::Relaxed);
         }
     }
     0
@@ -181,6 +198,10 @@ struct Cost {
     statements: u64,
     body_selects: u64,
     vm_steps: u64,
+    prov_inserts: u64,
+    prov_updates: u64,
+    prov_deletes: u64,
+    prov_json_selects: u64,
 }
 
 /// What one operation costs. A snapshot pinned by the observer keeps the WAL from
@@ -188,6 +209,11 @@ struct Cost {
 fn measure(path: &Path, observer: &Connection, operation: impl FnOnce()) -> Cost {
     let page = observer
         .pragma_query_value(None, "page_size", |row| row.get::<_, u32>(0).map(u64::from))
+        .unwrap();
+    // An empty log: a log that earlier saves left long would be reused from its start, and
+    // its size would say nothing about this operation.
+    observer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
     observer.execute_batch("BEGIN").unwrap();
     let _: i64 = observer
@@ -198,6 +224,10 @@ fn measure(path: &Path, observer: &Connection, operation: impl FnOnce()) -> Cost
         STATEMENTS.load(Ordering::Relaxed),
         BODY_SELECTS.load(Ordering::Relaxed),
         VM_STEPS.load(Ordering::Relaxed),
+        PROV_INSERTS.load(Ordering::Relaxed),
+        PROV_UPDATES.load(Ordering::Relaxed),
+        PROV_DELETES.load(Ordering::Relaxed),
+        PROV_JSON_SELECTS.load(Ordering::Relaxed),
     );
     operation();
     let cost = Cost {
@@ -205,6 +235,10 @@ fn measure(path: &Path, observer: &Connection, operation: impl FnOnce()) -> Cost
         statements: STATEMENTS.load(Ordering::Relaxed) - before.1,
         body_selects: BODY_SELECTS.load(Ordering::Relaxed) - before.2,
         vm_steps: VM_STEPS.load(Ordering::Relaxed) - before.3,
+        prov_inserts: PROV_INSERTS.load(Ordering::Relaxed) - before.4,
+        prov_updates: PROV_UPDATES.load(Ordering::Relaxed) - before.5,
+        prov_deletes: PROV_DELETES.load(Ordering::Relaxed) - before.6,
+        prov_json_selects: PROV_JSON_SELECTS.load(Ordering::Relaxed) - before.7,
     };
     observer.execute_batch("COMMIT").unwrap();
     cost
@@ -238,7 +272,9 @@ fn run(messages: usize) -> Run {
     });
 
     // The runtime's own save also writes the provenance map, which holds one entry per
-    // message: its cost is reported apart because it still grows with the length.
+    // message. After the saves above the stored map is empty, so this one writes every
+    // entry: it is reported apart because it grows with the length. (The saves that
+    // change a map by one entry are measured by `run_map`.)
     history.push(json!({"role": "assistant", "content": [{"type": "text", "text": long_text("bundle", messages)}]}));
     let write = with_map(record(&history, 4), history.len(), None);
     let cost_bundle = measure(&path, &observer, || {
@@ -306,6 +342,8 @@ fn saving_costs_what_changed_not_the_length_of_the_conversation() {
         assert_eq!(run.cost_bundle.body_selects, 0);
     }
 
+    assert_map_costs();
+
     // VM steps: a constant plus the metadata scan of the existing messages.
     for (messages, run) in [(100_u64, &short), (10_000, &long)] {
         for (name, cost) in [
@@ -319,5 +357,151 @@ fn saving_costs_what_changed_not_the_length_of_the_conversation() {
                 cost.vm_steps
             );
         }
+    }
+}
+
+/// What the saves of a provenance map cost.
+struct MapRun {
+    unchanged: Cost,
+    append: Cost,
+    change: Cost,
+    shrink: Cost,
+}
+
+/// `messages` messages with their map saved, then the map saved again unchanged, with one
+/// message appended, with one entry changed, and with the last two entries removed.
+fn run_map(messages: usize) -> MapRun {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("io-map.db");
+    let storage = Storage::open(config(&path)).unwrap();
+    let handle = storage.handle();
+    let mut history = conversation(messages);
+    handle
+        .save_snapshot_bundle(&with_map(record(&history, 1), history.len(), None))
+        .unwrap();
+    let observer = Connection::open(&path).unwrap();
+
+    let unchanged = measure(&path, &observer, || {
+        handle
+            .save_snapshot_bundle(&with_map(record(&history, 2), history.len(), None))
+            .unwrap();
+    });
+
+    history.push(json!({"role": "user", "content": [{"type": "text", "text": long_text("added", messages)}]}));
+    let append = measure(&path, &observer, || {
+        handle
+            .save_snapshot_bundle(&with_map(record(&history, 3), history.len(), None))
+            .unwrap();
+    });
+
+    // The same messages, with the origin of one entry in the middle different.
+    let mut changed = with_map(record(&history, 4), history.len(), None);
+    changed.map.messages[messages / 2].blocks[0].origin = BlockOrigin::Native;
+    changed.map.messages[messages / 2].blocks[0].excluded_reason =
+        Some(storage::thread_index::ExcludedReason::GeneratedBoundary);
+    let change = measure(&path, &observer, || {
+        handle.save_snapshot_bundle(&changed).unwrap();
+    });
+
+    history.truncate(history.len() - 2);
+    let mut shorter = with_map(record(&history, 5), history.len(), None);
+    shorter.map.messages[messages / 2].blocks[0].excluded_reason =
+        Some(storage::thread_index::ExcludedReason::GeneratedBoundary);
+    let shrink = measure(&path, &observer, || {
+        handle.save_snapshot_bundle(&shorter).unwrap();
+    });
+    drop(observer);
+    storage.close();
+    MapRun {
+        unchanged,
+        append,
+        change,
+        shrink,
+    }
+}
+
+/// Frames a save that appends one message and one map entry may differ by between a short
+/// and a long conversation: the message part stays within [`FRAME_DIFFERENCE`], and the
+/// entry row adds a b-tree level of the table and of its unique index at most (the whole
+/// difference was within this when first measured).
+const MAP_FRAME_DIFFERENCE: u64 = 8;
+
+fn assert_map_costs() {
+    let short = run_map(100);
+    let long = run_map(10_000);
+    for (name, run) in [("100", &short), ("10,000", &long)] {
+        println!(
+            "{name} messages, map saves: unchanged {:?}; append {:?}; change {:?}; shrink {:?}",
+            run.unchanged, run.append, run.change, run.shrink
+        );
+    }
+    for run in [&short, &long] {
+        // Same content: no provenance row is written.
+        assert_eq!(
+            (
+                run.unchanged.prov_inserts,
+                run.unchanged.prov_updates,
+                run.unchanged.prov_deletes
+            ),
+            (0, 0, 0),
+            "an unchanged map writes no entry"
+        );
+        // One more entry: one insert, no update.
+        assert_eq!(
+            (
+                run.append.prov_inserts,
+                run.append.prov_updates,
+                run.append.prov_deletes
+            ),
+            (1, 0, 0),
+            "an appended entry is one insert"
+        );
+        // One changed entry: one update.
+        assert_eq!(
+            (
+                run.change.prov_inserts,
+                run.change.prov_updates,
+                run.change.prov_deletes
+            ),
+            (0, 1, 0),
+            "a changed entry is one update"
+        );
+        // A shorter map: the tail goes in one statement.
+        assert_eq!(
+            (
+                run.shrink.prov_inserts,
+                run.shrink.prov_updates,
+                run.shrink.prov_deletes
+            ),
+            (0, 0, 1),
+            "a shorter map deletes its tail once"
+        );
+        // Comparing entries reads their hash and length, never their text; and no save
+        // reads a message skeleton or a blob.
+        for cost in [run.unchanged, run.append, run.change, run.shrink] {
+            assert_eq!(
+                cost.prov_json_selects, 0,
+                "a save reads no stored entry text"
+            );
+            assert_eq!(cost.body_selects, 0, "a save reads no body");
+        }
+    }
+    // The whole save of one appended message, map included, writes the same frames
+    // however long the conversation (the message part within FRAME_DIFFERENCE).
+    assert!(
+        long.append.frames.abs_diff(short.append.frames) <= MAP_FRAME_DIFFERENCE,
+        "frames of an append with its map entry: {} for 100 messages, {} for 10,000",
+        short.append.frames,
+        long.append.frames
+    );
+    for (name, short, long) in [
+        ("unchanged", short.unchanged.frames, long.unchanged.frames),
+        ("change", short.change.frames, long.change.frames),
+        ("shrink", short.shrink.frames, long.shrink.frames),
+    ] {
+        assert!(
+            long.abs_diff(short) <= MAP_FRAME_DIFFERENCE,
+            "frames of a map save ({name}): {short} for 100 messages, {long} for 10,000"
+        );
     }
 }

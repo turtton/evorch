@@ -1,8 +1,10 @@
 //! `evorch maintenance convert-bodies`: the one-time offline conversion of a database of
 //! version 33 to 39 (a run's whole conversation in `run_contexts.messages_json`; the
 //! migrations up to 39 are applied first, after the backup) to the current
-//! format (`run_messages` rows and `content_blobs`), including the removal of the old
-//! column.
+//! format (`run_messages` rows and `content_blobs`, and a provenance map as
+//! `run_message_provenance` rows), including the removal of the two old columns. A regular
+//! version 40 database (messages already rows, maps still one column) is accepted by this
+//! command alone: its runs are not converted again, only its provenance maps.
 //!
 //! # Contract
 //!
@@ -15,11 +17,13 @@
 //!   retention already deleted are reclaimed next (they are not converted), and the
 //!   reclaim must finish or the command stops.
 //! * Each run is converted in its own transaction, read back through the normal reader
-//!   and compared byte for byte with what the old column held before it commits.
+//!   and compared byte for byte with what the old column held before it commits. Then
+//!   each provenance map is converted in its own transaction and compared, as the typed
+//!   map, with the old one (`stage_snapshot` is not used: no revision or status moves).
 //! * A database older than 39 (33 at the oldest) gets migrations 34 to 39 first, one
 //!   transaction each, after the backup. `user_version` then stays 39 until everything is
-//!   converted, verified, the old column is dropped and the database is vacuumed; only
-//!   the last write publishes 40. A database stopped half way is refused by a normal start
+//!   converted, verified, the old columns are dropped and the database is vacuumed; only
+//!   the last write publishes the current version. A database stopped half way is refused by a normal start
 //!   and, once the conversion's own tables exist, by this command alike.
 
 use std::cell::Cell;
@@ -33,12 +37,17 @@ use serde::Serialize;
 
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
-use crate::migrations::{MESSAGE_ROWS_VERSION, MIGRATIONS, V40_DROP, V40_PREPARE};
+use crate::migrations::{
+    MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, V40_DROP, V40_PREPARE, V43_DROP,
+    V43_PREPARE,
+};
+use crate::repo::thread_retention::reclaim::Layout;
 
 use super::compact::{create_backup, integrity_check, parent};
 use super::vacuum::rebuild_incremental;
 use super::{invalid, offline};
 
+mod provenance;
 mod retention;
 mod runs;
 mod source;
@@ -52,9 +61,10 @@ pub use retention::RetentionReport;
 pub use source::{Analysis, Problem};
 pub use space::VolumeNeed;
 
+pub(crate) use provenance::ProvenancePoint;
 pub(crate) use runs::RunPoint;
 use runs::{MISMATCH, convert_run};
-use source::{Shape, classify, next_run};
+use source::{PROVENANCE_PROBLEM, Shape, classify, next_run};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConvertBodiesOptions {
@@ -80,6 +90,9 @@ pub struct ConvertBodiesSummary {
     /// Migrations applied first to bring the database to version 39.
     pub migrations_applied: u32,
     pub converted_runs: u64,
+    /// Provenance maps moved to rows, and the entry rows they became.
+    pub converted_provenance_maps: u64,
+    pub provenance_entries_created: u64,
     pub retention: RetentionReport,
     /// Runs that cannot be restored and were stored in the serializer's key order, not
     /// as the old bytes (same JSON value). Their conversation index is built again.
@@ -107,6 +120,8 @@ pub struct ConvertBodiesSummary {
     /// Most log frames one run's transaction left, read after its commit (the log
     /// restarts from the start after each checkpoint, so its length is the transaction's).
     pub peak_run_wal_frames: u64,
+    /// The same for one provenance map's transaction.
+    pub peak_provenance_wal_frames: u64,
     pub foreign_keys_enabled: bool,
     pub foreign_key_check: Option<&'static str>,
     pub integrity_check: Option<&'static str>,
@@ -193,6 +208,11 @@ pub(crate) enum Point {
     /// After a run committed and the log was checkpointed; `frames` is how many frames the
     /// run's transaction wrote.
     AfterRun {
+        frames: u64,
+    },
+    Provenance(ProvenancePoint),
+    /// After a provenance map committed and the log was checkpointed.
+    AfterProvenance {
         frames: u64,
     },
     BeforeVerify,
@@ -429,6 +449,7 @@ fn refusal(analysis: &Analysis) -> Option<String> {
         let first: Vec<String> = analysis
             .problems
             .iter()
+            .filter(|problem| !problem.reason.starts_with(PROVENANCE_PROBLEM))
             .take(5)
             .map(|problem| format!("run {}: {}", problem.run_id, problem.reason))
             .collect();
@@ -450,6 +471,21 @@ fn refusal(analysis: &Analysis) -> Option<String> {
         reasons.push(format!(
             "the reclaim of deleted runs cannot finish ({})",
             analysis.reclaim_blockers.join("; ")
+        ));
+    }
+    if analysis.unconvertible_provenance > 0 {
+        reasons.push(format!(
+            "{} provenance maps are not typed provenance maps and are never replaced by an \
+             empty one (first: {})",
+            analysis.unconvertible_provenance,
+            analysis
+                .problems
+                .iter()
+                .filter(|problem| problem.reason.starts_with(PROVENANCE_PROBLEM))
+                .take(5)
+                .map(|problem| format!("run {}", problem.run_id))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     (!reasons.is_empty()).then(|| reasons.join("; "))
@@ -495,7 +531,7 @@ fn run(
     let sizes_before = file_sizes(path)?;
     let source_runs = count(&ro, "SELECT COUNT(*) FROM run_contexts")?;
     let mut summary = ConvertBodiesSummary {
-        scope: "run_contexts",
+        scope: "run_contexts, run_context_provenance",
         source_schema,
         target_schema,
         preview: !options.apply,
@@ -504,6 +540,8 @@ fn run(
         source_runs,
         migrations_applied: 0,
         converted_runs: 0,
+        converted_provenance_maps: 0,
+        provenance_entries_created: 0,
         retention: RetentionReport::default(),
         canonicalized_runs: CanonicalizedRuns::default(),
         mismatched_runs: 0,
@@ -521,6 +559,7 @@ fn run(
         peak_wal_bytes: 0,
         vacuum_wal_bytes: 0,
         peak_run_wal_frames: 0,
+        peak_provenance_wal_frames: 0,
         foreign_keys_enabled: false,
         foreign_key_check: None,
         integrity_check: None,
@@ -539,7 +578,11 @@ fn run(
         return Ok(summary);
     }
     progress.enter("analyze");
-    let analysis = source::analyze(&ro)?;
+    let analysis = if shape == Shape::Source {
+        source::analyze(&ro)?
+    } else {
+        source::analyze_runs_converted(&ro)?
+    };
     let basis = basis(&ro, path)?;
     let backup_directory = options.backup.as_deref().map_or(parent(path), parent);
     let scratch_directory = space::scratch_directory();
@@ -576,9 +619,15 @@ fn run(
     progress.enter("lock");
     let conn = exclusive_connection(path)?;
     summary.foreign_keys_enabled = true;
-    if classify(&conn)? != Shape::Source {
+    if classify(&conn)? != shape {
         return Err(invalid("the database changed while the conversion started"));
     }
+    let convert_runs = shape == Shape::Source;
+    let layout = if convert_runs {
+        Layout::Converting
+    } else {
+        Layout::Current
+    };
     let gauge = WalGauge {
         path: suffixed_path(
             &path
@@ -601,7 +650,7 @@ fn run(
     summary.backup = Some(backup);
 
     progress.mutated = true;
-    if source_schema < MESSAGE_ROWS_VERSION - 1 {
+    if convert_runs && source_schema < MESSAGE_ROWS_VERSION - 1 {
         // The database is older than version 39: the ordinary migrations, in their own
         // transactions, after the backup, then the conversion proper. A stop in between
         // leaves a schema that is valid at its own version, but the way back is the same:
@@ -620,14 +669,17 @@ fn run(
     }
     progress.enter("prepare");
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(V40_PREPARE)?;
+    if convert_runs {
+        conn.execute_batch(V40_PREPARE)?;
+    }
+    conn.execute_batch(V43_PREPARE)?;
     conn.execute_batch("COMMIT")?;
     checkpoint_passive(&conn)?;
     gauge.sample();
     hook(Point::AfterPrepare, &conn)?;
 
     progress.enter("retention");
-    summary.retention = retention::reclaim_deleted(&conn, &mut || gauge.sample())?;
+    summary.retention = retention::reclaim_deleted(&conn, layout, &mut || gauge.sample())?;
     checkpoint_passive(&conn)?;
     hook(Point::AfterRetention, &conn)?;
     let (blobs_before, blob_bytes_before, references_before) = blob_figures(&conn)?;
@@ -636,6 +688,9 @@ fn run(
     progress.enter("convert");
     let mut cursor: Option<String> = None;
     while let Some(run_id) = next_run(&conn, cursor.as_deref(), false, false)? {
+        if !convert_runs {
+            break;
+        }
         progress.run_id = Some(run_id.clone());
         let converted = convert_run(&conn, &run_id, &mut |point, conn| {
             hook(Point::Run(point), conn)
@@ -654,7 +709,7 @@ fn run(
     }
     progress.run_id = None;
     summary.converted_runs = progress.converted_runs;
-    if summary.converted_runs != kept_runs {
+    if convert_runs && summary.converted_runs != kept_runs {
         return Err(invalid(format!(
             "{} runs were converted, {kept_runs} were expected",
             summary.converted_runs
@@ -665,9 +720,26 @@ fn run(
     summary.blob_bytes_created = blob_bytes_after.saturating_sub(blob_bytes_before);
     summary.references_created = references_after.saturating_sub(references_before);
 
+    progress.enter("provenance");
+    let mut cursor: Option<String> = None;
+    while let Some(run_id) = provenance::next_row(&conn, cursor.as_deref())? {
+        progress.run_id = Some(run_id.clone());
+        let entries = provenance::convert_row(&conn, &run_id, &mut |point, conn| {
+            hook(Point::Provenance(point), conn)
+        })?;
+        let frames = checkpoint_passive(&conn)?;
+        gauge.sample();
+        summary.peak_provenance_wal_frames = summary.peak_provenance_wal_frames.max(frames);
+        summary.converted_provenance_maps += 1;
+        summary.provenance_entries_created += entries;
+        hook(Point::AfterProvenance { frames }, &conn)?;
+        cursor = Some(run_id);
+    }
+    progress.run_id = None;
+
     progress.enter("verify");
     hook(Point::BeforeVerify, &conn)?;
-    verify::verify_all(&conn)?;
+    verify::verify_all(&conn, convert_runs)?;
     summary.foreign_key_check = Some("ok");
     summary.unconverted_runs_remaining = 0;
     let (runs_after, fingerprint_after) = verify::metadata_fingerprint(&conn)?;
@@ -680,14 +752,21 @@ fn run(
     progress.enter("drop_column");
     hook(Point::BeforeDrop, &conn)?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(V40_DROP)?;
+    if convert_runs {
+        conn.execute_batch(V40_DROP)?;
+    }
+    conn.execute_batch(V43_DROP)?;
     conn.execute_batch("COMMIT")?;
     hook(Point::AfterDrop, &conn)?;
     // Migrations after v40 are written for a database that already has the converted
     // shape, so they run now; `user_version` is set once, at publish.
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    for migration in &MIGRATIONS[usize::try_from(MESSAGE_ROWS_VERSION)
-        .map_err(|_| StorageError::OutOfRange("migration version"))?..]
+    // Version 43 is not among them: its two halves ran as `V43_PREPARE` and `V43_DROP`.
+    let first = source_schema.max(MESSAGE_ROWS_VERSION);
+    for migration in &MIGRATIONS[usize::try_from(first)
+        .map_err(|_| StorageError::OutOfRange("migration version"))?
+        ..usize::try_from(PROVENANCE_ROWS_VERSION - 1)
+            .map_err(|_| StorageError::OutOfRange("migration version"))?]
     {
         conn.execute_batch(migration)?;
     }

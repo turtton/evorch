@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 42;
+const LATEST_SCHEMA: u32 = 43;
 
-const EXPECTED_TABLES: [&str; 76] = [
+const EXPECTED_TABLES: [&str; 77] = [
     "lane_state",
     "lanes",
     "lane_reports",
@@ -43,6 +43,7 @@ const EXPECTED_TABLES: [&str; 76] = [
     "learning_claims",
     "learning_claim_roots",
     "run_context_provenance",
+    "run_message_provenance",
     "thread_index_runs",
     "conversation_blocks",
     "conversation_fts",
@@ -1121,6 +1122,25 @@ fn entry_rows(connection: &Connection) -> Vec<EntryRow> {
         .unwrap()
 }
 
+/// Runs the offline conversion on `path`, which holds a version 41 database whose
+/// provenance maps are still a column.
+fn convert_to_current(path: &Path) {
+    let lock = path.with_extension("db.maintenance-lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    drop(options.open(&lock).unwrap());
+    storage::maintenance::convert_bodies(
+        path,
+        &storage::maintenance::ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     // Given: a v41 database whose projection rowids and ledger sequence numbers are in
@@ -1150,10 +1170,19 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
                  (5, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 8, 'project');",
         )
         .unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v43.sql"))
+        .unwrap();
     connection.pragma_update(None, "user_version", 41).unwrap();
+    connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
     let ledger_before = ledger_rows(&connection);
     let entries_before = entry_rows(&connection);
     drop(connection);
+    // A database whose provenance maps are still a column opens only after the conversion
+    // command has run; that command applies the migrations after version 40 (v42 here).
+    convert_to_current(&path);
     let ids = |entries: Vec<storage::memory::MemoryEntry>| -> Vec<String> {
         entries.into_iter().map(|entry| entry.lesson.id).collect()
     };

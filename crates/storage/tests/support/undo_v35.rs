@@ -64,9 +64,12 @@ pub fn undo_v42(connection: &Connection) {
 }
 
 /// Restores the whole-conversation `run_contexts` shape migration v40 replaced, after
-/// undoing v42.
+/// undoing v43 and v42.
 pub fn undo_v40(connection: &Connection) {
     undo_v42(connection);
+    connection
+        .execute_batch(include_str!("undo_v43.sql"))
+        .unwrap();
     connection
         .execute_batch(include_str!("undo_v40.sql"))
         .unwrap();
