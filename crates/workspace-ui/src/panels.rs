@@ -53,6 +53,8 @@ pub enum PanelKind {
     ShellJobs,
     /// The pages the active conversation's agents opened with the browser tools.
     AgentBrowser,
+    /// Evaluations the Evaluator launched: groups, trials, reports and replays.
+    Evaluations,
 }
 
 impl PanelKind {
@@ -77,6 +79,7 @@ impl PanelKind {
             Self::ContextInspector => "Context",
             Self::ShellJobs => "Shell jobs",
             Self::AgentBrowser => "Browser",
+            Self::Evaluations => "Evaluations",
         }
     }
 }
