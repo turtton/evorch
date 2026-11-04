@@ -27,6 +27,7 @@ pub(crate) mod async_layout;
 mod queue;
 mod sandbox_review;
 mod thinking;
+mod unreadable;
 mod virtual_list;
 pub(crate) use virtual_list::mark_async_layout;
 #[doc(hidden)]
@@ -307,16 +308,28 @@ fn run_detail_body(
     if branch.is_some() {
         branch::confirm_modal(ui, branch_action);
     }
+    // A body that finishes loading resizes its row. The entry the reader is
+    // looking at must not move because of it, even when the pane follows the
+    // end of the conversation, so a move caused by that is undone.
+    let anchor_key = model_id.with("body-anchor");
+    let previous_anchor: Option<ScrollAnchor> = ui.data(|data| data.get_temp(anchor_key));
+    let mut first_visible: Option<(usize, f32)> = None;
+    // Where the entry the reader was looking at stands now, whether or not it
+    // is still the first in view: a row above it that changed height can put
+    // another entry first.
+    let mut anchored_entry_y: Option<f32> = None;
+    let mut corrected_offset: Option<f32> = None;
     let output = egui::ScrollArea::vertical()
         .id_salt(model_id)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
+            let used_offset = viewport.min.y;
             // show_viewport supplies content-relative coordinates, whereas
             // cursor positions are in screen coordinates.
-            let viewport = viewport
-                .translate(ui.min_rect().min.to_vec2())
-                .expand2(egui::vec2(0.0, viewport.height()));
+            let content_top = ui.min_rect().min.y;
+            let screen_viewport = viewport.translate(ui.min_rect().min.to_vec2());
+            let viewport = screen_viewport.expand2(egui::vec2(0.0, viewport.height()));
             if let Some(branch) = branch {
                 branch::start_versions(ui, model, branch, branch_action);
             }
@@ -362,6 +375,10 @@ fn run_detail_body(
                     &latest_job_entry,
                     layout_revision,
                 );
+                let row_top = ui.cursor().top();
+                if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
+                    anchored_entry_y = Some(row_top - content_top);
+                }
                 list.row(ui, viewport, entry_id, revision, |ui| {
                     if let TranscriptEntry::TurnEnd { .. } = entry {
                         // Run detail panes show history only; turn actions belong to threads.
@@ -458,6 +475,27 @@ fn run_detail_body(
                         agent_message::show(ui, *direction, peer_run_id, content, task_rows);
                         return;
                     }
+                    if let TranscriptEntry::Unreadable {
+                        event_id,
+                        run_id,
+                        kind,
+                        reason,
+                        reference,
+                    } = entry
+                    {
+                        unreadable::show(
+                            ui,
+                            pane_id.with(("unreadable", entry_id)),
+                            &unreadable::Gap {
+                                event_id: *event_id,
+                                run_id: run_id.as_deref(),
+                                kind,
+                                reason,
+                                reference: reference.as_ref(),
+                            },
+                        );
+                        return;
+                    }
                     if let Some((icon, color)) = event_icon(entry) {
                         let hover = match entry {
                             TranscriptEntry::Diagnostic { hover, .. } => Some(hover.as_str()),
@@ -488,15 +526,23 @@ fn run_detail_body(
                             | TranscriptEntry::AgentMessage { .. }
                             | TranscriptEntry::TurnEnd { .. }
                             | TranscriptEntry::Artifacts { .. }
+                            | TranscriptEntry::Unreadable { .. }
                             | TranscriptEntry::Branch { .. } => {}
                         }
                         if let TranscriptEntry::Message { text, .. } = entry {
-                            crate::panes::markdown_render::render_markdown_with_base(
+                            crate::body::ui::show_text(
                                 ui,
+                                pane_id.with(("message-body", entry_id)),
                                 text,
-                                &format!("msg-{entry_id}"),
-                                repo_root,
-                                repo_root,
+                                |ui, text| {
+                                    crate::panes::markdown_render::render_markdown_with_base(
+                                        ui,
+                                        text,
+                                        &format!("msg-{entry_id}"),
+                                        repo_root,
+                                        repo_root,
+                                    );
+                                },
                             );
                             return;
                         }
@@ -535,15 +581,100 @@ fn run_detail_body(
                         }
                     });
                 });
+                if first_visible.is_none() && ui.cursor().top() > screen_viewport.top() {
+                    first_visible = Some((entry_id, row_top - content_top));
+                }
             }
             list.store(ui, cache_key);
+            corrected_offset = anchor_correction(
+                ui,
+                previous_anchor,
+                anchored_entry_y,
+                first_visible,
+                (used_offset, screen_viewport.height()),
+            );
             if let Some(identity) = identity {
                 crate::panes::ledger::ledger_section(ui, identity.run_id, identity.ledger);
             }
             requests.and_then(|requests| requests.show(ui))
         });
     virtual_list::record_layout(ui, output.content_size, output.state.offset);
+    if let Some((entry, content_y)) = first_visible {
+        let offset_y = corrected_offset.unwrap_or(output.state.offset.y);
+        ui.data_mut(|data| {
+            data.insert_temp(
+                anchor_key,
+                ScrollAnchor {
+                    entry,
+                    content_y,
+                    offset_y,
+                },
+            );
+            data.insert_temp(
+                egui::Id::new(LATEST_ANCHOR_ID),
+                (entry, content_y - offset_y),
+            );
+        });
+    }
     output.inner
+}
+
+const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
+
+/// The entry the reader is looking at (the first in view) and where it is on
+/// the pane, as the last drawn transcript saw it. For tests of the position a
+/// loading body keeps.
+#[doc(hidden)]
+#[must_use]
+pub fn first_visible_entry_for_tests(ctx: &egui::Context) -> Option<(usize, f32)> {
+    ctx.data(|data| data.get_temp(egui::Id::new(LATEST_ANCHOR_ID)))
+}
+
+/// The first entry in view, and where it was: its place in the content and
+/// the scroll offset that put it on screen.
+#[derive(Clone, Copy)]
+struct ScrollAnchor {
+    entry: usize,
+    content_y: f32,
+    offset_y: f32,
+}
+
+/// If a body changed between waiting and shown this pass and moved the entry
+/// the reader was looking at (while they did not scroll), scrolls so that it
+/// stays where it was on screen, in the same pass. Returns the offset it
+/// scrolled to.
+fn anchor_correction(
+    ui: &egui::Ui,
+    previous: Option<ScrollAnchor>,
+    anchored_entry_y: Option<f32>,
+    first_visible: Option<(usize, f32)>,
+    (used_offset, viewport_height): (f32, f32),
+) -> Option<f32> {
+    let transitioned = crate::body::ui::take_transition(ui.ctx());
+    let (entry, content_y) = match (previous, anchored_entry_y) {
+        (Some(previous), Some(y)) => (previous.entry, y),
+        _ => first_visible?,
+    };
+    let previous = previous.filter(|previous| previous.entry == entry)?;
+    let scrolled = ui.input(|input| input.is_scrolling() || input.pointer.any_down());
+    if !transitioned || scrolled {
+        return None;
+    }
+    let wanted = content_y - (previous.content_y - previous.offset_y);
+    // A pane that follows the end of the conversation is pulled down by the
+    // growth once the rows are laid out; that moves the entry just as a change
+    // above it does.
+    let followed_end = (ui.min_rect().height() - viewport_height).max(0.0);
+    if (wanted - used_offset).abs() <= 0.5 && (followed_end - wanted).abs() <= 0.5 {
+        return None;
+    }
+    // Any explicit scroll adjustment also stops the pane from following the end.
+    let mut delta = used_offset - wanted;
+    if delta.abs() < 1e-3 {
+        delta = -1e-3;
+    }
+    ui.scroll_with_delta_animation(egui::vec2(0.0, delta), egui::style::ScrollAnimation::none());
+    Some(wanted)
 }
 
 /// Single-line lifecycle entries render as a muted icon line, not a card.
@@ -569,6 +700,7 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::Tool { .. }
         | TranscriptEntry::TurnEnd { .. }
         | TranscriptEntry::Artifacts { .. }
+        | TranscriptEntry::Unreadable { .. }
         | TranscriptEntry::Branch { .. } => None,
     }
 }
@@ -670,8 +802,12 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         | TranscriptEntry::Diagnostic { text, .. }
         | TranscriptEntry::SandboxReview { text, .. }
         | TranscriptEntry::Error { text } => text.clone(),
-        TranscriptEntry::Message { text, .. } => format!("Message: {text}"),
-        TranscriptEntry::Reasoning { text, .. } => text.clone(),
+        // Bodies are drawn through `show_text`; this label never sees a deferred one.
+        TranscriptEntry::Message { text, .. } => format!("Message: {}", text.inline_or_empty()),
+        TranscriptEntry::Reasoning { text, .. } => text.inline_or_empty().to_owned(),
+        TranscriptEntry::Unreadable { event_id, .. } => {
+            format!("Event {event_id} could not be read")
+        }
         TranscriptEntry::Compaction { .. } | TranscriptEntry::CompactionProgress { .. } => {
             compaction::summary(entry).unwrap_or_default()
         }

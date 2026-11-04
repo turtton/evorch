@@ -177,7 +177,7 @@ fn concurrent_runs_restore_answers_from_completion_and_reasoning_from_merged_row
         let reasoning: Vec<_> = restored
             .iter()
             .filter_map(|entry| match entry {
-                TranscriptEntry::Reasoning { text, .. } => Some(text.as_str()),
+                TranscriptEntry::Reasoning { text, .. } => Some(text.inline_or_empty()),
                 _ => None,
             })
             .collect();

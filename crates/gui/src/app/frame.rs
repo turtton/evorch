@@ -41,6 +41,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             crate::theme::style::install_preset(&ctx, self.theme_preset);
             self.theme_installed = true;
         }
+        self.bodies_begin_frame(&ctx);
         let (event_count, drain_time, fold_time) = self.drain_pump(&ctx, false);
         self.dispatch_system_notifications(&ctx);
         self.poll_external();
@@ -142,6 +143,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let ownership_time = ownership_started.elapsed();
         let render_started = Instant::now();
         self.render(ui);
+        self.bodies_end_frame();
         crate::panes::image_viewer::show(&ctx);
         self.open_requested_artifacts(&ctx);
         let render_time = render_started.elapsed();
@@ -292,6 +294,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::AgentMessage { .. }
                         | TranscriptEntry::TurnEnd { .. }
                         | TranscriptEntry::Artifacts { .. }
+                        | TranscriptEntry::Unreadable { .. }
                         | TranscriptEntry::Branch { .. } => None,
                     })
                     .flatten()

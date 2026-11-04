@@ -1,6 +1,7 @@
 use event_bus::{AgentMessageKind, CompactionReason, Event};
 
 use super::scoped_call::parse_scoped_call_id;
+use crate::body::{BodyRef, BodyText, FailureKind};
 
 mod branch;
 mod compaction;
@@ -11,10 +12,14 @@ mod lifecycle;
 mod reviews;
 pub mod shell_jobs;
 mod thinking;
+mod unreadable;
 
 pub use drafts::{redacted_for_display, redacted_text_for_display};
 pub use reviews::ToolReview;
+pub use unreadable::Fill;
 
+#[cfg(test)]
+mod body_tests;
 #[cfg(test)]
 mod draft_tests;
 #[cfg(test)]
@@ -120,14 +125,14 @@ pub enum TranscriptEntry {
         compacted_range_start: usize,
         compacted_range_end: usize,
         checkpoint_id: String,
-        summary: String,
+        summary: BodyText,
     },
     Message {
-        text: String,
+        text: BodyText,
         run_id: Option<String>,
     },
     Reasoning {
-        text: String,
+        text: BodyText,
         run_id: Option<String>,
     },
     Tool {
@@ -135,7 +140,7 @@ pub enum TranscriptEntry {
         tool_name: String,
         call_id: String,
         input: Option<serde_json::Value>,
-        output: Option<String>,
+        output: Option<BodyText>,
         detail: Option<serde_json::Value>,
         is_error: bool,
         status: ToolStatus,
@@ -164,6 +169,16 @@ pub enum TranscriptEntry {
         kind: workspace_ui::LineageKind,
         source_thread_id: String,
     },
+    /// A stored event that could not be read, kept at the place it occupies in
+    /// the history so a gap is visible. It can be read again.
+    Unreadable {
+        event_id: i64,
+        run_id: Option<String>,
+        kind: FailureKind,
+        reason: String,
+        /// The body whose read failed, when the event itself decodes.
+        reference: Option<BodyRef>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +201,12 @@ pub struct TranscriptModel {
     /// Approval IDs that interrupted an already running call.
     approvals_while_running: std::collections::BTreeSet<String>,
     drafts: drafts::DraftIndex,
+    /// The display body of the event being applied, when it is still in the
+    /// store. Set only for the duration of [`Self::apply_with_body`].
+    deferred_body: Option<BodyText>,
+    /// The stored event being applied (first and last id, more than one for a
+    /// response joined from slices), when it came from the log.
+    source: Option<(i64, i64)>,
     closed_compactions: std::collections::VecDeque<(String, String)>,
 }
 
@@ -193,6 +214,10 @@ pub struct TranscriptModel {
 struct EntryMeta {
     id: usize,
     revision: u64,
+    /// The first and last stored event that made or changed this entry, when
+    /// it was built from stored events. A gap that is read again is filled by
+    /// what these ranges say belongs to its event, not by comparing text.
+    src: Option<(i64, i64)>,
 }
 
 impl Default for TranscriptModel {
@@ -227,6 +252,8 @@ impl TranscriptModel {
             pending_reviews: std::collections::BTreeMap::new(),
             approvals_while_running: std::collections::BTreeSet::new(),
             drafts: drafts::DraftIndex::default(),
+            deferred_body: None,
+            source: None,
             closed_compactions: Default::default(),
         }
     }
@@ -264,14 +291,37 @@ impl TranscriptModel {
     }
 
     fn entry_index(&self, entry_id: usize) -> Option<usize> {
+        // Ids ascend except where a re-read event's entries replaced a gap.
         self.entry_meta
             .binary_search_by_key(&entry_id, |meta| meta.id)
             .ok()
+            .or_else(|| self.entry_meta.iter().position(|meta| meta.id == entry_id))
     }
 
     fn entry_mut(&mut self, index: usize) -> Option<&mut TranscriptEntry> {
-        self.entry_meta.get_mut(index)?.revision += 1;
+        self.entry_meta.get(index)?;
+        self.touch(index);
         self.entries.get_mut(index)
+    }
+
+    /// Marks the entry as changed, by the stored event being applied if there
+    /// is one.
+    fn touch(&mut self, index: usize) {
+        let source = self.source;
+        let meta = &mut self.entry_meta[index];
+        meta.revision += 1;
+        if let Some((first, last)) = source {
+            meta.src = Some(match meta.src {
+                Some((was_first, was_last)) => (was_first.min(first), was_last.max(last)),
+                None => (first, last),
+            });
+        }
+    }
+
+    /// Says which stored event the entries made from now on come from; `None`
+    /// for an event that is not in the log (a live one).
+    pub(crate) fn set_source(&mut self, source: Option<(i64, i64)>) {
+        self.source = source;
     }
 
     pub fn set_view_window(&mut self, start: usize, len: usize) {
@@ -281,7 +331,7 @@ impl TranscriptModel {
 
     pub fn push_message(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::Message {
-            text: text.into(),
+            text: text.into().into(),
             run_id: None,
         });
     }
@@ -300,7 +350,7 @@ impl TranscriptModel {
 
     pub fn push_reasoning(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::Reasoning {
-            text: text.into(),
+            text: text.into().into(),
             run_id: None,
         });
     }
@@ -323,6 +373,58 @@ impl TranscriptModel {
             reviews: Vec::new(),
             parent_call_id: None,
         });
+    }
+
+    /// Applies `event` whose display body is still in the store: `body` takes
+    /// the place of the (empty) string the event holds for it.
+    pub fn apply_with_body(&mut self, event: &Event, body: Option<BodyText>) {
+        self.deferred_body = body;
+        self.apply(event);
+        self.deferred_body = None;
+    }
+
+    /// Replaces every body in the transcript, as a test would read them all.
+    #[cfg(test)]
+    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
+        for entry in &mut self.entries {
+            match entry {
+                TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
+                    *text = f(text);
+                }
+                TranscriptEntry::Compaction { summary, .. } => *summary = f(summary),
+                TranscriptEntry::Tool {
+                    output: Some(output),
+                    ..
+                } => *output = f(output),
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether any body is still in the store.
+    #[cfg(test)]
+    pub(crate) fn has_deferred_bodies(&self) -> bool {
+        self.entries.iter().any(|entry| match entry {
+            TranscriptEntry::Message { text, .. } | TranscriptEntry::Reasoning { text, .. } => {
+                text.has_deferred()
+            }
+            TranscriptEntry::Compaction { summary, .. } => summary.has_deferred(),
+            TranscriptEntry::Tool {
+                output: Some(output),
+                ..
+            } => output.has_deferred(),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn set_deferred_body(&mut self, body: Option<BodyText>) {
+        self.deferred_body = body;
+    }
+
+    /// The body of the event being applied: the deferred one when there is
+    /// one, otherwise `text` as it came.
+    fn body_of(&mut self, text: &str) -> BodyText {
+        self.deferred_body.take().unwrap_or_else(|| text.into())
     }
 
     pub fn apply(&mut self, event: &Event) {
@@ -387,8 +489,8 @@ impl TranscriptModel {
                         self.entries.swap(0, 1);
                         // Keep allocated IDs sorted for ID lookup; both slots
                         // now contain different displayed content.
-                        self.entry_meta[0].revision += 1;
-                        self.entry_meta[1].revision += 1;
+                        self.touch(0);
+                        self.touch(1);
                     }
                 }
             }
@@ -432,7 +534,8 @@ impl TranscriptModel {
                 }
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::MessageCompleted { run_id, text }) => {
-                self.complete_message(run_id, text, &event.meta);
+                let body = self.body_of(text);
+                self.complete_message(run_id, body, &event.meta);
                 self.response_completed(run_id);
             }
             event_bus::EventKind::Message(event_bus::MessageEvent::ToolCallDelta {
@@ -498,6 +601,10 @@ impl TranscriptModel {
                 },
                 );
                 let mut input = None;
+                let shown_output = match self.deferred_body.take() {
+                    Some(body) => Some(body),
+                    None => output.as_deref().map(BodyText::from),
+                };
                 if let Some(TranscriptEntry::Tool {
                     run_id: current_run,
                     input: current_input,
@@ -508,7 +615,7 @@ impl TranscriptModel {
                     ..
                 }) = self.find_scoped_tool_mut(call_id, run_id.as_deref()) {
                     current_run.clone_from(run_id);
-                    current_output.clone_from(output);
+                    *current_output = shown_output;
                     current_detail.clone_from(detail);
                     *current_is_error = *is_error;
                     if parent_call_id.is_some() {
@@ -601,6 +708,7 @@ impl TranscriptModel {
             MessageEvent::FinalResultPublished { text, run_id } => {
                 self.streaming_messages.remove(&Some(run_id.clone()));
                 self.thinking.remove(&Some(run_id.clone()));
+                let body = self.body_of(text);
                 let last_message = self.entries.iter().rev().find_map(|entry| match entry {
                     TranscriptEntry::Message {
                         text,
@@ -608,16 +716,17 @@ impl TranscriptModel {
                     } if id == run_id => Some(text),
                     _ => None,
                 });
-                if !text.is_empty() && last_message != Some(text) {
+                if !body.is_empty() && last_message != Some(&body) {
                     // A finish result is a complete message, not another stream chunk.
                     self.push(TranscriptEntry::Message {
-                        text: text.clone(),
+                        text: body,
                         run_id: Some(run_id.clone()),
                     });
                 }
                 return;
             }
         };
+        let delta = self.body_of(delta);
         if delta.is_empty() {
             return;
         }
@@ -640,7 +749,7 @@ impl TranscriptModel {
             if let Some(entry) = self.entry_mut(self.entries.len() - 1) {
                 match entry {
                     TranscriptEntry::Message { text, .. }
-                    | TranscriptEntry::Reasoning { text, .. } => text.push_str(delta),
+                    | TranscriptEntry::Reasoning { text, .. } => text.push_body(delta),
                     TranscriptEntry::UserMessage { .. }
                     | TranscriptEntry::Error { .. }
                     | TranscriptEntry::Notice { .. }
@@ -652,6 +761,7 @@ impl TranscriptModel {
                     | TranscriptEntry::AgentMessage { .. }
                     | TranscriptEntry::TurnEnd { .. }
                     | TranscriptEntry::Artifacts { .. }
+                    | TranscriptEntry::Unreadable { .. }
                     | TranscriptEntry::Branch { .. } => {}
                 }
             }
@@ -663,11 +773,11 @@ impl TranscriptModel {
                 | MessageEvent::MessagePart { .. }
                 | MessageEvent::ToolCallDelta { .. }
                 | MessageEvent::StreamRetried { .. } => TranscriptEntry::Message {
-                    text: delta.clone(),
+                    text: delta,
                     run_id: run_id.clone(),
                 },
                 MessageEvent::ReasoningDelta { .. } => TranscriptEntry::Reasoning {
-                    text: delta.clone(),
+                    text: delta,
                     run_id: run_id.clone(),
                 },
             });
@@ -687,7 +797,7 @@ impl TranscriptModel {
         }
     }
 
-    fn complete_message(&mut self, run_id: &str, text: &str, meta: &event_bus::EventMeta) {
+    fn complete_message(&mut self, run_id: &str, text: BodyText, meta: &event_bus::EventMeta) {
         if self.completed_messages.get(run_id) == Some(meta) {
             return;
         }
@@ -704,14 +814,11 @@ impl TranscriptModel {
             if let Some(&index) = indices.first() {
                 if let Some(TranscriptEntry::Message { text: current, .. }) = self.entry_mut(index)
                 {
-                    text.clone_into(current);
+                    *current = text;
                 }
                 indices.remove(0);
             } else {
-                self.push(TranscriptEntry::Message {
-                    text: text.into(),
-                    run_id: key,
-                });
+                self.push(TranscriptEntry::Message { text, run_id: key });
             }
         }
         // Reasoning or diagnostics may split one response into several display
@@ -821,7 +928,7 @@ impl TranscriptModel {
             });
             return;
         };
-        self.entry_meta[index].revision += 1;
+        self.touch(index);
         let TranscriptEntry::Tool {
             status: current, ..
         } = &mut self.entries[index]
@@ -934,6 +1041,7 @@ impl TranscriptModel {
         self.entry_meta.push(EntryMeta {
             id: self.next_entry_id,
             revision: 0,
+            src: self.source,
         });
         self.next_entry_id += 1;
         if self.entries.len() > self.capacity {

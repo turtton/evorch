@@ -93,6 +93,13 @@ pub struct WorkbenchState<S> {
     /// the log shows only the first few.
     pub(super) unreadable_history_events:
         std::collections::BTreeMap<i64, super::history::UnreadableEvent>,
+    /// How many times an unreadable event was read again because what its
+    /// rows would replace had changed meanwhile, by event ID.
+    pub(super) gap_rereads: std::collections::BTreeMap<i64, u8>,
+    /// Reads bodies that stay in the store until something shows them.
+    pub(super) body_resolver: Option<crate::body::BodyResolver>,
+    /// Permanent body failures reported so far (one per body and kind).
+    pub(super) body_failure_reports: Vec<crate::body::FailureReport>,
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) receipt_reconciliation: super::delivery::ReceiptReconciliation,
     pub(super) draft_dirty_at: std::cell::Cell<Option<std::time::Instant>>,
@@ -242,6 +249,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             shared_feed: Default::default(),
             shown_through_event: 0,
             unreadable_history_events: std::collections::BTreeMap::new(),
+            gap_rereads: std::collections::BTreeMap::new(),
+            body_resolver: None,
+            body_failure_reports: Vec::new(),
             history: Vec::new(),
             receipt_reconciliation: Default::default(),
             draft_dirty_at: Default::default(),

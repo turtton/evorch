@@ -172,7 +172,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, None)
+        let source = self.storage_history(db);
+        self.restore_history_inner(db, None, &source)
+    }
+
+    /// [`Self::restore_history`] reading the event log from `source` instead
+    /// of from `db` (which still supplies everything else). For tests of a
+    /// log whose bodies are not inline.
+    pub fn restore_history_from(
+        &mut self,
+        db: &storage::Database,
+        source: &dyn crate::body::HistorySource,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, None, source)
+    }
+
+    /// [`Self::restore_history_from`] that also reconciles phases with the
+    /// owner registry, like a start-up.
+    pub fn restore_history_with_ownership_from(
+        &mut self,
+        db: &storage::Database,
+        registry_path: &std::path::Path,
+        source: &dyn crate::body::HistorySource,
+    ) -> Result<(), storage::StorageError> {
+        self.restore_history_inner(db, Some(registry_path), source)
     }
 
     /// Reconcile orphaned phases only when the owner registry can be inspected.
@@ -181,13 +204,25 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db: &storage::Database,
         registry_path: &std::path::Path,
     ) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, Some(registry_path))
+        let source = self.storage_history(db);
+        self.restore_history_inner(db, Some(registry_path), &source)
+    }
+
+    /// The database as a history source that counts what it reads at once in
+    /// the body resolver's meter.
+    fn storage_history<'a>(&self, db: &'a storage::Database) -> crate::body::StorageHistory<'a> {
+        crate::body::StorageHistory::new(db).with_meter(
+            self.body_resolver
+                .as_ref()
+                .map(crate::body::BodyResolver::meter),
+        )
     }
 
     fn restore_history_inner(
         &mut self,
         db: &storage::Database,
         registry_path: Option<&std::path::Path>,
+        source: &dyn crate::body::HistorySource,
     ) -> Result<(), storage::StorageError> {
         let total = crate::restore_metrics::RestoreTimer::new("history_total");
         let stage = crate::restore_metrics::RestoreTimer::new("history_first_pass");
@@ -331,15 +366,37 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut replayed_to = scan_through;
         let mut completed_since_request = std::collections::BTreeMap::new();
         let mut snapshot_error = None;
-        let mut parts = event_bus::MessagePartAssembler::new();
-        db.for_each_event_isolated(
-            scan_through,
-            |stored| {
-                replayed_to = replayed_to.max(stored.id);
-                let Some(assembled) = parts.accept(&stored.event) else {
+        let mut parts = crate::body::DeferredPartAssembler::new();
+        source.scan(scan_through, &mut |row| {
+            let row = match row {
+                crate::body::HistoryRow::Failure(failure) => {
+                    // The gap stands where the event was; what the run was
+                    // streaming cannot continue across it. A message the user
+                    // sent before the event comes first, as before a readable one.
+                    replayed_to = replayed_to.max(failure.id);
+                    if let Some(at) = failure.wall_clock {
+                        while messages.peek().is_some_and(|message| message.at <= at) {
+                            if let Some(message) = messages.next() {
+                                self.restore_user_message(message);
+                            }
+                        }
+                    }
+                    parts.interrupt(failure.run_id.as_deref());
+                    self.show_unreadable_event(&failure, &mut unreadable);
                     return;
+                }
+                crate::body::HistoryRow::Event(row) => row,
+            };
+            {
+                replayed_to = replayed_to.max(row.id);
+                let accepted = parts.accept(&row);
+                let assembled = match &accepted {
+                    crate::body::Accepted::Event(row) => *row,
+                    crate::body::Accepted::Completed(done) => &**done,
+                    crate::body::Accepted::Nothing => return,
                 };
-                let event: &event_bus::Event = &assembled;
+                let deferred = assembled.body.as_ref();
+                let event: &event_bus::Event = &assembled.event;
                 while messages
                     .peek()
                     .is_some_and(|message| message.at <= event.meta.wall_clock)
@@ -352,9 +409,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .and_then(|end| end.duration_since(event.meta.wall_clock).ok())
                     .and_then(|age| replay_now.checked_sub(age))
                     .unwrap_or(replay_now);
-                self.telemetry.apply_event_at(event, at);
+                self.telemetry.apply_event_at_with(
+                    event,
+                    at,
+                    deferred.map_or(0, crate::body::BodyText::byte_len),
+                );
                 self.transcripts.select_thread(None);
-                self.apply_conversation_event(event);
+                self.transcripts.set_source(Some((
+                    assembled.first_id.unwrap_or(assembled.id),
+                    assembled.id,
+                )));
+                self.apply_conversation_event_with_body(event, deferred);
+                self.transcripts.set_source(None);
                 self.seed_system_notification(event);
                 if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                     run_id,
@@ -392,7 +458,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 if let event_bus::EventKind::Lifecycle(
                     event_bus::LifecycleEvent::AgentRunStateChanged { run_id, .. },
                 ) = &event.kind
-                    && last_waiting.get(run_id) == Some(&stored.id)
+                    && last_waiting.get(run_id) == Some(&assembled.id)
                     && !completed_since_request
                         .get(run_id)
                         .copied()
@@ -411,14 +477,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         },
                     ));
                 }
-            },
-            |id, run, reason| {
-                unreadable.entry(id).or_insert_with(|| UnreadableEvent {
-                    run_id: run.map(str::to_owned),
-                    reason: reason.to_owned(),
-                });
-            },
-        )?;
+            }
+        })?;
         if let Some(error) = snapshot_error {
             return Err(error);
         }
@@ -427,11 +487,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .iter()
                 .map(|(id, event)| (*id, event.run_id.as_deref(), event.reason.as_str())),
         );
+        // An unreadable event that names no run has no transcript to show a gap
+        // in; it is never put in the open one by guess, so it is announced.
+        let orphans: Vec<i64> = unreadable
+            .iter()
+            .filter(|(_, event)| event.run_id.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        if !orphans.is_empty() {
+            self.notifications.push_history_gap(&orphans);
+        }
         self.unreadable_history_events = unreadable;
         stage.finish();
         let stage = crate::restore_metrics::RestoreTimer::new("history_reconcile_ledger");
         // A response can finish after the replay cursor, in a later feed batch.
-        self.shared_feed.parts = parts;
+        self.shared_feed.parts = event_bus::MessagePartAssembler::new();
+        self.hand_over_open_parts(parts);
         self.note_replayed_event(replayed_to);
         self.note_restored_active_runs();
         self.reconcile_restored_phases(db, registry_path);

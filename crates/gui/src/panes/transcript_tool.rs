@@ -1,3 +1,4 @@
+use crate::body::BodyText;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -166,7 +167,7 @@ const POLLING_TOOLS: &[&str] = &[
 /// the state they reported. Failures and running calls never match.
 fn poll_signature(
     entry: &TranscriptEntry,
-) -> Option<(Option<&str>, &str, Option<&serde_json::Value>, &str)> {
+) -> Option<(Option<&str>, &str, Option<&serde_json::Value>, &BodyText)> {
     let TranscriptEntry::Tool {
         run_id,
         tool_name,
@@ -269,10 +270,14 @@ pub fn tool_card_group(
         matches!(status, ToolStatus::Running),
     );
     let shown_input = display_input.as_deref().map(|display| &display.value);
+    // A header summary never asks for a body: it uses one only if held.
+    let header_output = output
+        .as_ref()
+        .and_then(|output| crate::body::ui::peek_text(ui.ctx(), output));
     let mut header = header::tool_header(
         tool_name,
         shown_input,
-        output.as_deref(),
+        header_output.as_deref(),
         *is_error,
         context.repo_root,
         context.agents,
@@ -352,7 +357,8 @@ pub fn tool_card_group(
                     TranscriptEntry::Tool {
                         output: Some(output),
                         ..
-                    } => Some(result_body(output)),
+                    } => crate::body::ui::peek_text(ui.ctx(), output)
+                        .map(|output| result_body(&output).to_owned()),
                     _ => None,
                 })
                 .collect();
@@ -391,19 +397,21 @@ pub fn tool_card_group(
                 } else {
                     "Output"
                 });
-                if is_diff {
-                    diff_code(ui, output);
-                } else {
-                    code(
-                        ui,
-                        &display_output(tool_name, output),
-                        if *is_error {
-                            palette().ERROR_FG
-                        } else {
-                            palette().TEXT
-                        },
-                    );
-                }
+                crate::body::ui::show_text(ui, id.with("output"), output, |ui, output| {
+                    if is_diff {
+                        diff_code(ui, output);
+                    } else {
+                        code(
+                            ui,
+                            &display_output(tool_name, output),
+                            if *is_error {
+                                palette().ERROR_FG
+                            } else {
+                                palette().TEXT
+                            },
+                        );
+                    }
+                });
             }
             if let Some(detail) = detail {
                 ui.label("Detail");

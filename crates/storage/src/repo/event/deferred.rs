@@ -141,18 +141,152 @@ pub fn for_each_event_ordered_deferred(
                 {
                     continue;
                 }
-                visit(DeferredRow::Failed(StoredEventFailure {
-                    id: row.get(0)?,
-                    run_id,
-                    wall_clock: row.get(4).ok().map(ns_to_system_time),
-                    kind: row.get(5).ok(),
-                    subkind: row.get(8).ok().flatten(),
-                    reason,
-                }));
+                visit(DeferredRow::Failed(failed_row(row, run_id, reason)?));
             }
         }
     }
     Ok(())
+}
+
+/// The failure a row that cannot be read becomes, with what its columns still say.
+fn failed_row(
+    row: &Row<'_>,
+    run_id: Option<String>,
+    reason: StoredEventFailureReason,
+) -> Result<StoredEventFailure, StorageError> {
+    Ok(StoredEventFailure {
+        id: row.get(0)?,
+        run_id,
+        wall_clock: row.get(4).ok().map(ns_to_system_time),
+        kind: row.get(5).ok(),
+        subkind: row.get(8).ok().flatten(),
+        reason,
+    })
+}
+
+const DEFERRED_COLUMNS: &str = "id, session_id, schema_version, monotonic_ns, wall_clock_ns, \
+     kind, payload, body_format, subkind, run_id";
+
+/// The events concerning `run_ids` with `after_id < id <= through_id`, in `id` order, as
+/// [`for_each_event_ordered_deferred`] hands them over: successes and failures in one
+/// sequence, no blob read. The rows are found through the run index, so a long log is not
+/// scanned. A row that cannot be read is handed over only when its `run_id` column names
+/// one of the runs (nothing else can say whom it concerns). Tombstoned rows are not handed
+/// over.
+///
+/// # Errors
+/// Fails only when the query itself fails.
+pub fn for_each_event_for_runs_deferred(
+    conn: &Connection,
+    run_ids: &[String],
+    after_id: i64,
+    through_id: i64,
+    mut visit: impl FnMut(DeferredRow),
+) -> Result<(), StorageError> {
+    let runs: std::collections::HashSet<&str> = run_ids.iter().map(String::as_str).collect();
+    // No transaction spans the visits: `visit` may read bodies on this very
+    // connection, and a transaction cannot be opened inside one. A row deleted
+    // since its id was collected is skipped.
+    let tombstones = TombstoneSet::load(conn)?;
+    let candidates: Vec<_> = super::select::run_candidates(conn, run_ids)?
+        .into_iter()
+        .filter(|candidate| candidate.id > after_id && candidate.id <= through_id)
+        .collect();
+    let mut statement = conn.prepare(&format!(
+        "SELECT {DEFERRED_COLUMNS} FROM events WHERE id = ?1"
+    ))?;
+    for candidate in candidates {
+        let mut rows = statement.query([candidate.id])?;
+        // The row may have been deleted since the ids were collected.
+        let Some(row) = rows.next()? else { continue };
+        let run_id: Option<String> = row.get(9).ok().flatten();
+        match deferred_row(row) {
+            Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
+            Ok(event) => {
+                if !candidate.confirm || super::select::concerns_runs(&event.event, &runs) {
+                    visit(DeferredRow::Event(Box::new(event)));
+                }
+            }
+            Err(reason) => {
+                let names_a_run = run_id.as_deref().is_some_and(|run| runs.contains(run));
+                if candidate.confirm
+                    || !names_a_run
+                    || run_id
+                        .as_deref()
+                        .is_some_and(|run| tombstones.contains_run(run))
+                {
+                    continue;
+                }
+                visit(DeferredRow::Failed(failed_row(row, run_id, reason)?));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One page of the log read after a cursor, for following what other processes write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeferredPage {
+    /// The rows of other sessions in `id` order: events (long strings still tokens) and
+    /// the rows that cannot be read, in one sequence.
+    pub rows: Vec<DeferredRow>,
+    /// The largest id scanned, including rows of the excluded session, or the cursor when
+    /// no row followed it.
+    pub last_id: i64,
+    /// Rows scanned; a page shorter than the limit reached the end of the log.
+    pub scanned: usize,
+}
+
+/// Up to `limit` rows with `id > after_id`, as [`DeferredPage`]. The payload of a row of
+/// `exclude_session` is not read. A row that cannot be read is a
+/// [`DeferredRow::Failed`] in its place, not an error. No blob is read.
+///
+/// # Errors
+/// Fails only when the query itself fails.
+pub fn deferred_events_after(
+    conn: &Connection,
+    after_id: i64,
+    limit: usize,
+    exclude_session: Option<&str>,
+) -> Result<DeferredPage, StorageError> {
+    let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+    let tombstones = TombstoneSet::load(conn)?;
+    let mut statement = conn.prepare_cached(
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+         CASE WHEN session_id = ?3 THEN NULL ELSE payload END, body_format, subkind, run_id \
+         FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+    )?;
+    let mut rows = statement.query(rusqlite::params![after_id, limit, exclude_session])?;
+    let mut page = DeferredPage {
+        rows: Vec::new(),
+        last_id: after_id,
+        scanned: 0,
+    };
+    while let Some(row) = rows.next()? {
+        page.scanned += 1;
+        page.last_id = row.get(0)?;
+        if exclude_session.is_some()
+            && row.get::<_, Option<String>>(1).ok().flatten().as_deref() == exclude_session
+        {
+            continue;
+        }
+        let run_id: Option<String> = row.get(9).ok().flatten();
+        match deferred_row(row) {
+            Ok(event) if tombstones.rejects(&event.event.kind).is_some() => {}
+            Ok(event) => page.rows.push(DeferredRow::Event(Box::new(event))),
+            Err(reason) => {
+                if run_id
+                    .as_deref()
+                    .is_some_and(|run| tombstones.contains_run(run))
+                {
+                    continue;
+                }
+                page.rows
+                    .push(DeferredRow::Failed(failed_row(row, run_id, reason)?));
+            }
+        }
+    }
+    Ok(page)
 }
 
 fn deferred_row(row: &Row<'_>) -> Result<DeferredStoredEvent, StoredEventFailureReason> {

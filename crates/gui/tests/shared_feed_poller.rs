@@ -266,3 +266,48 @@ fn compressed_event_payloads_are_followed_like_plain_ones() {
     assert_eq!(batch.events[0].event, foreign);
     assert_eq!(follower.cursor(), 2);
 }
+
+#[test]
+fn text_that_starts_with_the_escape_character_reaches_the_follower_exactly_as_written() {
+    // Stored as tokens whatever their length, and read back whole: what a body
+    // resolves to is text, never a token position to resolve once more.
+    let (_dir, config, storage) = setup("escape.db");
+    let handle = storage.handle();
+    let texts = [
+        "\u{e000}a short text that starts with the escape character".to_owned(),
+        format!(
+            "\u{e000}{}",
+            "a long text that starts with it. ".repeat(200)
+        ),
+        format!("\u{e000}evorch-body:v1:{}:3", "ab".repeat(32)),
+        "a long ordinary text. ".repeat(200),
+    ];
+    for text in &texts {
+        handle
+            .append_stream_event(
+                "other",
+                &Event::new(event_bus::MessageEvent::MessageCompleted {
+                    run_id: "run-a".into(),
+                    text: text.clone(),
+                }),
+                None,
+            )
+            .expect("append");
+    }
+    let mut follower = poller(&config, "me", 0);
+
+    let batch = follower.poll_once().expect("poll");
+
+    assert!(batch.failures.is_empty(), "{:?}", batch.failures);
+    let read: Vec<String> = batch
+        .events
+        .iter()
+        .map(|fed| match &fed.event.kind {
+            EventKind::Message(event_bus::MessageEvent::MessageCompleted { text, .. }) => {
+                text.clone()
+            }
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(read, texts);
+}

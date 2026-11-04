@@ -7,7 +7,7 @@ fn redactor() -> &'static secret_guard::SecretRedactor {
     REDACTOR.get_or_init(secret_guard::SecretRedactor::from_env)
 }
 
-fn entry(event: &CompactionEvent) -> TranscriptEntry {
+fn entry(event: &CompactionEvent, summary: crate::body::BodyText) -> TranscriptEntry {
     match event {
         CompactionEvent::Compacted {
             reason,
@@ -18,7 +18,6 @@ fn entry(event: &CompactionEvent) -> TranscriptEntry {
             compacted_range_start,
             compacted_range_end,
             checkpoint_id,
-            summary,
             ..
         } => TranscriptEntry::Compaction {
             reason: *reason,
@@ -29,7 +28,7 @@ fn entry(event: &CompactionEvent) -> TranscriptEntry {
             compacted_range_start: *compacted_range_start,
             compacted_range_end: *compacted_range_end,
             checkpoint_id: checkpoint_id.clone(),
-            summary: redactor().redact(summary).text,
+            summary,
         },
         _ => unreachable!("only durable compaction has a completed entry"),
     }
@@ -136,11 +135,16 @@ impl super::TranscriptModel {
         }
         let position = self.entries.iter().position(|entry| matches!(entry, TranscriptEntry::CompactionProgress { progress } if progress.run_id == *run && progress.operation_id == *operation));
         match &event.kind {
-            EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+            EventKind::Compaction(event @ CompactionEvent::Compacted { summary, .. }) => {
+                // A summary still in the store was redacted when it was stored.
+                let summary = self
+                    .deferred_body
+                    .take()
+                    .unwrap_or_else(|| redactor().redact(summary).text.into());
                 if let Some(position) = position {
-                    *self.entry_mut(position).unwrap() = entry(event);
+                    *self.entry_mut(position).unwrap() = entry(event, summary);
                 } else {
-                    self.push(entry(event));
+                    self.push(entry(event, summary));
                 }
             }
             EventKind::Compaction(CompactionEvent::Aborted { .. }) => {

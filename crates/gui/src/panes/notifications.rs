@@ -50,6 +50,7 @@ pub fn notifications_pane(
                 NotificationKind::RunFailed { .. } => terminal(ThreadRunPhase::Error),
                 NotificationKind::RetentionStartup => ("Storage", terminal(ThreadRunPhase::Done).1),
                 NotificationKind::RetentionDisabled { .. } => ("Storage", attention_color()),
+                NotificationKind::HistoryGap => ("History", attention_color()),
                 NotificationKind::EvaluationFinished { all_reported: true } => {
                     ("Evaluation", terminal(ThreadRunPhase::Done).1)
                 }
