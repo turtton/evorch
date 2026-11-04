@@ -23,6 +23,7 @@ fn compaction_survives_replay_without_loss_or_duplication() {
     .enumerate()
     .map(|(index, reason)| {
         let mut event = Event::new(CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-1".into(),
             reason,
             threshold: 0.8,

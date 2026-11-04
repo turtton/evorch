@@ -95,17 +95,15 @@ async fn a_delegate_card_names_the_agent_and_a_draft_shows_its_progress() {
     ));
     let harness = card(&drafting);
 
-    // Then: the card shows the tool and the argument tail, and cannot be expanded.
+    // Then: the card shows the tool and, below its short header, the prompt
+    // being written as text rather than as JSON.
     assert!(
         harness
             .query_by_label_contains("Delegate · composing…")
             .is_some()
     );
-    assert!(
-        harness
-            .query_by_label_contains("\"prompt\":\"fix the bug\"")
-            .is_some()
-    );
+    assert!(harness.query_by_label("fix the bug").is_some());
+    assert!(harness.query_by_label_contains("\"prompt\"").is_none());
 
     // And: once the runtime starts the call, the same card names the agent.
     registry.apply(&Event::new(ToolEvent::ToolStarted {

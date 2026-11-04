@@ -386,7 +386,12 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
         EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
             accepts(&message.sender_run_id) && accepts(&message.recipient_run_id)
         }
-        EventKind::Compaction(CompactionEvent::Compacted { run_id, .. }) => accepts(run_id),
+        // A live terminal cleanup cannot mutate history or claim success. It must
+        // survive ownership revocation so its exact operation cannot spin forever.
+        EventKind::Compaction(CompactionEvent::Aborted { .. }) => true,
+        EventKind::Compaction(
+            CompactionEvent::Compacted { run_id, .. } | CompactionEvent::Progress { run_id, .. },
+        ) => accepts(run_id),
         EventKind::Ledger(crate::LedgerEvent::RunLedgerAppended { run_id, .. }) => accepts(run_id),
         EventKind::Diagnostic(event) => event.run_id.as_deref().is_none_or(accepts),
         EventKind::Provider(ProviderEvent::ProviderFallback { .. })

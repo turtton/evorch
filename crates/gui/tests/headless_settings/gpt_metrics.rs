@@ -111,6 +111,7 @@ async fn context_pressure_uses_window_resolved_by_runtime() {
     let settings = settings(ProviderTypeConfig::OpenAiCodex).await;
     let mut telemetry = TelemetryOverlay::new();
     telemetry.apply_event(&Event::new(LifecycleEvent::RunProgress {
+        compaction_operation_id: None,
         run_id: "run-1".into(),
         activity: RunActivity::Model,
         context: Some(ContextComposition {

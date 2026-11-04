@@ -1,6 +1,6 @@
 use event_bus::CompactionEvent;
 
-const OLD: &str = r#"{"kind":"Compacted","payload":{"run_id":"run-1","reason":"automatic","threshold":0.75,"context_window_tokens":200000,"estimated_tokens_before":150000,"estimated_tokens_after":1000,"compacted_range_start":1,"compacted_range_end":4,"checkpoint_id":"ckpt-1","summary":"summary"}}"#;
+const OLD: &str = r#"{"kind":"Compacted","payload":{"operation_id":"op-1","run_id":"run-1","reason":"automatic","threshold":0.75,"context_window_tokens":200000,"estimated_tokens_before":150000,"estimated_tokens_after":1000,"compacted_range_start":1,"compacted_range_end":4,"checkpoint_id":"ckpt-1","summary":"summary"}}"#;
 
 #[test]
 fn window_source_round_trips_when_present() {

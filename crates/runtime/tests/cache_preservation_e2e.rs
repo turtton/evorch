@@ -527,6 +527,7 @@ fn verify_trace_of(
     requests: &[Value],
 ) {
     let protocol = harness.wire.protocol();
+    let mut live_compactions = std::collections::BTreeSet::new();
     let mut starts = Vec::new();
     let mut completed = std::collections::HashMap::new();
     let mut pending_checkpoint = None;
@@ -534,11 +535,41 @@ fn verify_trace_of(
     let mut aggregator = UsageAggregator::new();
     for event in events {
         match &event.kind {
+            EventKind::Lifecycle(event_bus::LifecycleEvent::RunProgress {
+                run_id,
+                compaction_operation_id: Some(operation_id),
+                activity: event_bus::RunActivity::Compaction,
+                ..
+            }) if run_id == &run.to_string() => {
+                assert!(live_compactions.insert(operation_id.clone()));
+            }
+            EventKind::Compaction(CompactionEvent::Progress {
+                run_id,
+                operation_id,
+                mode,
+                delta,
+                ..
+            }) if run_id == &run.to_string() => {
+                assert!(live_compactions.contains(operation_id));
+                assert!(delta.len() <= event_bus::COMPACTION_DELTA_MAX_BYTES);
+                assert!(*mode == event_bus::CompactionMode::ModelSummary || delta.is_empty());
+            }
+            EventKind::Compaction(CompactionEvent::Aborted {
+                run_id,
+                operation_id,
+            }) if run_id == &run.to_string() => {
+                assert!(live_compactions.remove(operation_id));
+            }
             EventKind::Compaction(CompactionEvent::Compacted {
                 run_id,
+                operation_id,
                 checkpoint_id,
                 ..
             }) if run_id == &run.to_string() => {
+                assert!(
+                    live_compactions.remove(operation_id),
+                    "success must match a live operation"
+                );
                 assert!(pending_checkpoint.replace(checkpoint_id.clone()).is_none());
                 checkpoint_count += 1;
             }
@@ -573,6 +604,10 @@ fn verify_trace_of(
             _ => {}
         }
     }
+    assert!(
+        live_compactions.is_empty(),
+        "no spinner may remain after the run"
+    );
     assert_eq!(checkpoint_count, compactions);
     assert!(
         pending_checkpoint.is_none(),

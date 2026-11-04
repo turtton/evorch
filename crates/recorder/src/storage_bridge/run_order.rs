@@ -85,7 +85,9 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
             ]),
         },
         EventKind::Compaction(event) => match event {
-            CompactionEvent::Compacted { run_id, .. } => runs.push(run_id),
+            CompactionEvent::Compacted { run_id, .. }
+            | CompactionEvent::Progress { run_id, .. }
+            | CompactionEvent::Aborted { run_id, .. } => runs.push(run_id),
         },
         EventKind::Ledger(event) => match event {
             LedgerEvent::RunLedgerAppended { run_id, .. } => runs.push(run_id),

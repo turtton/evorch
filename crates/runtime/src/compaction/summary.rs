@@ -116,7 +116,20 @@ impl ModelSummarizer {
         input: &SummaryInput<'_>,
         text_tool_history: bool,
     ) -> (Result<String, SummarizeError>, Option<Usage>) {
-        match self.complete_summary(input, text_tool_history).await {
+        self.summarize_with_progress(input, text_tool_history, None)
+            .await
+    }
+
+    pub(crate) async fn summarize_with_progress(
+        &self,
+        input: &SummaryInput<'_>,
+        text_tool_history: bool,
+        mut progress: Option<&mut super::progress::SummaryProgress>,
+    ) -> (Result<String, SummarizeError>, Option<Usage>) {
+        match self
+            .complete_summary(input, text_tool_history, &mut progress)
+            .await
+        {
             Ok((response, request_tokens)) => {
                 let usage = if response.usage_reported {
                     response.usage
@@ -135,6 +148,7 @@ impl ModelSummarizer {
         &self,
         input: &SummaryInput<'_>,
         text_tool_history: bool,
+        observer: &mut Option<&mut super::progress::SummaryProgress>,
     ) -> Result<(ChatResponse, u64), SummarizeError> {
         let mut messages = Vec::with_capacity(input.compacted.len().saturating_add(2));
         messages.push(Message {
@@ -199,21 +213,50 @@ impl ModelSummarizer {
         let idle = tokio::time::sleep(self.idle_timeout);
         let deadline = tokio::time::sleep(self.timeout);
         tokio::pin!(idle, deadline);
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut lagged = false;
         let response = loop {
             tokio::select! {
                 biased;
                 result = &mut completion => break result?,
                 _ = &mut deadline => return Err(SummarizeError::Deadline { seconds: self.timeout.as_secs() }),
                 _ = &mut idle => return Err(SummarizeError::IdleTimeout { seconds: self.idle_timeout.as_secs() }),
+                _ = tick.tick(), if observer.is_some() => {
+                    if let Some(observer) = observer.as_deref_mut() { observer.flush_pending(); }
+                }
                 event = progress.recv() => {
-                    if let Ok(event) = event
-                        && matches!(event.kind, event_bus::EventKind::Message(_))
-                    {
-                        idle.as_mut().reset(tokio::time::Instant::now() + self.idle_timeout);
+                    if let Ok(event) = event {
+                        if matches!(event.kind, event_bus::EventKind::Message(_)) {
+                            idle.as_mut().reset(tokio::time::Instant::now() + self.idle_timeout);
+                        }
+                        if !lagged && let Some(observer) = observer.as_deref_mut() { observer.event(&event); }
+                    } else if matches!(event, Err(event_bus::RecvError::Lagged { .. })) {
+                        lagged = true;
+                        if let Some(observer) = observer.as_deref_mut() { observer.retry(); }
                     }
                 }
             }
         };
+        // Completion can win while the private bus still holds deltas.
+        let (pending, skipped) = progress.drain_pending_snapshot_counting_lag();
+        lagged |= skipped > 0;
+        if !lagged && let Some(observer) = observer.as_deref_mut() {
+            for event in pending {
+                observer.event(&event);
+            }
+        }
+        if let Some(observer) = observer.as_deref_mut() {
+            if lagged {
+                observer.retry();
+                for block in &response.message.content {
+                    if let ContentBlock::Text { text } = block {
+                        observer.text(text);
+                    }
+                }
+            }
+            observer.flush_pending();
+        }
         Ok((response, request_tokens))
     }
 }

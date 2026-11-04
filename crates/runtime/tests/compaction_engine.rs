@@ -65,7 +65,10 @@ async fn compaction_events_until_done(
     timeout(Duration::from_secs(2), async {
         loop {
             let event = receiver.recv().await.expect("event receiver remains open");
-            if matches!(&event.kind, EventKind::Compaction(_)) {
+            if matches!(
+                &event.kind,
+                EventKind::Compaction(CompactionEvent::Compacted { .. })
+            ) {
                 compacted.push(event.clone());
             }
             if matches!(
@@ -128,6 +131,7 @@ async fn automatic_compaction_emits_complete_audit_event() {
     // Then: one complete automatic audit event is emitted and the next request is compacted
     assert_eq!(events.len(), 1);
     let EventKind::Compaction(CompactionEvent::Compacted {
+        operation_id: _,
         run_id: event_run_id,
         reason,
         threshold,

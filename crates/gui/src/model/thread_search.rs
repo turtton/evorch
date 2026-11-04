@@ -5,17 +5,20 @@
 //! [`ThreadSearchModal::query`]; once the running request finishes, the next
 //! [`ThreadSearchModal::poll`] searches for the newest query. An answer is
 //! adopted only if it still answers the current query and project, and results
-//! of an older query cannot be confirmed. A search examines a bounded number
+//! of an older query cannot be confirmed. The modal keeps the project it was
+//! opened for, whatever the sidebar selects afterwards, and never falls back
+//! to another project. A search examines a bounded number
 //! of threads per request, so the modal keeps the cursor and continues in the
 //! background until it has enough matches or has examined every thread; an
 //! empty list is "no matches" only after that. Only matches the sidebar can
 //! open are kept and counted, so unopenable ones never end the search early.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use runtime::{HostSearchIndex, HostThreadHit, HostThreadSearch};
-use workspace_ui::{SidebarState, ThreadId};
+use workspace_ui::{ProjectId, SidebarState, ThreadId};
 
 use super::commands::CommandSink;
 
@@ -26,6 +29,8 @@ pub type ThreadSearchReceiver = Receiver<Result<HostThreadSearch, String>>;
 
 pub const UNAVAILABLE: &str = "Thread search is unavailable in this session.";
 pub const NO_PROJECT: &str = "Select a project to search its threads.";
+pub const PROJECT_UNAVAILABLE: &str =
+    "The project to search is no longer available. Close the search and open it again.";
 const INTERRUPTED: &str = "The thread search was interrupted.";
 
 /// What a search answers: the trimmed query within one project.
@@ -83,6 +88,9 @@ pub struct SearchKeys {
 #[derive(Default)]
 pub struct ThreadSearchModal {
     open: bool,
+    /// The project this session searches, fixed when the modal opens. `None`
+    /// when it opened with no project to search.
+    project: Option<ProjectId>,
     pub query: String,
     selected: usize,
     /// Bumped on open and close, so an answer to an earlier session is dropped.
@@ -103,14 +111,33 @@ impl ThreadSearchModal {
         self.open
     }
 
-    pub fn open(&mut self) {
+    /// Opens a fresh session that searches `project` until it is closed.
+    pub fn open(&mut self, project: Option<ProjectId>) {
         self.close();
         self.open = true;
+        self.project = project;
         self.focus_pending = true;
+    }
+
+    /// The project this session searches.
+    pub fn project(&self) -> Option<&ProjectId> {
+        self.project.as_ref()
+    }
+
+    /// The repository root of the project this session searches, if that
+    /// project still exists.
+    pub fn root(&self, sidebar: &SidebarState) -> Option<PathBuf> {
+        let target = self.project.as_ref()?;
+        sidebar
+            .projects
+            .iter()
+            .find(|project| &project.id == target)
+            .map(|project| project.repo_root.clone())
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        self.project = None;
         self.generation += 1;
         self.query.clear();
         self.selected = 0;
@@ -119,14 +146,6 @@ impl ThreadSearchModal {
         self.keys = SearchKeys::default();
         self.composing = false;
         self.layer = None;
-    }
-
-    pub fn toggle(&mut self) {
-        if self.open {
-            self.close();
-        } else {
-            self.open();
-        }
     }
 
     pub fn take_focus_request(&mut self) -> bool {
@@ -229,6 +248,18 @@ impl ThreadSearchModal {
         sidebar: &SidebarState,
     ) -> bool {
         let current = self.key(project);
+        // The project this session searches is gone. That is decided before
+        // waiting for a running request: it is dropped (its answer, if any,
+        // has nowhere to go) and the error shows at once. No other project is
+        // searched in its place.
+        if self.open && self.project.is_some() && current.project.is_none() {
+            self.in_flight = None;
+            self.outcome = Some(SearchOutcome {
+                key: current,
+                result: Err(PROJECT_UNAVAILABLE.into()),
+            });
+            return false;
+        }
         if let Some(running) = &self.in_flight {
             match running.receiver.try_recv() {
                 Err(TryRecvError::Empty) => return true,
@@ -306,12 +337,11 @@ impl ThreadSearchModal {
         answer: Result<HostThreadSearch, String>,
         sidebar: &SidebarState,
     ) {
-        let openable = |hit: &HostThreadHit| {
-            sidebar
-                .threads
-                .iter()
-                .any(|thread| thread.id.to_string() == hit.thread_id)
-        };
+        let listed: HashSet<String> = sidebar
+            .threads
+            .iter()
+            .map(|thread| thread.id.to_string())
+            .collect();
         let page = match answer {
             Ok(page) => page,
             Err(error) => {
@@ -329,12 +359,10 @@ impl ThreadSearchModal {
             }) if continuation && previous == key => found,
             _ => SearchFindings::default(),
         };
-        for hit in page.hits.into_iter().filter(openable) {
-            if !found
-                .hits
-                .iter()
-                .any(|seen| seen.thread_id == hit.thread_id)
-            {
+        let mut seen: HashSet<String> =
+            found.hits.iter().map(|hit| hit.thread_id.clone()).collect();
+        for hit in page.hits {
+            if listed.contains(&hit.thread_id) && seen.insert(hit.thread_id.clone()) {
                 found.hits.push(hit);
             }
         }
@@ -353,14 +381,16 @@ impl ThreadSearchModal {
         let Some(Ok(found)) = self.outcome.as_ref().map(|outcome| &outcome.result) else {
             return Vec::new();
         };
+        let records: HashMap<String, _> = sidebar
+            .threads
+            .iter()
+            .map(|thread| (thread.id.to_string(), thread))
+            .collect();
         found
             .hits
             .iter()
             .filter_map(|hit| {
-                let record = sidebar
-                    .threads
-                    .iter()
-                    .find(|thread| thread.id.to_string() == hit.thread_id)?;
+                let record = records.get(&hit.thread_id)?;
                 Some(ResultRow {
                     thread: record.id.clone(),
                     title: record.title.clone(),

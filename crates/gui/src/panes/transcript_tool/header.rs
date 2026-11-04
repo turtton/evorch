@@ -399,7 +399,9 @@ const fn control_verb(action: &str) -> &'static str {
 /// instead of the bare job ID, which moves to the location.
 pub fn with_shell_job(header: &mut ToolHeader, job: &ShellJob, control: bool) {
     if control && let Some(command) = &job.command {
-        header.location = Some(std::mem::replace(&mut header.subject, one_line(command)));
+        // The job keeps the command as the call gave it; it is displayed redacted.
+        let command = crate::model::transcript::redacted_text_for_display(command);
+        header.location = Some(std::mem::replace(&mut header.subject, one_line(&command)));
     }
     header.meta = Some(job.outcome());
 }
