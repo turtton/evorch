@@ -256,7 +256,9 @@ impl TranscriptRegistry {
                 TranscriptKey::Run(message.sender_run_id.clone()),
                 TranscriptKey::Run(message.recipient_run_id.clone()),
             ],
-            EventKind::Lifecycle(_)
+            // Lane ledger events describe the sidebar and lane list, not a transcript.
+            EventKind::Ledger(_)
+            | EventKind::Lifecycle(_)
             | EventKind::Usage(_)
             | EventKind::Provider(_)
             | EventKind::Orchestrator(_) => Vec::new(),

@@ -54,6 +54,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         include_str!("migrations/v40_drop.sql"),
         include_str!("migrations/v40_prepare.sql")
     ),
+    include_str!("migrations/v41.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -241,3 +242,6 @@ DROP TABLE retention_unresolved; DROP TABLE retention_staging; DROP TABLE retent
 DROP TABLE run_ledger_delete_grants; DROP TABLE task_queue_delete_grants;
 DROP TABLE run_tombstones; DROP TABLE task_tombstones; DROP TABLE thread_tombstones;
 "#;
+
+#[cfg(test)]
+mod v41_tests;
