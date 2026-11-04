@@ -772,7 +772,7 @@ async fn read_only_children_weigh_a_tenth_toward_the_tool_call_budget() {
         .map(|_| ("shell", json!({"command": "true"})))
         .collect();
     let budget = || runtime::budget_tracker::BudgetSettings {
-        max_tool_calls: 20,
+        max_tool_calls: runtime::budget_tracker::ResourceLimit::Bounded(20),
         max_file_rereads: u32::MAX,
         // Repeated identical calls are a different guard.
         max_identical_tool_call_repeats: u32::MAX,
@@ -1097,7 +1097,7 @@ async fn calls_are_counted_even_when_the_result_detail_is_replaced_by_an_artifac
     );
     let mut config = RunConfig::default();
     // run_js itself plus its two commands reach the limit; the program's calls count.
-    config.budget.max_tool_calls = 3;
+    config.budget.max_tool_calls = runtime::budget_tracker::ResourceLimit::Bounded(3);
 
     let mut receiver = fixture.bus.subscribe();
     let run = fixture

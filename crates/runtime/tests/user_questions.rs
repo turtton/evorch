@@ -126,7 +126,7 @@ async fn delayed_user_answer_does_not_exhaust_elapsed_budget() {
         .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let run_config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_elapsed,
+            max_elapsed: runtime::budget_tracker::ResourceLimit::Bounded(max_elapsed),
             ..Default::default()
         },
         ..Default::default()

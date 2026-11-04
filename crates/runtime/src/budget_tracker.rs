@@ -21,11 +21,64 @@ mod tests;
 /// fresh children but never collects their results.
 pub(crate) const MAX_UNOBSERVED_SPAWN_CREDITS: u32 = 20;
 
+/// A quantity-based resource cap whose absence is explicit.
+///
+/// `Unlimited` is a deliberate "no cap" and `Bounded` is a real cap. There is
+/// no `Default`: a "not specified, use the runtime default" value is a separate
+/// concern (see [`BudgetSettings::default`]) and must never be spelled by a
+/// sentinel such as `u32::MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceLimit<T> {
+    Unlimited,
+    Bounded(T),
+}
+
+impl<T: Copy> ResourceLimit<T> {
+    /// The cap, or `None` when unlimited.
+    pub const fn bounded(self) -> Option<T> {
+        match self {
+            Self::Unlimited => None,
+            Self::Bounded(limit) => Some(limit),
+        }
+    }
+}
+
+impl<T: Copy + PartialOrd> ResourceLimit<T> {
+    /// Whether `used` has reached the cap (`used >= cap`). Never for `Unlimited`.
+    pub fn is_reached_by(self, used: T) -> bool {
+        self.bounded().is_some_and(|limit| used >= limit)
+    }
+
+    /// Whether `used` is over the cap (`used > cap`). Never for `Unlimited`.
+    pub fn is_exceeded_by(self, used: T) -> bool {
+        self.bounded().is_some_and(|limit| used > limit)
+    }
+}
+
+macro_rules! impl_remaining {
+    ($($ty:ty),*) => {$(
+        impl ResourceLimit<$ty> {
+            /// What is left of the cap after `used`; `None` when unlimited.
+            pub const fn remaining(self, used: $ty) -> Option<$ty> {
+                match self {
+                    Self::Unlimited => None,
+                    Self::Bounded(limit) => Some(limit.saturating_sub(used)),
+                }
+            }
+        }
+    )*};
+}
+impl_remaining!(u32, u64);
+
+/// Per-run budget. The quantity caps (`max_tool_calls`, `max_elapsed`,
+/// `max_tokens`) can be [`ResourceLimit::Unlimited`]; the runaway diagnostics
+/// (`max_file_rereads`, `max_no_progress_rounds`,
+/// `max_identical_tool_call_repeats`) are always enforced.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetSettings {
-    pub max_tool_calls: u32,
-    pub max_elapsed: Duration,
-    pub max_tokens: Option<u64>,
+    pub max_tool_calls: ResourceLimit<u32>,
+    pub max_elapsed: ResourceLimit<Duration>,
+    pub max_tokens: ResourceLimit<u64>,
     /// Reads after the first read of the same path.
     pub max_file_rereads: u32,
     pub max_no_progress_rounds: u32,
@@ -35,9 +88,9 @@ pub struct BudgetSettings {
 impl Default for BudgetSettings {
     fn default() -> Self {
         Self {
-            max_tool_calls: 400,
-            max_elapsed: Duration::from_secs(2 * 60 * 60),
-            max_tokens: None,
+            max_tool_calls: ResourceLimit::Bounded(400),
+            max_elapsed: ResourceLimit::Bounded(Duration::from_secs(2 * 60 * 60)),
+            max_tokens: ResourceLimit::Unlimited,
             max_file_rereads: 20,
             max_no_progress_rounds: 100,
             max_identical_tool_call_repeats: 10,
@@ -45,12 +98,37 @@ impl Default for BudgetSettings {
     }
 }
 
+impl BudgetSettings {
+    /// These settings with every quantity cap (tool calls, elapsed time,
+    /// tokens) lifted. The runaway diagnostics (no-progress rounds, identical
+    /// tool calls, file rereads) keep their values, and usage is still metered.
+    ///
+    /// For a lane-scoped root, which is not stopped by volume alone.
+    #[must_use]
+    pub const fn with_unlimited_resources(mut self) -> Self {
+        self.max_tool_calls = ResourceLimit::Unlimited;
+        self.max_elapsed = ResourceLimit::Unlimited;
+        self.max_tokens = ResourceLimit::Unlimited;
+        self
+    }
+
+    /// Settings for a lane-scoped root: the default runaway diagnostics with
+    /// every quantity cap lifted. Never equal to [`Self::default`], so it is
+    /// not mistaken for "unspecified" when a run is started.
+    #[must_use]
+    pub fn lane_scope() -> Self {
+        Self::default().with_unlimited_resources()
+    }
+}
+
 impl From<&config::BudgetConfig> for BudgetSettings {
     fn from(config: &config::BudgetConfig) -> Self {
         Self {
-            max_tool_calls: config.max_tool_calls,
-            max_tokens: config.max_tokens,
-            max_elapsed: Duration::from_secs(config.max_elapsed_secs),
+            max_tool_calls: ResourceLimit::Bounded(config.max_tool_calls),
+            max_tokens: config
+                .max_tokens
+                .map_or(ResourceLimit::Unlimited, ResourceLimit::Bounded),
+            max_elapsed: ResourceLimit::Bounded(Duration::from_secs(config.max_elapsed_secs)),
             max_no_progress_rounds: config.max_no_progress_rounds,
             max_file_rereads: config.max_file_rereads,
             max_identical_tool_call_repeats: config.max_identical_tool_call_repeats,
@@ -231,35 +309,39 @@ impl BudgetCounters {
             .max()
             .unwrap_or(0)
             .saturating_sub(1);
+        let used_tokens = self
+            .cumulative_input_tokens
+            .saturating_add(self.cumulative_output_tokens);
+        // Quantity caps may be `Unlimited`, which never trips; the runaway
+        // diagnostics below always apply.
         let checks = [
             (
-                tool_calls >= settings.max_tool_calls,
+                settings.max_tool_calls.is_reached_by(tool_calls),
                 "max_tool_calls",
-                u64::from(settings.max_tool_calls),
+                settings.max_tool_calls.bounded().map(u64::from),
             ),
             (
-                elapsed > settings.max_elapsed,
+                settings.max_elapsed.is_exceeded_by(elapsed),
                 "max_elapsed_ms",
-                u64::try_from(settings.max_elapsed.as_millis()).unwrap_or(u64::MAX),
+                settings
+                    .max_elapsed
+                    .bounded()
+                    .map(|limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)),
             ),
             (
-                settings.max_tokens.is_some_and(|limit| {
-                    self.cumulative_input_tokens
-                        .saturating_add(self.cumulative_output_tokens)
-                        > limit
-                }),
+                settings.max_tokens.is_exceeded_by(used_tokens),
                 "max_tokens",
-                settings.max_tokens.unwrap_or_default(),
+                settings.max_tokens.bounded(),
             ),
             (
                 rereads > settings.max_file_rereads,
                 "max_file_rereads",
-                u64::from(settings.max_file_rereads),
+                Some(u64::from(settings.max_file_rereads)),
             ),
             (
                 self.no_progress_rounds > settings.max_no_progress_rounds,
                 "max_no_progress_rounds",
-                u64::from(settings.max_no_progress_rounds),
+                Some(u64::from(settings.max_no_progress_rounds)),
             ),
         ];
         for (index, (exceeded, threshold, limit)) in checks.into_iter().enumerate() {
@@ -271,8 +353,9 @@ impl BudgetCounters {
                         diagnostic_codes::BUDGET_EXHAUSTED
                     },
                     detail: format!(
-                        "task {} exhausted {threshold}={limit}; tool_call_count={tool_calls}",
-                        context.task_id
+                        "task {} exhausted {threshold}={}; tool_call_count={tool_calls}",
+                        context.task_id,
+                        limit.unwrap_or_default()
                     ),
                 };
                 context.bus.emit(Event::new(DiagnosticEvent {
@@ -288,27 +371,25 @@ impl BudgetCounters {
                 return BudgetDecision::Exhausted(breach);
             }
         }
-        let remaining_tool_calls = settings.max_tool_calls.saturating_sub(tool_calls);
-        let remaining_tokens = settings.max_tokens.map(|limit| {
-            limit.saturating_sub(
-                self.cumulative_input_tokens
-                    .saturating_add(self.cumulative_output_tokens),
-            )
-        });
-        if !self.warned
-            && (remaining_tool_calls <= settings.max_tool_calls / 5
-                || remaining_tokens
-                    .zip(settings.max_tokens)
-                    .is_some_and(|(remaining, limit)| remaining <= limit / 5))
-        {
+        let remaining_tool_calls = settings.max_tool_calls.remaining(tool_calls);
+        let remaining_tokens = settings.max_tokens.remaining(used_tokens);
+        let calls_near_end = remaining_tool_calls
+            .zip(settings.max_tool_calls.bounded())
+            .is_some_and(|(remaining, limit)| remaining <= limit / 5);
+        let tokens_near_end = remaining_tokens
+            .zip(settings.max_tokens.bounded())
+            .is_some_and(|(remaining, limit)| remaining <= limit / 5);
+        if !self.warned && (calls_near_end || tokens_near_end) {
             self.warned = true;
             context.bus.emit(Event::new(DiagnosticEvent {
                 source: "budget_tracker".into(),
                 severity: DiagnosticSeverity::Warning,
                 code: diagnostic_codes::BUDGET_WARNING.into(),
                 detail: format!(
-                    "task {} remaining_tool_calls={remaining_tool_calls}{}",
+                    "task {} remaining_tool_calls={}{}",
                     context.task_id,
+                    remaining_tool_calls
+                        .map_or_else(|| "unlimited".to_owned(), |calls| calls.to_string()),
                     remaining_tokens
                         .map_or_else(String::new, |tokens| format!("; remaining_tokens={tokens}"))
                 ),
