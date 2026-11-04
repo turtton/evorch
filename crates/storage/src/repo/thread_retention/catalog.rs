@@ -80,6 +80,32 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "captured untracked files",
     ),
     ("thread_start_states", ReclaimThread, "captured start state"),
+    (
+        "lanes",
+        ReclaimThread,
+        "the lane of a deleted thread; deleted after its reports, which cascade to its keys",
+    ),
+    (
+        "lane_reports",
+        ReclaimThread,
+        "report history of a deleted lane thread",
+    ),
+    (
+        "lane_delivery_keys",
+        ReclaimThread,
+        "follows its lane row through ON DELETE CASCADE",
+    ),
+    ("lane_state", Keep, "ledger revision singleton"),
+    (
+        "lane_list_snapshots",
+        Keep,
+        "bounded by count (newest per lead and overall); rows of deleted lanes are skipped on read",
+    ),
+    (
+        "lane_list_snapshot_rows",
+        Keep,
+        "follows its snapshot through ON DELETE CASCADE",
+    ),
     ("tasks", ReclaimTask, "tasks of the family's runs"),
     ("task_links", ReclaimTask, "links of those tasks"),
     (

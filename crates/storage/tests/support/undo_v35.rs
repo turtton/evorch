@@ -13,10 +13,10 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Rebuilds the lesson tables as they were before migration v41: no favorite flag, and a
+/// Rebuilds the lesson tables as they were before migration v42: no favorite flag, and a
 /// ledger that only knows the 'lesson', 'finding' and 'eval_trace' kinds. The tables are
 /// left empty.
-pub fn undo_v41(connection: &Connection) {
+pub fn undo_v42(connection: &Connection) {
     connection
         .execute_batch(
             "DROP TABLE memory_entries;
@@ -64,9 +64,9 @@ pub fn undo_v41(connection: &Connection) {
 }
 
 /// Restores the whole-conversation `run_contexts` shape migration v40 replaced, after
-/// undoing v41.
+/// undoing v42.
 pub fn undo_v40(connection: &Connection) {
-    undo_v41(connection);
+    undo_v42(connection);
     connection
         .execute_batch(include_str!("undo_v40.sql"))
         .unwrap();

@@ -280,7 +280,7 @@ fn do_phase(
         Phase::RunMessages => run_messages(tx, family, cursor),
         Phase::RunContexts => run_contexts(tx, family, cursor, layout),
         Phase::Tasks => tasks(tx, family, cursor),
-        Phase::ThreadTables => thread_tables(tx, family, cursor),
+        Phase::ThreadTables => thread_tables(tx, family, cursor, layout),
         Phase::Finished => Ok(Work::default()),
     }
 }
@@ -809,18 +809,51 @@ fn take_untracked(
     }))
 }
 
+/// Moves to the next thread of the job, or finishes the phase.
+fn advance_thread(
+    tx: &Transaction<'_>,
+    family: &str,
+    cursor: &mut Cursor,
+    thread: &str,
+) -> Result<(), StorageError> {
+    match next_thread(tx, family, thread)? {
+        Some(next) => {
+            cursor.thread = Some(next);
+            cursor.table_idx = 0;
+        }
+        None => enter(tx, family, cursor, Phase::Finished)?,
+    }
+    Ok(())
+}
+
+/// The tables keyed by thread, one table per `table_idx`: 0 the lane ledger rows, 1 the
+/// captured untracked files, 2 the start state. The lane rows come first, so a capture
+/// above the step budget (left to the exclusive phase) never makes a thread skip them.
 fn thread_tables(
     tx: &Transaction<'_>,
     family: &str,
     cursor: &mut Cursor,
+    layout: Layout,
 ) -> Result<Work, StorageError> {
     let Some(thread) = cursor.thread.clone() else {
         enter(tx, family, cursor, Phase::Finished)?;
         return Ok(Work::default());
     };
     let mut work = Work::default();
-    if cursor.table_idx == 0 {
-        match take_untracked(tx, &thread, false)? {
+    match cursor.table_idx {
+        0 => {
+            // A database being converted is still at version 40: it has no lane tables
+            // (and so no lanes) yet.
+            if layout == Layout::Converting {
+                cursor.table_idx = 1;
+            } else {
+                work = take_lane_rows(tx, &thread)?;
+                if work.rows == 0 {
+                    cursor.table_idx = 1;
+                }
+            }
+        }
+        1 => match take_untracked(tx, &thread, false)? {
             Untracked::Taken(taken) => work = taken,
             // A captured file above the step's budget cannot be deleted by a bounded
             // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
@@ -828,51 +861,85 @@ fn thread_tables(
             // batches by the exclusive phase.
             Untracked::Oversized(size) => {
                 register_oversized(tx, family, "thread_start_states", &thread, size)?;
-                match next_thread(tx, family, &thread)? {
-                    Some(next) => {
-                        cursor.thread = Some(next);
-                        cursor.table_idx = 0;
-                    }
-                    None => enter(tx, family, cursor, Phase::Finished)?,
-                }
-                return Ok(Work::default());
+                advance_thread(tx, family, cursor, &thread)?;
             }
-            Untracked::None => cursor.table_idx = 1,
-        }
-    } else {
-        let stored: Option<u64> = tx
-            .query_row(
-                "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
-                [&thread],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match stored {
-            None => {}
-            Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
-                register_oversized(tx, family, "thread_start_states", &thread, bytes)?;
-            }
-            Some(bytes) => {
-                tx.execute(
-                    "DELETE FROM thread_start_states WHERE thread_id = ?1",
+            Untracked::None => cursor.table_idx = 2,
+        },
+        _ => {
+            let stored: Option<u64> = tx
+                .query_row(
+                    "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
                     [&thread],
-                )?;
-                work = Work {
-                    rows: 1,
-                    bytes,
-                    ..Work::default()
-                };
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match stored {
+                None => {}
+                Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
+                    register_oversized(tx, family, "thread_start_states", &thread, bytes)?;
+                }
+                Some(bytes) => {
+                    tx.execute(
+                        "DELETE FROM thread_start_states WHERE thread_id = ?1",
+                        [&thread],
+                    )?;
+                    work = Work {
+                        rows: 1,
+                        bytes,
+                        ..Work::default()
+                    };
+                }
             }
-        }
-        match next_thread(tx, family, &thread)? {
-            Some(next) => {
-                cursor.thread = Some(next);
-                cursor.table_idx = 0;
-            }
-            None => enter(tx, family, cursor, Phase::Finished)?,
+            advance_thread(tx, family, cursor, &thread)?;
         }
     }
     Ok(work)
+}
+
+/// Deletes up to [`RECLAIM_ROWS`] rows of the lane ledger of `thread`: reports first,
+/// then delivery keys, then the lane row itself once nothing else is left. Returns no
+/// rows when the thread has no lane (any more). None of these tables is fenced against
+/// DELETE, so reclaim always progresses, and each step is bounded.
+fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    let (rows, bytes): (u64, u64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(summary) + OCTET_LENGTH(artifact_refs_json) \
+            + OCTET_LENGTH(question_refs_json)), 0) FROM \
+         (SELECT summary, artifact_refs_json, question_refs_json FROM lane_reports \
+          WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+        params![thread, limit],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rows > 0 {
+        tx.execute(
+            "DELETE FROM lane_reports WHERE (lane_id, report_seq) IN \
+             (SELECT lane_id, report_seq FROM lane_reports \
+             WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+            params![thread, limit],
+        )?;
+        return Ok(Work {
+            rows,
+            bytes,
+            ..Work::default()
+        });
+    }
+    let keys = tx.execute(
+        "DELETE FROM lane_delivery_keys WHERE (lane_id, management_revision, event_kind, dedupe_key) IN \
+         (SELECT lane_id, management_revision, event_kind, dedupe_key FROM lane_delivery_keys \
+          WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+        params![thread, limit],
+    )?;
+    if keys > 0 {
+        return Ok(Work {
+            rows: keys as u64,
+            ..Work::default()
+        });
+    }
+    let deleted = tx.execute("DELETE FROM lanes WHERE thread_id = ?1", [thread])?;
+    Ok(Work {
+        rows: deleted as u64,
+        ..Work::default()
+    })
 }
 
 /// One transaction of one job. Returns what it deleted.

@@ -33,8 +33,8 @@ fn database_at(dir: &Path, version: usize) -> PathBuf {
     path
 }
 
-/// The schema version a converted database ends at: the conversion publishes 40 and then
-/// applies every later migration.
+/// The schema version a converted database ends at: the conversion applies every migration
+/// after v40 before it publishes.
 fn latest_schema() -> u32 {
     u32::try_from(MIGRATIONS.len()).unwrap()
 }
@@ -657,6 +657,71 @@ fn rows_of_deleted_runs_are_reclaimed_first_and_never_converted() {
         0
     );
     assert_eq!(single(&conn, "SELECT COUNT(*) FROM run_tombstones"), 1);
+    for run in &runs {
+        assert_eq!(read(&conn, run.id).messages_json, run.messages);
+    }
+}
+
+#[test]
+fn a_deleted_thread_of_a_pending_job_is_reclaimed_before_the_lane_tables_exist() {
+    // Given: a version 39 database whose retention job for a deleted family (a thread
+    // with a start state, and a run) has not been worked off yet.
+    let (_dir, path, runs) = seeded();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO threads(thread_id, root_run_id, created_at_ns, updated_at_ns, source) \
+             VALUES ('t-deleted', 'run-deleted', 1, 1, 'host');
+         INSERT INTO thread_start_states(thread_id, root_run_id, project_root, captured_at_ns, replayable, reason) \
+             VALUES ('t-deleted', 'run-deleted', '/p', 1, 0, 'no_commit');
+         INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
+             checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json, \
+             snapshot_revision, messages_len, checkpoints_len) \
+             VALUES ('run-deleted', 'worker', 'n', NULL, '{}', '[]', '[]', 'Done', 1, 1, '[]', 1, 2, 2);
+         INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) VALUES ('t-deleted', 'fam', 1);
+         INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES ('run-deleted', 't-deleted', 'fam');
+         INSERT INTO reclaim_jobs(family_key, state, created_at_ns, updated_at_ns) \
+             VALUES ('fam', 'db_pending', 1, 1);
+         DELETE FROM thread_tombstones WHERE 0;",
+    )
+    .unwrap();
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lanes'"
+        ),
+        0
+    );
+    drop(conn);
+
+    // When: it is converted (the reclaim runs while the database is at version 40).
+    let summary = apply(&path).unwrap();
+
+    // Then: the thread's rows went with the family without touching a lane table, the
+    // kept runs are converted, and the finished database has the lane ledger.
+    assert_eq!(summary.converted_runs, 4);
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM thread_start_states WHERE thread_id = 't-deleted'"
+        ),
+        0
+    );
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM run_contexts WHERE run_id = 'run-deleted'"
+        ),
+        0
+    );
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lanes'"
+        ),
+        1
+    );
+    assert_eq!(version(&path), latest_schema());
     for run in &runs {
         assert_eq!(read(&conn, run.id).messages_json, run.messages);
     }

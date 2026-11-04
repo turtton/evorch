@@ -9,11 +9,17 @@ mod undo_v35;
 
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
-use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v41};
+use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 41;
+const LATEST_SCHEMA: u32 = 42;
 
-const EXPECTED_TABLES: [&str; 70] = [
+const EXPECTED_TABLES: [&str; 76] = [
+    "lane_state",
+    "lanes",
+    "lane_reports",
+    "lane_delivery_keys",
+    "lane_list_snapshots",
+    "lane_list_snapshot_rows",
     "content_blobs",
     "content_blob_gc_queue",
     "content_blob_refs_header",
@@ -86,7 +92,11 @@ const EXPECTED_TABLES: [&str; 70] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 71] = [
+const EXPECTED_INDICES: [&str; 75] = [
+    "idx_lanes_lead_activity",
+    "idx_lanes_origin",
+    "idx_lanes_unstarted",
+    "idx_lane_list_snapshots_lead",
     "idx_content_blob_refs_header_blob",
     "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",
@@ -1112,15 +1122,15 @@ fn entry_rows(connection: &Connection) -> Vec<EntryRow> {
 }
 
 #[test]
-fn v41_adds_the_favorite_flag_without_moving_any_lesson() {
-    // Given: a v40 database whose projection rowids and ledger sequence numbers are in
+fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
+    // Given: a v41 database whose projection rowids and ledger sequence numbers are in
     // different orders, with lessons of several scopes and statuses, a finding and an
     // eval trace in the ledger.
     let temp_dir = TempDir::new().unwrap();
-    let path = temp_dir.path().join("v40.db");
+    let path = temp_dir.path().join("v41.db");
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
-    undo_v41(&connection);
+    undo_v42(&connection);
     connection
         .execute_batch(
             "INSERT INTO memory_ledger(seq, entry_id, project, task_id, content, evidence, status, kind, scope) VALUES
@@ -1140,7 +1150,7 @@ fn v41_adds_the_favorite_flag_without_moving_any_lesson() {
                  (5, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 8, 'project');",
         )
         .unwrap();
-    connection.pragma_update(None, "user_version", 40).unwrap();
+    connection.pragma_update(None, "user_version", 41).unwrap();
     let ledger_before = ledger_rows(&connection);
     let entries_before = entry_rows(&connection);
     drop(connection);

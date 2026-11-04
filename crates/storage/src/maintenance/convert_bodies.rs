@@ -19,9 +19,8 @@
 //! * A database older than 39 (33 at the oldest) gets migrations 34 to 39 first, one
 //!   transaction each, after the backup. `user_version` then stays 39 until everything is
 //!   converted, verified, the old column is dropped and the database is vacuumed; only
-//!   the last write publishes 40, after which any later migrations are applied. A database
-//!   stopped half way is refused by a normal start and, once the conversion's own tables
-//!   exist, by this command alike.
+//!   the last write publishes 40. A database stopped half way is refused by a normal start
+//!   and, once the conversion's own tables exist, by this command alike.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -360,9 +359,7 @@ fn basis(conn: &Connection, path: &Path) -> Result<u64, StorageError> {
     Ok(logical.max(file_sizes(path)?.total()))
 }
 
-/// Every object of a new database at version 40 (the version this command produces; later
-/// migrations are applied after the conversion is published) must be in the converted
-/// one, with the same SQL.
+/// Every object of a new database must be in the converted one, with the same SQL.
 fn compare_schema(conn: &Connection) -> Result<(), StorageError> {
     fn objects(conn: &Connection) -> Result<BTreeMap<(String, String), String>, StorageError> {
         let mut statement = conn.prepare(
@@ -379,7 +376,7 @@ fn compare_schema(conn: &Connection) -> Result<(), StorageError> {
         Ok(rows.collect::<Result<_, _>>()?)
     }
     let fresh = Connection::open_in_memory()?;
-    crate::migrations::apply_up_to(&fresh, MESSAGE_ROWS_VERSION)?;
+    crate::migrations::apply_migrations(&fresh)?;
     let expected = objects(&fresh)?;
     let found = objects(conn)?;
     for (key, sql) in &expected {
@@ -686,6 +683,15 @@ fn run(
     conn.execute_batch(V40_DROP)?;
     conn.execute_batch("COMMIT")?;
     hook(Point::AfterDrop, &conn)?;
+    // Migrations after v40 are written for a database that already has the converted
+    // shape, so they run now; `user_version` is set once, at publish.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    for migration in &MIGRATIONS[usize::try_from(MESSAGE_ROWS_VERSION)
+        .map_err(|_| StorageError::OutOfRange("migration version"))?..]
+    {
+        conn.execute_batch(migration)?;
+    }
+    conn.execute_batch("COMMIT")?;
     compare_schema(&conn)?;
 
     summary.peak_wal_bytes = gauge.peak.get();
@@ -709,13 +715,9 @@ fn run(
     progress.enter("publish");
     hook(Point::BeforePublish, &conn)?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.pragma_update(None, "user_version", MESSAGE_ROWS_VERSION)?;
+    conn.pragma_update(None, "user_version", target_schema)?;
     conn.execute_batch("COMMIT")?;
     crate::migrations::require_current_format(&conn)?;
-    // The database is now a regular version 40 one. The migrations after it (each in its
-    // own transaction) bring it to the schema this build runs; a stop before they finish
-    // leaves a valid version 40 database that the next start migrates the same way.
-    crate::migrations::apply_up_to(&conn, target_schema)?;
     checkpoint_truncate(&conn)?;
     summary.checkpoint_truncated = true;
     summary.file_bytes_after = file_sizes(path)?;

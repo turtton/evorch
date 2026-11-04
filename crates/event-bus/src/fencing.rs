@@ -393,6 +393,14 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             CompactionEvent::Compacted { run_id, .. } | CompactionEvent::Progress { run_id, .. },
         ) => accepts(run_id),
         EventKind::Ledger(crate::LedgerEvent::RunLedgerAppended { run_id, .. }) => accepts(run_id),
+        EventKind::Ledger(crate::LedgerEvent::LaneCreated { origin_run_id, .. }) => {
+            accepts(origin_run_id)
+        }
+        EventKind::Ledger(
+            crate::LedgerEvent::LaneReportAppended { run_id, .. }
+            | crate::LedgerEvent::LaneManagementChanged { run_id, .. }
+            | crate::LedgerEvent::LaneBriefRevised { run_id, .. },
+        ) => run_id.as_deref().is_none_or(accepts),
         EventKind::Diagnostic(event) => event.run_id.as_deref().is_none_or(accepts),
         EventKind::Provider(ProviderEvent::ProviderFallback { .. })
         | EventKind::Usage(_)
@@ -538,5 +546,51 @@ mod question_tests {
         })));
         question.answer = Some("A".into());
         assert!(!fences.accepts(&Event::new(ToolEvent::UserQuestionUpdated { question })));
+    }
+
+    #[test]
+    fn lane_events_are_fenced_by_the_run_that_caused_them_and_harness_reports_pass() {
+        use crate::{LaneStatus, LedgerEvent};
+
+        let fences = MutationFences::default();
+        assert!(fences.register("lead-run".into(), Arc::new(|| false)));
+        assert!(fences.register("lane-run".into(), Arc::new(|| true)));
+        let created = |origin: &str| {
+            Event::new(LedgerEvent::LaneCreated {
+                lane_id: "l".into(),
+                thread_id: "t".into(),
+                origin_run_id: origin.into(),
+                origin_thread_id: "lead".into(),
+                lead_thread_id: Some("lead".into()),
+                policy: crate::LanePolicy::Attached,
+                management_revision: 1,
+            })
+        };
+        let report = |run_id: Option<&str>| {
+            Event::new(LedgerEvent::LaneReportAppended {
+                lane_id: "l".into(),
+                thread_id: "t".into(),
+                run_id: run_id.map(str::to_owned),
+                report_seq: 1,
+                status: LaneStatus::Ready,
+                needs_human: false,
+            })
+        };
+        // A creation whose lead lost its authority is rejected; an unfenced lead passes.
+        assert!(!fences.accepts(&created("lead-run")));
+        assert!(fences.accepts(&created("other-lead-run")));
+        // A report is fenced by the lane run that produced it; a harness report has none.
+        assert!(fences.accepts(&report(Some("lane-run"))));
+        assert!(!fences.accepts(&report(Some("lead-run"))));
+        assert!(fences.accepts(&report(None)));
+        let changed = Event::new(LedgerEvent::LaneManagementChanged {
+            lane_id: "l".into(),
+            thread_id: "t".into(),
+            run_id: Some("lead-run".into()),
+            lead_thread_id: None,
+            policy: crate::LanePolicy::Detached,
+            management_revision: 2,
+        });
+        assert!(!fences.accepts(&changed));
     }
 }

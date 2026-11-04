@@ -49,7 +49,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
             .collect::<Result<_, _>>()?)
     };
     let definitions = definitions_of("'run_contexts'")?;
-    // The lesson tables v41 rebuilt (favorite flag, two more ledger kinds), as v39 had them.
+    // The lesson tables v42 rebuilt (favorite flag, two more ledger kinds), as v39 had them.
     let lesson_definitions = definitions_of("'memory_ledger', 'memory_entries'")?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     conn.execute_batch(
@@ -60,6 +60,13 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
          DROP TABLE run_messages;
          DELETE FROM content_blob_gc_queue;
          DELETE FROM content_blobs;
+         DROP TABLE lane_list_snapshot_rows;
+         DROP TABLE lane_list_snapshots;
+         DROP TABLE lane_delivery_keys;
+         DROP TABLE lane_reports;
+         DROP TABLE lanes;
+         DROP TABLE lane_state;
+         DROP TRIGGER threads_lane_lineage_sticky;
          DROP TABLE run_contexts;",
     )?;
     for definition in &definitions {
@@ -98,7 +105,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Rebuilds the lesson tables as migration v41 found them, keeping every lesson in its
+/// Rebuilds the lesson tables as migration v42 found them, keeping every lesson in its
 /// position: favorite marks and the ledger rows that record them are dropped.
 fn take_lessons_back(conn: &Connection, definitions: &[String]) -> Result<(), StorageError> {
     conn.execute_batch(
