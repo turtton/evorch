@@ -145,6 +145,7 @@ fn receipts_override_counts_and_resolved_originals_ignore_late_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(&dir.path().join("sidebar.json"));
     let receipt = storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "old".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
@@ -200,6 +201,7 @@ fn startup_missing_receipt_is_rejected_and_terminal_accepted_is_unknown() {
         .phases
         .insert("run-1".into(), workspace_ui::ThreadRunPhase::Stopped);
     let receipt = storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "old".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
@@ -256,6 +258,7 @@ fn withdrawn_receipt_removes_history_on_recovery_without_a_tombstone() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = state(&temp.path().join("sidebar.json"));
     let mut receipt = storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "old".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
@@ -327,6 +330,7 @@ fn already_consumed_input_cannot_be_deleted_or_duplicated_into_composer() {
         state.withdraw_queued_follow_up(0, edit);
         assert_eq!(state.history[0].status, DeliveryStatus::Delivered);
         let receipt = storage::HostInputReceipt {
+            provenance: storage::HostInputProvenance::User,
             prompt_id: "old".into(),
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),

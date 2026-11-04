@@ -308,6 +308,9 @@ mod tests {
         ] {
             // Given: a root question without a run-start event or a call resolver.
             let question = event_bus::UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "question-one".into(),
                 run_id: "root-run".into(),
                 root_run_id: "root-run".into(),
@@ -344,6 +347,9 @@ mod tests {
     fn answered_and_orchestrator_addressed_questions_push_nothing() {
         for (run_id, answer) in [("root-run", Some("JSON".into())), ("child-run", None)] {
             let question = event_bus::UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "question-one".into(),
                 run_id: run_id.into(),
                 root_run_id: "root-run".into(),

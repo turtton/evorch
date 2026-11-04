@@ -1663,6 +1663,9 @@ mod tests {
             loaded_skills: vec![],
         };
         let question = event_bus::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-1".into(),
             run_id: "run-81".into(),
             root_run_id: "run-81".into(),

@@ -265,7 +265,13 @@ async fn pending_question_survives_cancel_and_storage_reopen() {
     assert_eq!(db.pending_user_questions().unwrap(), vec![question.clone()]);
     storage
         .handle()
-        .answer_user_question(&question.id, "resume later", &event_bus::AnswerOrigin::Host)
+        .answer_user_question(
+            &question.id,
+            "resume later",
+            &event_bus::AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     assert_eq!(
         db.user_question(&question.id)
@@ -678,6 +684,9 @@ async fn stale_active_question_recipient_is_fenced_even_before_provider_admissio
         };
         let storage = Storage::open(config.clone()).unwrap();
         let question = event_bus::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-source".into(),
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),

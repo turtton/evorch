@@ -14,6 +14,9 @@ fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
 
 fn question(id: u64) -> UserQuestion {
     UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: format!("question-{id}"),
         run_id: format!("run-{id}"),
         root_run_id: format!("run-{id}"),
@@ -36,7 +39,9 @@ fn first_only_answers_report_any_earlier_answer_and_store_nothing() {
         storage.handle().answer_user_question_with_mode(
             &question.id,
             text,
-            &AnswerOrigin::Host,
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
             AnswerMode::FirstOnly,
         )
     };
@@ -54,7 +59,7 @@ fn first_only_answers_report_any_earlier_answer_and_store_nothing() {
         storage.handle().answer_user_question_with_mode(
             "unknown",
             "x",
-            &AnswerOrigin::Host,
+            &AnswerOrigin::Host { channel: Default::default() },
             AnswerMode::FirstOnly,
         ),
         Err(error) if !matches!(error, StorageError::QuestionAlreadyAnswered)
@@ -77,16 +82,34 @@ fn first_answer_wins_and_same_answer_is_idempotent_across_reopen() {
     storage.handle().create_user_question(&question).unwrap();
     storage
         .handle()
-        .answer_user_question(&question.id, "自由回答", &AnswerOrigin::Host)
+        .answer_user_question(
+            &question.id,
+            "自由回答",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     storage
         .handle()
-        .answer_user_question(&question.id, "自由回答", &AnswerOrigin::Host)
+        .answer_user_question(
+            &question.id,
+            "自由回答",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     assert!(
         storage
             .handle()
-            .answer_user_question(&question.id, "different", &AnswerOrigin::Host)
+            .answer_user_question(
+                &question.id,
+                "different",
+                &AnswerOrigin::Host {
+                    channel: Default::default()
+                }
+            )
             .is_err()
     );
     assert!(database.pending_user_questions().unwrap().is_empty());
@@ -112,18 +135,22 @@ fn question_limits_prevent_invisible_pending_questions() {
             .create_user_question(&question(id))
             .unwrap();
     }
-    assert!(
-        storage
-            .handle()
-            .create_user_question(&question(1024))
-            .unwrap_err()
-            .to_string()
-            .contains("pending question limit")
-    );
+    assert!(matches!(
+        storage.handle().create_user_question(&question(1024)),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Global
+        ))
+    ));
     assert_eq!(database.pending_user_questions().unwrap().len(), 1024);
     storage
         .handle()
-        .answer_user_question("question-0", "A", &AnswerOrigin::Host)
+        .answer_user_question(
+            "question-0",
+            "A",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     storage
         .handle()
@@ -142,14 +169,12 @@ fn per_run_metadata_and_utf8_byte_limits_are_enforced() {
     }
     let mut q = question(32);
     q.run_id = "run-1".into();
-    assert!(
-        storage
-            .handle()
-            .create_user_question(&q)
-            .unwrap_err()
-            .to_string()
-            .contains("32 per run")
-    );
+    assert!(matches!(
+        storage.handle().create_user_question(&q),
+        Err(StorageError::QuestionCapacity(
+            storage::lane_delivery::QuestionCapacity::Requester
+        ))
+    ));
     let mut q = question(99);
     q.title = "界".repeat(683);
     assert!(storage.handle().create_user_question(&q).is_err());
@@ -172,7 +197,13 @@ fn secret_rejection_leaves_no_question_or_answer_mutation() {
     assert!(
         storage
             .handle()
-            .answer_user_question(&q.id, secret, &AnswerOrigin::Host)
+            .answer_user_question(
+                &q.id,
+                secret,
+                &AnswerOrigin::Host {
+                    channel: Default::default()
+                }
+            )
             .is_err()
     );
     assert_eq!(database.user_question(&q.id).unwrap().unwrap().answer, None);
@@ -209,7 +240,13 @@ fn inheritance_is_explicit_preserves_provenance_and_cannot_read_unrelated_questi
     );
     storage
         .handle()
-        .answer_user_question(&original.id, "A", &AnswerOrigin::Host)
+        .answer_user_question(
+            &original.id,
+            "A",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     let inherited = database.user_questions_for_run("run-3").unwrap().remove(0);
     assert_eq!(inherited.run_id, "run-1");
@@ -319,7 +356,13 @@ fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
     );
     storage
         .handle()
-        .answer_user_question(&original.id, "A", &AnswerOrigin::Host)
+        .answer_user_question(
+            &original.id,
+            "A",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     // answer persists a projection, which a later link must supersede as well.
     storage
@@ -327,7 +370,9 @@ fn links_hydrate_all_reads_in_continuation_order_even_with_stale_payloads() {
         .bind_user_questions("run-3", "run-4", std::slice::from_ref(&original.id))
         .unwrap();
     original.answer = Some("A".into());
-    original.answer_origin = Some(AnswerOrigin::Host);
+    original.answer_origin = Some(AnswerOrigin::Host {
+        channel: Default::default(),
+    });
     original.recipient_run_ids.push("run-4".into());
     assert_eq!(
         reopened.user_question(&original.id).unwrap(),
@@ -355,7 +400,13 @@ fn answer_origin_is_stored_with_the_first_answer_and_survives_reopen() {
     // A later identical answer from another source must not rewrite who answered first.
     storage
         .handle()
-        .answer_user_question(&question.id, "yes", &AnswerOrigin::Host)
+        .answer_user_question(
+            &question.id,
+            "yes",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
         .unwrap();
     drop(storage);
     let stored = Database::open(&config)
@@ -370,6 +421,8 @@ fn answer_origin_is_stored_with_the_first_answer_and_survives_reopen() {
 fn a_question_cannot_be_created_already_attributed_to_an_answerer() {
     let (_dir, storage, _database, _config) = fixture();
     let mut question = question(8);
-    question.answer_origin = Some(AnswerOrigin::Host);
+    question.answer_origin = Some(AnswerOrigin::Host {
+        channel: Default::default(),
+    });
     assert!(storage.handle().create_user_question(&question).is_err());
 }

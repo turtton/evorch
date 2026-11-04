@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 46;
+const LATEST_SCHEMA: u32 = 47;
 
-const EXPECTED_TABLES: [&str; 83] = [
+const EXPECTED_TABLES: [&str; 86] = [
     "thread_pull_request_state",
     "thread_pull_requests",
     "pull_request_snapshots",
@@ -97,9 +97,12 @@ const EXPECTED_TABLES: [&str; 83] = [
     "messages",
     "sessions",
     "tasks",
+    "lane_question_routes",
+    "lane_notifications",
+    "lane_delivery_destinations",
 ];
 
-const EXPECTED_INDICES: [&str; 79] = [
+const EXPECTED_INDICES: [&str; 81] = [
     "idx_thread_pull_requests_active",
     "idx_thread_pull_requests_key",
     "idx_thread_pull_request_inheritance_pending",
@@ -179,6 +182,8 @@ const EXPECTED_INDICES: [&str; 79] = [
     "idx_messages_session_created",
     "idx_sessions_status",
     "idx_tasks_session_id",
+    "lane_notifications_pending",
+    "lane_routes_responder",
 ];
 
 fn database_path(temp_dir: &TempDir) -> std::path::PathBuf {
@@ -1164,7 +1169,10 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     // This fixture starts from the latest database: undo the later v46 tables and the
     // lane-only v45 column before reconstructing v41, so each migration runs exactly once.
     connection
-        .execute_batch(include_str!("support/undo_v46.sql"))
+        .execute_batch(concat!(
+            include_str!("support/undo_v47.sql"),
+            include_str!("support/undo_v46.sql")
+        ))
         .unwrap();
     connection
         .execute_batch("ALTER TABLE lanes DROP COLUMN start_blocked_reason;")

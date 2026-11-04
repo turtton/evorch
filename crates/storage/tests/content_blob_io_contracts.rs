@@ -308,7 +308,10 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
-            undo_v46 = include_str!("support/undo_v46.sql"),
+            undo_v46 = concat!(
+                include_str!("support/undo_v47.sql"),
+                include_str!("support/undo_v46.sql")
+            ),
             undo_v45 = include_str!("support/undo_v45.sql"),
             undo_v44 = include_str!("support/undo_v44.sql"),
             undo_v43 = include_str!("support/undo_v43.sql"),

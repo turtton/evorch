@@ -43,6 +43,9 @@ mod tests {
     #[test]
     fn durable_chat_identity_recovers_a_question_without_a_run_start_event() {
         let question = UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-1".into(),
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),

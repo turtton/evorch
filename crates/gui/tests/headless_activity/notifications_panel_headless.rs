@@ -48,6 +48,9 @@ fn pending_question_button_emits_thread_action_with_run_fallback() {
         model.apply_event(
             &Event::new(ToolEvent::UserQuestionUpdated {
                 question: UserQuestion {
+                    responder: None,
+                    routing_revision: 0,
+                    management_revision: None,
                     id: "question-one".into(),
                     run_id: "question-run".into(),
                     root_run_id: "question-run".into(),
@@ -114,6 +117,9 @@ fn question_notification_opens_owning_thread_and_conversation() {
         }
         state.apply_events([Event::new(ToolEvent::UserQuestionUpdated {
             question: UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "question-one".into(),
                 run_id: "question-run".into(),
                 root_run_id: "question-run".into(),

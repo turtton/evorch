@@ -26,7 +26,7 @@ const COLUMNS: &str = "lane_id, thread_id, origin_thread_id, origin_run_id, crea
 
 const REPORT_COLUMNS: &str = "lane_id, report_seq, status, summary, artifact_refs_json, \
     needs_human, question_refs_json, reason_code, producer, management_revision, brief_revision, \
-    created_at_ns";
+    created_at_ns, artifact_revision_json, failure_episode";
 
 fn immediate(conn: &Connection) -> Result<Transaction<'_>, StorageError> {
     Ok(Transaction::new_unchecked(
@@ -165,6 +165,19 @@ fn report_from_row(row: &Row<'_>) -> rusqlite::Result<LaneReport> {
     let status: String = row.get(2)?;
     let producer: String = row.get(8)?;
     Ok(LaneReport {
+        artifact_revision: row
+            .get::<_, Option<String>>(12)?
+            .map(|s| {
+                serde_json::from_str(&s).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?,
+        failure_episode: row.get(13)?,
         lane_id: row.get(0)?,
         report_seq: count(row, 1)?,
         status: LaneStatus::parse(&status).ok_or_else(|| column_error(2, "status"))?,
@@ -529,18 +542,32 @@ pub(crate) fn append_report(
     input: &LaneReportInput,
     at_ns: i64,
 ) -> Result<LaneReportAppended, StorageError> {
+    let tx = immediate(conn)?;
+    let result = append_report_in_transaction(&tx, lane_id, input, at_ns)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+/// Caller owns the transaction; used to commit report + semantic key + outbox.
+pub(crate) fn append_report_in_transaction(
+    tx: &Transaction<'_>,
+    lane_id: &str,
+    input: &LaneReportInput,
+    at_ns: i64,
+) -> Result<LaneReportAppended, StorageError> {
     input.validate().map_err(StorageError::LaneInvalid)?;
     guard_texts("lane_report", input.guarded_texts())?;
     let artifact_refs = serde_json::to_string(&input.artifact_refs)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let question_refs = serde_json::to_string(&input.question_refs)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
-    let tx = immediate(conn)?;
-    let lane = require(&tx, lane_id)?;
+    let lane = require(tx, lane_id)?;
     let seq = lane.latest_report_seq + 1;
     let seq_param = to_i64(seq, "report sequence")?;
     // The limit is on the report as stored and returned, identity and counters included.
     LaneReport {
+        artifact_revision: input.artifact_revision.clone(),
+        failure_episode: input.failure_episode.clone(),
         lane_id: lane_id.to_owned(),
         report_seq: seq,
         status: input.status,
@@ -559,7 +586,7 @@ pub(crate) fn append_report(
     tx.execute(
         &format!(
             "INSERT INTO lane_reports ({REPORT_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
         ),
         params![
             lane_id,
@@ -574,6 +601,13 @@ pub(crate) fn append_report(
             to_i64(lane.management_revision, "management revision")?,
             to_i64(lane.brief_revision, "brief revision")?,
             at_ns,
+            input
+                .artifact_revision
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| StorageError::Serialization(e.to_string()))?,
+            input.failure_episode,
         ],
     )?;
     tx.execute(
@@ -581,7 +615,7 @@ pub(crate) fn append_report(
             last_activity_at_ns = max(last_activity_at_ns, ?3) WHERE lane_id = ?1",
         params![lane_id, seq_param, at_ns],
     )?;
-    bump_revision(&tx)?;
+    bump_revision(tx)?;
     let report = tx.query_row(
         &format!(
             "SELECT {REPORT_COLUMNS} FROM lane_reports WHERE lane_id = ?1 AND report_seq = ?2"
@@ -589,8 +623,7 @@ pub(crate) fn append_report(
         params![lane_id, seq_param],
         report_from_row,
     )?;
-    let lane = require(&tx, lane_id)?;
-    tx.commit()?;
+    let lane = require(tx, lane_id)?;
     Ok(LaneReportAppended { lane, report })
 }
 

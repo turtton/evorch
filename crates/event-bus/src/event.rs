@@ -975,32 +975,57 @@ pub struct UserQuestion {
     /// the origin was recorded (their source is unknown, not assumed to be a user).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_origin: Option<AnswerOrigin>,
+    /// Routing projection, not continuation inheritance. Missing means legacy routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responder: Option<crate::lane::QuestionResponder>,
+    #[serde(default)]
+    pub routing_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_revision: Option<u64>,
 }
 
 /// The source of a question's answer. Only `Host` is a person's answer; a
-/// parent agent's answer must never be mistaken for the user's approval.
+/// agent answer must never be mistaken for the user's approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AnswerOrigin {
-    /// Submitted through the host-facing (user) answer API.
-    Host,
+    /// Submitted through an authenticated host-facing user answer API.
+    Host {
+        #[serde(default)]
+        channel: HumanChannel,
+    },
+    /// An authenticated lane lead, never a user approval.
+    LaneLead { run_id: String, thread_id: String },
     /// Given by the requester's Orchestrator parent via `answer_subagent_question`.
     ParentAgent { answered_by_run_id: String },
+}
+
+/// Extensible human-facing answer channel. Legacy `host` answers default to Host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HumanChannel {
+    #[default]
+    Host,
 }
 
 impl UserQuestion {
     /// The user-role message that delivers the stored answer to a recipient run.
     ///
     /// Injection and the history check that stops re-injection after a restore
-    /// both use this, so they cannot drift apart. Only a parent agent's answer
-    /// gets a distinct tag; host and legacy (unknown-origin) answers keep the
+    /// both use this, so they cannot drift apart. Agent origins have distinct
+    /// tags; host and legacy (unknown-origin) answers keep the
     /// original `user-answer` form so histories saved earlier still match.
     pub fn answer_message(&self) -> String {
         let tag = match &self.answer_origin {
             Some(AnswerOrigin::ParentAgent { answered_by_run_id }) => {
                 format!("parent-answer id={} from={answered_by_run_id}", self.id)
             }
-            Some(AnswerOrigin::Host) | None => format!("user-answer id={}", self.id),
+            Some(AnswerOrigin::LaneLead { run_id, .. }) => {
+                format!("lane-answer id={} from={run_id}", self.id)
+            }
+            Some(AnswerOrigin::Host { .. }) | None => format!("user-answer id={}", self.id),
         };
         format!(
             "[{tag}]\nQuestion: {}\nAnswer: {}",
@@ -1009,9 +1034,14 @@ impl UserQuestion {
         )
     }
 
-    /// Child-to-parent questions must never become user-facing prompts.
+    /// Legacy child questions stay private unless explicitly routed to the user.
     pub fn is_user_visible(&self) -> bool {
-        self.run_id == self.root_run_id
+        match &self.responder {
+            Some(crate::lane::QuestionResponder::User) => true,
+            Some(crate::lane::QuestionResponder::Lead { .. }) => false,
+            // Legacy child-to-parent questions remain private to the parent.
+            None => self.run_id == self.root_run_id,
+        }
     }
 
     /// Shared GUI projection/answer scope, not an execution ownership permit.
@@ -1791,6 +1821,9 @@ mod tests {
 
     fn answered_question(origin: Option<AnswerOrigin>) -> UserQuestion {
         UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-1".into(),
             run_id: "run-child".into(),
             root_run_id: "run-root".into(),
@@ -1806,7 +1839,10 @@ mod tests {
 
     #[test]
     fn answer_message_tells_a_parent_agent_answer_from_a_host_answer() {
-        let host = answered_question(Some(AnswerOrigin::Host)).answer_message();
+        let host = answered_question(Some(AnswerOrigin::Host {
+            channel: Default::default(),
+        }))
+        .answer_message();
         let parent = answered_question(Some(AnswerOrigin::ParentAgent {
             answered_by_run_id: "run-parent".into(),
         }))
@@ -1833,7 +1869,10 @@ mod tests {
         assert_eq!(legacy.answer_origin, None);
         assert_eq!(
             legacy.answer_message(),
-            answered_question(Some(AnswerOrigin::Host)).answer_message()
+            answered_question(Some(AnswerOrigin::Host {
+                channel: Default::default()
+            }))
+            .answer_message()
         );
     }
 

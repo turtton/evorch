@@ -62,7 +62,10 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     // Tokenized events are written back as plain ones while their blobs still exist.
     resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v46.sql"))?;
+    conn.execute_batch(concat!(
+        include_str!("../../../tests/support/undo_v47.sql"),
+        include_str!("../../../tests/support/undo_v46.sql")
+    ))?;
     conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
@@ -174,7 +177,10 @@ fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
 pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v46.sql"))?;
+    conn.execute_batch(concat!(
+        include_str!("../../../tests/support/undo_v47.sql"),
+        include_str!("../../../tests/support/undo_v46.sql")
+    ))?;
     let fresh = Connection::open_in_memory()?;
     for migration in &MIGRATIONS[..43] {
         fresh.execute_batch(migration)?;

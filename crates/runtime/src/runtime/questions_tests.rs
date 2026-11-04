@@ -105,7 +105,9 @@ async fn breaker_only_host_answers_not_delegation_or_parent_answers_lift_suspens
             .unwrap()
             .unwrap()
             .answer_origin,
-        Some(AnswerOrigin::Host)
+        Some(AnswerOrigin::Host {
+            channel: Default::default()
+        })
     );
     assert_eq!(review.visible_request_count(), generation + 1);
     assert!(
@@ -318,6 +320,9 @@ async fn unresolved_lineage_and_suspended_writes_reject_answers_and_trusted_send
         .request_user_question(root, "Continue?".into(), vec![], false)
         .unwrap();
     let legacy = UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "legacy-question".into(),
         run_id: "run-999".into(),
         root_run_id: "run-999".into(),

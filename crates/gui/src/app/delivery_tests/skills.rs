@@ -121,6 +121,7 @@ fn a_restored_bubble_shows_what_the_runtime_recorded_not_the_saved_copy() {
         body: "steps".into(),
     }];
     let receipt = storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "sent".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),

@@ -46,10 +46,12 @@ impl HostInputStatus {
     }
 }
 
-/// One submission's receipt. `text` is the host's own input, kept verbatim so
-/// an undelivered message can be shown and edited again.
+/// A durable input receipt. For User provenance, `text` is kept verbatim so an
+/// undelivered submission can be edited again. Lane notifications carry no human
+/// text, images or approval evidence and survive host-input reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInputReceipt {
+    pub provenance: HostInputProvenance,
     pub prompt_id: String,
     pub run_id: String,
     pub root_run_id: String,
@@ -84,6 +86,20 @@ impl HostInputReceipt {
         if self.prompt_id.is_empty() || self.run_id.is_empty() || self.root_run_id.is_empty() {
             return Err(StorageError::Serialization(
                 "host input receipt requires prompt, run and root IDs".into(),
+            ));
+        }
+        if let HostInputProvenance::LaneNotification {
+            notification_id,
+            destination_thread_id,
+        } = &self.provenance
+            && (notification_id.is_empty()
+                || destination_thread_id.is_empty()
+                || self.evidence_id.is_some()
+                || !self.text.is_empty()
+                || self.image_count != 0)
+        {
+            return Err(StorageError::Serialization(
+                "lane receipt cannot carry human text, images or approval evidence".into(),
             ));
         }
         for (field, text) in [
@@ -148,4 +164,16 @@ impl HostInputWrite {
     pub fn is_empty(&self) -> bool {
         self.inserts.is_empty() && self.transitions.is_empty() && self.reconcile_reason.is_none()
     }
+}
+
+/// Lane notifications are durable input but never human intent or approval.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostInputProvenance {
+    #[default]
+    User,
+    LaneNotification {
+        notification_id: String,
+        destination_thread_id: String,
+    },
 }

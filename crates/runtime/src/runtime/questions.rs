@@ -114,6 +114,9 @@ impl AgentRuntime {
                 .collect::<String>()
         );
         let question = UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id,
             run_id: run.to_string(),
             root_run_id: root.to_string(),
@@ -246,7 +249,13 @@ impl AgentRuntime {
     /// Host-facing answer API. A live run must still have current mutation authority.
     /// Offline answers are persisted for explicit conversation resumption, never replaying tools.
     pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<UserQuestion, String> {
-        self.answer_question(id, answer, AnswerOrigin::Host)
+        self.answer_question(
+            id,
+            answer,
+            AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
     }
 
     /// Host-facing answer API for a caller that must not answer a question twice. Unlike
@@ -264,7 +273,14 @@ impl AgentRuntime {
         id: &str,
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
-        self.answer_question_with_mode(id, answer, AnswerOrigin::Host, AnswerMode::FirstOnly)
+        self.answer_question_with_mode(
+            id,
+            answer,
+            AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+            AnswerMode::FirstOnly,
+        )
     }
 
     fn answer_question(
@@ -288,7 +304,10 @@ impl AgentRuntime {
     ) -> Result<AnswerOutcome, String> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
-        let trusted_user = origin == AnswerOrigin::Host;
+        let trusted_user = origin
+            == AnswerOrigin::Host {
+                channel: Default::default(),
+            };
         let question = self.user_question(id)?.ok_or("unknown question")?;
         self.deny_deleted_run(&question.run_id)
             .map_err(|deleted| deleted.to_string())?;

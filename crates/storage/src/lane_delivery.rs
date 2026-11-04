@@ -1,0 +1,176 @@
+//! Durable lane routing/delivery contracts (ADR 0044 Phase 1c).
+//!
+//! All clocks are caller supplied Unix nanoseconds. Runtime authenticates callers,
+//! resolves current roots and holds its ownership mutation guard around these APIs.
+//! A successful source write is not delivery: snapshot + receipt precedes ACK.
+
+pub use event_bus::lane::{
+    ArtifactRevision, LaneDeliveryBinding, LaneNotification, LaneNotificationKind,
+    QuestionRequester, QuestionResponder, QuestionRouting,
+};
+use serde::{Deserialize, Serialize};
+
+pub const LANE_DELIVERY_PAGE_MAX: usize = 20;
+pub const LANE_DELIVERY_PAGE_BYTES: usize = 16 * 1024;
+pub const LANE_NO_PROGRESS_LIMIT: u32 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuestionCapacity {
+    Requester,
+    Global,
+}
+impl QuestionCapacity {
+    pub const fn limit(self) -> u32 {
+        match self {
+            Self::Requester => 32,
+            Self::Global => 1024,
+        }
+    }
+}
+
+/// One diagnostic slot per lane, overwritten/aggregated, never an append-only log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionCapacityBlocked {
+    pub capacity: QuestionCapacity,
+    pub attempts: u64,
+    pub first_at_ns: i64,
+    pub last_at_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneQuestionCreated {
+    Created(Box<event_bus::UserQuestion>),
+    CapacityBlocked(QuestionCapacityBlocked),
+}
+
+/// Identifies a currently bound destination root; not itself an ownership permit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneDeliveryOwner {
+    pub root_run_id: String,
+    pub generation: u64,
+    pub ownership_generation: u64,
+}
+
+/// Durable destination binding, readable after restart or a lost bind reply.
+/// This is an observation for CAS, never an ownership permit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneDeliveryDestination {
+    pub thread_id: String,
+    pub epoch: u64,
+    pub stopped: bool,
+    pub owner: Option<LaneDeliveryOwner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneDeliveryClaim {
+    pub destination_thread_id: String,
+    pub destination_epoch: u64,
+    pub claim_epoch: u64,
+    pub token: String,
+    pub lease_until_ns: i64,
+    pub owner: LaneDeliveryOwner,
+    pub notifications: Vec<LaneNotification>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneDeliveryNack {
+    UnknownThread,
+    Readonly,
+    OwnershipLost,
+    Stopped,
+    RestoreFailed,
+    StorageFailed,
+}
+
+/// Rebinding ownership/root never implicitly resumes a stopped destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneDestinationAction {
+    Bind,
+    Stop,
+    ExplicitUserResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneClaimResult {
+    Claimed(LaneDeliveryClaim),
+    Empty,
+    Busy,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneClaimRequest {
+    pub destination_thread_id: String,
+    pub expected_destination_epoch: u64,
+    pub owner: LaneDeliveryOwner,
+    pub token: String,
+    pub now_ns: i64,
+    pub lease_until_ns: i64,
+    /// False for a completed root when only milestones/interventions are pending.
+    pub allow_non_waking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LaneWakeGuard {
+    pub revision: u64,
+    pub no_progress_batches: u32,
+    pub artifact_fingerprint: Option<String>,
+    pub failure_episode: Option<String>,
+    /// Stable causal wake-batch ID, retained across receipt/ACK retries.
+    pub last_wake_batch_id: Option<String>,
+    pub suppressed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneGuardSignal {
+    WakeBatch {
+        batch_id: String,
+    },
+    TerminalArtifact {
+        revision: Option<ArtifactRevision>,
+        failure_episode: Option<String>,
+    },
+    RealUserInput,
+    ExplicitUserResume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneQuestionPage {
+    pub questions: Vec<event_bus::UserQuestion>,
+    pub next_cursor: Option<LaneQuestionCursor>,
+    pub has_more: bool,
+}
+
+/// Opaque page continuation; management changes make it stale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneQuestionCursor {
+    pub lead_thread_id: String,
+    pub management_fingerprint: String,
+    pub snapshot_max_rowid: i64,
+    pub after_question_id: String,
+}
+
+/// Returned projection must be published as UserQuestionUpdated after commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneQuestionMutation {
+    pub lane_id: String,
+    pub question_id: String,
+    pub lead_thread_id: String,
+    pub expected_management_revision: u64,
+    pub expected_routing_revision: u64,
+    pub operation_id: String,
+    pub action: LaneQuestionAction,
+    pub at_ns: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaneQuestionAction {
+    RouteToUser,
+    Answer {
+        text: String,
+        origin: event_bus::AnswerOrigin,
+    },
+}
