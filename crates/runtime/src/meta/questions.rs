@@ -35,14 +35,19 @@ pub(super) fn ask_user(
         Ok(a) => a,
         Err(e) => return error(e),
     };
-    match runtime.request_user_question(
+    match runtime.request_user_question_outcome(
         state.caller_run_id(),
         args.title,
         args.options,
         args.blocking,
     ) {
-        Ok(q) => {
-            let delivery = if q.run_id == q.root_run_id {
+        Ok(storage::lane_delivery::LaneQuestionCreated::Created(q)) => {
+            let delivery = if matches!(
+                q.responder,
+                Some(event_bus::lane::QuestionResponder::Lead { .. })
+            ) {
+                "Your lane lead will answer or route this question to the user. Continue independent work; do not poll."
+            } else if q.run_id == q.root_run_id {
                 "The user can answer at a turn boundary. Continue independent work; do not poll."
             } else {
                 "Your Orchestrator parent will answer or ask the user. Continue independent work; do not poll."
@@ -50,6 +55,13 @@ pub(super) fn ask_user(
             serialize(
                 &serde_json::json!({"question_id":q.id,"status":"pending","blocking":q.blocking,"delivery":delivery}),
             )
+        }
+        Ok(storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(diagnostic)) => {
+            serialize(&serde_json::json!({
+                "status":"question_capacity_blocked", "capacity":diagnostic.capacity,
+                "limit":diagnostic.capacity.limit(), "retry_automatically":false,
+                "delivery":"No question was created. Capacity is blocked; do not automatically retry."
+            }))
         }
         Err(e) => error(e),
     }
