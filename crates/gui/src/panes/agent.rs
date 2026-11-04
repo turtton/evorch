@@ -21,6 +21,7 @@ mod branch;
 pub use branch::BranchContext;
 mod composer_panel;
 mod header;
+mod lane;
 use header::header_strip;
 pub(crate) mod async_layout;
 mod queue;
@@ -40,6 +41,12 @@ pub struct AgentIdentity<'a> {
     pub ledger: &'a [storage::RunLedgerEntry],
 }
 
+/// The lane the shown thread is, with the thread that opened it.
+pub struct LaneContext<'a> {
+    pub detail: &'a crate::model::lanes::LaneDetail,
+    pub origin: Option<&'a workspace_ui::ThreadRecord>,
+}
+
 /// 会話ペインが描画される文脈です。
 pub struct ConversationContext<'a> {
     pub todo: Option<&'a event_bus::ThreadTodoSnapshot>,
@@ -53,6 +60,8 @@ pub struct ConversationContext<'a> {
     pub extra_read_dirs: &'a [std::path::PathBuf],
     pub parent_thread: Option<&'a workspace_ui::ThreadRecord>,
     pub child_threads: Vec<&'a workspace_ui::ThreadRecord>,
+    /// Present when the shown thread is a lane whose ledger record has been read.
+    pub lane: Option<LaneContext<'a>>,
     pub thread_metrics: Option<crate::model::telemetry::ThreadMetrics>,
     pub phase: Option<ThreadRunPhase>,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
@@ -955,6 +964,7 @@ mod tests {
                         extra_read_dirs: &[],
                         parent_thread: None,
                         child_threads: Vec::new(),
+                        lane: None,
                         thread_metrics: None,
                         phase: Some(phase),
                         sandbox_picker: Default::default(),
@@ -972,5 +982,101 @@ mod tests {
             assert!(harness.query_by_label(label).is_none());
             assert!(harness.get_by_label("Thread: Chat").rect().right() < 400.0);
         }
+    }
+
+    #[test]
+    fn lane_header_words_a_ready_report_as_unverified() {
+        use event_bus::lane::{
+            LaneBrief, LanePolicy, LaneReport, LaneReportProducer, LaneScope, LaneStatus,
+            LaneWorkspaceDeclaration,
+        };
+
+        let record = storage::lanes::LaneRecord {
+            lane_id: "lane-1".into(),
+            thread_id: "lane-thread".into(),
+            origin_thread_id: "lead".into(),
+            origin_run_id: "lead-run".into(),
+            creation_key: "call".into(),
+            scope: LaneScope::Lane,
+            lead_thread_id: Some("lead".into()),
+            policy: LanePolicy::Attached,
+            management_revision: 1,
+            brief: LaneBrief {
+                objective: "Ship it".into(),
+                inputs: vec![],
+                deliverables: vec![],
+                acceptance_criteria: vec![],
+                constraints: vec![],
+                workspace: LaneWorkspaceDeclaration::default(),
+                report_policy: LanePolicy::Attached,
+            },
+            brief_revision: 1,
+            start_seed: String::new(),
+            root_run_id: None,
+            generation: 1,
+            latest_report_seq: 1,
+            created_at_ns: 0,
+            updated_at_ns: 0,
+            last_activity_at_ns: 0,
+        };
+        let detail = crate::model::lanes::LaneDetail {
+            record,
+            latest_report: Some(LaneReport {
+                lane_id: "lane-1".into(),
+                report_seq: 1,
+                status: LaneStatus::Ready,
+                summary: "all done".into(),
+                artifact_refs: vec![],
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: LaneReportProducer::LaneAgent,
+                management_revision: 1,
+                brief_revision: 1,
+                created_at_ns: 0,
+            }),
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(480.0, 200.0))
+            .build_ui(move |ui| {
+                crate::theme::install(ui.ctx());
+                let ctx = ConversationContext {
+                    todo: None,
+                    goal: None,
+                    requests: None,
+                    task_rows: &[],
+                    phase_unread: false,
+                    has_project: true,
+                    active_thread_title: Some("Lane"),
+                    extra_read_dirs: &[],
+                    parent_thread: None,
+                    child_threads: Vec::new(),
+                    lane: Some(LaneContext {
+                        detail: &detail,
+                        origin: None,
+                    }),
+                    thread_metrics: None,
+                    phase: None,
+                    sandbox_picker: Default::default(),
+                    model_picker: crate::panes::model_picker::ModelPickerContext {
+                        profiles: &[],
+                        preference: None,
+                        default_model: None,
+                        enabled: false,
+                    },
+                    branch: None,
+                };
+                header_strip(ui, &None, &ctx, &mut None);
+            });
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("ready (unverified)").is_some());
+        assert!(harness.query_by_label("lane · attached").is_some());
+        assert!(
+            harness
+                .query_by_label(crate::model::lanes::PREVIEW_NOTICE)
+                .is_some()
+        );
+        assert!(harness.query_by_label("Report #1: all done").is_some());
     }
 }

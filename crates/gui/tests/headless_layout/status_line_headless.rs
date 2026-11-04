@@ -31,6 +31,7 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     extra_read_dirs: &[],
                     parent_thread: None,
                     child_threads: Vec::new(),
+                    lane: None,
                     thread_metrics: Some(ThreadMetrics {
                         cost: Some(0.225),
                         conversation_cost: Some(0.125),

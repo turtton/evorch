@@ -2,7 +2,7 @@
 //!
 //! A family is the connected set of threads and runs under every relation
 //! that ties their rows together (lineage, bindings, the canonical run→thread
-//! rule, delegation, usage parents, escalation). The search is a worklist kept
+//! rule, delegation, usage parents, escalation, and a lane's managing lead). The search is a worklist kept
 //! in `retention_staging` so it can stop and resume across startups, **inside** a
 //! node: each node's relations are a fixed list of edge queries paged by rowid,
 //! and the position reached (query, last rowid) is stored on the worklist item.
@@ -97,6 +97,22 @@ const THREAD_STEPS: &[Step] = &[
          AND substr(name, 6 + instr(substr(name, 6), ':')) = ?1 AND rowid > ?2 \
          ORDER BY rowid LIMIT ?3",
         Yields::Run,
+    ),
+    // The lane ledger's current management relation (ADR 0044 §10): a lane its lead
+    // manages (attached or summary) is deleted with the lead's family, and a lead with
+    // its managed lanes. A detached lane has no lead and is a family of its own.
+    // `threads.parent_thread_id` is never that relation. Kept last so a stored
+    // position (step index) of an exploration in progress keeps its meaning.
+    Step::Paged(
+        "SELECT rowid, lead_thread_id FROM lanes \
+         WHERE thread_id = ?1 AND lead_thread_id IS NOT NULL AND rowid > ?2 \
+         ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
+    ),
+    Step::Paged(
+        "SELECT rowid, thread_id FROM lanes \
+         WHERE lead_thread_id = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+        Yields::Thread,
     ),
 ];
 

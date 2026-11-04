@@ -16,6 +16,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.persist_composer_draft();
         self.dispatch_system_notifications(ctx);
         // Folded events add and bind threads while the window is hidden, too.
+        if self.poll_lanes(ctx) {
+            self.save_sidebar();
+        }
         self.sync_thread_mirror(Instant::now());
         self.poll_retention(Instant::now());
         ctx.request_repaint_after(self.logic_repaint_delay());
@@ -54,6 +57,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let sink_time = sink_started.elapsed();
         self.diff.poll();
         self.poll_evaluations(&ctx);
+        if self.poll_lanes(&ctx) {
+            self.save_sidebar();
+        }
         self.drain_pty(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
