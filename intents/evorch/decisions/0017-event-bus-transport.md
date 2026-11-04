@@ -34,3 +34,7 @@ v0.1 の transport は **in-process の tokio broadcast 固定**とする（`cra
 - architecture.md の transport Open question は解決
 - GUI（#9 gui-panes）・永続化（#3 session-storage）・計測（ADR 0012）は `EventReceiver` で購読する共通 API に乗る
 - 購読 API は将来の分散化でも不変 — gateway bridge 方式の前提は、versioning された不変 schema が存在すること
+
+## Related
+
+- [ADR 0045](0045-single-core-and-client-protocol.md): 単一コアプロセスと共通 protocol クライアント（Event Bus をコアプロセス内に限定し、クライアントへは protocol の UiEvent で配信することで一部置換）

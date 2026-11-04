@@ -39,3 +39,4 @@ GUI Renderer
 - [features/gui-workbench](../features/gui-workbench/overview.md)
 - [features/diagnostics-self-improvement](../features/diagnostics-self-improvement/overview.md)
 - [technology/architecture](../technology/architecture.md)
+- [ADR 0045](0045-single-core-and-client-protocol.md): 単一コアプロセスと共通 protocol クライアント（Headless Kernel と GUI 分離の再徹底により一部置換）

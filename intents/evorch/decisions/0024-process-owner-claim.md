@@ -182,3 +182,4 @@ sidebar と thread ID の共有は [ADR 0041](0041-thread-context-reference.md) 
 - intents/evorch/features/gui-workbench/overview.md
 - intents/evorch/features/storage-memory/overview.md（event ledger / checkpoint 保存）
 - intents/evorch/technology/mvp-roadmap.md（Bundle C'）
+- [ADR 0045](0045-single-core-and-client-protocol.md): コアを 1 プロセスにし、GUI・Web・CLI を共通 protocol のクライアントにする（単一コアへの一元化により本 ADR の所有権・claim/handoff・owners.db を置換・撤去予定）
