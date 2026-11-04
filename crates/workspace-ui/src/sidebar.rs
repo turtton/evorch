@@ -177,6 +177,51 @@ impl SidebarState {
         Ok(())
     }
 
+    /// Applies the ledger's projection of a lane to its thread, unless the thread already
+    /// holds a newer management revision (a late event or an old scan must not undo a
+    /// later change). The lane's management alone decides where it hangs, so the
+    /// thread's `parent_thread_id` is cleared: it is never a management relation. Returns
+    /// whether the record changed.
+    ///
+    /// # Errors
+    /// `id` is unknown, or the thread already is another lane.
+    pub fn apply_lane_link(
+        &mut self,
+        id: &ThreadId,
+        link: crate::LaneLink,
+    ) -> Result<bool, ThreadError> {
+        let changed = self.set_lane_link(id, link)?;
+        if changed {
+            self.refresh_derived();
+        }
+        Ok(changed)
+    }
+
+    /// [`Self::apply_lane_link`] without recomputing the derived archive and pin fields,
+    /// for a caller applying many links that calls [`Self::refresh_derived`] once after.
+    ///
+    /// # Errors
+    /// As [`Self::apply_lane_link`].
+    pub fn set_lane_link(
+        &mut self,
+        id: &ThreadId,
+        link: crate::LaneLink,
+    ) -> Result<bool, ThreadError> {
+        let thread = self.thread_mut(id)?;
+        if let Some(current) = &thread.lane {
+            if current.lane_id != link.lane_id {
+                return Err(ThreadError::LaneConflict);
+            }
+            if !link.supersedes(current) {
+                return Ok(false);
+            }
+        }
+        let changed = thread.lane.as_ref() != Some(&link) || thread.parent_thread_id.is_some();
+        thread.lane = Some(link);
+        thread.parent_thread_id = None;
+        Ok(changed)
+    }
+
     /// Pins or unpins the whole family of `id`.
     pub fn set_pinned(&mut self, id: &ThreadId, pinned: bool) -> Result<(), ThreadError> {
         self.set_family_pinned(id, pinned).map(|_| ())
