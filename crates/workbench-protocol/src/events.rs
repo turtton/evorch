@@ -74,6 +74,11 @@ pub enum SnapshotItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubscriptionStarted {
+    /// Unique within one connection and never reused after the subscription
+    /// ends: a core numbers subscriptions monotonically per connection. A
+    /// client still tolerates a non-conforming peer that reuses an id (it
+    /// registers the new subscription and never lets a finished one release
+    /// it), but a reused id is a core bug, not something to rely on.
     pub subscription_id: SubscriptionId,
     /// Present when the client must replace its state with the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]

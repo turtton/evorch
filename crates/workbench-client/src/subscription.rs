@@ -62,9 +62,11 @@ impl SubscriptionEntry {
 pub(crate) struct SubscriptionGuard {
     shared: Arc<Shared>,
     id: SubscriptionId,
-    /// The registration this guard owns. A subscription that ended earlier
-    /// may be followed by a new one reusing the id; only the matching
-    /// generation may release it.
+    /// The registration this guard owns. A conforming core never reuses a
+    /// subscription id within a connection (it numbers them monotonically), so
+    /// this is defence against a non-conforming peer: if a finished
+    /// subscription's id is reused, only the matching generation may release
+    /// the registration.
     generation: u64,
     armed: bool,
 }

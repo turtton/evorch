@@ -557,8 +557,13 @@ async fn a_question_answer_over_256_kib_is_refused_in_a_snapshot_and_in_an_event
 }
 
 // --- a finished subscription must not release its successor ---------------------------------------
+//
+// A conforming core never reuses a subscription id within a connection. These
+// tests cover defence against a non-conforming peer that does, so a stale
+// handle can never stop a live subscription.
 
-/// Subscribe "sub-1", let the core end it, subscribe "sub-1" again, and return both.
+/// Subscribe "sub-1", let the core end it, then have a non-conforming core reuse "sub-1"
+/// for a new subscription, and return both.
 async fn ended_then_reused(
     client: &workbench_client::WorkbenchClient,
     server: &mut workbench_client::fake::FakeServer,
