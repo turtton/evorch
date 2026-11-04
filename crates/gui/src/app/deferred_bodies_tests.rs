@@ -793,3 +793,104 @@ fn deleting_a_thread_drops_the_unreadable_rows_held_for_its_runs() {
     );
     assert!(state.unreadable_history_events.is_empty());
 }
+
+fn live_delta(text: &str) -> Event {
+    Event::new(MessageEvent::MessageDelta {
+        run_id: Some("run-1".into()),
+        delta: text.into(),
+    })
+}
+
+#[test]
+fn rows_read_before_a_delta_arrived_do_not_overwrite_it_and_the_run_is_read_again() {
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            delta_row(2, "A "),
+            failure(3, Some("run-1")),
+            delta_row(4, "C "),
+        ],
+        &[],
+    );
+    assert_eq!(
+        thread_entries(&state),
+        ["message:A ", "gap:3", "message:C "]
+    );
+    // The rows are read up to where the history reaches (event 4) and their result waits.
+    backend.script_rows(Ok(vec![
+        started(),
+        delta_row(2, "A "),
+        delta_row(3, "B "),
+        delta_row(4, "C "),
+    ]));
+    resolver.request_gap("run-1", 3);
+    resolver.pump_all();
+
+    // Meanwhile another window's next delta (event 5) is shown in the stream.
+    state.transcripts.set_source(Some((5, 5)));
+    state.apply_conversation_event(&live_delta("D"));
+    state.transcripts.set_source(None);
+    resolver.note_shown_through(5);
+    backend.script_rows(Ok(vec![
+        started(),
+        delta_row(2, "A "),
+        delta_row(3, "B "),
+        delta_row(4, "C "),
+        delta_row(5, "D"),
+    ]));
+
+    // The older result is not applied over it: the delta stays.
+    state.apply_rows_results();
+    assert_eq!(
+        thread_entries(&state),
+        ["message:A ", "gap:3", "message:C D"],
+        "nothing was replaced by the stale rows"
+    );
+    // The run is read again up to event 5 and then nothing is lost.
+    state.settle_body_rows();
+    assert_eq!(thread_entries(&state), ["message:A B C D"]);
+    assert!(state.unreadable_history_events.is_empty());
+    assert_eq!(backend.rows_reads().len(), 2);
+    assert_eq!(backend.rows_reads()[1].2, 5);
+}
+
+#[test]
+fn a_run_that_keeps_changing_while_it_is_read_again_is_given_up_with_the_reason_on_the_gap() {
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            delta_row(2, "A "),
+            failure(3, Some("run-1")),
+            delta_row(4, "C "),
+        ],
+        &[],
+    );
+    resolver.request_gap("run-1", 3);
+    // Every read ends, and a newer delta arrives before its result is applied.
+    for newer in 5..=8 {
+        backend.script_rows(Ok(vec![
+            started(),
+            delta_row(2, "A "),
+            delta_row(3, "B "),
+            delta_row(4, "C "),
+        ]));
+        resolver.pump_all();
+        state.transcripts.set_source(Some((newer, newer)));
+        state.apply_conversation_event(&live_delta("+"));
+        state.transcripts.set_source(None);
+        resolver.note_shown_through(newer);
+        state.apply_rows_results();
+    }
+
+    assert!(!resolver.has_rows_work(), "it stopped asking");
+    assert_eq!(backend.rows_reads().len(), 4, "one read and three more");
+    let model = state.transcripts.thread_model("t1").unwrap();
+    let Some(TranscriptEntry::Unreadable { reason, .. }) = model
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry, TranscriptEntry::Unreadable { .. }))
+    else {
+        panic!("the gap is still shown")
+    };
+    assert!(reason.contains("kept changing"), "{reason}");
+}

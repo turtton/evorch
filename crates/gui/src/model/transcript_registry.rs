@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
 use super::scoped_call::parse_scoped_call_id;
-use super::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
+use super::transcript::{Fill, MessageDirection, TranscriptEntry, TranscriptModel};
 use crate::body::{BodyRef, BodyText, FailureKind, HistoryRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -545,7 +545,13 @@ impl TranscriptRegistry {
     /// held, so nothing shown moves or changes identity. No notification, no
     /// telemetry: only the transcripts are touched. Returns whether any
     /// transcript showed the gap.
-    pub fn fill_unreadable(&mut self, run: &str, event_id: i64, rows: &[HistoryRow]) -> bool {
+    pub fn fill_unreadable(
+        &mut self,
+        run: &str,
+        event_id: i64,
+        rows: &[HistoryRow],
+        through: i64,
+    ) -> Fill {
         let mut scratch = Self::new();
         match self.run_threads.get(run) {
             Some(thread) if self.is_thread_root(run) => scratch.bind_thread_root(thread, run),
@@ -571,29 +577,40 @@ impl TranscriptRegistry {
                 HistoryRow::Failure(_) => {}
             }
         }
-        let mut filled = false;
-        for key in self.route_run(run) {
-            match key {
-                TranscriptKey::Thread => {
-                    let Some(thread) = self.run_threads.get(run).cloned() else {
-                        continue;
-                    };
-                    if let (Some(model), Some(replayed)) =
-                        (self.threads.get_mut(&thread), scratch.threads.get(&thread))
-                    {
-                        filled |= model.fill_unreadable_from(event_id, replayed);
+        // Asked of every transcript first: a replacement is made in all of them
+        // or in none.
+        let mut outcome = Fill::Absent;
+        for apply in [false, true] {
+            for key in self.route_run(run) {
+                let result = match key {
+                    TranscriptKey::Thread => {
+                        let Some(thread) = self.run_threads.get(run).cloned() else {
+                            continue;
+                        };
+                        match (self.threads.get_mut(&thread), scratch.threads.get(&thread)) {
+                            (Some(model), Some(replayed)) => {
+                                model.fill_unreadable_from(event_id, replayed, through, apply)
+                            }
+                            _ => Fill::Absent,
+                        }
                     }
-                }
-                TranscriptKey::Run(run) => {
-                    if let (Some(model), Some(replayed)) =
-                        (self.runs.get_mut(&run), scratch.runs.get(&run))
-                    {
-                        filled |= model.fill_unreadable_from(event_id, replayed);
+                    TranscriptKey::Run(run) => {
+                        match (self.runs.get_mut(&run), scratch.runs.get(&run)) {
+                            (Some(model), Some(replayed)) => {
+                                model.fill_unreadable_from(event_id, replayed, through, apply)
+                            }
+                            _ => Fill::Absent,
+                        }
                     }
+                };
+                match result {
+                    Fill::Stale => return Fill::Stale,
+                    Fill::Filled => outcome = Fill::Filled,
+                    Fill::Absent => {}
                 }
             }
         }
-        filled
+        outcome
     }
 
     /// Drops the transcript of a deleted thread (and of its runs).

@@ -154,7 +154,7 @@ fn apply_rows(rig: &mut Rig) {
                 failure.reference,
             ),
             None => {
-                registry.fill_unreadable(&run, event_id, &rows);
+                registry.fill_unreadable(&run, event_id, &rows, i64::MAX);
             }
         }
     }
@@ -953,4 +953,47 @@ fn a_body_that_is_read_is_one_allocation_however_often_and_wherever_it_is_drawn(
         "a second drawing joins nothing"
     );
     assert!(first.is_same_allocation(&peek_text(&ctx, mixed).unwrap()));
+}
+
+#[test]
+fn a_joined_body_that_is_kept_is_drawn_frame_after_frame_without_reading_its_pieces_again() {
+    use gui::body::ui::{TextState, poll_text};
+    let backend = FakeBackend::new();
+    let resolver = BodyResolver::manual(
+        backend.clone(),
+        ResolverConfig {
+            cache_bytes: 1_000,
+            ..ResolverConfig::default()
+        },
+    );
+    let ctx = egui::Context::default();
+    gui::body::ui::install(&ctx, resolver.clone());
+    // Three pieces of 300 bytes: all together fit the budget, with their join they
+    // do not, so making room for the join lets go of the pieces.
+    let mut text = BodyText::from("<");
+    for n in 0..3_i64 {
+        let piece = backend.deferred(&n.to_string().repeat(300), RUN, n);
+        text.push_body(BodyText::deferred(piece));
+        text.push_body(BodyText::from("|"));
+    }
+
+    assert!(matches!(poll_text(&ctx, &text), TextState::Loading { .. }));
+    resolver.finish_frame();
+    resolver.pump_all();
+    let TextState::Ready(first) = poll_text(&ctx, &text) else {
+        panic!("the pieces were read")
+    };
+    resolver.finish_frame();
+    let reads = backend.bodies_read();
+
+    for frame in 0..4 {
+        let TextState::Ready(again) = poll_text(&ctx, &text) else {
+            panic!("frame {frame} went back to loading")
+        };
+        assert!(first.is_same_allocation(&again));
+        resolver.finish_frame();
+        resolver.pump_all();
+    }
+
+    assert_eq!(backend.bodies_read(), reads, "no piece was read again");
 }

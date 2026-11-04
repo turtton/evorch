@@ -3,6 +3,16 @@
 use super::{EntryMeta, TranscriptEntry, TranscriptModel};
 use crate::body::{BodyRef, FailureKind};
 
+/// What filling a gap from a replay came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill {
+    /// The event is not shown as unreadable here.
+    Absent,
+    Filled,
+    /// What would be replaced changed after the rows were read.
+    Stale,
+}
+
 /// Whether two entries are the same stream of one run: the pieces of what a
 /// replay shows as one entry (the slices of a reasoning, the deltas of a
 /// message, a call's start and result) are, whatever their text.
@@ -109,15 +119,18 @@ impl TranscriptModel {
     /// that the missing slice completes, a call shown without its result), so
     /// a response never shows twice. Entries made from other events, host
     /// inputs, and what arrived since the rows were read are left where they
-    /// are, and the entries that stay keep their identity. Returns whether the
-    /// gap was here.
+    /// are, and the entries that stay keep their identity. With `apply` false
+    /// only says what filling would come to. `through` is the last event the rows
+    /// were read up to.
     pub(crate) fn fill_unreadable_from(
         &mut self,
         event_id: i64,
         replayed: &TranscriptModel,
-    ) -> bool {
+        through: i64,
+        apply: bool,
+    ) -> Fill {
         let Some(gap) = self.unreadable_index(event_id) else {
-            return false;
+            return Fill::Absent;
         };
         let candidates: Vec<(TranscriptEntry, (i64, i64))> = replayed
             .entries
@@ -179,6 +192,19 @@ impl TranscriptModel {
             .filter(|(_, taken)| *taken)
             .map(|(candidate, _)| candidate)
             .collect();
+        // Something newer than the rows reached what would be replaced (a delta
+        // another window sent while they were read): replacing it would take the
+        // newer text away, so nothing is touched.
+        if slots.iter().any(|slot| {
+            self.entry_meta[*slot]
+                .src
+                .is_some_and(|(_, last)| last > through)
+        }) {
+            return Fill::Stale;
+        }
+        if !apply {
+            return Fill::Filled;
+        }
         slots.push(gap);
         slots.sort_unstable();
         slots.dedup();
@@ -210,6 +236,6 @@ impl TranscriptModel {
         for slot in slots[placed..].iter().rev() {
             self.remove_entry(*slot);
         }
-        true
+        Fill::Filled
     }
 }

@@ -768,6 +768,21 @@ impl BodyResolver {
         stats
     }
 
+    /// The joined text of `text` if it is held, without asking for its pieces:
+    /// a body whose joined text is kept needs none of them again.
+    #[must_use]
+    pub fn peek_joined(&self, text: &BodyText) -> Option<Arc<str>> {
+        let key = join_key(text);
+        let mut state = self.lock();
+        state.tick += 1;
+        let tick = state.tick;
+        let joined = state.joined.get_mut(&key)?;
+        joined.last_used = tick;
+        let text = Arc::clone(&joined.text);
+        state.stats.join_hits += 1;
+        Some(text)
+    }
+
     /// The text of a body made of several pieces, joined once: asking again
     /// for the same pieces gives the same allocation. `part` supplies the text
     /// of each deferred piece, in order (`None` when it is not at hand). The
@@ -779,21 +794,7 @@ impl BodyResolver {
         text: &BodyText,
         mut part: impl FnMut(&DeferredBody) -> Option<Arc<str>>,
     ) -> Option<Arc<str>> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::new();
-        for segment in text.segments() {
-            match segment {
-                Segment::Inline(inline) => {
-                    0_u8.hash(&mut hasher);
-                    inline.hash(&mut hasher);
-                }
-                Segment::Deferred(body) => {
-                    1_u8.hash(&mut hasher);
-                    body.key.hash(&mut hasher);
-                }
-            }
-        }
-        let key = hasher.finish();
+        let key = join_key(text);
         {
             let mut state = self.lock();
             state.tick += 1;
@@ -1393,6 +1394,27 @@ impl State {
             self.stats.evictions += 1;
         }
     }
+}
+
+/// What names a joined text: its inline pieces and the references between them.
+/// The pieces of a mixed body are short (a long string is a reference), so
+/// hashing them is cheap.
+fn join_key(text: &BodyText) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    for segment in text.segments() {
+        match segment {
+            Segment::Inline(inline) => {
+                0_u8.hash(&mut hasher);
+                inline.hash(&mut hasher);
+            }
+            Segment::Deferred(body) => {
+                1_u8.hash(&mut hasher);
+                body.key.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 /// A set of bodies held for an operation that needs all their text.

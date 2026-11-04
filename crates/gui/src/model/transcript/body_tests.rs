@@ -3,7 +3,7 @@
 
 use event_bus::{Event, MessageEvent};
 
-use super::{TranscriptEntry, TranscriptModel};
+use super::{Fill, TranscriptEntry, TranscriptModel};
 use crate::body::{BodyRef, BodyText, DeferredBody, FailureKind, Segment};
 
 fn stored(byte: u8, len: u64) -> BodyText {
@@ -162,7 +162,10 @@ fn a_gap_in_the_middle_of_a_stream_is_replaced_by_the_whole_stream_and_nothing_i
     }
     assert_eq!(shown(&replayed), ["message before the middle after"]);
 
-    assert!(model.fill_unreadable_from(8, &replayed));
+    assert_eq!(
+        model.fill_unreadable_from(8, &replayed, i64::MAX, true),
+        Fill::Filled
+    );
 
     assert_eq!(
         shown(&model),
@@ -200,7 +203,10 @@ fn a_completion_that_replaces_what_was_streamed_takes_its_place_not_a_second_one
     streamed(&mut replayed, 4, &completed("the full answer"));
     assert_eq!(shown(&replayed), ["message the full answer"]);
 
-    assert!(model.fill_unreadable_from(4, &replayed));
+    assert_eq!(
+        model.fill_unreadable_from(4, &replayed, i64::MAX, true),
+        Fill::Filled
+    );
 
     assert_eq!(
         shown(&model),
@@ -220,7 +226,10 @@ fn an_entry_made_from_other_events_is_not_taken_for_the_gaps_stream() {
     streamed(&mut replayed, 5, &completed("the middle answer"));
     streamed(&mut replayed, 9, &completed("a later answer"));
 
-    assert!(model.fill_unreadable_from(5, &replayed));
+    assert_eq!(
+        model.fill_unreadable_from(5, &replayed, i64::MAX, true),
+        Fill::Filled
+    );
 
     assert_eq!(
         shown(&model),
@@ -237,7 +246,47 @@ fn a_gap_whose_event_made_nothing_closes_without_a_trace() {
     let mut model = TranscriptModel::new();
     model.push_message("one");
     model.push_unreadable(6, None, FailureKind::Unreadable, "damaged", None);
-    assert!(model.fill_unreadable_from(6, &TranscriptModel::new()));
-    assert!(!model.fill_unreadable_from(6, &TranscriptModel::new()));
+    assert_eq!(
+        model.fill_unreadable_from(6, &TranscriptModel::new(), i64::MAX, true),
+        Fill::Filled
+    );
+    assert_eq!(
+        model.fill_unreadable_from(6, &TranscriptModel::new(), i64::MAX, true),
+        Fill::Absent
+    );
     assert_eq!(shown(&model), ["message one"]);
+}
+
+#[test]
+fn rows_older_than_what_they_would_replace_change_nothing() {
+    let mut model = TranscriptModel::new();
+    streamed(&mut model, 2, &delta("A "));
+    model.push_unreadable(3, Some("run"), FailureKind::Unreadable, "damaged", None);
+    streamed(&mut model, 4, &delta("C "));
+    // A later delta (event 6) extended what the rows (read through event 5) replace.
+    streamed(&mut model, 6, &delta("D"));
+    let before = shown(&model);
+    let mut replayed = TranscriptModel::new();
+    for (id, text) in [(2, "A "), (3, "B "), (4, "C ")] {
+        streamed(&mut replayed, id, &delta(text));
+    }
+
+    assert_eq!(
+        model.fill_unreadable_from(3, &replayed, 5, true),
+        Fill::Stale
+    );
+    assert_eq!(shown(&model), before, "not a thing was replaced");
+    // The same rows read up to the later event are not stale.
+    streamed(&mut replayed, 6, &delta("D"));
+    assert_eq!(
+        model.fill_unreadable_from(3, &replayed, 6, false),
+        Fill::Filled,
+        "a dry run says so without touching anything"
+    );
+    assert_eq!(shown(&model), before);
+    assert_eq!(
+        model.fill_unreadable_from(3, &replayed, 6, true),
+        Fill::Filled
+    );
+    assert_eq!(shown(&model), ["message A B C D"]);
 }

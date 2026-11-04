@@ -10,6 +10,7 @@ use crate::body::{
     RowsPurpose,
 };
 use crate::model::tasks::AgentRunSource;
+use crate::model::transcript::Fill;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
     /// Reads deferred bodies through `resolver` from now on. Without one a
@@ -70,7 +71,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.finish_rehydrate(&thread, &outcome.request.runs, outcome.result);
                 }
                 RowsPurpose::Gap { run, event_id } => {
-                    self.finish_gap(&run, event_id, outcome.result);
+                    self.finish_gap(&run, event_id, outcome.request.through, outcome.result);
                 }
             }
         }
@@ -106,7 +107,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    fn finish_gap(&mut self, run: &str, event_id: i64, result: Result<Vec<HistoryRow>, BodyError>) {
+    fn finish_gap(
+        &mut self,
+        run: &str,
+        event_id: i64,
+        through: i64,
+        result: Result<Vec<HistoryRow>, BodyError>,
+    ) {
         let rows = match result {
             Ok(rows) => rows,
             Err(error) => {
@@ -134,8 +141,39 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             return;
         }
-        self.transcripts.fill_unreadable(run, event_id, &rows);
-        self.unreadable_history_events.remove(&event_id);
+        match self
+            .transcripts
+            .fill_unreadable(run, event_id, &rows, through)
+        {
+            Fill::Stale => self.read_gap_again_for_newer_events(run, event_id),
+            Fill::Filled | Fill::Absent => {
+                self.gap_rereads.remove(&event_id);
+                self.unreadable_history_events.remove(&event_id);
+            }
+        }
+    }
+
+    /// What the rows would replace changed after they were read (another window
+    /// sent more of a stream meanwhile): they are not applied over it. The run
+    /// is read again, now up to where the history reaches, a few times; if it
+    /// keeps changing, the gap says so and waits for the user.
+    fn read_gap_again_for_newer_events(&mut self, run: &str, event_id: i64) {
+        let Some(resolver) = self.body_resolver.clone() else {
+            return;
+        };
+        let rereads = self.gap_rereads.entry(event_id).or_default();
+        if *rereads < crate::body::resolver::AUTO_RETRIES {
+            *rereads += 1;
+            resolver.request_gap(run, event_id);
+            return;
+        }
+        self.gap_rereads.remove(&event_id);
+        let reason = "The conversation kept changing while it was read again; try again";
+        self.transcripts
+            .update_unreadable(event_id, None, reason, None);
+        if let Some(known) = self.unreadable_history_events.get_mut(&event_id) {
+            known.reason = reason.to_owned();
+        }
     }
 
     /// The earlier events of a conversation that just became known, replacing

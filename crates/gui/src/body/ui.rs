@@ -100,6 +100,13 @@ pub fn poll_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> TextState<'a> {
     let Some(resolver) = resolver(ctx) else {
         return TextState::Failed(vec![no_store_failure(text)]);
     };
+    // Joined text that is kept is all a body of several pieces needs: asking
+    // for the pieces too would read again what the join made room by evicting.
+    if text.segments().len() > 1
+        && let Some(joined) = resolver.peek_joined(text)
+    {
+        return TextState::Ready(SharedText::Shared(joined));
+    }
     let mut views = Vec::new();
     for segment in text.segments() {
         if let Segment::Deferred(body) = segment {

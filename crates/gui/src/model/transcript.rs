@@ -16,6 +16,7 @@ mod unreadable;
 
 pub use drafts::{redacted_for_display, redacted_text_for_display};
 pub use reviews::ToolReview;
+pub use unreadable::Fill;
 
 #[cfg(test)]
 mod body_tests;
