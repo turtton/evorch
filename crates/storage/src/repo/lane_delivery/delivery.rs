@@ -185,6 +185,7 @@ pub(crate) fn claim(
         token: request.token,
         lease_until_ns: request.lease_until_ns,
         owner: request.owner,
+        completed_root_wake: !request.allow_non_waking,
         notifications,
     }))
 }
@@ -268,6 +269,7 @@ pub(crate) fn accept_delivery(
     }
     let snapshot = crate::repo::thread_index::stage_snapshot(&tx, &write)
         .map_err(crate::repo::thread_index::into_storage_error)?;
+    let mut wake_sources = std::collections::HashSet::new();
     for notice in missing {
         let receipt = crate::HostInputReceipt {
             prompt_id: receipt_id(notice),
@@ -290,6 +292,22 @@ pub(crate) fn accept_delivery(
             "UPDATE lane_notifications SET receipt_prompt_id=?2 WHERE notification_id=?1",
             params![notice.notification_id, receipt.prompt_id],
         )?;
+        // No post-commit callback: receipt-only crash recovery must retain the
+        // same causal wake count even when the sender never reaches ACK.
+        if claim.completed_root_wake
+            && !matches!(notice.kind, LaneNotificationKind::Answer { .. })
+            && wake_sources.insert(&notice.lane_id)
+        {
+            let expected = guard(&tx, &notice.lane_id)?.revision;
+            guards::update_guard_in_transaction(
+                &tx,
+                &notice.lane_id,
+                expected,
+                LaneGuardSignal::WakeBatch {
+                    batch_id: format!("lane-batch:{}", notice.notification_id),
+                },
+            )?;
+        }
     }
     tx.commit()?;
     Ok(Some(snapshot))

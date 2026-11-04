@@ -6,6 +6,8 @@ use storage::{
     Database, RunContextRecord, Storage, StorageConfig, StorageError, StorageHandle,
     lane_delivery::*, lanes::*, thread_index::*,
 };
+#[path = "lane_delivery/atomic_guard.rs"]
+mod atomic_guard;
 #[path = "lane_delivery/recovery.rs"]
 mod recovery;
 #[path = "lane_delivery/rollback.rs"]

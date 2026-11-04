@@ -127,7 +127,8 @@ impl StorageHandle {
             crate::repo::lane_delivery::nack(conn, &claim, reason, now_ns)
         })
     }
-    /// Snapshot + non-user receipt transaction. Fully received retries return None without rewriting history.
+    /// Snapshot + non-user receipts + completed-root wake guards in one transaction.
+    /// Fully received retries return None without rewriting history or counting again.
     pub fn accept_lane_delivery(
         &self,
         claim: LaneDeliveryClaim,

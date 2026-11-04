@@ -43,6 +43,7 @@ pub(super) fn update_guard_in_transaction(
             revision,
             failure_episode,
         } => {
+            let before = state.clone();
             if let Some(episode) = &failure_episode {
                 id(episode)?;
             }
@@ -54,14 +55,18 @@ pub(super) fn update_guard_in_transaction(
                 state.suppressed = false;
                 state.artifact_fingerprint = Some(fingerprint);
             }
+            if state == before {
+                return Ok(state);
+            }
         }
         LaneGuardSignal::WakeBatch { batch_id } => {
             id(&batch_id)?;
-            if state.last_wake_batch_id.as_deref() != Some(&batch_id) {
-                state.no_progress_batches = state.no_progress_batches.saturating_add(1);
-                state.last_wake_batch_id = Some(batch_id);
-                state.suppressed = state.no_progress_batches >= LANE_NO_PROGRESS_LIMIT;
+            if state.last_wake_batch_id.as_deref() == Some(&batch_id) {
+                return Ok(state);
             }
+            state.no_progress_batches = state.no_progress_batches.saturating_add(1);
+            state.last_wake_batch_id = Some(batch_id);
+            state.suppressed = state.no_progress_batches >= LANE_NO_PROGRESS_LIMIT;
         }
     }
     state.revision = state

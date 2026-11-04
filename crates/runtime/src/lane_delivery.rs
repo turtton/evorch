@@ -70,7 +70,6 @@ pub enum LaneDeliveryOutcome {
 }
 pub(crate) struct PendingDelivery {
     pub claim: LaneDeliveryClaim,
-    pub waking: bool,
     pub result: oneshot::Sender<Result<usize, LaneDeliveryNack>>,
 }
 pub(crate) struct DeliveryRuntime {
@@ -521,7 +520,6 @@ impl AgentRuntime {
                 target.root_run_id,
                 PendingDelivery {
                     claim: claim.clone(),
-                    waking: !active,
                     result: tx,
                 },
             );
@@ -553,16 +551,10 @@ impl AgentRuntime {
             rx.await.unwrap_or(Err(LaneDeliveryNack::RestoreFailed))
         }
     }
-    pub fn record_lane_report_progress(&self, report: &LaneReport) -> Result<(), LaneError> {
-        if matches!(report.status, LaneStatus::Ready | LaneStatus::Failed) {
-            self.lane_guard_signal(
-                &report.lane_id,
-                LaneGuardSignal::TerminalArtifact {
-                    revision: report.artifact_revision.clone(),
-                    failure_episode: report.failure_episode.clone(),
-                },
-            )?;
-        }
+    /// The source report/outbox transaction already applied terminal progress.
+    /// Keep B's port hook inert: a delayed older report must not rewind the
+    /// current artifact fingerprint or reset a newer wake batch.
+    pub fn record_lane_report_progress(&self, _report: &LaneReport) -> Result<(), LaneError> {
         Ok(())
     }
     pub(crate) fn lane_guard_signal(
@@ -814,7 +806,7 @@ impl crate::agent_loop::LoopState {
         let Some(pending) = pending else {
             return Ok(false);
         };
-        let accepted = self.accept_lane_batch(&runtime, &pending.claim, pending.waking);
+        let accepted = self.accept_lane_batch(&runtime, &pending.claim);
         let result = accepted.as_ref().map(|v| *v).map_err(|reason| *reason);
         let _ = pending.result.send(result);
         match accepted {
@@ -833,7 +825,6 @@ impl crate::agent_loop::LoopState {
         &mut self,
         runtime: &AgentRuntime,
         claim: &LaneDeliveryClaim,
-        waking: bool,
     ) -> Result<usize, LaneDeliveryNack> {
         let thread = self
             .thread_id
@@ -931,25 +922,7 @@ impl crate::agent_loop::LoopState {
             return Err(LaneDeliveryNack::StorageFailed);
         }
         self.context = candidate;
-        // Only completed-root automatic wakes consume this guard. Active turn
-        // delivery remains subject to the lead's own progress/tool diagnostics.
-        if waking {
-            let mut sources = HashSet::new();
-            for notice in &missing {
-                if sources.insert(&notice.lane_id)
-                    && !matches!(notice.kind, LaneNotificationKind::Answer { .. })
-                {
-                    runtime
-                        .lane_guard_signal(
-                            &notice.lane_id,
-                            LaneGuardSignal::WakeBatch {
-                                batch_id: format!("lane-batch:{}", notice.notification_id),
-                            },
-                        )
-                        .map_err(|_| LaneDeliveryNack::StorageFailed)?;
-                }
-            }
-        }
+        // The storage transaction also committed completed-root wake guards.
         // Credits remain pending until the post-compaction provider request succeeds.
         self.publish_message_count();
         Ok(missing.len())

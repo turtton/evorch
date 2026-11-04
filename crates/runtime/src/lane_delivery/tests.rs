@@ -5,6 +5,44 @@ use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 mod lease;
 mod questions;
+
+#[tokio::test]
+async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "delayed-progress").await;
+    f.report(&lane, Some(1), LaneStatus::Ready);
+    let old_report = f
+        .storage
+        .handle()
+        .lane_reports(&lane.lane_id, 0, 1)
+        .unwrap()[0]
+        .clone();
+    f.report(&lane, Some(2), LaneStatus::Ready);
+    let current = f
+        .storage
+        .handle()
+        .lane_wake_guard(lane.lane_id.clone())
+        .unwrap();
+    let counted = f
+        .storage
+        .handle()
+        .update_lane_wake_guard(
+            lane.lane_id.clone(),
+            current.revision,
+            LaneGuardSignal::WakeBatch {
+                batch_id: "after-new-artifact".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(counted.no_progress_batches, 1);
+    f.runtime.record_lane_report_progress(&old_report).unwrap();
+    assert_eq!(
+        f.storage.handle().lane_wake_guard(lane.lane_id).unwrap(),
+        counted
+    );
+}
+
 #[derive(Default)]
 struct Model {
     finish: AtomicBool,

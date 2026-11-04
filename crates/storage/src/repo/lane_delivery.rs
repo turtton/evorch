@@ -486,6 +486,23 @@ pub(crate) fn append_report(
 ) -> Result<crate::lanes::LaneReportAppended, StorageError> {
     let tx = transaction(conn)?;
     let appended = crate::repo::lanes::append_report_in_transaction(&tx, lane_id, &input, at_ns)?;
+    // A new terminal artifact must unblock delivery even if runtime crashes
+    // immediately after this source commit, before scheduling its outbox.
+    if matches!(
+        input.status,
+        event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
+    ) {
+        let expected = guard(&tx, lane_id)?.revision;
+        guards::update_guard_in_transaction(
+            &tx,
+            lane_id,
+            expected,
+            LaneGuardSignal::TerminalArtifact {
+                revision: input.artifact_revision.clone(),
+                failure_episode: input.failure_episode.clone(),
+            },
+        )?;
+    }
     let current = &appended.lane;
     if let Some(destination) = &current.lead_thread_id {
         let kind = match input.status {
