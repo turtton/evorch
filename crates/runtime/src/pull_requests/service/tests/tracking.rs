@@ -336,6 +336,74 @@ async fn nothing_changes_git_s_start_after_the_wait_for_the_pool() {
     }
 }
 
+// Given: tracking is switched off while the last check of the thread's lease waits on the
+// registry / When: the check returns / Then: git is not started: tracking is read after the lease
+#[tokio::test(start_paused = true)]
+async fn tracking_is_read_after_the_lease_is_confirmed_before_git() {
+    let world = World::new();
+    let process = world.process(enabled());
+    let checkout = world.dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    process.environment.set_directories(vec![checkout]);
+    process.source.push_ok(&key(1), open_running(1));
+    let service = process.service.clone();
+    process.hooks.during_confirm(move || {
+        service
+            .update_settings(PullRequestsConfig::default())
+            .unwrap();
+    });
+
+    process.link("t1", 1).await;
+    settle().await;
+
+    assert_eq!(process.environment.directory_requests(), 1);
+    assert_eq!(process.environment.resolutions(), 0);
+}
+
+// Given: a merged pull request that a refresh cannot fetch / When: time passes / Then: it is still
+// left alone (the refresh's failure does not restart the polling), and the next explicit refresh
+// that finds it open resumes the polling
+#[tokio::test(start_paused = true)]
+async fn a_failed_refresh_of_a_merged_pull_request_does_not_restart_the_polling() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(
+        &key(1),
+        fetched(1, facts(PullRequestState::Merged, passing())),
+    );
+    let permit = process.permit("t1");
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    assert_eq!(process.source.calls().len(), 1);
+
+    process
+        .source
+        .push_err(&key(1), FetchError::Network("down".into()));
+    process.service.refresh("t1", &permit).await.unwrap();
+    settle().await;
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "the refresh fetched and failed"
+    );
+
+    pass(1_000_000).await;
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "a merged pull request stays left alone, whatever the failed refresh's backoff"
+    );
+
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.service.refresh("t1", &permit).await.unwrap();
+    settle().await;
+    assert_eq!(process.source.calls().len(), 3);
+    pass(30).await;
+    assert_eq!(process.source.calls().len(), 4, "the polling resumed");
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]

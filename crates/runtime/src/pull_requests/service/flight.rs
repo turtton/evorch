@@ -366,14 +366,17 @@ impl Inner {
             // The one place `git` is started. The look at tracking and at the thread's lease is
             // the first thing the blocking closure does, immediately before the process, so
             // neither the lookup of the directories nor the wait for the pool can outdate it.
-            let (environment, settings, permit) = (
+            let (environment, ownership, settings, permit) = (
                 Arc::clone(&self.env),
+                Arc::clone(&self.ownership),
                 self.settings.subscribe(),
                 target.permit.clone(),
             );
             let resolved = self
                 .blocking_at(Stage::Checkout, move || {
-                    if !settings.borrow().enabled || !permit_holds(&permit) {
+                    // The lease is confirmed first (that may wait on a busy registry) and tracking
+                    // is read after it, immediately before the process.
+                    if !ownership.confirms(&permit) || !settings.borrow().enabled {
                         return None;
                     }
                     Some(environment.resolve_checkout(
@@ -523,10 +526,10 @@ impl Inner {
             {
                 state.flights.remove(key);
             }
-            let entry = state.keys.entry(key.clone()).or_insert(KeyState {
-                next_due: Some(now),
-                failures: 0,
-            });
+            let entry = state
+                .keys
+                .entry(key.clone())
+                .or_insert_with(|| KeyState::new(now, false));
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let stable = Duration::from_secs(config.stable_poll_seconds);
             let backoff_max = Duration::from_secs(config.backoff_max_seconds);
@@ -537,6 +540,8 @@ impl Inner {
                     ..
                 } => {
                     entry.failures = 0;
+                    entry.backoff_until = None;
+                    entry.terminal = *terminal;
                     entry.next_due = if *terminal {
                         None
                     } else {
@@ -545,17 +550,22 @@ impl Inner {
                 }
                 FlightOutcome::Failed { error, .. } => {
                     entry.failures = entry.failures.saturating_add(1);
-                    entry.next_due =
-                        Some(now + backoff(error, pending, backoff_max, entry.failures));
+                    let retry = now + backoff(error, pending, backoff_max, entry.failures);
+                    entry.backoff_until = Some(retry);
+                    // A pull request already known to be done stays left alone: the failure of
+                    // a refresh does not turn the polling back on.
+                    entry.next_due = (!entry.terminal).then_some(retry);
                 }
                 FlightOutcome::StorageFailed(_) => {
                     entry.failures = entry.failures.saturating_add(1);
-                    entry.next_due = Some(now + backoff_max.min(pending * 2));
+                    let retry = now + backoff_max.min(pending * 2);
+                    entry.backoff_until = Some(retry);
+                    entry.next_due = (!entry.terminal).then_some(retry);
                 }
                 FlightOutcome::Discarded => {
                     // Nobody who waited could be confirmed (or tracking was switched off):
                     // try again later, not in a tight loop against a busy registry.
-                    entry.next_due = Some(now + pending);
+                    entry.next_due = (!entry.terminal).then_some(now + pending);
                 }
             }
         }

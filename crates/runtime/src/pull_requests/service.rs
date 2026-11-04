@@ -173,10 +173,28 @@ pub struct ServiceParts {
 /// Per-key polling state kept in this process.
 #[derive(Debug)]
 pub(crate) struct KeyState {
-    /// When to fetch next; `None` parks the key (merged, closed) until something forces it.
+    /// When the tracking threads fetch it next; `None` while it is parked.
     pub(crate) next_due: Option<Instant>,
+    /// The newest stored facts say merged or closed: the tracking threads leave it alone. This is
+    /// kept apart from `next_due` so that a failed fetch (an explicit refresh that did not get
+    /// through) cannot start the polling again. Only facts that show it open end it.
+    pub(crate) terminal: bool,
     /// Failed fetches since the last success.
     pub(crate) failures: u32,
+    /// Until when a failed fetch is not tried again by whoever waits for the pull request (a
+    /// pending inheritance, the tracking threads). Independent of `terminal`.
+    pub(crate) backoff_until: Option<Instant>,
+}
+
+impl KeyState {
+    pub(crate) fn new(now: Instant, terminal: bool) -> Self {
+        Self {
+            next_due: if terminal { None } else { Some(now) },
+            terminal,
+            failures: 0,
+            backoff_until: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -276,10 +294,12 @@ impl Inner {
         &self,
         permits: impl IntoIterator<Item = &'a OwnerPermit>,
     ) -> bool {
-        self.config().enabled
-            && permits
-                .into_iter()
-                .any(|permit| matches!(permit.try_mutation_guard(), Ok(Some(_))))
+        // The permits first, tracking last: whatever the first took time over, the last look is
+        // the freshest.
+        permits
+            .into_iter()
+            .any(|permit| matches!(permit.try_mutation_guard(), Ok(Some(_))))
+            && self.config().enabled
     }
 
     pub(crate) fn enabled(&self) -> Result<PullRequestsConfig, PullRequestError> {

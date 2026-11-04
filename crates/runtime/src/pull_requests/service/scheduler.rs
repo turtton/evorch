@@ -210,10 +210,10 @@ impl Inner {
                     .iter()
                     .any(|target| state.forced.contains(&target.thread_id));
                 let terminal = plan.terminal.contains(&key);
-                let entry = state.keys.entry(key.clone()).or_insert(KeyState {
-                    next_due: if terminal { None } else { Some(now) },
-                    failures: 0,
-                });
+                let entry = state
+                    .keys
+                    .entry(key.clone())
+                    .or_insert_with(|| KeyState::new(now, terminal));
                 if forced {
                     entry.next_due = Some(now);
                 }
@@ -250,7 +250,7 @@ impl Inner {
                 // ends, for the children that wait for it as for the threads that track it.
                 if let Some(entry) = state.keys.get(&key)
                     && entry.failures > 0
-                    && let Some(due) = entry.next_due
+                    && let Some(due) = entry.backoff_until
                     && due > now
                 {
                     earliest = earlier(earliest, due);

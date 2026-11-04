@@ -205,12 +205,19 @@ type PermitAction = Box<dyn FnOnce(&OwnerPermit) + Send>;
 pub(super) struct Hooks {
     before_permit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     after_permit: Mutex<Option<PermitAction>>,
+    during_confirm: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Hooks {
     /// Runs `action` just before the next permit is looked up.
     pub(super) fn before_permit(&self, action: impl FnOnce() + Send + 'static) {
         *self.before_permit.lock().unwrap() = Some(Box::new(action));
+    }
+
+    /// Runs `action` in the middle of the next check that a permit still holds its thread, as if
+    /// the registry were busy and the world changed while the check waited.
+    pub(super) fn during_confirm(&self, action: impl FnOnce() + Send + 'static) {
+        *self.during_confirm.lock().unwrap() = Some(Box::new(action));
     }
 
     /// Runs `action` with the next permit that was found, before it is handed to the plan.
@@ -236,6 +243,14 @@ impl OwnershipView for HookedOwnership {
             action(&permit);
         }
         Some(permit)
+    }
+
+    fn confirms(&self, permit: &OwnerPermit) -> bool {
+        let during = self.hooks.during_confirm.lock().unwrap().take();
+        if let Some(action) = during {
+            action();
+        }
+        crate::pull_requests::ownership::permit_holds(permit)
     }
 }
 

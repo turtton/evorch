@@ -14,6 +14,13 @@ pub trait OwnershipView: Send + Sync {
     /// The permit this process holds for `thread_id` right now (its lease is running and
     /// belongs to this process), or `None`. Blocks briefly on the ownership registry.
     fn owned_permit(&self, thread_id: &str) -> Option<OwnerPermit>;
+
+    /// Whether `permit` still holds its thread right now. May wait on the registry (it retries a
+    /// busy one), so a caller reads anything else it depends on *after* it returns. A test
+    /// replaces it to change the world during that wait.
+    fn confirms(&self, permit: &OwnerPermit) -> bool {
+        permit_holds(permit)
+    }
 }
 
 impl OwnershipView for OwnerHost {
