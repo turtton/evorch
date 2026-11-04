@@ -5,12 +5,58 @@ use tokio::sync::Notify;
 #[derive(Default)]
 struct Model {
     requests: Mutex<Vec<Vec<Message>>>,
+    official: u8,
     summarizing: Notify,
     release: Notify,
 }
 
 #[async_trait::async_trait]
 impl AgentModel for Model {
+    async fn compact_context(
+        &self,
+        _: &crate::AgentInvocationContext,
+        _: Role,
+        _: &[Message],
+        _: &[Message],
+        _: &[ToolSpec],
+    ) -> Result<Option<providers::CompactionResult>, RuntimeError> {
+        match self.official {
+            1 => Ok(Some(providers::CompactionResult {
+                encrypted_content: "opaque-never-display".into(),
+                usage: Default::default(),
+                usage_reported: true,
+            })),
+            2 => Err(RuntimeError::Model {
+                reason: "official failed".into(),
+            }),
+            _ => Ok(None),
+        }
+    }
+    async fn complete_streaming(
+        &self,
+        invocation: &crate::AgentInvocationContext,
+        role: Role,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        bus: &event_bus::EventBus,
+    ) -> Result<ChatResponse, RuntimeError> {
+        if invocation.purpose == event_bus::RequestPurpose::Compaction {
+            bus.emit(event_bus::Event::new(
+                event_bus::MessageEvent::ReasoningDelta {
+                    run_id: Some(invocation.run_id.clone()),
+                    delta: "never show reasoning".into(),
+                },
+            ));
+            bus.emit(event_bus::Event::new(
+                event_bus::MessageEvent::MessageDelta {
+                    run_id: Some(invocation.run_id.clone()),
+                    delta: "summary ".repeat(512),
+                },
+            ));
+        }
+        self.complete(invocation, role, messages, tools).await
+    }
+
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "test".into()
     }
@@ -61,11 +107,20 @@ async fn seed(fixture: &Fixture) -> RunId {
 }
 
 fn configured(model: Arc<Model>, max_bytes: u64) -> Fixture {
+    configured_with(model, max_bytes, config::SummarizerKind::Model)
+}
+
+fn configured_with(
+    model: Arc<Model>,
+    max_bytes: u64,
+    summarizer: config::SummarizerKind,
+) -> Fixture {
     let mut fixture = Fixture::with_model(model);
     fixture.runtime = fixture.runtime.with_compaction(config::CompactionConfig {
         context_window_tokens: 1_000_000,
         keep_recent_tokens: 1,
         max_summary_bytes: max_bytes,
+        summarizer,
         ..Default::default()
     });
     fixture
@@ -97,8 +152,34 @@ async fn saved_compaction_serializes_mutations_and_resumes_without_replaying_a_c
     let fixture = configured(model.clone(), 16_384);
     let run = seed(&fixture).await;
     let before = snapshot(&fixture, run);
+    let mut events = fixture.runtime.shared.bus.subscribe();
     let job = compact(&fixture.runtime, run);
     model.summarizing.notified().await;
+    let mut operation_id = None;
+    loop {
+        let event = events.recv().await.unwrap();
+        match event.kind {
+            event_bus::EventKind::Lifecycle(LifecycleEvent::RunProgress {
+                compaction_operation_id: Some(id),
+                activity: event_bus::RunActivity::Compaction,
+                ..
+            }) => operation_id = Some(id),
+            event_bus::EventKind::Compaction(event_bus::CompactionEvent::Progress {
+                operation_id: id,
+                delta,
+                mode: event_bus::CompactionMode::ModelSummary,
+                ..
+            }) if !delta.is_empty() => {
+                assert_eq!(operation_id.as_ref(), Some(&id));
+                break;
+            }
+            event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. }) => {
+                panic!("not committed yet")
+            }
+            event_bus::EventKind::Message(_) => panic!("summary must not be a conversation event"),
+            _ => {}
+        }
+    }
     assert_eq!(snapshot(&fixture, run), before);
     assert_eq!(
         fixture.runtime.inspect_agent(run).unwrap().phase,
@@ -126,6 +207,18 @@ async fn saved_compaction_serializes_mutations_and_resumes_without_replaying_a_c
     }
     model.release.notify_one();
     job.await.unwrap().unwrap();
+    loop {
+        let event = events.recv().await.unwrap();
+        if let event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted {
+            operation_id: id,
+            ..
+        }) = event.kind
+        {
+            assert_eq!(operation_id.as_ref(), Some(&id));
+            assert!(snapshot(&fixture, run).snapshot_revision > before.snapshot_revision);
+            break;
+        }
+    }
     let saved = snapshot(&fixture, run);
     assert!(saved.snapshot_revision > before.snapshot_revision);
     assert_eq!(saved.record.messages_json, before.record.messages_json);
@@ -182,6 +275,7 @@ async fn cancelled_or_failed_saved_compaction_is_atomic_and_releases_the_reserva
         let fixture = configured(model.clone(), 0);
         let run = seed(&fixture).await;
         let before = snapshot(&fixture, run);
+        let mut events = fixture.runtime.shared.bus.subscribe();
         let job = compact(&fixture.runtime, run);
         model.summarizing.notified().await;
         if cancel {
@@ -194,6 +288,26 @@ async fn cancelled_or_failed_saved_compaction_is_atomic_and_releases_the_reserva
                 Err(RuntimeError::SavedCompactionFailed { .. })
             ));
         }
+        let mut started = None;
+        let mut aborted = None;
+        for event in events.drain_pending_snapshot() {
+            match event.kind {
+                event_bus::EventKind::Lifecycle(LifecycleEvent::RunProgress {
+                    compaction_operation_id: Some(id),
+                    ..
+                }) => started = Some(id),
+                event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted {
+                    operation_id,
+                    ..
+                }) => aborted = Some(operation_id),
+                event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted {
+                    ..
+                }) => panic!("failure cannot report success"),
+                _ => {}
+            }
+        }
+        assert!(started.is_some());
+        assert_eq!(started, aborted);
         assert_eq!(snapshot(&fixture, run), before);
         assert_eq!(
             fixture.runtime.inspect_agent(run).unwrap().phase,
@@ -212,6 +326,7 @@ async fn snapshot_revision_conflict_does_not_overwrite_an_external_update() {
     let model = Arc::new(Model::default());
     let fixture = configured(model.clone(), 16_384);
     let run = seed(&fixture).await;
+    let mut events = fixture.runtime.shared.bus.subscribe();
     let job = compact(&fixture.runtime, run);
     model.summarizing.notified().await;
     let mut updated = snapshot(&fixture, run).record;
@@ -227,6 +342,15 @@ async fn snapshot_revision_conflict_does_not_overwrite_an_external_update() {
         Err(RuntimeError::SavedCompactionFailed { .. })
     ));
     assert_eq!(snapshot(&fixture, run).record, updated);
+    let events = events.drain_pending_snapshot();
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event.kind,
+        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+    )));
     fixture.runtime.ensure_no_saved_compaction(run).unwrap();
 }
 
@@ -235,6 +359,7 @@ async fn ownership_lost_during_summary_cannot_commit_the_prepared_checkpoint() {
     let model = Arc::new(Model::default());
     let fixture = configured(model.clone(), 16_384);
     let run = seed(&fixture).await;
+    let mut events = fixture.runtime.shared.bus.subscribe();
     let before = snapshot(&fixture, run);
     let host = crate::ownership::OwnerHost::open(
         fixture._dir.path(),
@@ -261,6 +386,15 @@ async fn ownership_lost_during_summary_cannot_commit_the_prepared_checkpoint() {
     model.release.notify_one();
     assert!(job.await.unwrap().is_err());
     assert_eq!(snapshot(&fixture, run), before);
+    let events = events.drain_pending_snapshot();
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event.kind,
+        event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+    )));
     fixture.runtime.ensure_no_saved_compaction(run).unwrap();
 }
 
@@ -380,6 +514,76 @@ async fn disk_only_done_error_and_stopped_snapshots_compact_without_registering_
 }
 
 #[tokio::test]
+async fn saved_progress_follows_the_actual_official_summary_or_structural_path() {
+    use event_bus::{CompactionEvent, CompactionMode, EventKind};
+    for (official, structural, expected) in [
+        (1, false, CompactionMode::Official),
+        (0, false, CompactionMode::ModelSummary),
+        (2, false, CompactionMode::ModelSummary),
+        (0, true, CompactionMode::Structural),
+    ] {
+        let model = Arc::new(Model {
+            official,
+            ..Default::default()
+        });
+        let fixture = configured_with(
+            model.clone(),
+            16_384,
+            if structural {
+                config::SummarizerKind::Structural
+            } else {
+                config::SummarizerKind::Model
+            },
+        );
+        let run = seed(&fixture).await;
+        let mut events = fixture.runtime.shared.bus.subscribe();
+        model.release.notify_one();
+        fixture
+            .runtime
+            .compact_saved_chat(run, RunConfig::default())
+            .await
+            .unwrap();
+        let events = events.drain_pending_snapshot();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::Message(_))),
+            "summary cannot enter the conversation bus"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    EventKind::Compaction(CompactionEvent::Compacted { .. })
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.kind,
+            EventKind::Compaction(CompactionEvent::Aborted { .. })
+        )));
+        let paths: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Compaction(CompactionEvent::Progress { mode, delta, .. }) => {
+                    Some((*mode, delta))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.last().unwrap().0, expected);
+        assert!(
+            paths
+                .iter()
+                .all(|(mode, delta)| *mode == CompactionMode::ModelSummary || delta.is_empty())
+        );
+        assert!(!format!("{events:?}").contains("opaque-never-display"));
+    }
+}
+
+#[tokio::test]
 async fn saved_compaction_that_lost_to_a_newer_save_reports_it_and_publishes_nothing() {
     let model = Arc::new(Model::default());
     let fixture = configured(model.clone(), 16_384);
@@ -410,6 +614,13 @@ async fn saved_compaction_that_lost_to_a_newer_save_reports_it_and_publishes_not
         !events.iter().any(|event| matches!(
             event.kind,
             event_bus::EventKind::Compaction(event_bus::CompactionEvent::Compacted { .. })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            event_bus::EventKind::Compaction(event_bus::CompactionEvent::Aborted { .. })
         )),
         "{events:?}"
     );

@@ -93,7 +93,9 @@ async fn finish_and_collect(
     timeout(WAIT, async {
         loop {
             match receiver.recv().await.expect("event bus remains open").kind {
-                EventKind::Compaction(event) => events.push(event),
+                EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+                    events.push(event)
+                }
                 EventKind::Lifecycle(event_bus::LifecycleEvent::BackgroundTaskCompleted {
                     task_id,
                 }) if task_id == run_id.to_string() => return,
@@ -232,7 +234,10 @@ async fn automatic_ratchet_rearms_only_after_below_threshold_boundary() {
         threshold,
         context_window_tokens,
         ..
-    } = &events[1];
+    } = &events[1]
+    else {
+        panic!("expected committed compaction");
+    };
     assert!(*estimated_tokens_before as f64 >= *context_window_tokens as f64 * *threshold);
     assert_eq!(*estimated_tokens_after, request.estimate(&observed[3]));
     assert!(*estimated_tokens_after < *context_window_tokens);

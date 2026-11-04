@@ -104,8 +104,10 @@ impl TranscriptRegistry {
     /// Interrupts `run_id`'s running calls in every transcript that shows them,
     /// for runs whose terminal phase was reconciled without an event.
     pub(crate) fn interrupt_run_tools(&mut self, run_id: &str) {
+        self.thread.interrupt_compactions(Some(run_id));
         self.thread.interrupt_running_tools(run_id);
         for model in self.threads.values_mut().chain(self.runs.values_mut()) {
+            model.interrupt_compactions(Some(run_id));
             model.interrupt_running_tools(run_id);
         }
     }
@@ -160,9 +162,12 @@ impl TranscriptRegistry {
                     route
                 }
             }
-            EventKind::Compaction(event_bus::CompactionEvent::Compacted { run_id, .. }) => {
-                self.route_run(run_id)
-            }
+            EventKind::Lifecycle(event_bus::LifecycleEvent::RunProgress { run_id, .. })
+            | EventKind::Compaction(
+                event_bus::CompactionEvent::Compacted { run_id, .. }
+                | event_bus::CompactionEvent::Progress { run_id, .. }
+                | event_bus::CompactionEvent::Aborted { run_id, .. },
+            ) => self.route_run(run_id),
             EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => self.route_run(run_id),
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
@@ -259,6 +264,28 @@ impl TranscriptRegistry {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        // A committed event may be rejected on receipt after authority changes.
+        // Existing ownership signals therefore also settle live-only cards,
+        // including saved compactions whose run phase was already terminal.
+        if let EventKind::Ownership(ownership) = &event.kind
+            && matches!(
+                ownership.action,
+                event_bus::OwnershipAction::Claimed
+                    | event_bus::OwnershipAction::Released
+                    | event_bus::OwnershipAction::Handoff
+            )
+        {
+            if let Some(model) = self.threads.get_mut(&ownership.thread_id) {
+                model.interrupt_compactions(None);
+            }
+            for (run, thread) in &self.run_threads {
+                if thread == &ownership.thread_id
+                    && let Some(model) = self.runs.get_mut(run)
+                {
+                    model.interrupt_compactions(Some(run));
+                }
+            }
+        }
         if let EventKind::Compaction(event_bus::CompactionEvent::Compacted {
             run_id,
             checkpoint_id,
