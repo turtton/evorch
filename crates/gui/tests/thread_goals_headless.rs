@@ -438,6 +438,7 @@ fn band_harness(
                         extra_read_dirs: &[],
                         parent_thread: None,
                         child_threads: Vec::new(),
+                        lane: None,
                         thread_metrics: None,
                         phase: None,
                         model_picker: gui::panes::model_picker::ModelPickerContext {

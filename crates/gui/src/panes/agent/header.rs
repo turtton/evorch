@@ -99,6 +99,11 @@ pub(super) fn header_strip(
                     .on_hover_text(hint);
                 }
             }
+            if identity.is_none()
+                && let Some(lane) = &ctx.lane
+            {
+                super::lane::lane_card(ui, lane, action);
+            }
             if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty())
             {
                 ui.horizontal_wrapped(|ui| {

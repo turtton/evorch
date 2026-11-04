@@ -94,7 +94,7 @@ impl Fixture {
                 "INSERT INTO lanes(lane_id, thread_id, origin_thread_id, origin_run_id, creation_key, \
                  request_hash, scope, lead_thread_id, policy, management_revision, brief_json, \
                  brief_revision, start_seed, created_at_ns, updated_at_ns, last_activity_at_ns) \
-                 VALUES (?1, ?2, 'lead', 'lead-run', ?1, 'h', 'lane', 'lead', 'attached', 1, '{}', 1, \
+                 VALUES (?1, ?2, 'lead', 'lead-run', ?1, 'h', 'lane', NULL, 'detached', 1, '{}', 1, \
                  '', 1, 1, 1)",
                 params![lane_id, thread],
             )
@@ -3513,4 +3513,177 @@ fn a_capture_above_the_step_budget_does_not_keep_the_lane_rows_of_its_thread() {
             "{table}"
         );
     }
+}
+
+impl Fixture {
+    /// A lane the ledger says `policy` manages from `lead` (`None` for a detached one).
+    /// Its thread row has no `parent_thread_id`: the ledger alone relates them.
+    fn managed_lane(&self, lane_id: &str, thread: &str, lead: Option<&str>) {
+        self.conn
+            .execute(
+                "INSERT INTO lanes(lane_id, thread_id, origin_thread_id, origin_run_id, \
+                 creation_key, request_hash, scope, lead_thread_id, policy, management_revision, \
+                 brief_json, brief_revision, start_seed, created_at_ns, updated_at_ns, \
+                 last_activity_at_ns) VALUES (?1, ?2, 'lead', 'lead-run', ?1, 'h', 'lane', ?3, ?4, \
+                 1, '{}', 1, '', 1, 1, 1)",
+                params![
+                    lane_id,
+                    thread,
+                    lead,
+                    if lead.is_some() {
+                        "attached"
+                    } else {
+                        "detached"
+                    }
+                ],
+            )
+            .unwrap();
+    }
+}
+
+fn explored_threads(states: &[(String, FamilyState)]) -> Vec<Vec<String>> {
+    states
+        .iter()
+        .filter_map(|(_, state)| match state {
+            FamilyState::Explored { threads, .. } => Some(threads.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_lead_and_the_lanes_it_manages_are_one_family_deleted_together() {
+    // Given: an archived lead and two managed lanes whose thread rows name no parent
+    let f = Fixture::new();
+    f.thread("lead", None, Some("rl"), None);
+    f.thread("lane-a", None, Some("ra"), None);
+    f.thread("lane-b", None, Some("rb"), None);
+    f.run("rl", None, Some("lead"), "chat:Orchestrator:lead");
+    f.run("ra", None, Some("lane-a"), "chat:Orchestrator:lane-a");
+    f.run("rb", None, Some("lane-b"), "chat:Orchestrator:lane-b");
+    f.managed_lane("lane-id-a", "lane-a", Some("lead"));
+    f.managed_lane("lane-id-b", "lane-b", Some("lead"));
+    let database = f.database();
+    let input = sidebar(&["lead", "lane-a", "lane-b"], &[]);
+
+    // When: the closure is explored from the lead and from the lanes
+    let states = settle(&database, &input, &policy(), BIG);
+
+    // Then: they are a single family, confirmed and removed as a whole
+    assert_eq!(
+        explored_threads(&states),
+        [["lane-a", "lane-b", "lead"].map(String::from).to_vec()]
+    );
+    let key = states
+        .iter()
+        .find(|(_, state)| matches!(state, FamilyState::Explored { .. }))
+        .map(|(key, _)| key.clone())
+        .unwrap();
+    match finalize(&database, &key, &input) {
+        FinalizeOutcome::Confirmed(family) => {
+            assert_eq!(family.threads, ["lane-a", "lane-b", "lead"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM threads"), 0);
+}
+
+#[test]
+fn a_lead_is_held_while_a_lane_it_manages_is_not_due_or_unknown_to_the_sidebar() {
+    // Given: an archived lead whose managed lane was active just now
+    let f = Fixture::new();
+    f.thread("lead", None, Some("rl"), None);
+    f.thread("lane-a", None, Some("ra"), None);
+    f.run("rl", None, Some("lead"), "chat:Orchestrator:lead");
+    f.run("ra", None, Some("lane-a"), "chat:Orchestrator:lane-a");
+    f.managed_lane("lane-id-a", "lane-a", Some("lead"));
+    let database = f.database();
+    let mut input = sidebar(&["lead", "lane-a"], &[]);
+    let now_s = NOW_NS / 1_000_000_000;
+    for thread in &mut input.threads {
+        // Archived a day ago, so the family is not due for a while yet.
+        thread.archived_at_s = Some(now_s - 86_400);
+    }
+
+    // When: the family is explored
+    let states = settle(&database, &input, &policy(), BIG);
+
+    // Then: neither thread can be deleted before the lane is due
+    assert!(explored_threads(&states).is_empty(), "{states:?}");
+    assert!(
+        states.iter().all(|(_, state)| matches!(
+            state,
+            FamilyState::Blocked(BlockReason::FamilyMemberNotDue(_))
+        )),
+        "{states:?}"
+    );
+
+    // And: a lane the sidebar does not know holds the lead as well
+    let unknown = sidebar(&["lead"], &[]);
+    let states = settle(&database, &unknown, &policy(), BIG);
+    assert!(
+        states.iter().all(|(_, state)| matches!(
+            state,
+            FamilyState::Blocked(BlockReason::FamilyUnresolved(_))
+        )),
+        "{states:?}"
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_tombstones"), 0);
+}
+
+#[test]
+fn a_detached_lane_is_not_deleted_with_its_origin_and_does_not_hold_it() {
+    // Given: an archived lead and a detached lane it once opened (kept active)
+    let f = Fixture::new();
+    f.thread("lead", None, Some("rl"), None);
+    f.thread("lane-d", None, Some("rd"), None);
+    f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'lane-d'");
+    f.run("rl", None, Some("lead"), "chat:Orchestrator:lead");
+    f.run("rd", None, Some("lane-d"), "chat:Orchestrator:lane-d");
+    f.managed_lane("lane-id-d", "lane-d", None);
+    let database = f.database();
+    let input = sidebar(&["lead"], &["lane-d"]);
+
+    // When: the lead's family is explored and confirmed
+    let states = settle(&database, &input, &policy(), BIG);
+    assert_eq!(explored_threads(&states), [vec!["lead".to_owned()]]);
+    let outcome = finalize(&database, "lead", &input);
+
+    // Then: only the lead goes; the detached lane and its ledger row stay
+    assert!(
+        matches!(outcome, FinalizeOutcome::Confirmed(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM threads WHERE thread_id = 'lane-d'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM lanes WHERE thread_id = 'lane-d'"),
+        1
+    );
+}
+
+#[test]
+fn a_lane_attached_after_exploration_makes_the_family_stale() {
+    // Given: an explored archived lead, then a lane the ledger gives to it
+    let f = Fixture::new();
+    f.thread("lead", None, Some("rl"), None);
+    f.run("rl", None, Some("lead"), "chat:Orchestrator:lead");
+    let database = f.database();
+    let input = sidebar(&["lead", "lane-a"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    f.thread("lane-a", None, Some("ra"), None);
+    f.run("ra", None, Some("lane-a"), "chat:Orchestrator:lane-a");
+    f.managed_lane("lane-id-a", "lane-a", Some("lead"));
+
+    // When: the confirmation re-checks the closure
+    let outcome = finalize(&database, "lead", &input);
+
+    // Then: the family grew, so nothing is confirmed until it is explored again
+    assert!(
+        matches!(outcome, FinalizeOutcome::Stale { new_members } if new_members >= 1),
+        "{outcome:?}"
+    );
+    assert_eq!(f.tombstones(), 0);
 }

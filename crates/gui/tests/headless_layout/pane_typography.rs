@@ -78,6 +78,7 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     extra_read_dirs: &[],
                     parent_thread: None,
                     child_threads: Vec::new(),
+                    lane: None,
                     thread_metrics: None,
                     phase: None,
                     sandbox_picker: Default::default(),
