@@ -209,6 +209,24 @@ fn ui_settings_path(arguments: &Arguments) -> Option<PathBuf> {
         .or_else(|| config::user_config_dir().map(|directory| directory.join("ui.toml")))
 }
 
+/// Points the workbench at the UI settings file startup read, so the theme and the
+/// sidebar's sort and folds are saved to the file the next start loads.
+fn with_ui_settings_file<S: gui::model::tasks::AgentRunSource>(
+    state: WorkbenchState<S>,
+    arguments: &Arguments,
+) -> Result<WorkbenchState<S>, GuiError> {
+    let Some(path) = ui_settings_path(arguments) else {
+        return Ok(state);
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
+    }
+    Ok(state.with_ui_settings_path(path))
+}
+
 fn sidebar_path(arguments: &Arguments) -> Option<PathBuf> {
     arguments
         .state
@@ -1269,15 +1287,7 @@ fn build_workbench(
             gui::browser::LiveAgentView::new(browser, handle.clone()),
         )));
     }
-    if let Some(path) = ui_settings_path(&arguments) {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent).map_err(GuiError::StateDirectory)?;
-        }
-        state = state.with_ui_settings_path(path);
-    }
+    state = with_ui_settings_file(state, &arguments)?;
     if let Some(store) = settings_store {
         state = state.with_credential_store(store);
         if let Some((context, model)) = production_model {
@@ -1795,6 +1805,63 @@ mod tests {
             loaded.theme_preset,
             workspace_ui::ThemePresetName::TokyoNight
         );
+    }
+
+    #[derive(Default)]
+    struct NoRuns;
+
+    impl gui::model::tasks::AgentRunSource for NoRuns {
+        fn list(&self) -> Vec<runtime::AgentSummary> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn sidebar_sort_and_folds_persist_through_the_startup_settings_path() {
+        // Given: a start with no layout arguments, whose only saved state is the UI
+        // settings file the production resolver names.
+        let dir = tempfile::tempdir().unwrap();
+        let arguments = super::Arguments {
+            settings: Some(dir.path().join("config").join("ui.toml")),
+            ..Default::default()
+        };
+        let mut sidebar = workspace_ui::SidebarState::default();
+        for (id, name) in [("a", "zeta"), ("b", "alpha")] {
+            let root = dir.path().join(id);
+            std::fs::create_dir_all(&root).unwrap();
+            sidebar
+                .add_project(workspace_ui::ProjectId::new(id), name, &root)
+                .unwrap();
+        }
+        let start = |sidebar: workspace_ui::SidebarState| {
+            let state =
+                gui::app::WorkbenchState::new(NoRuns, &super::load_settings(&arguments).unwrap())
+                    .unwrap()
+                    .with_sidebar(sidebar);
+            let state = super::with_ui_settings_file(state, &arguments).unwrap();
+            gui::headless::HeadlessWorkbench::new(state, [1280.0, 700.0])
+        };
+        let mut first = start(sidebar.clone());
+        first.run();
+
+        // When: the operator sorts by name and folds a project.
+        first.click_label("Sort projects");
+        first.run();
+        first.click_label("Name (A–Z)");
+        first.run();
+        first.click_label("Collapse threads of zeta");
+        first.run();
+
+        // Then: the next start, loading settings the same way, restores both.
+        let mut second = start(sidebar);
+        second.run();
+        let view = second.state().sidebar_view();
+        assert_eq!(view.project_sort, workspace_ui::ProjectSort::Name);
+        assert!(view.is_collapsed(&workspace_ui::ProjectId::new("a")));
+        assert!(!view.is_collapsed(&workspace_ui::ProjectId::new("b")));
+        let top = |label: &str| second.label_rects(label)[0].top();
+        assert!(top("alpha") < top("zeta"));
+        assert!(second.has_label("Expand threads of zeta"));
     }
 
     #[test]

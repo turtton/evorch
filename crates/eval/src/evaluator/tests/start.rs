@@ -6,8 +6,8 @@ use event_bus::{DiagnosticEvent, DiagnosticSeverity, EventReceiver};
 
 use super::*;
 use crate::cost::Unpriced;
-use crate::evaluator::groups::{GroupRecord, Member, Purpose};
 use crate::evaluator::start::{Planned, estimate_value};
+use crate::inspection::{GROUP_SCHEMA, GroupRecord, Member, ProcessExit, Purpose};
 
 const CANDIDATE: &str = "[agents.worker.generation]\ntemperature = 0.2\n";
 
@@ -387,6 +387,7 @@ async fn running_groups_show_progress_and_unfinished_ones_from_earlier_sessions_
     let earlier = eval.join(".groups").join("20200101-000000-abcdef");
     std::fs::create_dir_all(&earlier).unwrap();
     let record = GroupRecord {
+        schema: GROUP_SCHEMA,
         id: "20200101-000000-abcdef".into(),
         run_id: "run-1".into(),
         started_at: "2020-01-01T00:00:00.000Z".into(),
@@ -470,4 +471,77 @@ fn the_cli_is_found_beside_the_gui_or_else_on_the_path() {
     assert_eq!(find_cli(Some(&gui("plain")), Some(&path)), Ok(on_path));
     let missing = find_cli(Some(&gui("plain")), None).unwrap_err();
     assert!(missing.contains(&plain.display().to_string()), "{missing}");
+}
+
+#[tokio::test]
+async fn groups_from_other_processes_are_judged_by_their_files_not_assumed_running() {
+    // Given: three groups no process of this session launched: one with a finished
+    // manifest and report but no recorded exit, one unfinished, and one whose
+    // process was killed before it reported.
+    let fixture = Fixture::new();
+    let eval = fixture.user.path().join("eval");
+    let group = |id: &str, dir: &str, exit: Option<ProcessExit>, report: bool, finished: bool| {
+        let dir = eval.join(dir);
+        let home = eval.join(".groups").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        output::write_json(&dir.join(output::MANIFEST_FILE), &manifest(finished)).unwrap();
+        if report {
+            output::write_json(&dir.join(output::REPORT_JSON_FILE), &evaluation_report()).unwrap();
+        }
+        std::fs::write(home.join("0.stderr.log"), "boom\n").unwrap();
+        let record = GroupRecord {
+            schema: GROUP_SCHEMA,
+            id: id.into(),
+            run_id: "run-1".into(),
+            started_at: "2020-01-01T00:00:00.000Z".into(),
+            candidate: home.join("candidate.toml"),
+            members: vec![Member {
+                thread_id: "thread-1".into(),
+                purpose: Purpose::Target,
+                repeat: 1,
+                dir,
+                pid: Some(1),
+                stdout: home.join("0.stdout.log"),
+                stderr: home.join("0.stderr.log"),
+                exit,
+            }],
+            finished_at: None,
+            notice: None,
+        };
+        output::write_json(&home.join("group.json"), &record).unwrap();
+    };
+    group("20200101-000000-aaaaaa", "done", None, true, true);
+    group("20200102-000000-bbbbbb", "unfinished", None, false, false);
+    let killed = ProcessExit {
+        code: None,
+        signal: Some(9),
+        error: None,
+        finished_at: "2020-01-02T00:00:00.000Z".into(),
+    };
+    group(
+        "20200103-000000-cccccc",
+        "killed",
+        Some(killed),
+        false,
+        false,
+    );
+
+    // When: each group is read.
+    let read = |id: &'static str| fixture.json("eval_report", json!({"group": id}));
+    let done = read("20200101-000000-aaaaaa").await;
+    let unfinished = read("20200102-000000-bbbbbb").await;
+    let killed = read("20200103-000000-cccccc").await;
+
+    // Then: a finished report is finished, an unconfirmed process is not running, and a
+    // killed one failed with the end of its stderr.
+    assert_eq!(done["evaluations"][0]["state"], "finished");
+    assert_eq!(done["evaluations"][0]["phase"], "finished");
+    assert!(done["evaluations"][0]["report"].is_string());
+    assert_eq!(unfinished["evaluations"][0]["state"], "interrupted");
+    assert_eq!(unfinished["evaluations"][0]["phase"], "unverified");
+    assert_eq!(killed["evaluations"][0]["state"], "failed");
+    assert_eq!(killed["evaluations"][0]["failure"], "killed by signal 9");
+    assert_eq!(killed["evaluations"][0]["stderr_tail"], "boom");
+    assert_eq!(killed["evaluations"][0]["progress"]["finished_runs"], 0);
 }

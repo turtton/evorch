@@ -32,11 +32,24 @@ impl LoopState {
         estimate_tool_tokens(&self.tool_specs)
     }
 
+    pub(crate) fn compaction_activity(&self, operation_id: String) {
+        self.note_activity(RunActivity::Compaction);
+        self.shared
+            .bus
+            .emit(Event::new(LifecycleEvent::RunProgress {
+                run_id: self.task.run_id.to_string(),
+                activity: RunActivity::Compaction,
+                compaction_operation_id: Some(operation_id),
+                context: None,
+            }));
+    }
+
     pub(crate) fn activity(&self, activity: RunActivity) {
         self.note_activity(activity);
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::RunProgress {
+                compaction_operation_id: None,
                 run_id: self.task.run_id.to_string(),
                 activity,
                 context: None,
@@ -88,6 +101,7 @@ impl LoopState {
         self.shared
             .bus
             .emit(Event::new(LifecycleEvent::RunProgress {
+                compaction_operation_id: None,
                 run_id: self.task.run_id.to_string(),
                 activity: RunActivity::Model,
                 context: Some(context),

@@ -164,7 +164,8 @@ impl fmt::Display for ConvertBodiesFailure {
         if self.restore_required {
             write!(
                 formatter,
-                "\nthe database was changed and is not usable: a normal start and this command refuse it. \
+                "\nthe database was changed; do not return it to normal use or use this changed database as the starting point for recovery. \
+                 Even if it appears to have a supported older schema, recover only from the verified backup made before this conversion. \
                  Recovery (there is no resume):\n\
                  1. keep every evorch process stopped, and do not start one on this database;\n\
                  2. move the database file and its -wal/-shm files, together, to a safe place for inspection;\n\

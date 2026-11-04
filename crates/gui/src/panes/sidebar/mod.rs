@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use workspace_ui::{ProjectId, SidebarState, ThreadId, ThreadRunPhase};
+use workspace_ui::{ProjectId, ProjectSort, SidebarState, SidebarView, ThreadId, ThreadRunPhase};
 
 use crate::theme::widgets::pane_root;
 
 mod projects;
 pub(crate) mod threads;
+mod toolbar;
 
 const UI_STATE_ID: &str = "sidebar-ui-state";
 
@@ -18,7 +19,17 @@ struct SidebarUiState {
 pub enum SidebarAction {
     SelectProject(ProjectId),
     OpenAddProject,
-    OpenThreadSearch,
+    /// Choose how the project list is ordered; the stored order is unchanged.
+    SetProjectSort(ProjectSort),
+    /// Fold or unfold one project's thread list.
+    SetProjectCollapsed {
+        project: ProjectId,
+        collapsed: bool,
+    },
+    /// Fold (`true`) or unfold (`false`) every project at once.
+    SetAllProjectsCollapsed(bool),
+    /// Search the threads of this project; the selection is left as it is.
+    OpenThreadSearch(ProjectId),
     OpenProjectSettings(ProjectId),
     /// Start an untitled thread in the selected project and make it active.
     CreateThread,
@@ -62,11 +73,13 @@ pub fn sidebar_pane(
         approval_threads,
         unread_threads,
         &BTreeMap::new(),
+        &SidebarView::default(),
     )
 }
 
 /// [`sidebar_pane`] that also explains, on hover over an archived thread, when it
-/// is deleted or why it is kept.
+/// is deleted or why it is kept. `view` is the local project sort and folding.
+#[allow(clippy::too_many_arguments)]
 pub fn sidebar_pane_with_retention(
     ui: &mut egui::Ui,
     sidebar: &SidebarState,
@@ -75,6 +88,7 @@ pub fn sidebar_pane_with_retention(
     approval_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
     retention: &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
+    view: &SidebarView,
 ) -> Option<SidebarAction> {
     let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
     let indicators = threads::ThreadIndicators {
@@ -93,17 +107,22 @@ pub fn sidebar_pane_with_retention(
     // Version groups are resolved once per frame and shared by every project.
     let lineage = workspace_ui::LineageIndex::new(&sidebar.threads);
 
+    // The order is a view over `sidebar.projects`, built once per frame.
+    let order = workspace_ui::ordered_projects(sidebar, view.project_sort);
+
     pane_root(ui, "Projects", |ui| {
+        // Outside the scroll area, so it stays put however long the list is.
+        toolbar::render(ui, sidebar, view, &mut action);
         egui::ScrollArea::vertical()
             .id_salt("sidebar-scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // The pane itself is the surface; nesting another frame only adds borders.
-                let selected = selected_project(sidebar);
                 projects::render(
                     ui,
                     sidebar,
-                    selected,
+                    &order,
+                    view,
                     &pane_state,
                     &mut action,
                     |ui, project, action| {

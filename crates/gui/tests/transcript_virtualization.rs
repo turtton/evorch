@@ -746,3 +746,30 @@ fn skipped_poll_groups_stay_folded_and_run_js_children_stay_nested() {
     assert_eq!(first_message, harness.get_by_label("You: Entry 0").rect());
     assert_bounded(&harness);
 }
+
+#[test]
+fn a_growing_draft_text_updates_the_measured_row_height() {
+    // Given: a delegate draft inside a virtualized transcript.
+    let draft = |text: &str| {
+        Event::new(MessageEvent::ToolCallDelta {
+            run_id: Some("grow-run".into()),
+            index: 0,
+            call_id: Some("grow".into()),
+            tool_name: Some("delegate".into()),
+            arguments_delta: text.into(),
+        })
+    };
+    let mut model = transcript(30);
+    model.apply(&draft("{\"prompt\":\"line 0"));
+    let mut harness = build_harness(model, Some(true));
+    harness.run_steps(3);
+    let before = content_height(&harness);
+
+    // When: more lines stream into the row.
+    let more: String = (1..6).map(|n| format!("\\nline {n}")).collect();
+    harness.state_mut().model.apply(&draft(&more));
+    harness.run_steps(3);
+
+    // Then: the row was measured again, so the extent grows with its text.
+    assert!(content_height(&harness) > before);
+}

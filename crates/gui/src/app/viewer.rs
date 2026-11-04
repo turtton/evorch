@@ -168,6 +168,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 terminal_target,
                 panels: &self.panels,
                 sidebar: &self.sidebar,
+                sidebar_view: &self.sidebar_view,
                 phases: &self.phases,
                 unread_threads: &self.unread_threads,
                 retention: &self.retention.statuses,
@@ -303,12 +304,30 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_add_project();
                     Ok(())
                 }
-                SidebarAction::OpenThreadSearch => {
-                    self.open_thread_search();
+                SidebarAction::OpenThreadSearch(project_id) => {
+                    self.open_thread_search_in(project_id);
                     Ok(())
                 }
                 SidebarAction::OpenProjectSettings(project_id) => {
                     self.open_project_settings(project_id);
+                    Ok(())
+                }
+                SidebarAction::SetProjectSort(sort) => {
+                    let changed = self.sidebar_view.project_sort != sort;
+                    self.sidebar_view.project_sort = sort;
+                    self.sidebar_view_changed(changed);
+                    Ok(())
+                }
+                SidebarAction::SetProjectCollapsed { project, collapsed } => {
+                    let changed = self.sidebar_view.set_collapsed(&project, collapsed);
+                    self.sidebar_view_changed(changed);
+                    Ok(())
+                }
+                SidebarAction::SetAllProjectsCollapsed(collapsed) => {
+                    let changed = self
+                        .sidebar_view
+                        .set_all_collapsed(&self.sidebar, collapsed);
+                    self.sidebar_view_changed(changed);
                     Ok(())
                 }
                 SidebarAction::SelectProject(project_id) => self.select_project(project_id),

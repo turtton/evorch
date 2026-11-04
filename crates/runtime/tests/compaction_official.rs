@@ -146,7 +146,9 @@ async fn scenario(
                 "暗号文は event/UI に公開しない"
             );
             match event.kind {
-                EventKind::Compaction(event) => compacted.push(event),
+                EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+                    compacted.push(event)
+                }
                 EventKind::Diagnostic(diagnostic) if diagnostic.code == "BudgetWarning" => {
                     saw_usage_budget_warning = diagnostic.detail.contains("remaining_tokens=11");
                 }
@@ -164,7 +166,9 @@ async fn scenario(
         "公式 compaction の 49 tokens を予算へ計上する"
     );
     assert_eq!(events.len(), 1);
-    let CompactionEvent::Compacted { summary, .. } = &events[0];
+    let CompactionEvent::Compacted { summary, .. } = &events[0] else {
+        panic!("expected committed compaction");
+    };
     if official {
         assert_eq!(summary, "[provider-side API compaction]");
     } else if summarizer == SummarizerKind::Model {

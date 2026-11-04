@@ -179,7 +179,9 @@ async fn finish_and_collect(
         loop {
             let event = receiver.recv().await.expect("event bus remains open");
             match event.kind {
-                EventKind::Compaction(event) => compacted.push(event),
+                EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+                    compacted.push(event)
+                }
                 EventKind::Lifecycle(event_bus::LifecycleEvent::BackgroundTaskCompleted {
                     task_id,
                 }) if task_id == run_id.to_string() => return,
@@ -254,7 +256,10 @@ async fn automatic_fires_once_at_turn_boundary_and_provider_sees_compact_window(
         compacted_range_end,
         checkpoint_id,
         ..
-    } = &events[0];
+    } = &events[0]
+    else {
+        panic!("expected committed compaction");
+    };
     assert_eq!(*reason, CompactionReason::Automatic);
     assert!((*threshold - 0.75).abs() < f64::EPSILON);
     assert_eq!(*context_window_tokens, window);
@@ -441,7 +446,10 @@ async fn still_above_threshold_reports_once_and_never_loops() {
         threshold,
         checkpoint_id,
         ..
-    } = &events[0];
+    } = &events[0]
+    else {
+        panic!("expected committed compaction");
+    };
     assert!(*estimated_tokens_after as f64 / *context_window_tokens as f64 >= *threshold);
     assert!(*estimated_tokens_after < *context_window_tokens);
     let observed = model.observed().await;
@@ -830,7 +838,9 @@ async fn context_limit_retries_compaction_during_cooldown_before_stopping() {
         loop {
             let event = receiver.recv().await.expect("event bus remains open");
             match event.kind {
-                EventKind::Compaction(event) => compacted.push(event),
+                EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+                    compacted.push(event)
+                }
                 EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged {
                     run_id,
                     to: AgentRunPhase::Error,
