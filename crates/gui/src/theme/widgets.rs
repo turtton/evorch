@@ -1,6 +1,6 @@
 use egui::{
-    Align, Button, Color32, CornerRadius, Frame, Id, Layout, Margin, Response, RichText, Sense,
-    Stroke, Ui, UiBuilder, WidgetInfo, WidgetType,
+    Align, Button, Color32, CornerRadius, Frame, Id, Layout, Margin, Rect, Response, RichText,
+    Sense, Stroke, Ui, UiBuilder, WidgetInfo, WidgetType,
 };
 
 use super::icons;
@@ -249,6 +249,41 @@ pub fn empty_state(ui: &mut Ui, title: &str, hint: &str, cta: Option<&str>) -> b
 /// Dense list row: transparent at rest, with an animated hover highlight and
 /// a persistent fill when `selected`.
 pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> R) -> Response {
+    compact_row_with(ui, selected, None, add)
+}
+
+/// A semantic tint for a [`compact_row_with`] row: its resting `surface` and a
+/// leading `stripe`, so the state does not rest on the fill alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowTone {
+    pub surface: Color32,
+    pub stripe: Color32,
+}
+
+/// Width of a tinted row's leading stripe.
+const TONE_STRIPE_WIDTH: f32 = 3.0;
+
+/// The fill a tinted row fades toward when hovered or selected: the shared
+/// hover / selection color mixed halfway into the tint, so the row still reads
+/// as its state and the pointer or selection still shows.
+pub fn toned_row_target(surface: Color32, selected: bool) -> Color32 {
+    let base = if selected {
+        palette().ACTIVE_ROW
+    } else {
+        palette().HOVER_ROW
+    };
+    surface.lerp_to_gamma(base, 0.5)
+}
+
+/// [`compact_row`] whose resting fill is `tone.surface`, with a leading stripe
+/// in `tone.stripe`. A selected tinted row keeps its tint and is outlined with
+/// the accent color instead, so neither the selection nor the tint is lost.
+pub fn compact_row_with<R>(
+    ui: &mut Ui,
+    selected: bool,
+    tone: Option<RowTone>,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Response {
     let id = ui.next_auto_id();
     let mut prepared = Frame::new()
         .corner_radius(CornerRadius::same(R_SM))
@@ -269,8 +304,33 @@ pub fn compact_row<R>(ui: &mut Ui, selected: bool, add: impl FnOnce(&mut Ui) -> 
             .response
     };
     let hovered = ui.rect_contains_pointer(response.rect.expand2(egui::vec2(SP_2, 0.0)));
-    prepared.frame.fill = row_fill(ui, id, hovered, selected);
-    prepared.end(ui)
+    let Some(tone) = tone else {
+        prepared.frame.fill = row_fill(ui, id, hovered, selected);
+        return prepared.end(ui);
+    };
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(id.with("row-hover"), hovered || selected, HOVER_FADE);
+    prepared.frame.fill = tone
+        .surface
+        .lerp_to_gamma(toned_row_target(tone.surface, selected), t);
+    let response = prepared.end(ui);
+    let rect = response.rect;
+    let painter = ui.painter();
+    painter.rect_filled(
+        Rect::from_min_size(rect.min, egui::vec2(TONE_STRIPE_WIDTH, rect.height())),
+        CornerRadius::same(R_SM),
+        tone.stripe,
+    );
+    if selected {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(R_SM),
+            egui::Stroke::new(1.0, palette().ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
 }
 
 /// Fills the rest of a row with a left-aligned, truncated, clickable label.

@@ -64,6 +64,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) sidebar_view: &'a workspace_ui::SidebarView,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) unread_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
+    pub(super) externally_working_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) retention:
         &'a BTreeMap<workspace_ui::ThreadId, storage::thread_retention::RetentionStatus>,
     pub(super) sidebar_action: &'a mut Option<SidebarAction>,
@@ -335,6 +336,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     &question_threads,
                     &approval_threads,
                     self.unread_threads,
+                    self.externally_working_threads,
                     self.retention,
                     self.sidebar_view,
                 ) {
