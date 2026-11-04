@@ -870,3 +870,66 @@ fn the_plain_runs_helper_is_used() {
         insert as fn(&Connection, &super::tests::Run),
     );
 }
+
+#[test]
+fn a_version_40_41_or_42_database_with_a_deleted_thread_to_reclaim_also_converts_its_events() {
+    for from in [40_u32, 41, 42] {
+        // Given: a database of version `from` with plain events, a deleted thread, a deleted
+        // run of it and the unfinished reclaim job of their family.
+        let (_dir, path, sidecars) = seeded_with_maps();
+        apply(&path).unwrap();
+        match from {
+            40 => crate::maintenance::downgrade_to_v40(&path).unwrap(),
+            41 => crate::maintenance::downgrade_to_v41(&path).unwrap(),
+            _ => crate::maintenance::downgrade_to_v42(&path).unwrap(),
+        }
+        let conn = Connection::open(&path).unwrap();
+        let seeded_events = seed_events(&conn);
+        conn.execute(
+            "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) \
+             VALUES ('t', 'fam', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'fam')",
+            [&sidecars[0].0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reclaim_jobs(family_key, state, created_at_ns, updated_at_ns) \
+             VALUES ('fam', 'db_pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        // When: it is converted.
+        let summary = apply(&path).unwrap();
+
+        // Then: the family is reclaimed and the events are tokens that read back unchanged.
+        assert_eq!(summary.retention.reclaimed_runs, 1, "from {from}");
+        assert_eq!(version(&path), LATEST);
+        assert!(summary.events.converted_events > 0);
+        assert_eq!(summary.events.mismatched_events, 0);
+        let conn = Connection::open(&path).unwrap();
+        let deleted_run = sidecars[0].0;
+        let kept = Seeded {
+            events: seeded_events
+                .events
+                .iter()
+                .filter(|(_, kind, _)| kind.primary_run_id() != Some(deleted_run))
+                .cloned()
+                .collect(),
+            unreadable: seeded_events.unreadable.clone(),
+        };
+        assert!(
+            kept.events.len() < seeded_events.events.len(),
+            "the reclaim removed the events of the deleted run"
+        );
+        assert_events_read_back(&conn, &kept);
+        assert_accounting_matches_rows(&conn);
+    }
+}
