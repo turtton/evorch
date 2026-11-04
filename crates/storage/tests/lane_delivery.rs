@@ -906,14 +906,15 @@ fn tombstoned_source_lane_is_hidden_from_a_live_lead_question_page() {
     );
 }
 #[test]
-fn an_escaped_question_over_page_budget_is_explicit_instead_of_a_stuck_cursor() {
+fn an_escaped_question_over_page_budget_rolls_back_before_acceptance() {
     let f = Fixture::new();
     f.lane(1, LanePolicy::Attached);
     let mut q = question(1, 0);
     q.title = "x".to_owned() + &"\u{0001}".repeat(2047);
     q.root_name = "x".to_owned() + &"\u{0001}".repeat(1023);
     q.options = vec!["x".to_owned() + &"\u{0001}".repeat(255); 3];
-    f.h()
+    let error = f
+        .h()
         .create_lane_question(
             "lane-1".into(),
             q.clone(),
@@ -925,24 +926,34 @@ fn an_escaped_question_over_page_budget_is_explicit_instead_of_a_stuck_cursor() 
             LaneDeliveryBinding::Bound,
             2,
         )
-        .unwrap();
+        .unwrap_err();
     assert!(matches!(
-        f.h().lane_questions("lead".into(), None),
-        Err(StorageError::LaneDeliveryConflict(
-            "question_exceeds_page_bytes"
-        ))
+        error,
+        StorageError::LaneDeliveryConflict("question_exceeds_page_bytes")
     ));
-    // The ID remains observable in the bounded reference-only inbox; detail
-    // rendering can use the ordinary bounded tool/artifact path rather than lose it.
-    let notice = f
-        .h()
-        .lane_inbox("lead".into(), String::new())
-        .unwrap()
-        .remove(0);
+    // Reject at the atomic source boundary rather than accept a question that
+    // can strand the listing. No hidden blocking question or notice survives.
+    assert!(f.db().user_question(&q.id).unwrap().is_none());
+    assert!(f.h().lane_question_routing(q.id).unwrap().is_none());
+    assert_eq!(f.count("lane_question_routes"), 0);
+    assert_eq!(f.count("user_question_links"), 0);
+    assert_eq!(f.count("lane_notifications"), 0);
     assert!(
-        matches!(notice.kind,LaneNotificationKind::Question{question_id,..} if question_id==q.id)
+        f.h()
+            .lane_questions("lead".into(), None)
+            .unwrap()
+            .questions
+            .is_empty()
     );
-    assert_eq!(f.db().user_question(&q.id).unwrap().unwrap().title, q.title);
+    f.create(1, 1, LaneDeliveryBinding::Bound);
+    assert_eq!(
+        f.h()
+            .lane_questions("lead".into(), None)
+            .unwrap()
+            .questions
+            .len(),
+        1
+    );
 }
 
 #[test]

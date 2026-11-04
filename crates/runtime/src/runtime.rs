@@ -17,7 +17,7 @@ pub(crate) use host_prompt::HostPrompt;
 mod nested_orchestrator;
 mod output;
 mod project;
-mod questions;
+pub(crate) mod questions;
 mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 pub use questions::{AnswerOutcome, RunWait};

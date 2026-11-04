@@ -1234,55 +1234,8 @@ fn reference_kind_label(kind: &ReferenceKind) -> &'static str {
     }
 }
 
-/// `git remote get-url origin` から `owner/name` 形式のリポジトリ識別子を
-/// 解決する。取得に失敗した場合はリポジトリディレクトリ名へ fallback する。
-pub fn derive_repo_slug(repo_root: &Path) -> String {
-    git_output(repo_root, ["remote", "get-url", "origin"])
-        .as_deref()
-        .and_then(parse_remote_slug)
-        .unwrap_or_else(|| fallback_slug(repo_root))
-}
-
-fn git_output(repo_root: &Path, args: [&str; 3]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo_root)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-/// origin URL (https / ssh / scp-like) から `owner/name` を抽出する。
-fn parse_remote_slug(remote: &str) -> Option<String> {
-    let trimmed = remote.trim().trim_end_matches('/');
-    let without_suffix = trimmed.strip_suffix(".git").unwrap_or(trimmed);
-    if let Some(rest) = without_suffix.strip_prefix("git@") {
-        let (_host, path) = rest.split_once(':')?;
-        return slug_from_path(path);
-    }
-    if let Some((_scheme, remainder)) = without_suffix.split_once("://") {
-        let path = remainder.split_once('/').map(|(_, path)| path)?;
-        return slug_from_path(path);
-    }
-    slug_from_path(without_suffix)
-}
-
-fn slug_from_path(path: &str) -> Option<String> {
-    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
-    let owner = segments.next()?;
-    let name = segments.next()?;
-    segments.next().is_none().then(|| format!("{owner}/{name}"))
-}
-
-fn fallback_slug(repo_root: &Path) -> String {
-    repo_root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("unknown"))
-}
+/// The `owner/name` label of a project (see [`runtime::repository::derive_repo_slug`]).
+pub use runtime::repository::derive_repo_slug;
 
 #[cfg(test)]
 mod tests {
@@ -2835,25 +2788,39 @@ mod tests {
         );
     }
 
-    // Given: origin URL 由来のリポジトリ識別子が必要なとき
-    // When: parse_remote_slug する
-    // Then: https / ssh 両形式から owner/name を抽出し、解釈不能なら None を返す
+    // Given: origin を持つリポジトリと、持たないディレクトリ
+    // When: derive_repo_slug する
+    // Then: origin の owner/name を返し、無ければディレクトリ名へ fallback する
     #[test]
-    fn parse_remote_slug_extracts_owner_and_name() {
-        assert_eq!(
-            super::parse_remote_slug("https://github.com/turtton/evorch.git").as_deref(),
-            Some("turtton/evorch")
-        );
-        assert_eq!(
-            super::parse_remote_slug("git@github.com:turtton/evorch.git").as_deref(),
-            Some("turtton/evorch")
-        );
-        assert_eq!(
-            super::parse_remote_slug("ssh://git@github.com/turtton/evorch").as_deref(),
-            Some("turtton/evorch")
-        );
-        assert_eq!(super::parse_remote_slug("not a remote"), None);
-        assert_eq!(super::parse_remote_slug("https://github.com/only"), None);
+    fn derive_repo_slug_uses_origin_and_falls_back_to_the_directory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("checkout");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "--quiet"]);
+        assert_eq!(super::derive_repo_slug(&repo), "checkout");
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:turtton/evorch.git",
+        ]);
+        assert_eq!(super::derive_repo_slug(&repo), "turtton/evorch");
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/turtton/evorch",
+        ]);
+        assert_eq!(super::derive_repo_slug(&repo), "turtton/evorch");
     }
 
     #[test]

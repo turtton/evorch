@@ -95,6 +95,21 @@ fn schemas_and_actual_argument_parsers_agree_on_required_fields() {
         "answer_subagent_question",
         json!({"question_id":"question-1","answer":"Use A"}),
     );
+    contract::<meta::lanes::QuestionsArgs>("lane_questions", json!({"cursor":"opaque"}));
+    contract::<meta::lanes::AnswerArgs>(
+        "lane_answer",
+        json!({
+            "question_id":"question-1", "management_revision":1, "routing_revision":1,
+            "operation_id":"answer-1", "action":{"kind":"answer","text":"Use A"}
+        }),
+    );
+    contract::<meta::lanes::AnswerArgs>(
+        "lane_answer",
+        json!({
+            "question_id":"question-1", "management_revision":1, "routing_revision":1,
+            "operation_id":"route-1", "action":{"kind":"route_to_user"}
+        }),
+    );
     contract::<meta::FinishArgs>(
         "finish",
         json!({"result":"Completed, files x, tested y, no open blockers."}),
