@@ -172,13 +172,7 @@ async fn conversation_chat_gets_bundled_overlay_in_stable_system_prompt() {
     let observed = model.observed().await;
     assert_eq!(observed.len(), 2);
     let system = text_of_role(&observed[0], MessageRole::System).expect("system prompt");
-    assert!(
-        system.contains(
-            config::PresetStore::resolve("category-conversation", None)
-                .expect("bundled conversation overlay")
-                .trim()
-        )
-    );
+    assert!(system.contains(conversation_overlay_asset().trim()));
     assert!(!system.contains(GATE_MARK));
     assert_eq!(
         text_of_role(&observed[1], MessageRole::System),
@@ -594,4 +588,15 @@ async fn missing_binding_fails_run_without_calling_complete() {
         model.observed().await.is_empty() && reason.contains("quick"),
         "モデルは呼ばれず reason はカテゴリ名 (識別子) を運ぶ (fail-closed)"
     );
+}
+
+/// Reads the bundled overlay file itself, not through the config resolver that
+/// the prompt under test is built with, so the expectation stays independent.
+fn conversation_overlay_asset() -> String {
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    std::fs::read_to_string(
+        std::path::Path::new(&manifest_dir)
+            .join("../config/assets/presets/category-conversation.md"),
+    )
+    .expect("conversation overlay asset")
 }

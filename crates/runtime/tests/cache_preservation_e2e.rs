@@ -427,12 +427,19 @@ fn codex_model(
     Arc::new(runtime::compose::SwitchableModel::new(model))
 }
 
+/// Reads the bundled overlay file directly, independent of the config resolver.
+fn conversation_overlay_asset() -> String {
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    std::fs::read_to_string(
+        std::path::Path::new(&manifest_dir)
+            .join("../config/assets/presets/category-conversation.md"),
+    )
+    .expect("conversation overlay asset")
+}
+
 fn contract_prompts() -> Arc<SystemPromptCatalog> {
-    let mut prompts = SystemPromptCatalog::builder().category_overlay(
-        "conversation",
-        config::PresetStore::resolve("category-conversation", None)
-            .expect("bundled conversation overlay"),
-    );
+    let mut prompts = SystemPromptCatalog::builder()
+        .category_overlay("conversation", conversation_overlay_asset());
     for role in [
         Role::Orchestrator,
         Role::Explorer,
