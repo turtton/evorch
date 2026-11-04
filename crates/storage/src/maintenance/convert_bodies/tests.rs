@@ -2146,3 +2146,47 @@ fn one_map_writes_a_log_in_proportion_to_the_entries_it_stores() {
         *frames_seen.iter().max().unwrap()
     );
 }
+
+#[test]
+fn the_preview_of_a_version_40_database_counts_what_the_reclaim_has_to_do() {
+    // Given: a version 40 database with one deleted run, its reclaim job waiting, and one
+    // row left for the exclusive phase.
+    let (_dir, path, sidecars) = seeded_with_maps();
+    apply(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    take_back(&conn, 40);
+    conn.execute(
+        "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'fam')",
+        [&sidecars[0].0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO reclaim_jobs(family_key, state, created_at_ns, updated_at_ns) \
+         VALUES ('fam', 'db_pending', 1, 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO reclaim_oversized(family_key, tbl, key, stored_bytes) \
+         VALUES ('fam', 'run_messages', '1', 5000000)",
+        [],
+    )
+    .unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+    lease(&path);
+
+    // When: it is previewed.
+    let analysis = preview(&path).unwrap().analysis.unwrap();
+
+    // Then: the figures of the reclaim are those of the database, not zero.
+    assert_eq!(
+        (
+            analysis.deleted_runs_to_reclaim,
+            analysis.reclaim_jobs_pending,
+            analysis.reclaim_oversized_registered
+        ),
+        (1, 1, 1)
+    );
+}

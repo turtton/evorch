@@ -3581,3 +3581,138 @@ fn provenance_entries_are_reclaimed_in_bounded_steps_and_before_their_header() {
     );
     assert_eq!(family_residue(&f), vec![]);
 }
+
+/// `count` provenance entries of run `rp`, each `half_mib * 2` bytes of text, from `first`.
+fn insert_big_entries(f: &Fixture, first: i64, count: i64, half_mib: i64) {
+    f.sql(&format!(
+        "WITH RECURSIVE n(x) AS (VALUES({first}) UNION ALL SELECT x + 1 FROM n WHERE x < {}) \
+         INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         SELECT 'rp', x, zeroblob(32), {}, hex(zeroblob({half_mib} * 524288)) FROM n;",
+        first + count - 1,
+        half_mib * 1024 * 1024,
+    ));
+}
+
+#[test]
+fn provenance_entries_are_reclaimed_within_the_byte_budget_of_a_step() {
+    // Given: a confirmed family whose first run has ten entries of 1 MiB (the existing
+    // header is entry-free), against a budget of 4 MiB per step.
+    let f = Fixture::new();
+    build_family(&f);
+    insert_big_entries(&f, 1000, 10, 1);
+    let stored = |f: &Fixture| {
+        f.count(
+            "SELECT COALESCE(SUM(entry_len), 0) FROM run_message_provenance WHERE run_id = 'rp'",
+        )
+    };
+    let mut previous = stored(&f);
+    assert_eq!(previous, 10 * 1024 * 1024 + 2);
+    drop(confirm_family(&f));
+
+    // When: the writer reclaims it one transaction at a time.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+    let mut steps_with_entries = 0;
+    for _ in 0..10_000 {
+        let progress = handle
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 1,
+            })
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let left = stored(&f);
+        let header = f.count("SELECT COUNT(*) FROM run_context_provenance WHERE run_id = 'rp'");
+
+        // Then: no step deletes more than 4 MiB of entries, and the header outlives them.
+        assert!(
+            previous - left <= 4 * 1024 * 1024,
+            "a step deleted {} bytes of entries",
+            previous - left
+        );
+        assert!(
+            left == 0 || header == 1,
+            "the header went before its entries"
+        );
+        steps_with_entries += i64::from(left != previous);
+        previous = left;
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+    assert!(
+        steps_with_entries >= 3,
+        "10 MiB of entries need three steps of at most 4 MiB"
+    );
+    assert_eq!(family_residue(&f), vec![]);
+}
+
+#[test]
+fn a_provenance_entry_above_the_step_budget_waits_for_the_exclusive_phase_and_keeps_its_header() {
+    // Given: a confirmed family whose first run has small entries around one of 5 MiB (above the 4 MiB budget).
+    let f = Fixture::new();
+    build_family(&f);
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 3) \
+         INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         SELECT 'rp', x, zeroblob(32), 2, '{}' FROM n;",
+    );
+    insert_big_entries(&f, 4, 1, 5); // 5 MiB, above the 4 MiB budget alone
+    f.sql(
+        "INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         VALUES ('rp', 5, zeroblob(32), 2, '{}')",
+    );
+    drop(confirm_family(&f));
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: only the large entry is left, registered, and its header was not deleted
+    // from under it.
+    let pending = last.unwrap().oversized_pending;
+    assert_eq!(pending, 2, "registrations");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp' AND entry_len > 4194304"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_context_provenance WHERE run_id = 'rp'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_message_provenance'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_context_provenance'"),
+        1
+    );
+
+    // And: the exclusive phase deletes the entry, then the header, and nothing is left.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 20);
+    }
+    assert_eq!(family_residue(&f), vec![]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 0);
+}

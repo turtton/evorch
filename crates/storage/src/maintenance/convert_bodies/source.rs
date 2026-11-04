@@ -514,38 +514,39 @@ fn scalar(conn: &Connection, sql: &str) -> Result<u64, StorageError> {
         .unwrap_or(0))
 }
 
-/// The counts that need no decoding.
-pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
-    let not_deleted = not_deleted(conn)?;
-    let reclaim = table_exists(conn, "reclaim_jobs")?;
-    let deleted_rows = if reclaim {
+/// What a reclaim of deleted runs has still to do, in either run layout: the tombstoned
+/// runs that still have a header, the jobs waiting and the rows left for the exclusive
+/// phase. All zero while the database has no reclaim jobs table.
+fn reclaim_figures(conn: &Connection) -> Result<(u64, u64, u64), StorageError> {
+    if !table_exists(conn, "reclaim_jobs")? {
+        return Ok((0, 0, 0));
+    }
+    Ok((
         scalar(
             conn,
             "SELECT COUNT(*) FROM run_contexts \
              WHERE run_id IN (SELECT run_id FROM run_tombstones)",
-        )?
-    } else {
-        0
-    };
+        )?,
+        scalar(
+            conn,
+            "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
+        )?,
+        scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?,
+    ))
+}
+
+/// The counts that need no decoding.
+pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
+    let not_deleted = not_deleted(conn)?;
+    let (deleted_rows, reclaim_jobs, reclaim_oversized) = reclaim_figures(conn)?;
     Ok(Analysis {
         convertible_runs: scalar(
             conn,
             &format!("SELECT COUNT(*) FROM run_contexts WHERE {not_deleted}"),
         )?,
         deleted_runs_to_reclaim: deleted_rows,
-        reclaim_jobs_pending: if reclaim {
-            scalar(
-                conn,
-                "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
-            )?
-        } else {
-            0
-        },
-        reclaim_oversized_registered: if reclaim {
-            scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?
-        } else {
-            0
-        },
+        reclaim_jobs_pending: reclaim_jobs,
+        reclaim_oversized_registered: reclaim_oversized,
         pending_migrations: MESSAGE_ROWS_VERSION
             - 1
             - user_version(conn)?.min(MESSAGE_ROWS_VERSION - 1),
@@ -710,8 +711,13 @@ pub(super) fn analyze_provenance(
 /// The analysis of a version 40 database: the runs are converted already, so only the
 /// reclaim blockers and the provenance maps are looked at.
 pub(super) fn analyze_runs_converted(conn: &Connection) -> Result<Analysis, StorageError> {
+    let (deleted_runs_to_reclaim, reclaim_jobs_pending, reclaim_oversized_registered) =
+        reclaim_figures(conn)?;
     let mut analysis = Analysis {
         reclaim_blockers: super::retention::blockers(conn)?,
+        deleted_runs_to_reclaim,
+        reclaim_jobs_pending,
+        reclaim_oversized_registered,
         ..Analysis::default()
     };
     analyze_provenance(conn, &mut analysis)?;
