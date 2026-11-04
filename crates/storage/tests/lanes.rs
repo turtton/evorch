@@ -618,6 +618,8 @@ fn v45_migration_keeps_pending_v44_intents_recoverable() {
     };
     {
         let conn = Connection::open(&config.db_path).unwrap();
+        conn.execute_batch(include_str!("support/undo_v46.sql"))
+            .unwrap();
         conn.execute_batch(
             "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=44;",
         )

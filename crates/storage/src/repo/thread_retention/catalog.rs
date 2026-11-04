@@ -102,6 +102,34 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("lane_state", Keep, "ledger revision singleton"),
     (
+        "thread_pull_requests",
+        ReclaimThread,
+        "links and their unlink history of a deleted thread",
+    ),
+    (
+        "thread_pull_request_candidates",
+        ReclaimThread,
+        "candidates suggested for a deleted thread",
+    ),
+    (
+        "thread_pull_request_inheritance",
+        ReclaimThread,
+        "the inheritance row of a deleted child thread; a parent's deletion leaves its \
+         children's rows alone",
+    ),
+    (
+        "thread_pull_request_state",
+        ReclaimThread,
+        "lifecycle revision, notification keys and local HEAD of a deleted thread",
+    ),
+    (
+        "pull_request_snapshots",
+        Keep,
+        "shared by pull request, not by thread: the facts of a key no thread references are \
+         cleared when its last thread is reclaimed, but the row stays as a tiny sequence \
+         counter so a fetch started before the clearing can never outrank a later one",
+    ),
+    (
         "lane_list_snapshots",
         Keep,
         "bounded by count (newest per lead and overall); rows of deleted lanes are skipped on read",

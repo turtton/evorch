@@ -162,6 +162,20 @@
       },
       "default": {}
     },
+    "pull_requests": {
+      "description": "スレッドに紐づいた PR の追跡（ADR 0043、既定で無効。信頼済みセクション）。",
+      "$ref": "#/$defs/PullRequestsConfig",
+      "default": {
+        "backoff_max_seconds": 1800,
+        "enabled": false,
+        "fetch_timeout_seconds": 20,
+        "include_in_review": true,
+        "pending_poll_seconds": 30,
+        "review_max_age_seconds": 60,
+        "review_refresh_timeout_seconds": 3,
+        "stable_poll_seconds": 300
+      }
+    },
     "role_profile": {
       "description": "選択中のロール構成プロファイル名。`None` と `\"default\"` はトップレベルの\n`agents` / `routing` を使う。プロジェクト層が設定できる唯一のキー。",
       "type": [
@@ -1461,6 +1475,65 @@
           "const": "cursor"
         }
       ]
+    },
+    "PullRequestsConfig": {
+      "description": "PR 追跡の利用者設定。",
+      "type": "object",
+      "properties": {
+        "backoff_max_seconds": {
+          "description": "取得失敗時の指数 backoff の上限（秒）。30..=86400、既定 1800。\n`stable_poll_seconds` 以上でなければならない。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "PR の紐づけ・取得・追跡を行う。既定 false（opt-in）。false の間は何も取得しない。",
+          "type": "boolean",
+          "default": false
+        },
+        "fetch_timeout_seconds": {
+          "description": "1 回の取得（`gh` の呼び出し全体）の期限（秒）。1..=300、既定 20。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 20,
+          "minimum": 0
+        },
+        "include_in_review": {
+          "description": "取得した PR の事実を escalation 審査の入力に含める。既定 true。",
+          "type": "boolean",
+          "default": true
+        },
+        "pending_poll_seconds": {
+          "description": "check が pending の PR を取得し直す間隔（秒）。5..=3600、既定 30。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "review_max_age_seconds": {
+          "description": "審査時に、追跡結果をそのまま使える取得からの経過時間（秒）。0..=3600、既定 60。\nこれより古ければ短い期限で再取得する。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "review_refresh_timeout_seconds": {
+          "description": "審査時の再取得の期限（秒）。1..=60、既定 3。`fetch_timeout_seconds` 以下でなければならない。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 3,
+          "minimum": 0
+        },
+        "stable_poll_seconds": {
+          "description": "check が安定している PR を取得し直す間隔（秒）。30..=86400、既定 300。\n`pending_poll_seconds` 以上でなければならない。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "RoleBindingConfig": {
       "description": "ロール 1 件分のバインディング設定。",

@@ -125,6 +125,42 @@ impl Fixture {
             .unwrap();
     }
 
+    /// Pull request rows of `thread`: `history` ended links and one active link to
+    /// `active_number`, a candidate, the lifecycle state, an inheritance row as a child, and
+    /// a snapshot with facts for the pull request it tracks.
+    fn pull_requests(&self, thread: &str, history: u32, active_number: u32) {
+        self.sql(&format!(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < {history}) \
+             INSERT INTO thread_pull_requests(thread_id, provider, host, repository, number, origin, \
+                created_at_ns, link_revision, superseded_at_ns, end_reason, end_revision) \
+             SELECT '{thread}', 'github', 'github.com', 'o/old', x, 'explicit', 1, x, 1, 'relinked', x + 1 FROM n;
+             INSERT INTO thread_pull_requests(thread_id, provider, host, repository, number, origin, \
+                created_at_ns, link_revision) \
+             VALUES ('{thread}', 'github', 'github.com', 'o/live', {active_number}, 'explicit', 1, {history} + 1);
+             INSERT INTO thread_pull_request_state(thread_id, lifecycle_revision, transition_seq) \
+             VALUES ('{thread}', {history} + 1, 1);
+             INSERT INTO thread_pull_request_candidates(thread_id, provider, host, repository, number, \
+                source_run_id, source_call_id, state, created_at_ns, updated_at_ns) \
+             VALUES ('{thread}', 'github', 'github.com', 'o/cand', 1, 'run-{thread}', 'call', 'presented', 1, 1);
+             INSERT INTO thread_pull_request_inheritance(child_thread_id, parent_thread_id, parent_link_id, \
+                provider, host, repository, number, expected_child_revision, state, created_at_ns) \
+             VALUES ('{thread}', 'elsewhere', 1, 'github', 'github.com', 'o/live', {active_number}, 0, \
+                'pending', 1);"
+        ));
+    }
+
+    /// A snapshot with facts and fetch counters for `o/live#number`.
+    fn snapshot(&self, repository: &str, number: u32) {
+        self.sql(&format!(
+            "INSERT OR REPLACE INTO pull_request_snapshots(provider, host, repository, number, state, \
+                base_branch, head_branch, head_sha, review_decision, fetched_at_ns, success_seq, \
+                fetch_seq, last_attempt_seq, last_attempt_at_ns) \
+             VALUES ('github', 'github.com', '{repository}', {number}, 'open', 'main', 'feat', \
+                '{sha}', 'none', 5, 4, 7, 4, 5);",
+            sha = "a".repeat(40)
+        ));
+    }
+
     /// A saved run with a binding to `thread`, plus a row in every run-keyed table.
     fn run(&self, id: &str, parent: Option<&str>, thread: Option<&str>, name: &str) {
         let c = &self.conn;
@@ -416,6 +452,10 @@ fn build_family(f: &Fixture) {
     f.start_state("C", "rc");
     // More reports than one reclaim batch holds, so the lane is worked off in steps.
     f.lane("lane-c", "C", 1200);
+    // More link history than one reclaim batch holds, a pull request only C tracks
+    // (o/live#1), one that C and the survivor X share (o/live#2) and a child of C.
+    f.pull_requests("C", 1200, 1);
+    f.snapshot("o/live", 1);
     // An unrelated live thread with the same kinds of rows.
     f.thread("X", None, Some("rx"), None);
     f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'X'");
@@ -425,6 +465,18 @@ fn build_family(f: &Fixture) {
     f.task("task-x", "rx");
     f.start_state("X", "rx");
     f.lane("lane-x", "X", 3);
+    f.pull_requests("X", 2, 2);
+    f.snapshot("o/live", 2);
+    f.sql(
+        "INSERT INTO thread_pull_request_candidates(thread_id, provider, host, repository, number, \
+         source_run_id, source_call_id, state, created_at_ns, updated_at_ns) \
+         VALUES ('C', 'github', 'github.com', 'o/live', 2, 'run-C', 'call-2', 'presented', 1, 1)",
+    );
+    f.sql(
+        "INSERT INTO thread_pull_request_inheritance(child_thread_id, parent_thread_id, parent_link_id, \
+         provider, host, repository, number, expected_child_revision, state, created_at_ns) \
+         VALUES ('child-of-C', 'C', 1, 'github', 'github.com', 'o/pinned', 9, 0, 'pending', 1)",
+    );
 }
 
 fn confirm_family(f: &Fixture) -> Database {
@@ -511,6 +563,11 @@ fn family_residue(f: &Fixture) -> Vec<(String, i64)> {
         ("lanes", "SELECT COUNT(*) FROM lanes WHERE thread_id IN ('P','C','E')".to_owned()),
         ("lane_reports", "SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-c'".to_owned()),
         ("lane_delivery_keys", "SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-c'".to_owned()),
+        ("thread_pull_requests", "SELECT COUNT(*) FROM thread_pull_requests WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("thread_pull_request_candidates", "SELECT COUNT(*) FROM thread_pull_request_candidates WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("thread_pull_request_inheritance", "SELECT COUNT(*) FROM thread_pull_request_inheritance WHERE child_thread_id IN ('P','C','E')".to_owned()),
+        ("thread_pull_request_state", "SELECT COUNT(*) FROM thread_pull_request_state WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("pull_request_snapshot facts of a deleted thread", "SELECT COUNT(*) FROM pull_request_snapshots WHERE repository = 'o/live' AND number = 1 AND state IS NOT NULL".to_owned()),
         ("todo events", "SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') IN ('P','C','E')".to_owned()),
     ] {
         checks.push((label.to_owned(), sql));
@@ -540,6 +597,12 @@ fn survivor_rows(f: &Fixture) -> Vec<i64> {
         f.count("SELECT COUNT(*) FROM lanes WHERE lane_id = 'lane-x'"),
         f.count("SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-x'"),
         f.count("SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-x'"),
+        f.count("SELECT COUNT(*) FROM thread_pull_requests WHERE thread_id = 'X'"),
+        f.count("SELECT COUNT(*) FROM thread_pull_request_candidates WHERE thread_id = 'X'"),
+        f.count("SELECT COUNT(*) FROM thread_pull_request_inheritance WHERE child_thread_id IN ('X', 'child-of-C')"),
+        f.count("SELECT COUNT(*) FROM thread_pull_request_state WHERE thread_id = 'X'"),
+        f.count("SELECT COUNT(*) FROM pull_request_snapshots WHERE repository = 'o/live' AND number = 2 AND state IS NOT NULL"),
+        f.count("SELECT success_seq * 100 + fetch_seq FROM pull_request_snapshots WHERE repository = 'o/live' AND number = 1"),
     ]
 }
 
