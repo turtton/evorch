@@ -1201,6 +1201,23 @@ impl PostEditHook for WarningHook {
     }
 }
 
+/// How the summary line shows `text`: cut after `limit` characters with a "…". The paths
+/// and messages in it name the temporary directory, so whether they are cut depends on how
+/// long that directory is; a check derives what must be shown from the limit instead.
+/// Control characters are flattened to spaces and whitespace runs collapsed first, as the
+/// summary does.
+fn as_summarized(text: &str, limit: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    format!("{}…", flat.chars().take(limit).collect::<String>())
+}
+
 #[tokio::test]
 async fn the_summary_reports_failed_calls_and_checker_warnings_the_program_discarded() {
     let directory = tempfile::tempdir().unwrap();
@@ -1233,13 +1250,18 @@ printf '%s\n' '{{"type":"done","value":null}}'"#
     run(&fixture, Role::Worker).await;
 
     let text = result_text(&fixture.model, "js-1").await;
+    assert!(text.contains("read #2:"), "{text}");
     assert!(
-        text.ends_with(&format!(
-            "[run_js: 2 calls, 1 failed (read #2: {missing}: no such file or directory); wrote: {target}; warnings: write #1: post-edit checker warning on {target}]"
-        )) || (text.contains("read #2:") && text.contains("warnings: write #1: post-edit checker warning")),
+        text.contains(&format!(
+            "warnings: write #1: {}",
+            as_summarized(&format!("post-edit checker warning on {target}"), 100)
+        )),
         "{text}"
     );
-    assert!(text.contains(&format!("wrote: {target}")), "{text}");
+    assert!(
+        text.contains(&format!("wrote: {}", as_summarized(&target, 120))),
+        "{text}"
+    );
     assert!(!text.contains("UNTRUSTED-REPOSITORY-COMMENT"), "{text}");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
@@ -1301,7 +1323,8 @@ printf '%s\n' '{{"type":"done","value":null}}'"#
     let text = result_text(&fixture.model, "js-1").await;
     assert!(
         text.contains(&format!(
-            "warnings: write #1: post-edit checker warning on {target}"
+            "warnings: write #1: {}",
+            as_summarized(&format!("post-edit checker warning on {target}"), 100)
         )),
         "{text}"
     );
