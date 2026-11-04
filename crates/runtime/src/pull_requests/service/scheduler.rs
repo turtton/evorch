@@ -172,6 +172,8 @@ impl Inner {
     /// One planning round: starts what is due and returns when the next thing is.
     async fn round(self: &Arc<Self>) -> Option<Instant> {
         let config = self.config();
+        // What this process finishes from here on is newer than the plan about to be read.
+        let plan_epoch = self.lock().finish_counter;
         let planner = Arc::clone(self);
         let plan = match self.blocking(move || plan_blocking(&planner)).await {
             Ok(Ok(plan)) => plan,
@@ -214,6 +216,13 @@ impl Inner {
                     .keys
                     .entry(key.clone())
                     .or_insert_with(|| KeyState::new(now, terminal));
+                // The shared snapshot is the other processes' word too: a merge or a reopening they
+                // stored is honoured, unless this process finished a fetch of it since the plan
+                // began (then the plan is the older view and must not undo the newer one).
+                if entry.finished_at <= plan_epoch && entry.terminal != terminal {
+                    entry.terminal = terminal;
+                    entry.next_due = if terminal { None } else { Some(now) };
+                }
                 if forced {
                     entry.next_due = Some(now);
                 }

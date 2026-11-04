@@ -404,6 +404,54 @@ async fn a_failed_refresh_of_a_merged_pull_request_does_not_restart_the_polling(
     assert_eq!(process.source.calls().len(), 4, "the polling resumed");
 }
 
+// Given: a pull request this process tracks as open, whose shared snapshot another process then
+// updates to merged / When: this process plans again / Then: it leaves the pull request alone
+// (no further fetch), and an explicit refresh that finds it open resumes the polling
+#[tokio::test(start_paused = true)]
+async fn a_merge_found_in_the_shared_snapshot_stops_the_polling_of_a_tracked_key() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    let permit = process.permit("t1");
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    assert_eq!(process.source.calls().len(), 1);
+
+    // Another process's fetch stores the merge.
+    let seq = process
+        .storage_handle
+        .begin_pull_request_fetch(&key(1))
+        .unwrap();
+    process
+        .storage_handle
+        .commit_pull_request_fetch(&key(1), seq, facts(PullRequestState::Merged, passing()), 5)
+        .unwrap();
+    process.service.notify_changed();
+    settle().await;
+    pass(3_600).await;
+    assert_eq!(
+        process.source.calls().len(),
+        1,
+        "the merge in the shared snapshot is honoured"
+    );
+
+    process.service.refresh("t1", &permit).await.unwrap();
+    settle().await;
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "an explicit refresh fetches"
+    );
+    pass(30).await;
+    assert_eq!(
+        process.source.calls().len(),
+        3,
+        "it found the pull request open: polling resumed"
+    );
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]

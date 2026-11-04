@@ -184,6 +184,9 @@ pub(crate) struct KeyState {
     /// Until when a failed fetch is not tried again by whoever waits for the pull request (a
     /// pending inheritance, the tracking threads). Independent of `terminal`.
     pub(crate) backoff_until: Option<Instant>,
+    /// The value of [`State::finish_counter`] when this process last finished a fetch of it. A plan
+    /// that began before that is older than what this process saw, and must not undo it.
+    pub(crate) finished_at: u64,
 }
 
 impl KeyState {
@@ -193,6 +196,7 @@ impl KeyState {
             terminal,
             failures: 0,
             backoff_until: None,
+            finished_at: 0,
         }
     }
 }
@@ -207,6 +211,8 @@ pub(crate) struct State {
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
     pub(crate) inheritance_due: HashMap<String, Instant>,
+    /// Counts the fetches this process finished.
+    pub(crate) finish_counter: u64,
 }
 
 /// A wait on the blocking pool right before a process is started. A test may interrupt it, which

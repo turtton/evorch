@@ -526,10 +526,13 @@ impl Inner {
             {
                 state.flights.remove(key);
             }
+            state.finish_counter += 1;
+            let finished_at = state.finish_counter;
             let entry = state
                 .keys
                 .entry(key.clone())
                 .or_insert_with(|| KeyState::new(now, false));
+            entry.finished_at = finished_at;
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let stable = Duration::from_secs(config.stable_poll_seconds);
             let backoff_max = Duration::from_secs(config.backoff_max_seconds);
