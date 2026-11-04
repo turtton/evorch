@@ -133,6 +133,9 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         ESCALATION_HANDOFF_FAILED => HarnessImprovement,
         // The durable panic spool, ingested on the next start rather than emitted on the bus.
         CRASH_RECOVERED => HarnessImprovement,
+        // thread_todos: end-of-work marking was skipped (fenced owner, exhausted revision);
+        // the list is left as it was and no run behaves differently.
+        THREAD_TODO_RECONCILE_FAILED => Ignored,
         // runtime: an agent run's task panicked and was moved to Error.
         AGENT_RUN_PANICKED => HarnessImprovement,
         // storage bridge (spooled): the writer stopped accepting events entirely.

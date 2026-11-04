@@ -294,21 +294,15 @@ fn procedure_row(
         .iter()
         .filter(|item| item.status == ThreadTodoStatus::InProgress)
         .count();
-    let current = todo
-        .items
-        .iter()
-        .find(|item| item.status == ThreadTodoStatus::InProgress)
-        .or_else(|| {
-            todo.items
-                .iter()
-                .find(|item| item.status == ThreadTodoStatus::Pending)
-        });
+    let current = representative_procedure(todo);
     let text = current
         .map(|item| item.content.as_str())
         .unwrap_or("All procedures completed");
     let title_color = current.map_or(palette().TEXT_MUTED, |item| procedure_status(item.status).2);
     let accessible_text = if active > 1 {
         format!("{text} · +{} in progress", active - 1)
+    } else if current.is_some_and(|item| item.status == ThreadTodoStatus::Interrupted) {
+        format!("{text} · interrupted: a work period ended before completion was recorded")
     } else {
         text.to_string()
     };
@@ -324,6 +318,12 @@ fn procedure_row(
                 icons::CIRCLE_HALF,
                 "Procedures in progress (stored status)",
                 palette().ACCENT_FG,
+            )
+        } else if current.is_some_and(|item| item.status == ThreadTodoStatus::Interrupted) {
+            (
+                icons::WARNING_CIRCLE,
+                INTERRUPTED_MEANING,
+                palette().WARNING,
             )
         } else {
             (icons::CIRCLE, "Procedures pending", palette().TEXT_MUTED)
@@ -370,6 +370,24 @@ fn procedure_row(
     });
 }
 
+/// What the runtime-set interrupted status says, and does not say.
+const INTERRUPTED_MEANING: &str = "Procedures interrupted: a work period ended before completion was recorded. This does not mean another lane stopped";
+
+/// The summary line's item: in progress, else interrupted, else pending.
+/// A list holding only completed items has none.
+fn representative_procedure(
+    todo: &event_bus::ThreadTodoSnapshot,
+) -> Option<&event_bus::ThreadTodoItem> {
+    use event_bus::ThreadTodoStatus;
+    [
+        ThreadTodoStatus::InProgress,
+        ThreadTodoStatus::Interrupted,
+        ThreadTodoStatus::Pending,
+    ]
+    .into_iter()
+    .find_map(|status| todo.items.iter().find(|item| item.status == status))
+}
+
 /// Icon, status text and color of one procedure; only in-progress work reads
 /// as normal text so the current step stands out from pending and done ones.
 fn procedure_status(
@@ -380,6 +398,11 @@ fn procedure_status(
         ThreadTodoStatus::Pending => (icons::CIRCLE, "Pending", palette().TEXT_MUTED),
         ThreadTodoStatus::InProgress => (icons::CIRCLE_HALF, "In progress", palette().TEXT),
         ThreadTodoStatus::Completed => (icons::CHECK_CIRCLE, "Completed", palette().TEXT_MUTED),
+        ThreadTodoStatus::Interrupted => (
+            icons::WARNING_CIRCLE,
+            "Interrupted (not completed)",
+            palette().WARNING,
+        ),
     }
 }
 
@@ -390,6 +413,9 @@ fn procedure_details(ui: &mut egui::Ui, todo: &event_bus::ThreadTodoSnapshot) {
             let response = ui.label(egui::RichText::new(icon).color(color));
             response
                 .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, status));
+            if item.status == event_bus::ThreadTodoStatus::Interrupted {
+                response.on_hover_text(INTERRUPTED_MEANING);
+            }
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(&item.content).color(color));
                 ui.label(

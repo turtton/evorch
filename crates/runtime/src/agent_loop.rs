@@ -1569,6 +1569,16 @@ impl LoopState {
                 return false;
             }
         }
+        // A turn that ends without a blocking question pending ends this root's
+        // work period: unfinished items are marked before Waiting and
+        // TurnCompleted are published. The new state reaches the model only with
+        // its next request, after the next input.
+        if completed_turn
+            && !runtime.has_pending_user_questions(self.task.run_id)
+            && self.reconcile_root_todo()
+        {
+            self.todo_context_pending = true;
+        }
         let turn_end = self.persist_turn_boundary();
         let completed_turn = (completed_turn
             && !runtime.has_unanswered_questions(self.task.run_id))

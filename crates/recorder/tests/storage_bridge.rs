@@ -237,3 +237,59 @@ async fn stream_bursts_are_drained_while_sqlite_writer_is_busy() {
         expected.len()
     );
 }
+
+#[tokio::test]
+async fn an_interrupted_procedure_item_is_recorded_and_read_back_unchanged() {
+    use event_bus::{
+        EventKind, OrchestratorEvent, ThreadTodoItem, ThreadTodoSnapshot, ThreadTodoStatus,
+    };
+    // Given: the real bridge draining a bus that carries a runtime-marked item.
+    let (_dir, storage, db) = fixture();
+    let bus = Arc::new(EventBus::new(32));
+    let task = tokio::spawn(storage_bridge::run(
+        bus.clone(),
+        StorageBridge::new(storage.handle(), "session"),
+        Duration::from_millis(50),
+    ));
+    wait_for_subscription(&bus).await;
+    let snapshot = ThreadTodoSnapshot {
+        list_id: "list".into(),
+        thread_id: "thread".into(),
+        revision: 2,
+        items: vec![
+            ThreadTodoItem {
+                content: "Left running".into(),
+                status: ThreadTodoStatus::Interrupted,
+            },
+            ThreadTodoItem {
+                content: "Not started".into(),
+                status: ThreadTodoStatus::Pending,
+            },
+        ],
+    };
+    assert_eq!(
+        bus.emit(Event::new(OrchestratorEvent::ThreadTodoUpdated {
+            snapshot: snapshot.clone()
+        })),
+        1
+    );
+
+    // When: the producer ends and the bridge drains.
+    drop(bus);
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Then: reading it back yields the same status, not a fallback.
+    let stored = db.orchestrator_events_ordered().unwrap();
+    let [stored] = stored.as_slice() else {
+        panic!("expected one stored event, got {}", stored.len());
+    };
+    let EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot: read }) =
+        &stored.event.kind
+    else {
+        panic!("unexpected event {:?}", stored.event.kind);
+    };
+    assert_eq!(read, &snapshot);
+}

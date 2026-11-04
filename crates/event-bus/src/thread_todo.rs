@@ -7,6 +7,10 @@ pub enum ThreadTodoStatus {
     Pending,
     InProgress,
     Completed,
+    /// Runtime-only: the work period ended before completion was recorded.
+    /// Models cannot write it; a status update can change it back.
+    /// It says nothing about any other lane or thread.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
