@@ -210,6 +210,7 @@ pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
          UPDATE sessions SET total_event_bytes = COALESCE( \
              (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
     )?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v45.sql"))?;
     conn.pragma_update(None, "user_version", 43)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;

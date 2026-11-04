@@ -136,6 +136,14 @@ impl From<&config::BudgetConfig> for BudgetSettings {
     }
 }
 
+/// Durable identity-aware credit accounting, shared by child and lane spawns.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SpawnCredits {
+    spawned: BTreeSet<String>,
+    observed: BTreeSet<String>,
+    unobserved: u32,
+}
+
 pub(crate) struct BudgetCounters {
     started_at: Instant,
     paused_at: Option<Instant>,
@@ -149,9 +157,7 @@ pub(crate) struct BudgetCounters {
     exhausted: Option<BudgetBreach>,
     round_changed: bool,
     /// Children whose terminal result was already counted as progress.
-    observed_child_completions: BTreeSet<String>,
-    /// Spawns since the last newly observed child completion.
-    unobserved_spawns: u32,
+    pub(crate) spawn_credits: SpawnCredits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,8 +193,7 @@ impl Default for BudgetCounters {
             warned: false,
             exhausted: None,
             round_changed: false,
-            observed_child_completions: BTreeSet::new(),
-            unobserved_spawns: 0,
+            spawn_credits: SpawnCredits::default(),
         }
     }
 }
@@ -249,9 +254,15 @@ impl BudgetCounters {
     /// ever collecting a result would otherwise never stop: after
     /// [`MAX_UNOBSERVED_SPAWN_CREDITS`] spawns without a newly observed child
     /// completion, further spawns are no longer progress. Returns whether it counted.
+    pub(crate) fn mark_spawned(&mut self, identity: &str) -> bool {
+        self.spawn_credits.spawned.insert(identity.into())
+            && !self.spawn_credits.observed.contains(identity)
+            && self.mark_child_spawned()
+    }
+
     pub(crate) const fn mark_child_spawned(&mut self) -> bool {
-        self.unobserved_spawns = self.unobserved_spawns.saturating_add(1);
-        if self.unobserved_spawns > MAX_UNOBSERVED_SPAWN_CREDITS {
+        self.spawn_credits.unobserved = self.spawn_credits.unobserved.saturating_add(1);
+        if self.spawn_credits.unobserved > MAX_UNOBSERVED_SPAWN_CREDITS {
             return false;
         }
         self.mark_progress();
@@ -262,12 +273,21 @@ impl BudgetCounters {
     /// restores the spawn credits. Re-observing the same child is neither;
     /// returns whether it counted.
     pub(crate) fn mark_child_completed(&mut self, run_id: &str) -> bool {
-        if !self.observed_child_completions.insert(run_id.to_owned()) {
+        if !self.spawn_credits.observed.insert(run_id.to_owned()) {
             return false;
         }
-        self.unobserved_spawns = 0;
+        self.spawn_credits.unobserved = 0;
         self.mark_progress();
         true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_lane_spawned(&mut self, lane_id: &str) -> bool {
+        self.mark_spawned(&format!("lane:{lane_id}"))
+    }
+
+    pub(crate) fn mark_lane_completed(&mut self, lane_id: &str) -> bool {
+        self.mark_child_completed(&format!("lane:{lane_id}"))
     }
 
     pub(crate) fn finish_round(&mut self) {

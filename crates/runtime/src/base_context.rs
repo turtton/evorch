@@ -175,6 +175,7 @@ pub(crate) enum InitialSystemPromptError {
 /// Inputs to [`compose_system_sections`] that vary per run.
 pub(crate) struct SystemInputs<'a> {
     pub(crate) role: Role,
+    pub(crate) lane_scope: bool,
     pub(crate) category: Option<&'a str>,
     pub(crate) load_skills: &'a [String],
     /// First user message length, counted against the rules injection budget.
@@ -215,6 +216,22 @@ pub(crate) fn compose_system_sections(
                         name,
                     });
             sections.push(ContextSection::new(part.kind.into(), source, part.text));
+        }
+    }
+    if inputs.role == Role::Orchestrator {
+        let guidance = if inputs.lane_scope {
+            "This is an independent lane root. Coordinate its Planner/Worker/Reviewer roles with delegate; lane_open is unavailable here and to your children, including after detach. For managed attached/summary lanes, keep the lead informed with lane_report at meaningful milestones and when ready or failed; ready is an unverified claim, not acceptance. Phase 1b preview sends questions to the user for all policies, with no automatic lead wake. Detached lanes do not owe a lead reports."
+        } else {
+            "Choose delegate for work completed by a single role whose result you can judge here using the required Reviewer evidence. Choose lane_open for cross-role planning/implementation/review, independent deliverables such as a PR, long-running work or direct user dialogue. Work you previously would have delegated to an Orchestrator belongs in a lane. A lane has its own thread, goal, ownership and lifecycle; stopping or finishing this lead does not stop it. Retrieve bounded reports only when needed, not whole lane transcripts."
+        };
+        // Extend the configured role text instead of inserting another message.
+        // Bare/custom runtimes deliberately have no generated role prompt.
+        if let Some(role) = sections
+            .iter_mut()
+            .find(|section| section.kind == ContextSectionKind::RoleBaseline)
+        {
+            role.text.push_str("\n\n");
+            role.text.push_str(guidance);
         }
     }
     // The rules budget counts the joined catalog text, separators included.

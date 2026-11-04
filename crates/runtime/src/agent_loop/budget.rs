@@ -6,6 +6,19 @@ use crate::budget_tracker::{BudgetContext, BudgetDecision};
 
 impl LoopState {
     pub(super) fn publish_budget(&mut self) -> BudgetDecision {
+        if let Some(runtime) = self.runtime() {
+            let started = runtime
+                .shared
+                .lanes
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.task.run_id)
+                .unwrap_or_default();
+            for lane in started {
+                self.budget.mark_spawned(&lane);
+            }
+        }
         let run_id = self.task.run_id.to_string();
         let task_id = self
             .task

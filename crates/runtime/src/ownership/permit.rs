@@ -40,6 +40,35 @@ impl OwnerPermit {
         ))
     }
 
+    /// Claim a separate lane lease without transferring this thread's authority.
+    /// A crash may have left its newly-created row behind; reuse it only while
+    /// it is still owned by this host, never steal another owner's lease.
+    pub(crate) fn prepare_lane(&self, thread_id: &str) -> Result<Self, String> {
+        self.validate_generation().map_err(|e| e.to_string())?;
+        if self.thread_id == thread_id {
+            return Ok(self.clone());
+        }
+        let registry = Registry::open_existing(&self.registry_path).map_err(|e| e.to_string())?;
+        match registry.attach(thread_id) {
+            Ok(owner) => {
+                if owner.lease.owner_id != self.lease.owner_id || owner.state != OwnerState::Running
+                {
+                    return Err("lane ownership belongs to another host or is quiescing".into());
+                }
+                Ok(Self {
+                    registry_path: self.registry_path.clone(),
+                    thread_id: thread_id.into(),
+                    lease: owner.lease,
+                    run_id: None,
+                })
+            }
+            Err(RegistryError::Absent) => {
+                self.prepare_child(thread_id, || Ok(())).map(|pair| pair.0)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     pub fn mutation_guard(&self) -> Result<Registry, RegistryError> {
         authority::observe(
             self,

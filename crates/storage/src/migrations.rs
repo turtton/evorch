@@ -61,6 +61,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         include_str!("migrations/v43_prepare.sql")
     ),
     include_str!("migrations/event_bodies.sql"),
+    include_str!("migrations/v45.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -237,6 +238,10 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
         message: error.to_string(),
     }
 }
+
+/// Reverts migration v45 (see `tests/support/undo_v45.sql`); apply it before [`UNDO_V44`].
+#[cfg(test)]
+pub(crate) const UNDO_V45: &str = include_str!("../tests/support/undo_v45.sql");
 
 /// Reverts migration v44 (see `tests/support/undo_v44.sql`); apply it before [`UNDO_V43`].
 #[cfg(test)]

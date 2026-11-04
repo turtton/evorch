@@ -121,10 +121,21 @@ impl AgentRuntime {
         }
         let category = request.category.as_deref();
         let selected_model = shared.model.selected_model(request.role, category);
+        let lane_scope = match (self.shared.run_store.get(), request.thread_id.as_deref()) {
+            (Some(store), Some(thread)) => store
+                .handle
+                .lane_by_thread(thread)
+                .map_err(|e| RuntimeError::Model {
+                    reason: format!("Cannot resolve lane scope: {e}"),
+                })?
+                .map(|_| event_bus::LaneScope::Lane),
+            _ => None,
+        };
         let config = RunConfig {
+            lane_scope,
             category: request.category.clone(),
             load_skills: request.load_skills.clone(),
-            conversation: request.conversation,
+            conversation: request.conversation || lane_scope.is_some(),
             ..RunConfig::default()
         };
         let policy = self
@@ -169,6 +180,7 @@ impl AgentRuntime {
             &shared,
             &SystemInputs {
                 role: request.role,
+                lane_scope: config.lane_scope.is_some(),
                 category,
                 load_skills: &request.load_skills,
                 prompt_len: 0,

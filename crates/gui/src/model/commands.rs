@@ -202,6 +202,10 @@ pub trait CommandSink: Send {
     }
     /// Rebind a thread to a root run (escalation handoff), without spawning work.
     fn bind_goal_context(&mut self, _thread: &str, _project: &str, _run: &str) {}
+    /// Point a lane thread at the root run the runtime itself started, without spawning
+    /// work. Stop and follow-ups then reach it like any other conversation root; every
+    /// ownership check still applies to the command that uses the binding.
+    fn bind_lane_root(&mut self, _thread: &str, _run: &str) {}
     fn restore_diagnostics(
         &self,
         _run: &str,

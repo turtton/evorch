@@ -38,8 +38,8 @@ use serde::Serialize;
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
 use crate::migrations::{
-    EVENT_BODIES, MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, V40_DROP, V40_PREPARE,
-    V43_DROP, V43_PREPARE,
+    EVENT_BODIES, EVENT_BODIES_VERSION, MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION,
+    V40_DROP, V40_PREPARE, V43_DROP, V43_PREPARE,
 };
 
 use super::compact::{create_backup, integrity_check, parent};
@@ -878,6 +878,12 @@ fn run(
         .map_err(|_| StorageError::OutOfRange("migration version"))?
         .min(end);
     for migration in &MIGRATIONS[first..end] {
+        conn.execute_batch(migration)?;
+    }
+    // Version 44 (the event bodies) ran as `EVENT_BODIES`; later ones are plain.
+    let after_events = usize::try_from(EVENT_BODIES_VERSION)
+        .map_err(|_| StorageError::OutOfRange("migration version"))?;
+    for migration in &MIGRATIONS[after_events..] {
         conn.execute_batch(migration)?;
     }
     conn.execute_batch("COMMIT")?;

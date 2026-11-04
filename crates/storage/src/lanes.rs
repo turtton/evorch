@@ -102,6 +102,8 @@ pub struct LaneRecord {
     /// Raised by every changed brief. Starts at 1.
     pub brief_revision: u64,
     pub start_seed: String,
+    /// A cancelled or locally failed creation intent. Never recovered automatically.
+    pub start_blocked_reason: Option<String>,
     /// The current root run; `None` until the first start.
     pub root_run_id: Option<String>,
     /// 0 until the root started, then raised by every start or restart.
@@ -115,7 +117,19 @@ pub struct LaneRecord {
     pub last_activity_at_ns: i64,
 }
 
+/// The `start_blocked_reason` of an intent the operator stopped before its root started.
+/// Unlike a cancellation or a local failure it can be resumed explicitly
+/// ([`StorageHandle::resume_lane_start`](crate::StorageHandle::resume_lane_start)); a
+/// restart or a crash scan never recovers it.
+pub const LANE_START_OPERATOR_STOP: &str = "operator_stop: stopped before root start";
+
 impl LaneRecord {
+    /// Whether the creation intent was stopped by the operator and may be resumed.
+    #[must_use]
+    pub fn is_operator_stopped(&self) -> bool {
+        self.start_blocked_reason.as_deref() == Some(LANE_START_OPERATOR_STOP)
+    }
+
     /// Whether the root run was ever started.
     #[must_use]
     pub const fn is_started(&self) -> bool {
@@ -285,7 +299,8 @@ impl crate::Database {
         crate::repo::lanes::reports(&self.conn, lane_id, after_seq, limit)
     }
 
-    /// Lanes whose root never started, in lane ID order (at most 200).
+    /// Recoverable creation intents whose root never started, in lane ID order
+    /// (at most 200). Explicitly cancelled or locally failed intents are excluded.
     ///
     /// # Errors
     /// Returns an error if SQLite access or row decoding fails.

@@ -181,6 +181,9 @@ pub struct RunConfig {
     /// first prompt, so the run's published instruction can name what the
     /// user typed. Hosts leave it empty; consumed when the run starts.
     pub prompt_origin: Option<PromptOrigin>,
+    /// Immutable runtime execution scope; never accepted from model arguments.
+    pub lane_scope: Option<event_bus::lane::LaneScope>,
+    pub spawn_credits: crate::budget_tracker::SpawnCredits,
     pub budget: crate::budget_tracker::BudgetSettings,
     /// Durable task identity when this run is attached to a task.
     pub task_id: Option<String>,

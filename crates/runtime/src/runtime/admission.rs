@@ -14,7 +14,7 @@ pub(super) struct Admission {
     pub(super) result: watch::Receiver<Option<Result<(), RuntimeError>>>,
 }
 
-pub(super) struct AdmissionSnapshot {
+pub(crate) struct AdmissionSnapshot {
     pub parent: Option<RunId>,
     pub ownership: Option<crate::ownership::OwnerPermit>,
     pub result: Option<Result<(), RuntimeError>>,
@@ -418,7 +418,7 @@ impl AgentRuntime {
 
     /// Preserve the parent boundary before provider admission registers the run.
     /// Never acquire admissions while holding runs: registration locks admissions first.
-    pub(super) fn admission_snapshot(&self, run_id: RunId) -> Option<AdmissionSnapshot> {
+    pub(crate) fn admission_snapshot(&self, run_id: RunId) -> Option<AdmissionSnapshot> {
         let admissions = self
             .shared
             .admissions

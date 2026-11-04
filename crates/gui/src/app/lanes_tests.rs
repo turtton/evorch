@@ -79,6 +79,7 @@ fn record(n: u32, lead: Option<&str>, policy: LedgerPolicy, revision: u64) -> La
         },
         brief_revision: 1,
         start_seed: "seed".into(),
+        start_blocked_reason: None,
         root_run_id: Some(format!("lane-root-{n}")),
         generation: 1,
         latest_report_seq: 0,
@@ -641,5 +642,221 @@ fn an_event_that_arrives_while_a_read_is_in_flight_triggers_one_more_read() {
     assert_eq!(
         workbench.lanes.details["lane-thread-1"].status(),
         Some(LaneStatus::Ready)
+    );
+}
+
+#[derive(Clone, Default)]
+struct RootBindings(Arc<Mutex<Vec<(String, String)>>>);
+
+impl RootBindings {
+    fn latest(&self, thread: &str) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == thread)
+            .map(|(_, run)| run.clone())
+    }
+}
+
+struct BindingSink(RootBindings);
+
+impl crate::model::commands::CommandSink for BindingSink {
+    fn submit(
+        &mut self,
+        _: crate::model::commands::WorkbenchCommand,
+    ) -> Vec<crate::model::commands::LoopEvent> {
+        Vec::new()
+    }
+
+    fn bind_lane_root(&mut self, thread: &str, run: &str) {
+        self.0
+            .0
+            .lock()
+            .unwrap()
+            .push((thread.to_owned(), run.to_owned()));
+    }
+}
+
+fn root_started(run: &str, thread: &str) -> Event {
+    Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+        run_id: run.into(),
+        parent_run_id: None,
+        agent_name: format!("chat:Orchestrator:{thread}"),
+        role: "Orchestrator".into(),
+    })
+}
+
+#[test]
+fn the_command_sink_follows_the_lane_root_whichever_event_arrives_first_and_after_a_new_root() {
+    // Given: a workbench whose sink records the lane roots it is given
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(None);
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+
+    // When: the runtime-started root announces itself before the lane's creation event
+    workbench.apply_conversation_event(&root_started("lane-root-a", "lane-thread-1"));
+    assert_eq!(bindings.latest("lane-thread-1"), None);
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // Then: the creation event places the thread and hands the sink its root
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-a")
+    );
+
+    // When: the lane gets another root
+    workbench.apply_conversation_event(&root_started("lane-root-b", "lane-thread-1"));
+
+    // Then: the sink points at the newest root
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-b")
+    );
+}
+
+#[test]
+fn a_lane_restored_from_the_ledger_gives_the_sink_its_recorded_root_and_a_plain_chat_gives_none() {
+    // Given: a ledger lane the sidebar never heard of, and a sink that records roots
+    let ledger = Arc::new(FakeLedger::default());
+    ledger.put(snapshot(
+        record(1, Some("thread"), LedgerPolicy::Attached, 1),
+        None,
+    ));
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(Some(Arc::clone(&ledger)));
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+
+    // When: the startup scan places it, and an ordinary chat root starts
+    settle(&mut workbench);
+    workbench.apply_conversation_event(&root_started("chat-root", "thread"));
+
+    // Then: only the lane's thread was bound, to the root the ledger records
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-1")
+    );
+    assert_eq!(bindings.latest("thread"), None);
+}
+
+#[test]
+fn a_child_run_named_like_the_lane_root_is_not_its_root() {
+    // Given: a lane whose root is known to the sink
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(None);
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    workbench.apply_conversation_event(&root_started("lane-root-a", "lane-thread-1"));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // When: a child that only carries the lane's chat name starts under another run
+    workbench.apply_conversation_event(&Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+        run_id: "imitator".into(),
+        parent_run_id: Some("lead-run".into()),
+        agent_name: "chat:Orchestrator:lane-thread-1".into(),
+        role: "Worker".into(),
+    }));
+
+    // Then: neither the sink nor the lane's root moved to it
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-a")
+    );
+    let lane = workbench
+        .sidebar
+        .threads
+        .iter()
+        .find(|thread| thread.id.to_string() == "lane-thread-1")
+        .unwrap();
+    assert_eq!(lane.root_run_id.as_deref(), Some("lane-root-a"));
+    assert!(!lane.run_ids.iter().any(|run| run == "imitator"));
+}
+
+#[test]
+fn roots_waiting_for_their_thread_are_bounded_and_a_dropped_one_comes_from_the_ledger() {
+    // Given: a ledger that knows lane 1, and 65 roots announced before any thread exists,
+    // the oldest of them lane 1's
+    let ledger = Arc::new(FakeLedger::default());
+    ledger.put(snapshot(
+        record(1, Some("thread"), LedgerPolicy::Attached, 1),
+        None,
+    ));
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(Some(Arc::clone(&ledger)));
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    for n in 1..=65 {
+        workbench.apply_conversation_event(&root_started(
+            &format!("early-root-{n}"),
+            &format!("lane-thread-{n}"),
+        ));
+    }
+
+    // When: the newest and the oldest lane are created
+    workbench.apply_conversation_event(&created(&record(
+        65,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // Then: the newest took its remembered root; the oldest was dropped and has none yet
+    assert_eq!(
+        bindings.latest("lane-thread-65").as_deref(),
+        Some("early-root-65")
+    );
+    assert_eq!(bindings.latest("lane-thread-1"), None);
+
+    // When: the ledger is read
+    settle(&mut workbench);
+
+    // Then: the dropped root is recovered from the ledger's record
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-1")
+    );
+}
+
+#[test]
+fn a_ledger_read_that_disagrees_with_the_events_does_not_rebind_the_sink() {
+    // Given: a lane whose events say root x, and a ledger that still records root 1
+    let ledger = Arc::new(FakeLedger::default());
+    ledger.put(snapshot(
+        record(1, Some("thread"), LedgerPolicy::Attached, 1),
+        None,
+    ));
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(Some(Arc::clone(&ledger)));
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    workbench.apply_conversation_event(&root_started("lane-root-x", "lane-thread-1"));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // When: the ledger is read
+    settle(&mut workbench);
+
+    // Then: the sink keeps the root the events established
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-x")
     );
 }

@@ -12,7 +12,8 @@ use serde_json::Value;
 use crate::StorageError;
 use crate::body_ref::{BodyToken, tokenize_in_place};
 use crate::migrations::{
-    MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, require_current_format,
+    EVENT_BODIES_VERSION, MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION,
+    require_current_format,
 };
 use crate::repo::run_messages::to_json;
 
@@ -238,7 +239,9 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
             supported: current,
         });
     }
-    if version == current {
+    if version >= EVENT_BODIES_VERSION {
+        // Already in the converted format; a version below the latest only lacks the
+        // later migrations, which an ordinary open applies.
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }

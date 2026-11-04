@@ -4,8 +4,8 @@ use providers::ToolSpec;
 use serde_json::Value;
 
 use super::{
-    DispatchResult, compaction, delegation, error, escalation, finish, ledger, messaging, parse,
-    questions, runs, skills, specs, success,
+    DispatchResult, compaction, delegation, error, escalation, finish, lanes, ledger, messaging,
+    parse, questions, runs, skills, specs, success,
 };
 use crate::{AgentRuntime, agent_loop::LoopState};
 
@@ -55,6 +55,9 @@ macro_rules! define_meta_ops {
 }
 
 define_meta_ops! {
+    LaneOpen => "lane_open" => lanes::open_spec => |state, runtime, input| { lanes::open(state, runtime, input) },
+    LaneList => "lane_list" => lanes::list_spec => |state, runtime, input| { lanes::list(state, runtime, input) },
+    LaneReport => "lane_report" => lanes::report_spec => |state, runtime, input| { lanes::report(state, runtime, input) },
     TodoWrite => "todo_write" => crate::thread_todos::spec => |state, runtime, input| {
         crate::thread_todos::dispatch(state, runtime, input)
     },

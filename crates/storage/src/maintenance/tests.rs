@@ -499,6 +499,7 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
     let expected = preview_task_progress_retention(&path).unwrap();
     {
         let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(crate::migrations::UNDO_V45).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V44).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V43).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V40).unwrap();

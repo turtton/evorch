@@ -70,7 +70,8 @@ impl StorageHandle {
     ///
     /// # Errors
     /// `StaleRevision { kind: "generation" }` when another start won, `LaneNotFound`,
-    /// a tombstoned run, suspended writes or a closed writer.
+    /// a blocked creation intent (StartBlocked), a tombstoned run, suspended writes
+    /// or a closed writer.
     pub fn start_lane_run(
         &self,
         lane_id: &str,
@@ -82,6 +83,36 @@ impl StorageHandle {
         self.lane_write(move |conn| {
             crate::repo::lanes::start_run(conn, &lane_id, expected_generation, &root_run_id, at_ns)
         })
+    }
+
+    /// Blocks a creation intent that was cancelled, failed locally or stopped by the
+    /// operator. A started lane and an already blocked intent are unchanged; the first
+    /// reason wins, except that an operator stop (resumable) is hardened by a later
+    /// cancellation or failure (permanent), never the other way round.
+    ///
+    /// # Errors
+    /// Invalid or secret-bearing reason (maximum 1 KiB), missing lane, suspended
+    /// writes or a closed writer. Success is the durable cancellation boundary.
+    pub fn block_lane_start(
+        &self,
+        lane_id: &str,
+        reason: &str,
+        at_ns: i64,
+    ) -> Result<LaneUpdate, StorageError> {
+        let (lane_id, reason) = (lane_id.to_owned(), reason.to_owned());
+        self.lane_write(move |conn| crate::repo::lanes::block_start(conn, &lane_id, &reason, at_ns))
+    }
+
+    /// Lets an intent that [`block_lane_start`](Self::block_lane_start) stopped for the
+    /// operator ([`LANE_START_OPERATOR_STOP`](crate::lanes::LANE_START_OPERATOR_STOP))
+    /// be recovered and started again. A cancelled or locally failed intent stays
+    /// blocked (`StartBlocked`); a started or unblocked lane is unchanged.
+    ///
+    /// # Errors
+    /// `StartBlocked`, a missing lane, suspended writes or a closed writer.
+    pub fn resume_lane_start(&self, lane_id: &str, at_ns: i64) -> Result<LaneUpdate, StorageError> {
+        let lane_id = lane_id.to_owned();
+        self.lane_write(move |conn| crate::repo::lanes::resume_start(conn, &lane_id, at_ns))
     }
 
     /// Appends a report. The ledger numbers it (1, 2, 3, …) and never changes it
@@ -232,8 +263,8 @@ impl StorageHandle {
         self.lane_read(move |conn| crate::repo::lanes::reports(conn, &lane_id, after_seq, limit))
     }
 
-    /// Lanes whose root never started (a creation intent a crash left), in lane ID
-    /// order, at most `limit` (200 at most).
+    /// Recoverable creation intents a crash left, in lane ID order, at most
+    /// `limit` (200 at most). Cancelled or locally failed intents are excluded.
     ///
     /// # Errors
     /// Returns an error for SQLite failure or a closed writer.

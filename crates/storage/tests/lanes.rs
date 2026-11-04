@@ -604,6 +604,83 @@ fn a_root_start_is_a_compare_and_swap_and_unstarted_lanes_are_found_again() {
 }
 
 #[test]
+fn v45_migration_keeps_pending_v44_intents_recoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("lanes.db"),
+        ..Default::default()
+    };
+    let original = {
+        let storage = Storage::open(config.clone()).unwrap();
+        let lane = storage.handle().create_lane(new_lane(1, 10)).unwrap().lane;
+        storage.close();
+        lane
+    };
+    {
+        let conn = Connection::open(&config.db_path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=44;",
+        )
+        .unwrap();
+    }
+    let storage = Storage::open(config).unwrap();
+    let h = storage.handle();
+    assert_eq!(h.unstarted_lanes(10).unwrap(), [original]);
+    assert!(
+        h.block_lane_start("lane-001", "cancelled", 20)
+            .unwrap()
+            .changed
+    );
+    assert!(h.unstarted_lanes(10).unwrap().is_empty());
+    storage.close();
+}
+
+#[test]
+fn a_blocked_intent_is_durable_idempotent_and_cannot_start_but_started_lanes_are_unchanged() {
+    let f = Fixture::new();
+    let h = f.handle();
+    h.create_lane(new_lane(1, 10)).unwrap();
+    h.create_lane(new_lane(2, 11)).unwrap();
+    let stopped = h.block_lane_start("lane-001", "cancelled", 12).unwrap();
+    assert!(stopped.changed);
+    let again = h
+        .block_lane_start("lane-001", "another reason", 13)
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(again.lane, stopped.lane);
+    let reopened = f.database();
+    assert_eq!(reopened.lane("lane-001").unwrap().unwrap(), stopped.lane);
+    assert_eq!(
+        reopened
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-002"]
+    );
+    assert_eq!(
+        h.start_lane_run("lane-001", 0, "root-1", 14).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    let retry = h.create_lane(new_lane(1, 10)).unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.lane, stopped.lane);
+    h.start_lane_run("lane-002", 0, "root-2", 20).unwrap();
+    assert!(
+        !h.block_lane_start("lane-002", "cancel running", 21)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        h.start_lane_run("lane-002", 1, "root-3", 22)
+            .unwrap()
+            .generation,
+        2
+    );
+}
+
+#[test]
 fn a_brief_is_revised_from_the_revision_read_and_keeps_the_lane_policy() {
     let f = Fixture::new();
     let handle = f.handle();
@@ -1250,4 +1327,108 @@ fn a_reopened_database_keeps_the_creation_and_its_unstarted_intent() {
             .is_empty()
     );
     storage.close();
+}
+
+#[test]
+fn an_operator_stopped_intent_is_not_recovered_and_only_it_can_be_resumed() {
+    let f = Fixture::new();
+    let h = f.handle();
+    for n in 1..=3 {
+        h.create_lane(new_lane(n, 10)).unwrap();
+    }
+    let stopped = h
+        .block_lane_start("lane-001", storage::lanes::LANE_START_OPERATOR_STOP, 12)
+        .unwrap();
+    assert!(stopped.lane.is_operator_stopped());
+    h.block_lane_start("lane-002", "cancelled before root start", 12)
+        .unwrap();
+    // A crash scan recovers neither blocked intent, also after a reopen.
+    assert_eq!(
+        f.database()
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-003"]
+    );
+    // A cancelled or locally failed intent cannot be resumed.
+    assert_eq!(
+        h.resume_lane_start("lane-002", 13).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    // An unblocked intent is unchanged.
+    assert!(!h.resume_lane_start("lane-003", 13).unwrap().changed);
+    // The stop is lifted once, durably, and the intent is recoverable again.
+    let resumed = h.resume_lane_start("lane-001", 14).unwrap();
+    assert!(resumed.changed);
+    assert!(resumed.lane.start_blocked_reason.is_none());
+    assert!(!h.resume_lane_start("lane-001", 15).unwrap().changed);
+    assert_eq!(
+        f.database()
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-001", "lane-003"]
+    );
+    // A started lane ignores both a stop and a resume.
+    h.start_lane_run("lane-003", 0, "root-3", 20).unwrap();
+    assert!(
+        !h.block_lane_start("lane-003", storage::lanes::LANE_START_OPERATOR_STOP, 21)
+            .unwrap()
+            .changed
+    );
+    assert!(!h.resume_lane_start("lane-003", 22).unwrap().changed);
+}
+
+#[test]
+fn an_operator_stop_hardens_into_a_cancellation_but_a_cancellation_is_never_loosened() {
+    let f = Fixture::new();
+    let h = f.handle();
+    for n in 1..=2 {
+        h.create_lane(new_lane(n, 10)).unwrap();
+    }
+    let stop = storage::lanes::LANE_START_OPERATOR_STOP;
+
+    // Stop, then cancel: the cancellation replaces the resumable reason, once.
+    assert!(h.block_lane_start("lane-001", stop, 11).unwrap().changed);
+    assert!(
+        !h.block_lane_start("lane-001", stop, 12).unwrap().changed,
+        "a repeated stop is unchanged"
+    );
+    let hardened = h
+        .block_lane_start("lane-001", "cancelled before root start", 13)
+        .unwrap();
+    assert!(hardened.changed);
+    assert!(!hardened.lane.is_operator_stopped());
+    assert_eq!(
+        h.resume_lane_start("lane-001", 14).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    assert!(
+        !h.block_lane_start("lane-001", "another failure", 15)
+            .unwrap()
+            .changed
+    );
+
+    // Cancel, then stop: the cancellation stays.
+    h.block_lane_start("lane-002", "cancelled before root start", 11)
+        .unwrap();
+    let kept = h.block_lane_start("lane-002", stop, 12).unwrap();
+    assert!(!kept.changed);
+    assert_eq!(
+        kept.lane.start_blocked_reason.as_deref(),
+        Some("cancelled before root start")
+    );
+    assert_eq!(
+        f.database()
+            .lane("lane-001")
+            .unwrap()
+            .unwrap()
+            .start_blocked_reason
+            .as_deref(),
+        Some("cancelled before root start")
+    );
 }

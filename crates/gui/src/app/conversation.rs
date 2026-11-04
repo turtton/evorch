@@ -66,8 +66,20 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 agent_name,
                 ..
             }) => {
-                if let Some(thread) = chat_thread(agent_name) {
-                    self.bind_conversation_run(thread, run_id, true)
+                // Only a parentless run is a conversation root: a child may carry any name
+                // its parent gave it, and belongs to its parent's thread.
+                if let Some(thread) = chat_thread(agent_name).filter(|_| parent_run_id.is_none()) {
+                    let known = self
+                        .sidebar
+                        .threads
+                        .iter()
+                        .any(|candidate| candidate.id.to_string() == thread);
+                    if !known {
+                        self.lanes.note_early_root(thread, run_id);
+                    }
+                    let bound = self.bind_conversation_run(thread, run_id, true);
+                    self.bind_lane_root(thread);
+                    bound
                 } else {
                     let owner = self.thread_for_run(run_id).or_else(|| {
                         parent_run_id

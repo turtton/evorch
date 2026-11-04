@@ -20,7 +20,7 @@
 //! Reading, redrawing and polling never change a lane's place: its order comes from real
 //! activity (conversation, Report) only.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -204,6 +204,9 @@ pub(super) struct LaneState {
     scan: ScanPhase,
     results: Receiver<Loaded>,
     sender: Sender<Loaded>,
+    /// Chat roots whose thread the sidebar did not have yet: the runtime starts a lane root
+    /// before the creation event places its thread.
+    early_roots: VecDeque<(String, String)>,
 }
 
 impl Default for LaneState {
@@ -222,11 +225,33 @@ impl Default for LaneState {
             scan: ScanPhase::Pending,
             results,
             sender,
+            early_roots: VecDeque::new(),
         }
     }
 }
 
 impl LaneState {
+    /// Remembers the newest root of a thread the sidebar lacks, the oldest threads going
+    /// first once too many are waiting. A lane that lost its root this way gets it from
+    /// the ledger read.
+    pub(super) fn note_early_root(&mut self, thread_id: &str, run_id: &str) {
+        const KEPT: usize = 64;
+        self.early_roots.retain(|(thread, _)| thread != thread_id);
+        self.early_roots
+            .push_back((thread_id.to_owned(), run_id.to_owned()));
+        while self.early_roots.len() > KEPT {
+            self.early_roots.pop_front();
+        }
+    }
+
+    fn take_early_root(&mut self, thread_id: &str) -> Option<String> {
+        let at = self
+            .early_roots
+            .iter()
+            .position(|(thread, _)| thread == thread_id)?;
+        self.early_roots.remove(at).map(|(_, run)| run)
+    }
+
     fn request(&mut self, thread_id: &str) {
         self.failed.remove(thread_id);
         if self.in_flight.contains(thread_id) {
@@ -489,7 +514,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         event.meta.wall_clock,
                     )
                 });
-                self.link_lane_thread(thread_id, link) | created
+                let linked = self.link_lane_thread(thread_id, link);
+                let rootless = self.sidebar.threads.iter().any(|thread| {
+                    thread.id.to_string() == *thread_id && thread.root_run_id.is_none()
+                });
+                let adopted = rootless
+                    && self
+                        .lanes
+                        .take_early_root(thread_id)
+                        .is_some_and(|run| self.bind_conversation_run(thread_id, &run, true));
+                self.bind_lane_root(thread_id);
+                linked | created | adopted
             }
             LedgerEvent::LaneManagementChanged {
                 lane_id,
@@ -531,6 +566,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             _ => false,
         }
+    }
+
+    /// Gives the command sink the lane's current root. The runtime starts a lane root
+    /// itself, so no submission from this window ever bound it; without the binding a
+    /// Stop on the lane would find no run. Events own which root is current.
+    pub(super) fn bind_lane_root(&mut self, thread_id: &str) {
+        let Some(root) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id.to_string() == thread_id && thread.lane.is_some())
+            .and_then(|thread| thread.root_run_id.clone())
+        else {
+            return;
+        };
+        self.sink.bind_lane_root(thread_id, &root);
     }
 
     fn project_of_thread(&self, id: &ThreadId) -> Option<ProjectId> {
@@ -609,6 +660,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         changed |= self.link_lane_thread(&thread_id, link_of(record));
         let activity = seconds(record.last_activity_at_ns);
         let root = record.root_run_id.clone();
+        let ledger_root = root.clone();
         if let Some(thread) = self
             .sidebar
             .threads
@@ -634,6 +686,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .any(|thread| thread.id.to_string() == thread_id && thread.root_run_id.is_none())
         {
             changed |= self.bind_conversation_run(&thread_id, &root, true);
+        }
+        // The sink follows the ledger's root, and only where the events agree with it.
+        if ledger_root.as_deref().is_some_and(|ledger| {
+            self.sidebar.threads.iter().any(|thread| {
+                thread.id.to_string() == thread_id && thread.root_run_id.as_deref() == Some(ledger)
+            })
+        }) {
+            self.bind_lane_root(&thread_id);
         }
         let current = self.lanes.details.get(&thread_id);
         let newer =

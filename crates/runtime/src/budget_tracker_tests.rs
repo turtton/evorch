@@ -553,3 +553,33 @@ async fn runaway_diagnostics_still_fire_with_unlimited_resources() {
                 && breach.detail.contains("max_file_rereads=1")
     ));
 }
+
+#[test]
+fn lane_and_child_share_identity_aware_credits_across_snapshot_restore() {
+    let mut counters = BudgetCounters::default();
+    for index in 0..MAX_UNOBSERVED_SPAWN_CREDITS {
+        let counted = if index % 2 == 0 {
+            counters.mark_lane_spawned(&format!("l{index}"))
+        } else {
+            counters.mark_spawned(&format!("run-{index}"))
+        };
+        assert!(counted);
+    }
+    assert!(!counters.mark_lane_spawned("twenty-first"));
+    assert!(!counters.mark_spawned("run-extra"));
+    counters.finish_round();
+    counters.finish_round();
+    assert_eq!(counters.no_progress_rounds, 1);
+    assert!(counters.mark_lane_completed("l0"));
+    assert!(counters.mark_spawned("run-new"));
+    let json = serde_json::to_string(&counters.spawn_credits).unwrap();
+    let mut restored = BudgetCounters {
+        spawn_credits: serde_json::from_str(&json).unwrap(),
+        ..Default::default()
+    };
+    assert!(!restored.mark_lane_completed("l0"));
+    assert!(!restored.mark_lane_spawned("l0"));
+    assert!(!restored.mark_spawned("run-new"));
+    // Same ID space, but child and lane terminal observations cannot alias.
+    assert!(restored.mark_child_completed("l0"));
+}
