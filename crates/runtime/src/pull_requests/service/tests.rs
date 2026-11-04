@@ -313,6 +313,17 @@ impl World {
 }
 
 impl Process {
+    /// Runs `action` when the service next waits on the blocking pool at `stage`, before the
+    /// work runs: the world changes while the work is queued.
+    pub(super) fn at_stage(&self, stage: Stage, action: impl FnOnce() + Send + 'static) {
+        self.service
+            .inner()
+            .stage_hooks
+            .lock()
+            .unwrap()
+            .insert(stage, Box::new(action));
+    }
+
     /// The permit for `thread`, starting its lease the way chat does when nobody owns it.
     pub(super) fn permit(&self, thread: &str) -> OwnerPermit {
         self.host

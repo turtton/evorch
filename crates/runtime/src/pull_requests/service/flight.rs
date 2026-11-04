@@ -13,7 +13,7 @@ use storage::pull_requests::{
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::{Inner, KeyState, PullRequestError};
+use super::{Inner, KeyState, PullRequestError, Stage};
 use crate::ownership::OwnerPermit;
 use crate::pull_requests::checkout::{CheckoutMiss, CheckoutResolution};
 use crate::pull_requests::diff::{self, FactsChange};
@@ -140,26 +140,27 @@ impl Inner {
     /// Fetches `key`, stores what came back and tells the threads. The answer is used only
     /// while some party it is for still owns its thread.
     async fn fetch_and_commit(&self, key: &PullRequestKey, flight: &Flight) -> FlightOutcome {
-        let config = self.config();
-        // The last look before `gh` is started: tracking is still on, and someone who waits for
-        // the answer still holds their thread (a handoff or a release since the plan fences them).
-        if !config.enabled || self.live_interests(flight.interests()).await.is_empty() {
-            return FlightOutcome::Discarded;
-        }
         let storage = self.storage.clone();
         let begin_key = key.clone();
         let seq = match self
-            .blocking(move || storage.begin_pull_request_fetch(&begin_key))
+            .blocking_at(Stage::BeginFetch, move || {
+                storage.begin_pull_request_fetch(&begin_key)
+            })
             .await
         {
             Ok(Ok(seq)) => seq,
             Ok(Err(error)) => return FlightOutcome::StorageFailed(error.to_string()),
             Err(error) => return FlightOutcome::StorageFailed(error.to_string()),
         };
-        let result = self
-            .source
-            .fetch(key, Duration::from_secs(config.fetch_timeout_seconds))
-            .await;
+        // The one place `gh` is started. Numbering the fetch waited, so what is true now is
+        // looked at now, and nothing is awaited between this look and the start of the process
+        // (`PullRequestSource::fetch` starts it before its first await).
+        let interests = flight.interests();
+        if !self.may_launch(interests.iter().map(Interest::permit)) {
+            return FlightOutcome::Discarded;
+        }
+        let deadline = Duration::from_secs(self.config().fetch_timeout_seconds);
+        let result = self.source.fetch(key, deadline).await;
         // Tracking may have been switched off while `gh` ran: nothing more is started for it.
         if !self.config().enabled {
             return FlightOutcome::Discarded;
@@ -358,31 +359,34 @@ impl Inner {
         else {
             return false;
         };
-        // The last look before `git` is started: looking up the directories took time.
-        let permit = target.permit.clone();
-        if !self.config().enabled
-            || !matches!(self.blocking(move || permit_holds(&permit)).await, Ok(true))
-        {
-            return false;
-        }
         let (repository, branch) = (facts.head_repository.clone(), facts.head_branch.clone());
         let resolution = if directories.is_empty() {
             CheckoutResolution::Missing(CheckoutMiss::NoCheckout)
         } else {
-            let environment = Arc::clone(&self.env);
-            match self
-                .blocking(move || {
-                    environment.resolve_checkout(
+            // The one place `git` is started. The look at tracking and at the thread's lease is
+            // the first thing the blocking closure does, immediately before the process, so
+            // neither the lookup of the directories nor the wait for the pool can outdate it.
+            let (environment, settings, permit) = (
+                Arc::clone(&self.env),
+                self.settings.subscribe(),
+                target.permit.clone(),
+            );
+            let resolved = self
+                .blocking_at(Stage::Checkout, move || {
+                    if !settings.borrow().enabled || !permit_holds(&permit) {
+                        return None;
+                    }
+                    Some(environment.resolve_checkout(
                         &directories,
                         repository.as_deref(),
                         &branch,
                         CHECKOUT_BUDGET,
-                    )
+                    ))
                 })
-                .await
-            {
-                Ok(resolution) => resolution,
-                Err(_) => return false,
+                .await;
+            match resolved {
+                Ok(Some(resolution)) => resolution,
+                Ok(None) | Err(_) => return false,
             }
         };
         let (storage, thread, revision) = (
@@ -549,7 +553,9 @@ impl Inner {
                     entry.next_due = Some(now + backoff_max.min(pending * 2));
                 }
                 FlightOutcome::Discarded => {
-                    entry.next_due = Some(now);
+                    // Nobody who waited could be confirmed (or tracking was switched off):
+                    // try again later, not in a tight loop against a busy registry.
+                    entry.next_due = Some(now + pending);
                 }
             }
         }

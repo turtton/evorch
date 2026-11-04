@@ -191,6 +191,16 @@ pub(crate) struct State {
     pub(crate) inheritance_due: HashMap<String, Instant>,
 }
 
+/// A wait on the blocking pool right before a process is started. A test may interrupt it, which
+/// is how "the world changed while the work was queued" is simulated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Stage {
+    /// Numbering a fetch, right before `gh` is started.
+    BeginFetch,
+    /// The look for a checkout, right before `git` is started.
+    Checkout,
+}
+
 pub(crate) struct Inner {
     pub(crate) storage: StorageHandle,
     pub(crate) source: Arc<dyn PullRequestSource>,
@@ -202,6 +212,8 @@ pub(crate) struct Inner {
     pub(crate) wake: Notify,
     pub(crate) state: Mutex<State>,
     pub(crate) shutdown: watch::Sender<bool>,
+    #[cfg(test)]
+    pub(crate) stage_hooks: Mutex<HashMap<Stage, Box<dyn FnOnce() + Send>>>,
 }
 
 impl Inner {
@@ -229,8 +241,45 @@ impl Inner {
         }
     }
 
+    /// [`Self::blocking`] that a test can interrupt at `stage` before the work runs.
+    #[cfg(test)]
+    pub(crate) async fn blocking_at<T: Send + 'static>(
+        &self,
+        stage: Stage,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, PullRequestError> {
+        let hook = self.stage_hooks.lock().unwrap().remove(&stage);
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.blocking(work).await
+    }
+
+    #[cfg(not(test))]
+    pub(crate) async fn blocking_at<T: Send + 'static>(
+        &self,
+        _stage: Stage,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, PullRequestError> {
+        self.blocking(work).await
+    }
+
     pub(crate) fn config(&self) -> PullRequestsConfig {
         *self.settings.borrow()
+    }
+
+    /// The last look before `gh` is started: tracking is on *now*, and some party that waits for
+    /// the answer holds its thread *now*. It is synchronous and does not wait for the registry
+    /// (a busy registry means "not confirmed"), so nothing can happen between it and the start
+    /// of the process; callers must not await between this and the launch.
+    pub(crate) fn may_launch<'a>(
+        &self,
+        permits: impl IntoIterator<Item = &'a OwnerPermit>,
+    ) -> bool {
+        self.config().enabled
+            && permits
+                .into_iter()
+                .any(|permit| matches!(permit.try_mutation_guard(), Ok(Some(_))))
     }
 
     pub(crate) fn enabled(&self) -> Result<PullRequestsConfig, PullRequestError> {
@@ -520,6 +569,8 @@ impl PullRequestService {
             wake: Notify::new(),
             state: Mutex::new(State::default()),
             shutdown,
+            #[cfg(test)]
+            stage_hooks: Mutex::default(),
         });
         let receiver = inner.bus.subscribe();
         tokio::spawn(scheduler::run(Arc::clone(&inner)));
@@ -855,6 +906,11 @@ impl PullRequestService {
     /// Stops the background tasks now (they also stop when the last clone is dropped).
     pub fn shutdown(&self) {
         self.inner.shutdown.send_replace(true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner(&self) -> &Arc<Inner> {
+        &self.inner
     }
 }
 

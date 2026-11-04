@@ -58,7 +58,7 @@ struct Setup {
     events: event_bus::EventReceiver,
 }
 
-fn setup() -> Setup {
+fn setup(enabled: bool) -> Setup {
     let directory = tempfile::tempdir().unwrap();
     let storage = storage::Storage::open(storage::StorageConfig {
         db_path: directory.path().join("service.db"),
@@ -83,7 +83,7 @@ fn setup() -> Setup {
         environment: Arc::new(Nothing),
         bus,
         settings: PullRequestsConfig {
-            enabled: true,
+            enabled,
             ..Default::default()
         },
         clock: Arc::new(SystemWallClock),
@@ -110,7 +110,7 @@ async fn next(setup: &mut Setup) -> PullRequestEvent {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_is_fetched_and_published_through_the_blocking_pool() {
     // Given: an owned thread.
-    let mut setup = setup();
+    let mut setup = setup(true);
     setup.source.push_ok(&key(), answer());
     let permit = setup.host.start("thread-1").unwrap();
 
@@ -141,28 +141,40 @@ async fn a_link_is_fetched_and_published_through_the_blocking_pool() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unlink_and_a_lost_lease_during_a_fetch_deliver_nothing_to_that_thread() {
-    // Given: two threads on one pull request, the fetch held, the first thread unlinked and the
-    // second one's lease moved to another host.
-    let mut setup = setup();
+    // Given: three threads linked to one pull request and owned, all prepared while tracking is
+    // off, so that the first plan sees all of them and one fetch is started for the three.
+    let mut setup = setup(false);
     let gate = setup.source.push_gate(&key());
-    let (first, second) = (
-        setup.host.start("thread-1").unwrap(),
-        setup.host.start("thread-2").unwrap(),
-    );
-    let third = setup.host.start("thread-3").unwrap();
-    for (thread, permit) in [
-        ("thread-1", &first),
-        ("thread-2", &second),
-        ("thread-3", &third),
-    ] {
+    let mut permits = Vec::new();
+    for thread in ["thread-1", "thread-2", "thread-3"] {
+        permits.push(setup.host.start(thread).unwrap());
         setup
-            .service
-            .link(thread, "turtton/evorch#1", 0, permit)
-            .await
+            ._storage
+            .handle()
+            .link_pull_request(storage::pull_requests::LinkPullRequest {
+                thread_id: thread.into(),
+                key: key(),
+                expected_revision: 0,
+                at_ns: 1,
+            })
             .unwrap();
     }
+    setup
+        .service
+        .update_settings(PullRequestsConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
     gate.arrived().await;
-    setup.service.unlink("thread-1", 1, &first).await.unwrap();
+
+    // When: the first thread unlinks, the second one's lease moves to another host, and the
+    // fetch is released.
+    setup
+        .service
+        .unlink("thread-1", 1, &permits[0])
+        .await
+        .unwrap();
     let successor = Arc::new(
         OwnerHost::open(
             &setup._directory.path().join("owners"),
@@ -171,13 +183,12 @@ async fn an_unlink_and_a_lost_lease_during_a_fetch_deliver_nothing_to_that_threa
         )
         .unwrap(),
     );
-    setup.host.handoff(&second, &successor).unwrap();
-
-    // When: the fetch is released.
+    setup.host.handoff(&permits[1], &successor).unwrap();
     gate.release_ok(answer());
 
-    // Then: only the thread that still has its link and its lease hears the change. Deliveries
-    // go in the order the threads joined, so the third one's change closes the other two.
+    // Then: only the thread that still has its link and its lease hears the change. All three
+    // took part in the one fetch, and deliveries go in link order, so the third one's change
+    // closes the other two.
     let mut changed = Vec::new();
     loop {
         if let PullRequestEvent::Changed { thread_id, .. } = next(&mut setup).await {
@@ -188,4 +199,5 @@ async fn an_unlink_and_a_lost_lease_during_a_fetch_deliver_nothing_to_that_threa
         }
     }
     assert_eq!(changed, vec!["thread-3".to_owned()]);
+    assert_eq!(setup.source.calls().len(), 1, "one fetch served the three");
 }

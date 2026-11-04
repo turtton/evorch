@@ -250,6 +250,92 @@ async fn new_settings_apply_to_a_waiting_poll_even_when_another_wake_comes_with_
     );
 }
 
+// Given: tracking is switched off, or the lease is handed off, while a fetch is being numbered
+// (a wait on the blocking pool right before gh) / When: the numbering is done / Then: gh is not
+// started
+#[tokio::test(start_paused = true)]
+async fn nothing_changes_gh_s_start_after_the_wait_for_the_fetch_number() {
+    for handoff in [false, true] {
+        let world = World::new();
+        let process = world.process(enabled());
+        let successor = world.process(enabled());
+        process.source.push_ok(&key(1), open_running(1));
+        let permit = process.permit("t1");
+        let (service, host, next_host) = (
+            process.service.clone(),
+            Arc::clone(&process.host),
+            Arc::clone(&successor.host),
+        );
+        process.at_stage(Stage::BeginFetch, move || {
+            if handoff {
+                host.handoff(&permit, &next_host).unwrap();
+            } else {
+                service
+                    .update_settings(PullRequestsConfig::default())
+                    .unwrap();
+            }
+        });
+
+        let owner = process.permit("t1");
+        process
+            .service
+            .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
+            .await
+            .unwrap();
+        settle().await;
+
+        assert!(
+            process.source.calls().is_empty(),
+            "gh was started (handoff: {handoff})"
+        );
+    }
+}
+
+// Given: tracking is switched off, or the lease is handed off, while the look for a checkout waits
+// for the blocking pool / When: the work runs / Then: git is not started
+#[tokio::test(start_paused = true)]
+async fn nothing_changes_git_s_start_after_the_wait_for_the_pool() {
+    for handoff in [false, true] {
+        let world = World::new();
+        let process = world.process(enabled());
+        let successor = world.process(enabled());
+        let checkout = world.dir.path().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        process.environment.set_directories(vec![checkout]);
+        process.source.push_ok(&key(1), open_running(1));
+        let permit = process.permit("t1");
+        let (service, host, next_host) = (
+            process.service.clone(),
+            Arc::clone(&process.host),
+            Arc::clone(&successor.host),
+        );
+        process.at_stage(Stage::Checkout, move || {
+            if handoff {
+                host.handoff(&permit, &next_host).unwrap();
+            } else {
+                service
+                    .update_settings(PullRequestsConfig::default())
+                    .unwrap();
+            }
+        });
+
+        let owner = process.permit("t1");
+        process
+            .service
+            .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
+            .await
+            .unwrap();
+        settle().await;
+
+        assert_eq!(process.environment.directory_requests(), 1);
+        assert_eq!(
+            process.environment.resolutions(),
+            0,
+            "git was started (handoff: {handoff})"
+        );
+    }
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]

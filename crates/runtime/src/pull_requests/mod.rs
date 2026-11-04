@@ -64,6 +64,10 @@ pub struct FetchedPullRequest {
 pub trait PullRequestSource: Send + Sync {
     /// Fetches `key`, giving up after `deadline`.
     ///
+    /// The service confirms that tracking is on and that the thread still has its lease
+    /// immediately before this call and waits for nothing after it, so an implementation that
+    /// starts a process starts it before its first `await`.
+    ///
     /// # Errors
     /// A [`FetchError`]; see its variants. A partial or unrecognized answer is an error,
     /// never a success with less in it.
