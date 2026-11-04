@@ -37,7 +37,7 @@ async fn search_shares_chat_run_headers_endpoint_and_refresh() {
             let body = if body["tools"][0]["type"] == "web_search" {
                 success()
             } else {
-                include_str!("../fixtures/codex/responses_success.sse").into()
+                include_str!("../../fixtures/codex/responses_success.sse").into()
             };
             ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")
         })

@@ -173,8 +173,11 @@ async fn conversation_chat_gets_bundled_overlay_in_stable_system_prompt() {
     assert_eq!(observed.len(), 2);
     let system = text_of_role(&observed[0], MessageRole::System).expect("system prompt");
     assert!(
-        system
-            .contains(include_str!("../../config/assets/presets/category-conversation.md").trim())
+        system.contains(
+            config::PresetStore::resolve("category-conversation", None)
+                .expect("bundled conversation overlay")
+                .trim()
+        )
     );
     assert!(!system.contains(GATE_MARK));
     assert_eq!(

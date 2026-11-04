@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { compareStreams, createRecordParser, inspectStream, runCli } from './inspect-client-hello.mjs';
 
-const fixture = readFileSync(new URL('../../../../crates/providers/tests/fixtures/claude-transport/native-2.1.295-client-hello.bin', import.meta.url));
+const fixture = readFileSync(new URL('../../../../crates/providers/fixtures/claude-transport/native-2.1.295-client-hello.bin', import.meta.url));
 const u16 = value => { const b = Buffer.alloc(2); b.writeUInt16BE(value); return b; };
 const vector = (bytes, width = 2) => Buffer.concat([width === 1 ? Buffer.from([bytes.length]) : u16(bytes.length), bytes]);
 const extension = (type, bytes) => Buffer.concat([u16(type), vector(bytes)]);

@@ -381,7 +381,7 @@ async fn claude_cache_normal_turns_keep_identity_tools_and_sent_prefix_after_rot
 #[tokio::test]
 async fn claude_stream_restores_tool_names_and_rejects_unsupported_reasoning_controls() {
     let server = MockServer::start().await;
-    let sse = include_str!("fixtures/anthropic/stream_tool_use.sse")
+    let sse = include_str!("../fixtures/anthropic/stream_tool_use.sse")
         .replace("get_weather", "_mcp__evorch__get_weather");
     Mock::given(method("POST"))
         .and(path("/messages"))

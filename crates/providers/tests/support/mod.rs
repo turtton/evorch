@@ -7,13 +7,12 @@ use std::path::Path;
 use event_bus::{Event, EventKind, EventReceiver, ProviderEvent, UsageEvent};
 use wiremock::ResponseTemplate;
 
-/// `tests/fixtures/<provider>/<name>` の内容を読み込んで返す。
+/// `fixtures/<provider>/<name>` の内容を読み込んで返す。
 ///
 /// # Panics
 /// フィクスチャが存在しない・読めない場合にパニックする (テスト失敗として扱う)。
 pub fn fixture(provider: &str, name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
         .join("fixtures")
         .join(provider)
         .join(name);

@@ -97,7 +97,7 @@ fn function_call_done() -> SseFrame {
 #[test]
 fn incomplete_fixture_completes_partial_output_as_length() {
     let response = interpret_all(frames(include_str!(
-        "../../../../tests/fixtures/openai/responses_incomplete.sse"
+        "../../../../fixtures/openai/responses_incomplete.sse"
     )))
     .unwrap()
     .expect("response.incomplete completes the stream");
@@ -207,7 +207,7 @@ fn incomplete_reason_maps_to_canonical_finish_reason() {
 #[test]
 fn error_event_fixture_maps_to_http_error() {
     let error = interpret_all(frames(include_str!(
-        "../../../../tests/fixtures/openai/responses_error_event.sse"
+        "../../../../fixtures/openai/responses_error_event.sse"
     )))
     .unwrap_err();
 
@@ -302,7 +302,7 @@ fn failure_events_normalize_known_codes_into_retry_and_rate_limit_classes() {
 #[test]
 fn text_fixture_keeps_reasoning_summary_and_text() {
     let response = interpret_all(frames(include_str!(
-        "../../../../tests/fixtures/openai/responses_text.sse"
+        "../../../../fixtures/openai/responses_text.sse"
     )))
     .unwrap()
     .expect("completion");

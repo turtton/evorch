@@ -101,7 +101,7 @@ fn frames_shape_matches_fixture() {
     // Given
     let fixture = payloads(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../providers/tests/fixtures/openai/stream_tool_call.sse"
+        "/../providers/fixtures/openai/stream_tool_call.sse"
     )));
     let scenario = ScriptedResponse::tool_call(
         "chatcmpl-2",

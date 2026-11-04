@@ -306,10 +306,10 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
-            undo_v45 = include_str!("support/undo_v45.sql"),
-            undo_v44 = include_str!("support/undo_v44.sql"),
-            undo_v43 = include_str!("support/undo_v43.sql"),
-            undo_v40 = include_str!("support/undo_v40.sql"),
+            undo_v45 = include_str!("../undo/undo_v45.sql"),
+            undo_v44 = include_str!("../undo/undo_v44.sql"),
+            undo_v43 = include_str!("../undo/undo_v43.sql"),
+            undo_v40 = include_str!("../undo/undo_v40.sql"),
         ))
         .unwrap();
     let page = page_size(&observer);

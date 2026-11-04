@@ -430,7 +430,8 @@ fn codex_model(
 fn contract_prompts() -> Arc<SystemPromptCatalog> {
     let mut prompts = SystemPromptCatalog::builder().category_overlay(
         "conversation",
-        include_str!("../../config/assets/presets/category-conversation.md"),
+        config::PresetStore::resolve("category-conversation", None)
+            .expect("bundled conversation overlay"),
     );
     for role in [
         Role::Orchestrator,

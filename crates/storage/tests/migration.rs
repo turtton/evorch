@@ -1179,10 +1179,10 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
         )
         .unwrap();
     connection
-        .execute_batch(include_str!("support/undo_v44.sql"))
+        .execute_batch(include_str!("../undo/undo_v44.sql"))
         .unwrap();
     connection
-        .execute_batch(include_str!("support/undo_v43.sql"))
+        .execute_batch(include_str!("../undo/undo_v43.sql"))
         .unwrap();
     connection.pragma_update(None, "user_version", 41).unwrap();
     connection

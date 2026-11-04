@@ -4,7 +4,7 @@
 //! 共有します。両者の差分は [`ResponsesDialect`] の規則 (`impl ResponsesDialect`) に
 //! 集約し、変換本体は dialect に依存しません。Codex の wire は Codex CLI 0.166.0 の
 //! `build_responses_request` に合わせ、指示文を top-level `instructions` でなく
-//! `input[0]` の developer message に置きます (`tests/fixtures/codex/wire_request_0166.json`)。
+//! `input[0]` の developer message に置きます (`fixtures/codex/wire_request_0166.json`)。
 //!
 //! # 拡張点
 //!
