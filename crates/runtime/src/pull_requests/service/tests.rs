@@ -132,11 +132,24 @@ pub(super) struct FakeEnvironment {
     runs: Mutex<HashMap<String, String>>,
     directories: Mutex<Vec<PathBuf>>,
     directory_requests: std::sync::atomic::AtomicUsize,
+    resolutions: std::sync::atomic::AtomicUsize,
+    on_directories: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeEnvironment {
     pub(super) fn set_directories(&self, directories: Vec<PathBuf>) {
         *self.directories.lock().unwrap() = directories;
+    }
+
+    /// Runs `action` the first time the service asks for the directories, as if the world changed
+    /// while the answer was being looked up.
+    pub(super) fn on_directories(&self, action: impl FnOnce() + Send + 'static) {
+        *self.on_directories.lock().unwrap() = Some(Box::new(action));
+    }
+
+    /// How many times the service went on to run git.
+    pub(super) fn resolutions(&self) -> usize {
+        self.resolutions.load(Ordering::SeqCst)
     }
 
     /// How many times the service asked where a thread's checkouts are (it asks only when it
@@ -160,7 +173,69 @@ impl ThreadEnvironment for FakeEnvironment {
 
     fn checkout_directories(&self, _thread_id: &str) -> Vec<PathBuf> {
         self.directory_requests.fetch_add(1, Ordering::SeqCst);
+        let action = self.on_directories.lock().unwrap().take();
+        if let Some(action) = action {
+            action();
+        }
         self.directories.lock().unwrap().clone()
+    }
+
+    fn resolve_checkout(
+        &self,
+        directories: &[PathBuf],
+        head_repository: Option<&str>,
+        head_branch: &str,
+        budget: Duration,
+    ) -> crate::pull_requests::CheckoutResolution {
+        self.resolutions.fetch_add(1, Ordering::SeqCst);
+        crate::pull_requests::checkout::resolve_blocking(
+            directories,
+            head_repository,
+            head_branch,
+            budget,
+        )
+    }
+}
+
+type PermitAction = Box<dyn FnOnce(&OwnerPermit) + Send>;
+
+/// Actions the ownership view runs while the scheduler plans, as if the world changed while the
+/// registry was being read.
+#[derive(Default)]
+pub(super) struct Hooks {
+    before_permit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    after_permit: Mutex<Option<PermitAction>>,
+}
+
+impl Hooks {
+    /// Runs `action` just before the next permit is looked up.
+    pub(super) fn before_permit(&self, action: impl FnOnce() + Send + 'static) {
+        *self.before_permit.lock().unwrap() = Some(Box::new(action));
+    }
+
+    /// Runs `action` with the next permit that was found, before it is handed to the plan.
+    pub(super) fn after_permit(&self, action: impl FnOnce(&OwnerPermit) + Send + 'static) {
+        *self.after_permit.lock().unwrap() = Some(Box::new(action));
+    }
+}
+
+struct HookedOwnership {
+    host: Arc<OwnerHost>,
+    hooks: Arc<Hooks>,
+}
+
+impl OwnershipView for HookedOwnership {
+    fn owned_permit(&self, thread_id: &str) -> Option<OwnerPermit> {
+        let before = self.hooks.before_permit.lock().unwrap().take();
+        if let Some(action) = before {
+            action();
+        }
+        let permit = OwnershipView::owned_permit(&*self.host, thread_id)?;
+        let after = self.hooks.after_permit.lock().unwrap().take();
+        if let Some(action) = after {
+            action(&permit);
+        }
+        Some(permit)
     }
 }
 
@@ -178,6 +253,7 @@ pub(super) struct Process {
     pub(super) bus: Arc<EventBus>,
     pub(super) source: FakePullRequestSource,
     pub(super) environment: Arc<FakeEnvironment>,
+    pub(super) hooks: Arc<Hooks>,
     pub(super) service: PullRequestService,
     pub(super) events: EventReceiver,
 }
@@ -207,11 +283,15 @@ impl World {
         );
         let source = FakePullRequestSource::new();
         let environment = Arc::new(FakeEnvironment::default());
+        let hooks = Arc::new(Hooks::default());
         let events = bus.subscribe();
         let service = PullRequestService::start(ServiceParts {
             storage: storage.handle(),
             source: Arc::new(source.clone()),
-            ownership: Arc::clone(&host) as Arc<dyn OwnershipView>,
+            ownership: Arc::new(HookedOwnership {
+                host: Arc::clone(&host),
+                hooks: Arc::clone(&hooks),
+            }),
             environment: Arc::clone(&environment) as Arc<dyn ThreadEnvironment>,
             bus: Arc::clone(&bus),
             settings,
@@ -225,6 +305,7 @@ impl World {
             bus,
             source,
             environment,
+            hooks,
             service,
             events,
         }

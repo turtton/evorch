@@ -37,11 +37,18 @@ struct Plan {
 pub(super) async fn run(inner: Arc<Inner>) {
     let mut settings = inner.settings.subscribe();
     let mut shutdown = inner.shutdown.subscribe();
+    let mut applied = *settings.borrow();
     loop {
         if *shutdown.borrow() {
             break;
         }
         let config = *settings.borrow_and_update();
+        // Whatever woke the loop, new settings are applied once: judged by the value, not by
+        // which branch of the select won.
+        if config != applied {
+            inner.apply_new_settings();
+            applied = config;
+        }
         let due = if config.enabled {
             inner.round().await
         } else {
@@ -53,7 +60,6 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 if changed.is_err() {
                     break;
                 }
-                inner.apply_new_settings();
             }
             () = sleep_until(due) => {}
             changed = shutdown.changed() => {
@@ -178,6 +184,11 @@ impl Inner {
                 return Some(Instant::now() + Duration::from_secs(config.pending_poll_seconds));
             }
         };
+        // Planning waited on the database and the ownership registry: tracking may have been
+        // switched off meanwhile, and then nothing is started from this plan.
+        if !self.config().enabled {
+            return None;
+        }
         let now = Instant::now();
         let mut earliest = None;
         let mut groups: HashMap<PullRequestKey, Vec<Target>> = HashMap::new();

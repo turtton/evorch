@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use super::{Inner, KeyState, PullRequestError};
 use crate::ownership::OwnerPermit;
-use crate::pull_requests::checkout::{CheckoutMiss, CheckoutResolution, resolve_blocking};
+use crate::pull_requests::checkout::{CheckoutMiss, CheckoutResolution};
 use crate::pull_requests::diff::{self, FactsChange};
 use crate::pull_requests::ownership::permit_holds;
 use crate::pull_requests::{FetchError, FetchedPullRequest};
@@ -141,6 +141,11 @@ impl Inner {
     /// while some party it is for still owns its thread.
     async fn fetch_and_commit(&self, key: &PullRequestKey, flight: &Flight) -> FlightOutcome {
         let config = self.config();
+        // The last look before `gh` is started: tracking is still on, and someone who waits for
+        // the answer still holds their thread (a handoff or a release since the plan fences them).
+        if !config.enabled || self.live_interests(flight.interests()).await.is_empty() {
+            return FlightOutcome::Discarded;
+        }
         let storage = self.storage.clone();
         let begin_key = key.clone();
         let seq = match self
@@ -353,13 +358,21 @@ impl Inner {
         else {
             return false;
         };
+        // The last look before `git` is started: looking up the directories took time.
+        let permit = target.permit.clone();
+        if !self.config().enabled
+            || !matches!(self.blocking(move || permit_holds(&permit)).await, Ok(true))
+        {
+            return false;
+        }
         let (repository, branch) = (facts.head_repository.clone(), facts.head_branch.clone());
         let resolution = if directories.is_empty() {
             CheckoutResolution::Missing(CheckoutMiss::NoCheckout)
         } else {
+            let environment = Arc::clone(&self.env);
             match self
                 .blocking(move || {
-                    resolve_blocking(
+                    environment.resolve_checkout(
                         &directories,
                         repository.as_deref(),
                         &branch,

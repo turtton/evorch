@@ -2,7 +2,9 @@
 //! (ADR 0024) and where a thread's checkouts are.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use super::checkout::{CheckoutResolution, resolve_blocking};
 use crate::ownership::{OwnerHost, OwnerPermit};
 
 /// Who may act for a thread. Polling, refreshing and resolving an inheritance are done only
@@ -35,4 +37,17 @@ pub trait ThreadEnvironment: Send + Sync {
     /// directories and the read-only directories declared for it. Never the project the
     /// window happens to have selected.
     fn checkout_directories(&self, thread_id: &str) -> Vec<PathBuf>;
+
+    /// Finds the checkout of `head_branch` of `head_repository` among `directories`: the only
+    /// place the service runs `git`. The default reads the repositories; a test replaces it to
+    /// see whether it was asked.
+    fn resolve_checkout(
+        &self,
+        directories: &[PathBuf],
+        head_repository: Option<&str>,
+        head_branch: &str,
+        budget: Duration,
+    ) -> CheckoutResolution {
+        resolve_blocking(directories, head_repository, head_branch, budget)
+    }
 }

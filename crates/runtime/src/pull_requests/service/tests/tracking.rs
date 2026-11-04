@@ -117,6 +117,139 @@ async fn switching_tracking_off_during_a_fetch_starts_no_git_afterwards() {
     assert!(stored.is_none());
 }
 
+// Given: tracking is switched off while the scheduler reads the registry for its plan / When:
+// the plan is done / Then: nothing is started from it
+#[tokio::test(start_paused = true)]
+async fn switching_tracking_off_while_planning_starts_nothing() {
+    let world = World::new();
+    let process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.link_directly("t1", 1);
+    let service = process.service.clone();
+    process.hooks.before_permit(move || {
+        service
+            .update_settings(PullRequestsConfig::default())
+            .unwrap();
+    });
+
+    process.host.start("t1").unwrap();
+    settle().await;
+
+    assert!(process.source.calls().is_empty());
+}
+
+// Given: tracking is switched off while the directories of a checkout are looked up / When: the
+// lookup is done / Then: git is not started
+#[tokio::test(start_paused = true)]
+async fn switching_tracking_off_while_looking_up_directories_starts_no_git() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    let checkout = world.dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    process.environment.set_directories(vec![checkout]);
+    let service = process.service.clone();
+    process.environment.on_directories(move || {
+        service
+            .update_settings(PullRequestsConfig::default())
+            .unwrap();
+    });
+    process.source.push_ok(&key(1), open_running(1));
+
+    process.link("t1", 1).await;
+    let events = process.quiet_events().await;
+
+    assert_eq!(process.environment.directory_requests(), 1);
+    assert_eq!(process.environment.resolutions(), 0);
+    assert!(process.state("t1").local_head.is_none(), "{events:?}");
+}
+
+// Given: the lease of a thread is handed to another process after the plan found it / When: the
+// fetch is about to start / Then: gh is not started for a lease that is gone
+#[tokio::test(start_paused = true)]
+async fn a_handed_off_lease_starts_no_fetch() {
+    let world = World::new();
+    let process = world.process(enabled());
+    let successor = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.link_directly("t1", 1);
+    let (host, next_host) = (Arc::clone(&process.host), Arc::clone(&successor.host));
+    process.hooks.after_permit(move |permit| {
+        host.handoff(permit, &next_host).unwrap();
+    });
+
+    process.host.start("t1").unwrap();
+    settle().await;
+
+    assert!(
+        process.source.calls().is_empty(),
+        "the old owner must not start gh"
+    );
+}
+
+// Given: the lease of a thread is handed off while the directories of its checkout are looked
+// up / When: the lookup is done / Then: git is not started for it
+#[tokio::test(start_paused = true)]
+async fn a_handed_off_lease_starts_no_git() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    let successor = world.process(enabled());
+    let checkout = world.dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    process.environment.set_directories(vec![checkout]);
+    let permit = process.permit("t1");
+    let (host, next_host) = (Arc::clone(&process.host), Arc::clone(&successor.host));
+    process.environment.on_directories(move || {
+        host.handoff(&permit, &next_host).unwrap();
+    });
+    process.source.push_ok(&key(1), open_running(1));
+
+    let owner = process.permit("t1");
+    process
+        .service
+        .link("t1", &format!("{REPOSITORY}#1"), 0, &owner)
+        .await
+        .unwrap();
+    process.quiet_events().await;
+
+    assert_eq!(process.environment.directory_requests(), 1);
+    assert_eq!(process.environment.resolutions(), 0);
+}
+
+// Given: a pull request waiting for its next poll / When: the settings change at the same time as
+// something else wakes the scheduler / Then: the new settings apply whichever wake it reacts to
+#[tokio::test(start_paused = true)]
+async fn new_settings_apply_to_a_waiting_poll_even_when_another_wake_comes_with_them() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_passing(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    assert_eq!(
+        process.source.calls().len(),
+        1,
+        "the next poll is 300 s away"
+    );
+
+    process
+        .service
+        .update_settings(PullRequestsConfig {
+            enabled: true,
+            stable_poll_seconds: 60,
+            ..PullRequestsConfig::default()
+        })
+        .unwrap();
+    process.service.notify_changed();
+    settle().await;
+
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "the waiting poll was brought forward"
+    );
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]

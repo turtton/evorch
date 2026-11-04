@@ -37,8 +37,7 @@ use config::PullRequestsConfig;
 use event_bus::{Event, EventBus, PullRequestEvent, PullRequestRef};
 use storage::pull_requests::{
     CandidateState, InheritanceRecord, InheritanceResolution, LinkPullRequest, LinkReceipt,
-    NewPullRequestInheritance, PullRequestCandidate, PullRequestKey, PullRequestRejection,
-    UnlinkReceipt,
+    PullRequestCandidate, PullRequestKey, PullRequestRejection, UnlinkReceipt,
 };
 use storage::{StorageError, StorageHandle};
 use tokio::sync::{Notify, watch};
@@ -282,27 +281,18 @@ impl Inner {
         if kind == DerivedThreadKind::Lane {
             return Ok(InheritanceScheduling::Lane);
         }
-        let Some(link) = self
-            .storage
-            .pull_request_thread_state(parent_thread_id)?
-            .active_link
-        else {
-            return Ok(InheritanceScheduling::NoParentLink);
-        };
-        let scheduled = self
-            .storage
-            .schedule_pull_request_inheritance(NewPullRequestInheritance {
-                child_thread_id: child_thread_id.to_owned(),
-                parent_link_id: link.link_id,
-                at_ns: self.clock.now_ns(),
-            });
-        let record = match scheduled {
-            Ok(record) => record,
+        // One transaction reads the parent's link and stores the row, so a parent that relinks at
+        // this moment is pinned to its old link or its new one, never to neither.
+        let pinned = self.storage.pin_pull_request_inheritance(
+            child_thread_id,
+            parent_thread_id,
+            self.clock.now_ns(),
+        );
+        let record = match pinned {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(InheritanceScheduling::NoParentLink),
             Err(StorageError::PullRequest(PullRequestRejection::LaneThread)) => {
                 return Ok(InheritanceScheduling::Lane);
-            }
-            Err(StorageError::PullRequest(PullRequestRejection::ParentLinkNotActive)) => {
-                return Ok(InheritanceScheduling::NoParentLink);
             }
             Err(error) => return Err(error.into()),
         };

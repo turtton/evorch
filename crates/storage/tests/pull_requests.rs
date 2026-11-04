@@ -1182,6 +1182,75 @@ fn old_notification_keys_stay_claimed_when_the_exact_list_is_trimmed() {
 }
 
 #[test]
+fn a_child_is_pinned_to_the_parents_link_as_read_in_the_same_transaction() {
+    let f = Fixture::new();
+    let h = f.handle();
+
+    // A parent without a link has nothing to pin, and nothing is stored.
+    assert!(
+        h.pin_pull_request_inheritance("child-0", "parent", 5)
+            .unwrap()
+            .is_none()
+    );
+    assert!(h.pull_request_inheritance("child-0").unwrap().is_none());
+
+    // The parent's current link is pinned; a repeat answers with the first row; a later relink
+    // of the parent does not move it.
+    let first = link(&h, "parent", 1, 0);
+    let pinned = h
+        .pin_pull_request_inheritance("child-0", "parent", 6)
+        .unwrap()
+        .unwrap();
+    link(&h, "parent", 2, first.lifecycle_revision);
+    let again = h
+        .pin_pull_request_inheritance("child-0", "parent", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pinned.parent_link_id, first.link.link_id);
+    assert_eq!(pinned, again);
+    let second = h
+        .pin_pull_request_inheritance("child-1", "parent", 8)
+        .unwrap()
+        .unwrap();
+    assert_ne!(second.parent_link_id, first.link.link_id);
+    assert_eq!(second.key, key(2));
+}
+
+#[test]
+fn a_parent_that_relinks_while_children_are_pinned_never_loses_the_inheritance() {
+    let f = Fixture::new();
+    let h = f.handle();
+    link(&h, "parent", 1, 0);
+    let relinking = {
+        let h = h.clone();
+        std::thread::spawn(move || {
+            for number in 2..=80_u64 {
+                let revision = h
+                    .pull_request_thread_state("parent")
+                    .unwrap()
+                    .lifecycle_revision;
+                link(&h, "parent", number, revision);
+            }
+        })
+    };
+
+    // Reading the link and storing the row in two steps loses the inheritance when the parent
+    // relinks in between (the link read has ended by the time it is stored). One transaction pins
+    // the old link or the new one, so every call is answered.
+    for index in 0..300_i64 {
+        let child = format!("child-{index}");
+        let row = h
+            .pin_pull_request_inheritance(&child, "parent", index)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "{child} was not pinned although the parent was linked"
+        );
+    }
+    relinking.join().unwrap();
+}
+
+#[test]
 fn the_local_head_belongs_to_the_link_revision_it_was_observed_under() {
     let f = Fixture::new();
     let h = f.handle();

@@ -333,6 +333,26 @@ impl StorageHandle {
         self.pull_request_write(move |conn| repo::inheritance::schedule(conn, &new))
     }
 
+    /// Schedules the inheritance of whatever active link `parent_thread_id` has, read in the same
+    /// transaction that stores the row: a parent that relinks at the same moment is pinned to its
+    /// old link or its new one, never to neither. `Ok(None)` when the parent has no active link.
+    /// Idempotent: an existing row of the child is returned unchanged.
+    ///
+    /// # Errors
+    /// `PullRequest(LaneThread | SameThread | Invalid)`, `Tombstoned`, suspended writes or a
+    /// closed writer.
+    pub fn pin_pull_request_inheritance(
+        &self,
+        child_thread_id: &str,
+        parent_thread_id: &str,
+        at_ns: i64,
+    ) -> Result<Option<InheritanceRecord>, StorageError> {
+        let (child, parent) = (child_thread_id.to_owned(), parent_thread_id.to_owned());
+        self.pull_request_write(move |conn| {
+            repo::inheritance::schedule_from_parent(conn, &child, &parent, at_ns)
+        })
+    }
+
     /// Tries to apply a pending inheritance: it needs the child's revision unchanged, no
     /// active child link and a stored snapshot (succeeded at `required_success_seq` or
     /// later) that shows the pull request open. Merged or closed skips it; unknown state

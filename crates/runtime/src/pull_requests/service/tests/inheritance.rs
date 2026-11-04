@@ -229,6 +229,32 @@ async fn a_pending_inheritance_is_resolved_after_a_restart() {
     assert_eq!(second.state("c1").active_link.unwrap().key, key(1));
 }
 
+// Given: a parent that relinked from one pull request to another / When: a child is derived /
+// Then: the child is pinned to the link the parent has now
+#[tokio::test(start_paused = true)]
+async fn a_child_is_pinned_to_the_link_its_parent_has_when_it_is_derived() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    linked_parent(&mut process, open_running(1)).await;
+    process.source.push_ok(&key(2), open_running(2));
+    process.link("t1", 2).await;
+
+    let scheduled = process
+        .service
+        .inherit("t1", "c1", DerivedThreadKind::Escalation)
+        .await
+        .unwrap();
+
+    let InheritanceScheduling::Scheduled(row) = scheduled else {
+        panic!("expected a pinned inheritance, got {scheduled:?}");
+    };
+    assert_eq!(row.key, key(2));
+    assert_eq!(
+        row.parent_link_id,
+        process.state("t1").active_link.unwrap().link_id
+    );
+}
+
 // Given: a lane, a parent without a link, and a repeated schedule / When: inheriting / Then: a
 // lane never inherits, nothing is stored without a link, and a repeat changes nothing
 #[tokio::test(start_paused = true)]
