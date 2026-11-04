@@ -257,8 +257,9 @@ fn capture_role_settings_png_evidence() {
     let Some(frame) = gui::evidence::capture_or_skip(&mut harness) else {
         return;
     };
-    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/role-settings");
+    let output =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/role-settings");
     std::fs::create_dir_all(&output).expect("evidence directory");
     frame
         .save_png(&output.join("role-settings.png"))

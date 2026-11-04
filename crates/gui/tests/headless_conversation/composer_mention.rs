@@ -562,8 +562,9 @@ fn capture_mention_completion() {
     type_text(&mut harness, "check @");
     harness.state_mut().wait_mention_index();
     harness.run();
-    let evidence = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/composer-mention");
+    let evidence =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/composer-mention");
     std::fs::create_dir_all(&evidence).expect("evidence directory");
     harness
         .capture()

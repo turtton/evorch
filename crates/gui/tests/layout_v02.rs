@@ -72,9 +72,10 @@ fn v1_layout_file_loads_via_migration_into_workbench() {
     // Given: a persisted v0.1 workspace fixture
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let path = temp_dir.path().join("workspace.json");
-    std::fs::write(
+    std::fs::copy(
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../workspace-ui/tests/fixtures/workspace_v1.json"),
         &path,
-        include_str!("../../workspace-ui/tests/fixtures/workspace_v1.json"),
     )
     .expect("write fixture");
 

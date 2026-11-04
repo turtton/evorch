@@ -9,7 +9,7 @@ use config::CURRENT_VERSION;
 
 /// docs/config 配下の versioned schema artifact のパスを返す。
 fn artifact_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
         .join("../../docs/config")
         .join(format!("evorch-config-v{CURRENT_VERSION}.schema.json"))
 }

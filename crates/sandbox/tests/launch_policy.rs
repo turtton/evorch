@@ -313,7 +313,10 @@ mod linux {
     #[ignore = "bwrap 実行環境が必要"]
     #[test]
     fn bwrap_commands_do_not_inherit_descriptors() {
-        let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+        let workspace = tempfile::tempdir_in(
+            std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+        )
+        .expect("workspace");
         let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
             .expect("bwrap required");
         let (_file, fd, name) = inheritable_descriptor();

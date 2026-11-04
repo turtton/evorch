@@ -244,7 +244,8 @@ fn capture_usage_tab_png_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let (mut harness, _) = opened_usage_tab(&directory, history());
     let output =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence/usage");
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/usage");
     std::fs::create_dir_all(&output).expect("evidence directory");
     for view in ["Overview", "Breakdown", "Analysis", "Request log", "Live"] {
         harness.click_label(view);

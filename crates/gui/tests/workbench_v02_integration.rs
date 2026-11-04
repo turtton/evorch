@@ -687,9 +687,10 @@ fn v1_settings_file_end_to_end_migration() {
     // Given: a persisted v0.1 workspace file whose panels carry no target.
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let settings_path = temp_dir.path().join("workspace.json");
-    std::fs::write(
+    std::fs::copy(
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../workspace-ui/tests/fixtures/workspace_v1.json"),
         &settings_path,
-        include_str!("../../workspace-ui/tests/fixtures/workspace_v1.json"),
     )
     .expect("write v1 fixture");
 

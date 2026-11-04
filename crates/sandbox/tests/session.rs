@@ -120,7 +120,9 @@ fn returns_io_error_when_executable_is_missing() {
 #[test]
 fn echoes_when_cat_runs_inside_bwrap() {
     // Given: the same detected bwrap and workspace fixture as existing isolation tests.
-    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+    let workspace =
+        tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .expect("workspace");
     let sandbox = BwrapSandbox::detect(BwrapConfig::new(workspace.path().to_path_buf()))
         .expect("bwrap required");
     round_trip(&sandbox, spec("cat", &[]));

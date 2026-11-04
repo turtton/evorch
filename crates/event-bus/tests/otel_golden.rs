@@ -16,7 +16,9 @@
 use event_bus::{Event, map_event, validate_metric_attributes};
 
 fn golden_cases() -> Vec<(String, serde_json::Value)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/otel_golden");
+    let dir =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("tests/otel_golden");
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
         .expect("golden fixture directory exists")
         .map(|entry| entry.expect("fixture entry readable").path())

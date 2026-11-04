@@ -115,8 +115,9 @@ fn capture_role_indicators() {
     // Given: both roles in the real desktop composer.
     let temp = tempfile::tempdir().expect("root");
     let mut harness = workbench(temp.path());
-    let evidence = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/composer-role");
+    let evidence =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/composer-role");
     std::fs::create_dir_all(&evidence).expect("evidence directory");
     for role in [ComposerRole::Worker, ComposerRole::Orchestrator] {
         harness.state_mut().composer_mut().role = role;

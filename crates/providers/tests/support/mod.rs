@@ -12,7 +12,7 @@ use wiremock::ResponseTemplate;
 /// # Panics
 /// フィクスチャが存在しない・読めない場合にパニックする (テスト失敗として扱う)。
 pub fn fixture(provider: &str, name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let path = Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
         .join("fixtures")
         .join(provider)
         .join(name);

@@ -280,8 +280,8 @@ async fn routing_settings_mark_automatic_candidates() {
 }
 
 fn evidence_dir() -> std::path::PathBuf {
-    let output =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence/auto-grouping");
+    let output = Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("../../target/gui-evidence/auto-grouping");
     std::fs::create_dir_all(&output).expect("evidence directory");
     output
 }

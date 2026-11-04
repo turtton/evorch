@@ -247,7 +247,10 @@ fn renderer_crash_reloads_the_artifact() {
 #[ignore = "needs the CEF runtime on LD_LIBRARY_PATH; see docs/browser.md"]
 fn cef_preview_is_offline_and_recovers() {
     let runtime = CefRuntime::initialize(RuntimeConfig {
-        helper_path: PathBuf::from(env!("CARGO_BIN_EXE_evorch-cef-helper")),
+        helper_path: PathBuf::from(
+            std::env::var("CARGO_BIN_EXE_evorch-cef-helper")
+                .expect("CARGO_BIN_EXE_evorch-cef-helper"),
+        ),
         ..RuntimeConfig::offline()
     })
     .expect("CEF runtime");

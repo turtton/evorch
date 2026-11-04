@@ -133,7 +133,8 @@ reviewer = [{{ profile = "local" }}]
     )
     .unwrap();
     let dir = root.join("out");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_evorch"));
+    let mut command =
+        Command::new(std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"));
     command.args(["eval", "run", "--thread", "thread-1", "--repeat", "1"]);
     if let Some(flag) = report_flag {
         command.arg(flag);

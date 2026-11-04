@@ -144,19 +144,21 @@ fn backfill_cli_outputs_progress_without_starting_runtime() {
         "INSERT INTO events(schema_version,monotonic_ns,wall_clock_ns,kind,payload) VALUES(1,0,0,'Message','undecodable')",
         [],
     ).unwrap();
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_evorch"))
-        .args([
-            "maintenance",
-            "backfill-events",
-            "--db",
-            path.to_str().unwrap(),
-            "--batch-rows",
-            "1",
-            "--max-rows",
-            "1",
-        ])
-        .output()
-        .unwrap();
+    let result = std::process::Command::new(
+        std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
+    )
+    .args([
+        "maintenance",
+        "backfill-events",
+        "--db",
+        path.to_str().unwrap(),
+        "--batch-rows",
+        "1",
+        "--max-rows",
+        "1",
+    ])
+    .output()
+    .unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -222,16 +224,18 @@ fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_
     drop(db);
     std::fs::File::create(dir.path().join("events.db.maintenance-lock")).unwrap();
     let run = |extra: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_evorch"))
-            .args([
-                "maintenance",
-                "convert-bodies",
-                "--db",
-                path.to_str().unwrap(),
-            ])
-            .args(extra)
-            .output()
-            .unwrap()
+        std::process::Command::new(
+            std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"),
+        )
+        .args([
+            "maintenance",
+            "convert-bodies",
+            "--db",
+            path.to_str().unwrap(),
+        ])
+        .args(extra)
+        .output()
+        .unwrap()
     };
 
     // Given/When: a database already in the current format, previewed and applied.
