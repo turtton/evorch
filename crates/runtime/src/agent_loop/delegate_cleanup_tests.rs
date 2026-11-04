@@ -97,6 +97,7 @@ fn fixture_with_model(
         runtime.delegate_background(Role::Orchestrator, "parent".into(), RunConfig::default());
     let mailbox = Arc::new(RunMailbox::new());
     let state = LoopState {
+        lane_failure_episode: "test-execution".into(),
         meta_call_id: None,
         thread_id: None,
         turn: providers::RequestTurnContext::unattributed(false),

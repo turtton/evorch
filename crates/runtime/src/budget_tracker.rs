@@ -142,6 +142,16 @@ pub struct SpawnCredits {
     spawned: BTreeSet<String>,
     observed: BTreeSet<String>,
     unobserved: u32,
+    /// Receipt acceptance is not model observation. Retained until provider input
+    /// preparation, including across a crash/restore before the first request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) lane_presentations: Vec<LanePresentation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LanePresentation {
+    fingerprint: String,
+    lanes: Vec<String>,
 }
 
 pub(crate) struct BudgetCounters {
@@ -284,6 +294,43 @@ impl BudgetCounters {
     #[cfg(test)]
     pub(crate) fn mark_lane_spawned(&mut self, lane_id: &str) -> bool {
         self.mark_spawned(&format!("lane:{lane_id}"))
+    }
+
+    pub(crate) fn queue_lane_presentation(&mut self, text: &str, lanes: Vec<String>) {
+        use sha2::{Digest, Sha256};
+        self.spawn_credits
+            .lane_presentations
+            .push(LanePresentation {
+                fingerprint: format!("{:x}", Sha256::digest(text)),
+                lanes,
+            });
+    }
+
+    pub(crate) fn observe_lane_presentations(&mut self, visible: &[providers::Message]) -> bool {
+        use sha2::{Digest, Sha256};
+        let pending = std::mem::take(&mut self.spawn_credits.lane_presentations);
+        let changed = !pending.is_empty();
+        let visible: std::collections::HashSet<String> = visible
+            .iter()
+            .filter(|m| m.role == providers::Role::User)
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                providers::ContentBlock::Text { text } => {
+                    Some(format!("{:x}", Sha256::digest(text)))
+                }
+                _ => None,
+            })
+            .collect();
+        for presentation in pending {
+            if visible.contains(&presentation.fingerprint) {
+                for lane in presentation.lanes {
+                    self.mark_lane_completed(&lane);
+                }
+            }
+            // Compacted-away details were not presented: no credit. A later
+            // explicit inbox/list detail read may still observe that lane.
+        }
+        changed
     }
 
     pub(crate) fn mark_lane_completed(&mut self, lane_id: &str) -> bool {

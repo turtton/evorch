@@ -46,6 +46,9 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
                 .map_err(|e| StorageError::Serialization(e.to_string()))?,
         ],
     )?;
+    // The writer transaction also owns evidence/reference consumption and, on
+    // restore, the snapshot. An outbox failure rolls all of them back.
+    crate::repo::lane_delivery::notify_user_input(conn, receipt)?;
     Ok(())
 }
 

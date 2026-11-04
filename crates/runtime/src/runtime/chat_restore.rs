@@ -59,7 +59,10 @@ impl AgentRuntime {
     pub fn resume_chat(&self, run_id: RunId, authority: RunConfig) -> Result<RunId, RuntimeError> {
         // An explicit continue renews the automatic-wake budget.
         self.reset_auto_wakes(run_id);
-        self.resume(run_id, ChatContinuation::Resume, authority)
+        let ownership = authority.ownership.clone();
+        let resumed = self.resume(run_id, ChatContinuation::Resume, authority)?;
+        self.explicitly_resume_lane_delivery(run_id, ownership.as_ref())?;
+        Ok(resumed)
     }
 
     /// Resume a root the runtime asked the host to wake
@@ -91,7 +94,10 @@ impl AgentRuntime {
         prompt: String,
         authority: RunConfig,
     ) -> Result<RunId, RuntimeError> {
-        self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)
+        let ownership = authority.ownership.clone();
+        let resumed = self.continue_chat(run_id, ChatContinuation::Followup(prompt), authority)?;
+        self.explicitly_resume_lane_delivery(run_id, ownership.as_ref())?;
+        Ok(resumed)
     }
 
     fn continue_chat(
@@ -173,6 +179,9 @@ impl AgentRuntime {
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?
             .ok_or_else(|| fail(RunRestoreFailure::MissingContext))?;
         let mut record = bundle.record.clone();
+        if !operator_resume && record.terminal_phase == "Stopped" {
+            return Err(fail(RunRestoreFailure::StoppedByOperator));
+        }
         let mut descriptor: RunRestoreDescriptor = serde_json::from_str(&record.config_json)
             .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
         self.validate_history_restore(&record, &descriptor, &authority)?;
@@ -459,6 +468,15 @@ impl AgentRuntime {
         if let Some(thread) = &thread {
             self.bind_thread_root(thread, run_id)
                 .map_err(|reason| fail(RunRestoreFailure::CorruptContext(reason)))?;
+        }
+        if prompt.is_some()
+            && let Err(error) = self.record_lane_user_intervention(run_id, "")
+        {
+            self.lane_delivery_diagnostic(
+                Some(run_id),
+                "lane_user_input_schedule_failed",
+                &error.to_string(),
+            );
         }
         if let Some((objective, criteria)) = config.initial_thread_goal.take() {
             let thread = self.goal_thread(run_id).ok_or_else(|| {

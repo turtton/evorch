@@ -151,6 +151,8 @@ fn unobserved_jobs_reminder(jobs: &[String]) -> String {
 }
 
 pub(crate) struct LoopState {
+    /// One harness episode per execution incarnation, never per model report.
+    lane_failure_episode: String,
     pub(crate) thread_id: Option<String>,
     pub(crate) turn: providers::RequestTurnContext,
     pub(crate) boundary_pending: bool,
@@ -243,6 +245,7 @@ impl LoopState {
             ..Default::default()
         };
         Self {
+            lane_failure_episode: providers::RequestTurnContext::unattributed(false).prompt_id,
             thread_id: None,
             turn: task.turn.clone(),
             boundary_pending: false,
@@ -971,6 +974,10 @@ impl LoopState {
                 self.finish_error(error);
                 return;
             }
+            if let Err(error) = self.flush_lane_deliveries() {
+                self.finish_error(error);
+                return;
+            }
             self.inject_parent_messages();
             for notice in self
                 .shared
@@ -1149,6 +1156,9 @@ impl LoopState {
             if estimated >= window {
                 self.finish_error(format!("ContextWindowExhausted: compaction could not reduce the projected context ({estimated} tokens) below model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
+            }
+            if self.budget.observe_lane_presentations(&visible_messages) {
+                self.boundary_pending = true;
             }
             if self.boundary_pending || self.host_inputs().unrecorded().next().is_some() {
                 self.boundary_pending = false;
@@ -1561,6 +1571,15 @@ impl LoopState {
             return false;
         };
         let mut answers = runtime.shared.question_version.subscribe();
+        let mut deliveries = runtime.shared.lanes.delivery.version.subscribe();
+        match self.flush_lane_deliveries() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                self.finish_error(error);
+                return false;
+            }
+        }
         match self.flush_user_answers() {
             Ok(true) => return true,
             Ok(false) => {}
@@ -1595,6 +1614,14 @@ impl LoopState {
                         self.finish_interrupted(kind);
                     }
                     return false;
+                }
+                changed = deliveries.changed() => {
+                    if changed.is_err() { return false; }
+                    match self.flush_lane_deliveries() {
+                        Ok(true) => return self.transition(AgentRunPhase::Running, None).is_ok(),
+                        Ok(false) => {},
+                        Err(error) => { self.finish_error(error); return false; }
+                    }
                 }
                 changed = answers.changed() => {
                     if changed.is_err() { return false; }

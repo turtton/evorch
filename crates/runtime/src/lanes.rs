@@ -11,6 +11,7 @@ use storage::lanes::{LaneRecord, NewLane};
 
 #[derive(Default)]
 pub(crate) struct LaneRuntime {
+    pub(crate) delivery: crate::lane_delivery::DeliveryRuntime,
     // Serialize retries until the run or its admission reservation is installed.
     pub(crate) opening: Mutex<HashSet<String>>,
     // Installed before admission; removed only after the durable first start.
@@ -359,19 +360,48 @@ impl AgentRuntime {
                 "another owner holds the lane thread; the stop is kept",
             ));
         };
-        let resumed = store
-            .handle
-            .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
-            .lane;
-        match self.start_recovered(&resumed, &seed, ownership) {
+        let resumed = {
+            let _guard = ownership
+                .as_ref()
+                .map(|p| p.mutation_guard())
+                .transpose()
+                .map_err(|error| LaneError::new("lane_creation_denied", error))?;
+            store
+                .handle
+                .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
+                .lane
+        };
+        match self.start_recovered(&resumed, &seed, ownership.clone()) {
             Ok(started) => Ok(started),
             Err(error) => {
                 // Nothing started: the operator's stop stays in force.
-                let _ = store.handle.block_lane_start(
-                    &lane.lane_id,
-                    storage::lanes::LANE_START_OPERATOR_STOP,
-                    self.lane_activity_time(),
-                );
+                let stopped = ownership
+                    .as_ref()
+                    .map(|p| p.mutation_guard())
+                    .transpose()
+                    .map_err(|e| LaneError::new("ownership_lost", e))
+                    .and_then(|_guard| {
+                        store
+                            .handle
+                            .block_lane_start(
+                                &lane.lane_id,
+                                storage::lanes::LANE_START_OPERATOR_STOP,
+                                self.lane_activity_time(),
+                            )
+                            .map(|_| ())
+                            .map_err(LaneError::from)
+                    });
+                if let Err(stop_error) = stopped {
+                    self.lane_delivery_diagnostic(
+                        None,
+                        "lane_stop_writeback_failed",
+                        &format!(
+                            "lane {}: start failed: {error}; stop writeback failed: {stop_error}",
+                            lane.lane_id
+                        ),
+                    );
+                    return Err(LaneError::new("lane_stop_writeback_failed", stop_error));
+                }
                 Err(error)
             }
         }

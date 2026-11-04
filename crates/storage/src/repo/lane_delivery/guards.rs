@@ -16,7 +16,17 @@ pub(crate) fn update_guard(
     signal: LaneGuardSignal,
 ) -> Result<LaneWakeGuard, StorageError> {
     let tx = transaction(conn)?;
-    let mut state = guard(&tx, lane_id)?;
+    let state = update_guard_in_transaction(&tx, lane_id, expected, signal)?;
+    tx.commit()?;
+    Ok(state)
+}
+pub(super) fn update_guard_in_transaction(
+    conn: &Connection,
+    lane_id: &str,
+    expected: u64,
+    signal: LaneGuardSignal,
+) -> Result<LaneWakeGuard, StorageError> {
+    let mut state = guard(conn, lane_id)?;
     if state.revision != expected {
         return Err(StorageError::StaleRevision {
             kind: "wake_guard",
@@ -58,11 +68,10 @@ pub(crate) fn update_guard(
         .revision
         .checked_add(1)
         .ok_or(StorageError::OutOfRange("guard revision"))?;
-    tx.execute(
+    conn.execute(
         "UPDATE lanes SET wake_guard_json=?2 WHERE lane_id=?1",
         params![lane_id, json(&state)?],
     )?;
-    tx.commit()?;
     Ok(state)
 }
 pub(crate) fn capacity_diagnostic(

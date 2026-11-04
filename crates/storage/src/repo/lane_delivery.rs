@@ -501,6 +501,57 @@ pub(crate) fn append_report(
     Ok(appended)
 }
 
+/// Called inside the host receipt writer's transaction, including restores with
+/// evidence and snapshots. Agent-authored input is never promoted to User here.
+pub(crate) fn notify_user_input(
+    conn: &Connection,
+    receipt: &crate::HostInputReceipt,
+) -> Result<(), StorageError> {
+    if receipt.provenance != crate::HostInputProvenance::User {
+        return Ok(());
+    }
+    let lane_id: Option<String> = conn.query_row(
+        "SELECT lane_id FROM lanes WHERE root_run_id=?1 AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones)",
+        [&receipt.root_run_id], |r| r.get(0)).optional()?;
+    // A real input is the reset signal, not a later best-effort runtime write.
+    // Include the source lane itself and lanes currently managed by this root.
+    let mut statement = conn.prepare("SELECT lane_id FROM lanes WHERE (root_run_id=?1 OR lead_thread_id=(SELECT json_extract(config_json,'$.thread_id') FROM run_contexts WHERE run_id=?1)) AND thread_id NOT IN (SELECT thread_id FROM thread_tombstones)")?;
+    let affected = statement
+        .query_map([&receipt.root_run_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for id in affected {
+        let state = guards::guard(conn, &id)?;
+        guards::update_guard_in_transaction(
+            conn,
+            &id,
+            state.revision,
+            LaneGuardSignal::RealUserInput,
+        )?;
+    }
+    let Some(lane_id) = lane_id else {
+        return Ok(());
+    };
+    let current = lane(conn, &lane_id)?;
+    if let Some(destination) = current.lead_thread_id {
+        enqueue(
+            conn,
+            LaneNotification {
+                notification_id: String::new(),
+                lane_id,
+                management_revision: current.management_revision,
+                source_thread_id: current.thread_id,
+                destination_thread_id: destination,
+                kind: LaneNotificationKind::Intervention {
+                    input_id: receipt.prompt_id.clone(),
+                },
+                report_seq: None,
+                created_at_ns: receipt.accepted_at_ns,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Receipt of actual lane input + reference-only intervention notification.
 pub(crate) fn accept_input(
     conn: &Connection,
