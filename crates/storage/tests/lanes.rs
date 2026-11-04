@@ -1328,3 +1328,57 @@ fn a_reopened_database_keeps_the_creation_and_its_unstarted_intent() {
     );
     storage.close();
 }
+
+#[test]
+fn an_operator_stopped_intent_is_not_recovered_and_only_it_can_be_resumed() {
+    let f = Fixture::new();
+    let h = f.handle();
+    for n in 1..=3 {
+        h.create_lane(new_lane(n, 10)).unwrap();
+    }
+    let stopped = h
+        .block_lane_start("lane-001", storage::lanes::LANE_START_OPERATOR_STOP, 12)
+        .unwrap();
+    assert!(stopped.lane.is_operator_stopped());
+    h.block_lane_start("lane-002", "cancelled before root start", 12)
+        .unwrap();
+    // A crash scan recovers neither blocked intent, also after a reopen.
+    assert_eq!(
+        f.database()
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-003"]
+    );
+    // A cancelled or locally failed intent cannot be resumed.
+    assert_eq!(
+        h.resume_lane_start("lane-002", 13).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    // An unblocked intent is unchanged.
+    assert!(!h.resume_lane_start("lane-003", 13).unwrap().changed);
+    // The stop is lifted once, durably, and the intent is recoverable again.
+    let resumed = h.resume_lane_start("lane-001", 14).unwrap();
+    assert!(resumed.changed);
+    assert!(resumed.lane.start_blocked_reason.is_none());
+    assert!(!h.resume_lane_start("lane-001", 15).unwrap().changed);
+    assert_eq!(
+        f.database()
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-001", "lane-003"]
+    );
+    // A started lane ignores both a stop and a resume.
+    h.start_lane_run("lane-003", 0, "root-3", 20).unwrap();
+    assert!(
+        !h.block_lane_start("lane-003", storage::lanes::LANE_START_OPERATOR_STOP, 21)
+            .unwrap()
+            .changed
+    );
+    assert!(!h.resume_lane_start("lane-003", 22).unwrap().changed);
+}

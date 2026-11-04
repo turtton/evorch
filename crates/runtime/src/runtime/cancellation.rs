@@ -135,7 +135,12 @@ impl AgentRuntime {
                 drop(gate);
                 continue;
             }
-            self.persist_pending_lane_cancellation(run, &runs, &admissions)?;
+            self.persist_pending_lane_cancellation(
+                run,
+                &runs,
+                &admissions,
+                "cancelled before root start",
+            )?;
             if let Some(admission) = admissions.get_mut(&run)
                 && Arc::ptr_eq(&admission.execution, &execution)
             {
@@ -153,6 +158,7 @@ impl AgentRuntime {
         run: RunId,
         runs: &HashMap<RunId, RunEntry>,
         admissions: &HashMap<RunId, admission::Admission>,
+        reason: &str,
     ) -> Result<(), RuntimeError> {
         let ownership = runs
             .get(&run)
@@ -162,7 +168,7 @@ impl AgentRuntime {
                     .get(&run)
                     .and_then(|admission| admission.snapshot().ownership)
             });
-        self.persist_lane_start_cancellation(run, ownership.as_ref())
+        self.persist_lane_start_cancellation(run, ownership.as_ref(), reason)
             .map_err(|error| RuntimeError::LaneCancellation {
                 run_id: run.to_string(),
                 reason: error.to_string(),

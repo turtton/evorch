@@ -101,6 +101,18 @@ impl StorageHandle {
         self.lane_write(move |conn| crate::repo::lanes::block_start(conn, &lane_id, &reason, at_ns))
     }
 
+    /// Lets an intent that [`block_lane_start`](Self::block_lane_start) stopped for the
+    /// operator ([`LANE_START_OPERATOR_STOP`](crate::lanes::LANE_START_OPERATOR_STOP))
+    /// be recovered and started again. A cancelled or locally failed intent stays
+    /// blocked (`StartBlocked`); a started or unblocked lane is unchanged.
+    ///
+    /// # Errors
+    /// `StartBlocked`, a missing lane, suspended writes or a closed writer.
+    pub fn resume_lane_start(&self, lane_id: &str, at_ns: i64) -> Result<LaneUpdate, StorageError> {
+        let lane_id = lane_id.to_owned();
+        self.lane_write(move |conn| crate::repo::lanes::resume_start(conn, &lane_id, at_ns))
+    }
+
     /// Appends a report. The ledger numbers it (1, 2, 3, …) and never changes it
     /// afterwards; the producer cannot choose the sequence.
     ///

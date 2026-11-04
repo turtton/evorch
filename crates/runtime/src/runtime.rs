@@ -2479,6 +2479,21 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
+        // A pending lane keeps the stop across a restart: block its creation intent
+        // before the stop is accepted, with a reason a resume can tell from a cancel.
+        for target in &targets {
+            if admissions
+                .get(target)
+                .is_some_and(|admission| admission.result.borrow().is_none())
+            {
+                self.persist_pending_lane_cancellation(
+                    *target,
+                    &runs,
+                    &admissions,
+                    storage::lanes::LANE_START_OPERATOR_STOP,
+                )?;
+            }
+        }
         let mut operator_stops = self
             .shared
             .operator_stops
@@ -2562,7 +2577,12 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
-        self.persist_pending_lane_cancellation(run_id, &runs, &admissions)?;
+        self.persist_pending_lane_cancellation(
+            run_id,
+            &runs,
+            &admissions,
+            "cancelled before root start",
+        )?;
         let mut cancellations = Vec::new();
         for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
             if let Some(execution) =

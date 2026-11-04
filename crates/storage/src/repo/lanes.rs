@@ -488,6 +488,38 @@ pub(crate) fn block_start(
     })
 }
 
+/// Lets an operator-stopped, never-started intent be recovered and started again.
+/// A started lane or an unblocked intent is unchanged; an intent blocked for another
+/// reason (cancelled, locally failed) stays blocked.
+pub(crate) fn resume_start(
+    conn: &Connection,
+    lane_id: &str,
+    at_ns: i64,
+) -> Result<LaneUpdate, StorageError> {
+    let tx = immediate(conn)?;
+    let lane = require(&tx, lane_id)?;
+    if lane.is_started() || lane.start_blocked_reason.is_none() {
+        return Ok(LaneUpdate {
+            lane,
+            changed: false,
+        });
+    }
+    if !lane.is_operator_stopped() {
+        return Err(StorageError::LaneConflict(LaneConflictReason::StartBlocked));
+    }
+    tx.execute(
+        "UPDATE lanes SET start_blocked_reason = NULL, updated_at_ns = max(updated_at_ns, ?2) WHERE lane_id = ?1",
+        params![lane_id, at_ns],
+    )?;
+    bump_revision(&tx)?;
+    let lane = require(&tx, lane_id)?;
+    tx.commit()?;
+    Ok(LaneUpdate {
+        lane,
+        changed: true,
+    })
+}
+
 pub(crate) fn append_report(
     conn: &Connection,
     lane_id: &str,

@@ -144,6 +144,7 @@ impl AgentRuntime {
         &self,
         run_id: RunId,
         ownership: Option<&crate::ownership::OwnerPermit>,
+        reason: &str,
     ) -> Result<(), LaneError> {
         let lane_id = self
             .shared
@@ -163,11 +164,9 @@ impl AgentRuntime {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
-        store.handle.block_lane_start(
-            &lane_id,
-            "cancelled before root start",
-            self.lane_activity_time(),
-        )?;
+        store
+            .handle
+            .block_lane_start(&lane_id, reason, self.lane_activity_time())?;
         Ok(())
     }
 
@@ -300,6 +299,72 @@ impl AgentRuntime {
         })?;
         let mut recovered = Vec::new();
         for lane in store.handle.unstarted_lanes(1000)? {
+            if let Some(id) = self.recover_lane(&lane, host)? {
+                recovered.push(id);
+            }
+        }
+        Ok(recovered)
+    }
+
+    /// Explicitly resumes an intent the operator stopped before its root started (the
+    /// durable state `Runtime::stop` leaves). Cancelled and failed intents stay blocked,
+    /// and a restart never does this on its own.
+    ///
+    /// A process that already tried to start this lane keeps its settled admission, so
+    /// the resume needs a new runtime (`lane_unavailable` otherwise).
+    pub fn resume_stopped_lane(
+        &self,
+        lane_id: &str,
+        host: Option<&crate::ownership::OwnerHost>,
+    ) -> Result<Option<RunId>, LaneError> {
+        let store = self.shared.run_store.get().ok_or_else(|| {
+            LaneError::new("storage_unavailable", "lane ledger is not configured")
+        })?;
+        let lane = store
+            .handle
+            .lane(lane_id)?
+            .ok_or_else(|| LaneError::new("lane_unavailable", "unknown lane"))?;
+        if lane.is_started() {
+            return Err(LaneError::new(
+                "lane_unavailable",
+                "the lane already started",
+            ));
+        }
+        if lane.start_blocked_reason.is_some() && !lane.is_operator_stopped() {
+            return Err(LaneError::new(
+                "lane_creation_denied",
+                "the creation intent was cancelled or failed; it cannot be resumed",
+            ));
+        }
+        if self
+            .shared
+            .lanes
+            .opening
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&lane.lane_id)
+        {
+            return Err(LaneError::new(
+                "lane_unavailable",
+                "this process already attempted the start; resume after a restart",
+            ));
+        }
+        let lane = store
+            .handle
+            .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
+            .lane;
+        self.recover_lane(&lane, host)
+    }
+
+    fn recover_lane(
+        &self,
+        lane: &LaneRecord,
+        host: Option<&crate::ownership::OwnerHost>,
+    ) -> Result<Option<RunId>, LaneError> {
+        let store = self.shared.run_store.get().ok_or_else(|| {
+            LaneError::new("storage_unavailable", "lane ledger is not configured")
+        })?;
+        {
             let seed: StartSeed = serde_json::from_str(&lane.start_seed)
                 .map_err(|e| LaneError::new("restore_failed", e))?;
             let ownership = if seed.requires_ownership {
@@ -328,7 +393,7 @@ impl AgentRuntime {
                         )
                         | crate::ownership::RegistryError::Exists
                         | crate::ownership::RegistryError::ThreadDeleted(_),
-                    ) => continue,
+                    ) => return Ok(None),
                     Err(error) => return Err(LaneError::new("lane_creation_denied", error)),
                 }
             } else {
@@ -355,20 +420,17 @@ impl AgentRuntime {
                     .handle
                     .block_lane_start(&lane.lane_id, &reason, self.lane_activity_time())?;
                 tracing::warn!(lane_id = %lane.lane_id, %reason, "lane startup held after local terminal failure");
-                continue;
+                return Ok(None);
             }
             let (id, started) = self.start_lane_intent(
-                &lane,
+                lane,
                 &RunConfig {
                     ownership,
                     ..RunConfig::default()
                 },
             )?;
-            if started {
-                recovered.push(id);
-            }
+            Ok(started.then_some(id))
         }
-        Ok(recovered)
     }
 
     fn start_lane_intent(

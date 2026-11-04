@@ -334,3 +334,96 @@ async fn local_setup_failure_is_held_and_the_startup_driver_finishes() {
     start_owned_runtime(&next, &current).unwrap().await.unwrap();
     assert!(!current.quiesce().unwrap());
 }
+
+#[tokio::test(start_paused = true)]
+async fn operator_stopped_pending_intent_survives_restart_unrecovered_and_resumes_only_explicitly()
+{
+    let f = Fixture::new();
+    let (first, host, model, lead, lane) = pending_lane(&f).await;
+    first
+        .stop(lane.root_run_id, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let stopped = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+    // The stop is durable and is not the cancellation reason.
+    assert!(stopped.is_operator_stopped());
+    assert_eq!(stopped.generation, 0);
+    // The process that attempted the start cannot resume it in place.
+    assert_eq!(
+        first
+            .resume_stopped_lane(&lane.lane_id, Some(&host))
+            .unwrap_err()
+            .code,
+        "lane_unavailable"
+    );
+    model.release.notify_one();
+    assert!(matches!(
+        first.wait(lane.root_run_id).await,
+        Err(RuntimeError::RunTerminated { .. })
+    ));
+    first.cancel(lead).unwrap();
+    first.wait(lead).await.unwrap();
+    assert!(!host.quiesce().unwrap());
+    drop(first);
+    drop(host);
+    f.crashed_lease(&lane, 0);
+
+    // A new runtime on the same storage does not treat the stop as a crash.
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let next_model = Arc::new(AdmissionGate::default());
+    let next = runtime(&f.config, &f.storage, bus.clone(), next_model.clone());
+    let current = f.host(bus);
+    start_owned_runtime(&next, &current).unwrap().await.unwrap();
+    assert!(
+        next.recover_unstarted_lanes(Some(&current))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
+    assert_eq!(next_model.completions.load(Ordering::SeqCst), 0);
+
+    // Only an explicit resume starts it, once, with the same root.
+    let resumed = next
+        .resume_stopped_lane(&lane.lane_id, Some(&current))
+        .unwrap();
+    assert_eq!(resumed, Some(lane.root_run_id));
+    waiting(&mut events, lane.root_run_id).await;
+    let record = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+    assert!(record.start_blocked_reason.is_none());
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.root_run_id, Some(lane.root_run_id.to_string()));
+    assert_eq!(next_model.completions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        next.resume_stopped_lane(&lane.lane_id, Some(&current))
+            .unwrap_err()
+            .code,
+        "lane_unavailable"
+    );
+    next.cancel(lane.root_run_id).unwrap();
+    next.wait(lane.root_run_id).await.unwrap();
+    assert!(!current.quiesce().unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_pending_intent_cannot_be_resumed_like_a_stopped_one() {
+    let f = Fixture::new();
+    let (first, host, model, lead, lane) = pending_lane(&f).await;
+    first.cancel(lane.root_run_id).unwrap();
+    let record = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+    assert!(record.start_blocked_reason.is_some() && !record.is_operator_stopped());
+    model.release.notify_one();
+    assert!(matches!(
+        first.wait(lane.root_run_id).await,
+        Err(RuntimeError::RunTerminated { .. })
+    ));
+    assert_eq!(
+        first
+            .resume_stopped_lane(&lane.lane_id, Some(&host))
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    first.cancel(lead).unwrap();
+    first.wait(lead).await.unwrap();
+    assert!(!host.quiesce().unwrap());
+}

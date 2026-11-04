@@ -117,7 +117,19 @@ pub struct LaneRecord {
     pub last_activity_at_ns: i64,
 }
 
+/// The `start_blocked_reason` of an intent the operator stopped before its root started.
+/// Unlike a cancellation or a local failure it can be resumed explicitly
+/// ([`StorageHandle::resume_lane_start`](crate::StorageHandle::resume_lane_start)); a
+/// restart or a crash scan never recovers it.
+pub const LANE_START_OPERATOR_STOP: &str = "operator_stop: stopped before root start";
+
 impl LaneRecord {
+    /// Whether the creation intent was stopped by the operator and may be resumed.
+    #[must_use]
+    pub fn is_operator_stopped(&self) -> bool {
+        self.start_blocked_reason.as_deref() == Some(LANE_START_OPERATOR_STOP)
+    }
+
     /// Whether the root run was ever started.
     #[must_use]
     pub const fn is_started(&self) -> bool {
