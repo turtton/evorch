@@ -596,3 +596,97 @@ async fn a_run_under_a_live_owner_marks_its_list_after_its_terminal_checkpoint()
         )
     );
 }
+
+#[tokio::test]
+async fn restoring_a_finished_turn_marks_before_an_unobserved_answer_starts_the_next_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage_config = storage::StorageConfig {
+        db_path: directory.path().join("runs.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(storage_config.clone()).unwrap();
+    let store = || crate::RunStore::open(&storage_config, storage.handle()).unwrap();
+
+    // A finished turn left an optional question open; the crash came before the
+    // marking was stored, and the answer arrived while nothing was running.
+    let (original, _, mut events) = harness_with_store(
+        vec![write(running_item()), ask(false), Step::Stop],
+        Some(store()),
+    );
+    let run = start(&original, Role::Worker, interactive(), true);
+    until(&mut events, run, |seen| *seen == Seen::Turn).await;
+    original.stop(run, crate::StopScope::SelfOnly).unwrap();
+    original.wait(run).await.unwrap();
+    let question = original.user_answers(run).unwrap().remove(0);
+    let mut crashed = original.thread_todo("thread").unwrap();
+    crashed.items = running_item();
+    crashed.revision += 1;
+
+    let (runtime, model, mut events) = harness_with_store(vec![Step::Stop], Some(store()));
+    runtime.restore_thread_todo(crashed.clone()).unwrap();
+    runtime
+        .answer_user_question(&question.id, "Option A")
+        .unwrap();
+    runtime.bind_thread_root("thread", run).unwrap();
+    runtime.resume_chat(run, config()).unwrap();
+    let seen = until(&mut events, run, |seen| *seen == Seen::Turn).await;
+    // Marked once, and the answer's single request already presents the mark.
+    position(&seen, &todo_seen("thread", crashed.revision + 1, &marked()));
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "the answer causes one request");
+    let current = runtime.thread_todo("thread").unwrap();
+    assert_eq!(statuses(&current.items), marked());
+    assert!(contains_snapshot(&requests[0].1, &current));
+    assert!(requests[0].1.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("Option A")))
+    }));
+}
+
+#[tokio::test]
+async fn an_orchestrators_accepted_finish_marks_before_done() {
+    let (runtime, _, mut events) = harness(vec![write(running_item()), finish_call()]);
+    let run = start(&runtime, Role::Orchestrator, config(), true);
+    let seen = until(&mut events, run, terminal).await;
+    assert_eq!(seen.last(), Some(&Seen::Phase(AgentRunPhase::Done)));
+    assert!(
+        position(&seen, &todo_seen("thread", 2, &marked()))
+            < position(&seen, &Seen::Phase(AgentRunPhase::Done))
+    );
+}
+
+#[tokio::test]
+async fn a_finish_refused_for_a_required_answer_does_not_end_the_work_period() {
+    let (runtime, model, mut events) = harness(vec![
+        write(running_item()),
+        ask(true),
+        finish_call(),
+        Step::Stop,
+    ]);
+    let run = start(&runtime, Role::Orchestrator, interactive(), true);
+    let seen = until(&mut events, run, |seen| {
+        *seen == Seen::Phase(AgentRunPhase::Waiting)
+    })
+    .await;
+    assert!(!seen.iter().any(|seen| matches!(seen, Seen::Todo(_, 2, _))));
+    {
+        let requests = model.requests.lock().unwrap();
+        let finish = results(&requests).pop().unwrap();
+        assert!(finish.0, "refused: {}", finish.1);
+        assert!(finish.1.contains("answers"), "{}", finish.1);
+    }
+    assert_eq!(runtime.thread_todo("thread").unwrap().items, running_item());
+    // Only when the run actually ends is the period over.
+    runtime.stop(run, crate::StopScope::SelfOnly).unwrap();
+    let seen = until(&mut events, run, terminal).await;
+    assert!(
+        position(&seen, &todo_seen("thread", 2, &marked()))
+            < position(&seen, &Seen::Phase(AgentRunPhase::Stopped))
+    );
+}
+
+fn finish_call() -> Step {
+    Step::Tools(vec![("finish", json!({"result":"Done"}))])
+}

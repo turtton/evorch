@@ -513,6 +513,21 @@ impl LoopState {
         })
     }
 
+    /// A turn that ended without a blocking question pending ended this root's
+    /// work period: mark unfinished items. A change reaches the model only with
+    /// the next request that input causes, never as a request of its own.
+    pub(crate) fn reconcile_finished_turn(&mut self) {
+        let Some(runtime) = self.runtime() else {
+            return;
+        };
+        if runtime.has_pending_user_questions(self.caller_run_id()) {
+            return;
+        }
+        if self.reconcile_root_todo() {
+            self.todo_context_pending = true;
+        }
+    }
+
     /// Called only after a complete tool round, immediately before estimating
     /// and submitting the next provider input. Existing history is never edited.
     pub(crate) fn append_todo_context(&mut self) {

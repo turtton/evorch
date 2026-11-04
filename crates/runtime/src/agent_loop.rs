@@ -810,8 +810,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_error(format!("Cannot commit lane registration: {error}"));
             return;
         }
-        if completed_turn_end.is_some() && !state.wait_for_input_boundary(true).await {
-            return;
+        if completed_turn_end.is_some() {
+            // The saved finished turn ended its work period before this
+            // incarnation existed. Mark it now, ahead of any input the boundary
+            // consumes, so the first request after restoring never presents a
+            // stale in-progress item as current work.
+            state.reconcile_finished_turn();
+            if !state.wait_for_input_boundary(true).await {
+                return;
+            }
         }
         state.execute().await;
     }
@@ -1573,11 +1580,8 @@ impl LoopState {
         // work period: unfinished items are marked before Waiting and
         // TurnCompleted are published. The new state reaches the model only with
         // its next request, after the next input.
-        if completed_turn
-            && !runtime.has_pending_user_questions(self.task.run_id)
-            && self.reconcile_root_todo()
-        {
-            self.todo_context_pending = true;
+        if completed_turn {
+            self.reconcile_finished_turn();
         }
         let turn_end = self.persist_turn_boundary();
         let completed_turn = (completed_turn
