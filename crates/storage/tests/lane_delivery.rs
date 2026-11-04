@@ -6,10 +6,14 @@ use storage::{
     Database, RunContextRecord, Storage, StorageConfig, StorageError, StorageHandle,
     lane_delivery::*, lanes::*, thread_index::*,
 };
+#[path = "lane_delivery/atomic_guard.rs"]
+mod atomic_guard;
 #[path = "lane_delivery/recovery.rs"]
 mod recovery;
 #[path = "lane_delivery/rollback.rs"]
 mod rollback;
+#[path = "lane_delivery/waking_batch.rs"]
+mod waking_batch;
 
 struct Fixture {
     _dir: tempfile::TempDir,

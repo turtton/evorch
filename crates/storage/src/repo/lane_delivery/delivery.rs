@@ -132,7 +132,20 @@ pub(crate) fn claim(
         ),
         [&request.destination_thread_id],
     )?;
-    let mut statement=tx.prepare(&format!("SELECT n.payload FROM lane_notifications n JOIN lanes l ON l.lane_id=n.lane_id WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE} AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0) AND (?2 OR n.event_kind IN ('question','ready','failed','answer')) ORDER BY n.notification_id LIMIT 20"))?;
+    // A waking notice admits deferred updates into the same bounded turn.
+    // Prioritize the waking member so old milestones cannot fill its page.
+    let mut statement = tx.prepare(&format!(
+        "WITH eligible AS NOT MATERIALIZED (
+           SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
+           JOIN lanes l ON l.lane_id=n.lane_id
+           WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE}
+             AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
+         )
+         SELECT payload FROM eligible
+         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer'))
+         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer') THEN 0 ELSE 1 END,
+                  notification_id LIMIT 20"
+    ))?;
     let values = statement
         .query_map(
             params![request.destination_thread_id, request.allow_non_waking],
@@ -172,6 +185,7 @@ pub(crate) fn claim(
         token: request.token,
         lease_until_ns: request.lease_until_ns,
         owner: request.owner,
+        completed_root_wake: !request.allow_non_waking,
         notifications,
     }))
 }
@@ -255,6 +269,7 @@ pub(crate) fn accept_delivery(
     }
     let snapshot = crate::repo::thread_index::stage_snapshot(&tx, &write)
         .map_err(crate::repo::thread_index::into_storage_error)?;
+    let mut wake_sources = std::collections::HashSet::new();
     for notice in missing {
         let receipt = crate::HostInputReceipt {
             prompt_id: receipt_id(notice),
@@ -277,6 +292,22 @@ pub(crate) fn accept_delivery(
             "UPDATE lane_notifications SET receipt_prompt_id=?2 WHERE notification_id=?1",
             params![notice.notification_id, receipt.prompt_id],
         )?;
+        // No post-commit callback: receipt-only crash recovery must retain the
+        // same causal wake count even when the sender never reaches ACK.
+        if claim.completed_root_wake
+            && !matches!(notice.kind, LaneNotificationKind::Answer { .. })
+            && wake_sources.insert(&notice.lane_id)
+        {
+            let expected = guard(&tx, &notice.lane_id)?.revision;
+            guards::update_guard_in_transaction(
+                &tx,
+                &notice.lane_id,
+                expected,
+                LaneGuardSignal::WakeBatch {
+                    batch_id: format!("lane-batch:{}", notice.notification_id),
+                },
+            )?;
+        }
     }
     tx.commit()?;
     Ok(Some(snapshot))
@@ -313,7 +344,21 @@ pub(crate) fn pending_destinations(
     conn: &Connection,
     after: &str,
 ) -> Result<Vec<String>, StorageError> {
-    let mut statement=conn.prepare(&format!("SELECT DISTINCT n.destination_thread_id FROM lane_notifications n WHERE n.state='pending' AND n.destination_thread_id>?1 AND {LIVE_NOTICE} ORDER BY n.destination_thread_id LIMIT 20"))?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT thread_id FROM (
+           SELECT n.destination_thread_id AS thread_id FROM lane_notifications n
+           WHERE n.state='pending' AND {LIVE_NOTICE}
+           UNION
+           SELECT d.thread_id FROM lane_delivery_destinations d
+           JOIN run_contexts c ON c.run_id=json_extract(d.owner_json,'$.root_run_id')
+           WHERE d.stopped=0 AND c.parent_run_id IS NULL
+             AND c.terminal_phase IN ('Checkpoint','Error','Done')
+             AND c.run_id NOT IN (SELECT run_id FROM run_tombstones)
+             AND d.thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+             AND CASE WHEN json_valid(c.config_json)
+               THEN json_array_length(c.config_json,'$.spawn_credits.lane_presentations')>0 ELSE 0 END
+         ) WHERE thread_id>?1 ORDER BY thread_id LIMIT 20"
+    ))?;
     Ok(statement
         .query_map([after], |r| r.get(0))?
         .collect::<Result<_, _>>()?)

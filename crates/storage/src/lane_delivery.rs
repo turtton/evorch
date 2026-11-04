@@ -69,6 +69,9 @@ pub struct LaneDeliveryClaim {
     pub token: String,
     pub lease_until_ns: i64,
     pub owner: LaneDeliveryOwner,
+    /// A completed-root wake, fixed from the claim request. Active deliveries
+    /// do not count toward the per-source automatic-wake guard.
+    pub completed_root_wake: bool,
     pub notifications: Vec<LaneNotification>,
 }
 

@@ -583,3 +583,37 @@ fn lane_and_child_share_identity_aware_credits_across_snapshot_restore() {
     // Same ID space, but child and lane terminal observations cannot alias.
     assert!(restored.mark_child_completed("l0"));
 }
+
+#[test]
+fn lane_credit_waits_for_full_visible_presentation_and_survives_snapshot() {
+    let mut counters = BudgetCounters::default();
+    assert!(counters.mark_lane_spawned("ready"));
+    counters.queue_lane_presentation("full ready artifact", vec!["ready".into()]);
+    assert_eq!(counters.spawn_credits.unobserved, 1);
+    let persisted = serde_json::to_string(&counters.spawn_credits).unwrap();
+    counters.spawn_credits = serde_json::from_str(&persisted).unwrap();
+    assert!(counters.observe_lane_presentations(&[providers::Message {
+        role: providers::Role::User,
+        content: vec![providers::ContentBlock::Text {
+            text: "full ready artifact".into()
+        }]
+    }]));
+    assert_eq!(counters.spawn_credits.unobserved, 0);
+    assert!(!counters.mark_lane_completed("ready"));
+    assert!(!counters.observe_lane_presentations(&[]));
+    assert!(counters.mark_lane_spawned("compacted-away"));
+    counters.queue_lane_presentation("full compacted artifact", vec!["compacted-away".into()]);
+    assert!(counters.observe_lane_presentations(&[providers::Message {
+        role: providers::Role::User,
+        content: vec![providers::ContentBlock::Text {
+            text: "reference only".into()
+        }]
+    }]));
+    assert_eq!(counters.spawn_credits.unobserved, 1);
+    assert!(
+        !counters
+            .spawn_credits
+            .observed
+            .contains("lane:compacted-away")
+    );
+}

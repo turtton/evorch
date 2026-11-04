@@ -30,6 +30,7 @@ pub mod escalation;
 pub mod escalation_review;
 pub(crate) mod git_read;
 pub mod image_generation;
+pub mod lane_delivery;
 pub mod lanes;
 pub mod learning;
 pub mod mailbox;

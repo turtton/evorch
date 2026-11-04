@@ -1,4 +1,74 @@
 //! Fail the last writes in each remaining atomicity boundary.
+
+#[test]
+fn host_acceptance_evidence_receipt_and_intervention_are_one_transaction() {
+    let f = Fixture::new();
+    f.lane(1, LanePolicy::Attached);
+    f.h().start_lane_run("lane-1", 0, "run-1", 2).unwrap();
+    let before_guard = f
+        .h()
+        .update_lane_wake_guard(
+            "lane-1".into(),
+            0,
+            LaneGuardSignal::WakeBatch {
+                batch_id: "before-input".into(),
+            },
+        )
+        .unwrap();
+    let mut receipt = user_receipt();
+    receipt.evidence_id = Some("evidence-lane-input".into());
+    let evidence = storage::ReviewEvidenceRow {
+        id: receipt.evidence_id.clone().unwrap(),
+        root_run_id: "run-1".into(),
+        target_run_id: "run-1".into(),
+        kind: "host_chat".into(),
+        text: receipt.text.clone(),
+        in_reply_to_question_id: None,
+        in_reply_to_title: None,
+        reference_kind: None,
+        reference_context: None,
+        attachments: Vec::new(),
+        created_at_ns: 3,
+    };
+    f.sql().execute_batch("CREATE TRIGGER fail_host_notice BEFORE INSERT ON lane_notifications BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(
+        f.h()
+            .append_host_input_accepted(std::slice::from_ref(&evidence), &[], None, &receipt)
+            .is_err()
+    );
+    assert_eq!(f.count("host_input_receipts"), 0);
+    assert_eq!(f.count("review_evidence"), 0);
+    assert_eq!(
+        f.h().lane_wake_guard("lane-1".into()).unwrap(),
+        before_guard
+    );
+    assert_eq!(f.count("lane_notifications"), 0);
+    f.sql()
+        .execute_batch("DROP TRIGGER fail_host_notice")
+        .unwrap();
+    f.h()
+        .append_host_input_accepted(&[evidence], &[], None, &receipt)
+        .unwrap();
+    assert_eq!(f.count("host_input_receipts"), 1);
+    assert_eq!(f.count("review_evidence"), 1);
+    assert_eq!(
+        f.h()
+            .lane_wake_guard("lane-1".into())
+            .unwrap()
+            .no_progress_batches,
+        0
+    );
+    let notices = f.h().lane_inbox("lead".into(), String::new()).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(
+        matches!(&notices[0].kind, LaneNotificationKind::Intervention { input_id } if input_id == &receipt.prompt_id)
+    );
+    assert!(
+        !serde_json::to_string(&notices)
+            .unwrap()
+            .contains(&receipt.text)
+    );
+}
 use super::*;
 
 #[test]

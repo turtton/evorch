@@ -302,7 +302,7 @@ pub(crate) fn persist_prepared_context(
     context: &crate::AgentContext,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     let end = safe_context_end(&context.messages);
-    write_snapshot_with_context(state, context, "Checkpoint", end, &[])
+    write_snapshot_with_context(state, context, "Checkpoint", end, &[], None)
 }
 
 /// Record uncertain tool effects before dispatch. A failed write must prevent dispatch.
@@ -343,7 +343,7 @@ pub(crate) fn persist_terminal_snapshot(
         ));
     }
     let settled = state.terminal_host_inputs(dropped, Some(end), "outside_terminal_snapshot");
-    write_snapshot_with_context(state, &state.context, phase, end, &settled)
+    write_snapshot_with_context(state, &state.context, phase, end, &settled, None)
 }
 
 /// Non-system message count. Host follow-ups may refresh system messages,
@@ -392,12 +392,28 @@ fn safe_context_end(messages: &[providers::Message]) -> usize {
     end
 }
 
+pub(crate) fn persist_lane_delivery(
+    state: &LoopState,
+    context: &crate::AgentContext,
+    claim: &storage::lane_delivery::LaneDeliveryClaim,
+    now: i64,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+    write_snapshot_with_context(
+        state,
+        context,
+        "Checkpoint",
+        context.messages.len(),
+        &[],
+        Some((claim, now)),
+    )
+}
+
 fn write_snapshot(
     state: &LoopState,
     terminal_phase: &str,
     end: usize,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
-    write_snapshot_with_context(state, &state.context, terminal_phase, end, &[])
+    write_snapshot_with_context(state, &state.context, terminal_phase, end, &[], None)
 }
 
 /// Every snapshot delivers the tracked host inputs it holds for the first time;
@@ -408,6 +424,7 @@ fn write_snapshot_with_context(
     terminal_phase: &str,
     end: usize,
     settled: &[storage::HostInputTransition],
+    lane: Option<(&storage::lane_delivery::LaneDeliveryClaim, i64)>,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     context
         .responses_replay
@@ -615,10 +632,18 @@ fn write_snapshot_with_context(
         .get()
         .ok_or(SnapshotError::RevisionUnknown)?;
     let write = context.provenance.write(record, expected)?;
-    let (saved, applied) = store
-        .handle
-        .save_snapshot_bundle_with_host_inputs(&write, &host_write)
-        .map_err(provenance::storage_error)?;
+    let (saved, applied) = if let Some((claim, now)) = lane {
+        let saved = store
+            .handle
+            .accept_lane_delivery(claim.clone(), write, now)?
+            .ok_or(SnapshotError::RevisionUnknown)?;
+        (saved, Vec::new())
+    } else {
+        store
+            .handle
+            .save_snapshot_bundle_with_host_inputs(&write, &host_write)
+            .map_err(provenance::storage_error)?
+    };
     // The transaction that committed our revision also computed the receipt
     // from the redacted bytes it wrote; a concurrent replacement would have
     // failed the compare-and-swap above, so nothing is read back.
