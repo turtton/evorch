@@ -1038,3 +1038,64 @@ fn compact_apply_switches_a_legacy_database_to_incremental_auto_vacuum() {
         .unwrap();
     assert_eq!(mode, 2);
 }
+
+#[test]
+fn merged_delta_text_that_needs_a_token_reports_the_blob_it_created_after_the_commit() {
+    // Given: three reasoning deltas that stay inline alone and need a token merged.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.db");
+    let db = seed(&path);
+    for part in 0..3_u64 {
+        let text: String = (0..900_u64)
+            .map(|n| char::from(b'a' + ((n * 7 + part * 11 + n / 13) % 26) as u8))
+            .collect();
+        insert(&db, delta("a", &text), true);
+    }
+    drop(db);
+    let blobs_before: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM content_blobs", [], |row| row.get(0))
+        .unwrap();
+
+    // When: the preview and then the apply run.
+    let preview = compact_events(&path, &options()).unwrap();
+    let applied = compact_events(
+        &path,
+        &CompactOptions {
+            apply: true,
+            ..options()
+        },
+    )
+    .unwrap();
+
+    // Then: only the apply reports the new blob, and the figures match the table. The
+    // surviving event keeps its charge: `blob_bytes` is never rewritten by the merge.
+    assert_eq!(
+        (preview.blobs_created, preview.blob_stored_bytes_created),
+        (0, 0)
+    );
+    assert_eq!(applied.blobs_created, 1);
+    assert_eq!(applied.reasoning_deltas.blobs_created, 1);
+    assert!(applied.blob_stored_bytes_created > 0);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let (blobs_after, stored): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(data)), 0) FROM content_blobs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        i64::try_from(applied.blobs_created).unwrap(),
+        blobs_after - blobs_before
+    );
+    assert!(i64::try_from(applied.blob_stored_bytes_created).unwrap() <= stored);
+    let charged: i64 = conn
+        .query_row(
+            "SELECT blob_bytes FROM events WHERE kind = 'Message'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(charged, 0);
+}

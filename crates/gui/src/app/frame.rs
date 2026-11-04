@@ -53,6 +53,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         let sink_time = sink_started.elapsed();
         self.diff.poll();
+        self.poll_evaluations(&ctx);
         self.drain_pty(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
@@ -293,6 +294,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     .flatten()
             },
         );
+        self.note_evaluation_event(event);
         self.notifications.apply_event_named(
             event,
             |call_id| self.transcripts.run_for_call(call_id).map(str::to_owned),
@@ -334,8 +336,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .as_ref()
                 .is_some_and(|host| host.owner_id() == owner_id) =>
             {
+                self.external_work.invalidate();
                 self.settle_claimed_receipts(thread_id, receipts);
             }
+            EventKind::Ownership(_) => self.external_work.invalidate(),
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
                 self.wake_conversation_root(run_id);
             }
@@ -352,7 +356,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_)
             | EventKind::Orchestrator(_) => {}
         }
     }

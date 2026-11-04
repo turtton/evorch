@@ -418,6 +418,33 @@ fn run_tables(
         advance_run(tx, family, cursor)?;
         return Ok(Work::default());
     };
+    if table == "run_message_provenance" {
+        return provenance_entries(tx, family, cursor, &run);
+    }
+    if table == "run_context_provenance" {
+        // The header goes after its entries (RESTRICT): an entry left for the exclusive
+        // phase keeps it, and the header is registered so that phase works the entries
+        // off before it.
+        let entries_left: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_message_provenance WHERE run_id = ?1)",
+            [&run],
+            |row| row.get(0),
+        )?;
+        if entries_left {
+            let stored: u64 = tx
+                .query_row(
+                    "SELECT COALESCE(OCTET_LENGTH(evidence_json), 0) \
+                     FROM run_context_provenance WHERE run_id = ?1",
+                    [&run],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            register_oversized(tx, family, "run_context_provenance", &run, stored)?;
+            cursor.table_idx += 1;
+            return Ok(Work::default());
+        }
+    }
     if table == "run_ledger" {
         tx.execute(
             "INSERT OR IGNORE INTO run_ledger_delete_grants(run_id) VALUES (?1)",
@@ -425,29 +452,13 @@ fn run_tables(
         )?;
     }
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
-    let mut bytes = 0_u64;
-    let deleted = if table == "run_message_provenance" {
-        // The stored entries have a size of their own, which the step's work counts.
-        let mut statement = tx.prepare(&format!(
+    let deleted = tx.execute(
+        &format!(
             "DELETE FROM {table} WHERE rowid IN \
-             (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2) RETURNING entry_len"
-        ))?;
-        let mut rows = statement.query(params![run, limit])?;
-        let mut deleted = 0_usize;
-        while let Some(row) = rows.next()? {
-            bytes += u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0);
-            deleted += 1;
-        }
-        deleted
-    } else {
-        tx.execute(
-            &format!(
-                "DELETE FROM {table} WHERE rowid IN \
-                 (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"
-            ),
-            params![run, limit],
-        )?
-    };
+             (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"
+        ),
+        params![run, limit],
+    )?;
     if table == "run_ledger" {
         tx.execute(
             "DELETE FROM run_ledger_delete_grants WHERE run_id = ?1",
@@ -459,6 +470,61 @@ fn run_tables(
     }
     Ok(Work {
         rows: deleted as u64,
+        bytes: 0,
+        ..Work::default()
+    })
+}
+
+/// Deletes the run's provenance entries in bounded batches (`cursor.after` is the next
+/// `map_index` to look at): at most [`RECLAIM_ROWS`] rows and [`RECLAIM_ROW_BUDGET`]
+/// stored bytes per transaction. An entry above the budget alone is registered for the
+/// exclusive phase and skipped; the header then waits for it.
+fn provenance_entries(
+    tx: &Transaction<'_>,
+    family: &str,
+    cursor: &mut Cursor,
+    run: &str,
+) -> Result<Work, StorageError> {
+    let rows: Vec<(i64, i64, u64)> = {
+        let mut statement = tx.prepare_cached(
+            "SELECT id, map_index, entry_len FROM run_message_provenance \
+             WHERE run_id = ?1 AND map_index >= ?2 ORDER BY map_index LIMIT ?3",
+        )?;
+        let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![run, cursor.after, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if rows.is_empty() {
+        cursor.table_idx += 1;
+        cursor.after = 0;
+        return Ok(Work::default());
+    }
+    let mut ids = Vec::new();
+    let mut bytes = 0_u64;
+    let mut next = cursor.after;
+    for (id, map_index, size) in rows {
+        let too_big = size > RECLAIM_ROW_BUDGET;
+        if ids.is_empty() && too_big {
+            register_oversized(tx, family, "run_message_provenance", &id.to_string(), size)?;
+            cursor.after = map_index + 1;
+            return Ok(Work::default());
+        }
+        if too_big || bytes.saturating_add(size) > RECLAIM_ROW_BUDGET {
+            break;
+        }
+        ids.push(id);
+        bytes += size;
+        next = map_index + 1;
+    }
+    tx.execute(
+        "DELETE FROM run_message_provenance WHERE id IN (SELECT value FROM json_each(?1))",
+        [json_ids(&ids)?],
+    )?;
+    cursor.after = next;
+    Ok(Work {
+        rows: ids.len() as u64,
         bytes,
         ..Work::default()
     })
@@ -822,6 +888,26 @@ fn take_untracked(
     }))
 }
 
+/// Moves to the next thread of the job, or finishes the phase.
+fn advance_thread(
+    tx: &Transaction<'_>,
+    family: &str,
+    cursor: &mut Cursor,
+    thread: &str,
+) -> Result<(), StorageError> {
+    match next_thread(tx, family, thread)? {
+        Some(next) => {
+            cursor.thread = Some(next);
+            cursor.table_idx = 0;
+        }
+        None => enter(tx, family, cursor, Phase::Finished)?,
+    }
+    Ok(())
+}
+
+/// The tables keyed by thread, one table per `table_idx`: 0 the lane ledger rows, 1 the
+/// captured untracked files, 2 the start state. The lane rows come first, so a capture
+/// above the step budget (left to the exclusive phase) never makes a thread skip them.
 fn thread_tables(
     tx: &Transaction<'_>,
     family: &str,
@@ -832,8 +918,25 @@ fn thread_tables(
         return Ok(Work::default());
     };
     let mut work = Work::default();
-    if cursor.table_idx == 0 {
-        match take_untracked(tx, &thread, false)? {
+    match cursor.table_idx {
+        0 => {
+            // A database the conversion command works on can still be at version 40: it
+            // has no lane tables (and so no lanes) yet, whatever the layout of its runs.
+            let lane_ledger: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lanes')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !lane_ledger {
+                cursor.table_idx = 1;
+            } else {
+                work = take_lane_rows(tx, &thread)?;
+                if work.rows == 0 {
+                    cursor.table_idx = 1;
+                }
+            }
+        }
+        1 => match take_untracked(tx, &thread, false)? {
             Untracked::Taken(taken) => work = taken,
             // A captured file above the step's budget cannot be deleted by a bounded
             // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
@@ -841,51 +944,85 @@ fn thread_tables(
             // batches by the exclusive phase.
             Untracked::Oversized(size) => {
                 register_oversized(tx, family, "thread_start_states", &thread, size)?;
-                match next_thread(tx, family, &thread)? {
-                    Some(next) => {
-                        cursor.thread = Some(next);
-                        cursor.table_idx = 0;
-                    }
-                    None => enter(tx, family, cursor, Phase::Finished)?,
-                }
-                return Ok(Work::default());
+                advance_thread(tx, family, cursor, &thread)?;
             }
-            Untracked::None => cursor.table_idx = 1,
-        }
-    } else {
-        let stored: Option<u64> = tx
-            .query_row(
-                "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
-                [&thread],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match stored {
-            None => {}
-            Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
-                register_oversized(tx, family, "thread_start_states", &thread, bytes)?;
-            }
-            Some(bytes) => {
-                tx.execute(
-                    "DELETE FROM thread_start_states WHERE thread_id = ?1",
+            Untracked::None => cursor.table_idx = 2,
+        },
+        _ => {
+            let stored: Option<u64> = tx
+                .query_row(
+                    "SELECT COALESCE(LENGTH(diff), 0) FROM thread_start_states WHERE thread_id = ?1",
                     [&thread],
-                )?;
-                work = Work {
-                    rows: 1,
-                    bytes,
-                    ..Work::default()
-                };
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match stored {
+                None => {}
+                Some(bytes) if bytes > RECLAIM_ROW_BUDGET => {
+                    register_oversized(tx, family, "thread_start_states", &thread, bytes)?;
+                }
+                Some(bytes) => {
+                    tx.execute(
+                        "DELETE FROM thread_start_states WHERE thread_id = ?1",
+                        [&thread],
+                    )?;
+                    work = Work {
+                        rows: 1,
+                        bytes,
+                        ..Work::default()
+                    };
+                }
             }
-        }
-        match next_thread(tx, family, &thread)? {
-            Some(next) => {
-                cursor.thread = Some(next);
-                cursor.table_idx = 0;
-            }
-            None => enter(tx, family, cursor, Phase::Finished)?,
+            advance_thread(tx, family, cursor, &thread)?;
         }
     }
     Ok(work)
+}
+
+/// Deletes up to [`RECLAIM_ROWS`] rows of the lane ledger of `thread`: reports first,
+/// then delivery keys, then the lane row itself once nothing else is left. Returns no
+/// rows when the thread has no lane (any more). None of these tables is fenced against
+/// DELETE, so reclaim always progresses, and each step is bounded.
+fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    let (rows, bytes): (u64, u64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(summary) + OCTET_LENGTH(artifact_refs_json) \
+            + OCTET_LENGTH(question_refs_json)), 0) FROM \
+         (SELECT summary, artifact_refs_json, question_refs_json FROM lane_reports \
+          WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+        params![thread, limit],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if rows > 0 {
+        tx.execute(
+            "DELETE FROM lane_reports WHERE (lane_id, report_seq) IN \
+             (SELECT lane_id, report_seq FROM lane_reports \
+             WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+            params![thread, limit],
+        )?;
+        return Ok(Work {
+            rows,
+            bytes,
+            ..Work::default()
+        });
+    }
+    let keys = tx.execute(
+        "DELETE FROM lane_delivery_keys WHERE (lane_id, management_revision, event_kind, dedupe_key) IN \
+         (SELECT lane_id, management_revision, event_kind, dedupe_key FROM lane_delivery_keys \
+          WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id = ?1) LIMIT ?2)",
+        params![thread, limit],
+    )?;
+    if keys > 0 {
+        return Ok(Work {
+            rows: keys as u64,
+            ..Work::default()
+        });
+    }
+    let deleted = tx.execute("DELETE FROM lanes WHERE thread_id = ?1", [thread])?;
+    Ok(Work {
+        rows: deleted as u64,
+        ..Work::default()
+    })
 }
 
 /// One transaction of one job. Returns what it deleted.
@@ -1094,6 +1231,18 @@ pub(crate) fn reclaim_oversized_step_in(
                 .optional()?;
             bytes = child.unwrap_or(bytes);
         }
+        if table == "run_context_provenance" {
+            // Same for a provenance header with entries left.
+            let child: Option<u64> = conn
+                .query_row(
+                    "SELECT entry_len FROM run_message_provenance \
+                     WHERE run_id = ?1 ORDER BY map_index LIMIT 1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            bytes = child.unwrap_or(bytes);
+        }
         if worked && progress.stored_bytes.saturating_add(bytes) > budget_bytes {
             break;
         }
@@ -1218,6 +1367,76 @@ fn delete_oversized(
                 },
                 true,
             )
+        }
+        "run_message_provenance" => {
+            let id: i64 = key.parse().map_err(|_| {
+                StorageError::Serialization(format!("bad oversized provenance entry id {key}"))
+            })?;
+            let size: Option<u64> = tx
+                .query_row(
+                    "SELECT entry_len FROM run_message_provenance WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let deleted = tx.execute("DELETE FROM run_message_provenance WHERE id = ?1", [id])?;
+            (
+                Work {
+                    rows: deleted as u64,
+                    bytes: size.unwrap_or(0),
+                    ..Work::default()
+                },
+                true,
+            )
+        }
+        "run_context_provenance" => {
+            // The header goes last, like a run header: while an entry of the run is left,
+            // one of them is deleted by this step (the header's registration stays).
+            let child: Option<(i64, u64)> = tx
+                .query_row(
+                    "SELECT id, entry_len FROM run_message_provenance \
+                     WHERE run_id = ?1 ORDER BY map_index LIMIT 1",
+                    [key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((id, size)) = child {
+                tx.execute("DELETE FROM run_message_provenance WHERE id = ?1", [id])?;
+                tx.execute(
+                    "DELETE FROM reclaim_oversized WHERE family_key = ?1 \
+                     AND tbl = 'run_message_provenance' AND key = ?2",
+                    params![family, id.to_string()],
+                )?;
+                (
+                    Work {
+                        rows: 1,
+                        bytes: size,
+                        ..Work::default()
+                    },
+                    false,
+                )
+            } else {
+                let size: Option<u64> = tx
+                    .query_row(
+                        "SELECT COALESCE(OCTET_LENGTH(evidence_json), 0) \
+                         FROM run_context_provenance WHERE run_id = ?1",
+                        [key],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let deleted = tx.execute(
+                    "DELETE FROM run_context_provenance WHERE run_id = ?1",
+                    [key],
+                )?;
+                (
+                    Work {
+                        rows: deleted as u64,
+                        bytes: size.unwrap_or(0),
+                        ..Work::default()
+                    },
+                    true,
+                )
+            }
         }
         "run_contexts" => {
             // The header goes last: while a message of the run is left, one of them is

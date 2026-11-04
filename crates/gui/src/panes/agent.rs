@@ -281,7 +281,11 @@ fn run_detail_body(
         pane_id.with(("transcript", model.cache_identity()))
     };
     let cache_key = model_id.with("entry-heights");
+    let passive_artifacts = super::artifact_card::is_passive(ui.ctx());
     for entry in model.visible_entries() {
+        if passive_artifacts {
+            break;
+        }
         if let TranscriptEntry::Artifacts { presentation } = entry {
             for artifact in &presentation.artifacts {
                 super::artifact_card::poll_availability(

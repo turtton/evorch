@@ -15,7 +15,7 @@ async fn five_call_budget_rejects_tail_of_shared_batch() {
     // Given: eight shared reads in one provider response and five permits.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tool_calls: 5,
+            max_tool_calls: runtime::budget_tracker::ResourceLimit::Bounded(5),
             ..Default::default()
         },
         ..Default::default()
@@ -143,8 +143,8 @@ async fn checkpoint_fires_every_50_tool_calls() {
 async fn checkpoint_precedes_one_shot_remaining_budget_warning_before_exhaustion() {
     // Given: 125 tool permits and independently ample progress/token budgets.
     let mut config = unlimited_progress();
-    config.budget.max_tool_calls = 125;
-    config.budget.max_tokens = Some(10_000);
+    config.budget.max_tool_calls = runtime::budget_tracker::ResourceLimit::Bounded(125);
+    config.budget.max_tokens = runtime::budget_tracker::ResourceLimit::Bounded(10_000);
     // When: the real runtime is asked to execute beyond the hard limit.
     let events = run_calls(130, config).await;
     // Then: checkpoints precede one correlated warning, followed by hard exhaustion.
@@ -203,8 +203,8 @@ async fn thresholds_do_not_fire_at_the_exact_limit() {
     // Given: eight calls consume exactly forty tokens and seven rereads.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tool_calls: 9,
-            max_tokens: Some(40),
+            max_tool_calls: runtime::budget_tracker::ResourceLimit::Bounded(9),
+            max_tokens: runtime::budget_tracker::ResourceLimit::Bounded(40),
             max_file_rereads: 7,
             max_no_progress_rounds: 8,
             ..Default::default()
@@ -232,7 +232,7 @@ async fn token_and_reread_thresholds_each_emit_once() {
     // Given: independent limits that both cross during repeated reads.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_tokens: Some(10),
+            max_tokens: runtime::budget_tracker::ResourceLimit::Bounded(10),
             max_file_rereads: 2,
             ..Default::default()
         },
@@ -255,7 +255,7 @@ async fn elapsed_threshold_emits_once() {
     // Given: a zero elapsed-time allowance.
     let config = RunConfig {
         budget: runtime::budget_tracker::BudgetSettings {
-            max_elapsed: std::time::Duration::ZERO,
+            max_elapsed: runtime::budget_tracker::ResourceLimit::Bounded(std::time::Duration::ZERO),
             ..Default::default()
         },
         ..Default::default()
@@ -314,4 +314,85 @@ fn unlimited_progress() -> RunConfig {
         },
         ..Default::default()
     }
+}
+
+fn lane_scope_with_five_call_cap() -> RunConfig {
+    // A cap of five that the lane-scope lifting must remove.
+    RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_tool_calls: runtime::budget_tracker::ResourceLimit::Bounded(5),
+            ..Default::default()
+        }
+        .with_unlimited_resources(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn unlimited_tool_calls_do_not_stop_sequential_runs() {
+    // Given: lane-scope settings derived from a five-call budget.
+    // When: eight sequential calls are made (the fixture asserts a clean Done).
+    let events = run_calls(8, lane_scope_with_five_call_cap()).await;
+    // Then: all complete and no budget diagnostic is emitted.
+    assert_eq!(
+        diagnostics(
+            &events,
+            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
+        ),
+        0
+    );
+    let completed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Tool(event_bus::ToolEvent::ToolCompleted { .. })
+            )
+        })
+        .count();
+    assert_eq!(completed, 8);
+}
+
+#[tokio::test]
+async fn unlimited_tool_calls_do_not_reject_the_tail_of_a_shared_batch() {
+    // Given: eight shared reads in one response under lane-scope settings.
+    // When: the real executor processes the batch.
+    let events = run_calls_in_batches(8, lane_scope_with_five_call_cap(), true).await;
+    // Then: every call executes; none is rejected for volume.
+    let completed = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Tool(event_bus::ToolEvent::ToolCompleted { .. })
+            )
+        })
+        .count();
+    assert_eq!(completed, 8);
+    assert_eq!(
+        diagnostics(
+            &events,
+            event_bus::event::diagnostic_codes::BUDGET_EXHAUSTED
+        ),
+        0
+    );
+}
+
+#[tokio::test]
+async fn no_progress_still_stops_a_run_with_unlimited_resources() {
+    // Given: lane-scope settings with a three-round no-progress allowance.
+    let config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_no_progress_rounds: 3,
+            ..runtime::budget_tracker::BudgetSettings::lane_scope()
+        },
+        ..Default::default()
+    };
+    // When: reads target a missing path.
+    let events = run_failing_calls(8, config).await;
+    // Then: NoProgress fires exactly once.
+    assert_eq!(
+        diagnostics(&events, event_bus::event::diagnostic_codes::NO_PROGRESS),
+        1
+    );
 }

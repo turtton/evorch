@@ -45,10 +45,12 @@ const MAX_TRACKED_BODIES: usize = 2_000_000;
 
 /// The kinds `compressible_payload` can accept; the scan reads no other row.
 const KINDS_SQL: &str = "kind IN ('Tool', 'Message', 'compaction')";
-/// A text payload below the token threshold without the escape character has no string
-/// that needs a token (JSON escaping never shortens one), so only these rows are decoded.
+/// A valid text payload below the token threshold without the escape character has no
+/// string that needs a token (JSON escaping never shortens one), so only the other rows are
+/// decoded. A short text that is not valid JSON is decoded too: it must be reported, never
+/// skipped silently.
 const MAY_NEED_TOKEN_SQL: &str = "(typeof(payload) = 'blob' OR OCTET_LENGTH(payload) >= 2048 \
-     OR instr(payload, char(57344)) > 0)";
+     OR instr(payload, char(57344)) > 0 OR NOT json_valid(payload))";
 
 /// The limit in force: [`MAX_BATCH_PAYLOAD_BYTES`], or a smaller one a test sets.
 pub(super) fn payload_limit() -> u64 {
@@ -57,6 +59,24 @@ pub(super) fn payload_limit() -> u64 {
         return limit;
     }
     MAX_BATCH_PAYLOAD_BYTES
+}
+
+/// The plain bytes the scan expanded, counted where they are decoded (tests only).
+#[cfg(test)]
+pub(super) mod decoded {
+    use std::cell::Cell;
+
+    thread_local! {
+        static BYTES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn add(bytes: u64) {
+        BYTES.with(|cell| cell.set(cell.get() + bytes));
+    }
+
+    pub(in crate::maintenance::convert_bodies) fn take() -> u64 {
+        BYTES.with(|cell| cell.replace(0))
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +234,8 @@ fn judge(
         Err(_) => return Ok((Verdict::Problem("the payload cannot be read"), 0)),
     };
     let len = text.len() as u64;
+    #[cfg(test)]
+    decoded::add(len);
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
         return Ok((Verdict::Problem("the payload is not JSON"), len));
     };
@@ -463,8 +485,11 @@ pub(super) fn convert_batch(
     let mut outcome = BatchOutcome::default();
     let mut batch_report = BatchFigures::default();
     for id in ids {
-        let (kind, verdict, len) = judge_row(&tx, id, limit)?;
-        if outcome.expanded_bytes.saturating_add(len) > limit && outcome.expanded_bytes > 0 {
+        // The budget left is decided before the row is expanded: a row that does not fit
+        // starts the next batch without having been decoded here.
+        let remaining = limit.saturating_sub(outcome.expanded_bytes);
+        let (kind, verdict, len) = judge_row(&tx, id, remaining)?;
+        if outcome.expanded_bytes > 0 && matches!(verdict, Verdict::Problem("OVERSIZED")) {
             break;
         }
         outcome.expanded_bytes += len;

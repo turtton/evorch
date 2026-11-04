@@ -27,6 +27,9 @@ pub struct Stage {
     pub payload_bytes_before: u64,
     pub payload_bytes_after: u64,
     pub removed_by_kind: BTreeMap<String, EventCount>,
+    /// Blobs this stage created (physical figures; no event's `blob_bytes` is changed by it).
+    pub blobs_created: u64,
+    pub blob_stored_bytes_created: u64,
 }
 
 impl Stage {

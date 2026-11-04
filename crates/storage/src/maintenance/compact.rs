@@ -63,6 +63,10 @@ pub struct CompactSummary {
     pub provider_observations: Stage,
     pub event_compression: CompressionSample,
     pub compressed_event_rows: u64,
+    /// Blobs the apply created for merged delta text (physical figures; an event's charged
+    /// `blob_bytes` is never rewritten by the merge).
+    pub blobs_created: u64,
+    pub blob_stored_bytes_created: u64,
     /// Existing individual rows over 64 KiB cannot be split without changing IDs.
     pub oversized_rows: u64,
     pub backup: Option<PathBuf>,
@@ -218,6 +222,8 @@ pub fn compact_events(
         provider_observations: Stage::default(),
         event_compression: CompressionSample::default(),
         compressed_event_rows: 0,
+        blobs_created: 0,
+        blob_stored_bytes_created: 0,
         oversized_rows: 0,
         backup: None,
         required_free_space_bytes: basis.saturating_mul(4),
@@ -271,6 +277,10 @@ pub fn compact_events(
         boundaries.as_deref(),
     )?;
     summary.reasoning_deltas = reasoning;
+    summary.blobs_created =
+        summary.message_deltas.blobs_created + summary.reasoning_deltas.blobs_created;
+    summary.blob_stored_bytes_created = summary.message_deltas.blob_stored_bytes_created
+        + summary.reasoning_deltas.blob_stored_bytes_created;
     summary.oversized_rows += oversized;
     if let Some(cutoff) = cutoff {
         summary.provider_observations = delete_matching(&db.conn, options, Some(cutoff))?;

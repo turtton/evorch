@@ -131,6 +131,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             enabled: !self.settings_save_in_progress(),
         };
         self.sync_agent_browser(&ctx);
+        self.refresh_external_work(Some(&ctx));
+        let externally_working_threads = self.externally_working_threads();
         {
             let rewind_block = self
                 .sidebar
@@ -156,6 +158,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 usage: &mut self.usage,
                 context_inspector: &mut self.context_inspector,
                 shell_jobs: &mut self.shell_jobs,
+                evaluations: &mut self.evaluations,
                 agent_browser: &mut self.agent_browser,
                 transcripts: &self.transcripts,
                 ledger: &self.ledger,
@@ -171,6 +174,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 sidebar_view: &self.sidebar_view,
                 phases: &self.phases,
                 unread_threads: &self.unread_threads,
+                externally_working_threads: &externally_working_threads,
                 retention: &self.retention.statuses,
                 sidebar_action: &mut sidebar_action,
                 agents_action: &mut agents_action,
@@ -276,6 +280,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 NotificationsAction::OpenThread(thread_id) => {
                     self.open_notification_thread(&ctx, thread_id);
                 }
+                NotificationsAction::OpenEvaluations => self.open_evaluations_tab(),
             }
         }
         if let Some(action) = request_action {

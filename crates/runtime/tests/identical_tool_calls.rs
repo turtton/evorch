@@ -5,11 +5,19 @@ use providers::{ChatResponse, ContentBlock, FinishReason, ToolResultContent};
 use runtime::{AgentRuntime, ModelSource, Role, RunConfig, RuntimeComposition, compose_runtime};
 use serde_json::json;
 use std::sync::Arc;
-use support::{ScriptedModel, drain_events, text_response, tool_response};
+use support::{ScriptedModel, text_response, tool_response};
 
 async fn run_script(
     script: Vec<ChatResponse>,
     config: config::Config,
+) -> (AgentRunPhase, Vec<event_bus::Event>, usize) {
+    run_script_with(script, config, RunConfig::default()).await
+}
+
+async fn run_script_with(
+    script: Vec<ChatResponse>,
+    config: config::Config,
+    run_config: RunConfig,
 ) -> (AgentRunPhase, Vec<event_bus::Event>, usize) {
     let bus = Arc::new(event_bus::EventBus::new(1024));
     let mut receiver = bus.subscribe();
@@ -32,23 +40,35 @@ async fn run_script(
         workspace: None,
     })
     .unwrap();
-    let run = composed.runtime.delegate_background(
-        Role::Worker,
-        "repeat guard".into(),
-        RunConfig::default(),
-    );
-    let phase = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        composed.runtime.wait(run),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let run = composed
+        .runtime
+        .delegate_background(Role::Worker, "repeat guard".into(), run_config);
+    // Completion is the lifecycle wait; hang detection belongs to the nextest runner.
+    let phase = composed.runtime.wait(run).await.unwrap();
     (
         phase,
-        drain_events(&mut receiver).await,
+        events_until_terminal(&mut receiver).await,
         model.observed().await.len(),
     )
+}
+
+/// Collects events up to and including the run's terminal state change.
+async fn events_until_terminal(receiver: &mut event_bus::EventReceiver) -> Vec<event_bus::Event> {
+    let mut events = Vec::new();
+    loop {
+        let event = receiver.recv().await.expect("terminal event");
+        let terminal = matches!(
+            &event.kind,
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                to: AgentRunPhase::Done | AgentRunPhase::Error,
+                ..
+            })
+        );
+        events.push(event);
+        if terminal {
+            return events;
+        }
+    }
 }
 
 /// The reason of the run's terminal `Error` transition.
@@ -186,10 +206,7 @@ async fn the_parent_sees_the_tool_and_error_class_of_a_child_stopped_by_repeats(
     // When: the child stops and the parent's wait returns its terminal snapshot.
     let parent =
         runtime.delegate_background(Role::Orchestrator, "PARENT".into(), RunConfig::default());
-    let phase = tokio::time::timeout(std::time::Duration::from_secs(10), runtime.wait(parent))
-        .await
-        .unwrap()
-        .unwrap();
+    let phase = runtime.wait(parent).await.unwrap();
     assert_eq!(phase, AgentRunPhase::Done);
     let wait_result = model
         .observed()
@@ -295,6 +312,29 @@ async fn configured_limit_stops_at_two() {
     assert_eq!(phase, AgentRunPhase::Error);
     assert_eq!(requests, 2);
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls" && d.call_id.as_deref() == Some("1"))));
+}
+
+#[tokio::test]
+async fn identical_calls_still_stop_a_run_with_unlimited_resources() {
+    // Given: lane-scope settings (every quantity cap lifted) with a threshold of two.
+    let run_config = RunConfig {
+        budget: runtime::budget_tracker::BudgetSettings {
+            max_identical_tool_call_repeats: 2,
+            ..runtime::budget_tracker::BudgetSettings::lane_scope()
+        },
+        ..Default::default()
+    };
+    // When: the model repeats one call.
+    let (phase, events, requests) =
+        run_script_with(calls(&[1; 3]), config::Config::default(), run_config).await;
+    // Then: the runaway diagnostic is not disabled by unlimited resources.
+    assert_eq!(phase, AgentRunPhase::Error);
+    assert_eq!(requests, 2);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "IdenticalToolCalls"))
+    );
 }
 
 #[tokio::test]

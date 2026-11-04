@@ -1,4 +1,4 @@
-//! The events step of the conversion: what a version 33, 40 or 41 database's events
+//! The events step of the conversion: what a version 33, 40, 41, 42 or 43 database's events
 //! become, and what stops it.
 
 use event_bus::{CompactionEvent, EventKind, MessageEvent, ToolEvent};
@@ -252,6 +252,12 @@ fn a_version_33_database_gets_runs_and_events_converted_by_the_one_command() {
     assert!(summary.events.batches >= 1);
     assert_eq!(version(&path), LATEST);
     let conn = Connection::open(&path).unwrap();
+    // The events figure counts the event references only, not the runs' ones.
+    assert_eq!(
+        summary.events.references_created,
+        query::<u64>(&conn, "SELECT COUNT(*) FROM content_blob_refs_event")
+    );
+    assert!(summary.events.references_created < summary.references_created);
     assert_eq!(
         query::<u64>(&conn, "SELECT COUNT(*) FROM events WHERE body_format = 1"),
         to_convert
@@ -311,11 +317,11 @@ fn a_version_33_database_gets_runs_and_events_converted_by_the_one_command() {
 }
 
 #[test]
-fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
-    // Given: a version 41 database (runs in rows, events plain) with events.
+fn a_version_42_database_converts_only_its_events_and_leaves_every_run_alone() {
+    // Given: a version 43 database (runs in rows, events plain) with events.
     let (_dir, path, _) = seeded();
     apply(&path).unwrap();
-    crate::maintenance::downgrade_to_v41(&path).unwrap();
+    crate::maintenance::downgrade_to_v43(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
     let seeded_events = seed_events(&conn);
     let runs_before: Vec<(i64, String, Vec<u8>, i64)> = conn
@@ -335,7 +341,7 @@ fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
         .collect::<Result<_, _>>()
         .unwrap();
     drop(conn);
-    assert_eq!(version(&path), 41);
+    assert_eq!(version(&path), 43);
 
     // When: it is converted.
     let summary = apply(&path).unwrap();
@@ -343,7 +349,7 @@ fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
     // Then: events are converted, no run was converted or touched.
     assert_eq!(summary.converted_runs, 0);
     assert_eq!(summary.migrations_applied, 0);
-    assert_eq!((summary.source_schema, summary.target_schema), (41, LATEST));
+    assert_eq!((summary.source_schema, summary.target_schema), (43, LATEST));
     assert!(summary.events.converted_events > 0);
     assert_eq!(summary.events.mismatched_events, 0);
     let conn = Connection::open(&path).unwrap();
@@ -373,49 +379,59 @@ fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
 }
 
 #[test]
-fn a_version_40_database_converts_its_maps_and_its_events_without_touching_a_run() {
-    // Given: a version 40 database (runs in rows, maps in one column, events plain).
-    let (_dir, path, sidecars) = seeded_with_maps();
-    apply(&path).unwrap();
-    crate::maintenance::downgrade_to_v40(&path).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    let seeded_events = seed_events(&conn);
-    let runs_before: Vec<(i64, String, Vec<u8>, i64)> = conn
-        .prepare("SELECT id, run_id, msg_sha256, ordinal FROM run_messages ORDER BY id")
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    drop(conn);
-    assert_eq!(version(&path), 40);
+fn a_version_40_41_or_42_database_converts_its_maps_and_its_events_without_touching_a_run() {
+    for from in [40_u32, 41, 42] {
+        // Given: a version 40 database, or a version 41 or 42 one that only added the lane ledger
+        // or the memory favorite flag (runs in rows, maps in one column, events plain).
+        let (_dir, path, sidecars) = seeded_with_maps();
+        apply(&path).unwrap();
+        match from {
+            40 => crate::maintenance::downgrade_to_v40(&path).unwrap(),
+            41 => crate::maintenance::downgrade_to_v41(&path).unwrap(),
+            _ => crate::maintenance::downgrade_to_v42(&path).unwrap(),
+        }
+        let conn = Connection::open(&path).unwrap();
+        let seeded_events = seed_events(&conn);
+        let runs_before: Vec<(i64, String, Vec<u8>, i64)> = conn
+            .prepare("SELECT id, run_id, msg_sha256, ordinal FROM run_messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(conn);
+        assert_eq!(version(&path), from);
 
-    // When: it is converted.
-    let summary = apply(&path).unwrap();
+        // When: it is converted.
+        let summary = apply(&path).unwrap();
 
-    // Then: the maps and the events are converted in one command; no run is.
-    assert_eq!(summary.converted_runs, 0);
-    assert_eq!((summary.source_schema, summary.target_schema), (40, LATEST));
-    assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
-    assert!(summary.events.converted_events > 0);
-    assert_eq!(summary.events.mismatched_events, 0);
-    assert_eq!(summary.events.unconverted_remaining, 0);
-    assert_eq!(version(&path), LATEST);
-    let conn = Connection::open(&path).unwrap();
-    let runs_after: Vec<(i64, String, Vec<u8>, i64)> = conn
-        .prepare("SELECT id, run_id, msg_sha256, ordinal FROM run_messages ORDER BY id")
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(runs_after, runs_before);
-    assert_events_read_back(&conn, &seeded_events);
-    assert_accounting_matches_rows(&conn);
+        // Then: the maps and the events are converted in one command; no run is.
+        assert_eq!(summary.converted_runs, 0);
+        assert_eq!(
+            (summary.source_schema, summary.target_schema),
+            (from, LATEST)
+        );
+        assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
+        assert!(summary.events.converted_events > 0);
+        assert_eq!(summary.events.mismatched_events, 0);
+        assert_eq!(summary.events.unconverted_remaining, 0);
+        assert_eq!(version(&path), LATEST);
+        let conn = Connection::open(&path).unwrap();
+        let runs_after: Vec<(i64, String, Vec<u8>, i64)> = conn
+            .prepare("SELECT id, run_id, msg_sha256, ordinal FROM run_messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(runs_after, runs_before);
+        assert_events_read_back(&conn, &seeded_events);
+        assert_accounting_matches_rows(&conn);
+    }
 }
 
 #[test]
@@ -429,10 +445,10 @@ fn a_converted_database_is_a_read_only_no_op_for_events_too() {
 }
 
 #[test]
-fn a_half_prepared_version_41_database_is_refused_unchanged() {
-    // Given: version 41 with the event columns already added (a conversion that stopped).
+fn a_half_prepared_version_42_database_is_refused_unchanged() {
+    // Given: version 43 with the event columns already added (a conversion that stopped).
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("ALTER TABLE events ADD COLUMN body_format INTEGER NOT NULL DEFAULT 0")
         .unwrap();
@@ -449,9 +465,9 @@ fn a_half_prepared_version_41_database_is_refused_unchanged() {
 
 #[test]
 fn events_that_cannot_be_read_stop_apply_before_any_change() {
-    // Given: a version 41 database with an event whose payload is not JSON.
+    // Given: a version 43 database with an event whose payload is not JSON.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     insert_raw(
         &conn,
@@ -484,9 +500,9 @@ fn events_that_cannot_be_read_stop_apply_before_any_change() {
 #[test]
 fn a_payload_of_exactly_the_batch_limit_converts_and_one_byte_more_is_refused() {
     for (extra, converts) in [(0_u64, true), (1, false)] {
-        // Given: a version 41 database with one event of a chosen decoded size.
+        // Given: a version 43 database with one event of a chosen decoded size.
         let dir = tempfile::tempdir().unwrap();
-        let path = database_at(dir.path(), 41);
+        let path = database_at(dir.path(), 43);
         let conn = Connection::open(&path).unwrap();
         let shell = |text: &str| {
             json!({"kind": "Message", "payload": {"kind": "MessageCompleted",
@@ -525,7 +541,7 @@ fn a_payload_of_exactly_the_batch_limit_converts_and_one_byte_more_is_refused() 
 fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
     // Given: five events of about 3 KiB each, and a limit that fits two of them.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     let kinds: Vec<EventKind> = (0..5)
         .map(|n| message(long(&format!("body {n}"), 3_000)))
@@ -549,7 +565,7 @@ fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
 
     // And: with one row per batch every event is its own transaction.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     for (n, kind) in kinds.iter().enumerate() {
         insert_event(&conn, None, kind, n as i64);
@@ -569,10 +585,89 @@ fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
 }
 
 #[test]
-fn a_batch_wal_stays_within_the_stated_bound_whatever_the_event_count() {
+fn a_row_that_does_not_fit_the_batch_is_not_expanded_into_it() {
+    // Given: three events of about 3 KiB each, and a limit that fits two of them.
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at(dir.path(), 43);
+    let conn = Connection::open(&path).unwrap();
+    let kinds: Vec<EventKind> = (0..3)
+        .map(|n| message(long(&format!("fit {n}"), 3_000)))
+        .collect();
+    for (n, kind) in kinds.iter().enumerate() {
+        insert_event(&conn, None, kind, n as i64);
+    }
+    let one = serde_json::to_string(&kinds[0]).unwrap().len() as u64;
+    drop(conn);
+    let limit = one * 2 + one / 2;
+    events::limit_override::set(Some(limit));
+    let mut expanded_per_batch = Vec::new();
+
+    // When: converted, counting the bytes the scan decoded in each transaction.
+    let result = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            ..Default::default()
+        },
+        &mut |point, _| {
+            match point {
+                Point::AfterEventsPrepare => {
+                    events::decoded::take();
+                }
+                Point::Event(EventPoint::BeforeCommit) => {
+                    expanded_per_batch.push(events::decoded::take());
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    );
+    events::limit_override::set(None);
+    let summary = result.unwrap();
+
+    // Then: no transaction decoded more than the limit, and the third event was decoded
+    // only by the batch that holds it.
+    assert_eq!(summary.events.converted_events, 3);
+    assert_eq!(expanded_per_batch, vec![one * 2, one]);
+    assert!(expanded_per_batch.iter().all(|bytes| *bytes <= limit));
+}
+
+#[test]
+fn a_short_text_that_is_not_json_is_reported_and_stops_apply_before_any_change() {
+    // Given: a message event below the token threshold whose payload is not JSON.
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_at(dir.path(), 43);
+    let conn = Connection::open(&path).unwrap();
+    insert_raw(
+        &conn,
+        None,
+        "Message",
+        Some("MessageCompleted"),
+        "{",
+        Some("r"),
+        1,
+    );
+    drop(conn);
+    let before = files(&path);
+
+    // When: it is previewed and applied.
+    let preview = preview(&path).unwrap();
+    let failure = apply(&path).unwrap_err();
+
+    // Then: the preview lists the row, apply refuses before the backup, nothing changed.
+    let events = &preview.analysis.as_ref().unwrap().events;
+    assert_eq!(events.unconvertible_events, 1);
+    assert_eq!(events.problems.len(), 1);
+    assert!(failure.backup.is_none());
+    assert!(!failure.restore_required);
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn every_batch_wal_stays_within_its_own_stated_bound_whatever_the_event_count() {
     // Given: events with bodies of several sizes, converted one per transaction.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     for (n, size) in [3_000, 40_000, 400_000].into_iter().enumerate() {
         insert_event(
@@ -583,30 +678,54 @@ fn a_batch_wal_stays_within_the_stated_bound_whatever_the_event_count() {
         );
     }
     let page: u64 = query(&conn, "PRAGMA page_size");
+    let before: Vec<(i64, u64)> = conn
+        .prepare("SELECT id, OCTET_LENGTH(payload) FROM events ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     drop(conn);
-    let summary = convert_bodies(
+    let mut frames = Vec::new();
+    convert_with(
         &path,
         &ConvertBodiesOptions {
             apply: true,
             event_batch_rows: Some(1),
             ..Default::default()
         },
+        &mut |point, _| {
+            if let Point::AfterEventBatch { frames: seen } = point {
+                frames.push(seen);
+            }
+            Ok(())
+        },
     )
     .unwrap();
 
-    // Then: the largest batch fits frames <= ceil(2 S / page) + 128 + 16 (E + R + B).
-    let s = summary.events.payload_stored_bytes_before
-        + summary.events.payload_stored_bytes_after
-        + summary.events.blob_stored_bytes_created;
-    let bound = (2 * s).div_ceil(page)
-        + 128
-        + 16 * (1 + summary.events.references_created + summary.events.blobs_created);
-    assert!(
-        summary.events.peak_batch_wal_frames <= bound,
-        "{} frames, bound {bound}",
-        summary.events.peak_batch_wal_frames
-    );
-    assert!(summary.events.peak_batch_wal_frames > 0);
+    // Then: batch n (one event) fits frames <= ceil(2 S / page) + 128 + 16 (E + R + B),
+    // with S, R and B taken from that event alone.
+    assert_eq!(frames.len(), before.len(), "one batch per event");
+    let conn = Connection::open(&path).unwrap();
+    for ((id, plain_before), seen) in before.iter().zip(&frames) {
+        let (payload_after, refs, blob_bytes): (u64, u64, u64) = conn
+            .query_row(
+                "SELECT OCTET_LENGTH(e.payload), \
+                        (SELECT COUNT(*) FROM content_blob_refs_event r WHERE r.event_id = e.id), \
+                        (SELECT COALESCE(SUM(OCTET_LENGTH(b.data)), 0) FROM content_blob_refs_event r \
+                         JOIN content_blobs b ON b.id = r.blob_id WHERE r.event_id = e.id) \
+                 FROM events e WHERE e.id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let s = plain_before + payload_after + blob_bytes;
+        let bound = (2 * s).div_ceil(page) + 128 + 16 * (1 + refs + refs);
+        assert!(
+            *seen <= bound && *seen > 0,
+            "event {id}: {seen} frames, bound {bound}"
+        );
+    }
 }
 
 #[test]
@@ -726,7 +845,7 @@ fn a_run_and_an_event_share_one_blob_and_the_collector_keeps_it() {
 #[test]
 fn free_space_one_byte_short_refuses_before_the_backup_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 43);
     let conn = Connection::open(&path).unwrap();
     insert_event(&conn, None, &message(long("space", 50_000)), 1);
     drop(conn);
@@ -750,4 +869,67 @@ fn the_plain_runs_helper_is_used() {
         plain_run("x", &json!([]), 1),
         insert as fn(&Connection, &super::tests::Run),
     );
+}
+
+#[test]
+fn a_version_40_41_or_42_database_with_a_deleted_thread_to_reclaim_also_converts_its_events() {
+    for from in [40_u32, 41, 42] {
+        // Given: a database of version `from` with plain events, a deleted thread, a deleted
+        // run of it and the unfinished reclaim job of their family.
+        let (_dir, path, sidecars) = seeded_with_maps();
+        apply(&path).unwrap();
+        match from {
+            40 => crate::maintenance::downgrade_to_v40(&path).unwrap(),
+            41 => crate::maintenance::downgrade_to_v41(&path).unwrap(),
+            _ => crate::maintenance::downgrade_to_v42(&path).unwrap(),
+        }
+        let conn = Connection::open(&path).unwrap();
+        let seeded_events = seed_events(&conn);
+        conn.execute(
+            "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) \
+             VALUES ('t', 'fam', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'fam')",
+            [&sidecars[0].0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reclaim_jobs(family_key, state, created_at_ns, updated_at_ns) \
+             VALUES ('fam', 'db_pending', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        // When: it is converted.
+        let summary = apply(&path).unwrap();
+
+        // Then: the family is reclaimed and the events are tokens that read back unchanged.
+        assert_eq!(summary.retention.reclaimed_runs, 1, "from {from}");
+        assert_eq!(version(&path), LATEST);
+        assert!(summary.events.converted_events > 0);
+        assert_eq!(summary.events.mismatched_events, 0);
+        let conn = Connection::open(&path).unwrap();
+        let deleted_run = sidecars[0].0;
+        let kept = Seeded {
+            events: seeded_events
+                .events
+                .iter()
+                .filter(|(_, kind, _)| kind.primary_run_id() != Some(deleted_run))
+                .cloned()
+                .collect(),
+            unreadable: seeded_events.unreadable.clone(),
+        };
+        assert!(
+            kept.events.len() < seeded_events.events.len(),
+            "the reclaim removed the events of the deleted run"
+        );
+        assert_events_read_back(&conn, &kept);
+        assert_accounting_matches_rows(&conn);
+    }
 }

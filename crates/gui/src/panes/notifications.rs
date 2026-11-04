@@ -14,6 +14,8 @@ pub enum NotificationsAction {
     OpenRun(String),
     OpenConversation(String),
     OpenThread(ThreadId),
+    /// Show the Evaluations panel, read afresh.
+    OpenEvaluations,
 }
 
 pub fn notifications_pane(
@@ -49,6 +51,12 @@ pub fn notifications_pane(
                 NotificationKind::RetentionStartup => ("Storage", terminal(ThreadRunPhase::Done).1),
                 NotificationKind::RetentionDisabled { .. } => ("Storage", attention_color()),
                 NotificationKind::HistoryGap => ("History", attention_color()),
+                NotificationKind::EvaluationFinished { all_reported: true } => {
+                    ("Evaluation", terminal(ThreadRunPhase::Done).1)
+                }
+                NotificationKind::EvaluationFinished {
+                    all_reported: false,
+                } => ("Evaluation", attention_color()),
             };
             let row = ui
                 .push_id(notification.id, |ui| {
@@ -81,6 +89,18 @@ pub fn notifications_pane(
                             summary.color(palette().TEXT_MUTED)
                         };
                         match &notification.run_id {
+                            _ if matches!(
+                                notification.kind,
+                                NotificationKind::EvaluationFinished { .. }
+                            ) =>
+                            {
+                                if ui
+                                    .add(egui::Button::new(summary).frame(false).wrap())
+                                    .clicked()
+                                {
+                                    action = Some(NotificationsAction::OpenEvaluations);
+                                }
+                            }
                             Some(run_id) => {
                                 if ui
                                     .add(egui::Button::new(summary).frame(false).wrap())
@@ -102,6 +122,13 @@ pub fn notifications_pane(
                             None => {
                                 ui.label(summary);
                             }
+                        }
+                        if matches!(
+                            notification.kind,
+                            NotificationKind::EvaluationFinished { .. }
+                        ) && ui.button("Open evaluations").clicked()
+                        {
+                            action = Some(NotificationsAction::OpenEvaluations);
                         }
                         if let NotificationKind::QuestionPending { thread_id, .. } =
                             &notification.kind

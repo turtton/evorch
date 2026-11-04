@@ -866,18 +866,27 @@ fn build_workbench(
     start_gui_index_owner(&storage.handle())?;
     // The Evaluator reads and pins threads of the same database the GUI records into.
     let evaluator_host = Arc::new(EvaluatorHost::default());
+    // The panel reads the evaluations this process launches through the same
+    // monitor the Evaluator's tools report them to, so it can tell which run.
+    let evaluation_reads: std::cell::OnceCell<(PathBuf, eval::inspection::LaunchMonitor)> =
+        std::cell::OnceCell::new();
     let evaluator_tools = |user_config_dir: Option<PathBuf>, catalog_dir: Option<PathBuf>| {
         user_config_dir
             .map(|user_config_dir| {
-                eval::evaluator::tools(eval::evaluator::EvaluatorContext {
-                    database: storage_config.db_path.clone(),
-                    storage: storage.handle(),
-                    user_config_dir,
-                    catalog_dir,
-                    bus: Arc::clone(&bus),
-                    host: Arc::clone(&evaluator_host) as Arc<dyn eval::evaluator::EvaluatorHost>,
-                    cli: None,
-                })
+                let root = user_config_dir.join("eval");
+                let (tools, monitor) =
+                    eval::evaluator::tools_with_monitor(eval::evaluator::EvaluatorContext {
+                        database: storage_config.db_path.clone(),
+                        storage: storage.handle(),
+                        user_config_dir,
+                        catalog_dir,
+                        bus: Arc::clone(&bus),
+                        host: Arc::clone(&evaluator_host)
+                            as Arc<dyn eval::evaluator::EvaluatorHost>,
+                        cli: None,
+                    });
+                let _ = evaluation_reads.set((root, monitor));
+                tools
             })
             .unwrap_or_default()
     };
@@ -1266,6 +1275,14 @@ fn build_workbench(
             settings_store.clone(),
         ))
         .with_memory_storage(storage_config.clone())
+        .with_evaluations(match evaluation_reads.get() {
+            Some((root, monitor)) => gui::model::evaluations::EvaluationsModel::default()
+                .with_reader(Arc::new(gui::model::evaluations::InspectorReader(
+                    eval::inspection::EvaluationInspector::new(root.clone())
+                        .with_monitor(monitor.clone()),
+                ))),
+            None => gui::model::evaluations::EvaluationsModel::default(),
+        })
         .with_pump(pump)
         .with_terminal_spawner(Arc::new(ShellSpawner::from_env()))
         .with_ownership(Arc::clone(&ownership))

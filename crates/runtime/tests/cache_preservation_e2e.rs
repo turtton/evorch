@@ -1358,13 +1358,44 @@ async fn converted_database_resumes_with_the_interrupted_wire_input() {
 }
 
 #[tokio::test]
-async fn a_version_40_database_converted_for_its_events_resumes_with_the_interrupted_wire_input() {
-    // A database whose runs are already rows (version 40) holds its events as plain
-    // payloads. The same command converts only the events and no run; a normal start
-    // refuses the file before, and accepts it after, and the restore must still send the
-    // interrupted request byte for byte and read the cache from it.
+async fn a_version_40_database_converted_for_its_maps_and_events_resumes_with_the_interrupted_wire_input()
+ {
+    // A database whose runs are already rows (version 40) holds its maps as one column and
+    // its events as plain payloads. The same command converts the maps and the events and
+    // no run; a normal start refuses the file before, and accepts it after, and the restore
+    // must still send the interrupted request byte for byte and read the cache from it.
     for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
         resume_unfinished_model_request(compacted, true, above_threshold, Some(40)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_version_41_database_with_the_lane_ledger_converts_its_maps_and_events_and_resumes() {
+    // Version 41 only added the lane ledger to version 40: the maps are still a column and
+    // the events plain, and the same command converts both before the restore.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(41)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_version_42_database_with_the_favorite_flag_converts_its_maps_and_events_and_resumes() {
+    // Version 42 only added the memory favorite flag to version 41: the maps are still a
+    // column and the events plain, and the same command converts both before the restore.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(42)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_version_43_database_converted_for_its_events_only_resumes_with_the_interrupted_wire_input()
+ {
+    // Version 43 already holds its maps as rows; only its events are plain payloads. The
+    // command converts only the events and no run or map; a normal start refuses the file
+    // before, and accepts it after, and the restore must still send the interrupted request
+    // byte for byte and read the cache from it.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(43)).await;
     }
 }
 
@@ -1509,10 +1540,12 @@ async fn resume_unfinished_model_request(
         // that no process holds the database, as the command requires.
         recompose_runtime(&mut harness, &config, None);
         storage.close();
-        if source == 39 {
-            storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
-        } else {
-            storage::maintenance::downgrade_to_v40(&config.db_path).unwrap();
+        match source {
+            39 => storage::maintenance::downgrade_to_v39(&config.db_path).unwrap(),
+            40 => storage::maintenance::downgrade_to_v40(&config.db_path).unwrap(),
+            41 => storage::maintenance::downgrade_to_v41(&config.db_path).unwrap(),
+            42 => storage::maintenance::downgrade_to_v42(&config.db_path).unwrap(),
+            _ => storage::maintenance::downgrade_to_v43(&config.db_path).unwrap(),
         }
         // A normal start refuses the file and says to convert it, until it is converted.
         let refused = storage::Database::open(&config).unwrap_err();

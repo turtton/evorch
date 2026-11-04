@@ -31,6 +31,12 @@ pub enum NotificationKind {
     /// Stored events that could not be read and name no run, so no
     /// conversation shows a gap for them.
     HistoryGap,
+    /// A background evaluation the Evaluator started has ended. The event names
+    /// no group, so the notification opens the Evaluations panel, not one group.
+    EvaluationFinished {
+        /// Every evaluation produced a report.
+        all_reported: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +133,20 @@ impl NotificationsModel {
                 resolve_run(call_id),
                 format!("Approval requested: {tool_name}"),
             ),
+            EventKind::Diagnostic(diagnostic)
+                if diagnostic.code == event_bus::event::diagnostic_codes::EVALUATION_FINISHED =>
+            {
+                let all_reported = diagnostic.severity == event_bus::DiagnosticSeverity::Info;
+                (
+                    NotificationKind::EvaluationFinished { all_reported },
+                    None,
+                    if all_reported {
+                        "Evaluation finished".to_owned()
+                    } else {
+                        "Evaluation finished with problems".to_owned()
+                    },
+                )
+            }
             EventKind::Lifecycle(_)
             | EventKind::Tool(_)
             | EventKind::Orchestrator(_)
@@ -149,6 +169,10 @@ impl NotificationsModel {
             | NotificationKind::RetentionDisabled { .. }
             | NotificationKind::HistoryGap => ThreadRunPhase::Waiting,
             NotificationKind::RetentionStartup => ThreadRunPhase::Done,
+            NotificationKind::EvaluationFinished { all_reported: true } => ThreadRunPhase::Done,
+            NotificationKind::EvaluationFinished {
+                all_reported: false,
+            } => ThreadRunPhase::Waiting,
         };
         self.push(kind, run_id, summary, phase);
     }

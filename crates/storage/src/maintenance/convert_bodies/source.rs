@@ -45,7 +45,7 @@ const REQUIRED_TABLES: [&str; 4] = [
     "reclaim_jobs",
 ];
 
-/// Tables migrations v40 to v42 create: none of them may exist before the conversion
+/// Tables migrations v40, v43 and v44 create: none of them may exist before the conversion
 /// starts.
 const TARGET_TABLES: [&str; 5] = [
     "run_messages",
@@ -55,7 +55,7 @@ const TARGET_TABLES: [&str; 5] = [
     "content_blob_refs_event",
 ];
 
-/// The columns migration v41 adds to `run_context_provenance`.
+/// The columns migration v43 adds to `run_context_provenance`.
 const PROVENANCE_HEADER_COLUMNS: [&str; 4] = [
     "map_version",
     "raw_message_count",
@@ -121,11 +121,11 @@ const MAX_LISTED_PROBLEMS: usize = 20;
 pub(super) enum Shape {
     /// A regular database of version 33 to 39: the whole conversion applies.
     Source,
-    /// A regular version 40 database: the runs are already rows, the provenance maps and
-    /// the events are converted. (Explicit conversion only; no running build reads
-    /// version 40.)
+    /// A regular version 40, 41 or 42 database (41 added only the lane ledger, 42 only the
+    /// memory favorite flag): the runs are already rows, the provenance maps and the events
+    /// are converted. (Explicit conversion only; no running build reads version 40.)
     RunsConverted,
-    /// A regular version 41 database: the runs and the provenance maps are converted, only
+    /// A regular version 43 database: the runs and the provenance maps are converted, only
     /// the events are not in token form. No run and no map is touched.
     EventsPending,
     /// Already in the current format: nothing to do.
@@ -184,7 +184,7 @@ fn events_started(conn: &Connection) -> Result<bool, StorageError> {
         || table_exists(conn, "content_blob_refs_event")?)
 }
 
-/// A version 41 database: the run tables and the provenance rows are in their final
+/// A version 43 database: the run tables and the provenance rows are in their final
 /// format, and nothing of the event body format exists yet.
 fn classify_events_pending(conn: &Connection) -> Result<Shape, StorageError> {
     let runs = column_names(conn, "run_contexts")?;
@@ -242,16 +242,19 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
-    if version == MESSAGE_ROWS_VERSION {
-        return classify_runs_converted(conn);
-    }
     if version == PROVENANCE_ROWS_VERSION {
         return classify_events_pending(conn);
     }
+    if version >= MESSAGE_ROWS_VERSION {
+        // Messages are rows, the provenance maps are still a column (version 40, or a
+        // version 41 or 42 that only added the lane ledger or the favorite flag on top of it).
+        return classify_runs_converted(conn);
+    }
     if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {
         return Err(invalid(format!(
-            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {} (a version {MESSAGE_ROWS_VERSION} or {PROVENANCE_ROWS_VERSION} one gets only what it still lacks); this one is version {version}",
-            MESSAGE_ROWS_VERSION - 1
+            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {} (a version {MESSAGE_ROWS_VERSION} to {} one gets only what it still lacks); this one is version {version}",
+            MESSAGE_ROWS_VERSION - 1,
+            PROVENANCE_ROWS_VERSION
         )));
     }
     let columns: Vec<String> = conn
@@ -570,38 +573,39 @@ fn scalar(conn: &Connection, sql: &str) -> Result<u64, StorageError> {
         .unwrap_or(0))
 }
 
-/// The counts that need no decoding.
-pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
-    let not_deleted = not_deleted(conn)?;
-    let reclaim = table_exists(conn, "reclaim_jobs")?;
-    let deleted_rows = if reclaim {
+/// What a reclaim of deleted runs has still to do, in either run layout: the tombstoned
+/// runs that still have a header, the jobs waiting and the rows left for the exclusive
+/// phase. All zero while the database has no reclaim jobs table.
+fn reclaim_figures(conn: &Connection) -> Result<(u64, u64, u64), StorageError> {
+    if !table_exists(conn, "reclaim_jobs")? {
+        return Ok((0, 0, 0));
+    }
+    Ok((
         scalar(
             conn,
             "SELECT COUNT(*) FROM run_contexts \
              WHERE run_id IN (SELECT run_id FROM run_tombstones)",
-        )?
-    } else {
-        0
-    };
+        )?,
+        scalar(
+            conn,
+            "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
+        )?,
+        scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?,
+    ))
+}
+
+/// The counts that need no decoding.
+pub(super) fn measure(conn: &Connection) -> Result<Analysis, StorageError> {
+    let not_deleted = not_deleted(conn)?;
+    let (deleted_rows, reclaim_jobs, reclaim_oversized) = reclaim_figures(conn)?;
     Ok(Analysis {
         convertible_runs: scalar(
             conn,
             &format!("SELECT COUNT(*) FROM run_contexts WHERE {not_deleted}"),
         )?,
         deleted_runs_to_reclaim: deleted_rows,
-        reclaim_jobs_pending: if reclaim {
-            scalar(
-                conn,
-                "SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_pending'",
-            )?
-        } else {
-            0
-        },
-        reclaim_oversized_registered: if reclaim {
-            scalar(conn, "SELECT COUNT(*) FROM reclaim_oversized")?
-        } else {
-            0
-        },
+        reclaim_jobs_pending: reclaim_jobs,
+        reclaim_oversized_registered: reclaim_oversized,
         pending_migrations: MESSAGE_ROWS_VERSION
             - 1
             - user_version(conn)?.min(MESSAGE_ROWS_VERSION - 1),
@@ -797,8 +801,13 @@ pub(super) fn analyze_provenance(
 /// The analysis of a version 40 database: the runs are converted already, so only the
 /// reclaim blockers and the provenance maps are looked at.
 pub(super) fn analyze_runs_converted(conn: &Connection) -> Result<Analysis, StorageError> {
+    let (deleted_runs_to_reclaim, reclaim_jobs_pending, reclaim_oversized_registered) =
+        reclaim_figures(conn)?;
     let mut analysis = Analysis {
         reclaim_blockers: super::retention::blockers(conn)?,
+        deleted_runs_to_reclaim,
+        reclaim_jobs_pending,
+        reclaim_oversized_registered,
         ..Analysis::default()
     };
     analyze_provenance(conn, &mut analysis)?;

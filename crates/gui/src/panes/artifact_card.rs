@@ -27,6 +27,58 @@ fn external_open_requests_id() -> egui::Id {
     egui::Id::new("artifact-external-open-requests")
 }
 
+fn passive_id() -> egui::Id {
+    egui::Id::new("artifact-cards-passive")
+}
+
+/// Clears the passive mark when the scope ends, however it ends.
+struct PassiveScope<'a>(&'a egui::Context);
+
+impl Drop for PassiveScope<'_> {
+    fn drop(&mut self) {
+        self.0
+            .data_mut(|data| data.remove_temp::<bool>(passive_id()));
+    }
+}
+
+/// Run `body` with artifact cards that only list what was presented. They look
+/// at no file and offer no way to open one, so a transcript of a past run,
+/// whose artifact store is not this machine's to inspect, can be drawn without
+/// file system access on the UI thread.
+pub fn passive<R>(ctx: &egui::Context, body: impl FnOnce() -> R) -> R {
+    ctx.data_mut(|data| data.insert_temp(passive_id(), true));
+    let _scope = PassiveScope(ctx);
+    body()
+}
+
+pub(crate) fn is_passive(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(passive_id()).unwrap_or(false))
+}
+
+/// The passive form of an artifact card: titles and captions, nothing else.
+fn show_passive(ui: &mut Ui, presentation: &ArtifactPresentation) {
+    soft_frame(palette().SURFACE).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if let Some(title) = &presentation.title {
+            ui.label(medium(icons::with_icon(icons::IMAGES, title)).color(palette().TEXT));
+        }
+        if let Some(caption) = &presentation.caption {
+            ui.label(RichText::new(caption).color(palette().TEXT_MUTED));
+        }
+        for artifact in &presentation.artifacts {
+            ui.label(medium(&artifact.title).color(palette().TEXT));
+            if let Some(caption) = &artifact.caption {
+                ui.label(RichText::new(caption).color(palette().TEXT_MUTED));
+            }
+        }
+        ui.label(
+            RichText::new("Artifacts of a replayed run are not opened here.")
+                .size(FONT_SMALL)
+                .color(palette().TEXT_MUTED),
+        );
+    });
+}
+
 /// Open outside evorch, even when the host has an in-app HTML preview.
 fn request_external_open(ctx: &egui::Context, path: PathBuf) {
     ctx.data_mut(|data| {
@@ -74,6 +126,10 @@ pub fn summary(presentation: &ArtifactPresentation) -> String {
 
 pub fn show(ui: &mut Ui, id: egui::Id, presentation: &ArtifactPresentation) {
     crate::panes::agent::mark_async_layout(ui.ctx());
+    if is_passive(ui.ctx()) {
+        show_passive(ui, presentation);
+        return;
+    }
     soft_frame(palette().SURFACE).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if let Some(title) = &presentation.title {

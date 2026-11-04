@@ -44,6 +44,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
     pub(super) shell_jobs: &'a mut crate::panes::shell_jobs::ShellJobsPane,
+    pub(super) evaluations: &'a mut crate::model::evaluations::EvaluationsModel,
     pub(super) agent_browser: &'a mut super::agent_browser::AgentBrowserTabs,
     pub(super) memory: &'a mut crate::panes::memory::MemoryPane,
     pub(super) self_improvement: &'a mut crate::panes::self_improvement::SelfImprovementPane,
@@ -63,6 +64,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) sidebar_view: &'a workspace_ui::SidebarView,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) unread_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
+    pub(super) externally_working_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) retention:
         &'a BTreeMap<workspace_ui::ThreadId, storage::thread_retention::RetentionStatus>,
     pub(super) sidebar_action: &'a mut Option<SidebarAction>,
@@ -169,6 +171,7 @@ fn panel_icon(kind: PanelKind) -> &'static str {
         PanelKind::ContextInspector => icons::STACK,
         PanelKind::ShellJobs => icons::TERMINAL,
         PanelKind::AgentBrowser => icons::BROWSER,
+        PanelKind::Evaluations => icons::FLASK,
     }
 }
 
@@ -247,6 +250,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                         | PanelKind::ContextInspector
                         | PanelKind::ShellJobs
                         | PanelKind::AgentBrowser
+                        | PanelKind::Evaluations
                 )
             })
     }
@@ -332,6 +336,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     &question_threads,
                     &approval_threads,
                     self.unread_threads,
+                    self.externally_working_threads,
                     self.retention,
                     self.sidebar_view,
                 ) {
@@ -446,6 +451,9 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             PanelKind::ShellJobs => {
                 let jobs = self.active_shell_jobs();
                 self.shell_jobs.render(ui, &jobs);
+            }
+            PanelKind::Evaluations => {
+                crate::panes::evaluations::evaluations_pane(ui, self.evaluations);
             }
             PanelKind::AgentBrowser => {
                 let thread = self.sidebar.active_thread.as_ref().map(ToString::to_string);

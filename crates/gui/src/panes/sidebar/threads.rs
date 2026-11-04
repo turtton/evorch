@@ -9,8 +9,8 @@ use workspace_ui::{
 
 use crate::theme::icons;
 use crate::theme::text::muted;
-use crate::theme::tokens::{FONT_ICON, FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{compact_row, ghost, icon_text, row_title};
+use crate::theme::tokens::{FONT_ICON, FONT_SMALL, Palette, ROW_DENSE, SP_1, SP_2, palette};
+use crate::theme::widgets::{RowTone, compact_row_with, ghost, icon_text, row_title};
 
 use super::SidebarAction;
 
@@ -101,6 +101,7 @@ pub(super) fn render(
             || indicators.question_threads.contains(&thread.id)
             || indicators.approval_threads.contains(&thread.id)
             || indicators.unread_threads.contains(&thread.id)
+            || indicators.externally_working.contains(&thread.id)
     });
     render_tree(ui, sidebar, lineage, &rows, indicators, false, action);
     if hidden > 0 {
@@ -136,6 +137,9 @@ pub(super) struct ThreadIndicators<'a> {
     pub approval_threads: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads whose finished work has not been opened since it finished.
     pub unread_threads: &'a BTreeSet<workspace_ui::ThreadId>,
+    /// Threads another process works on: a run it started is Running or
+    /// Pending and this process does not own the thread.
+    pub externally_working: &'a BTreeSet<workspace_ui::ThreadId>,
     /// Threads with a pending or running run of their own.
     pub active_runs: &'a HashSet<&'a workspace_ui::ThreadId>,
     /// When each archived thread is deleted, or why it is kept.
@@ -147,6 +151,120 @@ struct Attention {
     question: bool,
     approval: bool,
     unread: bool,
+    /// Another process works on the thread.
+    external: bool,
+}
+
+/// What a row asks of the user, strongest first: an unanswered question, then
+/// an approval, then an unread report, then work another process does. The
+/// derived order is the priority, so resolving takes the maximum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RowAttention {
+    #[default]
+    Normal,
+    ExternalWorking,
+    Unread,
+    Approval,
+    Question,
+}
+
+impl Attention {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            question: self.question || other.question,
+            approval: self.approval || other.approval,
+            unread: self.unread || other.unread,
+            external: self.external || other.external,
+        }
+    }
+
+    fn resolve(self) -> RowAttention {
+        [
+            (self.question, RowAttention::Question),
+            (self.approval, RowAttention::Approval),
+            (self.unread, RowAttention::Unread),
+            (self.external, RowAttention::ExternalWorking),
+        ]
+        .into_iter()
+        .find_map(|(set, level)| set.then_some(level))
+        .unwrap_or_default()
+    }
+}
+
+impl RowAttention {
+    /// The title color, surface and stripe of a row in this state; none for a
+    /// normal row, which keeps the shared row style.
+    fn colors(self, p: &Palette) -> Option<(egui::Color32, RowTone)> {
+        let (fg, surface) = match self {
+            Self::Normal => return None,
+            Self::ExternalWorking => (p.EXTERNAL_WORKING_FG, p.EXTERNAL_WORKING_SURFACE),
+            Self::Unread => (p.UNREAD_FG, p.UNREAD_SURFACE),
+            Self::Approval => (p.WARNING_FG, p.WARNING_SURFACE),
+            Self::Question => (p.QUESTION_FG, p.QUESTION_SURFACE),
+        };
+        Some((
+            fg,
+            RowTone {
+                surface,
+                stripe: fg,
+            },
+        ))
+    }
+}
+
+const QUESTION_NOTE: &str = "Answer needed: this thread has an unanswered question";
+const QUESTION_HIDDEN_NOTE: &str =
+    "Answer needed: a collapsed child thread has an unanswered question";
+const APPROVAL_NOTE: &str = "Approval needed: a tool call is waiting";
+const APPROVAL_HIDDEN_NOTE: &str =
+    "Approval needed: a tool call is waiting in a collapsed child thread";
+const UNREAD_NOTE: &str = "Unread report";
+const UNREAD_HIDDEN_NOTE: &str = "Unread report in a collapsed child thread";
+const EXTERNAL_NOTE: &str = "Working in another window or process";
+const EXTERNAL_HIDDEN_NOTE: &str =
+    "A collapsed child thread is working in another window or process";
+
+/// The words for a row's state, for its tooltip and accessible name: the
+/// strongest state, saying whether it is the row's own or a collapsed child's.
+fn attention_note(own: Attention, hidden: Attention) -> Option<&'static str> {
+    [
+        (
+            own.question,
+            hidden.question,
+            QUESTION_NOTE,
+            QUESTION_HIDDEN_NOTE,
+        ),
+        (
+            own.approval,
+            hidden.approval,
+            APPROVAL_NOTE,
+            APPROVAL_HIDDEN_NOTE,
+        ),
+        (own.unread, hidden.unread, UNREAD_NOTE, UNREAD_HIDDEN_NOTE),
+        (
+            own.external,
+            hidden.external,
+            EXTERNAL_NOTE,
+            EXTERNAL_HIDDEN_NOTE,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(own, hidden, note, hidden_note)| {
+        if own {
+            Some(note)
+        } else {
+            hidden.then_some(hidden_note)
+        }
+    })
+}
+
+/// What a thread row shows besides its title: its own states, what its
+/// collapsed descendants hide, and the title color its state calls for.
+#[derive(Clone, Copy, Debug, Default)]
+struct RowMarks {
+    attention: Attention,
+    hidden: Hidden,
+    title_color: Option<egui::Color32>,
 }
 
 /// What a collapsed row hides, so collapsing a family never hides work that
@@ -178,6 +296,8 @@ fn hidden_descendants(
                 approval: hidden.attention.approval
                     || indicators.approval_threads.contains(&thread.id),
                 unread: hidden.attention.unread || indicators.unread_threads.contains(&thread.id),
+                external: hidden.attention.external
+                    || indicators.externally_working.contains(&thread.id),
             },
         })
 }
@@ -213,8 +333,24 @@ fn render_tree(
         let active = sidebar.active_thread.as_ref() == Some(&thread.id);
         let display_root = lineage.display_parent(&thread.id).is_none();
         let kind = branch_kind(lineage, thread).filter(|_| !display_root);
+        let hidden = if has_children && !expansion.is_open() {
+            hidden_descendants(rows, index, indicators)
+        } else {
+            Hidden::default()
+        };
+        let own = Attention {
+            question: indicators.question_threads.contains(&thread.id),
+            approval: indicators.approval_threads.contains(&thread.id),
+            unread: indicators.unread_threads.contains(&thread.id),
+            external: indicators.externally_working.contains(&thread.id),
+        };
+        let row_colors = if archived {
+            None
+        } else {
+            own.merge(hidden.attention).resolve().colors(&palette())
+        };
         ui.push_id(&thread.id, |ui| {
-            compact_row(ui, active, |ui| {
+            let row = compact_row_with(ui, active, row_colors.map(|(_, tone)| tone), |ui| {
                 ui.spacing_mut().item_spacing.x = SP_1;
                 ui.spacing_mut().button_padding.x = SP_1;
                 ui.add_space(depth as f32 * INDENT);
@@ -281,11 +417,6 @@ fn render_tree(
                     };
                     branch_kind_icon(ui, slot, response, kind);
                 }
-                let hidden = if has_children && !expansion.is_open() {
-                    hidden_descendants(rows, index, indicators)
-                } else {
-                    Hidden::default()
-                };
                 if archived {
                     let retention = indicators.retention.get(&thread.id);
                     archived_row(ui, thread, display_root, hidden.count, retention, action);
@@ -300,17 +431,22 @@ fn render_tree(
                         ui,
                         (thread, display_root),
                         state,
-                        Attention {
-                            question: indicators.question_threads.contains(&thread.id),
-                            approval: indicators.approval_threads.contains(&thread.id),
-                            unread: indicators.unread_threads.contains(&thread.id),
+                        RowMarks {
+                            attention: own,
+                            hidden,
+                            title_color: row_colors.map(|(fg, _)| fg),
                         },
-                        hidden,
                         family_running,
                         action,
                     );
                 }
             });
+            if let Some(note) = attention_note(own, hidden.attention).filter(|_| !archived) {
+                let label = format!("Thread attention: {note}");
+                row.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
+                });
+            }
         });
         expansion.store(ui.ctx());
         if has_children && !expansion.is_open() {
@@ -496,11 +632,16 @@ fn active_row(
     ui: &mut Ui,
     (thread, display_root): (&ThreadRecord, bool),
     state: ThreadState,
-    attention: Attention,
-    hidden: Hidden,
+    marks: RowMarks,
     family_running: bool,
     action: &mut Option<SidebarAction>,
 ) {
+    let RowMarks {
+        attention,
+        hidden,
+        title_color,
+    } = marks;
+    let note = attention_note(attention, hidden.attention);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         // Runtime/question indicators stay at the trailing edge.
         ui.spacing_mut().item_spacing.x = SP_1;
@@ -526,9 +667,25 @@ fn active_row(
                 *action = Some(SidebarAction::ToggleArchive(thread.id.clone()));
             }
         } else if matches!(state, ThreadState::Running) {
-            running_spinner(ui, "Thread status: Running");
+            if attention.external {
+                running_spinner(
+                    ui,
+                    "Thread status: Running in another window or process",
+                    palette().EXTERNAL_WORKING_FG,
+                );
+            } else {
+                running_spinner(ui, "Thread status: Running", palette().RUNNING);
+            }
         } else if hidden.running {
-            running_spinner(ui, "Running in a collapsed child thread");
+            if hidden.attention.external {
+                running_spinner(
+                    ui,
+                    "Running in another window or process in a collapsed child thread",
+                    palette().EXTERNAL_WORKING_FG,
+                );
+            } else {
+                running_spinner(ui, "Running in a collapsed child thread", palette().RUNNING);
+            }
         } else {
             ui.add_space(ACTION_SIZE);
         }
@@ -563,7 +720,7 @@ fn active_row(
         }
         ui.add_space(SP_1);
         hidden_count_badge(ui, hidden.count);
-        thread_title(ui, thread, !display_root, None, action);
+        thread_title(ui, thread, !display_root, note, title_color, action);
     });
 }
 
@@ -582,7 +739,7 @@ fn archived_row(
         }
         hidden_count_badge(ui, hidden_count);
         let note = retention.and_then(retention_hover_text);
-        thread_title(ui, thread, !display_root, note.as_deref(), action);
+        thread_title(ui, thread, !display_root, note.as_deref(), None, action);
     });
 }
 
@@ -687,11 +844,15 @@ fn thread_title(
     thread: &ThreadRecord,
     child: bool,
     note: Option<&str>,
+    color: Option<egui::Color32>,
     action: &mut Option<SidebarAction>,
 ) {
     // Indentation and the caret already show nesting; "↳" stays in the
     // accessible name only.
-    let title = row_title(ui, thread.title.as_str());
+    let title = match color {
+        Some(color) => row_title(ui, egui::RichText::new(thread.title.as_str()).color(color)),
+        None => row_title(ui, thread.title.as_str()),
+    };
     if child {
         let label = format!("↳ {}", thread.title);
         title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
@@ -831,9 +992,9 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hid
         response.on_hover_text(label);
     }
     let question = if attention.question {
-        Some("Answer needed: this thread has an unanswered question")
+        Some(QUESTION_NOTE)
     } else if hidden.question {
-        Some("Answer needed: a collapsed child thread has an unanswered question")
+        Some(QUESTION_HIDDEN_NOTE)
     } else {
         None
     };
@@ -841,9 +1002,9 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hid
         attention_dot(ui, label);
     }
     let approval = if attention.approval {
-        Some("Approval needed: a tool call is waiting")
+        Some(APPROVAL_NOTE)
     } else if hidden.approval {
-        Some("Approval needed: a tool call is waiting in a collapsed child thread")
+        Some(APPROVAL_HIDDEN_NOTE)
     } else {
         None
     };
@@ -869,10 +1030,10 @@ fn thread_status_icon(ui: &mut Ui, state: ThreadState, attention: Attention, hid
     }
 }
 
-fn running_spinner(ui: &mut Ui, label: &str) {
+fn running_spinner(ui: &mut Ui, label: &str, color: egui::Color32) {
     // add_sized reserves the whole Archive slot and centers the spinner in it.
     let response = ui.add_sized(egui::vec2(ACTION_SIZE, ACTION_SIZE), |ui: &mut Ui| {
-        crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(palette().RUNNING))
+        crate::theme::widgets::spinner_with(ui, FONT_SMALL, Some(color))
     });
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
@@ -900,9 +1061,9 @@ mod tests {
     };
 
     use super::{
-        Attention, BranchKind, Hidden, ThreadIndicators, TreeRails, active_row, branch_kind,
-        family_gap_before, family_has_running_runs, hidden_descendants, limit_families,
-        nested_threads, thread_family,
+        Attention, BranchKind, Hidden, RowAttention, RowMarks, ThreadIndicators, TreeRails,
+        active_row, attention_note, branch_kind, family_gap_before, family_has_running_runs,
+        hidden_descendants, limit_families, nested_threads, thread_family,
     };
     use crate::panes::sidebar::SidebarAction;
 
@@ -925,6 +1086,7 @@ mod tests {
             question_threads: &question_threads,
             approval_threads: &approval_threads,
             unread_threads: &unread_threads,
+            externally_working: &BTreeSet::new(),
             active_runs: &HashSet::new(),
             retention: &BTreeMap::new(),
         };
@@ -938,6 +1100,7 @@ mod tests {
                     question: true,
                     approval: false,
                     unread: true,
+                    external: false,
                 },
             }
         );
@@ -1141,8 +1304,7 @@ mod tests {
                                 ui,
                                 (&thread, true),
                                 ThreadState::Running,
-                                Attention::default(),
-                                Hidden::default(),
+                                RowMarks::default(),
                                 true,
                                 action,
                             );
@@ -1414,6 +1576,7 @@ mod tests {
                         question_threads: &none,
                         approval_threads: &none,
                         unread_threads: &none,
+                        externally_working: &none,
                         active_runs: &active,
                         retention: &BTreeMap::new(),
                     };
@@ -1469,6 +1632,7 @@ mod tests {
                         question_threads: &none,
                         approval_threads: &none,
                         unread_threads: &none,
+                        externally_working: &none,
                         active_runs: &active,
                         retention: &BTreeMap::new(),
                     };
@@ -1598,6 +1762,7 @@ mod tests {
                         question_threads: &none,
                         approval_threads: &none,
                         unread_threads: &none,
+                        externally_working: &none,
                         active_runs: &active,
                         retention: &retention,
                     };
@@ -1668,5 +1833,422 @@ mod tests {
 
         let (kept, hidden) = limit_families(&rows, 5, |_| false);
         assert_eq!((kept.len(), hidden), (rows.len(), 0));
+    }
+
+    /// The palette is process-wide; tests that install one take turns.
+    fn palette_lock() -> std::sync::MutexGuard<'static, ()> {
+        static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        PALETTE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn flags(question: bool, approval: bool, unread: bool, external: bool) -> Attention {
+        Attention {
+            question,
+            approval,
+            unread,
+            external,
+        }
+    }
+
+    #[test]
+    fn a_row_takes_the_strongest_of_its_states() {
+        // Given: every combination of the four states
+        for bits in 0..16u8 {
+            let has = |bit: u8| bits & (1 << bit) != 0;
+            let attention = flags(has(0), has(1), has(2), has(3));
+
+            // When: the row's state is resolved
+            let expected = if has(0) {
+                RowAttention::Question
+            } else if has(1) {
+                RowAttention::Approval
+            } else if has(2) {
+                RowAttention::Unread
+            } else if has(3) {
+                RowAttention::ExternalWorking
+            } else {
+                RowAttention::Normal
+            };
+
+            // Then: question > approval > unread > external work > normal
+            assert_eq!(attention.resolve(), expected, "{attention:?}");
+        }
+    }
+
+    #[test]
+    fn each_state_has_its_own_colors_in_both_themes() {
+        use crate::theme::tokens::Palette;
+        for p in [Palette::tokyo_night(), Palette::graphite()] {
+            let states = [
+                RowAttention::ExternalWorking,
+                RowAttention::Unread,
+                RowAttention::Approval,
+                RowAttention::Question,
+            ];
+            let colors: Vec<_> = states
+                .iter()
+                .map(|state| state.colors(&p).expect("a state with colors"))
+                .collect();
+
+            // Then: no two states share a text color or a surface
+            for (i, (fg, tone)) in colors.iter().enumerate() {
+                for (other_fg, other) in &colors[i + 1..] {
+                    assert_ne!(fg, other_fg);
+                    assert_ne!(tone.surface, other.surface);
+                }
+                // And: a surface is neither the sidebar's own nor a selection / hover fill
+                assert_ne!(tone.surface, p.SIDEBAR);
+                assert_ne!(tone.surface, p.ACTIVE_ROW);
+                assert_ne!(tone.surface, p.HOVER_ROW);
+            }
+
+            // And: a normal row keeps the shared row style
+            assert!(RowAttention::Normal.colors(&p).is_none());
+        }
+    }
+
+    #[test]
+    fn a_tinted_row_stays_distinct_resting_hovered_and_selected() {
+        use crate::theme::tokens::Palette;
+        use crate::theme::widgets::toned_row_target;
+        let _guard = palette_lock();
+        for p in [Palette::tokyo_night(), Palette::graphite()] {
+            crate::theme::tokens::install_palette(p);
+            for state in [
+                RowAttention::ExternalWorking,
+                RowAttention::Unread,
+                RowAttention::Approval,
+                RowAttention::Question,
+            ] {
+                let (_, tone) = state.colors(&p).expect("colors");
+                let hovered = toned_row_target(tone.surface, false);
+                let selected = toned_row_target(tone.surface, true);
+                assert_ne!(hovered, tone.surface, "{state:?} hover");
+                assert_ne!(selected, tone.surface, "{state:?} selection");
+                assert_ne!(hovered, selected, "{state:?} hover vs selection");
+            }
+        }
+    }
+
+    #[test]
+    fn the_note_names_the_strongest_state_and_where_it_comes_from() {
+        let none = Attention::default();
+        assert_eq!(attention_note(none, none), None);
+        assert_eq!(
+            attention_note(flags(false, false, false, true), none),
+            Some("Working in another window or process")
+        );
+        assert_eq!(
+            attention_note(none, flags(false, false, false, true)),
+            Some("A collapsed child thread is working in another window or process")
+        );
+        // A stronger child state beats a weaker one of the row itself only when
+        // it is stronger; the row's own state wins at the same level.
+        assert_eq!(
+            attention_note(
+                flags(false, false, false, true),
+                flags(false, false, true, false)
+            ),
+            Some("Unread report in a collapsed child thread")
+        );
+        assert_eq!(
+            attention_note(
+                flags(true, false, false, true),
+                flags(true, false, false, false)
+            ),
+            Some("Answer needed: this thread has an unanswered question")
+        );
+    }
+
+    #[test]
+    fn collapsing_rolls_up_a_childs_external_work() {
+        // Given: a root with a child worked on elsewhere
+        let project = ProjectId::new("demo");
+        let mut threads: Vec<ThreadRecord> = ["root", "child"]
+            .into_iter()
+            .map(|id| ThreadRecord::new(ThreadId::new(id), project.clone(), id))
+            .collect();
+        threads[1].parent_thread_id = Some(ThreadId::new("root"));
+        let lineage = LineageIndex::new(&threads);
+        let all: Vec<&ThreadRecord> = threads.iter().collect();
+        let rows = nested_threads(&all, &lineage);
+        let phases = BTreeMap::new();
+        let none = BTreeSet::new();
+        let external = BTreeSet::from([ThreadId::new("child")]);
+        let active = HashSet::new();
+        let indicators = ThreadIndicators {
+            phases: &phases,
+            question_threads: &none,
+            approval_threads: &none,
+            unread_threads: &none,
+            externally_working: &external,
+            active_runs: &active,
+            retention: &BTreeMap::new(),
+        };
+
+        // Then: the collapsed root carries it, the child itself is not hidden
+        assert!(hidden_descendants(&rows, 0, &indicators).attention.external);
+        assert_eq!(
+            hidden_descendants(&rows, 0, &indicators)
+                .attention
+                .resolve(),
+            RowAttention::ExternalWorking
+        );
+    }
+
+    fn labels_of_rows(
+        question: &[&str],
+        external: &[&str],
+        collapsed: bool,
+    ) -> Harness<'static, Option<SidebarAction>> {
+        let project = ProjectId::new("demo");
+        let mut threads: Vec<ThreadRecord> = ["root", "child"]
+            .into_iter()
+            .map(|id| ThreadRecord::new(ThreadId::new(id), project.clone(), id))
+            .collect();
+        threads[1].parent_thread_id = Some(ThreadId::new("root"));
+        let sidebar = workspace_ui::SidebarState {
+            threads,
+            ..Default::default()
+        };
+        let ids = |ids: &[&str]| -> BTreeSet<ThreadId> {
+            ids.iter().copied().map(ThreadId::new).collect()
+        };
+        let (question, external) = (ids(question), ids(external));
+        let (phases, none, active) = (BTreeMap::new(), BTreeSet::new(), HashSet::new());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(400.0, 200.0))
+            .build_ui_state(
+                move |ui, action: &mut Option<SidebarAction>| {
+                    crate::theme::install(ui.ctx());
+                    let id = egui::Id::new((
+                        "sidebar-thread-children",
+                        &project,
+                        &ThreadId::new("root"),
+                    ));
+                    let mut state =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            id,
+                            true,
+                        );
+                    state.set_open(!collapsed);
+                    state.store(ui.ctx());
+                    let lineage = LineageIndex::new(&sidebar.threads);
+                    let section: Vec<&ThreadRecord> = sidebar.threads.iter().collect();
+                    let rows = nested_threads(&section, &lineage);
+                    let indicators = ThreadIndicators {
+                        phases: &phases,
+                        question_threads: &question,
+                        approval_threads: &none,
+                        unread_threads: &none,
+                        externally_working: &external,
+                        active_runs: &active,
+                        retention: &BTreeMap::new(),
+                    };
+                    super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
+                },
+                None,
+            );
+        harness.run_steps(2);
+        harness
+    }
+
+    #[test]
+    fn rows_name_their_state_for_assistive_tools_and_tooltips() {
+        let count = |harness: &Harness<'_, Option<SidebarAction>>, label: &str| {
+            harness.query_all_by_label(label).count()
+        };
+
+        // Given: an expanded tree whose child is worked on elsewhere
+        let harness = labels_of_rows(&[], &["child"], false);
+        // Then: only the child's row is marked
+        assert_eq!(
+            count(
+                &harness,
+                "Thread attention: Working in another window or process"
+            ),
+            1
+        );
+
+        // Given: the same tree collapsed
+        let harness = labels_of_rows(&[], &["child"], true);
+        // Then: the root says a collapsed child is the one working elsewhere
+        assert_eq!(
+            count(
+                &harness,
+                "Thread attention: A collapsed child thread is working in another window or process"
+            ),
+            1
+        );
+
+        // Given: the child both asks a question and works elsewhere
+        let harness = labels_of_rows(&["child"], &["child"], false);
+        // Then: the question outranks the external work
+        assert_eq!(
+            count(
+                &harness,
+                "Thread attention: Answer needed: this thread has an unanswered question"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &harness,
+                "Thread attention: Working in another window or process"
+            ),
+            0
+        );
+
+        // Given: the question is answered, the work goes on elsewhere
+        let harness = labels_of_rows(&[], &["child"], false);
+        // Then: the row falls back to the external state
+        assert_eq!(
+            count(
+                &harness,
+                "Thread attention: Working in another window or process"
+            ),
+            1
+        );
+
+        // Given: nothing needs attention
+        let harness = labels_of_rows(&[], &[], false);
+        // Then: no row carries a state
+        assert_eq!(
+            harness
+                .query_all_by_label_contains("Thread attention:")
+                .count(),
+            0
+        );
+    }
+
+    /// What one thread row paints: fills, outlines, and the color of its title.
+    #[derive(Default)]
+    struct Painted {
+        fills: Vec<egui::Color32>,
+        strokes: Vec<egui::Color32>,
+        title: Option<egui::Color32>,
+    }
+
+    fn collect_shapes(shape: &egui::Shape, title: &str, painted: &mut Painted) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes
+                .iter()
+                .for_each(|shape| collect_shapes(shape, title, painted)),
+            egui::Shape::Rect(rect) => {
+                painted.fills.push(rect.fill);
+                painted.strokes.push(rect.stroke.color);
+            }
+            egui::Shape::Text(text) if text.galley.job.text == title => {
+                painted.title = text.galley.job.sections.first().map(|s| s.format.color);
+            }
+            _ => {}
+        }
+    }
+
+    fn paint_row(
+        preset: crate::theme::style::ThemePreset,
+        question: bool,
+        selected: bool,
+    ) -> Painted {
+        let project = ProjectId::new("demo");
+        let mut sidebar = workspace_ui::SidebarState {
+            threads: vec![ThreadRecord::new(
+                ThreadId::new("row"),
+                project,
+                "row-title",
+            )],
+            ..Default::default()
+        };
+        if selected {
+            sidebar.active_thread = Some(ThreadId::new("row"));
+        }
+        let asking = if question {
+            BTreeSet::from([ThreadId::new("row")])
+        } else {
+            BTreeSet::new()
+        };
+        let (phases, none, active) = (BTreeMap::new(), BTreeSet::new(), HashSet::new());
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                crate::theme::style::install_preset(ui.ctx(), preset);
+                let lineage = LineageIndex::new(&sidebar.threads);
+                let section: Vec<&ThreadRecord> = sidebar.threads.iter().collect();
+                let rows = nested_threads(&section, &lineage);
+                let indicators = ThreadIndicators {
+                    phases: &phases,
+                    question_threads: &asking,
+                    approval_threads: &none,
+                    unread_threads: &none,
+                    externally_working: &none,
+                    active_runs: &active,
+                    retention: &BTreeMap::new(),
+                };
+                let mut action = None;
+                super::render_tree(
+                    ui,
+                    &sidebar,
+                    &lineage,
+                    &rows,
+                    &indicators,
+                    false,
+                    &mut action,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let mut painted = Painted::default();
+        for clipped in &output.shapes {
+            collect_shapes(&clipped.shape, "row-title", &mut painted);
+        }
+        painted
+    }
+
+    #[test]
+    fn a_tinted_row_paints_its_tint_stripe_and_title_and_a_selected_one_keeps_its_outline() {
+        use crate::theme::style::ThemePreset;
+        use crate::theme::widgets::toned_row_target;
+        let _guard = palette_lock();
+        for preset in [ThemePreset::TokyoNight, ThemePreset::Graphite] {
+            let p = preset.palette();
+
+            // Given: a row with an unanswered question, resting
+            let resting = paint_row(preset, true, false);
+            // Then: its tint, stripe and title color are the question's, with no selection outline
+            assert!(resting.fills.contains(&p.QUESTION_SURFACE));
+            assert!(resting.fills.contains(&p.QUESTION_FG));
+            assert_eq!(resting.title, Some(p.QUESTION_FG));
+            assert!(!resting.strokes.contains(&p.ACCENT));
+
+            // Given: the same row, selected
+            let selected = paint_row(preset, true, true);
+            // Then: the tint now mixes in the selection, the stripe and title stay,
+            // and the accent outline marks the selection
+            assert!(
+                selected
+                    .fills
+                    .contains(&toned_row_target(p.QUESTION_SURFACE, true))
+            );
+            assert!(selected.fills.contains(&p.QUESTION_FG));
+            assert_eq!(selected.title, Some(p.QUESTION_FG));
+            assert!(selected.strokes.contains(&p.ACCENT));
+
+            // Given: an ordinary row
+            let ordinary = paint_row(preset, false, false);
+            // Then: nothing of the question's colors is painted
+            assert!(!ordinary.fills.contains(&p.QUESTION_SURFACE));
+            assert!(!ordinary.fills.contains(&p.QUESTION_FG));
+            assert_ne!(ordinary.title, Some(p.QUESTION_FG));
+        }
     }
 }

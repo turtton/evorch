@@ -29,6 +29,15 @@ pub struct Palette {
     pub INFO: Color32,
     pub RUNNING: Color32,
     pub WAITING: Color32,
+    /// Thread row foreground / surface for an unanswered question.
+    pub QUESTION_FG: Color32,
+    pub QUESTION_SURFACE: Color32,
+    /// Thread row foreground / surface for an unread report.
+    pub UNREAD_FG: Color32,
+    pub UNREAD_SURFACE: Color32,
+    /// Thread row foreground / surface for work another process executes.
+    pub EXTERNAL_WORKING_FG: Color32,
+    pub EXTERNAL_WORKING_SURFACE: Color32,
 }
 
 impl Palette {
@@ -60,6 +69,13 @@ impl Palette {
             INFO: Color32::from_rgb(0x2a, 0xc3, 0xde),
             RUNNING: Color32::from_rgb(0x7d, 0xcf, 0xff),
             WAITING: Color32::from_rgb(0x2a, 0xc3, 0xde),
+            QUESTION_FG: Color32::from_rgb(0xff, 0x8a, 0xc7),
+            // Semantic surfaces: 85% canvas + 15% base role, rounded in sRGB.
+            QUESTION_SURFACE: Color32::from_rgb(0x3a, 0x25, 0x37),
+            UNREAD_FG: Color32::from_rgb(0x7a, 0xa2, 0xf7),
+            UNREAD_SURFACE: Color32::from_rgb(0x25, 0x2e, 0x48),
+            EXTERNAL_WORKING_FG: Color32::from_rgb(0xbb, 0x9a, 0xf7),
+            EXTERNAL_WORKING_SURFACE: Color32::from_rgb(0x30, 0x2c, 0x4b),
         }
     }
 
@@ -89,6 +105,12 @@ impl Palette {
             INFO: Color32::from_rgb(0x60, 0xa5, 0xfa),
             RUNNING: Color32::from_rgb(0x22, 0xd3, 0xee),
             WAITING: Color32::from_rgb(0x60, 0xa5, 0xfa),
+            QUESTION_FG: Color32::from_rgb(0xf4, 0x72, 0xb6),
+            QUESTION_SURFACE: Color32::from_rgb(0x2b, 0x13, 0x20),
+            UNREAD_FG: Color32::from_rgb(0x60, 0xa5, 0xfa),
+            UNREAD_SURFACE: Color32::from_rgb(0x12, 0x1f, 0x35),
+            EXTERNAL_WORKING_FG: Color32::from_rgb(0xa7, 0x8b, 0xfa),
+            EXTERNAL_WORKING_SURFACE: Color32::from_rgb(0x1f, 0x16, 0x35),
         }
     }
 }
@@ -289,6 +311,12 @@ mod tests {
             (p.INFO, [0x2a, 0xc3, 0xde]),
             (p.RUNNING, [0x7d, 0xcf, 0xff]),
             (p.WAITING, [0x2a, 0xc3, 0xde]),
+            (p.QUESTION_FG, [0xff, 0x8a, 0xc7]),
+            (p.QUESTION_SURFACE, [0x3a, 0x25, 0x37]),
+            (p.UNREAD_FG, [0x7a, 0xa2, 0xf7]),
+            (p.UNREAD_SURFACE, [0x25, 0x2e, 0x48]),
+            (p.EXTERNAL_WORKING_FG, [0xbb, 0x9a, 0xf7]),
+            (p.EXTERNAL_WORKING_SURFACE, [0x30, 0x2c, 0x4b]),
         ] {
             assert_eq!(
                 actual,
@@ -326,6 +354,15 @@ mod tests {
         assert_eq!(p.INFO, Color32::from_rgb(0x60, 0xa5, 0xfa));
         assert_eq!(p.RUNNING, Color32::from_rgb(0x22, 0xd3, 0xee));
         assert_eq!(p.WAITING, Color32::from_rgb(0x60, 0xa5, 0xfa));
+        assert_eq!(p.QUESTION_FG, Color32::from_rgb(0xf4, 0x72, 0xb6));
+        assert_eq!(p.QUESTION_SURFACE, Color32::from_rgb(0x2b, 0x13, 0x20));
+        assert_eq!(p.UNREAD_FG, Color32::from_rgb(0x60, 0xa5, 0xfa));
+        assert_eq!(p.UNREAD_SURFACE, Color32::from_rgb(0x12, 0x1f, 0x35));
+        assert_eq!(p.EXTERNAL_WORKING_FG, Color32::from_rgb(0xa7, 0x8b, 0xfa));
+        assert_eq!(
+            p.EXTERNAL_WORKING_SURFACE,
+            Color32::from_rgb(0x1f, 0x16, 0x35)
+        );
     }
 
     #[test]

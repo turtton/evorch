@@ -355,6 +355,13 @@ impl SecretGuard {
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;
                 self.check_text("event", "Orchestrator.payload", &payload)
             }
+            // Lane events carry identifiers and enums; scanned whole so a future
+            // free-text field is covered without another arm.
+            EventKind::Ledger(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "Ledger.payload", &payload)
+            }
         }
     }
 

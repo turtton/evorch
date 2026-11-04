@@ -111,7 +111,10 @@ async fn scenario(
         RunConfig {
             interactive: true,
             budget: runtime::budget_tracker::BudgetSettings {
-                max_tokens: official.then_some(60),
+                max_tokens: official.then_some(60).map_or(
+                    runtime::budget_tracker::ResourceLimit::Unlimited,
+                    runtime::budget_tracker::ResourceLimit::Bounded,
+                ),
                 ..Default::default()
             },
             ..RunConfig::default()
@@ -279,7 +282,7 @@ async fn budget_exhaustions_after_official_compaction(usage_reported: bool) -> u
         RunConfig {
             interactive: true,
             budget: runtime::budget_tracker::BudgetSettings {
-                max_tokens: Some(1_000),
+                max_tokens: runtime::budget_tracker::ResourceLimit::Bounded(1_000),
                 ..Default::default()
             },
             ..RunConfig::default()

@@ -1,4 +1,4 @@
--- Reverts the event body format (migration 42): events lose `body_format` and
+-- Reverts the event body format (migration 44): events lose `body_format` and
 -- `blob_bytes`, the event reference table goes, and the three accounting triggers are the
 -- ones migration v12 created. Tokenized rows are not turned back into plain ones; tests
 -- that need an older schema hold only plain events.
