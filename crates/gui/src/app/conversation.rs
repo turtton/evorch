@@ -56,7 +56,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 agent_name,
                 ..
             }) => {
-                if let Some(thread) = chat_thread(agent_name) {
+                // Only a parentless run is a conversation root: a child may carry any name
+                // its parent gave it, and belongs to its parent's thread.
+                if let Some(thread) = chat_thread(agent_name).filter(|_| parent_run_id.is_none()) {
                     let known = self
                         .sidebar
                         .threads

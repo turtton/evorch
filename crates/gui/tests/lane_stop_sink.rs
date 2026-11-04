@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
 use gui::{
-    app::WorkbenchState, fixture::DemoSource, model::composer::ProviderStatus,
+    app::WorkbenchState,
+    fixture::DemoSource,
+    model::commands::{CommandSink, LoopEvent, WorkbenchCommand},
+    model::composer::ProviderStatus,
     runtime_sink::RuntimeCommandSink,
 };
 use providers::{ChatResponse, ContentBlock, FinishReason, Message, ToolSpec};
@@ -18,6 +21,7 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 #[derive(Default)]
 struct LaneModel {
     lane_turn: tokio::sync::Notify,
+    spoof_turn: tokio::sync::Notify,
 }
 
 #[async_trait::async_trait]
@@ -34,8 +38,18 @@ impl AgentModel for LaneModel {
                 matches!(block, ContentBlock::Text { text } if text.contains("Agent-authored lane brief"))
             })
         });
+        let spoof = messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == "spoof"))
+        });
         if lane {
             self.lane_turn.notify_one();
+            std::future::pending::<()>().await;
+        }
+        if spoof {
+            self.spoof_turn.notify_one();
             std::future::pending::<()>().await;
         }
         Ok(ChatResponse {
@@ -175,6 +189,146 @@ fn stopping_a_lane_thread_stops_the_runtime_started_lane_root_and_leaves_the_lea
             "the lead is not part of the lane's Stop"
         );
 
+        runtime.cancel(lead).unwrap();
+        runtime.wait(lead).await.unwrap();
+    });
+}
+
+#[test]
+fn a_child_named_like_the_lane_thread_never_becomes_the_target_of_the_lanes_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("lanes.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    let mut events = bus.subscribe();
+    let owner = Arc::new(
+        runtime::ownership::OwnerHost::open(
+            &dir.path().join("owners"),
+            Default::default(),
+            bus.clone(),
+        )
+        .unwrap(),
+    );
+    let model = Arc::new(LaneModel::default());
+    let runtime = {
+        let _guard = rt.enter();
+        AgentRuntime::new(
+            bus.clone(),
+            Arc::new(tools::ToolExecutor::new(bus.clone())),
+            model.clone(),
+        )
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap())
+    };
+    let mut sidebar = SidebarState::default();
+    let project = ProjectId::new("project");
+    sidebar
+        .add_project(project.clone(), "project", dir.path())
+        .unwrap();
+    sidebar.select_project(&project).unwrap();
+    sidebar
+        .create_thread(ThreadId::new("lead"), project, "Lead")
+        .unwrap();
+    sidebar.switch_thread(&ThreadId::new("lead")).unwrap();
+    let make_sink = || {
+        RuntimeCommandSink::new(runtime.clone(), rt.handle().clone()).with_ownership(owner.clone())
+    };
+    let mut state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar)
+        .with_ownership(owner.clone())
+        .with_provider_status(ProviderStatus::Configured)
+        .with_command_sink(Box::new(make_sink()));
+
+    rt.block_on(async {
+        let lead = runtime
+            .delegate_chat(
+                "lead",
+                Role::Orchestrator,
+                "coordinate".into(),
+                RunConfig {
+                    ownership: Some(owner.start("lead").unwrap()),
+                    interactive: true,
+                    keep_alive: true,
+                    conversation: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        pump_until(&mut state, &mut events, |_, kind| {
+            phase_is(kind, lead, AgentRunPhase::Waiting)
+        })
+        .await;
+        let lane = runtime.open_lane(lead, "owned-lane", brief()).unwrap();
+        let lane_thread = ThreadId::new(lane.thread_id.clone());
+        let root = lane.root_run_id.to_string();
+        model.lane_turn.notified().await;
+        pump_until(&mut state, &mut events, |state, _| {
+            state.sidebar().threads.iter().any(|thread| {
+                thread.id == lane_thread && thread.root_run_id.as_deref() == Some(root.as_str())
+            })
+        })
+        .await;
+
+        // A child whose name only imitates the lane thread's chat root.
+        let spoof = runtime
+            .delegate_background_as_child(
+                lead,
+                Role::Worker,
+                "spoof",
+                RunConfig {
+                    name: Some(format!("chat:Orchestrator:{}", lane.thread_id)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        model.spoof_turn.notified().await;
+        pump_until(&mut state, &mut events, |_, kind| {
+            phase_is(kind, spoof, AgentRunPhase::Running)
+        })
+        .await;
+        assert!(
+            state.sidebar().threads.iter().any(|thread| {
+                thread.id == lane_thread && thread.root_run_id.as_deref() == Some(root.as_str())
+            }),
+            "the child is not projected as the lane's root"
+        );
+        // Not even a direct bind of the child makes it a Stop target.
+        let mut probe = make_sink();
+        probe.bind_lane_root(&lane.thread_id, &spoof.to_string());
+        assert!(matches!(
+            probe
+                .submit(WorkbenchCommand::StopChat {
+                    thread_id: lane.thread_id.clone(),
+                })
+                .as_slice(),
+            [LoopEvent::ChatNotice { text, .. }] if text == "No chat run to stop"
+        ));
+
+        state.switch_thread(lane_thread).unwrap();
+        state.stop_chat();
+        pump_until(&mut state, &mut events, |_, kind| {
+            phase_is(kind, lane.root_run_id, AgentRunPhase::Stopped)
+        })
+        .await;
+        assert_eq!(
+            runtime.inspect_agent(spoof).unwrap().phase,
+            AgentRunPhase::Running,
+            "the imitating child was not stopped"
+        );
+        assert_eq!(
+            runtime.inspect_agent(lead).unwrap().phase,
+            AgentRunPhase::Waiting
+        );
+
+        runtime.cancel(spoof).unwrap();
         runtime.cancel(lead).unwrap();
         runtime.wait(lead).await.unwrap();
     });

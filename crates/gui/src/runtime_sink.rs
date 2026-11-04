@@ -275,7 +275,10 @@ impl CommandSink for RuntimeCommandSink {
     }
 
     fn bind_lane_root(&mut self, thread: &str, run: &str) {
-        if let Ok(id) = run.parse::<RunId>() {
+        // The runtime decides what a lane root is; a name or a child never qualifies.
+        if let Ok(id) = run.parse::<RunId>()
+            && self.runtime.is_lane_root(thread, id)
+        {
             self.rebind_conversation_root(thread, id);
             self.chat_runs.insert(thread.into(), id);
         }

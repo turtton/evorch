@@ -744,3 +744,119 @@ fn a_lane_restored_from_the_ledger_gives_the_sink_its_recorded_root_and_a_plain_
     );
     assert_eq!(bindings.latest("thread"), None);
 }
+
+#[test]
+fn a_child_run_named_like_the_lane_root_is_not_its_root() {
+    // Given: a lane whose root is known to the sink
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(None);
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    workbench.apply_conversation_event(&root_started("lane-root-a", "lane-thread-1"));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // When: a child that only carries the lane's chat name starts under another run
+    workbench.apply_conversation_event(&Event::new(event_bus::LifecycleEvent::AgentRunStarted {
+        run_id: "imitator".into(),
+        parent_run_id: Some("lead-run".into()),
+        agent_name: "chat:Orchestrator:lane-thread-1".into(),
+        role: "Worker".into(),
+    }));
+
+    // Then: neither the sink nor the lane's root moved to it
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-a")
+    );
+    let lane = workbench
+        .sidebar
+        .threads
+        .iter()
+        .find(|thread| thread.id.to_string() == "lane-thread-1")
+        .unwrap();
+    assert_eq!(lane.root_run_id.as_deref(), Some("lane-root-a"));
+    assert!(!lane.run_ids.iter().any(|run| run == "imitator"));
+}
+
+#[test]
+fn roots_waiting_for_their_thread_are_bounded_and_a_dropped_one_comes_from_the_ledger() {
+    // Given: a ledger that knows lane 1, and 65 roots announced before any thread exists,
+    // the oldest of them lane 1's
+    let ledger = Arc::new(FakeLedger::default());
+    ledger.put(snapshot(
+        record(1, Some("thread"), LedgerPolicy::Attached, 1),
+        None,
+    ));
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(Some(Arc::clone(&ledger)));
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    for n in 1..=65 {
+        workbench.apply_conversation_event(&root_started(
+            &format!("early-root-{n}"),
+            &format!("lane-thread-{n}"),
+        ));
+    }
+
+    // When: the newest and the oldest lane are created
+    workbench.apply_conversation_event(&created(&record(
+        65,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // Then: the newest took its remembered root; the oldest was dropped and has none yet
+    assert_eq!(
+        bindings.latest("lane-thread-65").as_deref(),
+        Some("early-root-65")
+    );
+    assert_eq!(bindings.latest("lane-thread-1"), None);
+
+    // When: the ledger is read
+    settle(&mut workbench);
+
+    // Then: the dropped root is recovered from the ledger's record
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-1")
+    );
+}
+
+#[test]
+fn a_ledger_read_that_disagrees_with_the_events_does_not_rebind_the_sink() {
+    // Given: a lane whose events say root x, and a ledger that still records root 1
+    let ledger = Arc::new(FakeLedger::default());
+    ledger.put(snapshot(
+        record(1, Some("thread"), LedgerPolicy::Attached, 1),
+        None,
+    ));
+    let bindings = RootBindings::default();
+    let (workbench, _dir) = workbench(Some(Arc::clone(&ledger)));
+    let mut workbench = workbench.with_command_sink(Box::new(BindingSink(bindings.clone())));
+    workbench.apply_conversation_event(&root_started("lane-root-x", "lane-thread-1"));
+    workbench.apply_conversation_event(&created(&record(
+        1,
+        Some("thread"),
+        LedgerPolicy::Attached,
+        1,
+    )));
+
+    // When: the ledger is read
+    settle(&mut workbench);
+
+    // Then: the sink keeps the root the events established
+    assert_eq!(
+        bindings.latest("lane-thread-1").as_deref(),
+        Some("lane-root-x")
+    );
+}
