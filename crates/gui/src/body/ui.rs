@@ -4,9 +4,7 @@
 //! The resolver is found through the egui context, so a pane draws a body the
 //! same way whether or not any body is deferred. Nothing here reads storage.
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use egui::{Id, RichText, Ui};
@@ -75,94 +73,6 @@ impl<'a> SharedText<'a> {
         Arc::ptr_eq(own, theirs)
     }
 }
-
-/// Joined text of bodies made of several pieces, kept so that drawing the same
-/// body every frame joins it once. Bounded; the oldest goes first.
-#[derive(Default)]
-struct JoinCache {
-    entries: HashMap<u64, (Arc<str>, u64)>,
-    bytes: usize,
-    tick: u64,
-}
-
-const JOIN_CACHE_BYTES: usize = 16 * 1024 * 1024;
-const JOIN_CACHE_ID: &str = "body-join-cache";
-
-type SharedJoinCache = Arc<Mutex<JoinCache>>;
-
-fn join_cache(ctx: &egui::Context) -> SharedJoinCache {
-    ctx.data_mut(|data| {
-        data.get_temp_mut_or_insert_with(Id::new(JOIN_CACHE_ID), SharedJoinCache::default)
-            .clone()
-    })
-}
-
-/// What names a joined text: its inline pieces and the references between
-/// them. The pieces of a mixed body are short (a long string is a reference),
-/// so hashing them is cheap.
-fn join_key(text: &BodyText) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    for segment in text.segments() {
-        match segment {
-            Segment::Inline(inline) => {
-                0_u8.hash(&mut hasher);
-                inline.hash(&mut hasher);
-            }
-            Segment::Deferred(body) => {
-                1_u8.hash(&mut hasher);
-                body.key.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
-fn joined(
-    ctx: &egui::Context,
-    text: &BodyText,
-    mut part: impl FnMut(&DeferredBodyRef) -> Option<Arc<str>>,
-) -> Option<Arc<str>> {
-    let key = join_key(text);
-    let cache = join_cache(ctx);
-    {
-        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.tick += 1;
-        let tick = cache.tick;
-        if let Some((text, used)) = cache.entries.get_mut(&key) {
-            *used = tick;
-            return Some(Arc::clone(text));
-        }
-    }
-    let mut out = String::with_capacity(text.len());
-    for segment in text.segments() {
-        match segment {
-            Segment::Inline(inline) => out.push_str(inline),
-            Segment::Deferred(body) => out.push_str(&part(body)?),
-        }
-    }
-    let shared: Arc<str> = Arc::from(out);
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    cache.bytes += shared.len();
-    let tick = cache.tick;
-    cache.entries.insert(key, (Arc::clone(&shared), tick));
-    while cache.bytes > JOIN_CACHE_BYTES && cache.entries.len() > 1 {
-        let Some(oldest) = cache
-            .entries
-            .iter()
-            .filter(|(entry_key, _)| **entry_key != key)
-            .min_by_key(|(_, (_, used))| *used)
-            .map(|(entry_key, _)| *entry_key)
-        else {
-            break;
-        };
-        if let Some((evicted, _)) = cache.entries.remove(&oldest) {
-            cache.bytes -= evicted.len();
-        }
-    }
-    Some(shared)
-}
-
-type DeferredBodyRef = super::types::DeferredBody;
 
 /// Where a body stands for the frame being drawn.
 #[derive(Debug, Clone)]
@@ -239,7 +149,7 @@ pub fn poll_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> TextState<'a> {
         return TextState::Ready(SharedText::Shared(only));
     }
     let mut parts = ready;
-    let text_joined = joined(ctx, text, |_| parts.next());
+    let text_joined = resolver.joined(text, |_| parts.next());
     text_joined.map_or_else(
         || TextState::Failed(vec![no_store_failure(text)]),
         |text| TextState::Ready(SharedText::Shared(text)),
@@ -257,7 +167,9 @@ pub fn peek_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> Option<SharedTe
     if let [Segment::Deferred(body)] = text.segments() {
         return resolver.peek(body).map(SharedText::Shared);
     }
-    joined(ctx, text, |body| resolver.peek(body)).map(SharedText::Shared)
+    resolver
+        .joined(text, |body| resolver.peek(body))
+        .map(SharedText::Shared)
 }
 
 fn no_store_failure(text: &BodyText) -> BodyFailure {

@@ -1731,3 +1731,94 @@ fn recovering_the_earlier_history_of_a_late_known_thread_keeps_each_unreadable_r
         ]
     );
 }
+
+/// A row of `run` that this build cannot decode, appended to the shared log.
+fn append_unreadable_row(shared: &Shared, run: &str) -> i64 {
+    let raw = rusqlite::Connection::open(&shared.config.db_path).expect("raw connection");
+    raw.execute(
+        "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+         payload, run_id) VALUES ('evorch-gui:a', ?1, 0, 1, 'Message', '{\"kind\":\"Removed\"}', ?2)",
+        rusqlite::params![event_bus::SCHEMA_VERSION, run],
+    )
+    .expect("raw insert");
+    raw.last_insert_rowid()
+}
+
+#[test]
+fn an_unreadable_row_in_the_middle_of_a_response_another_window_streams_ends_that_response() {
+    // Given: A streams a response in two slices and a row of its run that cannot be
+    // read lands between them
+    let shared = Shared::new();
+    let (mut a, mut b, thread) = working_owner_and_open_follower(&shared);
+    let slice = |index: usize, text: &str| {
+        Event::new(MessageEvent::MessagePart {
+            run_id: "run-a".into(),
+            response_id: "response".into(),
+            text: text.into(),
+            index,
+            total: 2,
+        })
+    };
+    a.emit(slice(0, "the first half, "));
+    let damaged = append_unreadable_row(&shared, "run-a");
+    a.emit(slice(1, "and the second half"));
+
+    // When: B follows the log
+    b.state.poll_and_settle();
+    b.state.switch_thread(thread).unwrap();
+
+    // Then: the gap stands there and no response is invented from the two halves,
+    // as a restart's replay would show it
+    assert_eq!(
+        thread_gaps_and_texts(&b.state),
+        ["reply from a".to_owned(), format!("gap #{damaged}")]
+    );
+}
+
+#[test]
+fn a_row_that_cannot_be_read_and_arrives_while_the_history_is_recovered_shows_once_it_is_applied() {
+    // Given: B recovers the earlier history of a thread through a held worker
+    let shared = Shared::new();
+    let private = shared.dir.path().join("private.json");
+    let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    a.emit(reply("run-a", "first"));
+    a.emit(reply("run-a", "second"));
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release) = std::sync::mpsc::channel();
+    let gate = Arc::new(Gate {
+        inner: StorageBodies::new(shared.config.db_path.clone()),
+        entered: Mutex::new(entered),
+        release: Mutex::new(release),
+        readers: Arc::new(Mutex::new(Vec::new())),
+    });
+    let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
+        state.with_body_resolver(BodyResolver::spawn(gate, ResolverConfig::default(), None))
+    });
+    std::fs::copy(&private, shared.sidebar()).unwrap();
+    b.state.poll_shared_feed();
+    b.state.switch_thread(thread).unwrap();
+    entered_rx.recv().expect("the worker started the read");
+
+    // When: only a row that cannot be read arrives meanwhile, and then the history is applied
+    let damaged = append_unreadable_row(&shared, "run-a");
+    b.state.poll_shared_feed();
+    release_tx.send(()).unwrap();
+    b.state.settle_body_rows();
+
+    // Then: no later event is needed for the gap to show
+    assert_eq!(
+        thread_gaps_and_texts(&b.state),
+        [
+            "first".to_owned(),
+            "second".to_owned(),
+            format!("gap #{damaged}")
+        ]
+    );
+}

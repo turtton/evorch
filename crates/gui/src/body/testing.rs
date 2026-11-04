@@ -169,6 +169,9 @@ impl BodyBackend for FakeBackend {
         through: i64,
         _meter: &ImmediateMeter,
     ) -> Result<Vec<HistoryRow>, BodyError> {
+        if let Some(hook) = &*self.during_read.lock().unwrap_or_else(|e| e.into_inner()) {
+            hook();
+        }
         let mut script = self.script();
         script.rows_reads.push((runs.to_vec(), after, through));
         let thread = std::thread::current().id();

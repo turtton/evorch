@@ -648,3 +648,33 @@ fn a_busy_content_of_an_unreadable_event_is_retried_by_itself_until_it_reads() {
     assert_eq!(resolver.event_phase(3), EventPhase::Idle);
     assert_eq!(resolver.stats().row_auto_retries, 1);
 }
+
+#[test]
+fn a_history_read_that_a_deleted_thread_outlives_is_dropped_and_nothing_is_recreated() {
+    let (mut state, backend, resolver, _clock, _dir) =
+        restored_with_user_messages(vec![started(), message(2, "first")], &[]);
+    // The thread's transcript goes away, then its history is asked for again
+    // and the thread is deleted while the worker reads it.
+    state.transcripts.drop_thread("t1");
+    assert!(state.transcripts.run("run-1").is_none());
+    backend.script_rows(Ok(vec![started(), message(2, "first")]));
+    let forgetting = resolver.clone();
+    backend.on_read(move || forgetting.forget_run("run-1"));
+    state.rehydrate_threads(&[("t1".to_owned(), vec!["run-1".to_owned()])]);
+    assert!(
+        !state.shared_feed.rehydrating.is_empty(),
+        "the feed waits for it"
+    );
+
+    state.settle_body_rows();
+
+    assert!(
+        state.transcripts.run("run-1").is_none(),
+        "the deleted run's transcript was not built again"
+    );
+    assert!(state.transcripts.thread_model("t1").is_none());
+    assert!(
+        state.shared_feed.rehydrating.is_empty(),
+        "and the feed does not wait for a read nobody will apply"
+    );
+}

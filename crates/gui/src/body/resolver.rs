@@ -140,6 +140,14 @@ pub struct ResolverStats {
     /// Bodies read at once while events were built (nested positions, control
     /// results, the feed's display bodies, hand-over text), by class.
     pub immediate: ImmediateStats,
+    /// Joins of a body made of several pieces, and asks served from the joined
+    /// text kept for it.
+    pub joins: u64,
+    pub join_hits: u64,
+    /// Joined text held now, and the most it held at once. It is part of the
+    /// cache's budget (`cached_bytes`), not a second one.
+    pub joined_bytes: usize,
+    pub joined_peak_bytes: usize,
     /// The threads that called the backend; never the UI's.
     pub reader_threads: Vec<ThreadId>,
 }
@@ -186,6 +194,14 @@ enum Phase {
     },
 }
 
+/// The text of a body made of several pieces, joined once and kept within
+/// the same budget as the pieces.
+struct Joined {
+    text: Arc<str>,
+    last_used: u64,
+    runs: Vec<String>,
+}
+
 struct Entry {
     phase: Phase,
     origins: Vec<Arc<BodyOrigin>>,
@@ -227,7 +243,11 @@ struct State {
     wanted: HashSet<BodyRef>,
     wanted_before: HashSet<BodyRef>,
     pins: HashMap<BodyRef, usize>,
+    /// Resolved text held for reuse: the pieces and the joined texts.
     ready_bytes: usize,
+    joined: HashMap<u64, Joined>,
+    joined_bytes: usize,
+    joined_peak: usize,
     tick: u64,
     seq: u64,
     request: u64,
@@ -238,6 +258,9 @@ struct State {
     rows_waiting: Vec<RowsWait>,
     rows_results: Vec<RowsOutcome>,
     rows_seq: u64,
+    /// Rows reads that were running when what they read for was forgotten:
+    /// whatever they bring back, and any retry of them, is dropped.
+    rows_invalid: HashSet<u64>,
     gap_failed: HashMap<i64, String>,
     stats: ResolverStats,
 }
@@ -622,6 +645,24 @@ impl BodyResolver {
         state
             .rows_results
             .retain(|o| !o.request.runs.iter().any(|run| run == run_id));
+        if let Some(reading) = state.rows_reading.as_ref()
+            && reading.runs.iter().any(|run| run == run_id)
+        {
+            let id = reading.id;
+            state.rows_invalid.insert(id);
+        }
+        let dropped: Vec<u64> = state
+            .joined
+            .iter()
+            .filter(|(_, joined)| joined.runs.iter().any(|run| run == run_id))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in dropped {
+            if let Some(joined) = state.joined.remove(&key) {
+                state.ready_bytes -= joined.text.len();
+                state.joined_bytes -= joined.text.len();
+            }
+        }
         let State {
             entries,
             ready_bytes,
@@ -718,9 +759,85 @@ impl BodyResolver {
 
     #[must_use]
     pub fn stats(&self) -> ResolverStats {
-        let mut stats = self.lock().stats.clone();
+        let state = self.lock();
+        let mut stats = state.stats.clone();
+        stats.joined_bytes = state.joined_bytes;
+        stats.joined_peak_bytes = state.joined_peak;
+        drop(state);
         stats.immediate = self.shared.meter.snapshot();
         stats
+    }
+
+    /// The text of a body made of several pieces, joined once: asking again
+    /// for the same pieces gives the same allocation. `part` supplies the text
+    /// of each deferred piece, in order (`None` when it is not at hand). The
+    /// joined text counts against the cache's budget like the pieces do and is
+    /// released with them; one larger than the whole budget is not kept, only
+    /// handed to whoever asked, for as long as they hold it.
+    pub fn joined(
+        &self,
+        text: &BodyText,
+        mut part: impl FnMut(&DeferredBody) -> Option<Arc<str>>,
+    ) -> Option<Arc<str>> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for segment in text.segments() {
+            match segment {
+                Segment::Inline(inline) => {
+                    0_u8.hash(&mut hasher);
+                    inline.hash(&mut hasher);
+                }
+                Segment::Deferred(body) => {
+                    1_u8.hash(&mut hasher);
+                    body.key.hash(&mut hasher);
+                }
+            }
+        }
+        let key = hasher.finish();
+        {
+            let mut state = self.lock();
+            state.tick += 1;
+            let tick = state.tick;
+            if let Some(joined) = state.joined.get_mut(&key) {
+                joined.last_used = tick;
+                let text = Arc::clone(&joined.text);
+                state.stats.join_hits += 1;
+                return Some(text);
+            }
+        }
+        let mut out = String::with_capacity(text.len());
+        for segment in text.segments() {
+            match segment {
+                Segment::Inline(inline) => out.push_str(inline),
+                Segment::Deferred(body) => out.push_str(&part(body)?),
+            }
+        }
+        let shared: Arc<str> = Arc::from(out);
+        let mut runs: Vec<String> = Vec::new();
+        for run in text.bodies().filter_map(|body| body.origin.run_id.clone()) {
+            if !runs.contains(&run) {
+                runs.push(run);
+            }
+        }
+        let cap = self.shared.config.cache_bytes;
+        let mut state = self.lock();
+        state.stats.joins += 1;
+        if shared.len() <= cap && !state.joined.contains_key(&key) {
+            let tick = state.tick;
+            state.ready_bytes += shared.len();
+            state.joined_bytes += shared.len();
+            state.joined_peak = state.joined_peak.max(state.joined_bytes);
+            state.joined.insert(
+                key,
+                Joined {
+                    text: Arc::clone(&shared),
+                    last_used: tick,
+                    runs,
+                },
+            );
+            state.evict_over(cap, None, Some(key));
+        }
+        Some(shared)
     }
 
     /// Bytes of resolved text held for reuse (not counting oversized text).
@@ -843,6 +960,11 @@ impl Shared {
             state.stats.reader_threads.push(thread);
         }
         state.rows_reading = None;
+        if state.rows_invalid.remove(&request.id) {
+            // What it was read for was forgotten (a deleted thread) while it ran.
+            state.stats.late_results_dropped += 1;
+            return;
+        }
         if let Some(error) = transient_failure(&request, &outcome)
             && usize::from(request.retries) < self.config.retry_delays.len()
         {
@@ -1210,18 +1332,19 @@ impl State {
         }
         if !oversize {
             self.ready_bytes += len;
-            self.evict_over(config.cache_bytes, key);
+            self.evict_over(config.cache_bytes, Some(key), None);
         }
     }
 
-    /// Drops the least recently used resolved text until the cache fits.
-    fn evict_over(&mut self, cap: usize, keep: &BodyRef) {
+    /// Drops the least recently used resolved text, a piece or a joined text,
+    /// until the cache fits. `keep` and `keep_joined` are the one just stored.
+    fn evict_over(&mut self, cap: usize, keep: Option<&BodyRef>, keep_joined: Option<u64>) {
         while self.ready_bytes > cap {
-            let victim = self
+            let piece = self
                 .entries
                 .iter()
                 .filter(|(key, entry)| {
-                    *key != keep
+                    Some(*key) != keep
                         && matches!(
                             entry.phase,
                             Phase::Ready {
@@ -1231,15 +1354,43 @@ impl State {
                         )
                 })
                 .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| *key);
-            let Some(victim) = victim else { break };
-            if let Some(entry) = self.entries.get_mut(&victim)
-                && let Phase::Ready { text, .. } = &entry.phase
-            {
-                self.ready_bytes -= text.len();
-                entry.phase = Phase::Idle;
-                self.stats.evictions += 1;
+                .map(|(key, entry)| (*key, entry.last_used));
+            let joined = self
+                .joined
+                .iter()
+                .filter(|(key, _)| Some(**key) != keep_joined)
+                .min_by_key(|(_, joined)| joined.last_used)
+                .map(|(key, joined)| (*key, joined.last_used));
+            match (piece, joined) {
+                (None, None) => break,
+                (Some((key, _)), None) => self.evict_piece(&key),
+                (None, Some((key, _))) => self.evict_joined(key),
+                (Some((piece_key, piece_used)), Some((joined_key, joined_used))) => {
+                    if piece_used <= joined_used {
+                        self.evict_piece(&piece_key);
+                    } else {
+                        self.evict_joined(joined_key);
+                    }
+                }
             }
+        }
+    }
+
+    fn evict_piece(&mut self, key: &BodyRef) {
+        if let Some(entry) = self.entries.get_mut(key)
+            && let Phase::Ready { text, .. } = &entry.phase
+        {
+            self.ready_bytes -= text.len();
+            entry.phase = Phase::Idle;
+            self.stats.evictions += 1;
+        }
+    }
+
+    fn evict_joined(&mut self, key: u64) {
+        if let Some(joined) = self.joined.remove(&key) {
+            self.ready_bytes -= joined.text.len();
+            self.joined_bytes -= joined.text.len();
+            self.stats.evictions += 1;
         }
     }
 }

@@ -64,6 +64,7 @@ pub fn split_container(
     resolve_now: &mut ResolveNow<'_>,
 ) -> Result<Split, BodyError> {
     let mut body = None;
+    let mut display_text = None;
     let control_result = control_result_token(&container);
     if let Some(slot) = primary_slot(&mut container)
         && let Some(parsed) = slot.as_str().and_then(BodyRef::parse_token)
@@ -75,12 +76,19 @@ pub fn split_container(
                 run_id_hint,
                 Some(event_id),
             )));
-            *slot = Value::String(String::new());
         } else {
-            *slot = Value::String(resolve_now(&key, ImmediateClass::FeedDisplay)?.to_string());
+            display_text = Some(resolve_now(&key, ImmediateClass::FeedDisplay)?);
         }
+        // Empty while the rest is walked: what the display body resolves to may
+        // itself start with the escape character and is not a token position.
+        *slot = Value::String(String::new());
     }
     resolve_nested(&mut container, control_result.as_deref(), resolve_now)?;
+    if let Some(text) = display_text
+        && let Some(slot) = primary_slot(&mut container)
+    {
+        *slot = Value::String(text.to_string());
+    }
     let kind = serde_json::from_value::<EventKind>(container).map_err(|error| {
         BodyError::new(
             BodyErrorKind::Corrupt,
@@ -266,5 +274,67 @@ mod tests {
             panic!("kind")
         };
         assert_eq!(text, "joined");
+    }
+
+    #[test]
+    fn a_display_body_read_for_a_joining_reader_is_not_scanned_again_as_a_token() {
+        let (nested_key, nested_token) = token(6, 3);
+        let (key, token) = token(5, 40);
+        // The text itself starts with the escape character: it is text, not a
+        // token position, whether it is malformed or looks like another blob.
+        for stored in [
+            "\u{e000}evorch-body:v1:not-a-token".to_owned(),
+            nested_token.clone(),
+        ] {
+            let container = json!({"kind": "Message", "payload": {"kind": "MessageCompleted",
+                "payload": {"run_id": "r", "text": token}}});
+            let mut reads = Vec::new();
+            let mut resolve =
+                |read: &BodyRef, class: ImmediateClass| -> Result<Arc<str>, BodyError> {
+                    reads.push((*read, class));
+                    Ok(Arc::from(stored.as_str()))
+                };
+
+            let split = split_container(container, Some("r"), 1, false, &mut resolve).unwrap();
+
+            assert_eq!(
+                reads,
+                vec![(key, ImmediateClass::FeedDisplay)],
+                "read once, not again"
+            );
+            assert!(!reads.iter().any(|(read, _)| *read == nested_key));
+            let EventKind::Message(event_bus::MessageEvent::MessageCompleted { text, .. }) =
+                split.kind
+            else {
+                panic!("kind")
+            };
+            assert_eq!(text, stored, "the text comes back exactly as it was stored");
+        }
+    }
+
+    #[test]
+    fn a_joining_reader_still_resolves_the_nested_positions_around_the_display_body() {
+        let (_, display) = token(7, 12);
+        let (input_key, input) = token(8, 5);
+        let container = json!({"kind": "Tool", "payload": {"kind": "ToolCompleted", "payload": {
+            "tool_name": "read", "call_id": "c", "is_error": false, "output": display,
+            "detail": {"nested": input}, "run_id": "r"}}});
+        let mut resolve = |read: &BodyRef, class: ImmediateClass| -> Result<Arc<str>, BodyError> {
+            Ok(Arc::from(match class {
+                ImmediateClass::FeedDisplay => "\u{e000}shown",
+                _ if *read == input_key => "nested text",
+                _ => panic!("unexpected read"),
+            }))
+        };
+
+        let split = split_container(container, Some("r"), 1, false, &mut resolve).unwrap();
+
+        let EventKind::Tool(event_bus::ToolEvent::ToolCompleted { output, detail, .. }) =
+            split.kind
+        else {
+            panic!("kind")
+        };
+        assert_eq!(output.as_deref(), Some("\u{e000}shown"));
+        assert_eq!(detail.unwrap()["nested"], "nested text");
     }
 }

@@ -693,3 +693,116 @@ fn a_worker_retries_by_the_injected_clock_and_stops_when_the_resolver_is_dropped
     drop(resolver);
     assert!(weak.upgrade().is_none(), "the worker released its backend");
 }
+
+#[test]
+fn a_rows_read_running_when_its_run_is_forgotten_brings_back_nothing_and_is_not_retried() {
+    for outcome in [
+        Ok(vec![failure_row(7, FailureKind::Unreadable, "x")]),
+        Err(busy()),
+    ] {
+        let rig = rig();
+        rig.backend.script_rows(outcome);
+        let resolver = rig.resolver.clone();
+        // The thread is deleted while the worker is reading.
+        rig.backend.on_read(move || resolver.forget_run("run-a"));
+        rig.resolver.request_rows(
+            RowsPurpose::Rehydrate { thread: "t".into() },
+            vec!["run-a".into()],
+            0,
+            9,
+        );
+
+        rig.resolver.pump_all();
+
+        assert!(rig.resolver.take_rows_results().is_empty());
+        assert!(!rig.resolver.rehydrating("t"), "nothing waits for a retry");
+        rig.clock.advance(Duration::from_secs(10));
+        rig.resolver.pump_all();
+        assert_eq!(rig.backend.rows_reads().len(), 1, "and nothing reads again");
+        assert!(rig.resolver.take_rows_results().is_empty());
+        assert_eq!(rig.resolver.stats().late_results_dropped, 1);
+    }
+}
+
+fn mixed(a: DeferredBody, b: DeferredBody) -> BodyText {
+    let mut text = BodyText::from("<");
+    text.push_body(BodyText::deferred(a));
+    text.push_body(BodyText::from("|"));
+    text.push_body(BodyText::deferred(b));
+    text
+}
+
+#[test]
+fn a_joined_text_counts_against_the_same_budget_as_its_pieces_and_is_shared_while_kept() {
+    let rig = rig_with(|config| config.cache_bytes = 1_000);
+    let a = rig.backend.deferred(&"a".repeat(300), "run-a", 1);
+    let b = rig.backend.deferred(&"b".repeat(300), "run-a", 2);
+    rig.frame(&[&a, &b]);
+    rig.resolver.pump_all();
+    assert_eq!(rig.resolver.cached_bytes(), 600);
+    let text = mixed(a, b);
+
+    let first = rig
+        .resolver
+        .joined(&text, |body| rig.resolver.peek(body))
+        .expect("both pieces are held");
+
+    assert_eq!(first.len(), 602);
+    // 600 of pieces and 602 joined would be 1202 against a budget of 1000.
+    assert!(
+        rig.resolver.cached_bytes() <= 1_000,
+        "{}",
+        rig.resolver.cached_bytes()
+    );
+    let stats = rig.resolver.stats();
+    assert_eq!(stats.joined_bytes, 602);
+    assert!(stats.joined_peak_bytes >= 602);
+    let second = rig
+        .resolver
+        .joined(&text, |_| panic!("nothing is joined again"))
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &second), "the same allocation");
+    assert_eq!(rig.resolver.stats().join_hits, 1);
+}
+
+#[test]
+fn a_joined_text_larger_than_the_whole_budget_is_not_kept_after_its_asker_is_done() {
+    let rig = rig_with(|config| config.cache_bytes = 1_000);
+    let part = |_: &DeferredBody| Some(Arc::<str>::from("x".repeat(500)));
+    let a = rig.backend.deferred("one", "run-a", 1);
+    let b = rig.backend.deferred("two", "run-a", 2);
+    let text = mixed(a, b);
+
+    let first = rig.resolver.joined(&text, part).expect("joined");
+    assert_eq!(first.len(), 1_002);
+
+    let stats = rig.resolver.stats();
+    assert_eq!(stats.joined_bytes, 0, "nothing of it is kept");
+    assert_eq!(rig.resolver.cached_bytes(), 0);
+    let second = rig.resolver.joined(&text, part).unwrap();
+    assert!(!Arc::ptr_eq(&first, &second), "so the next ask joins again");
+    assert_eq!(rig.resolver.stats().joins, 2);
+}
+
+#[test]
+fn forgetting_a_run_releases_the_joined_text_of_its_bodies() {
+    let rig = rig();
+    let a = rig.backend.deferred(&"a".repeat(300), "run-a", 1);
+    let b = rig.backend.deferred(&"b".repeat(300), "run-a", 2);
+    rig.frame(&[&a, &b]);
+    rig.resolver.pump_all();
+    let text = mixed(a, b);
+    rig.resolver
+        .joined(&text, |body| rig.resolver.peek(body))
+        .unwrap();
+    assert_eq!(rig.resolver.stats().joined_bytes, 602);
+
+    rig.resolver.forget_run("run-a");
+
+    assert_eq!(rig.resolver.stats().joined_bytes, 0);
+    assert_eq!(
+        rig.resolver.cached_bytes(),
+        0,
+        "pieces and joined text are all gone"
+    );
+}

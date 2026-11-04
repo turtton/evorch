@@ -181,13 +181,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     /// Whether events of other processes are held back, waiting for the sidebar.
     pub(super) fn shared_events_held(&self) -> bool {
-        !self.shared_feed.pending.is_empty()
+        !self.shared_feed.pending.is_empty() || !self.shared_feed.failures.is_empty()
     }
 
     /// Folds the queued events of other processes in order, stopping at one that
     /// waits for the sidebar. Run once per frame while events are queued.
     pub fn retry_pending_shared_events(&mut self) {
-        if !self.shared_feed.pending.is_empty() {
+        if !self.shared_feed.pending.is_empty() || !self.shared_feed.failures.is_empty() {
             self.fold_pending_shared();
         }
     }
@@ -243,6 +243,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 break;
             }
             let failure = entry.remove();
+            // What the run was streaming cannot continue across the gap, as in
+            // a restart's replay: the next slice would be the rest of nothing.
+            if let Some(run) = &failure.run_id {
+                let boundary = Event::new(event_bus::MessageEvent::StreamRetried {
+                    run_id: Some(run.clone()),
+                });
+                let _ = self.shared_feed.parts.accept(&boundary);
+            }
             let mut shown = std::collections::BTreeMap::new();
             self.show_unreadable_event(&failure, &mut shown);
             for (id, event) in shown {
