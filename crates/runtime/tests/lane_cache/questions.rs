@@ -368,3 +368,91 @@ async fn ask_user_capacity_returns_a_bounded_success_without_retry() {
     h.runtime.cancel(lead).unwrap();
     h.runtime.wait(lead).await.unwrap();
 }
+
+#[tokio::test]
+async fn failed_report_retries_from_same_run_share_one_notification_episode() {
+    let mut h = harness(vec![text_response("lead idle")], 1_000_000);
+    let config = storage::StorageConfig {
+        db_path: h._directory.path().join("failed-report.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    h.runtime = h
+        .runtime
+        .with_run_store(runtime::RunStore::open(&config, db.handle()).unwrap());
+    let lead = h
+        .runtime
+        .delegate_chat(
+            "failed-report-lead",
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut events = through_phase(&mut h.receiver, lead, AgentRunPhase::Waiting).await;
+    let lane = open(&mut h, lead, "open-failed", "failure episode", &mut events).await;
+    let mut reports = Vec::new();
+    for call_id in ["failed-first", "failed-again"] {
+        input(
+            &mut h,
+            lane,
+            "report failed attempt",
+            vec![
+                call(
+                    call_id,
+                    "lane_report",
+                    json!({"status":"failed","summary":call_id}),
+                ),
+                text_response("reported"),
+            ],
+            &mut events,
+        )
+        .await;
+        let report = result(&h, call_id);
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["failure_episode"], format!("agent:{lane}"));
+        reports.push(report);
+    }
+    assert_eq!(reports[0]["failure_episode"], reports[1]["failure_episode"]);
+    assert_ne!(
+        reports[0]["report_seq"], reports[1]["report_seq"],
+        "both report writes are retained"
+    );
+    input(
+        &mut h,
+        lead,
+        "read notification references",
+        vec![
+            call(
+                "failure-notices",
+                "lane_list",
+                json!({"notifications_after":""}),
+            ),
+            text_response("read"),
+        ],
+        &mut events,
+    )
+    .await;
+    let notices = result(&h, "failure-notices");
+    let failed: Vec<_> = notices["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["kind"]["kind"] == "failed")
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "a repeated failure episode queues exactly one notification"
+    );
+    for run in [lane, lead] {
+        h.runtime.cancel(run).unwrap();
+        h.runtime.wait(run).await.unwrap();
+    }
+    assert_eq!(h.mock.remaining_scripts(), 0);
+}

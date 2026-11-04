@@ -295,8 +295,8 @@ async fn lead_questions_are_independent_paginated_and_answers_are_untrusted() {
         f.runtime.shared.review_runs.lock().unwrap()[&lane_run].visible_request_count(),
         before
     );
-    let mut second = request(&answered, "second", Some("another"));
-    second.routing_revision = answered.routing_revision;
+    // A competing operation uses the SAME revision from the original listing.
+    let second = request(first, "second", Some("another"));
     assert_eq!(
         f.runtime
             .resolve_lane_question(lead, second)
@@ -333,6 +333,16 @@ async fn lead_questions_are_independent_paginated_and_answers_are_untrusted() {
         human.answer_origin,
         Some(AnswerOrigin::Host { .. })
     ));
+    assert_eq!(
+        f.runtime
+            .resolve_lane_question(
+                lead,
+                request(&questions[1], "late-after-human", Some("late"))
+            )
+            .unwrap_err()
+            .code,
+        "stale_routing"
+    );
     assert_eq!(f.runtime.user_answers(lead).unwrap().len(), 32);
     for q in &questions[2..] {
         f.runtime
@@ -608,6 +618,135 @@ async fn lane_lead_answer_is_injected_once_across_explicit_restore() {
         1
     );
     assert!(last.iter().any(|m|m.content.iter().any(|b|matches!(b,providers::ContentBlock::Text{text} if text.contains("followup after a second restore")))));
+    f.stop(lane.root_run_id).await;
+    f.stop(lead).await;
+}
+
+fn escaped_question_at_page_bytes(mut question: UserQuestion, bytes: usize) -> UserQuestion {
+    question.responder = Some(QuestionResponder::Lead {
+        thread_id: "lead".into(),
+    });
+    question.management_revision = Some(1);
+    question.routing_revision = 1;
+    question.title = format!("Q{}", "x".repeat(2047));
+    question.options = vec![format!("A{}", "x".repeat(255)); 3];
+    let base = serde_json::to_vec(&(Vec::<UserQuestion>::new(), &question))
+        .unwrap()
+        .len();
+    let extra = bytes.checked_sub(base).unwrap();
+    let controls = extra / 5;
+    let quotes = extra % 5;
+    let mut fields = vec!['x'; 2047 + 3 * 255];
+    assert!(controls + quotes <= fields.len());
+    fields[..controls].fill('\0');
+    fields[controls..controls + quotes].fill('"');
+    question.title = format!("Q{}", fields[..2047].iter().collect::<String>());
+    question.options = fields[2047..]
+        .chunks(255)
+        .map(|chars| format!("A{}", chars.iter().collect::<String>()))
+        .collect();
+    assert_eq!(question.title.len(), 2048);
+    assert!(question.options.iter().all(|s| s.len() == 256));
+    assert_eq!(
+        serde_json::to_vec(&(Vec::<UserQuestion>::new(), &question))
+            .unwrap()
+            .len(),
+        bytes
+    );
+    question
+}
+
+#[tokio::test]
+async fn escaped_questions_fit_the_page_or_roll_back_before_acceptance() {
+    let mut f = Fixture::new();
+    let lead = f.lead("lead").await;
+    let lane = f.lane(lead, "lane", LanePolicy::Attached).await;
+    let template = f
+        .runtime
+        .request_user_question(lane.root_run_id, "template?".into(), vec![], false)
+        .unwrap();
+    let page_budget = storage::lane_delivery::LANE_DELIVERY_PAGE_BYTES - 1024;
+    let boundary = escaped_question_at_page_bytes(template.clone(), page_budget);
+    let accepted = created(
+        f.runtime
+            .request_question_with_binding(
+                lane.root_run_id,
+                boundary.title,
+                boundary.options,
+                false,
+                LaneDeliveryBinding::Bound,
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_vec(&(Vec::<UserQuestion>::new(), &accepted))
+            .unwrap()
+            .len(),
+        page_budget
+    );
+    let page = f.runtime.list_lane_questions(lead, None).unwrap();
+    assert_eq!(page.questions.len(), 1);
+    assert_eq!(page.questions[0].id, accepted.id);
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 16384);
+    let excess = escaped_question_at_page_bytes(template, page_budget + 1);
+    let error = f
+        .runtime
+        .request_question_with_binding(
+            lane.root_run_id,
+            excess.title,
+            excess.options,
+            false,
+            LaneDeliveryBinding::Bound,
+        )
+        .unwrap_err();
+    assert!(error.contains("question_exceeds_page_bytes"));
+    let error = f
+        .runtime
+        .request_question_with_binding(
+            lane.root_run_id,
+            format!("Q{}", "\0".repeat(2047)),
+            vec![format!("A{}", "\0".repeat(255)); 3],
+            true,
+            LaneDeliveryBinding::Bound,
+        )
+        .unwrap_err();
+    assert!(error.contains("question_exceeds_page_bytes"));
+    assert_eq!(
+        f.runtime.user_answers(lane.root_run_id).unwrap().len(),
+        2,
+        "rejected questions must not remain as hidden blockers"
+    );
+    assert_eq!(
+        f.db.handle()
+            .lane_inbox("lead".into(), String::new())
+            .unwrap()
+            .len(),
+        1,
+        "no outbox notices for rejected questions"
+    );
+    let after = created(
+        f.runtime
+            .request_question_with_binding(
+                lane.root_run_id,
+                "after escaping boundary?".into(),
+                vec![],
+                true,
+                LaneDeliveryBinding::Bound,
+            )
+            .unwrap(),
+    );
+    let first_page = f.runtime.list_lane_questions(lead, None).unwrap();
+    let mut all = first_page.questions;
+    if let Some(cursor) = first_page.next_cursor {
+        all.extend(
+            f.runtime
+                .list_lane_questions(lead, Some(cursor))
+                .unwrap()
+                .questions,
+        );
+    }
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().any(|q| q.id == after.id));
     f.stop(lane.root_run_id).await;
     f.stop(lead).await;
 }

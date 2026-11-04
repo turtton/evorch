@@ -259,6 +259,12 @@ pub(crate) fn create_question(
     };
     tx.execute("INSERT INTO lane_question_routes(question_id,lane_id,requester_run_id,requester_root_run_id,requester_thread_id,responder_thread_id,management_revision,routing_revision,payload) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![route.question_id,lane_id,route.requester.run_id,route.requester.root_run_id,route.requester.thread_id,responder_thread(&route.responder)?,route.management_revision,route.routing_revision,json(&route)?])?;
     project(&mut question, &route);
+    // Raw UTF-8 limits do not bound JSON escaping. A successfully created
+    // question must fit the first slot of a lane_questions page; rejecting here
+    // rolls back the question and route before an outbox notice can be queued.
+    if json(&(Vec::<UserQuestion>::new(), &question))?.len() > LANE_DELIVERY_PAGE_BYTES - 1024 {
+        return Err(conflict("question_exceeds_page_bytes"));
+    }
     save_projection(&tx, &question)?;
     if let QuestionResponder::Lead { thread_id } = &route.responder {
         enqueue(
@@ -320,6 +326,14 @@ pub(crate) fn mutate_question(
             return Err(conflict("operation_id_reused"));
         }
         return Ok(question);
+    }
+    // An answer advances routing_revision too, but leaves the lead responder
+    // unchanged. Classify a competing answer from the same listing as answered,
+    // not as a route change. A User responder still takes the stale-routing path.
+    if question.answer.is_some()
+        && responder_thread(&route.responder)? == Some(&request.lead_thread_id)
+    {
+        return Err(StorageError::QuestionAlreadyAnswered);
     }
     if route.routing_revision != request.expected_routing_revision {
         return Err(StorageError::StaleRevision {
