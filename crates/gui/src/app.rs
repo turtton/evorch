@@ -14,6 +14,7 @@ mod delivery;
 #[cfg(test)]
 mod delivery_tests;
 mod escalation;
+mod evaluations;
 mod external_commands;
 #[cfg(test)]
 mod family_state_tests;
