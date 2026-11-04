@@ -87,6 +87,7 @@ fn seed_events(conn: &Connection) -> Seeded {
     .unwrap();
     let shared = long("shared tool output", 5_000);
     let compaction: EventKind = CompactionEvent::Compacted {
+        operation_id: "fixture-compaction".into(),
         run_id: "run-big".into(),
         reason: event_bus::CompactionReason::Automatic,
         threshold: 0.8,

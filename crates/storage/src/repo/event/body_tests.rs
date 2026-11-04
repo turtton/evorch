@@ -176,6 +176,7 @@ fn every_targeted_kind_round_trips_through_tokens() {
             Some(json!({"files": [noise(7, 2_048), "x"]})),
         ),
         CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-a".into(),
             reason: event_bus::CompactionReason::Automatic,
             threshold: 0.8,
