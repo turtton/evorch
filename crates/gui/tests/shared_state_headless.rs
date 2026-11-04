@@ -16,6 +16,10 @@ use event_bus::{
     OwnershipEvent, ProviderEvent, ProviderFailureKind, SkillDiagnosticKind, ToolEvent,
 };
 use gui::app::WorkbenchState;
+use gui::body::{
+    BodyBackend, BodyError, BodyRef, BodyResolver, BodyResult, HistoryRow, ImmediateMeter,
+    ResolverConfig, StorageBodies,
+};
 use gui::fixture::DemoSource;
 use gui::model::commands::{CommandSink, LoopEvent, WorkbenchCommand};
 use gui::model::composer::ProviderStatus;
@@ -92,7 +96,13 @@ fn open_window_customized(
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
             .expect("workbench")
             .with_provider_status(ProviderStatus::Configured)
-            .with_ownership(Arc::clone(&host)),
+            .with_ownership(Arc::clone(&host))
+            // The resolver reads on the thread that pumps it: a test runs the
+            // worker's reads by hand, in `poll_and_settle`.
+            .with_body_resolver(BodyResolver::manual(
+                Arc::new(StorageBodies::new(shared.config.db_path.clone())),
+                ResolverConfig::default(),
+            )),
     )
     .with_sidebar_path(sidebar_path.clone());
     if sidebar_path.exists() {
@@ -110,6 +120,21 @@ fn open_window_customized(
         stream: stream.into(),
         host,
         bus,
+    }
+}
+
+/// Polling the feed the way frames do, then letting the resolver's worker read
+/// what was asked of it (an earlier history recovered for a conversation that
+/// just became known) and applying it.
+trait PollAndSettle {
+    fn poll_and_settle(&mut self) -> usize;
+}
+
+impl PollAndSettle for WorkbenchState<DemoSource> {
+    fn poll_and_settle(&mut self) -> usize {
+        let arrived = self.poll_shared_feed();
+        self.settle_body_rows();
+        arrived
     }
 }
 
@@ -218,7 +243,7 @@ fn a_thread_worked_on_elsewhere_shows_its_transcript_and_phase_and_rejects_input
     let before = event_count(&shared);
 
     // When: B follows the shared log
-    let arrived = b.state.poll_shared_feed();
+    let arrived = b.state.poll_and_settle();
 
     // Then: B shows A's conversation and that it is running
     assert!(arrived >= 3, "arrived {arrived}");
@@ -237,7 +262,7 @@ fn a_thread_worked_on_elsewhere_shows_its_transcript_and_phase_and_rejects_input
         before,
         "following must not re-persist"
     );
-    assert_eq!(b.state.poll_shared_feed(), 0);
+    assert_eq!(b.state.poll_and_settle(), 0);
 }
 
 #[test]
@@ -247,7 +272,7 @@ fn a_window_does_not_fold_its_own_events_a_second_time() {
     let (mut a, _b, _thread) = working_owner_and_open_follower(&shared);
 
     // When: A follows the log, which holds only its own rows
-    let arrived = a.state.poll_shared_feed();
+    let arrived = a.state.poll_and_settle();
 
     // Then: nothing arrives and the transcript is not duplicated
     assert_eq!(arrived, 0);
@@ -264,7 +289,7 @@ fn a_restart_replays_history_once_and_following_starts_after_it() {
     let mut c = open_window(&shared, "evorch-gui:c");
     c.state.switch_thread(thread).expect("open");
     let replayed = texts(&c.state);
-    let arrived = c.state.poll_shared_feed();
+    let arrived = c.state.poll_and_settle();
 
     // Then: the replay holds the conversation once and following adds nothing
     assert_eq!(replayed, ["hello from a", "reply from a"]);
@@ -336,20 +361,20 @@ fn response_parts_survive_feed_batches_and_every_restart_boundary_without_duplic
         for (index, part) in parts.iter().enumerate().skip(restored) {
             persist(part);
             let before = event_count(&shared);
-            assert_eq!(b.state.poll_shared_feed(), 1);
+            assert_eq!(b.state.poll_and_settle(), 1);
             assert_eq!(event_count(&shared), before, "following must not write");
             if index + 1 < parts.len() {
                 assert!(texts(&b.state).is_empty());
             }
         }
         assert_eq!(texts(&b.state), [text.as_str()]);
-        assert_eq!(b.state.poll_shared_feed(), 0);
+        assert_eq!(b.state.poll_and_settle(), 0);
         assert_eq!(texts(&b.state), [text.as_str()]);
     }
 }
 
 #[test]
-fn late_sidebar_rehydrates_response_parts_across_pages_and_then_follows_the_remaining_parts() {
+fn late_sidebar_rehydrates_response_parts_and_then_follows_the_remaining_parts() {
     let text = "あ\"\\\n".repeat(200);
     let parts = stored_response_parts(&text);
     for restored in [1, parts.len()] {
@@ -372,22 +397,20 @@ fn late_sidebar_rehydrates_response_parts_across_pages_and_then_follows_the_rema
         for part in &parts[..restored] {
             persist(part);
         }
-        let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
-            state.with_rehydrate_page_size(1)
-        });
+        let mut b = open_window(&shared, "evorch-gui:b");
         assert!(b.state.sidebar().threads.is_empty());
         std::fs::copy(&private, shared.sidebar()).unwrap();
-        assert_eq!(b.state.poll_shared_feed(), 0);
+        assert_eq!(b.state.poll_and_settle(), 0);
         b.state.switch_thread(thread).unwrap();
         if restored < parts.len() {
             assert!(texts(&b.state).is_empty());
         }
         for part in &parts[restored..] {
             persist(part);
-            b.state.poll_shared_feed();
+            b.state.poll_and_settle();
         }
         assert_eq!(texts(&b.state), [text.as_str()]);
-        assert_eq!(b.state.poll_shared_feed(), 0);
+        assert_eq!(b.state.poll_and_settle(), 0);
         assert_eq!(texts(&b.state), [text.as_str()]);
     }
 }
@@ -408,7 +431,7 @@ fn a_released_thread_stops_showing_its_runs_as_active() {
         AgentRunPhase::Pending,
         AgentRunPhase::Running,
     ));
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     assert_eq!(thread_state(&b.state, &thread), ThreadState::Running);
     let child = workspace_ui::PanelId::new("agent-child-a");
     let path = b.state.dock().find_tab(&child).expect("running child pane");
@@ -424,7 +447,7 @@ fn a_released_thread_stops_showing_its_runs_as_active() {
         generation: 1,
         action: OwnershipAction::Released,
     }));
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
 
     // Then: B shows it as stopped, not running forever
     assert_eq!(
@@ -456,7 +479,7 @@ fn a_late_final_event_still_settles_a_run_that_ended_normally() {
     }));
 
     // When: B follows both in one batch
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
 
     // Then: the recorded Done is kept, not overwritten by the release
     assert_eq!(
@@ -488,8 +511,8 @@ fn sidebar_changes_of_both_windows_reach_both_and_neither_overwrites_the_other()
     );
 
     // And: following brings each window up to date without moving its selection
-    a.state.poll_shared_feed();
-    b.state.poll_shared_feed();
+    a.state.poll_and_settle();
+    b.state.poll_and_settle();
     for window in [&a, &b] {
         let titles: BTreeSet<_> = window
             .state
@@ -519,8 +542,8 @@ fn threads_created_by_both_windows_get_distinct_ids() {
         created.insert(a.state.create_thread(format!("a{index}")).expect("a"));
         created.insert(b.state.create_thread(format!("b{index}")).expect("b"));
     }
-    a.state.poll_shared_feed();
-    b.state.poll_shared_feed();
+    a.state.poll_and_settle();
+    b.state.poll_and_settle();
 
     // Then: no id was reused and both windows hold all of them
     assert_eq!(created.len(), 40);
@@ -554,14 +577,14 @@ fn events_of_a_conversation_the_sidebar_lacks_wait_for_the_sidebar() {
     a.emit(reply("run-a", "early reply"));
 
     // When: B follows before the sidebar names the thread
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
 
     // Then: the chat start is held back rather than lost
     assert!(b.state.thread_phases().is_empty());
 
     // When: the sidebar appears
     std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     b.state.switch_thread(thread).expect("open");
 
     // Then: the held events are shown in order
@@ -728,7 +751,7 @@ fn a_release_stops_only_the_runs_active_when_it_happened() {
     let shared = Shared::new();
     let (a, _b, thread) = working_owner_and_open_follower(&shared);
     let mut c = open_window(&shared, "evorch-gui:c");
-    c.state.poll_shared_feed();
+    c.state.poll_and_settle();
     assert_eq!(
         c.state.thread_phases().get("run-a"),
         Some(&ThreadRunPhase::Running)
@@ -754,7 +777,7 @@ fn a_release_stops_only_the_runs_active_when_it_happened() {
         "evorch-gui:d",
         phase("run-new", AgentRunPhase::Pending, AgentRunPhase::Running),
     );
-    c.state.poll_shared_feed();
+    c.state.poll_and_settle();
 
     // Then: the old run ended with the release, the new owner's run keeps running
     assert_eq!(
@@ -793,7 +816,7 @@ fn a_sidebar_published_after_a_restart_recovers_the_conversations_earlier_events
 
     // When: the sidebar naming the thread is published and B follows
     std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     b.state.switch_thread(thread).expect("open");
 
     // Then: the conversation shows what happened before it was known, once and in order
@@ -863,7 +886,7 @@ fn what_other_windows_do_is_shown_without_acting_on_it() {
     }));
     recorder.flush().expect("flush");
     let rows_before = event_count(&shared);
-    assert!(b.state.poll_shared_feed() > 0);
+    assert!(b.state.poll_and_settle() > 0);
     unfocused_logic(&mut b.state);
     recorder.flush().expect("flush");
 
@@ -956,7 +979,7 @@ fn importing_the_sidebar_keeps_this_windows_selection_and_typed_text() {
     a.state.create_thread("In two").expect("thread");
 
     // When: B follows
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
 
     // Then: B knows the new project and thread but did not follow A's selection
     assert!(
@@ -988,7 +1011,7 @@ fn an_unsaved_change_survives_importing_and_is_written_by_the_next_save() {
 
     // When: B saves, A follows (importing) without saving, B saves again, then A repeats its save
     b.state.create_thread("From B1").expect("create");
-    a.state.poll_shared_feed();
+    a.state.poll_and_settle();
     b.state.create_thread("From B2").expect("create");
     a.state.flush_deferred_sidebar_save();
 
@@ -1008,7 +1031,7 @@ fn an_unsaved_change_survives_importing_and_is_written_by_the_next_save() {
             "From B2".to_owned()
         ])
     );
-    a.state.poll_shared_feed();
+    a.state.poll_and_settle();
     assert_eq!(titles(&a.state), on_disk);
 }
 
@@ -1034,7 +1057,7 @@ fn conversation_across_a_late_sidebar(before: &[Event], after: &[Event]) -> (Win
         a.emit(event.clone());
     }
     std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     b.state.switch_thread(thread.clone()).expect("open");
     (b, thread)
 }
@@ -1160,7 +1183,7 @@ fn events_without_a_conversation_never_reach_the_open_thread_when_queued_events_
     h.emit(fault_event());
     h.emit(failed_event());
     h.emit(request_failed_without_run());
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     assert_eq!(entries_debug(&b.state), entries_before);
 
     // And: the sidebar is published and the held events are retried without a new batch
@@ -1176,7 +1199,7 @@ fn events_without_a_conversation_never_reach_the_open_thread_when_queued_events_
             .iter()
             .any(|entry| matches!(entry, TranscriptEntry::Error { .. }))
     );
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     assert_eq!(entries_debug(&b.state), entries_before);
 }
 
@@ -1206,9 +1229,9 @@ fn a_conversation_that_changes_root_shows_every_reply_however_the_events_are_spl
     ];
     for event in events {
         a.emit(event);
-        b2.state.poll_shared_feed();
+        b2.state.poll_and_settle();
     }
-    b1.state.poll_shared_feed();
+    b1.state.poll_and_settle();
     let mut restarted = open_window(&shared, "evorch-gui:c");
     restarted.state.switch_thread(thread).expect("open");
 
@@ -1242,7 +1265,7 @@ fn follow_in_chunks(
         for make in part {
             a.emit(make(&thread));
         }
-        b.state.poll_shared_feed();
+        b.state.poll_and_settle();
     }
     (
         entries_debug(&b.state),
@@ -1292,9 +1315,8 @@ fn what_is_shown_does_not_depend_on_how_the_events_were_split_into_polls() {
 }
 
 #[test]
-fn recovering_a_long_history_reads_it_in_pages_without_losing_the_latest_replies() {
+fn recovering_a_long_history_does_not_lose_the_latest_replies() {
     // Given: A answered many times in a thread whose sidebar B lacks, and B restarted
-    // with a recovery page of 3 events, much smaller than the history
     let shared = Shared::new();
     let private = shared.dir.path().join("private.json");
     let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
@@ -1309,9 +1331,7 @@ fn recovering_a_long_history_reads_it_in_pages_without_losing_the_latest_replies
     for text in &before {
         a.emit(reply("run-a", text));
     }
-    let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
-        state.with_rehydrate_page_size(3)
-    });
+    let mut b = open_window(&shared, "evorch-gui:b");
     let after: Vec<String> = (9..=10).map(|n| format!("reply {n}")).collect();
     for text in &after {
         a.emit(reply("run-a", text));
@@ -1319,7 +1339,7 @@ fn recovering_a_long_history_reads_it_in_pages_without_losing_the_latest_replies
 
     // When: the sidebar is published and B follows
     std::fs::copy(&private, shared.sidebar()).expect("publish sidebar");
-    b.state.poll_shared_feed();
+    b.state.poll_and_settle();
     b.state.switch_thread(thread).expect("open");
 
     // Then: every reply appears once, in order, including the latest one before the cut
@@ -1502,8 +1522,8 @@ fn a_failed_import_of_a_broken_sidebar_does_not_let_later_saves_overwrite_it() {
     std::fs::write(shared.sidebar(), b"{ broken").expect("break");
 
     // When: the shared feed tries to import it (and fails), then ordinary saves follow.
-    a.state.poll_shared_feed();
-    a.state.poll_shared_feed();
+    a.state.poll_and_settle();
+    a.state.poll_and_settle();
     for title in ["one", "two", "three"] {
         a.state.rename_thread(alpha.clone(), title.into()).ok();
         a.state.save_sidebar();
@@ -1518,10 +1538,196 @@ fn a_failed_import_of_a_broken_sidebar_does_not_let_later_saves_overwrite_it() {
 
     // And: once the file is good again, the window imports and saves normally.
     std::fs::write(shared.sidebar(), &good).expect("repair");
-    a.state.poll_shared_feed();
+    a.state.poll_and_settle();
     a.state
         .rename_thread(alpha, "after".into())
         .expect("rename");
     let saved = workspace_ui::load_sidebar(&shared.sidebar()).expect("sidebar");
     assert!(saved.threads.iter().any(|thread| thread.title == "after"));
+}
+
+/// The real store, but a read of rows waits until the test lets it go, and every
+/// thread that read is remembered.
+struct Gate {
+    inner: StorageBodies,
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    readers: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+}
+
+impl BodyBackend for Gate {
+    fn resolve(&self, refs: &[BodyRef]) -> Result<Vec<BodyResult>, BodyError> {
+        self.readers
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        self.inner.resolve(refs)
+    }
+
+    fn read_rows(
+        &self,
+        runs: &[String],
+        after: i64,
+        through: i64,
+        meter: &ImmediateMeter,
+    ) -> Result<Vec<HistoryRow>, BodyError> {
+        self.readers
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        self.entered
+            .lock()
+            .unwrap()
+            .send(())
+            .expect("the test listens");
+        self.release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("the test lets it go");
+        self.inner.read_rows(runs, after, through, meter)
+    }
+}
+
+#[test]
+fn a_late_sidebar_recovers_the_earlier_history_on_the_worker_and_the_ui_thread_never_waits_or_reads()
+ {
+    // Given: A answered in a thread whose sidebar B lacks, and B reads through a
+    // resolver with a worker of its own whose read of rows is held at a gate
+    let shared = Shared::new();
+    let private = shared.dir.path().join("private.json");
+    let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    a.emit(reply("run-a", "first"));
+    a.emit(reply("run-a", "second"));
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release) = std::sync::mpsc::channel();
+    let readers = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(Gate {
+        inner: StorageBodies::new(shared.config.db_path.clone()),
+        entered: Mutex::new(entered),
+        release: Mutex::new(release),
+        readers: Arc::clone(&readers),
+    });
+    let mut b = open_window_customized(&shared, "evorch-gui:b", shared.sidebar(), |state| {
+        state.with_body_resolver(BodyResolver::spawn(gate, ResolverConfig::default(), None))
+    });
+
+    // When: the sidebar is published and B follows, while the worker is held
+    std::fs::copy(&private, shared.sidebar()).unwrap();
+    b.state.poll_shared_feed();
+    b.state.switch_thread(thread.clone()).unwrap();
+    entered_rx.recv().expect("the worker started the read");
+
+    // Then: the UI thread got here without the history, which is still being read
+    assert!(texts(&b.state).is_empty());
+
+    // And: once the worker is let go, the history is applied in place
+    release_tx.send(()).unwrap();
+    b.state.settle_body_rows();
+    assert_eq!(texts(&b.state), ["first", "second"]);
+    let readers = readers.lock().unwrap().clone();
+    assert!(!readers.is_empty());
+    assert!(
+        readers
+            .iter()
+            .all(|reader| *reader != std::thread::current().id()),
+        "no read of the database ran on the UI thread"
+    );
+}
+
+fn thread_gaps_and_texts(state: &WorkbenchState<DemoSource>) -> Vec<String> {
+    state
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message { text, .. } => Some(text.inline_or_empty().to_owned()),
+            TranscriptEntry::Unreadable { event_id, .. } => Some(format!("gap #{event_id}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_row_another_window_wrote_that_cannot_be_read_shows_as_a_gap_between_its_neighbours() {
+    // Given: A answers, then a row of its run that this build cannot decode lands
+    // in the log, then A answers again
+    let shared = Shared::new();
+    let (mut a, mut b, thread) = working_owner_and_open_follower(&shared);
+    let before = event_count(&shared);
+    {
+        let raw = rusqlite::Connection::open(&shared.config.db_path).expect("raw connection");
+        raw.execute(
+            "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+             payload, run_id) VALUES ('evorch-gui:a', ?1, 0, 1, 'Message', '{\"kind\":\"Removed\"}', 'run-a')",
+            rusqlite::params![event_bus::SCHEMA_VERSION],
+        )
+        .expect("raw insert");
+    }
+    a.emit(reply("run-a", "after the damaged row"));
+
+    // When: B follows the log
+    b.state.poll_and_settle();
+    b.state.switch_thread(thread).unwrap();
+
+    // Then: the gap stands exactly where the row was, and the feed went on past it
+    assert_eq!(
+        thread_gaps_and_texts(&b.state),
+        [
+            "reply from a".to_owned(),
+            format!("gap #{}", before + 1),
+            "after the damaged row".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn recovering_the_earlier_history_of_a_late_known_thread_keeps_each_unreadable_row_in_its_place() {
+    // Given: A answered, a row of its run that cannot be read landed, A answered
+    // again, all before B knew the thread
+    let shared = Shared::new();
+    let private = shared.dir.path().join("private.json");
+    let mut a = open_window_with_sidebar(&shared, "evorch-gui:a", private.clone());
+    let thread = a.open_thread(&shared, "Alpha");
+    a.emit(run_started("run-a", &thread));
+    a.emit(phase(
+        "run-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
+    a.emit(reply("run-a", "before"));
+    let damaged = event_count(&shared) + 1;
+    {
+        let raw = rusqlite::Connection::open(&shared.config.db_path).expect("raw connection");
+        raw.execute(
+            "INSERT INTO events (session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+             payload, run_id) VALUES ('evorch-gui:a', ?1, 0, 1, 'Message', '{\"kind\":\"Removed\"}', 'run-a')",
+            rusqlite::params![event_bus::SCHEMA_VERSION],
+        )
+        .expect("raw insert");
+    }
+    a.emit(reply("run-a", "after"));
+    let mut b = open_window(&shared, "evorch-gui:b");
+
+    // When: the sidebar that introduces the thread is published and B follows
+    std::fs::copy(&private, shared.sidebar()).unwrap();
+    b.state.poll_and_settle();
+    b.state.switch_thread(thread).unwrap();
+
+    // Then: the recovered history has the gap where the row was, not dropped
+    assert_eq!(
+        thread_gaps_and_texts(&b.state),
+        [
+            "before".to_owned(),
+            format!("gap #{damaged}"),
+            "after".to_owned()
+        ]
+    );
 }

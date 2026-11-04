@@ -2,8 +2,9 @@
 
 use egui::{RichText, Ui};
 
+use crate::body::resolver::AUTO_RETRIES;
 use crate::body::ui::{COPY_DETAILS, RETRY, unreadable_details};
-use crate::body::{EventPhase, FailureKind};
+use crate::body::{BodyRef, EventPhase, FailureKind};
 use crate::theme::icons;
 use crate::theme::tokens::{SP_1, SP_2, palette};
 
@@ -12,6 +13,8 @@ pub(super) struct Gap<'a> {
     pub run_id: Option<&'a str>,
     pub kind: &'a FailureKind,
     pub reason: &'a str,
+    /// The body whose read failed, when the event itself decodes.
+    pub reference: Option<&'a BodyRef>,
 }
 
 pub const TITLE_PREFIX: &str = "Couldn't read event";
@@ -36,6 +39,10 @@ pub(super) fn show(ui: &mut Ui, id: egui::Id, gap: &Gap<'_>) {
         .map(|resolver| resolver.event_phase(gap.event_id))
         .unwrap_or(EventPhase::Idle);
     let loading = phase == EventPhase::Loading;
+    let retrying = match phase {
+        EventPhase::Retrying { retries } => Some(retries),
+        _ => None,
+    };
     let reason = match &phase {
         EventPhase::Failed(latest) => latest.as_str(),
         _ => gap.reason,
@@ -53,6 +60,15 @@ pub(super) fn show(ui: &mut Ui, id: egui::Id, gap: &Gap<'_>) {
                 if loading {
                     ui.add(egui::Spinner::new());
                     ui.label(RichText::new("Reading the event again…").color(palette().TEXT_MUTED));
+                } else if let Some(retries) = retrying {
+                    ui.add(egui::Spinner::new());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} — retrying (retry {retries} of {AUTO_RETRIES})",
+                            title(gap.event_id, gap.kind),
+                        ))
+                        .color(palette().TEXT_MUTED),
+                    );
                 } else {
                     ui.label(
                         RichText::new(icons::with_icon(
@@ -74,9 +90,11 @@ pub(super) fn show(ui: &mut Ui, id: egui::Id, gap: &Gap<'_>) {
             gap.run_id,
             &kind_name(gap.kind),
             reason,
+            gap.reference,
         ));
     }
-    if retry && let Some(resolver) = crate::body::ui::resolver(ui.ctx()) {
-        resolver.request_event(gap.event_id);
+    if retry && let (Some(resolver), Some(run)) = (crate::body::ui::resolver(ui.ctx()), gap.run_id)
+    {
+        resolver.request_gap(run, gap.event_id);
     }
 }

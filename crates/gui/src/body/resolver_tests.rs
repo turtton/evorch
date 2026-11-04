@@ -429,36 +429,194 @@ fn an_operation_on_a_body_that_cannot_be_read_fails_instead_of_yielding_a_token_
     assert!(failure.details().contains("run-x"));
 }
 
+fn failure_row(id: i64, kind: FailureKind, reason: &str) -> HistoryRow {
+    HistoryRow::Failure(EventFailure {
+        id,
+        run_id: Some("run-a".into()),
+        kind,
+        reason: reason.into(),
+        reference: None,
+        wall_clock: None,
+    })
+}
+
 #[test]
 fn an_unreadable_event_is_read_again_once_however_often_it_is_asked() {
     let rig = rig();
-    rig.backend.script_event(
+    rig.resolver.note_shown_through(40);
+    rig.backend.script_rows(Ok(vec![failure_row(
         7,
-        EventReread::Failed(EventFailure {
-            id: 7,
-            run_id: None,
-            kind: FailureKind::Unreadable,
-            reason: "still damaged".into(),
-        }),
-    );
+        FailureKind::Unreadable,
+        "still damaged",
+    )]));
     assert_eq!(rig.resolver.event_phase(7), EventPhase::Idle);
-    rig.resolver.request_event(7);
-    rig.resolver.request_event(7);
+    rig.resolver.request_gap("run-a", 7);
+    rig.resolver.request_gap("run-a", 7);
     assert_eq!(rig.resolver.event_phase(7), EventPhase::Loading);
 
     rig.resolver.pump_all();
 
-    assert_eq!(rig.backend.event_reads(), vec![7]);
+    assert_eq!(
+        rig.backend.rows_reads(),
+        vec![(vec!["run-a".to_owned()], 0, 40)],
+        "the run is read up to where the history reaches when the read starts"
+    );
     assert_eq!(
         rig.resolver.event_phase(7),
         EventPhase::Failed("still damaged".into())
     );
-    assert_eq!(rig.resolver.take_event_results().len(), 1);
-    assert!(rig.resolver.take_event_results().is_empty());
+    assert_eq!(rig.resolver.take_rows_results().len(), 1);
+    assert!(rig.resolver.take_rows_results().is_empty());
     // Asking again after a failure reads again.
-    rig.resolver.request_event(7);
+    rig.resolver.request_gap("run-a", 7);
     rig.resolver.pump_all();
-    assert_eq!(rig.backend.event_reads(), vec![7, 7]);
+    assert_eq!(rig.backend.rows_reads().len(), 2);
+}
+
+#[test]
+fn an_event_whose_content_is_busy_is_read_again_by_itself_on_the_schedule() {
+    let rig = rig();
+    let busy_row = || {
+        failure_row(
+            7,
+            FailureKind::Body(BodyErrorKind::Busy),
+            "database is locked",
+        )
+    };
+    for _ in 0..4 {
+        rig.backend.script_rows(Ok(vec![busy_row()]));
+    }
+    rig.resolver.request_gap("run-a", 7);
+    rig.resolver.pump_all();
+
+    // Each failed try waits, and nothing is reported while tries are left.
+    assert_eq!(
+        rig.resolver.event_phase(7),
+        EventPhase::Retrying { retries: 1 }
+    );
+    assert!(rig.resolver.take_rows_results().is_empty());
+    // The waits are 250 ms, 1 s and 4 s, none of them cut short.
+    for (wait_ms, reads, retries) in [(250, 2, 2_u8), (1_000, 3, 3)] {
+        rig.clock.advance(Duration::from_millis(wait_ms - 1));
+        rig.resolver.pump_all();
+        assert_eq!(
+            rig.backend.rows_reads().len(),
+            reads - 1,
+            "not before {wait_ms} ms"
+        );
+        rig.clock.advance(Duration::from_millis(1));
+        rig.resolver.pump_all();
+        assert_eq!(rig.backend.rows_reads().len(), reads);
+        assert_eq!(
+            rig.resolver.event_phase(7),
+            EventPhase::Retrying { retries }
+        );
+    }
+    rig.clock.advance(Duration::from_millis(3_999));
+    rig.resolver.pump_all();
+    assert_eq!(rig.backend.rows_reads().len(), 3);
+    rig.clock.advance(Duration::from_millis(1));
+    rig.resolver.pump_all();
+
+    assert_eq!(rig.backend.rows_reads().len(), 4);
+    assert_eq!(
+        rig.resolver.event_phase(7),
+        EventPhase::Failed("database is locked".into())
+    );
+    assert_eq!(
+        rig.resolver.take_rows_results().len(),
+        1,
+        "reported once, at the end"
+    );
+    assert_eq!(rig.resolver.stats().row_auto_retries, 3);
+}
+
+#[test]
+fn an_event_that_becomes_readable_while_retrying_is_reported_as_read() {
+    let rig = rig();
+    rig.backend.script_rows(Ok(vec![failure_row(
+        7,
+        FailureKind::Body(BodyErrorKind::Io),
+        "i/o",
+    )]));
+    rig.backend.script_rows(Ok(Vec::new()));
+    rig.resolver.request_gap("run-a", 7);
+    rig.resolver.pump_all();
+    rig.clock.advance(Duration::from_millis(250));
+    rig.resolver.pump_all();
+
+    assert_eq!(rig.resolver.event_phase(7), EventPhase::Idle);
+    let results = rig.resolver.take_rows_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].result, Ok(Vec::new()));
+}
+
+#[test]
+fn only_a_failure_that_can_pass_starts_retrying_on_its_own() {
+    let rig = rig();
+    rig.resolver.watch_gap("run-a", 1, &FailureKind::Unreadable);
+    rig.resolver
+        .watch_gap("run-a", 2, &FailureKind::Body(BodyErrorKind::Missing));
+    rig.resolver
+        .watch_gap("run-a", 3, &FailureKind::Body(BodyErrorKind::Corrupt));
+    assert!(!rig.resolver.has_rows_work());
+    assert!(rig.resolver.is_idle());
+
+    rig.resolver
+        .watch_gap("run-a", 4, &FailureKind::Body(BodyErrorKind::Busy));
+    // Watching twice is one wait.
+    rig.resolver
+        .watch_gap("run-a", 4, &FailureKind::Body(BodyErrorKind::Busy));
+    assert_eq!(
+        rig.resolver.event_phase(4),
+        EventPhase::Retrying { retries: 1 }
+    );
+    assert!(rig.backend.rows_reads().is_empty());
+    rig.clock.advance(Duration::from_millis(250));
+    rig.resolver.pump_all();
+    assert_eq!(rig.backend.rows_reads().len(), 1);
+}
+
+#[test]
+fn a_read_of_rows_that_fails_busy_is_retried_and_one_that_fails_for_good_is_reported() {
+    let rig = rig();
+    rig.backend.script_rows(Err(busy()));
+    rig.backend.script_rows(Err(missing()));
+    rig.resolver.request_rows(
+        RowsPurpose::Rehydrate { thread: "t".into() },
+        vec!["run-a".into()],
+        0,
+        9,
+    );
+    rig.resolver.pump_all();
+    assert!(rig.resolver.rehydrating("t"));
+    assert!(rig.resolver.take_rows_results().is_empty());
+
+    rig.clock.advance(Duration::from_millis(250));
+    rig.resolver.pump_all();
+
+    assert!(!rig.resolver.rehydrating("t"));
+    let results = rig.resolver.take_rows_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].result.as_ref().unwrap_err().kind,
+        BodyErrorKind::Missing
+    );
+}
+
+#[test]
+fn forgetting_a_run_drops_the_rows_reads_waiting_for_it() {
+    let rig = rig();
+    rig.resolver.request_rows(
+        RowsPurpose::Rehydrate { thread: "t".into() },
+        vec!["run-a".into()],
+        0,
+        9,
+    );
+    rig.resolver.forget_run("run-a");
+    rig.resolver.pump_all();
+    assert!(rig.backend.rows_reads().is_empty());
+    assert!(!rig.resolver.rehydrating("t"));
 }
 
 #[test]
@@ -473,7 +631,13 @@ fn start_up_reads_join_the_pieces_in_order_and_count_apart_from_frame_reads() {
 
     assert_eq!(rig.resolver.read_now(&text).unwrap(), "<12345abc12345");
     let stats = rig.resolver.stats();
-    assert_eq!((stats.immediate_reads, stats.immediate_bytes), (2, 8));
+    assert_eq!(
+        stats.immediate.part_hand_over,
+        ClassStats {
+            bodies: 2,
+            bytes: 8
+        }
+    );
     assert_eq!(stats.bodies_read, 0);
 }
 

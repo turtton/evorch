@@ -711,6 +711,38 @@ impl Database {
         crate::for_each_event_ordered_deferred(&self.conn, through_id, visit)
     }
 
+    /// The events concerning `run_ids` with `after_id < id <= through_id`, in id order,
+    /// as [`Self::for_each_event_ordered_deferred`] hands them over (a row that cannot be
+    /// read in its place), found through the run index. See
+    /// [`crate::for_each_event_for_runs_deferred`].
+    ///
+    /// # Errors
+    /// Returns an error if the query itself fails.
+    pub fn for_each_event_for_runs_deferred(
+        &self,
+        run_ids: &[String],
+        after_id: i64,
+        through_id: i64,
+        visit: impl FnMut(crate::DeferredRow),
+    ) -> Result<(), StorageError> {
+        crate::for_each_event_for_runs_deferred(&self.conn, run_ids, after_id, through_id, visit)
+    }
+
+    /// Up to `limit` rows after `after_id`, passing over the rows of `exclude_session`,
+    /// with long strings still tokens and unreadable rows in their place. See
+    /// [`crate::deferred_events_after`].
+    ///
+    /// # Errors
+    /// Returns an error if the query itself fails.
+    pub fn deferred_events_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+        exclude_session: Option<&str>,
+    ) -> Result<crate::DeferredPage, StorageError> {
+        crate::deferred_events_after(&self.conn, after_id, limit, exclude_session)
+    }
+
     /// The text of each of `refs` (at most [`crate::MAX_RESOLVE_REFS`] distinct), in the
     /// order given, in one read snapshot. See [`crate::resolve_bodies`].
     ///

@@ -1,7 +1,7 @@
 use event_bus::{AgentMessageKind, CompactionReason, Event};
 
 use super::scoped_call::parse_scoped_call_id;
-use crate::body::{BodyText, FailureKind};
+use crate::body::{BodyRef, BodyText, FailureKind};
 
 mod branch;
 mod compaction;
@@ -175,6 +175,8 @@ pub enum TranscriptEntry {
         run_id: Option<String>,
         kind: FailureKind,
         reason: String,
+        /// The body whose read failed, when the event itself decodes.
+        reference: Option<BodyRef>,
     },
 }
 
@@ -387,11 +389,6 @@ impl TranscriptModel {
 
     pub(crate) fn set_deferred_body(&mut self, body: Option<BodyText>) {
         self.deferred_body = body;
-    }
-
-    /// Whether a call with this id is shown here.
-    pub(crate) fn has_tool_call(&self, call_id: &str, run_id: Option<&str>) -> bool {
-        self.scoped_tool_index(call_id, run_id).is_some()
     }
 
     /// The body of the event being applied: the deferred one when there is

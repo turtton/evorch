@@ -95,6 +95,10 @@ pub struct FedEvent {
 pub struct FeedBatch {
     /// Events other processes persisted, in log order.
     pub events: Vec<FedEvent>,
+    /// Rows other processes persisted that cannot be shown: an event that does
+    /// not decode, or one whose content cannot be read. Each stands at its
+    /// `id` among `events`; they are not left out.
+    pub failures: Vec<crate::body::EventFailure>,
     /// Threads another process released or handed off in `events`.
     pub released: Vec<ReleasedThread>,
     /// The `sidebar.json` stamp when it differs from the previous poll's.
@@ -105,7 +109,7 @@ pub struct FeedBatch {
 
 impl FeedBatch {
     fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.sidebar_stamp.is_none()
+        self.events.is_empty() && self.failures.is_empty() && self.sidebar_stamp.is_none()
     }
 }
 
@@ -129,6 +133,7 @@ pub struct FeedPoller {
     sidebar_path: Option<PathBuf>,
     reported_stamp: Option<FileStamp>,
     event_queries: usize,
+    meter: crate::body::ImmediateMeter,
 }
 
 impl FeedPoller {
@@ -145,7 +150,16 @@ impl FeedPoller {
             sidebar_path: config.sidebar_path,
             reported_stamp: None,
             event_queries: 0,
+            meter: crate::body::ImmediateMeter::new(),
         })
+    }
+
+    /// Counts the bodies this reader joins into events (it reads them on its
+    /// own thread, never on a frame) in `meter`.
+    #[must_use]
+    pub fn with_meter(mut self, meter: crate::body::ImmediateMeter) -> Self {
+        self.meter = meter;
+        self
     }
 
     /// How many event queries have run; a poll that finds `data_version`
@@ -176,26 +190,32 @@ impl FeedPoller {
             let mut complete = false;
             while scanned < POLL_ROW_LIMIT {
                 self.event_queries += 1;
-                let page =
-                    match self
-                        .db
-                        .events_after_excluding(self.cursor, PAGE_SIZE, &self.own_stream)
-                    {
-                        Ok(page) => page,
-                        Err(error) if scanned > 0 => {
-                            tracing::warn!(%error, "shared event feed stopped mid-poll");
-                            break;
-                        }
-                        Err(error) => return Err(error),
-                    };
+                let page = match self.db.deferred_events_after(
+                    self.cursor,
+                    PAGE_SIZE,
+                    Some(&self.own_stream),
+                ) {
+                    Ok(page) => page,
+                    Err(error) if scanned > 0 => {
+                        tracing::warn!(%error, "shared event feed stopped mid-poll");
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
                 self.cursor = page.last_id;
                 scanned += page.scanned;
-                batch
-                    .events
-                    .extend(page.events.into_iter().map(|stored| FedEvent {
-                        id: stored.id,
-                        event: stored.event,
-                    }));
+                for row in page.rows {
+                    // The text is read here, on this thread, and an event whose
+                    // content cannot be read stands as a failure, not as an
+                    // error of the whole page.
+                    match crate::body::source::row_of(&self.db, row, false, &self.meter) {
+                        crate::body::HistoryRow::Event(event) => batch.events.push(FedEvent {
+                            id: event.id,
+                            event: event.event,
+                        }),
+                        crate::body::HistoryRow::Failure(failure) => batch.failures.push(failure),
+                    }
+                }
                 if page.scanned < PAGE_SIZE {
                     complete = true;
                     break;

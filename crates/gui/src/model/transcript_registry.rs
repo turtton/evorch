@@ -13,7 +13,7 @@ use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
 use super::scoped_call::parse_scoped_call_id;
 use super::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
-use crate::body::{BodyText, EventReread, FailureKind};
+use crate::body::{BodyRef, BodyText, FailureKind, HistoryRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptKey {
@@ -450,6 +450,7 @@ impl TranscriptRegistry {
         run_id: Option<&str>,
         kind: FailureKind,
         reason: &str,
+        reference: Option<BodyRef>,
     ) -> bool {
         let Some(run) = run_id else {
             return false;
@@ -464,6 +465,7 @@ impl TranscriptRegistry {
                             run_id,
                             kind.clone(),
                             reason,
+                            reference,
                         );
                     }
                 }
@@ -473,6 +475,7 @@ impl TranscriptRegistry {
                         run_id,
                         kind.clone(),
                         reason,
+                        reference,
                     );
                 }
             }
@@ -502,39 +505,72 @@ impl TranscriptRegistry {
             .chain(self.runs.values_mut())
     }
 
-    /// Applies the outcome of reading an unreadable event again: a read event
-    /// takes the gap's place in each transcript that shows it; a failure only
-    /// updates the gap's reason.
-    pub fn apply_reread(&mut self, event_id: i64, outcome: &EventReread) {
+    /// Records why reading the event again failed, in every transcript that
+    /// shows it as unreadable.
+    pub fn update_unreadable(
+        &mut self,
+        event_id: i64,
+        kind: Option<&FailureKind>,
+        reason: &str,
+        reference: Option<BodyRef>,
+    ) {
         for model in self.models_mut() {
-            if !model.has_unreadable(event_id) {
-                continue;
+            model.update_unreadable(event_id, kind.cloned(), reason, reference);
+        }
+    }
+
+    /// Fills the gap of `event_id` in the transcripts of `run` from `rows`,
+    /// the rows of the run read again (their slices already joined). The run
+    /// is replayed into scratch transcripts the way a restart would show it,
+    /// and each shown transcript takes from that replay only what its gap
+    /// held, so nothing shown moves or changes identity. No notification, no
+    /// telemetry: only the transcripts are touched. Returns whether any
+    /// transcript showed the gap.
+    pub fn fill_unreadable(&mut self, run: &str, event_id: i64, rows: &[HistoryRow]) -> bool {
+        let mut scratch = Self::new();
+        match self.run_threads.get(run) {
+            Some(thread) if self.is_thread_root(run) => scratch.bind_thread_root(thread, run),
+            Some(thread) => scratch.bind_run(run, thread),
+            None => {}
+        }
+        for row in rows {
+            match row {
+                HistoryRow::Event(row) => scratch.apply_with_body(&row.event, row.body.as_ref()),
+                HistoryRow::Failure(failure) if failure.run_id.as_deref() == Some(run) => {
+                    scratch.push_unreadable(
+                        failure.id,
+                        Some(run),
+                        failure.kind.clone(),
+                        &failure.reason,
+                        failure.reference,
+                    );
+                }
+                HistoryRow::Failure(_) => {}
             }
-            match outcome {
-                EventReread::Ready(row) => {
-                    let mut scratch = TranscriptModel::new();
-                    scratch.apply_with_body(&row.event, row.body.clone());
-                    let entries: Vec<_> = scratch.entries().to_vec();
-                    // A result updates the call it belongs to in place.
-                    if let EventKind::Tool(ToolEvent::ToolCompleted {
-                        call_id, run_id, ..
-                    }) = &row.event.kind
-                        && model.has_tool_call(call_id, run_id.as_deref())
+        }
+        let mut filled = false;
+        for key in self.route_run(run) {
+            match key {
+                TranscriptKey::Thread => {
+                    let Some(thread) = self.run_threads.get(run).cloned() else {
+                        continue;
+                    };
+                    if let (Some(model), Some(replayed)) =
+                        (self.threads.get_mut(&thread), scratch.threads.get(&thread))
                     {
-                        model.apply_with_body(&row.event, row.body.clone());
-                        model.replace_unreadable(event_id, Vec::new());
-                    } else {
-                        model.replace_unreadable(event_id, entries);
+                        filled |= model.fill_unreadable_from(event_id, replayed);
                     }
                 }
-                EventReread::Failed(failure) => {
-                    model.update_unreadable(event_id, failure.kind.clone(), &failure.reason);
-                }
-                EventReread::Gone => {
-                    model.replace_unreadable(event_id, Vec::new());
+                TranscriptKey::Run(run) => {
+                    if let (Some(model), Some(replayed)) =
+                        (self.runs.get_mut(&run), scratch.runs.get(&run))
+                    {
+                        filled |= model.fill_unreadable_from(event_id, replayed);
+                    }
                 }
             }
         }
+        filled
     }
 
     /// Drops the transcript of a deleted thread (and of its runs).

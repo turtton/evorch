@@ -4,7 +4,9 @@
 //! The resolver is found through the egui context, so a pane draws a body the
 //! same way whether or not any body is deferred. Nothing here reads storage.
 
-use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egui::{Id, RichText, Ui};
@@ -36,10 +38,136 @@ pub fn resolver(ctx: &egui::Context) -> Option<BodyResolver> {
     ctx.data(|data| data.get_temp::<BodyResolver>(Id::new(RESOLVER_ID)))
 }
 
+/// The text of a body that is read: borrowed from the transcript when it is
+/// inline, otherwise shared with the resolver's cache (a body of one piece) or
+/// with the joined text kept for it (several pieces). Asking again never
+/// copies the text.
+#[derive(Debug, Clone)]
+pub enum SharedText<'a> {
+    Borrowed(&'a str),
+    Shared(Arc<str>),
+}
+
+impl std::ops::Deref for SharedText<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Borrowed(text) => text,
+            Self::Shared(text) => text,
+        }
+    }
+}
+
+impl<'a> SharedText<'a> {
+    /// Whether this is the very text another asker got: a copy would not be.
+    #[must_use]
+    pub fn shares_with(&self, other: &Arc<str>) -> bool {
+        matches!(self, Self::Shared(own) if Arc::ptr_eq(own, other))
+    }
+
+    /// Whether both are the same allocation.
+    #[must_use]
+    pub fn is_same_allocation(&self, other: &SharedText<'_>) -> bool {
+        let (Self::Shared(own), SharedText::Shared(theirs)) = (self, other) else {
+            return false;
+        };
+        Arc::ptr_eq(own, theirs)
+    }
+}
+
+/// Joined text of bodies made of several pieces, kept so that drawing the same
+/// body every frame joins it once. Bounded; the oldest goes first.
+#[derive(Default)]
+struct JoinCache {
+    entries: HashMap<u64, (Arc<str>, u64)>,
+    bytes: usize,
+    tick: u64,
+}
+
+const JOIN_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const JOIN_CACHE_ID: &str = "body-join-cache";
+
+type SharedJoinCache = Arc<Mutex<JoinCache>>;
+
+fn join_cache(ctx: &egui::Context) -> SharedJoinCache {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_insert_with(Id::new(JOIN_CACHE_ID), SharedJoinCache::default)
+            .clone()
+    })
+}
+
+/// What names a joined text: its inline pieces and the references between
+/// them. The pieces of a mixed body are short (a long string is a reference),
+/// so hashing them is cheap.
+fn join_key(text: &BodyText) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    for segment in text.segments() {
+        match segment {
+            Segment::Inline(inline) => {
+                0_u8.hash(&mut hasher);
+                inline.hash(&mut hasher);
+            }
+            Segment::Deferred(body) => {
+                1_u8.hash(&mut hasher);
+                body.key.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn joined(
+    ctx: &egui::Context,
+    text: &BodyText,
+    mut part: impl FnMut(&DeferredBodyRef) -> Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    let key = join_key(text);
+    let cache = join_cache(ctx);
+    {
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.tick += 1;
+        let tick = cache.tick;
+        if let Some((text, used)) = cache.entries.get_mut(&key) {
+            *used = tick;
+            return Some(Arc::clone(text));
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for segment in text.segments() {
+        match segment {
+            Segment::Inline(inline) => out.push_str(inline),
+            Segment::Deferred(body) => out.push_str(&part(body)?),
+        }
+    }
+    let shared: Arc<str> = Arc::from(out);
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    cache.bytes += shared.len();
+    let tick = cache.tick;
+    cache.entries.insert(key, (Arc::clone(&shared), tick));
+    while cache.bytes > JOIN_CACHE_BYTES && cache.entries.len() > 1 {
+        let Some(oldest) = cache
+            .entries
+            .iter()
+            .filter(|(entry_key, _)| **entry_key != key)
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(entry_key, _)| *entry_key)
+        else {
+            break;
+        };
+        if let Some((evicted, _)) = cache.entries.remove(&oldest) {
+            cache.bytes -= evicted.len();
+        }
+    }
+    Some(shared)
+}
+
+type DeferredBodyRef = super::types::DeferredBody;
+
 /// Where a body stands for the frame being drawn.
 #[derive(Debug, Clone)]
 pub enum TextState<'a> {
-    Ready(Cow<'a, str>),
+    Ready(SharedText<'a>),
     Loading {
         bytes: u64,
     },
@@ -57,7 +185,7 @@ pub enum TextState<'a> {
 #[must_use]
 pub fn poll_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> TextState<'a> {
     if let Some(inline) = text.inline() {
-        return TextState::Ready(Cow::Borrowed(inline));
+        return TextState::Ready(SharedText::Borrowed(inline));
     }
     let Some(resolver) = resolver(ctx) else {
         return TextState::Failed(vec![no_store_failure(text)]);
@@ -108,38 +236,28 @@ pub fn poll_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> TextState<'a> {
     if let [Segment::Deferred(_)] = text.segments()
         && let Some(only) = ready.next()
     {
-        return TextState::Ready(Cow::Owned(only.to_string()));
+        return TextState::Ready(SharedText::Shared(only));
     }
-    let mut joined = String::with_capacity(text.len());
-    for segment in text.segments() {
-        match segment {
-            Segment::Inline(inline) => joined.push_str(inline),
-            Segment::Deferred(_) => {
-                if let Some(part) = ready.next() {
-                    joined.push_str(&part);
-                }
-            }
-        }
-    }
-    TextState::Ready(Cow::Owned(joined))
+    let mut parts = ready;
+    let text_joined = joined(ctx, text, |_| parts.next());
+    text_joined.map_or_else(
+        || TextState::Failed(vec![no_store_failure(text)]),
+        |text| TextState::Ready(SharedText::Shared(text)),
+    )
 }
 
 /// The text of `text` if nothing in it needs a read: inline, or already held.
 /// Never asks for a read.
 #[must_use]
-pub fn peek_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> Option<Cow<'a, str>> {
+pub fn peek_text<'a>(ctx: &egui::Context, text: &'a BodyText) -> Option<SharedText<'a>> {
     if let Some(inline) = text.inline() {
-        return Some(Cow::Borrowed(inline));
+        return Some(SharedText::Borrowed(inline));
     }
     let resolver = resolver(ctx)?;
-    let mut joined = String::with_capacity(text.len());
-    for segment in text.segments() {
-        match segment {
-            Segment::Inline(inline) => joined.push_str(inline),
-            Segment::Deferred(body) => joined.push_str(&resolver.peek(body)?),
-        }
+    if let [Segment::Deferred(body)] = text.segments() {
+        return resolver.peek(body).map(SharedText::Shared);
     }
-    Some(Cow::Owned(joined))
+    joined(ctx, text, |body| resolver.peek(body)).map(SharedText::Shared)
 }
 
 fn no_store_failure(text: &BodyText) -> BodyFailure {
@@ -353,11 +471,26 @@ pub fn human_bytes(bytes: u64) -> String {
 
 /// Where an unreadable event's details come from, for the copy action.
 #[must_use]
-pub fn unreadable_details(id: i64, run_id: Option<&str>, kind: &str, reason: &str) -> String {
-    format!(
-        "Event could not be read\nevent: {id}\nrun: {}\nkind: {kind}\nreason: {reason}\ninspect: evorch inspect events --id {id}\n",
+pub fn unreadable_details(
+    id: i64,
+    run_id: Option<&str>,
+    kind: &str,
+    reason: &str,
+    reference: Option<&super::types::BodyRef>,
+) -> String {
+    let mut details = format!(
+        "Event could not be read\nevent: {id}\nrun: {}\nkind: {kind}\nreason: {reason}\n",
         run_id.unwrap_or("(none)")
-    )
+    );
+    if let Some(reference) = reference {
+        let hash = reference.hash_hex();
+        details.push_str(&format!(
+            "hash: {hash}\nbyte_len: {}\ninspect: evorch inspect blob {hash}\n",
+            reference.byte_len
+        ));
+    }
+    details.push_str(&format!("inspect: evorch inspect events --id {id}\n"));
+    details
 }
 
 /// Waits on a copy of `text` for an operation: while it is read, `Pending`.

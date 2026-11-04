@@ -305,6 +305,10 @@ fn run_detail_body(
     let anchor_key = model_id.with("body-anchor");
     let previous_anchor: Option<ScrollAnchor> = ui.data(|data| data.get_temp(anchor_key));
     let mut first_visible: Option<(usize, f32)> = None;
+    // Where the entry the reader was looking at stands now, whether or not it
+    // is still the first in view: a row above it that changed height can put
+    // another entry first.
+    let mut anchored_entry_y: Option<f32> = None;
     let mut corrected_offset: Option<f32> = None;
     let output = egui::ScrollArea::vertical()
         .id_salt(model_id)
@@ -363,6 +367,9 @@ fn run_detail_body(
                     layout_revision,
                 );
                 let row_top = ui.cursor().top();
+                if previous_anchor.is_some_and(|anchor| anchor.entry == entry_id) {
+                    anchored_entry_y = Some(row_top - content_top);
+                }
                 list.row(ui, viewport, entry_id, revision, |ui| {
                     if let TranscriptEntry::TurnEnd { .. } = entry {
                         // Run detail panes show history only; turn actions belong to threads.
@@ -464,6 +471,7 @@ fn run_detail_body(
                         run_id,
                         kind,
                         reason,
+                        reference,
                     } = entry
                     {
                         unreadable::show(
@@ -474,6 +482,7 @@ fn run_detail_body(
                                 run_id: run_id.as_deref(),
                                 kind,
                                 reason,
+                                reference: reference.as_ref(),
                             },
                         );
                         return;
@@ -571,6 +580,7 @@ fn run_detail_body(
             corrected_offset = anchor_correction(
                 ui,
                 previous_anchor,
+                anchored_entry_y,
                 first_visible,
                 (used_offset, screen_viewport.height()),
             );
@@ -591,9 +601,24 @@ fn run_detail_body(
                     offset_y,
                 },
             );
+            data.insert_temp(
+                egui::Id::new(LATEST_ANCHOR_ID),
+                (entry, content_y - offset_y),
+            );
         });
     }
     output.inner
+}
+
+const LATEST_ANCHOR_ID: &str = "transcript-latest-anchor";
+
+/// The entry the reader is looking at (the first in view) and where it is on
+/// the pane, as the last drawn transcript saw it. For tests of the position a
+/// loading body keeps.
+#[doc(hidden)]
+#[must_use]
+pub fn first_visible_entry_for_tests(ctx: &egui::Context) -> Option<(usize, f32)> {
+    ctx.data(|data| data.get_temp(egui::Id::new(LATEST_ANCHOR_ID)))
 }
 
 /// The first entry in view, and where it was: its place in the content and
@@ -612,11 +637,15 @@ struct ScrollAnchor {
 fn anchor_correction(
     ui: &egui::Ui,
     previous: Option<ScrollAnchor>,
+    anchored_entry_y: Option<f32>,
     first_visible: Option<(usize, f32)>,
     (used_offset, viewport_height): (f32, f32),
 ) -> Option<f32> {
     let transitioned = crate::body::ui::take_transition(ui.ctx());
-    let (entry, content_y) = first_visible?;
+    let (entry, content_y) = match (previous, anchored_entry_y) {
+        (Some(previous), Some(y)) => (previous.entry, y),
+        _ => first_visible?,
+    };
     let previous = previous.filter(|previous| previous.entry == entry)?;
     let scrolled = ui.input(|input| input.is_scrolling() || input.pointer.any_down());
     if !transitioned || scrolled {

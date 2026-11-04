@@ -87,10 +87,15 @@ impl DeferredPartAssembler {
         }
     }
 
-    /// The unfinished sequences, for the caller to hand on or resolve.
+    /// The unfinished sequences, oldest first (the order they began in, not
+    /// their runs' names), for the caller to hand on or resolve. Handing them
+    /// on in this order keeps the next assembler's eviction of its oldest
+    /// response the same one this assembler would have made.
     pub fn take_open(&mut self) -> Vec<(String, String, usize, usize, BodyText)> {
         let open = std::mem::take(&mut self.open);
         self.buffered_bytes = 0;
+        let mut open: Vec<_> = open.into_iter().collect();
+        open.sort_by_key(|(_, pending)| pending.order);
         open.into_iter()
             .map(|(run, p)| (run, p.response_id, p.total, p.next, p.body))
             .collect()
@@ -299,6 +304,30 @@ mod tests {
             Accepted::Nothing
         );
         assert!(assembler.open.is_empty());
+    }
+
+    #[test]
+    fn unfinished_responses_are_handed_on_oldest_first_not_in_the_order_of_run_names() {
+        let mut assembler = DeferredPartAssembler::new();
+        for run in ["c-run", "a-run", "b-run"] {
+            assert_eq!(
+                assembler.accept(&part(run, "r", "x".into(), 0, 2)),
+                Accepted::Nothing
+            );
+        }
+        // A newer response of the oldest run makes it the newest.
+        assert_eq!(
+            assembler.accept(&part("c-run", "r2", "y".into(), 0, 2)),
+            Accepted::Nothing
+        );
+
+        let runs: Vec<String> = assembler
+            .take_open()
+            .into_iter()
+            .map(|(run, ..)| run)
+            .collect();
+
+        assert_eq!(runs, ["a-run", "b-run", "c-run"]);
     }
 
     #[test]

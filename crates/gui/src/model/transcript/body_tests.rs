@@ -98,7 +98,7 @@ fn a_body_given_for_one_event_is_not_used_for_the_next() {
 fn a_gap_ends_the_message_being_streamed_so_the_stream_cannot_continue_across_it() {
     let mut model = TranscriptModel::new();
     model.apply(&delta("before "));
-    model.push_unreadable(8, Some("run"), FailureKind::Unreadable, "damaged");
+    model.push_unreadable(8, Some("run"), FailureKind::Unreadable, "damaged", None);
     model.apply(&delta("after"));
 
     let kinds: Vec<_> = model
@@ -112,7 +112,7 @@ fn a_gap_ends_the_message_being_streamed_so_the_stream_cannot_continue_across_it
         .collect();
     assert_eq!(kinds, ["before ", "gap 8", "after"]);
     // Reporting the same event again adds no second gap.
-    model.push_unreadable(8, Some("run"), FailureKind::Unreadable, "damaged");
+    model.push_unreadable(8, Some("run"), FailureKind::Unreadable, "damaged", None);
     assert_eq!(model.entries().len(), 3);
 }
 
@@ -120,7 +120,7 @@ fn a_gap_ends_the_message_being_streamed_so_the_stream_cannot_continue_across_it
 fn entries_that_replace_a_gap_keep_stable_ids_and_the_rest_of_the_transcript_still_updates() {
     let mut model = TranscriptModel::new();
     model.push_message("one");
-    model.push_unreadable(5, Some("run"), FailureKind::Unreadable, "damaged");
+    model.push_unreadable(5, Some("run"), FailureKind::Unreadable, "damaged", None);
     model.push_message("three");
     let ids: Vec<_> = model.visible_entry_ids().collect();
 
@@ -144,7 +144,7 @@ fn entries_that_replace_a_gap_keep_stable_ids_and_the_rest_of_the_transcript_sti
     model.apply(&delta("more"));
     assert_eq!(model.entries().len(), 5);
     // Closing a gap with nothing leaves no trace.
-    model.push_unreadable(6, None, FailureKind::Unreadable, "damaged");
+    model.push_unreadable(6, None, FailureKind::Unreadable, "damaged", None);
     assert!(model.replace_unreadable(6, Vec::new()));
     assert!(!model.replace_unreadable(6, Vec::new()));
     assert_eq!(model.entries().len(), 5);

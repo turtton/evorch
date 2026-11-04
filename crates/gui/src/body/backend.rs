@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use event_bus::Event;
 
+use super::meter::ImmediateMeter;
 use super::text::BodyText;
 use super::types::{BodyError, BodyErrorKind, BodyRef};
 
@@ -39,6 +40,12 @@ pub struct EventFailure {
     pub kind: FailureKind,
     /// Never contains stored text.
     pub reason: String,
+    /// The body whose read failed, when the failure is a body's: the event
+    /// itself decodes. Lets the gap say which body, and its details name it.
+    pub reference: Option<BodyRef>,
+    /// When the event happened, if its columns still say: where a message the
+    /// user sent before it belongs in the replay.
+    pub wall_clock: Option<std::time::SystemTime>,
 }
 
 /// One row of the stored event log, in id order.
@@ -51,16 +58,6 @@ pub enum HistoryRow {
     Failure(EventFailure),
 }
 
-/// The outcome of reading one event again.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum EventReread {
-    Ready(DeferredEvent),
-    Failed(EventFailure),
-    /// The row no longer exists.
-    Gone,
-}
-
 /// The per-body result of one storage call.
 pub type BodyResult = Result<Arc<str>, BodyError>;
 
@@ -70,8 +67,20 @@ pub trait BodyBackend: Send + Sync {
     /// connection, not one body) is the outer error and applies to all of them.
     fn resolve(&self, refs: &[BodyRef]) -> Result<Vec<BodyResult>, BodyError>;
 
-    /// Reads one event again, as a deferred row.
-    fn read_event(&self, id: i64) -> EventReread;
+    /// Reads the events concerning `runs` with `after < id <= through` as history
+    /// rows (a row that cannot be read in its place), in id order. Nested
+    /// bodies are read here, on the worker; display bodies stay references.
+    /// Counts what it reads at once in `meter`.
+    ///
+    /// # Errors
+    /// The query itself failed.
+    fn read_rows(
+        &self,
+        runs: &[String],
+        after: i64,
+        through: i64,
+        meter: &ImmediateMeter,
+    ) -> Result<Vec<HistoryRow>, BodyError>;
 }
 
 /// A backend that holds nothing: every body is missing. Used when no store is
@@ -91,7 +100,13 @@ impl BodyBackend for NoBodies {
             .collect())
     }
 
-    fn read_event(&self, _id: i64) -> EventReread {
-        EventReread::Gone
+    fn read_rows(
+        &self,
+        _runs: &[String],
+        _after: i64,
+        _through: i64,
+        _meter: &ImmediateMeter,
+    ) -> Result<Vec<HistoryRow>, BodyError> {
+        Ok(Vec::new())
     }
 }

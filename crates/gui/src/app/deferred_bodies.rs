@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 
 use super::WorkbenchState;
 use super::history::UnreadableEvent;
-use crate::body::{BodyResolver, DeferredPartAssembler, EventFailure, EventReread, FailureReport};
+use crate::body::{
+    BodyError, BodyResolver, DeferredPartAssembler, EventFailure, FailureReport, HistoryRow,
+    RowsPurpose,
+};
 use crate::model::tasks::AgentRunSource;
 
 impl<S: AgentRunSource> WorkbenchState<S> {
@@ -36,19 +39,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         crate::body::ui::install(ctx, resolver.clone());
-        for (id, outcome) in resolver.take_event_results() {
-            match &outcome {
-                EventReread::Ready(_) | EventReread::Gone => {
-                    self.unreadable_history_events.remove(&id);
-                }
-                EventReread::Failed(failure) => {
-                    if let Some(known) = self.unreadable_history_events.get_mut(&id) {
-                        known.reason.clone_from(&failure.reason);
-                    }
-                }
-            }
-            self.transcripts.apply_reread(id, &outcome);
-        }
+        resolver.note_shown_through(self.shown_through_event);
+        self.apply_rows_results();
         for report in resolver.take_failure_reports() {
             let failure = &report.failure;
             tracing::warn!(
@@ -62,6 +54,146 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             );
             self.body_failure_reports.push(report);
         }
+    }
+
+    /// Applies the rows the resolver's worker has read since the last call:
+    /// the earlier history of a conversation that became known, and the events
+    /// that were unreadable and were read again. Nothing here reads the
+    /// database; the worker did.
+    pub(super) fn apply_rows_results(&mut self) {
+        let Some(resolver) = self.body_resolver.clone() else {
+            return;
+        };
+        for outcome in resolver.take_rows_results() {
+            match outcome.request.purpose {
+                RowsPurpose::Rehydrate { thread } => {
+                    self.finish_rehydrate(&thread, &outcome.request.runs, outcome.result);
+                }
+                RowsPurpose::Gap { run, event_id } => {
+                    self.finish_gap(&run, event_id, outcome.result);
+                }
+            }
+        }
+        // A conversation the resolver no longer holds a read for (its runs
+        // were forgotten) must not keep the feed waiting.
+        self.shared_feed
+            .rehydrating
+            .retain(|thread| resolver.rehydrating(thread));
+    }
+
+    /// Runs what a manual resolver has queued and applies what it read, until
+    /// nothing is left to run. For headless tests, which draw no frames; a
+    /// resolver with a thread of its own is only waited for, so the reads
+    /// stay on its thread.
+    pub fn settle_body_rows(&mut self) {
+        let Some(resolver) = self.body_resolver.clone() else {
+            return;
+        };
+        loop {
+            if !resolver.has_worker() {
+                resolver.pump_all();
+            }
+            self.apply_rows_results();
+            // Events of other processes that waited for the history are shown.
+            self.retry_pending_shared_events();
+            if !resolver.has_rows_work() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn finish_gap(&mut self, run: &str, event_id: i64, result: Result<Vec<HistoryRow>, BodyError>) {
+        let rows = match result {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.transcripts
+                    .update_unreadable(event_id, None, &error.reason, None);
+                if let Some(known) = self.unreadable_history_events.get_mut(&event_id) {
+                    known.reason = error.reason;
+                }
+                return;
+            }
+        };
+        let still_unreadable = rows.iter().find_map(|row| match row {
+            HistoryRow::Failure(failure) if failure.id == event_id => Some(failure),
+            _ => None,
+        });
+        if let Some(failure) = still_unreadable {
+            self.transcripts.update_unreadable(
+                event_id,
+                Some(&failure.kind),
+                &failure.reason,
+                failure.reference,
+            );
+            if let Some(known) = self.unreadable_history_events.get_mut(&event_id) {
+                known.reason.clone_from(&failure.reason);
+            }
+            return;
+        }
+        self.transcripts.fill_unreadable(run, event_id, &rows);
+        self.unreadable_history_events.remove(&event_id);
+    }
+
+    /// The earlier events of a conversation that just became known, replacing
+    /// what was shown for its runs while no conversation owned them. The rows
+    /// come with the places of the events that could not be read, so each gap
+    /// is where it was, and a message the user sent goes in at its time.
+    fn finish_rehydrate(
+        &mut self,
+        thread: &str,
+        runs: &[String],
+        result: Result<Vec<HistoryRow>, BodyError>,
+    ) {
+        self.shared_feed.rehydrating.remove(thread);
+        let rows = match result {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, thread, "earlier events of a conversation cannot be loaded");
+                return;
+            }
+        };
+        let outer = self.transcripts.set_foreign_scope(true);
+        for run in runs {
+            self.transcripts.forget_run(run);
+        }
+        let mut messages: Vec<_> = self
+            .history
+            .iter()
+            .filter(|message| message.thread_id == thread && message.shown_as_sent())
+            .cloned()
+            .collect();
+        messages.sort_by_key(|message| message.at);
+        let mut messages = messages.into_iter().peekable();
+        let mut unreadable = BTreeMap::new();
+        for row in rows {
+            let at = match &row {
+                HistoryRow::Event(row) => Some(row.event.meta.wall_clock),
+                HistoryRow::Failure(failure) => failure.wall_clock,
+            };
+            if let Some(at) = at {
+                while messages.peek().is_some_and(|message| message.at <= at) {
+                    if let Some(message) = messages.next() {
+                        self.restore_user_message(message);
+                    }
+                }
+            }
+            match row {
+                HistoryRow::Failure(failure) => {
+                    self.show_unreadable_event(&failure, &mut unreadable);
+                }
+                HistoryRow::Event(row) => {
+                    self.apply_conversation_event_with_body(&row.event, row.body.as_ref());
+                }
+            }
+        }
+        for message in messages {
+            self.restore_user_message(message);
+        }
+        for (id, event) in unreadable {
+            self.unreadable_history_events.entry(id).or_insert(event);
+        }
+        self.transcripts.set_foreign_scope(outer);
     }
 
     /// After drawing: reads queued for bodies no pane drew are dropped.
@@ -89,7 +221,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             failure.run_id.as_deref(),
             failure.kind.clone(),
             &failure.reason,
+            failure.reference,
         );
+        if let (Some(resolver), Some(run)) = (&self.body_resolver, failure.run_id.as_deref()) {
+            resolver.watch_gap(run, failure.id, &failure.kind);
+        }
     }
 
     /// Hands the responses a replay left unfinished to the feed's assembler, so

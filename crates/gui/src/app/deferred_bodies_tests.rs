@@ -11,8 +11,8 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 use super::WorkbenchState;
 use crate::body::testing::FakeBackend;
 use crate::body::{
-    BodyError, BodyErrorKind, BodyResolver, BodyText, DeferredEvent, EventFailure, EventReread,
-    FailureKind, HistoryRow, HistorySource, ResolverConfig,
+    BodyError, BodyErrorKind, BodyResolver, BodyText, DeferredEvent, EventFailure, EventPhase,
+    FailureKind, HistoryRow, HistorySource, ManualClock, ResolverConfig,
 };
 use crate::fixture::DemoSource;
 use crate::model::transcript::TranscriptEntry;
@@ -56,7 +56,23 @@ fn failure(id: i64, run: Option<&str>) -> HistoryRow {
         run_id: run.map(str::to_owned),
         kind: FailureKind::Unreadable,
         reason: "the payload does not decode".into(),
+        reference: None,
+        wall_clock: None,
     })
+}
+
+/// When the events of the tests happened: seconds after a fixed start.
+fn at(seconds: u64) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + seconds)
+}
+
+/// `row` as it was stored `seconds` after the start.
+fn happened(mut row: HistoryRow, seconds: u64) -> HistoryRow {
+    match &mut row {
+        HistoryRow::Event(event) => event.event.meta.wall_clock = at(seconds),
+        HistoryRow::Failure(failure) => failure.wall_clock = Some(at(seconds)),
+    }
+    row
 }
 
 fn started() -> HistoryRow {
@@ -244,7 +260,15 @@ fn replaying_a_log_opens_no_display_body_and_shows_the_declared_size() {
     assert_eq!(text, &body);
     assert_eq!(text.byte_len(), backend_text.len() as u64);
     assert!(backend.calls().is_empty(), "nothing was read");
-    assert_eq!(state.body_resolver().unwrap().stats().immediate_reads, 0);
+    assert_eq!(
+        state
+            .body_resolver()
+            .unwrap()
+            .stats()
+            .immediate
+            .total_bodies(),
+        0
+    );
 }
 
 #[test]
@@ -313,41 +337,159 @@ fn a_permanent_failure_is_reported_once_however_many_frames_show_it() {
     assert_eq!(reports[0].failure.origin.run_id.as_deref(), Some("run-1"));
 }
 
-#[test]
-fn reading_an_event_again_replaces_its_gap_and_replays_nothing_else() {
+fn part(id: i64, index: usize, text: &str) -> HistoryRow {
+    event(
+        id,
+        MessageEvent::MessagePart {
+            run_id: "run-1".into(),
+            response_id: "response".into(),
+            text: text.into(),
+            index,
+            total: 3,
+        },
+    )
+}
+
+/// A restored thread whose sidebar file holds `messages` the user sent, with a
+/// resolver driven by hand and a clock the test moves.
+fn restored_with_user_messages(
+    rows: Vec<HistoryRow>,
+    messages: &[(&str, u64)],
+) -> (
+    WorkbenchState<DemoSource>,
+    Arc<FakeBackend>,
+    BodyResolver,
+    Arc<ManualClock>,
+    tempfile::TempDir,
+) {
+    use super::history::{DeliveryStatus, HistorySidebar, UserMessage};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sidebar.json");
+    let saved = HistorySidebar {
+        sidebar: sidebar(),
+        user_messages: messages
+            .iter()
+            .map(|(text, seconds)| UserMessage {
+                id: format!("user-{text}"),
+                thread_id: "t1".into(),
+                text: (*text).into(),
+                skills: Vec::new(),
+                origin_unverified: false,
+                image_count: 0,
+                resent_from: None,
+                at: at(*seconds),
+                status: DeliveryStatus::Delivered,
+                starts_run: false,
+                resolution: None,
+            })
+            .collect(),
+        composer_drafts: Vec::new(),
+    };
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let backend = FakeBackend::new();
-    let resolver = BodyResolver::manual(backend.clone(), ResolverConfig::default());
+    let clock = Arc::new(ManualClock::new());
+    let resolver = BodyResolver::manual(
+        backend.clone(),
+        ResolverConfig {
+            clock: clock.clone(),
+            ..ResolverConfig::default()
+        },
+    );
     let mut state = WorkbenchState::new(DemoSource(vec![]), &UiSettings::default())
         .unwrap()
         .with_sidebar(sidebar())
+        .with_sidebar_path(path)
         .with_body_resolver(resolver.clone());
     state
-        .restore_history_from(
-            &Database::open_in_memory().unwrap(),
-            &Rows(vec![
-                started(),
-                message(2, "first"),
-                failure(3, Some("run-1")),
-                message(4, "last"),
-            ]),
-        )
+        .restore_history_from(&Database::open_in_memory().unwrap(), &Rows(rows))
         .unwrap();
-    let notifications = state.notifications.items().count();
-    backend.script_event(
-        3,
-        EventReread::Ready(DeferredEvent {
-            id: 3,
-            event: Event::new(MessageEvent::MessageCompleted {
-                run_id: "run-1".into(),
-                text: "recovered".into(),
-            }),
-            body: None,
-        }),
+    (state, backend, resolver, clock, dir)
+}
+
+fn thread_entries_with_input(state: &WorkbenchState<DemoSource>) -> Vec<String> {
+    state
+        .transcripts
+        .thread_model("t1")
+        .expect("the thread's transcript")
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message { text, .. } => {
+                Some(format!("message:{}", text.inline_or_empty()))
+            }
+            TranscriptEntry::UserMessage { text, .. } => Some(format!("you:{text}")),
+            TranscriptEntry::Unreadable { event_id, .. } => Some(format!("gap:{event_id}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn what_the_user_sent_before_an_unreadable_event_stays_before_its_gap() {
+    // The user asked at second 2; the answer (event 3) happened at second 3 and
+    // cannot be read; the next answer is at second 4.
+    let (state, ..) = restored_with_user_messages(
+        vec![
+            happened(started(), 0),
+            happened(message(2, "first"), 1),
+            happened(failure(3, Some("run-1")), 3),
+            happened(message(4, "second"), 4),
+        ],
+        &[("ask", 2)],
     );
 
-    resolver.request_event(3);
-    resolver.pump_all();
-    state.bodies_begin_frame(&egui::Context::default());
+    assert_eq!(
+        thread_entries_with_input(&state),
+        ["message:first", "you:ask", "gap:3", "message:second"],
+        "the question comes first, as it does before a readable answer"
+    );
+}
+
+#[test]
+fn a_failure_that_does_not_know_when_it_happened_does_not_move_the_input() {
+    let (state, ..) = restored_with_user_messages(
+        vec![
+            happened(started(), 0),
+            happened(message(2, "first"), 1),
+            failure(3, Some("run-1")),
+            happened(message(4, "second"), 4),
+        ],
+        &[("ask", 2)],
+    );
+
+    assert_eq!(
+        thread_entries_with_input(&state),
+        ["message:first", "gap:3", "you:ask", "message:second"]
+    );
+}
+
+#[test]
+fn reading_an_event_again_replaces_its_gap_and_replays_nothing_else() {
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            message(2, "first"),
+            failure(3, Some("run-1")),
+            message(4, "last"),
+        ],
+        &[],
+    );
+    let notifications = state.notifications.items().count();
+    let before: Vec<usize> = state
+        .transcripts
+        .thread_model("t1")
+        .unwrap()
+        .visible_entry_ids()
+        .collect();
+    backend.script_rows(Ok(vec![
+        started(),
+        message(2, "first"),
+        message(3, "recovered"),
+        message(4, "last"),
+    ]));
+
+    resolver.request_gap("run-1", 3);
+    state.settle_body_rows();
 
     assert_eq!(
         thread_entries(&state),
@@ -355,4 +497,154 @@ fn reading_an_event_again_replaces_its_gap_and_replays_nothing_else() {
     );
     assert!(state.unreadable_history_events.is_empty());
     assert_eq!(state.notifications.items().count(), notifications);
+    let after: Vec<usize> = state
+        .transcripts
+        .thread_model("t1")
+        .unwrap()
+        .visible_entry_ids()
+        .collect();
+    let first = before.len() - 3;
+    assert_eq!(
+        (after[first], after[after.len() - 1]),
+        (before[first], before[before.len() - 1]),
+        "the entries around the gap keep their identity, so nothing shown moves"
+    );
+}
+
+#[test]
+fn a_repaired_slice_of_a_response_brings_the_whole_response_back() {
+    // Slice 1 of 3 was unreadable: the restore shows no response, only the gap.
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            message(2, "first"),
+            part(3, 0, "AAA "),
+            failure(4, Some("run-1")),
+            part(5, 2, "CCC "),
+            message(6, "last"),
+        ],
+        &[],
+    );
+    assert_eq!(
+        thread_entries(&state),
+        ["message:first", "gap:4", "message:last"]
+    );
+    // The slice is repaired; the worker reads the run again and joins the slices.
+    backend.script_rows(Ok(vec![
+        started(),
+        message(2, "first"),
+        part(3, 0, "AAA "),
+        part(4, 1, "BBB "),
+        part(5, 2, "CCC "),
+        message(6, "last"),
+    ]));
+
+    resolver.request_gap("run-1", 4);
+    state.settle_body_rows();
+
+    assert_eq!(
+        thread_entries(&state),
+        ["message:first", "message:AAA BBB CCC ", "message:last"],
+        "the response is complete, where the gap was, not just a closed gap"
+    );
+    assert!(state.unreadable_history_events.is_empty());
+}
+
+#[test]
+fn an_event_that_fails_again_keeps_its_gap_and_says_why() {
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![started(), failure(3, Some("run-1")), message(4, "last")],
+        &[],
+    );
+    backend.script_rows(Ok(vec![
+        started(),
+        HistoryRow::Failure(EventFailure {
+            id: 3,
+            run_id: Some("run-1".into()),
+            kind: FailureKind::Body(BodyErrorKind::Missing),
+            reason: "no such blob".into(),
+            reference: Some(FakeBackend::key_of("gone")),
+            wall_clock: None,
+        }),
+        message(4, "last"),
+    ]));
+
+    resolver.request_gap("run-1", 3);
+    state.settle_body_rows();
+
+    assert_eq!(thread_entries(&state), ["gap:3", "message:last"]);
+    let model = state.transcripts.thread_model("t1").unwrap();
+    let Some(TranscriptEntry::Unreadable {
+        kind,
+        reason,
+        reference,
+        ..
+    }) = model
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry, TranscriptEntry::Unreadable { .. }))
+    else {
+        panic!("the gap")
+    };
+    assert_eq!(kind, &FailureKind::Body(BodyErrorKind::Missing));
+    assert_eq!(reason, "no such blob");
+    assert_eq!(reference, &Some(FakeBackend::key_of("gone")));
+    assert_eq!(
+        state
+            .unreadable_history_events
+            .get(&3)
+            .map(|e| e.reason.as_str()),
+        Some("no such blob")
+    );
+}
+
+#[test]
+fn a_busy_content_of_an_unreadable_event_is_retried_by_itself_until_it_reads() {
+    let reference = FakeBackend::key_of("nested input");
+    let busy = |id: i64| {
+        HistoryRow::Failure(EventFailure {
+            id,
+            run_id: Some("run-1".into()),
+            kind: FailureKind::Body(BodyErrorKind::Busy),
+            reason: "database is locked".into(),
+            reference: Some(reference),
+            wall_clock: None,
+        })
+    };
+    let (mut state, backend, resolver, clock, _dir) = restored_with_user_messages(
+        vec![started(), message(2, "first"), busy(3), message(4, "last")],
+        &[],
+    );
+    // The restore itself started the retries: nobody pressed Retry.
+    assert_eq!(resolver.event_phase(3), EventPhase::Retrying { retries: 1 });
+    backend.script_rows(Ok(vec![
+        started(),
+        message(2, "first"),
+        busy(3),
+        message(4, "last"),
+    ]));
+    backend.script_rows(Ok(vec![
+        started(),
+        message(2, "first"),
+        message(3, "now readable"),
+        message(4, "last"),
+    ]));
+
+    clock.advance(std::time::Duration::from_millis(250));
+    state.settle_body_rows();
+    assert_eq!(
+        thread_entries(&state),
+        ["message:first", "gap:3", "message:last"]
+    );
+    assert_eq!(resolver.event_phase(3), EventPhase::Retrying { retries: 2 });
+
+    clock.advance(std::time::Duration::from_secs(1));
+    state.settle_body_rows();
+
+    assert_eq!(
+        thread_entries(&state),
+        ["message:first", "message:now readable", "message:last"]
+    );
+    assert_eq!(resolver.event_phase(3), EventPhase::Idle);
+    assert_eq!(resolver.stats().row_auto_retries, 1);
 }

@@ -9,13 +9,15 @@
 //! injected clock; integrity failures are not, but can be retried by hand.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{JoinHandle, ThreadId};
 use std::time::Duration;
 
-use super::backend::{BodyBackend, EventReread};
+use super::backend::{BodyBackend, FailureKind, HistoryRow};
 use super::clock::{Clock, SystemClock};
+use super::meter::{ImmediateClass, ImmediateMeter, ImmediateStats};
+use super::rows::{RowsOutcome, RowsPurpose, RowsRequest};
 use super::text::{BodyText, Segment};
 use super::types::{BodyError, BodyErrorKind, BodyOrigin, BodyRef, DeferredBody};
 
@@ -130,10 +132,14 @@ pub struct ResolverStats {
     pub late_results_dropped: u64,
     pub largest_batch_refs: usize,
     pub largest_batch_bytes: u64,
-    pub event_rereads: u64,
-    /// Bodies read at once for the start-up replay (not for a frame).
-    pub immediate_reads: u64,
-    pub immediate_bytes: u64,
+    /// Reads of the rows of some runs (a late-known conversation, an
+    /// unreadable event read again), each on the worker.
+    pub row_reads: u64,
+    /// Rows reads started again by themselves after a Busy or I/O failure.
+    pub row_auto_retries: u64,
+    /// Bodies read at once while events were built (nested positions, control
+    /// results, the feed's display bodies, hand-over text), by class.
+    pub immediate: ImmediateStats,
     /// The threads that called the backend; never the UI's.
     pub reader_threads: Vec<ThreadId>,
 }
@@ -143,7 +149,17 @@ pub struct ResolverStats {
 pub enum EventPhase {
     Idle,
     Loading,
+    /// A Busy or I/O failure; read again by itself after the wait.
+    Retrying {
+        retries: u8,
+    },
     Failed(String),
+}
+
+/// A rows read waiting for its next automatic try.
+struct RowsWait {
+    request: RowsRequest,
+    due: Duration,
 }
 
 #[derive(Debug)]
@@ -217,10 +233,12 @@ struct State {
     request: u64,
     reports: Vec<FailureReport>,
     reported: HashSet<(BodyRef, BodyErrorKind)>,
-    event_queue: VecDeque<i64>,
-    event_reading: Option<i64>,
-    event_failed: HashMap<i64, String>,
-    event_results: Vec<(i64, EventReread)>,
+    rows_queue: VecDeque<RowsRequest>,
+    rows_reading: Option<RowsRequest>,
+    rows_waiting: Vec<RowsWait>,
+    rows_results: Vec<RowsOutcome>,
+    rows_seq: u64,
+    gap_failed: HashMap<i64, String>,
     stats: ResolverStats,
 }
 
@@ -231,6 +249,12 @@ struct Shared {
     config: ResolverConfig,
     repaint: Option<Arc<dyn Fn() + Send + Sync>>,
     shutdown: AtomicBool,
+    meter: ImmediateMeter,
+    /// The newest event id the app shows: an unreadable event is read again
+    /// up to it, when the read starts.
+    shown_through: AtomicI64,
+    /// Whether a thread of its own runs the reads.
+    threaded: AtomicBool,
 }
 
 struct WorkerGuard {
@@ -262,7 +286,7 @@ pub struct BodyResolver {
 
 enum Job {
     Bodies(Vec<(BodyRef, u64)>),
-    Event(i64),
+    Rows(RowsRequest),
 }
 
 impl BodyResolver {
@@ -281,6 +305,7 @@ impl BodyResolver {
             .spawn(move || shared.worker_loop());
         match spawned {
             Ok(handle) => {
+                resolver.shared.threaded.store(true, Ordering::SeqCst);
                 *resolver
                     ._guard
                     .thread
@@ -312,6 +337,9 @@ impl BodyResolver {
             config,
             repaint,
             shutdown: AtomicBool::new(false),
+            meter: ImmediateMeter::new(),
+            shown_through: AtomicI64::new(0),
+            threaded: AtomicBool::new(false),
         });
         Self {
             _guard: Arc::new(WorkerGuard {
@@ -402,15 +430,122 @@ impl BodyResolver {
         }
     }
 
-    /// Asks for an unreadable event to be read again.
-    pub fn request_event(&self, id: i64) {
+    /// Whether a thread of its own runs the reads (a resolver made by
+    /// [`Self::spawn`]); a manual one reads when [`Self::pump`] is called.
+    #[must_use]
+    pub fn has_worker(&self) -> bool {
+        self.shared.threaded.load(Ordering::SeqCst)
+    }
+
+    /// Tells the resolver how far the app's history reaches. An unreadable
+    /// event is read again up to this id, which is the one current when the
+    /// read starts.
+    pub fn note_shown_through(&self, id: i64) {
+        self.shared.shown_through.fetch_max(id, Ordering::SeqCst);
+    }
+
+    /// The meter that counts the bodies events read at once while they are
+    /// built; hand it to whatever builds events off a frame.
+    #[must_use]
+    pub fn meter(&self) -> ImmediateMeter {
+        self.shared.meter.clone()
+    }
+
+    /// Asks for the events concerning `runs` with `after < id <= through`,
+    /// read on the worker. A request for the same purpose that is already
+    /// queued, running or waiting for a retry is joined, not repeated.
+    pub fn request_rows(&self, purpose: RowsPurpose, runs: Vec<String>, after: i64, through: i64) {
         {
             let mut state = self.lock();
-            if state.event_queue.contains(&id) || state.event_reading == Some(id) {
+            let joined = state.rows_queue.iter().any(|r| r.purpose == purpose)
+                || state
+                    .rows_reading
+                    .as_ref()
+                    .is_some_and(|r| r.purpose == purpose)
+                || state
+                    .rows_waiting
+                    .iter()
+                    .any(|w| w.request.purpose == purpose);
+            if joined {
                 return;
             }
-            state.event_failed.remove(&id);
-            state.event_queue.push_back(id);
+            if let RowsPurpose::Gap { event_id, .. } = &purpose {
+                state.gap_failed.remove(event_id);
+            }
+            state.rows_seq += 1;
+            let id = state.rows_seq;
+            state.rows_queue.push_back(RowsRequest {
+                id,
+                purpose,
+                runs,
+                after,
+                through,
+                retries: 0,
+            });
+        }
+        self.shared.wake.notify_one();
+    }
+
+    /// Reads an unreadable event again, by hand: from a fresh retry count,
+    /// replacing whatever wait was scheduled for it.
+    pub fn request_gap(&self, run: &str, event_id: i64) {
+        {
+            let mut state = self.lock();
+            state.rows_waiting.retain(|wait| {
+                !matches!(&wait.request.purpose, RowsPurpose::Gap { event_id: id, .. } if *id == event_id)
+            });
+        }
+        self.request_rows(
+            RowsPurpose::Gap {
+                run: run.to_owned(),
+                event_id,
+            },
+            vec![run.to_owned()],
+            0,
+            0,
+        );
+    }
+
+    /// Starts the automatic retries of an unreadable event whose failure can
+    /// pass (a body that was busy or hit an I/O error), once: an event that is
+    /// already queued, waiting, or has used its retries up is left alone.
+    pub fn watch_gap(&self, run: &str, event_id: i64, kind: &FailureKind) {
+        if !matches!(kind, FailureKind::Body(error) if error.is_transient()) {
+            return;
+        }
+        let now = self.shared.config.clock.now();
+        {
+            let mut state = self.lock();
+            let known = |purpose: &RowsPurpose| matches!(purpose, RowsPurpose::Gap { event_id: id, .. } if *id == event_id);
+            if state.rows_queue.iter().any(|r| known(&r.purpose))
+                || state
+                    .rows_reading
+                    .as_ref()
+                    .is_some_and(|r| known(&r.purpose))
+                || state.rows_waiting.iter().any(|w| known(&w.request.purpose))
+                || state.gap_failed.contains_key(&event_id)
+            {
+                return;
+            }
+            state.rows_seq += 1;
+            let id = state.rows_seq;
+            let due = now + self.shared.config.retry_delays[0];
+            state.rows_waiting.push(RowsWait {
+                request: RowsRequest {
+                    id,
+                    purpose: RowsPurpose::Gap {
+                        run: run.to_owned(),
+                        event_id,
+                    },
+                    runs: vec![run.to_owned()],
+                    after: 0,
+                    through: 0,
+                    // The read waiting is the first retry: the failure it
+                    // answers was the first try.
+                    retries: 1,
+                },
+                due,
+            });
         }
         self.shared.wake.notify_one();
     }
@@ -418,19 +553,52 @@ impl BodyResolver {
     #[must_use]
     pub fn event_phase(&self, id: i64) -> EventPhase {
         let state = self.lock();
-        if state.event_queue.contains(&id) || state.event_reading == Some(id) {
+        let known = |purpose: &RowsPurpose| matches!(purpose, RowsPurpose::Gap { event_id, .. } if *event_id == id);
+        if state.rows_queue.iter().any(|r| known(&r.purpose))
+            || state
+                .rows_reading
+                .as_ref()
+                .is_some_and(|r| known(&r.purpose))
+        {
             EventPhase::Loading
-        } else if let Some(reason) = state.event_failed.get(&id) {
+        } else if let Some(wait) = state
+            .rows_waiting
+            .iter()
+            .find(|w| known(&w.request.purpose))
+        {
+            EventPhase::Retrying {
+                retries: wait.request.retries,
+            }
+        } else if let Some(reason) = state.gap_failed.get(&id) {
             EventPhase::Failed(reason.clone())
         } else {
             EventPhase::Idle
         }
     }
 
-    /// The finished event re-reads, for the app to apply to its transcripts.
+    /// Whether a rows read for a conversation of `thread` has not finished
+    /// (queued, running, or waiting for a retry).
     #[must_use]
-    pub fn take_event_results(&self) -> Vec<(i64, EventReread)> {
-        std::mem::take(&mut self.lock().event_results)
+    pub fn rehydrating(&self, thread: &str) -> bool {
+        let state = self.lock();
+        let is = |purpose: &RowsPurpose| matches!(purpose, RowsPurpose::Rehydrate { thread: t } if t == thread);
+        state.rows_queue.iter().any(|r| is(&r.purpose))
+            || state.rows_reading.as_ref().is_some_and(|r| is(&r.purpose))
+            || state.rows_waiting.iter().any(|w| is(&w.request.purpose))
+    }
+
+    /// Whether a rows read is queued or running. One that waits for its next
+    /// automatic try is not counted: only time moves it on.
+    #[must_use]
+    pub fn has_rows_work(&self) -> bool {
+        let state = self.lock();
+        !state.rows_queue.is_empty() || state.rows_reading.is_some()
+    }
+
+    /// The finished rows reads, for the app to apply to its transcripts.
+    #[must_use]
+    pub fn take_rows_results(&self) -> Vec<RowsOutcome> {
+        std::mem::take(&mut self.lock().rows_results)
     }
 
     /// Permanent failures not reported yet. One report per body and kind of
@@ -445,6 +613,15 @@ impl BodyResolver {
     /// is deleted.
     pub fn forget_run(&self, run_id: &str) {
         let mut state = self.lock();
+        state
+            .rows_queue
+            .retain(|r| !r.runs.iter().any(|run| run == run_id));
+        state
+            .rows_waiting
+            .retain(|w| !w.request.runs.iter().any(|run| run == run_id));
+        state
+            .rows_results
+            .retain(|o| !o.request.runs.iter().any(|run| run == run_id));
         let State {
             entries,
             ready_bytes,
@@ -494,10 +671,11 @@ impl BodyResolver {
                 read.insert(*key, body);
             }
         }
-        let mut state = self.lock();
-        state.stats.immediate_reads += read.len() as u64;
-        state.stats.immediate_bytes += read.values().map(|body| body.len() as u64).sum::<u64>();
-        drop(state);
+        for body in read.values() {
+            self.shared
+                .meter
+                .record(ImmediateClass::PartHandOver, body.len());
+        }
         let mut out = String::with_capacity(text.len());
         for segment in text.segments() {
             match segment {
@@ -520,8 +698,9 @@ impl BodyResolver {
     #[must_use]
     pub fn is_idle(&self) -> bool {
         let state = self.lock();
-        state.event_queue.is_empty()
-            && state.event_reading.is_none()
+        state.rows_queue.is_empty()
+            && state.rows_reading.is_none()
+            && state.rows_waiting.is_empty()
             && state.entries.values().all(|entry| {
                 !matches!(
                     entry.phase,
@@ -539,7 +718,9 @@ impl BodyResolver {
 
     #[must_use]
     pub fn stats(&self) -> ResolverStats {
-        self.lock().stats.clone()
+        let mut stats = self.lock().stats.clone();
+        stats.immediate = self.shared.meter.snapshot();
+        stats
     }
 
     /// Bytes of resolved text held for reuse (not counting oversized text).
@@ -607,15 +788,18 @@ impl Shared {
         if let Some(items) = state.take_batch(&self.config) {
             return Some(Job::Bodies(items));
         }
-        let id = state.event_queue.pop_front()?;
-        state.event_reading = Some(id);
-        Some(Job::Event(id))
+        let mut request = state.rows_queue.pop_front()?;
+        if matches!(request.purpose, RowsPurpose::Gap { .. }) {
+            request.through = self.shown_through.load(Ordering::SeqCst);
+        }
+        state.rows_reading = Some(request.clone());
+        Some(Job::Rows(request))
     }
 
     fn execute(&self, job: Job) {
         match job {
             Job::Bodies(items) => self.read_bodies(&items),
-            Job::Event(id) => self.read_event(id),
+            Job::Rows(request) => self.read_rows(request),
         }
         if let Some(repaint) = &self.repaint {
             repaint();
@@ -646,19 +830,84 @@ impl Shared {
         }
     }
 
-    fn read_event(&self, id: i64) {
-        let outcome = self.backend.read_event(id);
+    fn read_rows(&self, request: RowsRequest) {
+        let outcome = self
+            .backend
+            .read_rows(&request.runs, request.after, request.through, &self.meter)
+            .map(super::rows::assemble);
+        let now = self.config.clock.now();
         let thread = std::thread::current().id();
         let mut state = self.lock();
-        state.stats.event_rereads += 1;
+        state.stats.row_reads += 1;
         if !state.stats.reader_threads.contains(&thread) {
             state.stats.reader_threads.push(thread);
         }
-        state.event_reading = None;
-        if let EventReread::Failed(failure) = &outcome {
-            state.event_failed.insert(id, failure.reason.clone());
+        state.rows_reading = None;
+        if let Some(error) = transient_failure(&request, &outcome)
+            && usize::from(request.retries) < self.config.retry_delays.len()
+        {
+            let due = now + self.config.retry_delays[usize::from(request.retries)];
+            let mut next = request;
+            next.retries += 1;
+            state.stats.row_auto_retries += 1;
+            tracing::debug!(target: "gui::bodies", %error, "rows read will be retried");
+            state.rows_waiting.push(RowsWait { request: next, due });
+            return;
         }
-        state.event_results.push((id, outcome));
+        if let RowsPurpose::Gap { event_id, .. } = &request.purpose {
+            match gap_failure(*event_id, &outcome) {
+                Some(reason) => {
+                    state.gap_failed.insert(*event_id, reason);
+                }
+                None => {
+                    state.gap_failed.remove(event_id);
+                }
+            }
+        }
+        state.rows_results.push(RowsOutcome {
+            request,
+            result: outcome,
+        });
+    }
+}
+
+/// Why a rows read should be tried again: it failed for a reason that can
+/// pass, or (for an unreadable event) the event still fails for one.
+fn transient_failure(
+    request: &RowsRequest,
+    outcome: &Result<Vec<HistoryRow>, super::types::BodyError>,
+) -> Option<String> {
+    match outcome {
+        Err(error) if error.kind.is_transient() => Some(error.reason.clone()),
+        Err(_) => None,
+        Ok(rows) => {
+            let RowsPurpose::Gap { event_id, .. } = &request.purpose else {
+                return None;
+            };
+            rows.iter().find_map(|row| match row {
+                HistoryRow::Failure(failure)
+                    if failure.id == *event_id
+                        && matches!(&failure.kind, FailureKind::Body(kind) if kind.is_transient()) =>
+                {
+                    Some(failure.reason.clone())
+                }
+                _ => None,
+            })
+        }
+    }
+}
+
+/// The reason an unreadable event is still unreadable after a read, if it is.
+fn gap_failure(
+    event_id: i64,
+    outcome: &Result<Vec<HistoryRow>, super::types::BodyError>,
+) -> Option<String> {
+    match outcome {
+        Err(error) => Some(error.reason.clone()),
+        Ok(rows) => rows.iter().find_map(|row| match row {
+            HistoryRow::Failure(failure) if failure.id == event_id => Some(failure.reason.clone()),
+            _ => None,
+        }),
     }
 }
 
@@ -762,6 +1011,15 @@ impl State {
     }
 
     fn promote_due(&mut self, now: Duration) {
+        let mut index = 0;
+        while index < self.rows_waiting.len() {
+            if self.rows_waiting[index].due <= now {
+                let wait = self.rows_waiting.remove(index);
+                self.rows_queue.push_back(wait.request);
+            } else {
+                index += 1;
+            }
+        }
         let due: Vec<BodyRef> = self
             .entries
             .iter()
@@ -782,7 +1040,13 @@ impl State {
     }
 
     fn next_due(&self, now: Duration) -> Option<Duration> {
-        self.entries
+        let rows = self
+            .rows_waiting
+            .iter()
+            .map(|wait| wait.due.saturating_sub(now))
+            .min();
+        let bodies = self
+            .entries
             .iter()
             .filter_map(|(key, entry)| match entry.phase {
                 Phase::RetryWait { due, .. } if self.wanted_or_pinned(key) => {
@@ -790,7 +1054,11 @@ impl State {
                 }
                 _ => None,
             })
-            .min()
+            .min();
+        match (rows, bodies) {
+            (Some(rows), Some(bodies)) => Some(rows.min(bodies)),
+            (one, other) => one.or(other),
+        }
     }
 
     fn take_batch(&mut self, config: &ResolverConfig) -> Option<Vec<(BodyRef, u64)>> {

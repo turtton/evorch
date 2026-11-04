@@ -172,7 +172,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn restore_history(&mut self, db: &storage::Database) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, None, &crate::body::StorageHistory(db))
+        let source = self.storage_history(db);
+        self.restore_history_inner(db, None, &source)
     }
 
     /// [`Self::restore_history`] reading the event log from `source` instead
@@ -203,7 +204,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         db: &storage::Database,
         registry_path: &std::path::Path,
     ) -> Result<(), storage::StorageError> {
-        self.restore_history_inner(db, Some(registry_path), &crate::body::StorageHistory(db))
+        let source = self.storage_history(db);
+        self.restore_history_inner(db, Some(registry_path), &source)
+    }
+
+    /// The database as a history source that counts what it reads at once in
+    /// the body resolver's meter.
+    fn storage_history<'a>(&self, db: &'a storage::Database) -> crate::body::StorageHistory<'a> {
+        crate::body::StorageHistory::new(db).with_meter(
+            self.body_resolver
+                .as_ref()
+                .map(crate::body::BodyResolver::meter),
+        )
     }
 
     fn restore_history_inner(
@@ -359,8 +371,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             let row = match row {
                 crate::body::HistoryRow::Failure(failure) => {
                     // The gap stands where the event was; what the run was
-                    // streaming cannot continue across it.
+                    // streaming cannot continue across it. A message the user
+                    // sent before the event comes first, as before a readable one.
                     replayed_to = replayed_to.max(failure.id);
+                    if let Some(at) = failure.wall_clock {
+                        while messages.peek().is_some_and(|message| message.at <= at) {
+                            if let Some(message) = messages.next() {
+                                self.restore_user_message(message);
+                            }
+                        }
+                    }
                     parts.interrupt(failure.run_id.as_deref());
                     self.show_unreadable_event(&failure, &mut unreadable);
                     return;

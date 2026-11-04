@@ -521,7 +521,7 @@ fn assert_restore_matches_legacy_inner(
         })).unwrap(),
         );
         let source = DeferringSource {
-            inner: crate::body::StorageHistory(&db),
+            inner: crate::body::StorageHistory::new(&db),
             backend: backend.clone(),
         };
         match registry_path {

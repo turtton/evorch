@@ -10,8 +10,8 @@ use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, MessageEvent, ToolEvent};
 use gui::app::WorkbenchState;
 use gui::body::{
-    BodyBackend, BodyError, BodyErrorKind, BodyRef, BodyResolver, BodyResult, EventReread,
-    ManualClock, ResolverConfig, StorageBodies,
+    BodyBackend, BodyError, BodyErrorKind, BodyRef, BodyResolver, BodyResult, HistoryRow,
+    ImmediateMeter, ManualClock, ResolverConfig, StorageBodies,
 };
 use gui::fixture::DemoSource;
 use gui::model::transcript::TranscriptEntry;
@@ -430,8 +430,14 @@ impl BodyBackend for Busy {
         self.inner.resolve(refs)
     }
 
-    fn read_event(&self, id: i64) -> EventReread {
-        self.inner.read_event(id)
+    fn read_rows(
+        &self,
+        runs: &[String],
+        after: i64,
+        through: i64,
+        meter: &ImmediateMeter,
+    ) -> Result<Vec<HistoryRow>, BodyError> {
+        self.inner.read_rows(runs, after, through, meter)
     }
 }
 
@@ -538,4 +544,133 @@ fn an_event_whose_nested_text_cannot_be_read_stands_as_a_gap_that_says_its_conte
             .query_by_label_contains("A short closing line.")
             .is_some()
     );
+}
+
+fn note_reference(log: &Log) -> BodyRef {
+    use sha2::{Digest, Sha256};
+    BodyRef {
+        hash: Sha256::digest(log.note.as_bytes()).into(),
+        byte_len: log.note.len() as u64,
+    }
+}
+
+#[test]
+fn the_gap_of_a_missing_nested_text_names_the_body_and_a_repaired_store_fills_it_on_retry() {
+    let log = tokenized_log();
+    let raw = rusqlite::Connection::open(&log.config.db_path).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    raw.execute(
+        "CREATE TABLE saved_blobs AS SELECT * FROM content_blobs WHERE hash = ?1",
+        [blob_of(&log.note)],
+    )
+    .unwrap();
+    raw.execute(
+        "DELETE FROM content_blobs WHERE hash = ?1",
+        [blob_of(&log.note)],
+    )
+    .unwrap();
+    let (resolver, _) = manual(&log.config.db_path);
+    let state = restore(&log, &resolver);
+    let mut harness = pane(state, &resolver);
+    settle(&mut harness);
+
+    // The gap says which body is gone, and its details name it for inspection.
+    let Some(TranscriptEntry::Unreadable { reference, .. }) =
+        thread_entries(&harness.state().state)
+            .iter()
+            .find(|entry| matches!(entry, TranscriptEntry::Unreadable { .. }))
+    else {
+        panic!("a gap")
+    };
+    let reference = *reference;
+    let wanted = note_reference(&log);
+    assert_eq!(reference, Some(wanted));
+    harness.get_by_label("Copy details").click();
+    settle(&mut harness);
+    let copied = harness.state().copied.last().cloned().expect("details");
+    assert!(
+        copied.contains(&format!("hash: {}", wanted.hash_hex())),
+        "{copied}"
+    );
+    assert!(copied.contains(&format!("byte_len: {}", wanted.byte_len)));
+    assert!(!copied.contains("note line"), "never the text");
+
+    // The store is repaired; Retry reads the run again on the worker.
+    raw.execute_batch("INSERT INTO content_blobs SELECT * FROM saved_blobs")
+        .unwrap();
+    harness.get_by_label("Retry").click();
+    settle(&mut harness);
+    harness.state_mut().state.settle_body_rows();
+    settle(&mut harness);
+
+    assert!(
+        harness
+            .query_by_label_contains("its content is unavailable")
+            .is_none(),
+        "the gap is gone"
+    );
+    let entries = thread_entries(&harness.state().state);
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Unreadable { .. }))
+    );
+    let call = entries.iter().find_map(|entry| match entry {
+        TranscriptEntry::Tool {
+            call_id, output, ..
+        } if call_id == "call-1" => Some(output.is_some()),
+        _ => None,
+    });
+    assert_eq!(call, Some(true), "the call shows its result now");
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::Tool { call_id, .. } if call_id == "call-1"))
+            .count(),
+        1,
+        "the call's card was completed in place, not shown twice"
+    );
+}
+
+#[test]
+fn what_a_restore_reads_at_once_is_counted_by_what_needed_it() {
+    let log = tokenized_log();
+    let (resolver, _) = manual(&log.config.db_path);
+
+    let state = restore(&log, &resolver);
+
+    let stats = resolver.stats();
+    // The note nested in a call's detail, and the result of a shell call that a
+    // job card parses: two bodies, each in its own class.
+    assert_eq!(
+        stats.immediate.nested,
+        gui::body::ClassStats {
+            bodies: 1,
+            bytes: log.note.len() as u64
+        }
+    );
+    assert_eq!(
+        stats.immediate.control_result,
+        gui::body::ClassStats {
+            bodies: 1,
+            bytes: log.shell.len() as u64
+        }
+    );
+    assert_eq!(
+        stats.immediate.feed_display,
+        gui::body::ClassStats::default()
+    );
+    assert_eq!(
+        stats.immediate.part_hand_over,
+        gui::body::ClassStats::default()
+    );
+    // Held outside the cache for as long as the event is built: the larger of the two.
+    assert_eq!(
+        stats.immediate.largest_event_bytes,
+        log.note.len().max(log.shell.len()) as u64
+    );
+    // The display bodies (answer, reasoning, tool output) were not read at all.
+    assert_eq!(stats.bodies_read, 0);
+    assert_eq!(stats.storage_calls, 0);
+    drop(state);
 }

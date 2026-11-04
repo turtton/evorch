@@ -20,9 +20,6 @@ use crate::shared_state::{FedEvent, FeedBatch, FeedConfig, FeedPoller, FeedWorke
 /// sidebar that introduces it before being folded without it.
 const UNKNOWN_THREAD_GRACE: Duration = Duration::from_secs(10);
 
-/// Events read at a time when a conversation's earlier history is recovered.
-const REHYDRATE_PAGE: usize = 5_000;
-
 pub(super) enum SharedFeed {
     Worker(FeedWorker),
     Manual(Box<FeedPoller>),
@@ -35,26 +32,23 @@ pub(super) struct SharedFeedState {
     pub parts: event_bus::MessagePartAssembler,
     /// Events not folded yet, oldest first.
     pub pending: std::collections::VecDeque<FedEvent>,
+    /// Rows of other processes that cannot be shown, by log id: each is put in
+    /// the transcripts where it stands among the events once they are folded.
+    pub failures: std::collections::BTreeMap<i64, crate::body::EventFailure>,
     pub blocked_since: Option<Instant>,
     /// How the runs of threads other processes released last ended, by thread.
     pub released_runs: std::collections::BTreeMap<String, Vec<ReleasedRun>>,
     /// The database the feed follows.
     pub db_path: Option<std::path::PathBuf>,
-    /// Events read at a time when recovering a conversation's earlier history.
-    pub rehydrate_page: Option<usize>,
+    /// Conversations whose earlier history is being read on the resolver's
+    /// worker. Events of other processes wait until it has been applied, so
+    /// the replay and the feed never both show the same event.
+    pub rehydrating: std::collections::BTreeSet<String>,
     /// Runs whose events came from other processes.
     pub foreign_runs: std::collections::BTreeSet<String>,
 }
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    /// Reads this many events at a time when recovering a conversation's
-    /// earlier history (default 5000), which bounds the memory that takes.
-    #[must_use]
-    pub fn with_rehydrate_page_size(mut self, events: usize) -> Self {
-        self.shared_feed.rehydrate_page = Some(events);
-        self
-    }
-
     /// Follows the shared database on a background thread; `own_stream` is the
     /// stream this process persists under, whose rows are already shown live.
     /// Call after [`Self::restore_history`], which fixes where following starts.
@@ -66,7 +60,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ) -> Self {
         self.shared_feed.db_path = Some(db_path.clone());
         let config = self.feed_config(db_path, own_stream);
+        let meter = self.feed_meter();
         match FeedPoller::open(config).and_then(|poller| {
+            let poller = poller.with_meter(meter);
             FeedWorker::spawn(poller, repaint)
                 .map_err(|error| storage::StorageError::Io(error.to_string()))
         }) {
@@ -87,8 +83,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ) -> Result<Self, storage::StorageError> {
         self.shared_feed.db_path = Some(db_path.clone());
         let config = self.feed_config(db_path, own_stream);
-        self.shared_feed.feed = Some(SharedFeed::Manual(Box::new(FeedPoller::open(config)?)));
+        let poller = FeedPoller::open(config)?.with_meter(self.feed_meter());
+        self.shared_feed.feed = Some(SharedFeed::Manual(Box::new(poller)));
         Ok(self)
+    }
+
+    /// Where the feed's reads at once are counted: the body resolver's meter.
+    fn feed_meter(&self) -> crate::body::ImmediateMeter {
+        self.body_resolver
+            .as_ref()
+            .map(crate::body::BodyResolver::meter)
+            .unwrap_or_default()
     }
 
     fn feed_config(&self, db_path: std::path::PathBuf, own_stream: String) -> FeedConfig {
@@ -163,6 +168,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.import_shared_sidebar();
         }
         self.shared_feed.pending.extend(batch.events);
+        for failure in batch.failures {
+            self.shared_feed.failures.insert(failure.id, failure);
+        }
         for thread in batch.released {
             self.shared_feed
                 .released_runs
@@ -185,10 +193,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_pending_shared(&mut self) {
+        self.apply_rows_results();
         // Events no conversation owns are dropped, never shown in the open one.
         let outer = self.transcripts.set_foreign_scope(true);
         let mut imported = false;
         while let Some(fed) = self.shared_feed.pending.front() {
+            if !self.shared_feed.rehydrating.is_empty() {
+                break;
+            }
+            let next_id = fed.id;
             if self.waits_for_sidebar(&fed.event) {
                 if !imported {
                     imported = true;
@@ -204,15 +217,41 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
             self.shared_feed.blocked_since = None;
+            self.fold_shared_failures(Some(next_id));
             if let Some(fed) = self.shared_feed.pending.pop_front() {
                 self.fold_shared_event(&fed.event);
                 self.shown_through_event = self.shown_through_event.max(fed.id);
             }
         }
+        if self.shared_feed.pending.is_empty() && self.shared_feed.rehydrating.is_empty() {
+            self.fold_shared_failures(None);
+        }
         self.transcripts.set_foreign_scope(outer);
+        self.publish_shown_through();
         if self.shared_feed.pending.is_empty() {
             self.shared_feed.blocked_since = None;
             self.shared_feed.released_runs.clear();
+        }
+    }
+
+    /// Shows the rows of other processes that could not be read and that stand
+    /// before event `before` (all of them with `None`), each as a gap in the
+    /// transcripts of its run, where the events around it put it.
+    fn fold_shared_failures(&mut self, before: Option<i64>) {
+        while let Some(entry) = self.shared_feed.failures.first_entry() {
+            if before.is_some_and(|limit| *entry.key() > limit) {
+                break;
+            }
+            let failure = entry.remove();
+            let mut shown = std::collections::BTreeMap::new();
+            self.show_unreadable_event(&failure, &mut shown);
+            for (id, event) in shown {
+                self.unreadable_history_events.entry(id).or_insert(event);
+            }
+            if failure.run_id.is_none() {
+                self.notifications.push_history_gap(&[failure.id]);
+            }
+            self.shown_through_event = self.shown_through_event.max(failure.id);
         }
     }
 
@@ -326,89 +365,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Only events already reflected (up to `shown_through_event`) are replayed;
     /// the later ones are still to be folded by the feed, exactly once.
     pub(super) fn rehydrate_threads(&mut self, threads: &[(String, Vec<String>)]) {
-        let path = self.shared_feed.db_path.clone().or_else(|| {
-            self.memory
-                .config
-                .as_ref()
-                .map(|config| config.db_path.clone())
-        });
-        let Some(path) = path else {
+        let Some(resolver) = self.body_resolver.clone() else {
             tracing::warn!(
-                "earlier events of newly known conversations cannot be loaded: no database"
+                "earlier events of newly known conversations cannot be loaded: no body reader"
             );
             return;
         };
-        let db = match storage::Database::open_read_only(&path) {
-            Ok(db) => db,
-            Err(error) => {
-                tracing::warn!(%error, "earlier events of newly known conversations cannot be loaded");
-                return;
-            }
-        };
-        let outer = self.transcripts.set_foreign_scope(true);
-        let shown_through = self.shown_through_event;
-        let page = self
-            .shared_feed
-            .rehydrate_page
-            .unwrap_or(REHYDRATE_PAGE)
-            .max(1);
+        let through = self.shown_through_event;
         for (thread, runs) in threads {
-            for run in runs {
-                self.transcripts.forget_run(run);
-            }
-            let mut messages: Vec<_> = self
-                .history
-                .iter()
-                .filter(|message| &message.thread_id == thread && message.shown_as_sent())
-                .cloned()
-                .collect();
-            messages.sort_by_key(|message| message.at);
-            let mut messages = messages.into_iter().peekable();
-            // Read through what is already shown, a page at a time; whatever
-            // follows is folded by the feed.
-            let mut after = 0;
-            let mut parts = event_bus::MessagePartAssembler::new();
-            loop {
-                let (events, more) = match db.events_for_runs_between(
-                    runs,
-                    after,
-                    shown_through,
-                    page,
-                ) {
-                    Ok(found) => found,
-                    Err(error) => {
-                        tracing::warn!(%error, thread, "earlier events of a conversation cannot be loaded");
-                        break;
-                    }
-                };
-                let Some(last) = events.last().map(|stored| stored.id) else {
-                    break;
-                };
-                for stored in events {
-                    let Some(assembled) = parts.accept(&stored.event) else {
-                        continue;
-                    };
-                    let event: &Event = &assembled;
-                    while messages
-                        .peek()
-                        .is_some_and(|message| message.at <= event.meta.wall_clock)
-                    {
-                        if let Some(message) = messages.next() {
-                            self.restore_user_message(message);
-                        }
-                    }
-                    self.apply_conversation_event(event);
-                }
-                if !more {
-                    break;
-                }
-                after = last;
-            }
-            for message in messages {
-                self.restore_user_message(message);
-            }
+            // The worker reads them; the result replaces what is shown for the
+            // runs in one step, when it arrives, and the feed waits until then.
+            self.shared_feed.rehydrating.insert(thread.clone());
+            resolver.request_rows(
+                crate::body::RowsPurpose::Rehydrate {
+                    thread: thread.clone(),
+                },
+                runs.clone(),
+                0,
+                through,
+            );
         }
-        self.transcripts.set_foreign_scope(outer);
     }
 
     /// After a restart's replay, runs still shown as active belong to other
@@ -494,5 +470,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Where the replay of a restart stopped, so following starts after it.
     pub(super) fn note_replayed_event(&mut self, id: i64) {
         self.shown_through_event = self.shown_through_event.max(id);
+        self.publish_shown_through();
+    }
+
+    /// Tells the body resolver how far the history reaches, for the reads of
+    /// unreadable events it starts later.
+    fn publish_shown_through(&self) {
+        if let Some(resolver) = &self.body_resolver {
+            resolver.note_shown_through(self.shown_through_event);
+        }
     }
 }

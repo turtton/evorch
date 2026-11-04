@@ -11,8 +11,8 @@ use egui_kittest::{Harness, kittest::Queryable};
 use event_bus::{CompactionEvent, CompactionReason, Event, MessageEvent, ToolEvent};
 use gui::body::testing::FakeBackend;
 use gui::body::{
-    BodyError, BodyErrorKind, BodyResolver, BodyText, DeferredEvent, EventReread, ManualClock,
-    ResolverConfig,
+    BodyError, BodyErrorKind, BodyResolver, BodyText, DeferredEvent, EventFailure, FailureKind,
+    HistoryRow, ManualClock, ResolverConfig, RowsPurpose,
 };
 use gui::model::transcript::TranscriptEntry;
 use gui::model::transcript_registry::TranscriptRegistry;
@@ -129,6 +129,34 @@ impl Rig {
     fn click(&mut self, label: &str) {
         self.harness.get_by_label(label).click();
         self.run();
+    }
+}
+
+/// What the app does with the rows the worker read: fill the gap, or record why
+/// the event still cannot be read.
+fn apply_rows(rig: &mut Rig) {
+    rig.resolver().pump_all();
+    for outcome in rig.resolver().take_rows_results() {
+        let RowsPurpose::Gap { run, event_id } = outcome.request.purpose else {
+            continue;
+        };
+        let rows = outcome.result.expect("the rows were read");
+        let still = rows.iter().find_map(|row| match row {
+            HistoryRow::Failure(failure) if failure.id == event_id => Some(failure.clone()),
+            _ => None,
+        });
+        let registry = &mut rig.harness.state_mut().registry;
+        match still {
+            Some(failure) => registry.update_unreadable(
+                event_id,
+                Some(&failure.kind),
+                &failure.reason,
+                failure.reference,
+            ),
+            None => {
+                registry.fill_unreadable(&run, event_id, &rows);
+            }
+        }
     }
 }
 
@@ -517,6 +545,7 @@ fn an_unreadable_event_stands_between_its_neighbours_and_reading_it_again_fills_
             Some(RUN),
             gui::body::FailureKind::Unreadable,
             "the payload does not decode",
+            None,
         );
         registry.apply(&Event::new(MessageEvent::MessageCompleted {
             run_id: RUN.into(),
@@ -540,26 +569,27 @@ fn an_unreadable_event_stands_between_its_neighbours_and_reading_it_again_fills_
     let copied = rig.harness.state().copied.last().cloned().unwrap();
     assert!(copied.contains("event: 12") && copied.contains("run: run-1"));
 
-    rig.backend.script_event(
-        12,
-        EventReread::Ready(DeferredEvent {
-            id: 12,
+    let answer = |id: i64, text: &str| {
+        HistoryRow::Event(DeferredEvent {
+            id,
             event: Event::new(MessageEvent::MessageCompleted {
                 run_id: RUN.into(),
-                text: "the middle answer".into(),
+                text: text.into(),
             }),
             body: None,
-        }),
-    );
+        })
+    };
+    rig.backend.script_rows(Ok(vec![
+        answer(10, "first answer"),
+        answer(12, "the middle answer"),
+        answer(13, "last answer"),
+    ]));
     rig.click("Retry");
     assert!(
         rig.has("Reading the event again"),
         "the gap shows the read is under way"
     );
-    rig.resolver().pump_all();
-    for (id, outcome) in rig.resolver().take_event_results() {
-        rig.harness.state_mut().registry.apply_reread(id, &outcome);
-    }
+    apply_rows(&mut rig);
     rig.run();
 
     assert!(!rig.has("Couldn't read event"));
@@ -715,6 +745,7 @@ fn capture_every_loading_state() {
             Some(RUN),
             gui::body::FailureKind::Unreadable,
             "the payload does not decode",
+            None,
         );
         registry.apply(&Event::new(MessageEvent::MessageCompleted {
             run_id: RUN.into(),
@@ -743,4 +774,182 @@ fn capture_every_loading_state() {
         .select_thread(Some("thread".into()));
     shoot(&mut rig, &dir, "7-thread-deleted");
     println!("{}", dir.display());
+}
+
+#[test]
+fn a_gap_whose_content_is_busy_says_it_is_retrying_then_offers_the_details_with_the_body() {
+    let reference = FakeBackend::key_of("a long nested input");
+    let busy_row = || {
+        HistoryRow::Failure(EventFailure {
+            id: 12,
+            run_id: Some(RUN.into()),
+            kind: FailureKind::Body(BodyErrorKind::Busy),
+            reason: "database is locked".into(),
+            reference: Some(reference),
+            wall_clock: None,
+        })
+    };
+    let mut rig = rig_with(|_, registry| {
+        registry.push_unreadable(
+            12,
+            Some(RUN),
+            FailureKind::Body(BodyErrorKind::Busy),
+            "database is locked",
+            Some(reference),
+        );
+    });
+    for _ in 0..4 {
+        rig.backend.script_rows(Ok(vec![busy_row()]));
+    }
+    // The restore starts the retries; nobody presses anything.
+    rig.resolver()
+        .watch_gap(RUN, 12, &FailureKind::Body(BodyErrorKind::Busy));
+    rig.run();
+    assert!(
+        rig.has("retrying (retry 1 of 3)"),
+        "the gap says it will try again"
+    );
+    assert!(
+        !rig.has("Retry"),
+        "there is nothing to press while it retries by itself"
+    );
+
+    for step in 2..=3 {
+        rig.clock.advance(Duration::from_secs(4));
+        apply_rows(&mut rig);
+        rig.run();
+        assert!(rig.has(&format!("retry {step} of 3")));
+    }
+    rig.clock.advance(Duration::from_secs(4));
+    apply_rows(&mut rig);
+    rig.run();
+
+    // The retries are used up: now it is a failure with its buttons.
+    assert!(!rig.has("retrying"));
+    assert!(rig.has("Retry") && rig.has("Copy details"));
+    rig.click("Copy details");
+    let copied = rig.harness.state().copied.last().cloned().unwrap();
+    assert!(
+        copied.contains(&format!("hash: {}", reference.hash_hex())),
+        "{copied}"
+    );
+    assert!(copied.contains(&format!("byte_len: {}", reference.byte_len)));
+    assert!(copied.contains("evorch inspect blob"));
+    assert!(!copied.contains("a long nested input"), "never the text");
+}
+
+/// The pane scrolled by hand: a complete trackpad gesture avoids wheel smoothing.
+fn scroll_by(rig: &mut Rig, delta: f32) {
+    rig.harness.hover_at(egui::pos2(360.0, 200.0));
+    for (phase, amount) in [
+        (egui::TouchPhase::Start, 0.0),
+        (egui::TouchPhase::Move, delta),
+        (egui::TouchPhase::End, 0.0),
+    ] {
+        rig.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, amount),
+            phase,
+            modifiers: egui::Modifiers::NONE,
+        });
+        rig.harness.step();
+    }
+    rig.harness.run_steps(8);
+}
+
+#[test]
+fn the_entry_being_read_stays_where_it_is_whatever_part_of_the_conversation_is_scrolled_to() {
+    // Bodies of different sizes, so the room each placeholder reserved from its
+    // declared size is wrong by a different amount for each when the text arrives.
+    for scrolled_up in [120.0_f32, 333.0, 640.0, 1_100.0, 1_900.0] {
+        let mut rig = rig_sized(egui::vec2(720.0, 360.0), |backend, registry| {
+            for n in 0..40_usize {
+                registry.push_thread(TranscriptEntry::Notice {
+                    text: format!("Marker {n}"),
+                });
+                completed(
+                    registry,
+                    BodyText::deferred(backend.deferred(
+                        &format!("Entry {n}: {}", text_of(20 + (n * 37) % 150)),
+                        RUN,
+                        n as i64,
+                    )),
+                );
+            }
+        });
+        rig.harness.state_mut().virtualize = true;
+        rig.run();
+        scroll_by(&mut rig, scrolled_up);
+        let (entry, y) = gui::panes::agent::first_visible_entry_for_tests(&rig.harness.ctx)
+            .expect("an entry is in view");
+
+        // The bodies in view arrive and change the height of their rows.
+        rig.read();
+        rig.read();
+
+        let (after_entry, after_y) =
+            gui::panes::agent::first_visible_entry_for_tests(&rig.harness.ctx)
+                .expect("an entry is in view");
+        assert_eq!(
+            after_entry, entry,
+            "scrolled up by {scrolled_up}: the reader is still looking at the same entry"
+        );
+        assert!(
+            (after_y - y).abs() < 1.0,
+            "scrolled up by {scrolled_up}: the entry moved on the pane from {y} to {after_y}"
+        );
+    }
+}
+
+#[test]
+fn a_body_that_is_read_is_one_allocation_however_often_and_wherever_it_is_drawn() {
+    use gui::body::ui::{TextState, peek_text, poll_text};
+    let mut rig = rig_with(|backend, registry| {
+        let single = backend.deferred(&text_of(800), RUN, 5);
+        let piece = backend.deferred(&text_of(900), RUN, 6);
+        completed(registry, BodyText::deferred(single));
+        let mut mixed = BodyText::from("<<");
+        mixed.push_body(BodyText::deferred(piece));
+        mixed.push_body(BodyText::from(">>"));
+        completed(registry, mixed);
+    });
+    rig.run();
+    rig.read();
+    let ctx = rig.harness.ctx.clone();
+    let entries = rig.harness.state().registry.thread().entries().to_vec();
+    let bodies: Vec<BodyText> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let (single, mixed) = (&bodies[0], &bodies[1]);
+
+    // A body of one piece is the very text the resolver holds, in every pane.
+    let held = rig
+        .resolver()
+        .peek(single.bodies().next().unwrap())
+        .expect("held");
+    for _ in 0..3 {
+        let TextState::Ready(drawn) = poll_text(&ctx, single) else {
+            panic!("read")
+        };
+        assert!(drawn.shares_with(&held), "drawing copies nothing");
+        assert!(peek_text(&ctx, single).unwrap().shares_with(&held));
+    }
+
+    // A body of several pieces is joined once and the join is shared.
+    let TextState::Ready(first) = poll_text(&ctx, mixed) else {
+        panic!("read")
+    };
+    let TextState::Ready(second) = poll_text(&ctx, mixed) else {
+        panic!("read")
+    };
+    assert!(first.starts_with("<<word ") && first.ends_with(">>"));
+    assert!(
+        first.is_same_allocation(&second),
+        "a second drawing joins nothing"
+    );
+    assert!(first.is_same_allocation(&peek_text(&ctx, mixed).unwrap()));
 }

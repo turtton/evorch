@@ -5,7 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 
-use super::backend::{BodyBackend, BodyResult, EventReread};
+use super::backend::{BodyBackend, BodyResult, HistoryRow};
+use super::meter::ImmediateMeter;
 use super::types::{BodyError, BodyRef, DeferredBody};
 
 type Hook = Box<dyn Fn() + Send + Sync>;
@@ -19,8 +20,8 @@ struct Script {
     outer_failures: VecDeque<BodyError>,
     calls: Vec<Vec<BodyRef>>,
     threads: Vec<ThreadId>,
-    events: HashMap<i64, VecDeque<EventReread>>,
-    event_reads: Vec<i64>,
+    rows: VecDeque<Result<Vec<HistoryRow>, BodyError>>,
+    rows_reads: Vec<(Vec<String>, i64, i64)>,
 }
 
 #[derive(Default)]
@@ -92,13 +93,10 @@ impl FakeBackend {
         self.script().outer_failures.push_back(error);
     }
 
-    /// What reading `id` again answers, in turn.
-    pub fn script_event(&self, id: i64, outcome: EventReread) {
-        self.script()
-            .events
-            .entry(id)
-            .or_default()
-            .push_back(outcome);
+    /// What the next read of rows answers, in turn (an empty list when none is
+    /// scripted).
+    pub fn script_rows(&self, outcome: Result<Vec<HistoryRow>, BodyError>) {
+        self.script().rows.push_back(outcome);
     }
 
     /// Runs `hook` while a read is in progress, before it answers.
@@ -116,9 +114,10 @@ impl FakeBackend {
         self.script().calls.iter().map(Vec::len).sum()
     }
 
+    /// The rows reads so far: the runs, `after` and `through`.
     #[must_use]
-    pub fn event_reads(&self) -> Vec<i64> {
-        self.script().event_reads.clone()
+    pub fn rows_reads(&self) -> Vec<(Vec<String>, i64, i64)> {
+        self.script().rows_reads.clone()
     }
 
     /// The threads that read from the store.
@@ -163,17 +162,19 @@ impl BodyBackend for FakeBackend {
         Ok(answers)
     }
 
-    fn read_event(&self, id: i64) -> EventReread {
+    fn read_rows(
+        &self,
+        runs: &[String],
+        after: i64,
+        through: i64,
+        _meter: &ImmediateMeter,
+    ) -> Result<Vec<HistoryRow>, BodyError> {
         let mut script = self.script();
-        script.event_reads.push(id);
+        script.rows_reads.push((runs.to_vec(), after, through));
         let thread = std::thread::current().id();
         if !script.threads.contains(&thread) {
             script.threads.push(thread);
         }
-        script
-            .events
-            .get_mut(&id)
-            .and_then(VecDeque::pop_front)
-            .unwrap_or(EventReread::Gone)
+        script.rows.pop_front().unwrap_or_else(|| Ok(Vec::new()))
     }
 }
