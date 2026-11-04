@@ -5,6 +5,7 @@ mod tests;
 use crate::{AgentRuntime, RunConfig, RunId, lanes::LaneError};
 use event_bus::lane::{LaneDeliveryBinding, LaneNotificationKind};
 use event_bus::{AgentRunPhase, LaneReport, LaneStatus};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -185,15 +186,24 @@ impl AgentRuntime {
     pub async fn drive_pending_lane_deliveries(&self) -> Result<(), LaneError> {
         let store = self.delivery_store()?;
         let mut after = String::new();
+        let mut first_error = None;
         loop {
             let threads = store
                 .handle
                 .pending_lane_delivery_destinations(after.clone())?;
             if threads.is_empty() {
-                return Ok(());
+                return first_error.map_or(Ok(()), Err);
             }
-            for thread in &threads {
-                self.drive_lane_deliveries(thread).await?;
+            // Each page remains bounded, but an occupied root cannot serialize
+            // unrelated destinations behind its lease horizon.
+            let mut drives: FuturesUnordered<_> = threads
+                .iter()
+                .map(|thread| self.drive_lane_deliveries(thread))
+                .collect();
+            while let Some(result) = drives.next().await {
+                if let Err(error) = result {
+                    first_error.get_or_insert(error);
+                }
             }
             after = threads.last().expect("nonempty page").clone();
         }
@@ -297,19 +307,70 @@ impl AgentRuntime {
             Err(reason) => return Ok(LaneDeliveryOutcome::Nacked(reason)),
         };
         // An explicit resume may still be registering its new incarnation.
-        self.wait_admission(target.root_run_id)
-            .await
-            .map_err(|e| LaneError::new("restore_failed", e.to_string()))?;
+        tokio::select! {
+            result = self.wait_admission(target.root_run_id) => {
+                result.map_err(|e| LaneError::new("restore_failed", e.to_string()))?;
+            }
+            _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
+                return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+            }
+        }
         if let Err(reason) = self.check_delivery_target(thread, &target) {
             return Ok(LaneDeliveryOutcome::Nacked(reason));
         }
         let store = self.delivery_store()?;
-        let active = self.inspect_agent(target.root_run_id).is_ok_and(|r| {
+        let mut active = self.inspect_agent(target.root_run_id).is_ok_and(|r| {
             matches!(
                 r.phase,
                 AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
             )
         });
+        if !active {
+            // Receipt/ACK is not completion of the receiver's provider turn.
+            // Recover the exact saved input before storage's receipt-only ACK
+            // repair removes the last outbox trigger. No notification is appended.
+            let record = store
+                .restore_record(target.root_run_id)?
+                .ok_or_else(|| LaneError::new("unknown_thread", "root snapshot disappeared"))?;
+            let descriptor: crate::restore::RunRestoreDescriptor =
+                serde_json::from_str(&record.config_json)
+                    .map_err(|e| LaneError::new("unknown_thread", e.to_string()))?;
+            let destination = store.handle.lane_delivery_destination(thread.to_owned())?;
+            if !descriptor.spawn_credits.lane_presentations.is_empty()
+                && destination.as_ref().is_some_and(|d| {
+                    !d.stopped
+                        && d.owner
+                            .as_ref()
+                            .is_some_and(|o| o.root_run_id == target.root_run_id.to_string())
+                })
+            {
+                let current = match host.resolve(thread) {
+                    Ok(current) if current.owner() == target.owner() => current,
+                    Ok(_) => {
+                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost));
+                    }
+                    Err(reason) => return Ok(LaneDeliveryOutcome::Nacked(reason)),
+                };
+                if let Err(reason) = self.check_delivery_target(thread, &current) {
+                    return Ok(LaneDeliveryOutcome::Nacked(reason));
+                }
+                if let Err(reason) = host.restore_root(self, &current) {
+                    return Ok(LaneDeliveryOutcome::Nacked(reason));
+                }
+                tokio::select! {
+                    result = self.wait_admission(target.root_run_id) => {
+                        result.map_err(|e| LaneError::new("restore_failed", e.to_string()))?;
+                    }
+                    _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
+                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+                    }
+                }
+                if let Err(reason) = self.check_delivery_target(thread, &target) {
+                    return Ok(LaneDeliveryOutcome::Nacked(reason));
+                }
+                active = true;
+            }
+        }
         let claim = {
             let _guard = target
                 .authority
@@ -351,39 +412,19 @@ impl AgentRuntime {
                 LaneClaimResult::Stopped => return Ok(LaneDeliveryOutcome::Stopped),
             }
         };
-        let execute = async {
-            let current = host.resolve(thread)?;
-            if current.owner() != claim.owner { return Err(LaneDeliveryNack::OwnershipLost); }
-            self.check_delivery_target(thread, &current)?;
-            let received = store.handle.lane_delivery_received_ids(claim.clone()).map_err(|_| LaneDeliveryNack::StorageFailed)?;
-            if received.len() == claim.notifications.len() { return Ok(0); }
-            if !active {
-                let record = store.restore_record(target.root_run_id).map_err(|_| LaneDeliveryNack::StorageFailed)?.ok_or(LaneDeliveryNack::UnknownThread)?;
-                if !matches!(record.terminal_phase.as_str(), "Done" | "Error") { return Err(LaneDeliveryNack::Stopped); }
+        let remaining = claim.lease_until_ns.saturating_sub(host.now_ns()).max(0) as u64;
+        let execute = tokio::select! {
+            biased;
+            result = self.deliver_lane_claim(thread, &target, host.as_ref(), &claim, active) => result,
+            _ = tokio::time::sleep(Duration::from_nanos(remaining)) => {
+                self.lane_delivery_diagnostic(
+                    Some(target.root_run_id),
+                    "lane_delivery_lease_expired",
+                    &claim.token,
+                );
+                Err(LaneDeliveryNack::OwnershipLost)
             }
-            let (tx, rx) = oneshot::channel();
-            delivery.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(target.root_run_id, PendingDelivery { claim: claim.clone(), waking: !active, result: tx });
-            // Queue before restoring: the prepared loop must save receipts before
-            // any provider request, including an unfinished restored turn.
-            if !active && let Err(reason) = host.restore_root(self, &current) {
-
-                delivery.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&target.root_run_id);
-                return Err(reason);
-            }
-            delivery.version.send_modify(|v| *v = v.wrapping_add(1));
-            self.wait_admission(target.root_run_id).await.map_err(|_| LaneDeliveryNack::RestoreFailed)?;
-            let phase = self.lane_delivery_phase(target.root_run_id);
-            if let Some(mut phase) = phase {
-                tokio::select! {
-                    biased;
-                    result = rx => result.unwrap_or(Err(LaneDeliveryNack::RestoreFailed)),
-                    _ = phase.wait_for(|p| matches!(p, AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped)) => {
-                        delivery.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&target.root_run_id);
-                        Err(if self.operator_stopped(target.root_run_id) { LaneDeliveryNack::Stopped } else { LaneDeliveryNack::RestoreFailed })
-                    }
-                }
-            } else { rx.await.unwrap_or(Err(LaneDeliveryNack::RestoreFailed)) }
-        }.await;
+        };
         match execute {
             Ok(notifications) => {
                 if let Err(error) = store.handle.ack_lane_delivery(claim.clone(), host.now_ns()) {
@@ -422,10 +463,11 @@ impl AgentRuntime {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&target.root_run_id);
-                if let Err(error) =
-                    store
-                        .handle
-                        .nack_lane_delivery(claim.clone(), reason, host.now_ns())
+                if host.now_ns() < claim.lease_until_ns
+                    && let Err(error) =
+                        store
+                            .handle
+                            .nack_lane_delivery(claim.clone(), reason, host.now_ns())
                 {
                     self.lane_delivery_diagnostic(
                         Some(target.root_run_id),
@@ -435,6 +477,80 @@ impl AgentRuntime {
                 }
                 Ok(LaneDeliveryOutcome::Nacked(reason))
             }
+        }
+    }
+    async fn deliver_lane_claim(
+        &self,
+        thread: &str,
+        target: &LaneDeliveryTarget,
+        host: &dyn LaneDeliveryHost,
+        claim: &LaneDeliveryClaim,
+        active: bool,
+    ) -> Result<usize, LaneDeliveryNack> {
+        let delivery = &self.shared.lanes.delivery;
+        let store = self
+            .delivery_store()
+            .map_err(|_| LaneDeliveryNack::StorageFailed)?;
+        let current = host.resolve(thread)?;
+        if current.owner() != claim.owner {
+            return Err(LaneDeliveryNack::OwnershipLost);
+        }
+        self.check_delivery_target(thread, &current)?;
+        let received = store
+            .handle
+            .lane_delivery_received_ids(claim.clone())
+            .map_err(|_| LaneDeliveryNack::StorageFailed)?;
+        if received.len() == claim.notifications.len() {
+            return Ok(0);
+        }
+        if !active {
+            let record = store
+                .restore_record(target.root_run_id)
+                .map_err(|_| LaneDeliveryNack::StorageFailed)?
+                .ok_or(LaneDeliveryNack::UnknownThread)?;
+            if !matches!(record.terminal_phase.as_str(), "Done" | "Error") {
+                return Err(LaneDeliveryNack::Stopped);
+            }
+        }
+        let (tx, rx) = oneshot::channel();
+        delivery
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                target.root_run_id,
+                PendingDelivery {
+                    claim: claim.clone(),
+                    waking: !active,
+                    result: tx,
+                },
+            );
+        // Queue before restoring: the prepared loop must save receipts before
+        // any provider request, including an unfinished restored turn.
+        if !active && let Err(reason) = host.restore_root(self, &current) {
+            delivery
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&target.root_run_id);
+            return Err(reason);
+        }
+        delivery.version.send_modify(|v| *v = v.wrapping_add(1));
+        self.wait_admission(target.root_run_id)
+            .await
+            .map_err(|_| LaneDeliveryNack::RestoreFailed)?;
+        let phase = self.lane_delivery_phase(target.root_run_id);
+        if let Some(mut phase) = phase {
+            tokio::select! {
+                biased;
+                result = rx => result.unwrap_or(Err(LaneDeliveryNack::RestoreFailed)),
+                _ = phase.wait_for(|p| matches!(p, AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped)) => {
+                    delivery.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&target.root_run_id);
+                    Err(if self.operator_stopped(target.root_run_id) { LaneDeliveryNack::Stopped } else { LaneDeliveryNack::RestoreFailed })
+                }
+            }
+        } else {
+            rx.await.unwrap_or(Err(LaneDeliveryNack::RestoreFailed))
         }
     }
     pub fn record_lane_report_progress(&self, report: &LaneReport) -> Result<(), LaneError> {

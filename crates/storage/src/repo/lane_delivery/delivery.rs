@@ -132,7 +132,20 @@ pub(crate) fn claim(
         ),
         [&request.destination_thread_id],
     )?;
-    let mut statement=tx.prepare(&format!("SELECT n.payload FROM lane_notifications n JOIN lanes l ON l.lane_id=n.lane_id WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE} AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0) AND (?2 OR n.event_kind IN ('question','ready','failed','answer')) ORDER BY n.notification_id LIMIT 20"))?;
+    // A waking notice admits deferred updates into the same bounded turn.
+    // Prioritize the waking member so old milestones cannot fill its page.
+    let mut statement = tx.prepare(&format!(
+        "WITH eligible AS NOT MATERIALIZED (
+           SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
+           JOIN lanes l ON l.lane_id=n.lane_id
+           WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE}
+             AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
+         )
+         SELECT payload FROM eligible
+         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer'))
+         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer') THEN 0 ELSE 1 END,
+                  notification_id LIMIT 20"
+    ))?;
     let values = statement
         .query_map(
             params![request.destination_thread_id, request.allow_non_waking],
@@ -313,7 +326,21 @@ pub(crate) fn pending_destinations(
     conn: &Connection,
     after: &str,
 ) -> Result<Vec<String>, StorageError> {
-    let mut statement=conn.prepare(&format!("SELECT DISTINCT n.destination_thread_id FROM lane_notifications n WHERE n.state='pending' AND n.destination_thread_id>?1 AND {LIVE_NOTICE} ORDER BY n.destination_thread_id LIMIT 20"))?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT thread_id FROM (
+           SELECT n.destination_thread_id AS thread_id FROM lane_notifications n
+           WHERE n.state='pending' AND {LIVE_NOTICE}
+           UNION
+           SELECT d.thread_id FROM lane_delivery_destinations d
+           JOIN run_contexts c ON c.run_id=json_extract(d.owner_json,'$.root_run_id')
+           WHERE d.stopped=0 AND c.parent_run_id IS NULL
+             AND c.terminal_phase IN ('Checkpoint','Error','Done')
+             AND c.run_id NOT IN (SELECT run_id FROM run_tombstones)
+             AND d.thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+             AND CASE WHEN json_valid(c.config_json)
+               THEN json_array_length(c.config_json,'$.spawn_credits.lane_presentations')>0 ELSE 0 END
+         ) WHERE thread_id>?1 ORDER BY thread_id LIMIT 20"
+    ))?;
     Ok(statement
         .query_map([after], |r| r.get(0))?
         .collect::<Result<_, _>>()?)

@@ -3,10 +3,13 @@ use crate::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use event_bus::{EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+mod lease;
 #[derive(Default)]
 struct Model {
     finish: AtomicBool,
     fail_next: AtomicBool,
+    block_next: AtomicBool,
+    blocked: tokio::sync::Notify,
     requests: Mutex<Vec<Vec<Message>>>,
 }
 #[async_trait::async_trait]
@@ -21,6 +24,10 @@ impl AgentModel for Model {
         messages: &[Message],
         _: &[ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
+        if self.block_next.swap(false, Ordering::SeqCst) {
+            self.blocked.notify_one();
+            std::future::pending::<()>().await;
+        }
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(RuntimeError::Model {
                 reason: "injected pre-send provider rejection".into(),
@@ -276,6 +283,20 @@ impl Fixture {
     }
     fn receipts(&self) -> usize {
         rusqlite::Connection::open(&self.config.db_path).unwrap().query_row("SELECT count(*) FROM host_input_receipts WHERE json_extract(provenance_json,'$.kind')='lane_notification'",[],|r|r.get(0)).unwrap()
+    }
+    fn credits(&self, run: RunId) -> crate::budget_tracker::SpawnCredits {
+        let record = self
+            .runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_record(run)
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<crate::restore::RunRestoreDescriptor>(&record.config_json)
+            .unwrap()
+            .spawn_credits
     }
     async fn drive(&self) -> LaneDeliveryOutcome {
         self.runtime
@@ -534,22 +555,8 @@ async fn provider_rejection_keeps_credit_pending_until_successful_restore() {
     );
     assert_eq!(f.receipts(), 1);
     assert_eq!(f.model.requests.lock().unwrap().len(), before);
-    let credits = || {
-        let record = f
-            .runtime
-            .shared
-            .run_store
-            .get()
-            .unwrap()
-            .restore_record(lead)
-            .unwrap()
-            .unwrap();
-        serde_json::from_str::<crate::restore::RunRestoreDescriptor>(&record.config_json)
-            .unwrap()
-            .spawn_credits
-    };
     let mut budget = crate::budget_tracker::BudgetCounters::default();
-    budget.spawn_credits = credits();
+    budget.spawn_credits = f.credits(lead);
     assert_eq!(budget.spawn_credits.lane_presentations.len(), 1);
     assert!(budget.mark_lane_completed(&lane.lane_id));
 
@@ -563,10 +570,115 @@ async fn provider_rejection_keeps_credit_pending_until_successful_restore() {
         AgentRunPhase::Done
     );
     let mut budget = crate::budget_tracker::BudgetCounters::default();
-    budget.spawn_credits = credits();
+    budget.spawn_credits = f.credits(lead);
     assert!(budget.spawn_credits.lane_presentations.is_empty());
     assert!(!budget.mark_lane_completed(&lane.lane_id));
     assert_eq!(f.receipts(), 1);
+}
+#[tokio::test]
+async fn cancellation_before_provider_send_keeps_credit_pending() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "cancelled-presentation").await;
+    f.finish(lead).await;
+    f.report(&lane, Some(1), LaneStatus::Ready);
+    let before = f.model.requests.lock().unwrap().len();
+    f.model.block_next.store(true, Ordering::SeqCst);
+    assert_eq!(
+        f.drive().await,
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    f.model.blocked.notified().await;
+    f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(lead).await.unwrap();
+    assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    let mut budget = crate::budget_tracker::BudgetCounters::default();
+    budget.spawn_credits = f.credits(lead);
+    assert_eq!(budget.spawn_credits.lane_presentations.len(), 1);
+    assert!(budget.mark_lane_completed(&lane.lane_id));
+}
+
+async fn recovery_of_unpresented_receipt(fail_ack: bool) {
+    let mut f = Fixture::new();
+    let (lead, host) = f.lead().await;
+    let lane = f.lane(lead, "crash-before-provider").await;
+    f.finish(lead).await;
+    f.report(&lane, Some(1), LaneStatus::Ready);
+    let before = f.model.requests.lock().unwrap().len();
+    f.model.fail_next.store(true, Ordering::SeqCst);
+    if fail_ack {
+        f.sql("CREATE TRIGGER fail_recovery_ack BEFORE UPDATE OF state ON lane_notifications WHEN NEW.state='acked' BEGIN SELECT RAISE(ABORT,'injected'); END;");
+        assert!(
+            f.runtime
+                .drive_lane_deliveries("delivery-lead")
+                .await
+                .is_err()
+        );
+        f.sql("DROP TRIGGER fail_recovery_ack");
+    } else {
+        assert_eq!(
+            f.drive().await,
+            LaneDeliveryOutcome::Delivered { notifications: 1 }
+        );
+    }
+    f.runtime.wait(lead).await.unwrap();
+    assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    assert!(
+        f.storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .contains(&"delivery-lead".into())
+    );
+    let storage = storage::Storage::open(f.config.clone()).unwrap();
+    let bus = Arc::new(EventBus::new(1024));
+    let restarted = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        f.model.clone(),
+    )
+    .with_run_store(crate::RunStore::open(&f.config, storage.handle()).unwrap());
+    *restarted.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
+    restarted.drive_pending_lane_deliveries().await.unwrap();
+    restarted.wait_admission(lead).await.unwrap();
+    restarted.wait(lead).await.unwrap();
+    assert_eq!(
+        restarted.inspect_agent(lead).unwrap().phase,
+        AgentRunPhase::Done
+    );
+    assert_eq!(host.restores.load(Ordering::SeqCst), 2);
+    assert_eq!(f.model.requests.lock().unwrap().len(), before + 1);
+    assert_eq!(f.receipts(), 1);
+}
+#[tokio::test]
+async fn acknowledged_unpresented_delivery_recovers_on_startup() {
+    recovery_of_unpresented_receipt(false).await;
+}
+#[tokio::test]
+async fn received_unacked_unpresented_delivery_recovers_on_startup() {
+    recovery_of_unpresented_receipt(true).await;
+}
+#[tokio::test]
+async fn important_wake_includes_deferred_working_in_the_same_bounded_batch() {
+    let mut f = Fixture::new();
+    let (lead, host) = f.lead().await;
+    let working = f.lane(lead, "deferred-working").await;
+    let ready = f.lane(lead, "wake-ready").await;
+    f.finish(lead).await;
+    f.report(&working, Some(1), LaneStatus::Working);
+    assert_eq!(f.drive().await, LaneDeliveryOutcome::Empty);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+    f.report(&ready, Some(1), LaneStatus::Ready);
+    assert_eq!(
+        f.drive().await,
+        LaneDeliveryOutcome::Delivered { notifications: 2 }
+    );
+    f.runtime.wait(lead).await.unwrap();
+    let requests = f.model.requests.lock().unwrap();
+    let text = serde_json::to_string(requests.last().unwrap()).unwrap();
+    assert!(text.contains(&working.lane_id) && text.contains(&ready.lane_id));
+    assert_eq!(f.receipts(), 2);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
 async fn receipt_before_ack_crash_repairs_without_reappend_or_wake() {

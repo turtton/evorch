@@ -328,6 +328,14 @@ async fn important_batch_completed_wake_and_deferred_working_preserve_wire_prefi
     f.delivered_request().await;
     f.finish().await;
     // (3,4) Two sources are one important batch and one completed-root restore.
+    f.report(0, event_bus::LaneStatus::Working, 4);
+    assert_eq!(
+        f.h.runtime
+            .drive_lane_deliveries("cache-delivery-lead")
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Empty
+    );
     f.report(0, event_bus::LaneStatus::Ready, 2);
     f.report(1, event_bus::LaneStatus::Ready, 3);
     f.h.mock
@@ -337,7 +345,7 @@ async fn important_batch_completed_wake_and_deferred_working_preserve_wire_prefi
             .drive_lane_deliveries("cache-delivery-lead")
             .await
             .unwrap(),
-        LaneDeliveryOutcome::Delivered { notifications: 2 }
+        LaneDeliveryOutcome::Delivered { notifications: 3 }
     );
     f.delivered_request().await;
     assert_eq!(f.host.restores.load(Ordering::SeqCst), 1);
@@ -350,6 +358,7 @@ async fn important_batch_completed_wake_and_deferred_working_preserve_wire_prefi
     assert!(
         last.contains("immutable artifact revision 2")
             && last.contains("immutable artifact revision 3")
+            && last.contains("immutable artifact revision 4")
     );
     f.verify(0);
     f.h.runtime.cancel(f.lead).unwrap();
@@ -389,17 +398,8 @@ async fn receipt_ack_retry_stop_resume_and_compaction_restore_never_duplicate_no
     {
         f.events.push(f.h.receiver.recv().await.unwrap());
     }
-    f.sql("DROP TRIGGER fail_cache_ack");
-    let before = f.requests().len();
-    assert_eq!(
-        f.h.runtime
-            .drive_lane_deliveries("cache-delivery-lead")
-            .await
-            .unwrap(),
-        LaneDeliveryOutcome::Empty
-    );
-    assert_eq!(f.requests().len(), before);
-    f.followup("ordinary turn after ACK repair").await;
+    // Keep the received notification unacknowledged across the history boundary.
+    f.followup("ordinary turn before ACK repair").await;
     for pair in f.requests().windows(2) {
         assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
     }
@@ -431,9 +431,27 @@ async fn receipt_ack_retry_stop_resume_and_compaction_restore_never_duplicate_no
             break;
         }
     }
+    let failures_before_restore = f
+        .events
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "lane_delivery_failed"))
+        .count();
     f.h.runtime.resume_chat(f.lead, chat_authority()).unwrap();
     f.events
         .extend(through_phase(&mut f.h.receiver, f.lead, AgentRunPhase::Waiting).await);
+    // A queued resume-triggered driver must finish before removing the injected
+    // ACK failure. Its diagnostic is distinct from the pre-compaction failure.
+    while f
+        .events
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::Diagnostic(d) if d.code == "lane_delivery_failed"))
+        .count()
+        <= failures_before_restore
+    {
+        f.events.push(f.h.receiver.recv().await.unwrap());
+    }
+    f.sql("DROP TRIGGER fail_cache_ack");
+    let before = f.requests().len();
     assert_eq!(
         f.h.runtime
             .drive_lane_deliveries("cache-delivery-lead")
@@ -441,6 +459,7 @@ async fn receipt_ack_retry_stop_resume_and_compaction_restore_never_duplicate_no
             .unwrap(),
         LaneDeliveryOutcome::Empty
     );
+    assert_eq!(f.requests().len(), before);
     f.followup("first post-compaction ordinary turn").await;
     f.followup("reuse the post-compaction prefix").await;
     let count:usize=rusqlite::Connection::open(&f.config.db_path).unwrap().query_row("SELECT count(*) FROM host_input_receipts WHERE json_extract(provenance_json,'$.kind')='lane_notification'",[],|r|r.get(0)).unwrap();
