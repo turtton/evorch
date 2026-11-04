@@ -348,7 +348,69 @@
               '.default_headers(headers).tcp_user_timeout(std::time::Duration::from_secs(300))'
           '';
         });
-        devShell = pkgs.mkShell {
+        # huacnlee/cargo (https://huacnlee.github.io/cargo/): a Cargo fork that
+        # keeps intermediate artifacts under ~/.cargo/targets and shares
+        # dependency builds across checkouts. Trial only: the default dev shell
+        # resolves `cargo` to it, and `nix develop .#upstream-cargo` restores the
+        # fenix toolchain's cargo. rustc, rustfmt, clippy and rust-analyzer stay
+        # with fenix, and crane (packages / checks) keeps the upstream cargo.
+        #
+        # The release asset is a tarball holding one `cargo` binary. Bump
+        # `cargoForkVersion` and the hashes together (the hashes are the
+        # release's SHA256SUMS in SRI form). A system without an asset gets no
+        # fork and its default dev shell keeps the upstream cargo.
+        cargoForkVersion = "0.102.0-9";
+        cargoForkAssets = {
+          x86_64-linux = {
+            target = "x86_64-unknown-linux-gnu";
+            hash = "sha256-3EVTXaSDD0FpSf33Oby2Ve95m9IgbngTdXJhR3+WuyA=";
+          };
+          aarch64-linux = {
+            target = "aarch64-unknown-linux-gnu";
+            hash = "sha256-1SEHDRFNA9SD9Ttow/uIReRXyRd2oWTOve55m4h/ZwM=";
+          };
+          aarch64-darwin = {
+            target = "aarch64-apple-darwin";
+            hash = "sha256-amNx8siYi47illhnFFoD8EgYgccCwF+0KaX2fR4JmLs=";
+          };
+        };
+        cargoFork =
+          let
+            asset = cargoForkAssets.${system} or null;
+          in
+          if asset == null then
+            null
+          else
+            pkgs.stdenv.mkDerivation {
+              pname = "cargo-fork";
+              version = cargoForkVersion;
+              src = pkgs.fetchurl {
+                url = "https://github.com/huacnlee/cargo/releases/download/v${cargoForkVersion}/cargo-${cargoForkVersion}-${asset.target}.tar.gz";
+                inherit (asset) hash;
+              };
+              sourceRoot = ".";
+              # The Linux binary links zlib and libgcc_s dynamically.
+              nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
+              buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.zlib
+                pkgs.stdenv.cc.cc.lib
+              ];
+              dontConfigure = true;
+              dontBuild = true;
+              dontStrip = true;
+              installPhase = ''
+                runHook preInstall
+                install -Dm755 cargo $out/bin/cargo
+                runHook postInstall
+              '';
+              meta = {
+                description = "huacnlee/cargo fork of Cargo (prebuilt release binary)";
+                homepage = "https://github.com/huacnlee/cargo";
+                mainProgram = "cargo";
+              };
+            };
+        # The dev shell with the fenix toolchain's own cargo (comparison and rollback).
+        upstreamCargoDevShell = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
@@ -383,6 +445,17 @@
             fi
           '';
         };
+        # The fork goes first in PATH, ahead of the fenix toolchain's cargo. Its
+        # self-update would try to replace binaries outside the Nix store, so
+        # CARGO_FORK_AUTO_UPDATE=0 turns it off.
+        devShell =
+          if cargoFork == null then
+            upstreamCargoDevShell
+          else
+            upstreamCargoDevShell.overrideAttrs (old: {
+              nativeBuildInputs = [ cargoFork ] ++ old.nativeBuildInputs;
+              CARGO_FORK_AUTO_UPDATE = "0";
+            });
       in
       {
         packages = {
@@ -419,6 +492,7 @@
         };
         devShells = {
           default = devShell;
+          upstream-cargo = upstreamCargoDevShell;
         } // pkgs.lib.optionalAttrs isCefSystem {
           # `nix develop .#cef`: CEF builds and the ignored browser-cef tests
           # without downloading CEF. cef-dll-sys copies libcef.so into target/<profile>.
