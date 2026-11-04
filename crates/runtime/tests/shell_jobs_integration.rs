@@ -577,7 +577,8 @@ async fn a_poll_waits_for_a_long_job_without_spending_the_elapsed_budget() {
     // The job outlasts the whole elapsed budget by a margin that tolerates a
     // loaded test host; only the poll waits for it.
     let mut config = RunConfig::default();
-    config.budget.max_elapsed = Duration::from_secs(2);
+    config.budget.max_elapsed =
+        runtime::budget_tracker::ResourceLimit::Bounded(Duration::from_secs(2));
     let run = runtime.delegate_background(Role::Worker, "long build".into(), config);
     next(&mut calls).await.respond(tool_response(
         "start",
