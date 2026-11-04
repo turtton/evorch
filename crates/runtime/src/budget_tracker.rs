@@ -142,8 +142,8 @@ pub struct SpawnCredits {
     spawned: BTreeSet<String>,
     observed: BTreeSet<String>,
     unobserved: u32,
-    /// Receipt acceptance is not model observation. Retained until provider input
-    /// preparation, including across a crash/restore before the first request.
+    /// Receipt acceptance is not model observation. Retained until a successful
+    /// provider request, including across a crash/restore before presentation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) lane_presentations: Vec<LanePresentation>,
 }

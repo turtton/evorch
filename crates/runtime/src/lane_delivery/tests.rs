@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 #[derive(Default)]
 struct Model {
     finish: AtomicBool,
+    fail_next: AtomicBool,
     requests: Mutex<Vec<Vec<Message>>>,
 }
 #[async_trait::async_trait]
@@ -20,6 +21,11 @@ impl AgentModel for Model {
         messages: &[Message],
         _: &[ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeError::Model {
+                reason: "injected pre-send provider rejection".into(),
+            });
+        }
         self.requests.lock().unwrap().push(messages.to_vec());
         let finish = self.finish.load(Ordering::SeqCst);
         Ok(providers::ChatResponse {
@@ -507,6 +513,60 @@ async fn snapshot_failure_releases_lease_without_provider_send() {
         f.drive().await,
         LaneDeliveryOutcome::Delivered { notifications: 1 }
     );
+}
+#[tokio::test]
+async fn provider_rejection_keeps_credit_pending_until_successful_restore() {
+    let mut f = Fixture::new();
+    let (lead, host) = f.lead().await;
+    let lane = f.lane(lead, "unpresented").await;
+    f.finish(lead).await;
+    f.report(&lane, Some(1), LaneStatus::Ready);
+    let before = f.model.requests.lock().unwrap().len();
+    f.model.fail_next.store(true, Ordering::SeqCst);
+    assert_eq!(
+        f.drive().await,
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    f.runtime.wait(lead).await.unwrap();
+    assert_eq!(
+        f.runtime.inspect_agent(lead).unwrap().phase,
+        AgentRunPhase::Error
+    );
+    assert_eq!(f.receipts(), 1);
+    assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    let credits = || {
+        let record = f
+            .runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_record(lead)
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<crate::restore::RunRestoreDescriptor>(&record.config_json)
+            .unwrap()
+            .spawn_credits
+    };
+    let mut budget = crate::budget_tracker::BudgetCounters::default();
+    budget.spawn_credits = credits();
+    assert_eq!(budget.spawn_credits.lane_presentations.len(), 1);
+    assert!(budget.mark_lane_completed(&lane.lane_id));
+
+    f.runtime
+        .resume_chat(lead, host.target.authority.clone())
+        .unwrap();
+    f.runtime.wait_admission(lead).await.unwrap();
+    f.runtime.wait(lead).await.unwrap();
+    assert_eq!(
+        f.runtime.inspect_agent(lead).unwrap().phase,
+        AgentRunPhase::Done
+    );
+    let mut budget = crate::budget_tracker::BudgetCounters::default();
+    budget.spawn_credits = credits();
+    assert!(budget.spawn_credits.lane_presentations.is_empty());
+    assert!(!budget.mark_lane_completed(&lane.lane_id));
+    assert_eq!(f.receipts(), 1);
 }
 #[tokio::test]
 async fn receipt_before_ack_crash_repairs_without_reappend_or_wake() {

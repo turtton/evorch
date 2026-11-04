@@ -1157,9 +1157,6 @@ impl LoopState {
                 self.finish_error(format!("ContextWindowExhausted: compaction could not reduce the projected context ({estimated} tokens) below model window {window}; conversation checkpoint retained. Reduce context or change the compaction/model settings before resuming."));
                 return;
             }
-            if self.budget.observe_lane_presentations(&visible_messages) {
-                self.boundary_pending = true;
-            }
             if self.boundary_pending || self.host_inputs().unrecorded().next().is_some() {
                 self.boundary_pending = false;
                 if let Err(error) = crate::restore::persist_checkpoint(self) {
@@ -1221,6 +1218,13 @@ impl LoopState {
             self.activity(event_bus::RunActivity::Idle);
             let response = match completion {
                 Ok(response) => {
+                    // Preparation can still be refused by goal limits, Stop,
+                    // routing or the provider. Only a successful request proves
+                    // the post-compaction details reached the model. Refund
+                    // before dispatching this response's tool calls.
+                    if self.budget.observe_lane_presentations(&visible_messages) {
+                        self.boundary_pending = true;
+                    }
                     self.model_switches = 0;
                     response
                 }

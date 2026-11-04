@@ -832,7 +832,7 @@ impl crate::agent_loop::LoopState {
                 }
             }
         }
-        // Credits remain pending until post-compaction provider input preparation.
+        // Credits remain pending until the post-compaction provider request succeeds.
         self.publish_message_count();
         Ok(missing.len())
     }
