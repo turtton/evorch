@@ -262,7 +262,13 @@ pub(crate) fn create_question(
     // Raw UTF-8 limits do not bound JSON escaping. A successfully created
     // question must fit the first slot of a lane_questions page; rejecting here
     // rolls back the question and route before an outbox notice can be queued.
-    if json(&(Vec::<UserQuestion>::new(), &question))?.len() > LANE_DELIVERY_PAGE_BYTES - 1024 {
+    let lead_projection = UserQuestion {
+        recipient_run_ids: Vec::new(),
+        ..question.clone()
+    };
+    if json(&(Vec::<UserQuestion>::new(), &lead_projection))?.len()
+        > LANE_DELIVERY_PAGE_BYTES - 1024
+    {
         return Err(conflict("question_exceeds_page_bytes"));
     }
     save_projection(&tx, &question)?;
@@ -444,9 +450,12 @@ pub(crate) fn questions(
         has_more: false,
     };
     for question_id in ids {
-        let Some(question) = crate::repo::user_questions::get(conn, &question_id)? else {
+        let Some(mut question) = crate::repo::user_questions::get(conn, &question_id)? else {
             continue;
         };
+        // Continuation links are not lead-inbox routing. Their growth across
+        // restores must not change this bounded, responder-only projection.
+        question.recipient_run_ids.clear();
         let bytes = json(&(&page.questions, &question))?.len();
         if page.questions.is_empty() && bytes > LANE_DELIVERY_PAGE_BYTES - 1024 {
             // Escaping may expand otherwise-valid UTF-8 source fields. Never

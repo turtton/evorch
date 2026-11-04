@@ -657,7 +657,7 @@ fn escaped_question_at_page_bytes(mut question: UserQuestion, bytes: usize) -> U
 }
 
 #[tokio::test]
-async fn escaped_questions_fit_the_page_or_roll_back_before_acceptance() {
+async fn escaped_questions_stay_listable_through_inheritance_and_reject_oversize() {
     let mut f = Fixture::new();
     let lead = f.lead("lead").await;
     let lane = f.lane(lead, "lane", LanePolicy::Attached).await;
@@ -688,6 +688,36 @@ async fn escaped_questions_fit_the_page_or_roll_back_before_acceptance() {
     assert_eq!(page.questions.len(), 1);
     assert_eq!(page.questions[0].id, accepted.id);
     assert!(serde_json::to_vec(&page).unwrap().len() <= 16384);
+    f.db.handle()
+        .bind_user_questions(
+            &lane.root_run_id.to_string(),
+            "continuation-one",
+            std::slice::from_ref(&accepted.id),
+        )
+        .unwrap();
+    f.db.handle()
+        .bind_user_questions(
+            "continuation-one",
+            "continuation-two",
+            std::slice::from_ref(&accepted.id),
+        )
+        .unwrap();
+    let inherited = f.runtime.user_question(&accepted.id).unwrap().unwrap();
+    assert_eq!(
+        inherited.recipient_run_ids,
+        ["continuation-one", "continuation-two"]
+    );
+    assert!(
+        serde_json::to_vec(&(Vec::<UserQuestion>::new(), &inherited))
+            .unwrap()
+            .len()
+            > page_budget
+    );
+    let continued_page = f.runtime.list_lane_questions(lead, None).unwrap();
+    assert_eq!(
+        continued_page.questions, page.questions,
+        "lead projections must not grow with continuation inheritance"
+    );
     let excess = escaped_question_at_page_bytes(template, page_budget + 1);
     let error = f
         .runtime
@@ -747,6 +777,17 @@ async fn escaped_questions_fit_the_page_or_roll_back_before_acceptance() {
     }
     assert_eq!(all.len(), 2);
     assert!(all.iter().any(|q| q.id == after.id));
+    assert!(all.iter().any(|q| q.id == accepted.id));
+    assert!(all.iter().all(|q| q.recipient_run_ids.is_empty()));
+    assert_eq!(
+        f.runtime
+            .user_question(&accepted.id)
+            .unwrap()
+            .unwrap()
+            .recipient_run_ids,
+        inherited.recipient_run_ids,
+        "listing must not discard durable continuation links"
+    );
     f.stop(lane.root_run_id).await;
     f.stop(lead).await;
 }
