@@ -353,6 +353,49 @@ mod tests {
     }
 
     #[test]
+    fn a_lane_is_mirrored_with_its_leads_family_state_and_never_with_a_parent() {
+        // Given: a lead archived and pinned, an attached lane of it and a detached one
+        let lead = record("lead");
+        let mut attached = record("lane-a");
+        let mut detached = record("lane-d");
+        for (thread, lead_thread, policy, id) in [
+            (
+                &mut attached,
+                Some("lead"),
+                workspace_ui::LanePolicy::Attached,
+                "a",
+            ),
+            (&mut detached, None, workspace_ui::LanePolicy::Detached, "d"),
+        ] {
+            thread.lane = Some(workspace_ui::LaneLink {
+                lane_id: id.into(),
+                origin_thread_id: lead.id.clone(),
+                lead_thread_id: lead_thread.map(ThreadId::new),
+                policy,
+                management_revision: 1,
+            });
+        }
+        let others = [lead.clone(), detached.clone()];
+        let edit = |sidebar: &mut workspace_ui::SidebarState| {
+            sidebar
+                .set_family_archived(&ThreadId::new("lead"), true, 1_700)
+                .unwrap();
+        };
+
+        // When: both lanes are mapped to storage definitions
+        let attached = upsert_in(&attached, &others, edit, None).unwrap();
+        let detached = upsert_in(&detached, std::slice::from_ref(&lead), edit, None).unwrap();
+
+        // Then: no parent is sent (the management relation lives in the ledger); the attached
+        // lane reads its lead's archive, the detached one its own family's (none)
+        assert_eq!(attached.parent_thread_id, None);
+        assert_eq!(detached.parent_thread_id, None);
+        assert_eq!(attached.lineage_kind, None);
+        assert_eq!(attached.archived, Some(true));
+        assert_eq!(detached.archived, Some(false));
+    }
+
+    #[test]
     fn definitions_storage_would_reject_are_left_out() {
         // Given: a thread with an empty ID and one with an oversized fork point.
         let empty = record("");

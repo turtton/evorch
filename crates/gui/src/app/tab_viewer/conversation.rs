@@ -125,6 +125,16 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            lane: active_thread.and_then(|thread| {
+                let detail = self.lane_details.get(&thread.id.to_string())?;
+                let origin = thread.lane.as_ref().and_then(|lane| {
+                    self.sidebar
+                        .threads
+                        .iter()
+                        .find(|t| t.id == lane.origin_thread_id)
+                });
+                Some(crate::panes::agent::LaneContext { detail, origin })
+            }),
             branch: match (self.focus, active_thread) {
                 (ConversationFocus::Thread, Some(thread)) => {
                     lineage

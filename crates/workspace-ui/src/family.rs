@@ -1,8 +1,8 @@
 //! Archive and pin state of a conversation family.
 //!
-//! A family is every conversation that descends, by `parent_thread_id`, from one
-//! top ancestor: forks, rewound versions, escalated conversations and their
-//! descendants. Its key is that top ancestor's ID, which does not depend on the
+//! A family is every conversation that descends, by `ThreadRecord::tree_parent`, from one
+//! top ancestor: forks, rewound versions, escalated conversations, lanes a lead
+//! manages and their descendants (a detached lane starts a family of its own). Its key is that top ancestor's ID, which does not depend on the
 //! version shown or on the thread in view. The family owns **one** archive series and
 //! **one** pin series ([`FamilyState`]); a thread record holds no state of its own.
 //!
@@ -148,7 +148,7 @@ impl SidebarState {
         let parents: BTreeMap<&ThreadId, Option<&ThreadId>> = self
             .threads
             .iter()
-            .map(|thread| (&thread.id, thread.parent_thread_id.as_ref()))
+            .map(|thread| (&thread.id, thread.tree_parent()))
             .collect();
         let mut keys: BTreeMap<ThreadId, Result<ThreadId, FamilyUnresolved>> = BTreeMap::new();
         for thread in &self.threads {

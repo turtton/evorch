@@ -27,7 +27,7 @@ pub struct LineageIndex<'a> {
     members: Vec<Vec<usize>>,
     /// The first record of each group that is not superseded, indexed by root.
     visible: Vec<Option<usize>>,
-    /// Record indices by `parent_thread_id`, in list order.
+    /// Record indices by [`ThreadRecord::tree_parent`], in list order.
     children: HashMap<&'a ThreadId, Vec<usize>>,
 }
 
@@ -42,7 +42,7 @@ impl<'a> LineageIndex<'a> {
         let mut children: HashMap<&ThreadId, Vec<usize>> = HashMap::new();
         for (index, thread) in threads.iter().enumerate() {
             members[root[index]].push(index);
-            if let Some(parent) = &thread.parent_thread_id {
+            if let Some(parent) = thread.tree_parent() {
                 children.entry(parent).or_default().push(index);
             }
         }
@@ -168,11 +168,11 @@ impl<'a> LineageIndex<'a> {
     /// reported, so an orphan keeps child semantics.
     pub fn display_parent(&self, id: &ThreadId) -> Option<&'a ThreadId> {
         let &index = self.position.get(id)?;
-        let parent = self.threads[self.root[index]].parent_thread_id.as_ref()?;
+        let parent = self.threads[self.root[index]].tree_parent()?;
         Some(self.visible_version(parent).unwrap_or(parent))
     }
 
-    /// Threads whose `parent_thread_id` is `id`, in list order.
+    /// Threads whose [`ThreadRecord::tree_parent`] is `id`, in list order.
     pub fn children(&self, id: &ThreadId) -> impl Iterator<Item = &'a ThreadRecord> + '_ {
         self.children
             .get(id)

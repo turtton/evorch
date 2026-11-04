@@ -26,6 +26,9 @@ mod history;
 #[cfg(test)]
 mod history_restore_tests;
 mod input;
+pub mod lanes;
+#[cfg(test)]
+mod lanes_tests;
 mod mentions;
 mod ownership;
 mod ownership_status;

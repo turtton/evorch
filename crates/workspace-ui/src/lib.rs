@@ -5,6 +5,7 @@
 
 mod errors;
 mod family;
+mod lane;
 mod lineage;
 mod merge;
 mod migrate;
@@ -23,6 +24,7 @@ pub use errors::{
     LayoutError, PersistError, ProjectError, SettingsError, SidebarError, ThreadError,
 };
 pub use family::{FamilyState, FamilyUnresolved, MigrationReport, ResolvedState};
+pub use lane::{LaneLink, LanePolicy};
 pub use lineage::{
     LineageIndex, display_parent, normalize_versions, point_versions, show_version, version_root,
     visible_version,
