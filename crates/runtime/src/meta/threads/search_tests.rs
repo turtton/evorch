@@ -26,13 +26,12 @@ impl Fixture {
         messages: Vec<Message>,
     ) {
         self.run(run, thread, parent, messages);
-        let record = self
+        let bundle = self
             .store()
-            .with_database(|db| db.run_context(run))
-            .unwrap()
+            .with_database(|db| Ok(db.snapshot_bundle(run).unwrap().unwrap()))
             .unwrap();
         let write = crate::restore::provenance::ConversationProvenance::default()
-            .write(record)
+            .write(bundle.record, bundle.snapshot_revision)
             .unwrap();
         self.store().handle.save_snapshot_bundle(&write).unwrap();
     }
@@ -663,8 +662,13 @@ fn header_only_search_does_not_decode_saved_payloads() {
     );
     let conn = Connection::open(&f.store().db_path).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET messages_json = x'ff', config_json = x'ff', \
-         checkpoints_json = x'ff' WHERE run_id = 'run-201'",
+        "UPDATE run_contexts SET config_json = x'ff', checkpoints_json = x'ff' \
+         WHERE run_id = 'run-201'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = 'run-201'",
         [],
     )
     .unwrap();
@@ -1730,6 +1734,296 @@ fn host_search_lists_a_thread_once_when_its_title_and_body_both_match() {
         assert_eq!(flat.len(), titles + 1, "{pages:?}");
         assert!(pages.iter().all(|page| page.len() <= limit));
     }
+}
+
+// ---- Host search at scale: the title scans keep their results, visibility and
+// ---- thread limit while a dedup-only scan skips building and ranking hits.
+
+/// Title of thread `index` in a scaled project (a larger index is newer):
+/// a literal "pg" at the start, a literal "pg" at a word start, a scattered
+/// match, or no match for "pg".
+fn scaled_title(index: usize) -> String {
+    match index {
+        i if i % 13 == 5 => format!("pg sync {i}"),
+        i if i % 17 == 2 => format!("Fix pg retries {i}"),
+        i if i.is_multiple_of(7) => format!("Page group {i}"),
+        i => format!("Chat {i}"),
+    }
+}
+
+fn scaled_title_matches(index: usize) -> bool {
+    index % 13 == 5 || index % 17 == 2 || index.is_multiple_of(7)
+}
+
+/// `total` listed threads, a few of them with an indexed body that holds "pg",
+/// plus an archived thread and a thread of another project whose titles match
+/// too: neither is visible to the project's search.
+fn scaled_project(f: &Fixture, total: usize) {
+    for index in 0..total {
+        f.thread(
+            &format!("t{index:04}"),
+            Some(f.project.path()),
+            &format!("run-{}", 5000 + index),
+            |row| {
+                row.title = Some(scaled_title(index));
+                row.updated_at_ns = 10 + index as i64;
+            },
+        );
+    }
+    f.store()
+        .handle
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: "archived".into(),
+            project_root: Some(Fixture::canonical(f.project.path())),
+            title: Some("pg archived".into()),
+            updated_at_ns: 10 + total as i64,
+            archived: Some(true),
+            archive_revision: 1,
+            ..Default::default()
+        }])
+        .unwrap();
+    f.thread("foreign", Some(f.other.path()), "run-4002", |row| {
+        row.title = Some("pg other project".into());
+        row.updated_at_ns = 10 + total as i64;
+    });
+    let mut bodies = vec![0, 1, 7, 8, total / 2, total - 1];
+    bodies.dedup();
+    for index in bodies {
+        let run = format!("run-{}", 5000 + index);
+        f.native_run(
+            &run,
+            Some(&format!("t{index:04}")),
+            None,
+            vec![
+                assistant(vec![text("talked about pg")]),
+                assistant(vec![text("done")]),
+            ],
+        );
+        f.index(&run);
+    }
+}
+
+/// Follows the cursors of a "pg" search to the end.
+fn scaled_pages(f: &Fixture) -> Vec<crate::HostThreadSearch> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = f
+            .runtime
+            .search_threads_for_host(f.project.path(), "pg", 20, cursor.as_deref())
+            .unwrap();
+        cursor = page.next_cursor.clone();
+        pages.push(page);
+        if cursor.is_none() {
+            return pages;
+        }
+        assert!(pages.len() < 200, "the cursor chain must end");
+    }
+}
+
+/// A continuation cursor as its logical position. The host's own title cursors
+/// are plain text. A body cursor is a signed token; its MAC and the caller
+/// binding (which holds the fixture's temporary project path) differ on every
+/// run and are dropped, while the position it resumes at (the thread cursor and
+/// the run, block and revisions to resume inside a thread) is kept.
+fn logical_cursor(cursor: &str) -> String {
+    use base64::Engine as _;
+    if cursor.starts_with("host:") {
+        return cursor.to_owned();
+    }
+    let payload = cursor
+        .strip_prefix("ts2.")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(payload, _mac)| payload)
+        .expect("a body cursor is a ts2 token");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    let mut position: serde_json::Map<String, Value> = serde_json::from_slice(&payload).unwrap();
+    position.remove("caller");
+    Value::Object(position).to_string()
+}
+
+/// FNV-1a over every field a page reports, in order. The times of body hits
+/// depend on when the fixture was written, so only title hit times are included.
+fn pages_digest(pages: &[crate::HostThreadSearch]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut feed = |text: &str| {
+        for byte in text.bytes().chain([0xff]) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for page in pages {
+        let cursor = page.next_cursor.as_deref().map(logical_cursor);
+        feed(&format!(
+            "page cursor={cursor:?} limited={} index={:?}",
+            page.title_scan_limited, page.index
+        ));
+        for hit in &page.hits {
+            let at = (hit.snippet_kind.as_deref() == Some("title")).then_some(hit.updated_at_ns);
+            feed(&format!(
+                "{} {:?} {:?} {:?} {} {at:?}",
+                hit.thread_id, hit.title, hit.snippet_kind, hit.snippet, hit.archived
+            ));
+        }
+    }
+    hash
+}
+
+#[test]
+fn host_search_results_are_stable_across_the_title_scan_limit() {
+    // Golden values recorded with the implementation before the title scans were made cheaper (a
+    // dedup-only scan, set lookups, a prepared query): the pages, their order,
+    // cursors, flags and visibility must stay exactly as they were. On a
+    // mismatch the assertion prints the new values to compare.
+    let golden = [
+        // (threads, pages, hits, digest)
+        (100_usize, 3_usize, 31_usize, 3_763_424_433_782_355_709_u64),
+        (2000, 46, 516, 5_489_298_250_593_877_980),
+        (2150, 47, 535, 14_816_139_041_794_912_385),
+    ];
+    let mut actual = Vec::new();
+    for (total, ..) in golden {
+        let f = Fixture::new();
+        scaled_project(&f, total);
+        let pages = scaled_pages(&f);
+        let ids: Vec<&str> = pages
+            .iter()
+            .flat_map(|page| page.hits.iter().map(|hit| hit.thread_id.as_str()))
+            .collect();
+        // Visibility and uniqueness hold whatever the golden says.
+        let unique: BTreeSet<_> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "{total}: a thread was listed twice"
+        );
+        assert!(
+            !ids.contains(&"archived") && !ids.contains(&"foreign"),
+            "{total}"
+        );
+        assert!(pages.iter().all(|page| page.hits.len() <= 20), "{total}");
+        assert!(pages.last().unwrap().next_cursor.is_none(), "{total}");
+        // Every page says whether the scan stopped at its thread limit.
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.title_scan_limited == (total > 2000)),
+            "{total}"
+        );
+        actual.push((total, pages.len(), ids.len(), pages_digest(&pages)));
+    }
+    assert_eq!(actual, golden);
+}
+
+#[test]
+fn host_search_resume_cursors_are_stable_when_a_thread_is_cut_mid_conversation() {
+    // Given: a title match whose body holds more matching blocks than one page
+    // may verify, so the body page is cut inside that thread and its cursor
+    // carries a resume position (run, block, revisions), next to other threads.
+    let f = Fixture::new();
+    many_threads_with_titles(&f, &["Notes", "Page group", "Chat", "Chat"]);
+    for (index, blocks) in [(0_usize, 3_usize), (1, 2001), (3, 3)] {
+        let run = format!("run-{}", 3000 + index);
+        f.native_run(
+            &run,
+            Some(&format!("t{index:03}")),
+            None,
+            (0..blocks)
+                .map(|_| assistant(vec![text("pg body")]))
+                .collect(),
+        );
+        f.index(&run);
+    }
+    // When: following the cursors to the end.
+    let pages = scaled_pages(&f);
+    // Then: a body cursor resumes inside the cut thread, and the whole chain is
+    // the one recorded with the implementation before the title scans changed.
+    let cursors: Vec<_> = pages
+        .iter()
+        .filter_map(|page| page.next_cursor.as_deref().map(logical_cursor))
+        .collect();
+    assert!(
+        cursors.iter().any(|cursor| cursor.contains("\"resume\"")),
+        "{cursors:?}"
+    );
+    let ids: Vec<_> = pages
+        .iter()
+        .flat_map(|page| page.hits.iter().map(|hit| hit.thread_id.as_str()))
+        .collect();
+    let unique: BTreeSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    assert_eq!(
+        (pages.len(), ids.len(), pages_digest(&pages)),
+        (2, 3, 2_911_311_821_480_345_036),
+        "{cursors:?}"
+    );
+}
+
+#[test]
+fn a_dedup_only_title_scan_reads_the_same_threads_but_builds_and_ranks_no_hit() {
+    use super::super::host::{TitleQuery, scan_titles, title_match_ids};
+    let query = TitleQuery::new("pg");
+    for total in [100_usize, 2000, 2150] {
+        let f = Fixture::new();
+        scaled_project(&f, total);
+        let caller = Caller::new(crate::RunId::new(0), None, Some(f.project.path()));
+        let scope = Scope::new(f.store(), &f.runtime, caller, SecretRedactor::from_env());
+        let window = total.min(2000);
+        let expected_matches = (total - window..total)
+            .filter(|index| scaled_title_matches(*index))
+            .count();
+
+        let full = scan_titles(&scope, &query, 0, 0).unwrap();
+        let ids = title_match_ids(&scope, &query).unwrap();
+
+        // Both walk the same pages: the thread limit, visibility and redaction are shared.
+        // (The archived thread and the other project's thread are never read.)
+        assert_eq!(full.stats.threads_read, window, "{total}");
+        assert_eq!(full.stats.pages_read, window.div_ceil(100), "{total}");
+        assert_eq!(ids.stats.threads_read, full.stats.threads_read, "{total}");
+        assert_eq!(ids.stats.pages_read, full.stats.pages_read, "{total}");
+        assert_eq!(full.limited, total > 2000, "{total}");
+        assert_eq!(ids.limited, full.limited, "{total}");
+        // The same threads match.
+        assert_eq!(full.stats.matched, expected_matches, "{total}");
+        assert_eq!(ids.stats.matched, expected_matches, "{total}");
+        assert_eq!(ids.ids, full.all, "{total}");
+        assert_eq!(ids.ids.len(), expected_matches, "{total}");
+        // The full scan builds and ranks one hit per match; the dedup-only scan none.
+        assert_eq!(full.stats.hits_built, expected_matches, "{total}");
+        assert_eq!(full.stats.ranked, expected_matches, "{total}");
+        assert_eq!(ids.stats.hits_built, 0, "{total}");
+        assert_eq!(ids.stats.ranked, 0, "{total}");
+        println!(
+            "title scan threads={total}: pages_read={} threads_read={} matched={} | \
+             full scan hits_built={} ranked={} | dedup-only hits_built={} ranked={}",
+            full.stats.pages_read,
+            full.stats.threads_read,
+            full.stats.matched,
+            full.stats.hits_built,
+            full.stats.ranked,
+            ids.stats.hits_built,
+            ids.stats.ranked,
+        );
+    }
+}
+
+#[test]
+fn a_prepared_title_query_scores_like_matching_each_word_of_the_query() {
+    use super::super::host::TitleQuery;
+    let score = |query: &str, title: &str| TitleQuery::new(query).score(title);
+    // A literal at the start, at a word start, inside a word, and scattered letters.
+    assert_eq!(score("pg", "pg sync"), Some(1000));
+    assert_eq!(score("pg", "Fix pg retries"), Some(800));
+    assert_eq!(score("pg", "stopgap"), Some(600));
+    assert_eq!(score("pg", "Page group"), Some(399));
+    assert_eq!(score("pg", "Chat"), None);
+    // Case and repeated spaces do not matter; every word must match and the scores add up.
+    assert_eq!(score("  PG   Sync ", "pg sync 5"), Some(1800));
+    assert_eq!(score("pg missing", "pg sync"), None);
+    // A query without a word matches nothing.
+    assert_eq!(score("   ", "pg sync"), None);
 }
 
 // ---- Bounded scan (#374): the matcher alone decides, the budget counts what

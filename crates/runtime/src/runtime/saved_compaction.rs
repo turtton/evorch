@@ -130,9 +130,7 @@ impl AgentRuntime {
                 run_id: run.to_string(),
             });
         }
-        let mut restored = RestoredState::from_record(&record)?;
-        restored.provenance =
-            crate::restore::provenance::ConversationProvenance::from_bundle(&bundle);
+        let restored = RestoredState::from_bundle(&bundle)?;
         authority.images.clear();
         authority.project_root = descriptor.project_root.clone();
         authority.category = descriptor.category.clone();
@@ -152,12 +150,15 @@ impl AgentRuntime {
         .await;
         let mut context = state.context.clone();
         let mut events = Vec::new();
+        let mut operation =
+            crate::compaction::progress::Operation::new(self.shared.bus.clone(), run.to_string());
         crate::compaction::compact_candidate(
             &mut state,
             &mut context,
             event_bus::CompactionReason::Manual,
             None,
             &mut events,
+            &mut operation,
         )
         .await
         .map_err(|error| fail(error.to_string()))?;
@@ -171,11 +172,10 @@ impl AgentRuntime {
             .map_err(|error| fail(error.to_string()))?;
         record.config_json =
             serde_json::to_string(&descriptor).map_err(|error| fail(error.to_string()))?;
-        let mut write = context
+        let write = context
             .provenance
-            .write(record)
+            .write(record, bundle.snapshot_revision)
             .map_err(|error| fail(error.to_string()))?;
-        write.expected_snapshot_revision = Some(bundle.snapshot_revision);
         {
             let _restore = store
                 .restore_gate
@@ -193,10 +193,14 @@ impl AgentRuntime {
             store
                 .handle
                 .save_snapshot_bundle(&write)
-                .map_err(|error| fail(format!("{error:?}")))?;
+                .map_err(|error| fail(crate::restore::provenance::save_failure_reason(error)))?;
         }
+        let mut published = false;
         for event in events {
-            self.shared.bus.emit(event);
+            published |= self.shared.bus.emit(event) > 0;
+        }
+        if published {
+            operation.committed();
         }
         drop(reservation);
         Ok(())

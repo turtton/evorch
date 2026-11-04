@@ -493,16 +493,18 @@ impl Harness {
     fn visual_child(&self, parent: RunId, steps: Vec<Step>) -> RunId {
         let run = self.runtime.reserve_run_id();
         self.script(run, steps);
-        self.runtime.spawn_reserved_child(
-            parent,
-            run,
-            Role::Worker,
-            "Draw the mock",
-            RunConfig {
-                category: Some(CategoryId::Visual.to_string()),
-                ..Default::default()
-            },
-        )
+        self.runtime
+            .spawn_reserved_child(
+                parent,
+                run,
+                Role::Worker,
+                "Draw the mock",
+                RunConfig {
+                    category: Some(CategoryId::Visual.to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("a non-Orchestrator child is admitted")
     }
 
     fn results(&self, run: RunId) -> Vec<(bool, String)> {

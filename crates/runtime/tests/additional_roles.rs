@@ -174,8 +174,9 @@ fn advisor_consultation_and_reviewer_acceptance_have_distinct_contracts() {
     ] {
         assert!(reviewer.contains(contract), "{contract}");
     }
-    assert_eq!(triggers.len(), 9);
+    assert_eq!(triggers.len(), 8);
     assert!(!triggers.iter().any(|t| t.name == "Oracle"));
+    assert!(!triggers.iter().any(|t| t.name == "Orchestrator"));
 }
 
 /// ADR 0040: 起用条件は Orchestrator には keyTriggers の 1 か所だけで届き、

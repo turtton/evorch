@@ -154,7 +154,7 @@ async fn absent_recipient_authorizes_before_reading_corrupt_payload() {
         drop(first);
         let conn = rusqlite::Connection::open(&config.db_path).unwrap();
         conn.execute(
-            "UPDATE run_contexts SET messages_json = ?2 WHERE run_id = ?1",
+            "UPDATE run_messages SET codec = 0, skeleton = ?2 WHERE run_id = ?1",
             rusqlite::params![child.to_string(), payload],
         )
         .unwrap();

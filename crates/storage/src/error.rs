@@ -19,6 +19,62 @@ impl std::error::Error for IoSource {}
 
 static IO_SOURCE: IoSource = IoSource;
 
+/// Why a body could not be resolved or stored. No variant carries body text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyUnresolvedReason {
+    /// A string in a token position is not a well-formed token.
+    InvalidToken,
+    /// A well-formed token of a version this build does not know.
+    UnknownTokenVersion,
+    /// No blob has the token's hash.
+    BlobMissing,
+    /// The blob (or the token) declares a length that the other does not match.
+    LengthMismatch { expected: u64, actual: u64 },
+    /// The blob declares more bytes than a blob may hold.
+    DeclaredLengthTooLarge { declared: u64 },
+    /// The `codec` column holds a value this build does not know.
+    UnknownCodec(i64),
+    /// The stored bytes could not be decompressed to the declared length.
+    DecompressFailed,
+    /// The stored bytes are not UTF-8.
+    InvalidUtf8,
+    /// The row's `data` is not a blob (another SQL type): the row was altered.
+    MalformedRow,
+    /// The stored bytes do not hash to the blob's `hash` (found by verification).
+    HashMismatch,
+    /// A different text with the same hash but another length is already stored: a
+    /// collision or a corrupt row. The storing transaction must be rolled back.
+    HashLengthConflict { stored: u64, new: u64 },
+}
+
+impl fmt::Display for BodyUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidToken => write!(formatter, "malformed body token"),
+            Self::UnknownTokenVersion => write!(formatter, "body token of an unknown version"),
+            Self::BlobMissing => write!(formatter, "blob is missing"),
+            Self::LengthMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "length mismatch (expected {expected}, found {actual})"
+                )
+            }
+            Self::DeclaredLengthTooLarge { declared } => {
+                write!(formatter, "declared length {declared} is too large")
+            }
+            Self::UnknownCodec(codec) => write!(formatter, "unknown codec {codec}"),
+            Self::DecompressFailed => write!(formatter, "decompression failed"),
+            Self::InvalidUtf8 => write!(formatter, "stored bytes are not UTF-8"),
+            Self::MalformedRow => write!(formatter, "blob row holds a value of the wrong type"),
+            Self::HashMismatch => write!(formatter, "stored bytes do not match the hash"),
+            Self::HashLengthConflict { stored, new } => write!(
+                formatter,
+                "hash is already stored with length {stored}, not {new}"
+            ),
+        }
+    }
+}
+
 /// ストレージ操作で発生するエラーです。
 // `rusqlite::Error` が `Eq` を実装しないため、ワークスペースの慣例に反して `Eq` は導出しません。
 #[derive(Debug, PartialEq)]
@@ -39,6 +95,16 @@ pub enum StorageError {
         found: u32,
         /// このクレートがサポートする最大バージョンです。
         supported: u32,
+    },
+    /// The database still has the format that stored a run's messages as one
+    /// column of `run_contexts` (or a conversion stopped half way). This build never
+    /// opens it: every evorch process must be stopped and the conversion command
+    /// run. Never retryable; the database is left untouched.
+    ConversionRequired {
+        /// `PRAGMA user_version` found, or 0 when the shape (not the version) is old.
+        found: u32,
+        /// What is old.
+        detail: &'static str,
     },
     /// 容量上限を超過しました。
     LimitExceeded {
@@ -74,6 +140,16 @@ pub enum StorageError {
         run_id: Option<String>,
         thread_id: Option<String>,
     },
+    /// A body token could not be turned back into its text, or a body could not be
+    /// stored consistently. Never a soft failure: the caller must not substitute an
+    /// empty or placeholder text, nor show the raw token as if it were the body.
+    BodyUnresolved {
+        /// Where the token was found, for example `message run=r1 ordinal=3`.
+        owner: String,
+        /// Lowercase hex SHA-256 of the body, when the token (or blob) names one.
+        hash: Option<String>,
+        reason: BodyUnresolvedReason,
+    },
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -103,6 +179,13 @@ impl fmt::Display for StorageError {
             Self::SchemaTooNew { found, supported } => write!(
                 formatter,
                 "schema version {found} is newer than supported version {supported}"
+            ),
+            Self::ConversionRequired { found, detail } => write!(
+                formatter,
+                "the database (schema version {found}) uses the old conversation storage \
+                 ({detail}); stop every evorch process and run the conversion command \
+                 (`evorch maintenance convert-bodies`, shipped with the release that \
+                 includes this storage format) before starting this build. Nothing was changed"
             ),
             Self::LimitExceeded { limit, actual, max } => {
                 write!(
@@ -135,6 +218,15 @@ impl fmt::Display for StorageError {
                 "run {} / thread {} was deleted by retention",
                 run_id.as_deref().unwrap_or("-"),
                 thread_id.as_deref().unwrap_or("-")
+            ),
+            Self::BodyUnresolved {
+                owner,
+                hash,
+                reason,
+            } => write!(
+                formatter,
+                "body unresolved at {owner} (hash {}): {reason}",
+                hash.as_deref().unwrap_or("unknown")
             ),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
@@ -173,7 +265,11 @@ impl StorageError {
     pub fn class(&self) -> FailureClass {
         use rusqlite::ErrorCode;
         match self {
-            Self::SchemaTooNew { .. } => FailureClass::SchemaUnsupported,
+            // A database that needs the conversion command is older than this build
+            // reads, like any other older schema.
+            Self::SchemaTooNew { .. } | Self::ConversionRequired { .. } => {
+                FailureClass::SchemaUnsupported
+            }
             Self::Serialization(message) if message.contains(crate::inspect::OLDER_SCHEMA) => {
                 FailureClass::SchemaUnsupported
             }
@@ -202,6 +298,7 @@ impl std::error::Error for StorageError {
             Self::Migration { .. }
             | Self::StaleMutation
             | Self::SchemaTooNew { .. }
+            | Self::ConversionRequired { .. }
             | Self::LimitExceeded { .. }
             | Self::WriterClosed
             | Self::RawUsageEventNotPersisted
@@ -212,6 +309,7 @@ impl std::error::Error for StorageError {
             | Self::AssistantReferenceUnavailable
             | Self::QuestionAlreadyAnswered
             | Self::Tombstoned { .. }
+            | Self::BodyUnresolved { .. }
             | Self::SecretDetected { .. } => None,
         }
     }

@@ -2,7 +2,7 @@
 use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent};
 use runtime::RunId;
 use std::time::{Duration, Instant};
-use workspace_ui::{KeyAction, PanelId, ThreadRunPhase, Workspace};
+use workspace_ui::{KeyAction, ThreadRunPhase, Workspace};
 
 use super::WorkbenchState;
 use crate::dock::{from_dock_state, to_dock_state};
@@ -280,6 +280,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Diagnostic { .. }
                         | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
+                        | TranscriptEntry::CompactionProgress { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }
                         | TranscriptEntry::AgentMessage { .. }
@@ -311,6 +312,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn apply_runtime_event(&mut self, event: &Event, receipts: &mut [storage::HostInputReceipt]) {
+        self.apply_run_display_event(event);
         match &event.kind {
             EventKind::Lifecycle(LifecycleEvent::EscalationRequested {
                 source_run_id,
@@ -319,38 +321,6 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }) => {
                 if self.is_conversation_run(new_run_id) {
                     self.prepare_escalation_thread(source_run_id, new_run_id);
-                }
-            }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStarted {
-                run_id, agent_name, ..
-            }) => {
-                self.open_subagent_pane(run_id);
-                self.unpark_subagent(run_id);
-                if let Some(panel) = self
-                    .panels
-                    .get_mut(&PanelId::new(format!("agent-{run_id}")))
-                    && !agent_name.trim().is_empty()
-                {
-                    panel.title = format!("Transcript: {agent_name}");
-                }
-            }
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
-                self.phases.insert(run_id.clone(), phase(*to));
-                match to {
-                    AgentRunPhase::Stopped | AgentRunPhase::Done | AgentRunPhase::Error => {
-                        let has_pane = self
-                            .dock
-                            .find_tab(&PanelId::new(format!("agent-{run_id}")))
-                            .is_some();
-                        let known_conversation = self.is_conversation_run(run_id);
-                        if has_pane || !known_conversation {
-                            self.park_completed_subagent(run_id);
-                        }
-                    }
-                    AgentRunPhase::Pending | AgentRunPhase::Running => {
-                        self.unpark_subagent(run_id);
-                    }
-                    AgentRunPhase::Waiting => {}
                 }
             }
             EventKind::Ownership(event_bus::OwnershipEvent {
@@ -442,7 +412,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.thread_search_available()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
         {
-            self.thread_search.toggle();
+            self.toggle_thread_search();
         }
         // While the search is up every key belongs to it, not to shortcuts behind it.
         if self.search_owns_input() {

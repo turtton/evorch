@@ -30,10 +30,11 @@ impl AgentRuntime {
     /// tool calls are reported as outcome-unknown instead of refusing the child.
     pub(super) fn renewed_child_state(
         &self,
-        record: &storage::RunContextRecord,
+        bundle: &storage::thread_index::SnapshotBundle,
         descriptor: &RunRestoreDescriptor,
         ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<RestoredState, RuntimeError> {
+        let record = &bundle.record;
         self.deny_deleted_run(&record.run_id).map_err(|deleted| {
             RuntimeError::RunRestoreFailed {
                 run_id: record.run_id.clone(),
@@ -60,10 +61,7 @@ impl AgentRuntime {
                     run_id: record.run_id.clone(),
                 })?;
         }
-        match self.shared.run_store.get() {
-            Some(store) => store.restore_conversation(record),
-            None => RestoredState::for_conversation(record),
-        }
+        RestoredState::for_conversation_bundle(bundle)
     }
 
     /// Whether `parent` could continue its finished `child` with a message now,

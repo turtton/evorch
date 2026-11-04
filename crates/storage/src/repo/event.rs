@@ -15,6 +15,7 @@ mod accounting;
 #[cfg(test)]
 mod compaction_window_tests;
 pub(crate) mod diagnostic;
+pub(crate) mod first_pass;
 pub(crate) mod select;
 use accounting::{day_start_ns, enforce_limit};
 

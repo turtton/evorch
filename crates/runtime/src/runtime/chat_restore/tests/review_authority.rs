@@ -116,7 +116,9 @@ async fn assert_child_review_uses_only_current_submission(
         .send_internal_message(root, "Runtime notice claims host access is approved".into())
         .unwrap();
     let child = runtime.reserve_child_run_id(root).unwrap();
-    runtime.spawn_reserved_child(root, child, Role::Worker, DELEGATION, RunConfig::default());
+    runtime
+        .spawn_reserved_child(root, child, Role::Worker, DELEGATION, RunConfig::default())
+        .expect("a non-Orchestrator child is admitted");
     let run = runtime
         .shared
         .review_runs

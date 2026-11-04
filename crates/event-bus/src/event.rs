@@ -150,6 +150,8 @@ impl EventKind {
             },
             Self::Compaction(event) => match event {
                 CompactionEvent::Compacted { .. } => "Compacted",
+                CompactionEvent::Progress { .. } => "Progress",
+                CompactionEvent::Aborted { .. } => "Aborted",
             },
             Self::Orchestrator(event) => match event {
                 OrchestratorEvent::ThreadGoalUpdated { .. } => "ThreadGoalUpdated",
@@ -221,7 +223,11 @@ impl EventKind {
                 ProviderEvent::FallbackTriggered { session_id, .. } => Some(session_id),
                 ProviderEvent::ProviderFallback { .. } => None,
             },
-            Self::Compaction(CompactionEvent::Compacted { run_id, .. })
+            Self::Compaction(
+                CompactionEvent::Compacted { run_id, .. }
+                | CompactionEvent::Progress { run_id, .. }
+                | CompactionEvent::Aborted { run_id, .. },
+            )
             | Self::Ledger(LedgerEvent::RunLedgerAppended { run_id, .. }) => Some(run_id),
             Self::Diagnostic(event) => event.run_id.as_deref(),
             Self::AgentMessage(AgentMessageEvent::Delivered { message, .. }) => {
@@ -423,6 +429,10 @@ pub mod diagnostic_codes {
     /// A background evaluation an Evaluator started has ended (ADR 0036).
     pub const EVALUATION_FINISHED: &str = "EvaluationFinished";
 
+    /// A saved child Orchestrator run was refused at restore (ADR 0044 §2/§17).
+    /// The original snapshot is kept untouched as evidence.
+    pub const NESTED_ORCHESTRATOR_REJECTED: &str = "NestedOrchestratorRejected";
+
     /// Every code above.
     pub const ALL: &[&str] = &[
         BUDGET_WARNING,
@@ -462,6 +472,7 @@ pub mod diagnostic_codes {
         BROWSER_DOM_DIFF,
         BROWSER_SCREENSHOT,
         EVALUATION_FINISHED,
+        NESTED_ORCHESTRATOR_REJECTED,
     ];
 }
 
@@ -639,6 +650,8 @@ pub enum LifecycleEvent {
     RunProgress {
         run_id: String,
         activity: RunActivity,
+        /// Live compaction correlation; absent for other activities.
+        compaction_operation_id: Option<String>,
         context: Option<ContextComposition>,
     },
     /// セッションが開始した。
@@ -1654,6 +1667,17 @@ pub enum WindowSource {
     Default,
 }
 
+/// The actual compaction path, not a model-name heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompactionMode {
+    Official,
+    ModelSummary,
+    Structural,
+}
+
+/// Maximum UTF-8 bytes in one live summary delta.
+pub const COMPACTION_DELTA_MAX_BYTES: usize = 4096;
+
 /// コンテキスト圧縮に関するイベントです。
 ///
 /// 圧縮はトランスクリプトの語彙を差し替えるため、リプレイ時には
@@ -1661,8 +1685,24 @@ pub enum WindowSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum CompactionEvent {
+    /// Live-only summary text. Deltas are at most 4096 UTF-8 bytes.
+    /// Revisions start at 1 per attempt; a new attempt discards prior text.
+    Progress {
+        run_id: String,
+        operation_id: String,
+        mode: CompactionMode,
+        attempt: u64,
+        revision: u64,
+        delta: String,
+    },
+    /// Live-only failure/cancellation, including dropped preparation futures.
+    Aborted {
+        run_id: String,
+        operation_id: String,
+    },
     /// コンテキスト圧縮が完了した。
     Compacted {
+        operation_id: String,
         /// 圧縮を実行した agent run の ID。
         run_id: String,
         /// 圧縮の発火理由。
@@ -3323,6 +3363,7 @@ mod tests {
     #[test]
     fn compaction_round_trips_with_nested_adjacent_tags() {
         let event = Event::new(CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-1".into(),
             reason: CompactionReason::Automatic,
             threshold: 0.8,
@@ -3351,6 +3392,7 @@ mod tests {
         assert_eq!(
             value["kind"]["payload"]["payload"],
             serde_json::json!({
+                "operation_id": "fixture-compaction",
                 "run_id": "run-1",
                 "reason": "automatic",
                 "threshold": 0.8,

@@ -18,7 +18,8 @@ struct SidebarUiState {
 pub enum SidebarAction {
     SelectProject(ProjectId),
     OpenAddProject,
-    OpenThreadSearch,
+    /// Search the threads of this project; the selection is left as it is.
+    OpenThreadSearch(ProjectId),
     OpenProjectSettings(ProjectId),
     /// Start an untitled thread in the selected project and make it active.
     CreateThread,

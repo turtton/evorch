@@ -305,8 +305,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.open_add_project();
                     Ok(())
                 }
-                SidebarAction::OpenThreadSearch => {
-                    self.open_thread_search();
+                SidebarAction::OpenThreadSearch(project_id) => {
+                    self.open_thread_search_in(project_id);
                     Ok(())
                 }
                 SidebarAction::OpenProjectSettings(project_id) => {

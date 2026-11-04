@@ -26,8 +26,9 @@ impl AgentRuntime {
         parent: RunId,
         task: (Role, String, RunConfig),
     ) -> Result<RunId, RuntimeError> {
-        let run_id = self.reserve_child_run_id(parent)?;
         let (role, prompt, config) = task;
+        crate::policy::authorize_child_role(Some(parent), role)?;
+        let run_id = self.reserve_child_run_id(parent)?;
         Ok(self.spawn_run_with_handoff(
             run_id,
             Some(parent),

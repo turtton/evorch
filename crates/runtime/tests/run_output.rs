@@ -140,8 +140,8 @@ async fn observe_waiting_child(question: Option<bool>) {
     let model = Arc::new(ScriptedModel::new([]));
     let parent_gate = Arc::new(Notify::new());
     model.gate_key("PARENT", parent_gate.clone()).await;
-    // A wait returns at once only for the question; without one it would wait
-    // for the idle child to finish, so only run_output observes that case.
+    // run_output can observe an idle-turn result without terminating the child.
+    // Question waits remain distinct from successful interactive turn completion.
     let mut parent = vec![
         Ok(tool_response(
             "spawn",
@@ -243,8 +243,22 @@ async fn observe_waiting_child(question: Option<bool>) {
     }
     for snapshot in snapshots {
         assert_eq!(snapshot["phase"], "Waiting");
-        assert_eq!(snapshot["status"], "waiting");
-        assert_eq!(snapshot["output"], Value::Null);
+        assert_eq!(
+            snapshot["status"],
+            if question.is_none() {
+                "turn_completed"
+            } else {
+                "waiting"
+            }
+        );
+        assert_eq!(
+            snapshot["output"],
+            if question.is_none() {
+                json!("Waiting for input")
+            } else {
+                Value::Null
+            }
+        );
         assert_eq!(snapshot["reason"], Value::Null);
     }
 }

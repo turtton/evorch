@@ -270,16 +270,18 @@ async fn ac12_ac14_root_worker_and_visual_worker_generate_embed_and_present() {
                 },
             );
             let worker = runtime.reserve_run_id();
-            runtime.spawn_reserved_child(
-                parent,
-                worker,
-                Role::Worker,
-                "materials",
-                RunConfig {
-                    category: Some("visual".into()),
-                    ..Default::default()
-                },
-            );
+            runtime
+                .spawn_reserved_child(
+                    parent,
+                    worker,
+                    Role::Worker,
+                    "materials",
+                    RunConfig {
+                        category: Some("visual".into()),
+                        ..Default::default()
+                    },
+                )
+                .expect("a non-Orchestrator child is admitted");
             worker
         };
         if root_worker {
