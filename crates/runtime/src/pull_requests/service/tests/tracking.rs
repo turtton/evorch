@@ -20,6 +20,103 @@ fn changed(event: &PullRequestEvent) -> (&[PullRequestChangedField], &[String], 
     }
 }
 
+/// Git for building a checkout: no global or system configuration.
+fn git(dir: &std::path::Path, arguments: &[&str]) -> String {
+    let mut command = std::process::Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(arguments)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+// Given: a tracked thread whose checkout is on the pull request's branch / When: the checkout
+// moves to another branch / Then: the old commit is forgotten and the change is published
+#[tokio::test(start_paused = true)]
+async fn a_checkout_that_can_no_longer_be_named_forgets_the_old_local_head() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    let checkout = world.dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    git(&checkout, &["init", "--quiet", "--initial-branch", "feat"]);
+    std::fs::write(checkout.join("file.txt"), "x").unwrap();
+    git(&checkout, &["add", "."]);
+    git(&checkout, &["commit", "--quiet", "-m", "initial"]);
+    git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/turtton/evorch.git",
+        ],
+    );
+    process
+        .environment
+        .set_directories(vec![std::fs::canonicalize(&checkout).unwrap()]);
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    let seen = process.next().await;
+    let head = process.state("t1").local_head.unwrap().head_sha;
+    assert_eq!(head, git(&checkout, &["rev-parse", "HEAD"]));
+    assert!(matches!(&seen, PullRequestEvent::Changed { fields, .. }
+        if fields.contains(&PullRequestChangedField::LocalHead)));
+
+    git(&checkout, &["checkout", "--quiet", "-b", "elsewhere"]);
+    pass(30).await;
+
+    assert!(
+        process.state("t1").local_head.is_none(),
+        "the old commit must not stand for it"
+    );
+    let events = process.quiet_events().await;
+    assert!(events.iter().any(|event| matches!(event,
+        PullRequestEvent::Changed { fields, .. }
+            if fields == &[PullRequestChangedField::LocalHead])));
+}
+
+// Given: a fetch under way / When: tracking is switched off, then the answer arrives / Then:
+// nothing is stored or published and no git runs for it
+#[tokio::test(start_paused = true)]
+async fn switching_tracking_off_during_a_fetch_starts_no_git_afterwards() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process
+        .environment
+        .set_directories(vec![world.dir.path().to_path_buf()]);
+    let gate = process.source.push_gate(&key(1));
+    process.link("t1", 1).await;
+    gate.arrived().await;
+
+    process
+        .service
+        .update_settings(PullRequestsConfig::default())
+        .unwrap();
+    gate.release_ok(open_running(1));
+    let events = process.quiet_events().await;
+
+    assert!(only_changed(&events).is_empty(), "{events:?}");
+    assert_eq!(process.environment.directory_requests(), 0);
+    let stored = process
+        .storage_handle
+        .pull_request_snapshot(&key(1))
+        .unwrap()
+        .and_then(|snapshot| snapshot.facts);
+    assert!(stored.is_none());
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]
@@ -76,7 +173,7 @@ async fn polling_is_quick_while_checks_run_and_slow_once_they_settled() {
 
     assert!(matches!(linked, PullRequestEvent::Linked { .. }));
     let (fields, notifications, first_seq) = changed(&baseline);
-    assert_eq!(fields.len(), 5, "the first fetch is a baseline");
+    assert_eq!(fields.len(), 6, "the first fetch is a baseline");
     assert!(notifications.is_empty());
     assert_eq!(process.source.calls().len(), 1);
 

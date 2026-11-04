@@ -106,6 +106,10 @@ pub enum PullRequestError {
     /// Ownership was lost while the fetch ran, so its result was dropped.
     #[error("ownership was lost before the result could be used")]
     OwnershipLost,
+    /// The ownership registry stayed busy, so the lease could not be checked. Nothing was
+    /// done; try again.
+    #[error("the ownership registry is busy")]
+    OwnershipBusy,
 }
 
 impl From<StorageError> for PullRequestError {
@@ -265,6 +269,47 @@ impl Inner {
         }
     }
 
+    /// Pins the parent's active link for `child_thread_id`. Blocks on the database.
+    pub(crate) fn pin_inheritance(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        kind: DerivedThreadKind,
+    ) -> Result<InheritanceScheduling, PullRequestError> {
+        if self.enabled().is_err() {
+            return Ok(InheritanceScheduling::Disabled);
+        }
+        if kind == DerivedThreadKind::Lane {
+            return Ok(InheritanceScheduling::Lane);
+        }
+        let Some(link) = self
+            .storage
+            .pull_request_thread_state(parent_thread_id)?
+            .active_link
+        else {
+            return Ok(InheritanceScheduling::NoParentLink);
+        };
+        let scheduled = self
+            .storage
+            .schedule_pull_request_inheritance(NewPullRequestInheritance {
+                child_thread_id: child_thread_id.to_owned(),
+                parent_link_id: link.link_id,
+                at_ns: self.clock.now_ns(),
+            });
+        let record = match scheduled {
+            Ok(record) => record,
+            Err(StorageError::PullRequest(PullRequestRejection::LaneThread)) => {
+                return Ok(InheritanceScheduling::Lane);
+            }
+            Err(StorageError::PullRequest(PullRequestRejection::ParentLinkNotActive)) => {
+                return Ok(InheritanceScheduling::NoParentLink);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        self.wake.notify_one();
+        Ok(InheritanceScheduling::Scheduled(Box::new(record)))
+    }
+
     pub(crate) fn reference(key: &PullRequestKey) -> PullRequestRef {
         PullRequestRef {
             provider: key.provider.as_str().to_owned(),
@@ -272,6 +317,43 @@ impl Inner {
             repository: key.repository.clone(),
             number: key.number,
         }
+    }
+
+    /// Runs a short write for `permit`'s thread while its generation is held fixed by a registry
+    /// guard (ADR 0024): a claim or handoff cannot commit until the write and the event that
+    /// announces it are done. A check made earlier proves nothing about the write, so every write
+    /// that acts for a thread goes through here. Never hold it across a wait for `gh` or `git`.
+    pub(crate) async fn guarded<T: Send + 'static>(
+        &self,
+        permit: &OwnerPermit,
+        write: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, PullRequestError> {
+        self.guarded_any(vec![permit.clone()], write).await
+    }
+
+    /// [`Self::guarded`] under the first of `permits` that still holds its thread, for a write
+    /// that serves several threads (the snapshot of a shared pull request).
+    pub(crate) async fn guarded_any<T: Send + 'static>(
+        &self,
+        permits: Vec<OwnerPermit>,
+        write: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, PullRequestError> {
+        self.blocking(move || {
+            let mut refusal = PullRequestError::NotOwner;
+            for permit in &permits {
+                match permit.mutation_guard() {
+                    Ok(guard) => {
+                        let written = write();
+                        drop(guard);
+                        return Ok(written);
+                    }
+                    Err(error) if error.is_fenced() => refusal = PullRequestError::NotOwner,
+                    Err(_) => refusal = PullRequestError::OwnershipBusy,
+                }
+            }
+            Err(refusal)
+        })
+        .await?
     }
 
     pub(crate) async fn link_key(
@@ -283,52 +365,45 @@ impl Inner {
     ) -> Result<LinkReceipt, PullRequestError> {
         self.enabled()?;
         self.check_permit(thread_id, permit).await?;
-        let (storage, request) = (
+        let (storage, bus, thread) = (
             self.storage.clone(),
-            LinkPullRequest {
-                thread_id: thread_id.to_owned(),
-                key,
-                expected_revision,
-                at_ns: self.clock.now_ns(),
-            },
+            Arc::clone(&self.bus),
+            thread_id.to_owned(),
         );
+        let request = LinkPullRequest {
+            thread_id: thread_id.to_owned(),
+            key,
+            expected_revision,
+            at_ns: self.clock.now_ns(),
+        };
         let receipt = self
-            .blocking(move || storage.link_pull_request(request))
+            .guarded(permit, move || -> Result<LinkReceipt, StorageError> {
+                let receipt = storage.link_pull_request(request)?;
+                if receipt.changed {
+                    let seq = storage
+                        .next_pull_request_transition(&thread, receipt.link.link_revision)?;
+                    if let Some(old) = &receipt.superseded {
+                        bus.emit(Event::new(PullRequestEvent::Unlinked {
+                            thread_id: thread.clone(),
+                            link_revision: old.link_revision,
+                            transition_seq: seq,
+                            pull_request: Self::reference(&old.key),
+                            reason: event_bus::PullRequestLinkEnd::Relinked,
+                        }));
+                    }
+                    bus.emit(Event::new(PullRequestEvent::Linked {
+                        thread_id: thread,
+                        link_revision: receipt.link.link_revision,
+                        transition_seq: seq,
+                        pull_request: Self::reference(&receipt.link.key),
+                        origin: event_bus::PullRequestLinkOrigin::Explicit,
+                    }));
+                }
+                Ok(receipt)
+            })
             .await??;
-        if receipt.changed {
-            let seq = self
-                .next_transition(thread_id, receipt.link.link_revision)
-                .await?;
-            if let Some(old) = &receipt.superseded {
-                self.emit(PullRequestEvent::Unlinked {
-                    thread_id: thread_id.to_owned(),
-                    link_revision: old.link_revision,
-                    transition_seq: seq,
-                    pull_request: Self::reference(&old.key),
-                    reason: event_bus::PullRequestLinkEnd::Relinked,
-                });
-            }
-            self.emit(PullRequestEvent::Linked {
-                thread_id: thread_id.to_owned(),
-                link_revision: receipt.link.link_revision,
-                transition_seq: seq,
-                pull_request: Self::reference(&receipt.link.key),
-                origin: event_bus::PullRequestLinkOrigin::Explicit,
-            });
-        }
         self.force(thread_id);
         Ok(receipt)
-    }
-
-    pub(crate) async fn next_transition(
-        &self,
-        thread_id: &str,
-        link_revision: u64,
-    ) -> Result<u64, PullRequestError> {
-        let (storage, thread) = (self.storage.clone(), thread_id.to_owned());
-        Ok(self
-            .blocking(move || storage.next_pull_request_transition(&thread, link_revision))
-            .await??)
     }
 
     pub(crate) async fn thread_state(
@@ -524,24 +599,28 @@ impl PullRequestService {
         let inner = &self.inner;
         inner.enabled()?;
         inner.check_permit(thread_id, permit).await?;
-        let (storage, thread, at_ns) = (
+        let (storage, bus, thread, at_ns) = (
             inner.storage.clone(),
+            Arc::clone(&inner.bus),
             thread_id.to_owned(),
             inner.clock.now_ns(),
         );
         let receipt = inner
-            .blocking(move || storage.unlink_pull_request(&thread, expected_revision, at_ns))
+            .guarded(permit, move || -> Result<UnlinkReceipt, StorageError> {
+                let receipt = storage.unlink_pull_request(&thread, expected_revision, at_ns)?;
+                if let Some(ended) = &receipt.ended {
+                    let state = storage.pull_request_thread_state(&thread)?;
+                    bus.emit(Event::new(PullRequestEvent::Unlinked {
+                        thread_id: thread,
+                        link_revision: ended.link_revision,
+                        transition_seq: state.transition_seq,
+                        pull_request: Inner::reference(&ended.key),
+                        reason: event_bus::PullRequestLinkEnd::Unlinked,
+                    }));
+                }
+                Ok(receipt)
+            })
             .await??;
-        if let Some(ended) = &receipt.ended {
-            let state = inner.thread_state(thread_id).await?;
-            inner.emit(PullRequestEvent::Unlinked {
-                thread_id: thread_id.to_owned(),
-                link_revision: ended.link_revision,
-                transition_seq: state.transition_seq,
-                pull_request: Inner::reference(&ended.key),
-                reason: event_bus::PullRequestLinkEnd::Unlinked,
-            });
-        }
         inner.wake.notify_one();
         Ok(receipt)
     }
@@ -643,9 +722,10 @@ impl PullRequestService {
     }
 
     /// Records that `child_thread_id`, derived from `parent_thread_id`, may take the parent's
-    /// active link once the pull request is confirmed open. Idempotent; a lane never inherits.
-    /// The child's owner resolves it (see [`Self::resolve_inheritance`]); this process does so
-    /// by itself when it owns the child.
+    /// active link once the pull request is confirmed open. The parent's link is pinned **now**:
+    /// whatever the parent does afterwards (unlink, relink) does not change which pull request the
+    /// child may take. Idempotent; a lane never inherits. The child's owner resolves it (see
+    /// [`Self::resolve_inheritance`]); this process does so by itself when it owns the child.
     ///
     /// # Errors
     /// Storage errors.
@@ -655,61 +735,31 @@ impl PullRequestService {
         child_thread_id: &str,
         kind: DerivedThreadKind,
     ) -> Result<InheritanceScheduling, PullRequestError> {
-        let inner = &self.inner;
-        if inner.enabled().is_err() {
-            return Ok(InheritanceScheduling::Disabled);
-        }
-        if kind == DerivedThreadKind::Lane {
-            return Ok(InheritanceScheduling::Lane);
-        }
-        let Some(link) = inner.thread_state(parent_thread_id).await?.active_link else {
-            return Ok(InheritanceScheduling::NoParentLink);
-        };
-        let (storage, new) = (
-            inner.storage.clone(),
-            NewPullRequestInheritance {
-                child_thread_id: child_thread_id.to_owned(),
-                parent_link_id: link.link_id,
-                at_ns: inner.clock.now_ns(),
-            },
+        let (inner, parent, child) = (
+            Arc::clone(&self.inner),
+            parent_thread_id.to_owned(),
+            child_thread_id.to_owned(),
         );
-        let scheduled = inner
-            .blocking(move || storage.schedule_pull_request_inheritance(new))
-            .await?;
-        let record = match scheduled {
-            Ok(record) => record,
-            Err(StorageError::PullRequest(PullRequestRejection::LaneThread)) => {
-                return Ok(InheritanceScheduling::Lane);
-            }
-            Err(StorageError::PullRequest(PullRequestRejection::ParentLinkNotActive)) => {
-                return Ok(InheritanceScheduling::NoParentLink);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        inner.wake.notify_one();
-        Ok(InheritanceScheduling::Scheduled(Box::new(record)))
+        self.inner
+            .blocking(move || inner.pin_inheritance(&parent, &child, kind))
+            .await?
     }
 
-    /// [`Self::inherit`] without waiting, for callers that cannot (the escalation path). A
-    /// failure is logged: the escalation does not depend on it.
-    pub fn inherit_in_background(
+    /// [`Self::inherit`] for synchronous code that creates the child (an escalation): the link
+    /// is pinned before this returns, in the path that makes the child. It blocks briefly on the
+    /// database and starts no process; only the confirmation that the pull request is open is
+    /// left to the background.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn inherit_now(
         &self,
-        parent_thread_id: String,
-        child_thread_id: String,
+        parent_thread_id: &str,
+        child_thread_id: &str,
         kind: DerivedThreadKind,
-    ) {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        let service = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = service
-                .inherit(&parent_thread_id, &child_thread_id, kind)
-                .await
-            {
-                tracing::warn!(%error, parent = %parent_thread_id, child = %child_thread_id, "pull request inheritance was not scheduled");
-            }
-        });
+    ) -> Result<InheritanceScheduling, PullRequestError> {
+        self.inner
+            .pin_inheritance(parent_thread_id, child_thread_id, kind)
     }
 
     /// Tries to apply the pending inheritance of `child_thread_id` now: confirms the pull

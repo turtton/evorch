@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use event_bus::{PullRequestChangedField, PullRequestEvent, PullRequestFetchStatus};
+use event_bus::{Event, PullRequestChangedField, PullRequestEvent, PullRequestFetchStatus};
 use storage::StorageError;
 use storage::pull_requests::{
     InheritanceResolution, InheritanceState, NotificationKey, PullRequestFacts, PullRequestKey,
@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use super::{Inner, KeyState, PullRequestError};
 use crate::ownership::OwnerPermit;
-use crate::pull_requests::checkout::{CheckoutResolution, resolve_blocking};
+use crate::pull_requests::checkout::{CheckoutMiss, CheckoutResolution, resolve_blocking};
 use crate::pull_requests::diff::{self, FactsChange};
 use crate::pull_requests::ownership::permit_holds;
 use crate::pull_requests::{FetchError, FetchedPullRequest};
@@ -155,6 +155,10 @@ impl Inner {
             .source
             .fetch(key, Duration::from_secs(config.fetch_timeout_seconds))
             .await;
+        // Tracking may have been switched off while `gh` ran: nothing more is started for it.
+        if !self.config().enabled {
+            return FlightOutcome::Discarded;
+        }
         let live = self.live_interests(flight.interests()).await;
         if live.is_empty() {
             return FlightOutcome::Discarded;
@@ -212,13 +216,14 @@ impl Inner {
             (self.storage.clone(), key.clone(), facts.clone());
         let at_ns = fetched.fetched_at_ns;
         let commit = match self
-            .blocking(move || {
+            .guarded_any(permits(live), move || {
                 storage.commit_pull_request_fetch(&commit_key, seq, commit_facts, at_ns)
             })
             .await
         {
             Ok(Ok(commit)) => commit,
             Ok(Err(error)) => return FlightOutcome::StorageFailed(error.to_string()),
+            Err(PullRequestError::NotOwner) => return FlightOutcome::Discarded,
             Err(error) => return FlightOutcome::StorageFailed(error.to_string()),
         };
         let stored = if commit.facts_stored {
@@ -267,13 +272,16 @@ impl Inner {
         let (storage, fail_key) = (self.storage.clone(), key.clone());
         let at_ns = self.clock.now_ns();
         let commit = match self
-            .blocking(move || storage.fail_pull_request_fetch(&fail_key, seq, failure, at_ns))
+            .guarded_any(permits(live), move || {
+                storage.fail_pull_request_fetch(&fail_key, seq, failure, at_ns)
+            })
             .await
         {
             Ok(Ok(commit)) => commit,
             Ok(Err(storage_error)) => {
                 return FlightOutcome::StorageFailed(storage_error.to_string());
             }
+            Err(PullRequestError::NotOwner) => return FlightOutcome::Discarded,
             Err(storage_error) => return FlightOutcome::StorageFailed(storage_error.to_string()),
         };
         if commit.attempt_recorded && previous_kind != Some(kind) {
@@ -321,8 +329,11 @@ impl Inner {
     }
 
     /// Looks for the checkout of the pull request's head branch among the directories the
-    /// thread can reach and stores its HEAD for this link. Only for a thread whose link is
-    /// still the one the fetch was made for. `true` when the stored observation changed.
+    /// thread can reach, and keeps the thread's stored HEAD true to what it finds: a new commit is
+    /// stored, and when no single checkout can be named any more the old commit is forgotten (an
+    /// old commit must not stand for a checkout that is gone, moved or ambiguous). Only for a
+    /// thread whose link is still the one the fetch was made for, and only while tracking is on.
+    /// `true` when the stored observation changed.
     async fn record_local_head(
         &self,
         key: &PullRequestKey,
@@ -332,52 +343,82 @@ impl Inner {
         let Ok(state) = self.thread_state(&target.thread_id).await else {
             return false;
         };
-        if !still_linked(&state, key, target) {
+        if !still_linked(&state, key, target) || !self.config().enabled {
             return false;
         }
-        let directories = self.env.checkout_directories(&target.thread_id);
-        if directories.is_empty() {
-            return false;
-        }
-        let (repository, branch) = (facts.head_repository.clone(), facts.head_branch.clone());
-        let resolution = self
-            .blocking(move || {
-                resolve_blocking(
-                    &directories,
-                    repository.as_deref(),
-                    &branch,
-                    CHECKOUT_BUDGET,
-                )
-            })
-            .await;
-        let Ok(CheckoutResolution::Found(checkout)) = resolution else {
+        let (environment, thread) = (Arc::clone(&self.env), target.thread_id.clone());
+        let Ok(directories) = self
+            .blocking(move || environment.checkout_directories(&thread))
+            .await
+        else {
             return false;
         };
-        if state
-            .local_head
-            .as_ref()
-            .is_some_and(|head| head.head_sha == checkout.head_sha)
-        {
-            return false;
-        }
-        let (storage, thread, at_ns) = (
+        let (repository, branch) = (facts.head_repository.clone(), facts.head_branch.clone());
+        let resolution = if directories.is_empty() {
+            CheckoutResolution::Missing(CheckoutMiss::NoCheckout)
+        } else {
+            match self
+                .blocking(move || {
+                    resolve_blocking(
+                        &directories,
+                        repository.as_deref(),
+                        &branch,
+                        CHECKOUT_BUDGET,
+                    )
+                })
+                .await
+            {
+                Ok(resolution) => resolution,
+                Err(_) => return false,
+            }
+        };
+        let (storage, thread, revision) = (
             self.storage.clone(),
             target.thread_id.clone(),
-            self.clock.now_ns(),
+            target.link_revision,
         );
-        let revision = target.link_revision;
-        matches!(
-            self.blocking(move || {
-                storage.record_pull_request_local_head(&thread, revision, &checkout.head_sha, at_ns)
-            })
-            .await,
-            Ok(Ok(true))
-        )
+        match resolution {
+            CheckoutResolution::Found(checkout) => {
+                if state
+                    .local_head
+                    .as_ref()
+                    .is_some_and(|head| head.head_sha == checkout.head_sha)
+                {
+                    return false;
+                }
+                let at_ns = self.clock.now_ns();
+                matches!(
+                    self.guarded(&target.permit, move || {
+                        storage.record_pull_request_local_head(
+                            &thread,
+                            revision,
+                            &checkout.head_sha,
+                            at_ns,
+                        )
+                    })
+                    .await,
+                    Ok(Ok(true))
+                )
+            }
+            CheckoutResolution::Missing(_) => {
+                if state.local_head.is_none() {
+                    return false;
+                }
+                matches!(
+                    self.guarded(&target.permit, move || {
+                        storage.clear_pull_request_local_head(&thread, revision)
+                    })
+                    .await,
+                    Ok(Ok(true))
+                )
+            }
+        }
     }
 
-    /// Publishes one change for one thread: takes the next transition number of the link it
-    /// was made for (refused once the link ended), claims each notification kind exactly once,
-    /// and emits after all of that is stored.
+    /// Publishes one change for one thread, inside one guarded write for the thread: takes the
+    /// next transition number of the link it was made for (refused once the link ended), claims
+    /// each notification kind exactly once, and emits once all of that is stored. The thread's
+    /// generation is held fixed throughout, so a process that lost the thread cannot publish.
     async fn deliver(
         &self,
         key: &PullRequestKey,
@@ -389,55 +430,65 @@ impl Inner {
         if fields.is_empty() && status.is_none() {
             return;
         }
-        let seq = match self
-            .next_transition(&target.thread_id, target.link_revision)
-            .await
-        {
-            Ok(seq) => seq,
-            Err(
-                PullRequestError::NotLinked
-                | PullRequestError::Deleted
-                | PullRequestError::Rejected(PullRequestRejection::LinkNotActive),
-            ) => return,
-            Err(error) => {
-                tracing::warn!(%error, thread = %target.thread_id, "a pull request transition was not numbered");
-                return;
-            }
-        };
-        let mut claimed = Vec::new();
-        for kind in notifications {
-            let (storage, thread) = (self.storage.clone(), target.thread_id.clone());
-            let notification = NotificationKey {
-                link_revision: target.link_revision,
-                transition_seq: seq,
-                kind: kind.clone(),
-            };
-            if let Ok(Ok(true)) = self
-                .blocking(move || storage.claim_pull_request_notification(&thread, notification))
-                .await
-            {
-                claimed.push(kind);
-            }
-        }
+        let (storage, bus, thread, revision) = (
+            self.storage.clone(),
+            Arc::clone(&self.bus),
+            target.thread_id.clone(),
+            target.link_revision,
+        );
         let pull_request = Self::reference(key);
-        if let Some(status) = status {
-            self.emit(PullRequestEvent::FetchStatusChanged {
-                thread_id: target.thread_id.clone(),
-                link_revision: target.link_revision,
-                transition_seq: seq,
-                pull_request: pull_request.clone(),
-                status,
-            });
-        }
-        if !fields.is_empty() {
-            self.emit(PullRequestEvent::Changed {
-                thread_id: target.thread_id.clone(),
-                link_revision: target.link_revision,
-                transition_seq: seq,
-                pull_request,
-                fields,
-                notifications: claimed,
-            });
+        let published = self
+            .guarded(&target.permit, move || -> Result<(), StorageError> {
+                let seq = storage.next_pull_request_transition(&thread, revision)?;
+                let mut claimed = Vec::new();
+                for kind in notifications {
+                    let notification = NotificationKey {
+                        link_revision: revision,
+                        transition_seq: seq,
+                        kind: kind.clone(),
+                    };
+                    if let Ok(true) = storage.claim_pull_request_notification(&thread, notification)
+                    {
+                        claimed.push(kind);
+                    }
+                }
+                if let Some(status) = status {
+                    bus.emit(Event::new(PullRequestEvent::FetchStatusChanged {
+                        thread_id: thread.clone(),
+                        link_revision: revision,
+                        transition_seq: seq,
+                        pull_request: pull_request.clone(),
+                        status,
+                    }));
+                }
+                if !fields.is_empty() {
+                    bus.emit(Event::new(PullRequestEvent::Changed {
+                        thread_id: thread,
+                        link_revision: revision,
+                        transition_seq: seq,
+                        pull_request,
+                        fields,
+                        notifications: claimed,
+                    }));
+                }
+                Ok(())
+            })
+            .await;
+        match published {
+            Ok(Ok(())) => {}
+            Ok(Err(
+                StorageError::Tombstoned { .. }
+                | StorageError::PullRequest(
+                    PullRequestRejection::NotLinked | PullRequestRejection::LinkNotActive,
+                ),
+            ))
+            | Err(PullRequestError::NotOwner) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, thread = %target.thread_id, "a pull request change was not published");
+            }
+            Err(error) => {
+                tracing::warn!(%error, thread = %target.thread_id, "a pull request change was not published");
+            }
         }
     }
 
@@ -514,25 +565,62 @@ impl Inner {
             record.key.clone(),
             vec![Interest::Child {
                 child: child.clone(),
-                permit,
+                permit: permit.clone(),
             }],
         );
+        self.settle_child(child, permit, &flight).await
+    }
+
+    /// [`Self::resolve_child`] for a fetch the scheduler already started with the child as one of
+    /// its interests, so one fetch serves the pull request's threads and its waiting children
+    /// even when it ends before this task first runs.
+    pub(crate) async fn resolve_child_in(
+        self: &Arc<Self>,
+        child: String,
+        permit: OwnerPermit,
+        flight: Arc<Flight>,
+    ) -> Result<InheritanceResolution, PullRequestError> {
+        self.settle_child(child, permit, &flight).await
+    }
+
+    async fn settle_child(
+        self: &Arc<Self>,
+        child: String,
+        permit: OwnerPermit,
+        flight: &Flight,
+    ) -> Result<InheritanceResolution, PullRequestError> {
         match flight.wait().await {
             FlightOutcome::Committed { seq, .. } => {
-                let (storage, thread, at_ns) =
-                    (self.storage.clone(), child.clone(), self.clock.now_ns());
+                // The answer is shared, so it says nothing about the child's own authority:
+                // the decision is written under the child's lease.
+                let (storage, bus, thread, at_ns) = (
+                    self.storage.clone(),
+                    Arc::clone(&self.bus),
+                    child.clone(),
+                    self.clock.now_ns(),
+                );
                 let resolution = self
-                    .blocking(move || storage.resolve_pull_request_inheritance(&thread, seq, at_ns))
+                    .guarded(
+                        &permit,
+                        move || -> Result<InheritanceResolution, StorageError> {
+                            let resolution =
+                                storage.resolve_pull_request_inheritance(&thread, seq, at_ns)?;
+                            if let InheritanceResolution::Applied { link, .. } = &resolution {
+                                let seq = storage
+                                    .next_pull_request_transition(&thread, link.link_revision)?;
+                                bus.emit(Event::new(PullRequestEvent::Linked {
+                                    thread_id: thread,
+                                    link_revision: link.link_revision,
+                                    transition_seq: seq,
+                                    pull_request: Self::reference(&link.key),
+                                    origin: event_bus::PullRequestLinkOrigin::Inherited,
+                                }));
+                            }
+                            Ok(resolution)
+                        },
+                    )
                     .await??;
-                if let InheritanceResolution::Applied { link, .. } = &resolution {
-                    let seq = self.next_transition(&child, link.link_revision).await?;
-                    self.emit(PullRequestEvent::Linked {
-                        thread_id: child.clone(),
-                        link_revision: link.link_revision,
-                        transition_seq: seq,
-                        pull_request: Self::reference(&link.key),
-                        origin: event_bus::PullRequestLinkOrigin::Inherited,
-                    });
+                if matches!(resolution, InheritanceResolution::Applied { .. }) {
                     self.force(&child);
                 }
                 Ok(resolution)
@@ -541,7 +629,7 @@ impl Inner {
                 let (storage, thread, at_ns) = (self.storage.clone(), child, self.clock.now_ns());
                 let note = error.failure().message;
                 let _ = self
-                    .blocking(move || {
+                    .guarded(&permit, move || {
                         storage.record_pull_request_inheritance_attempt(&thread, &note, at_ns)
                     })
                     .await;
@@ -553,6 +641,12 @@ impl Inner {
             }
         }
     }
+}
+
+fn permits(live: &[Interest]) -> Vec<OwnerPermit> {
+    live.iter()
+        .map(|interest| interest.permit().clone())
+        .collect()
 }
 
 fn still_linked(

@@ -130,9 +130,21 @@ impl WallClock for ManualClock {
 #[derive(Default)]
 pub(super) struct FakeEnvironment {
     runs: Mutex<HashMap<String, String>>,
+    directories: Mutex<Vec<PathBuf>>,
+    directory_requests: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeEnvironment {
+    pub(super) fn set_directories(&self, directories: Vec<PathBuf>) {
+        *self.directories.lock().unwrap() = directories;
+    }
+
+    /// How many times the service asked where a thread's checkouts are (it asks only when it
+    /// is about to run git).
+    pub(super) fn directory_requests(&self) -> usize {
+        self.directory_requests.load(Ordering::SeqCst)
+    }
+
     pub(super) fn bind(&self, run: &str, thread: &str) {
         self.runs
             .lock()
@@ -147,7 +159,8 @@ impl ThreadEnvironment for FakeEnvironment {
     }
 
     fn checkout_directories(&self, _thread_id: &str) -> Vec<PathBuf> {
-        Vec::new()
+        self.directory_requests.fetch_add(1, Ordering::SeqCst);
+        self.directories.lock().unwrap().clone()
     }
 }
 

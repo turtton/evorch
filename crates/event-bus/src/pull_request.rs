@@ -7,6 +7,13 @@
 //!
 //! The events are scoped to a thread, carry no run, and never reach a model: they are
 //! not part of any transcript, history or prompt.
+//!
+//! **Consumers.** Facts are stored once per pull request, and the process that owns a thread
+//! publishes the change for *its* threads. When several processes (or threads of different
+//! owners) track one pull request, only the one that first sees the difference publishes a
+//! `Changed`. So a reader must not count on one event per thread: it invalidates what it shows by
+//! the pull request key (`pull_request`) as well as by `thread_id`, and reads the database
+//! again.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +77,8 @@ pub enum PullRequestChangedField {
     ChecksComplete,
     /// The structured review decision.
     ReviewDecision,
+    /// The base branch, or the head repository or branch.
+    Refs,
     /// The commit the thread's local checkout is at.
     LocalHead,
 }

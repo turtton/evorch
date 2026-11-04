@@ -1243,6 +1243,38 @@ fn the_local_head_belongs_to_the_link_revision_it_was_observed_under() {
 }
 
 #[test]
+fn a_local_head_can_be_forgotten_for_its_link_revision() {
+    let f = Fixture::new();
+    let h = f.handle();
+    let revision = link(&h, "t1", 1, 0).link.link_revision;
+    assert!(
+        !h.clear_pull_request_local_head("t1", revision).unwrap(),
+        "nothing stored, nothing cleared"
+    );
+    h.record_pull_request_local_head("t1", revision, &sha('c'), 50)
+        .unwrap();
+
+    assert!(h.clear_pull_request_local_head("t1", revision).unwrap());
+
+    assert!(
+        h.pull_request_thread_state("t1")
+            .unwrap()
+            .local_head
+            .is_none()
+    );
+    // A later observation can be stored again, and a stale revision cannot clear anything.
+    assert!(
+        h.record_pull_request_local_head("t1", revision, &sha('d'), 51)
+            .unwrap()
+    );
+    link(&h, "t1", 2, 1);
+    assert_eq!(
+        rejection(&h.clear_pull_request_local_head("t1", revision).unwrap_err()),
+        &PullRequestRejection::LinkNotActive
+    );
+}
+
+#[test]
 fn candidates_are_presented_once_and_decided_by_a_person() {
     let f = Fixture::new();
     let h = f.handle();
@@ -1301,7 +1333,7 @@ fn candidates_are_presented_once_and_decided_by_a_person() {
 }
 
 #[test]
-fn undecided_candidates_are_limited_and_decided_ones_make_room() {
+fn a_full_thread_refuses_new_candidates_and_forgets_no_decision() {
     let f = Fixture::new();
     let h = f.handle();
     let present = |number: u64| {
@@ -1320,15 +1352,18 @@ fn undecided_candidates_are_limited_and_decided_ones_make_room() {
     let error = present(max + 1).unwrap_err();
     assert_eq!(rejection(&error), &PullRequestRejection::CandidateLimit);
 
+    // A decided candidate is the memory of the decision: it does not make room, so the
+    // same pull request is never offered again after it.
     let first = h.pull_request_candidates("t1", None).unwrap()[0].candidate_id;
     h.dismiss_pull_request_candidate("t1", first, 500).unwrap();
-    present(max + 1).unwrap();
+    let error = present(max + 1).unwrap_err();
+    assert_eq!(rejection(&error), &PullRequestRejection::CandidateLimit);
     let all = h.pull_request_candidates("t1", None).unwrap();
     assert_eq!(all.len(), PULL_REQUEST_CANDIDATES_MAX);
-    assert!(
-        all.iter().all(|c| c.candidate_id != first),
-        "the decided one made room"
-    );
+    let kept = all.iter().find(|c| c.candidate_id == first).unwrap();
+    assert_eq!(kept.state, CandidateState::Dismissed);
+    let again = present(1).unwrap();
+    assert!(!again.created, "an existing candidate is still answered");
 }
 
 #[test]

@@ -268,6 +268,48 @@ async fn the_tracked_pull_request_is_not_offered() {
     assert!(presented(&process).is_empty());
 }
 
+// Given: a thread that holds as many candidates as it may, one of them dismissed / When: its
+// pull request shows up again, together with a new one / Then: the decision is remembered and
+// the new one is not accepted
+#[tokio::test(start_paused = true)]
+async fn a_full_thread_keeps_its_decisions_and_takes_no_new_candidate() {
+    let world = World::new();
+    let mut process = tracked_process(&world);
+    for chunk in 0..8_u64 {
+        let output: String = (1..=8).map(|n| url(chunk * 8 + n)).collect();
+        completed(
+            &process,
+            "shell",
+            &format!("fill-{chunk}"),
+            &output,
+            None,
+            None,
+        );
+    }
+    process.quiet_events().await;
+    assert_eq!(presented(&process).len(), 64);
+    process
+        .service
+        .dismiss_candidate("t1", by_number(&process, 1).candidate_id)
+        .await
+        .unwrap();
+    process.quiet_events().await;
+
+    completed(
+        &process,
+        "shell",
+        "again",
+        &format!("{}{}", url(1), url(65)),
+        None,
+        None,
+    );
+    let events = process.quiet_events().await;
+
+    assert!(candidates_changed(&events).is_empty(), "{events:?}");
+    assert_eq!(by_number(&process, 1).state, CandidateState::Dismissed);
+    assert_eq!(presented(&process).len(), 64);
+}
+
 // Given: tracking is off / When: command output names a pull request / Then: nothing is stored
 #[tokio::test(start_paused = true)]
 async fn a_disabled_service_offers_nothing() {

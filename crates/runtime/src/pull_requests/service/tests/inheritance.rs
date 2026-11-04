@@ -32,6 +32,80 @@ fn record(process: &Process, child: &str) -> storage::pull_requests::Inheritance
         .unwrap()
 }
 
+// Given: a child whose lease moves to another process while a fetch it waits on is under way,
+// a fetch that stays valid for the parent / When: the answer arrives / Then: the shared answer
+// does not stand in for the child's own authority: nothing is inherited
+#[tokio::test(start_paused = true)]
+async fn a_child_that_lost_its_lease_during_the_fetch_does_not_take_the_link() {
+    let world = World::new();
+    let mut first = world.process(enabled());
+    let second = world.process(enabled());
+    linked_parent(&mut first, open_running(1)).await;
+    let gate = first.source.push_gate(&key(1));
+    let parent_permit = first.permit("t1");
+    let child_permit = first.permit("c1");
+    first
+        .service
+        .inherit("t1", "c1", DerivedThreadKind::Escalation)
+        .await
+        .unwrap();
+    gate.arrived().await;
+    first.service.refresh("t1", &parent_permit).await.unwrap();
+    settle().await;
+
+    first.host.handoff(&child_permit, &second.host).unwrap();
+    gate.release_ok(open_running(1));
+    settle().await;
+
+    assert_eq!(record(&first, "c1").state, InheritanceState::Pending);
+    assert!(first.state("c1").active_link.is_none());
+    drop(second);
+}
+
+// Given: a pull request that cannot be fetched and a pending inheritance / When: time passes /
+// Then: the attempts follow the pull request's backoff, shared with the parent's tracking
+#[tokio::test(start_paused = true)]
+async fn a_pending_inheritance_waits_for_the_backoff_of_its_pull_request() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    linked_parent(&mut process, open_running(1)).await;
+    process
+        .source
+        .push_err(&key(1), FetchError::Network("down".into()));
+    process.source.repeat_last();
+    process.permit("c1");
+
+    process
+        .service
+        .inherit("t1", "c1", DerivedThreadKind::Escalation)
+        .await
+        .unwrap();
+    settle().await;
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "the first attempt is made at once"
+    );
+
+    pass(59).await;
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "the retry waits the 60 s backoff"
+    );
+    pass(1).await;
+    assert_eq!(
+        process.source.calls().len(),
+        3,
+        "one fetch serves the parent and the child"
+    );
+    pass(119).await;
+    assert_eq!(process.source.calls().len(), 3, "then 120 s");
+    pass(1).await;
+    assert_eq!(process.source.calls().len(), 4);
+    assert_eq!(record(&process, "c1").state, InheritanceState::Pending);
+}
+
 // Given: a parent with an open pull request and an owned child / When: the child is derived /
 // Then: it takes the link (origin inherited, pinned to the parent's link) and is tracked
 #[tokio::test(start_paused = true)]

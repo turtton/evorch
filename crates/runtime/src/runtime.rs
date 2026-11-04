@@ -1961,7 +1961,7 @@ impl AgentRuntime {
             parent_thread_id.clone(),
             &config,
         );
-        self.inherit_pull_request(parent_thread_id, escalation_thread);
+        self.inherit_pull_request(parent_thread_id, &escalation_thread);
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

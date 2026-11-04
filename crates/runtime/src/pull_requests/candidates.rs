@@ -128,6 +128,8 @@ impl StreamScanner {
         if self.seen_bytes >= MAX_SCANNED_BYTES {
             return;
         }
+        // The chunk that crosses the budget is read only up to it.
+        let chunk = floor_boundary(chunk, MAX_SCANNED_BYTES - self.seen_bytes);
         self.seen_bytes = self.seen_bytes.saturating_add(chunk.len());
         let mut text = std::mem::take(&mut self.tail);
         text.push_str(chunk);
@@ -304,6 +306,26 @@ mod tests {
         scanner.push(500, "ll/7\n");
 
         assert_eq!(scanner.finish(), Vec::new());
+    }
+
+    // Given: a stream past the budget / When: a huge chunk crosses it / Then: only the part
+    // inside the budget is read, and nothing after
+    #[test]
+    fn a_chunk_crossing_the_budget_is_read_only_up_to_it() {
+        let mut scanner = StreamScanner::new();
+        let filler = " ".repeat(MAX_SCANNED_BYTES - 8);
+        let chunk = format!(
+            "{filler}https://github.com/o/r/pull/1\n{}https://github.com/o/r/pull/2\n",
+            " ".repeat(64)
+        );
+
+        scanner.push(0, &chunk);
+
+        assert_eq!(
+            scanner.finish(),
+            Vec::new(),
+            "the first URL starts inside the budget but is cut"
+        );
     }
 
     // Given: multi-byte text around the cut / When: streamed in tiny chunks / Then: no panic

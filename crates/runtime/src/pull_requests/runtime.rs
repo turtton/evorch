@@ -117,11 +117,120 @@ impl AgentRuntime {
     }
 
     /// A derived thread may take its parent's pull request link (escalation only here; a fork
-    /// or rewind is derived by the host, which calls
-    /// [`PullRequestService::inherit`] with the same arguments).
-    pub(crate) fn inherit_pull_request(&self, parent_thread: Option<String>, child_thread: String) {
-        if let (Some(service), Some(parent)) = (self.shared.pull_requests.get(), parent_thread) {
-            service.inherit_in_background(parent, child_thread, DerivedThreadKind::Escalation);
+    /// or rewind is derived by the host, which calls [`PullRequestService::inherit`] with the
+    /// same arguments). The parent's link is pinned here, in the path that creates the child.
+    pub(crate) fn inherit_pull_request(&self, parent_thread: Option<String>, child_thread: &str) {
+        if let (Some(service), Some(parent)) = (self.shared.pull_requests.get(), parent_thread)
+            && let Err(error) =
+                service.inherit_now(&parent, child_thread, DerivedThreadKind::Escalation)
+        {
+            tracing::warn!(%error, parent, child = child_thread, "pull request inheritance was not pinned");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use config::PullRequestsConfig;
+    use event_bus::EventBus;
+    use providers::{ChatResponse, FinishReason, Message, Role as MessageRole, ToolSpec, Usage};
+    use storage::pull_requests::{InheritanceState, PullRequestKey};
+
+    use crate::ownership::OwnerHost;
+    use crate::pull_requests::FakePullRequestSource;
+    use crate::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunStore, RuntimeError};
+
+    struct NoModel;
+
+    #[async_trait]
+    impl AgentModel for NoModel {
+        async fn complete(
+            &self,
+            _: &AgentInvocationContext,
+            _: Role,
+            _: &[Message],
+            _: &[ToolSpec],
+        ) -> Result<ChatResponse, RuntimeError> {
+            Ok(ChatResponse {
+                usage_reported: true,
+                message: Message {
+                    role: MessageRole::Assistant,
+                    content: Vec::new(),
+                },
+                finish_reason: FinishReason::Stop,
+                usage: Usage::default(),
+            })
+        }
+
+        fn selected_model(&self, _: Role, _: Option<&str>) -> String {
+            "pull-request-hook".into()
+        }
+    }
+
+    // Given: a parent linked to a pull request / When: an escalation creates a child and the
+    // parent unlinks right after / Then: the child's inheritance was pinned to the parent's link
+    // inside the creation path, so the unlink does not take it away
+    #[tokio::test(start_paused = true)]
+    async fn an_escalation_pins_the_parent_link_before_the_parent_can_change_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = storage::StorageConfig {
+            db_path: directory.path().join("hook.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let bus = Arc::new(EventBus::new(256));
+        let runtime = AgentRuntime::new(
+            Arc::clone(&bus),
+            Arc::new(tools::ToolExecutor::new(bus)),
+            Arc::new(NoModel),
+        )
+        .with_run_store(RunStore::open(&config, storage.handle()).unwrap());
+        let host = Arc::new(
+            OwnerHost::open(
+                &directory.path().join("owners"),
+                config::OwnershipConfig::default(),
+                Arc::clone(&runtime.shared.bus),
+            )
+            .unwrap(),
+        );
+        let service = runtime
+            .start_pull_requests(
+                Arc::clone(&host) as Arc<dyn crate::pull_requests::OwnershipView>,
+                Arc::new(FakePullRequestSource::new()),
+                PullRequestsConfig {
+                    enabled: true,
+                    ..PullRequestsConfig::default()
+                },
+            )
+            .unwrap();
+        let permit = host.start("parent").unwrap();
+        let linked = service
+            .link("parent", "turtton/evorch#1", 0, &permit)
+            .await
+            .unwrap();
+
+        runtime.inherit_pull_request(Some("parent".into()), "escalation-run-9");
+        service
+            .unlink("parent", linked.lifecycle_revision, &permit)
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let row = storage
+            .handle()
+            .pull_request_inheritance("escalation-run-9")
+            .unwrap()
+            .expect("the inheritance was pinned in the creation path");
+        assert_eq!(row.state, InheritanceState::Pending);
+        assert_eq!(row.parent_link_id, linked.link.link_id);
+        assert_eq!(
+            row.key,
+            PullRequestKey::github("turtton/evorch", 1).unwrap()
+        );
     }
 }

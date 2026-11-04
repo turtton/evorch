@@ -46,7 +46,7 @@ pub const PULL_REQUEST_CHECK_ID_MAX_CHARS: usize = 128;
 pub const PULL_REQUEST_BRANCH_MAX_CHARS: usize = 255;
 /// Longest stored fetch error message (or inheritance attempt note), in characters.
 pub const PULL_REQUEST_ERROR_MAX_CHARS: usize = 256;
-/// Candidates one thread keeps before the oldest decided ones are dropped.
+/// Candidates one thread keeps, decided ones included; a full thread takes no new one.
 pub const PULL_REQUEST_CANDIDATES_MAX: usize = 64;
 /// Notification keys one thread remembers exactly (older ones are summarized by a floor).
 pub const PULL_REQUEST_NOTIFIED_MAX: usize = 64;
@@ -300,7 +300,7 @@ pub enum PullRequestRejection {
     LinkNotActive,
     /// The candidate does not exist for this thread.
     CandidateNotFound,
-    /// The thread already holds [`PULL_REQUEST_CANDIDATES_MAX`] undecided candidates.
+    /// The thread already holds [`PULL_REQUEST_CANDIDATES_MAX`] candidates.
     CandidateLimit,
     /// The parent link does not exist.
     ParentLinkNotFound,

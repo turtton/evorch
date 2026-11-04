@@ -15,7 +15,7 @@ use storage::StorageError;
 use storage::pull_requests::{InheritanceResolution, PullRequestKey, PullRequestState};
 use tokio::time::Instant;
 
-use super::flight::{Interest, Target};
+use super::flight::{Flight, Interest, Target};
 use super::{Inner, KeyState};
 use crate::ownership::OwnerPermit;
 
@@ -29,7 +29,9 @@ struct Plan {
     targets: Vec<Target>,
     /// Keys whose stored facts say merged or closed.
     terminal: HashSet<PullRequestKey>,
-    children: Vec<(String, OwnerPermit)>,
+    /// Pending inheritances of children this process owns: the child, the pull request it waits
+    /// for, and its permit.
+    children: Vec<(String, PullRequestKey, OwnerPermit)>,
 }
 
 pub(super) async fn run(inner: Arc<Inner>) {
@@ -51,6 +53,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
                 if changed.is_err() {
                     break;
                 }
+                inner.apply_new_settings();
             }
             () = sleep_until(due) => {}
             changed = shutdown.changed() => {
@@ -130,7 +133,7 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
         let full = page.len() == PAGE;
         for record in &page {
             if let Some(permit) = owned(inner, &mut cache, &record.child_thread_id) {
-                children.push((record.child_thread_id.clone(), permit));
+                children.push((record.child_thread_id.clone(), record.key.clone(), permit));
             }
         }
         if !full || children.len() >= MAX_CHILDREN_PER_ROUND {
@@ -148,6 +151,18 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
 }
 
 impl Inner {
+    /// New intervals apply to what is waiting: every pull request that was waiting for its next
+    /// poll is fetched again now (failures keep counting), and from then on at the new pace.
+    fn apply_new_settings(&self) {
+        let now = Instant::now();
+        let mut state = self.lock();
+        for entry in state.keys.values_mut() {
+            if entry.next_due.is_some() {
+                entry.next_due = Some(now);
+            }
+        }
+    }
+
     /// One planning round: starts what is due and returns when the next thing is.
     async fn round(self: &Arc<Self>) -> Option<Instant> {
         let config = self.config();
@@ -173,10 +188,12 @@ impl Inner {
         let mut resolve = Vec::new();
         {
             let mut state = self.lock();
-            let flying: HashSet<PullRequestKey> = state.flights.keys().cloned().collect();
-            state
-                .keys
-                .retain(|key, _| groups.contains_key(key) || flying.contains(key));
+            // A key stays while a thread tracks it, a fetch of it is under way, or a child waits
+            // for it: the failure state of a pull request is one, whoever asks.
+            let mut needed: HashSet<PullRequestKey> = state.flights.keys().cloned().collect();
+            needed.extend(groups.keys().cloned());
+            needed.extend(plan.children.iter().map(|(_, key, _)| key.clone()));
+            state.keys.retain(|key, _| needed.contains(key));
             for (key, targets) in groups {
                 let forced = targets
                     .iter()
@@ -204,37 +221,62 @@ impl Inner {
             state.forced.clear();
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let live_children: HashSet<&String> =
-                plan.children.iter().map(|(child, _)| child).collect();
+                plan.children.iter().map(|(child, _, _)| child).collect();
             state
                 .inheritance_due
                 .retain(|child, _| live_children.contains(child));
-            for (child, permit) in plan.children {
+            for (child, key, permit) in plan.children {
                 if state.resolving.contains(&child) {
                     continue;
                 }
-                match state.inheritance_due.get(&child) {
-                    Some(due) if *due > now => earliest = earlier(earliest, *due),
-                    _ => {
-                        state.resolving.insert(child.clone());
-                        state.inheritance_due.insert(child.clone(), now + pending);
-                        resolve.push((child, permit));
-                    }
+                if let Some(due) = state.inheritance_due.get(&child)
+                    && *due > now
+                {
+                    earliest = earlier(earliest, *due);
+                    continue;
                 }
+                // A pull request that failed to be fetched is tried again when its backoff
+                // ends, for the children that wait for it as for the threads that track it.
+                if let Some(entry) = state.keys.get(&key)
+                    && entry.failures > 0
+                    && let Some(due) = entry.next_due
+                    && due > now
+                {
+                    earliest = earlier(earliest, due);
+                    continue;
+                }
+                state.resolving.insert(child.clone());
+                state.inheritance_due.insert(child.clone(), now + pending);
+                resolve.push((child, key, permit));
             }
         }
-        for (key, interests) in start {
-            self.start_or_join(key, interests);
+        // One fetch per pull request, started with every party that waits for it.
+        let mut fetches: HashMap<PullRequestKey, Vec<Interest>> = start.into_iter().collect();
+        for (child, key, permit) in &resolve {
+            fetches
+                .entry(key.clone())
+                .or_default()
+                .push(Interest::Child {
+                    child: child.clone(),
+                    permit: permit.clone(),
+                });
         }
-        for (child, permit) in resolve {
-            self.spawn_resolution(child, permit);
+        let flights: HashMap<PullRequestKey, Arc<Flight>> = fetches
+            .into_iter()
+            .map(|(key, interests)| (key.clone(), self.start_or_join(key, interests)))
+            .collect();
+        for (child, key, permit) in resolve {
+            if let Some(flight) = flights.get(&key) {
+                self.spawn_resolution(child, permit, Arc::clone(flight));
+            }
         }
         earliest
     }
 
-    fn spawn_resolution(self: &Arc<Self>, child: String, permit: OwnerPermit) {
+    fn spawn_resolution(self: &Arc<Self>, child: String, permit: OwnerPermit, flight: Arc<Flight>) {
         let inner = Arc::clone(self);
         tokio::spawn(async move {
-            let result = inner.resolve_child(child.clone(), permit).await;
+            let result = inner.resolve_child_in(child.clone(), permit, flight).await;
             let pending = Duration::from_secs(inner.config().pending_poll_seconds);
             {
                 let mut state = inner.lock();

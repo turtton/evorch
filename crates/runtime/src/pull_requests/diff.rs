@@ -122,6 +122,7 @@ pub fn compare(previous: Option<&PullRequestFacts>, next: &PullRequestFacts) -> 
             fields: vec![
                 PullRequestChangedField::State,
                 PullRequestChangedField::HeadSha,
+                PullRequestChangedField::Refs,
                 PullRequestChangedField::Checks,
                 PullRequestChangedField::ChecksComplete,
                 PullRequestChangedField::ReviewDecision,
@@ -140,6 +141,12 @@ pub fn compare(previous: Option<&PullRequestFacts>, next: &PullRequestFacts) -> 
     }
     if previous.head_sha != next.head_sha {
         change.fields.push(PullRequestChangedField::HeadSha);
+    }
+    if previous.base_branch != next.base_branch
+        || previous.head_repository != next.head_repository
+        || previous.head_branch != next.head_branch
+    {
+        change.fields.push(PullRequestChangedField::Refs);
     }
     if previous.checks != next.checks {
         change.fields.push(PullRequestChangedField::Checks);
@@ -226,7 +233,7 @@ mod tests {
 
         let change = compare(None, &merged);
 
-        assert_eq!(change.fields.len(), 5);
+        assert_eq!(change.fields.len(), 6);
         assert!(change.notifications.is_empty());
     }
 
@@ -366,6 +373,25 @@ mod tests {
             Some(CheckConclusion::Cancelled),
         )];
         assert_eq!(checks_verdict(&cancelled), ChecksVerdict::Unsettled);
+    }
+
+    // Given: a branch that moved without anything else changing / When: compared / Then: that
+    // alone is a change
+    #[test]
+    fn a_changed_branch_or_repository_is_a_change() {
+        let before = facts();
+        let mut moved = facts();
+        moved.head_branch = "other".into();
+        let mut renamed = facts();
+        renamed.head_repository = None;
+        let mut rebased = facts();
+        rebased.base_branch = "release".into();
+
+        for next in [moved, renamed, rebased] {
+            let change = compare(Some(&before), &next);
+            assert_eq!(change.fields, vec![PullRequestChangedField::Refs]);
+            assert!(change.notifications.is_empty());
+        }
     }
 
     // Given: facts / When: asked whether to poll soon / Then: unknown, running and partial

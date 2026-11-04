@@ -22,8 +22,8 @@ use crate::pull_requests::candidates::{
 };
 use event_bus::RecvError;
 
-/// Most entries each table of in-flight calls and jobs keeps. A flood past it forgets the oldest
-/// state; the cost is a missed early refresh, never a wrong one.
+/// Most entries each table of in-flight calls and jobs keeps. A flood past it forgets all of
+/// them at once; the cost is a missed early refresh or a missed chip, never a wrong one.
 const MAX_TRACKED: usize = 512;
 
 #[derive(Default)]
