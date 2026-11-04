@@ -73,6 +73,7 @@ pub mod maintenance;
 pub mod memory;
 mod migrations;
 mod projection;
+pub mod pull_requests;
 mod read;
 mod repo;
 mod review;

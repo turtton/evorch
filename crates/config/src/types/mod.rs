@@ -13,6 +13,7 @@ pub mod orchestration;
 pub mod ownership;
 pub mod panel;
 pub mod provider;
+pub mod pull_requests;
 pub mod role_profile;
 pub mod routing;
 pub mod rules;
@@ -47,6 +48,7 @@ pub use provider::{
     ApiProtocolConfig, CredentialRefConfig, MetadataSource, ModelEntryConfig, ModelKind,
     ProviderProfileConfig, ProviderTypeConfig,
 };
+pub use pull_requests::PullRequestsConfig;
 pub use role_profile::{
     DEFAULT_ROLE_PROFILE, RoleProfileConfig, chain_kind_problems, is_valid_role_profile_name,
     route_mixing_problems, scope_kind_problems,
@@ -123,6 +125,8 @@ pub struct Config {
     pub eval: EvalConfig,
     /// ストレージ層の設定（会話全文索引、ADR 0041）。
     pub storage: StorageConfig,
+    /// スレッドに紐づいた PR の追跡（ADR 0043、既定で無効。信頼済みセクション）。
+    pub pull_requests: PullRequestsConfig,
 }
 
 impl Default for Config {
@@ -151,6 +155,7 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             eval: EvalConfig::default(),
             storage: StorageConfig::default(),
+            pull_requests: PullRequestsConfig::default(),
         }
     }
 }

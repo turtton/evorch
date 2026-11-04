@@ -906,8 +906,9 @@ fn advance_thread(
 }
 
 /// The tables keyed by thread, one table per `table_idx`: 0 the lane ledger rows, 1 the
-/// captured untracked files, 2 the start state. The lane rows come first, so a capture
-/// above the step budget (left to the exclusive phase) never makes a thread skip them.
+/// pull request rows, 2 the captured untracked files, 3 the start state. The lane and pull
+/// request rows come first, so a capture above the step budget (left to the exclusive
+/// phase) never makes a thread skip them.
 fn thread_tables(
     tx: &Transaction<'_>,
     family: &str,
@@ -936,7 +937,22 @@ fn thread_tables(
                 }
             }
         }
-        1 => match take_untracked(tx, &thread, false)? {
+        1 => {
+            // The same holds for the pull request tables (migration 46).
+            let pull_requests: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'thread_pull_requests')",
+                [],
+                |row| row.get(0),
+            )?;
+            if pull_requests {
+                work = take_pull_request_rows(tx, &thread)?;
+            }
+            if work.rows == 0 {
+                cursor.table_idx = 2;
+            }
+        }
+        2 => match take_untracked(tx, &thread, false)? {
             Untracked::Taken(taken) => work = taken,
             // A captured file above the step's budget cannot be deleted by a bounded
             // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
@@ -946,7 +962,7 @@ fn thread_tables(
                 register_oversized(tx, family, "thread_start_states", &thread, size)?;
                 advance_thread(tx, family, cursor, &thread)?;
             }
-            Untracked::None => cursor.table_idx = 2,
+            Untracked::None => cursor.table_idx = 3,
         },
         _ => {
             let stored: Option<u64> = tx
@@ -977,6 +993,38 @@ fn thread_tables(
         }
     }
     Ok(work)
+}
+
+/// Works off the pull request rows of `thread`, at most [`RECLAIM_ROWS`] per call and in
+/// this order: first the cached facts of the snapshots only this thread references are
+/// cleared (the thread's own rows still name them), then its links, candidates,
+/// inheritance row and lifecycle state are deleted. Returns no rows when nothing is left.
+fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    let cleared = super::super::pull_requests::snapshots::clear_unshared(tx, thread, limit)?;
+    if cleared > 0 {
+        return Ok(Work {
+            rows: cleared,
+            ..Work::default()
+        });
+    }
+    for sql in [
+        "DELETE FROM thread_pull_requests WHERE link_id IN \
+         (SELECT link_id FROM thread_pull_requests WHERE thread_id = ?1 LIMIT ?2)",
+        "DELETE FROM thread_pull_request_candidates WHERE candidate_id IN \
+         (SELECT candidate_id FROM thread_pull_request_candidates WHERE thread_id = ?1 LIMIT ?2)",
+        "DELETE FROM thread_pull_request_inheritance WHERE child_thread_id = ?1 AND ?2 > 0",
+        "DELETE FROM thread_pull_request_state WHERE thread_id = ?1 AND ?2 > 0",
+    ] {
+        let deleted = tx.execute(sql, params![thread, limit])?;
+        if deleted > 0 {
+            return Ok(Work {
+                rows: deleted as u64,
+                ..Work::default()
+            });
+        }
+    }
+    Ok(Work::default())
 }
 
 /// Deletes up to [`RECLAIM_ROWS`] rows of the lane ledger of `thread`: reports first,

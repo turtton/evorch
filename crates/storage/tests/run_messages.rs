@@ -15,6 +15,7 @@ use tempfile::TempDir;
 
 const UNDO_V40: &str = include_str!("../undo/undo_v40.sql");
 const UNDO_V43: &str = include_str!("../undo/undo_v43.sql");
+const UNDO_V46: &str = include_str!("../undo/undo_v46.sql");
 const UNDO_V45: &str = include_str!("../undo/undo_v45.sql");
 const UNDO_V44: &str = include_str!("../undo/undo_v44.sql");
 
@@ -888,6 +889,7 @@ fn old_format_database(path: &std::path::Path, version: u32) {
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(path).unwrap();
+    connection.execute_batch(UNDO_V46).unwrap();
     connection.execute_batch(UNDO_V45).unwrap();
     connection.execute_batch(UNDO_V44).unwrap();
     connection.execute_batch(UNDO_V43).unwrap();
@@ -977,6 +979,7 @@ fn a_version_40_database_whose_maps_are_a_column_is_refused_by_every_entry_untou
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(UNDO_V46).unwrap();
     connection.execute_batch(UNDO_V45).unwrap();
     connection.execute_batch(UNDO_V44).unwrap();
     connection.execute_batch(UNDO_V43).unwrap();

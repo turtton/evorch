@@ -31,6 +31,7 @@ const ROOT_KEYS: &[&str] = &[
     "tools",
     "eval",
     "storage",
+    "pull_requests",
 ];
 const PROVIDER_KEYS: &[&str] = &[
     "provider_type",
@@ -92,6 +93,16 @@ const DIAGNOSTICS_KEYS: &[&str] = &[
 ];
 const PERMISSIONS_KEYS: &[&str] = &["preset"];
 const METRICS_KEYS: &[&str] = &["enabled", "retention_days"];
+const PULL_REQUESTS_KEYS: &[&str] = &[
+    "enabled",
+    "include_in_review",
+    "pending_poll_seconds",
+    "stable_poll_seconds",
+    "review_max_age_seconds",
+    "review_refresh_timeout_seconds",
+    "fetch_timeout_seconds",
+    "backoff_max_seconds",
+];
 const STORAGE_KEYS: &[&str] = &["thread_index", "thread_retention"];
 const THREAD_RETENTION_KEYS: &[&str] = &["archived_delete_after_days"];
 const THREAD_INDEX_KEYS: &[&str] = &["enabled", "max_bytes"];
@@ -253,6 +264,7 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "sandbox", SANDBOX_KEYS)?;
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
     validate_section(root, "tools", TOOLS_KEYS)?;
+    validate_section(root, "pull_requests", PULL_REQUESTS_KEYS)?;
     if let Some(tools) = root.get("tools").and_then(toml::Value::as_table)
         && let Some(browser) = tools.get("browser").and_then(toml::Value::as_table)
     {
@@ -461,6 +473,7 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("tools", TOOLS_KEYS),
         ("eval", EVAL_KEYS),
         ("storage", STORAGE_KEYS),
+        ("pull_requests", PULL_REQUESTS_KEYS),
     ];
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {

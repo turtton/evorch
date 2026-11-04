@@ -16,6 +16,7 @@ use crate::{
 mod cleanup;
 mod index;
 mod lanes;
+mod pull_requests;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,
     LeaseResult, ReindexRequest, RequestFailure, RequestStatus, RequestSubmission,
@@ -163,6 +164,8 @@ enum Command {
     /// Work on the lane ledger. The flag says whether writes are suspended by a storage
     /// limit; the job decides whether that matters to it and sends its own reply.
     Lane(lanes::LaneJob),
+    /// Work on the pull request tables (ADR 0043), with the same contract as `Lane`.
+    PullRequest(lanes::LaneJob),
     Shutdown,
 }
 

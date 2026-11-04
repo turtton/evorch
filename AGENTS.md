@@ -64,11 +64,33 @@ mismatch. Revisit this policy before cutting a v1 release.
 
 ## Development environment
 
-- Every checkout (the main clone and each git worktree) builds into its own
+- The default Nix dev shell resolves `cargo` to the huacnlee/cargo fork (a
+  trial, pinned in `flake.nix`, with `CARGO_FORK_AUTO_UPDATE=0`). rustc,
+  rustfmt, clippy and rust-analyzer still come from the fenix toolchain. CI
+  and the crane builds keep the upstream cargo. `nix develop .#upstream-cargo`
+  gives the previous setup: fenix's cargo, a `target/` per checkout, sccache.
+- The fork ignores `CARGO_TARGET_DIR`, `build.target-dir` and
+  `build.build-dir` (with a warning), so do not set them. Intermediate
+  artifacts go to `${CARGO_HOME:-~/.cargo}/targets/<workspace>-<hash>/`, with
+  dependencies in `shared-deps/`, shared by every checkout; only final and
+  test binaries land in each checkout's `target/`. A new checkout of the same
+  commit reuses dependencies, but still rebuilds units that depend on
+  `CARGO_MANIFEST_DIR` or `CARGO_BIN_EXE_*` (mostly integration tests), and a
+  data file read with `include_str!` from `tests/` or `docs/` has a newer
+  mtime in a fresh worktree and invalidates its crate and every dependent.
+- Those directories live outside the repository and are not removed with a
+  worktree; delete them by hand (`rm -rf ~/.cargo/targets/<dir>`) when they
+  grow large.
+- The fork shell does not use sccache: an unset `RUSTC_WRAPPER` becomes the
+  empty string, which also overrides a `build.rustc-wrapper` in Cargo config
+  (the user's `~/.cargo/config.toml` may set one). A non-empty `RUSTC_WRAPPER`
+  that is already set when the shell starts is kept.
+- The rest of this section describes the `upstream-cargo` shell. Every
+  checkout (the main clone and each git worktree) builds into its own
   `target/`, Cargo's default (gitignored). Do not point `CARGO_TARGET_DIR` at
   one directory from several checkouts: their same-named workspace crates
   overwrite each other's artifacts there and cause spurious compile errors.
-- The Nix dev shell sets `RUSTC_WRAPPER=sccache`, so most compiled dependency
+- That shell sets `RUSTC_WRAPPER=sccache`, so most compiled dependency
   crates are reused across checkouts. sccache does not cache workspace crates
   (incremental in the dev profile), proc-macros or build scripts, and
   dependencies that compile checkout-specific paths, such as build-script
@@ -82,9 +104,10 @@ mismatch. Revisit this policy before cutting a v1 release.
   a new server with that build's environment. Stopping the server also resets
   the statistics of every build sharing it, and `sccache --show-stats` counts
   all of those builds, not only this checkout's.
-- A `RUSTC_WRAPPER` that is already set when the shell starts is kept. To
-  disable sccache, set it to the empty string: `RUSTC_WRAPPER= nix develop`,
-  or `RUSTC_WRAPPER= cargo build` for one command. The empty value also
+- In the `upstream-cargo` shell, a `RUSTC_WRAPPER` that is already set when
+  the shell starts is kept. To disable sccache, set it to the empty string:
+  `RUSTC_WRAPPER= nix develop .#upstream-cargo`, or
+  `RUSTC_WRAPPER= cargo build` for one command. The empty value also
   overrides a `build.rustc-wrapper` in Cargo config.
 
 ## Wrong-host detection (G301)

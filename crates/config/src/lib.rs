@@ -61,6 +61,7 @@ pub use schema::json_schema;
 pub use types::BudgetConfig;
 pub use types::OrchestrationConfig;
 pub use types::OwnershipConfig;
+pub use types::PullRequestsConfig;
 pub use types::{
     AgentsConfig, ApiProtocolConfig, CURRENT_VERSION, CategorizedRoleBindingConfig,
     CategoryBindingConfig, ChainEntryConfig, CommentCheckerConfig, CompactionConfig, Config,
