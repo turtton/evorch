@@ -1,9 +1,6 @@
--- Test-only reconstruction of v45; never a production downgrade.
-DROP TABLE lane_question_routes;
-DROP TABLE lane_notifications;
-DROP TABLE lane_delivery_destinations;
-ALTER TABLE lanes DROP COLUMN wake_guard_json;
-ALTER TABLE lanes DROP COLUMN question_capacity_blocked_json;
-ALTER TABLE lane_reports DROP COLUMN artifact_revision_json;
-ALTER TABLE lane_reports DROP COLUMN failure_episode;
-ALTER TABLE host_input_receipts DROP COLUMN provenance_json;
+-- Reverts the pull request tables (migration 46). Apply it before undo_v45.sql.
+DROP TABLE thread_pull_request_inheritance;
+DROP TABLE thread_pull_request_candidates;
+DROP TABLE pull_request_snapshots;
+DROP TABLE thread_pull_requests;
+DROP TABLE thread_pull_request_state;

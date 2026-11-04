@@ -12,7 +12,7 @@
 - `evorch maintenance backfill-events` は、既存イベントの `subkind` / `run_id` 列だけを埋める軽量コマンド。GUI/runtime の稼働中にも使用できる。DB の物理サイズ縮小や delta の集約は行わない。
 - `evorch maintenance compact-events` は、既定で読み取り専用 preview。実際の変換には `--apply` が必要。preview と apply の両方で、対象 DB を使うすべての GUI/runtime/reader を停止する。
 - `evorch maintenance vacuum` は、旧 DB の `auto_vacuum` を INCREMENTAL に一度だけ切り替える軽量コマンド（[auto_vacuum の一回限りの移行](#auto_vacuum-の一回限りの移行)）。イベントの変換は行わない。
-- `evorch maintenance convert-bodies` は、schema 33〜43 の旧形式 DB を一度だけ現行形式（schema 44）へ変換する。既定は読み取り専用 preview で、`--apply` で変換する。変換が済むまで、旧形式の DB は他のコマンドでも GUI でも開けない（[convert-bodies による変換](#convert-bodies-による変換)）。
+- `evorch maintenance convert-bodies` は、schema 33〜43 の旧形式 DB を一度だけ現行形式（schema 46）へ変換する。既定は読み取り専用 preview で、`--apply` で変換する。変換が済むまで、旧形式の DB は他のコマンドでも GUI でも開けない（[convert-bodies による変換](#convert-bodies-による変換)）。
 - いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない（`convert-bodies` だけが、変換の一部として migration を明示的に適用する）。compact・backfill・`strip-task-progress-cursor` は、現行の形式（schema 44。会話は `run_messages`、provenance は `run_message_provenance`、events の大きな本文は token）の DB だけを受け付ける。それより古い形式の DB は `ConversionRequired` で拒否し、何も変更しない（`vacuum` はファイルの再構築だけで会話を解釈しないため対象外）。旧形式の DB は、すべての GUI/runtime を停止したうえで、[`evorch maintenance convert-bodies`](#convert-bodies-による変換) で変換する。
 
 以下の `$DB` は対象を確認した DB の絶対パスに置き換える。既定パスはユーザー設定ディレクトリ内の `evorch-events.db`。
@@ -39,16 +39,16 @@
 
 ## convert-bodies による変換
 
-`evorch maintenance convert-bodies` は、旧形式の DB を一度だけ現行形式（schema 44）へ変換するオフライン専用コマンド。変換元は schema 33〜43 の DB で、成功すると 44 になる。runtime やモデル呼び出しは開始しない。
+`evorch maintenance convert-bodies` は、旧形式の DB を一度だけ現行形式（schema 46）へ変換するオフライン専用コマンド。変換元は schema 33〜43 の DB で、成功すると 46 になる（migration 46 は ADR 0043 の PR 連携テーブルの追加だけで、本文の変換はない）。runtime やモデル呼び出しは開始しない。
 
 | 変換元 | 変換する内容 |
 | --- | --- |
 | v33〜v39 | migration 34〜39 を（バックアップ後に）先に適用し、会話本文を `run_messages` / `content_blobs` へ、provenance を行へ、events の大きな本文を token へ変換し、旧列（`run_contexts.messages_json` など）を削除する |
 | v40〜v42 | 会話本文は変換済み。**provenance と events** を変換する（USAGE によると v41・v42 は lane ledger と memory favorite の追加だけの差） |
 | v43 | provenance も変換済み。**events だけ**を変換する |
-| v44 | 変換済み。`already_converted: true` で、何も書かずに終わる |
+| v44 | 会話・provenance・events は変換済み。変換は行わず、`already_converted: true` で何も書かずに終わる。migration 45（lane の列）と 46（PR 連携テーブル）は通常の起動が適用する |
 
-v33 未満の DB と、現行（44）より新しい DB は変換できず拒否される。
+v33 未満の DB と、現行（46）より新しい DB は変換できず拒否される。
 
 ### 手順
 
@@ -85,7 +85,7 @@ v33 未満の DB と、現行（44）より新しい DB は変換できず拒否
 - **未変換の DB では起動が拒否される（`ConversionRequired`）。** schema 44 未満の DB を `Database::open` や GUI の起動で開くと、DB を変更せずに拒否する。エラーは "stop every evorch process and run the conversion command (`evorch maintenance convert-bodies` …)" と案内する。`evorch inspect` や他の `evorch maintenance` コマンドも同様。
 - **tombstone は変換前に retention で回収する。** 確定済みの期限削除（tombstone）の run の行は、変換の前に既存の回収処理（有界の回収と排他フェーズの回収）で DB から消し、変換の対象にしない。回収が終わらない場合はコマンドが止まる。新しい削除対象は選ばず、DB 外のファイルには触れない。結果は JSON の `retention` にある。
 - **`canonicalized_runs`。** 復元できない run（`restorable = 0`）は provider へ再送されないため、旧列のバイト列がシリアライザの出力と違っていても、同じ JSON 値であることを確認したうえでシリアライザのキー順で保存する。この run は会話の索引が snapshot hash と合わなくなるため、索引も再生成する。件数と run ID は JSON の `canonicalized_runs.count` / `run_ids` に出る（preview では `analysis.canonicalizable_runs`）。実 DB の変換では 51 件の run が並べ直された。復元できる run のバイト列が違うときは変換せず、停止する。
-- **検証。** 各 run は自分の transaction で変換し、通常の reader で読み戻して旧列とバイト単位で比較してから commit する。provenance は型付き map として、events は JSON 値として比較する。最後に旧列を削除し、スキーマを新規 DB と比較し、VACUUM（`auto_vacuum=INCREMENTAL`）・WAL TRUNCATE・`integrity_check` を行ってから `user_version` を 44 にする。公開が最後の書き込みなので、途中で止まった DB は通常の起動で拒否される。
+- **検証。** 各 run は自分の transaction で変換し、通常の reader で読み戻して旧列とバイト単位で比較してから commit する。provenance は型付き map として、events は JSON 値として比較する。最後に旧列を削除し、スキーマを新規 DB と比較し、VACUUM（`auto_vacuum=INCREMENTAL`）・WAL TRUNCATE・`integrity_check` を行ってから `user_version` を 46 にする。公開が最後の書き込みなので、途中で止まった DB は通常の起動で拒否される。
 - 変換済みの DB に再実行しても何も書かれない（`already_converted: true`）。
 
 ## 計測値

@@ -611,7 +611,7 @@ fn intervention_uses_actual_input_receipt_but_outbox_never_copies_its_text() {
     assert_eq!(f.count("lane_notifications"), 1);
 }
 #[test]
-fn v45_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() {
+fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() {
     let f = Fixture::new();
     f.lane(1, LanePolicy::Attached);
     f.h().create_user_question(&question(1, 0)).unwrap();
@@ -625,9 +625,9 @@ fn v45_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     } = f;
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
-    conn.execute_batch(include_str!("support/undo_v46.sql"))
+    conn.execute_batch(include_str!("support/undo_v47.sql"))
         .unwrap();
-    conn.pragma_update(None, "user_version", 45).unwrap();
+    conn.pragma_update(None, "user_version", 46).unwrap();
     drop(conn);
     let storage = Storage::open(config.clone()).unwrap();
     let h = storage.handle();

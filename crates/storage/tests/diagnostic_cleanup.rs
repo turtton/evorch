@@ -298,7 +298,7 @@ fn legacy_database_reports_deletion_without_claiming_file_recovery() {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 960_000;
+    config.hard_limits.max_db_bytes = 1_000_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(
