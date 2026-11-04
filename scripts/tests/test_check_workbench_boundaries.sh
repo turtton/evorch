@@ -114,6 +114,22 @@ run_case runtime_depends_on_protocol fail "core crate runtime must not depend on
 {$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"workbench-protocol"}]}
 SPEC
 
+run_case runtime_reaches_protocol_through_a_workspace_crate fail "runtime -> test-support [normal; resolved] -> workbench-protocol" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"test-support"},{"from":"test-support","to":"workbench-protocol"}]}
+SPEC
+
+run_case storage_reaches_client_through_gui fail "core crate storage must not depend on workbench-client (directly or transitively): storage -> gui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"storage","to":"gui"}]}
+SPEC
+
+run_case core_crate_reaching_the_protocol_in_two_hops_through_the_client fail "config -> gui [normal; resolved] -> workbench-client [normal; resolved] -> workbench-protocol" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"config","to":"gui"}]}
+SPEC
+
+run_case dev_dependencies_of_a_core_dependency_are_not_followed ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"test-support"},{"from":"test-support","to":"workbench-client","kind":"dev"}]}
+SPEC
+
 run_case storage_dev_depends_on_client fail "core crate storage must not depend on workbench-client" <<SPEC
 {$WS, $EXT, "deps": [$GOOD, {"from":"storage","to":"workbench-client","kind":"dev"}]}
 SPEC

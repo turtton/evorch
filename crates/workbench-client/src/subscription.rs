@@ -1,6 +1,6 @@
 //! A live event stream and the rules for ending it.
 
-use crate::client::Inner;
+use crate::client::{Inner, Shared};
 use crate::error::ClientError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -50,8 +50,45 @@ impl SubscriptionEntry {
     }
 }
 
+/// Releases a registered subscription unless it was explicitly handed over.
+///
+/// The reader registers a subscription the moment the core's reply arrives,
+/// before any caller has the `Subscription`. This guard travels with the
+/// reply, so wherever the reply ends up (a live `Subscription`, a reply nobody
+/// is waiting for any more, or a future dropped before the reply came), dropping
+/// it unregisters the subscription and tells the core to stop sending.
+pub(crate) struct SubscriptionGuard {
+    shared: Arc<Shared>,
+    id: SubscriptionId,
+    armed: bool,
+}
+
+impl SubscriptionGuard {
+    pub(crate) fn new(shared: Arc<Shared>, id: SubscriptionId) -> Self {
+        Self {
+            shared,
+            id,
+            armed: true,
+        }
+    }
+
+    /// The owner is releasing the subscription itself.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared.release_subscription(&self.id);
+        }
+    }
+}
+
 /// Everything the reader hands to the caller when a subscription starts.
 pub(crate) struct SubscriptionParts {
+    pub(crate) guard: SubscriptionGuard,
     pub(crate) started: SubscriptionStarted,
     pub(crate) rx: mpsc::Receiver<Queued>,
     pub(crate) queued_bytes: Arc<AtomicUsize>,
@@ -65,6 +102,8 @@ pub(crate) struct SubscriptionParts {
 /// continue, a final [`UiEvent::ResyncRequired`] is delivered and then
 /// [`Subscription::next`] returns `None`; [`Subscription::end`] says why.
 pub struct Subscription {
+    // Declared before `client` so the release is queued while the connection is still alive.
+    guard: SubscriptionGuard,
     client: Arc<Inner>,
     started: SubscriptionStarted,
     rx: mpsc::Receiver<Queued>,
@@ -72,12 +111,12 @@ pub struct Subscription {
     end: Arc<Mutex<Option<SubscriptionEnd>>>,
     last_cursor: EventCursor,
     synthesized: bool,
-    released: bool,
 }
 
 impl Subscription {
     pub(crate) fn new(client: Arc<Inner>, parts: SubscriptionParts) -> Self {
         Self {
+            guard: parts.guard,
             client,
             last_cursor: parts.started.high_water,
             started: parts.started,
@@ -85,7 +124,6 @@ impl Subscription {
             queued_bytes: parts.queued_bytes,
             end: parts.end,
             synthesized: false,
-            released: false,
         }
     }
 
@@ -129,7 +167,7 @@ impl Subscription {
 
     /// Stop the subscription and wait for the core to confirm.
     pub async fn unsubscribe(mut self) -> Result<(), ClientError> {
-        self.released = true;
+        self.guard.disarm();
         self.client.shared.drop_subscription(self.id());
         let body = RequestBody::Control(Control::Unsubscribe {
             subscription_id: self.id().clone(),
@@ -138,13 +176,5 @@ impl Subscription {
             .call(body, crate::client::PendingKind::Control)
             .await?;
         Ok(())
-    }
-}
-
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        if !self.released {
-            self.client.shared.release_subscription(self.id());
-        }
     }
 }

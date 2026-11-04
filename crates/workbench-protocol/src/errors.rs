@@ -143,3 +143,39 @@ impl WorkbenchError {
         .with_details(ErrorDetails::Epoch { expected, actual })
     }
 }
+
+const MAX_ERROR_MESSAGE_BYTES: usize = 8 * 1024;
+const MAX_ERROR_LIST: usize = 32;
+
+impl WorkbenchError {
+    /// Bound an error received from a peer; its text is relayed, not trusted.
+    pub fn validate(&self) -> Result<(), crate::validation::ValidationError> {
+        use crate::limits::MAX_NAME_BYTES;
+        use crate::validation::{check_bytes, check_count};
+        check_bytes(
+            "error.message",
+            &self.message,
+            MAX_ERROR_MESSAGE_BYTES,
+            true,
+        )?;
+        match &self.details {
+            Some(ErrorDetails::Field { field }) => {
+                check_bytes("error.details.field", field, MAX_NAME_BYTES, true)
+            }
+            Some(ErrorDetails::MissingCapabilities { capabilities }) => check_count(
+                "error.details.capabilities",
+                capabilities.len(),
+                MAX_ERROR_LIST,
+            ),
+            Some(ErrorDetails::SupportedVersions { versions }) => {
+                check_count("error.details.versions", versions.len(), MAX_ERROR_LIST)
+            }
+            Some(
+                ErrorDetails::Revision { .. }
+                | ErrorDetails::Epoch { .. }
+                | ErrorDetails::Limit { .. },
+            )
+            | None => Ok(()),
+        }
+    }
+}

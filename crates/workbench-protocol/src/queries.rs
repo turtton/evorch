@@ -99,7 +99,12 @@ pub struct ReadBody {
 
 /// Every read-only request a client may send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum Query {
     GetCoreStatus,
     ListProjects(PageRequest),
@@ -201,4 +206,34 @@ pub enum QueryReply {
     CommandReceipt(CommandReceipt),
     CommittedHistory(Page<CommittedMessage>),
     Body(BodyChunk),
+}
+
+impl CommandReceipt {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match &self.state {
+            CommandReceiptState::Rejected { error } => error.validate(),
+            CommandReceiptState::Unknown | CommandReceiptState::Applied { .. } => Ok(()),
+        }
+    }
+}
+
+impl QueryReply {
+    /// Check a reply received from a peer: every page against the page limit
+    /// and every item, string and chunk against its bound. A reply that fails
+    /// is never handed to application code.
+    pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
+        match self {
+            Self::CoreStatus(status) => status.validate(),
+            Self::Projects(page) => page.validate_with(ProjectSummary::validate),
+            Self::Threads(page) => page.validate_with(ThreadSummary::validate),
+            Self::Thread(view) => view.validate(),
+            Self::Runs(page) => page.validate(),
+            Self::Questions(page) => page.validate_with(QuestionView::validate),
+            Self::Approvals(page) => page.validate_with(ApprovalView::validate),
+            Self::InputReceipts(page) => page.validate_with(InputReceipt::validate),
+            Self::CommandReceipt(receipt) => receipt.validate(),
+            Self::CommittedHistory(page) => page.validate_with(CommittedMessage::validate),
+            Self::Body(chunk) => chunk.validate(limits.max_body_chunk_bytes),
+        }
+    }
 }

@@ -3,7 +3,7 @@
 
 use crate::error::{ClientError, TransportError};
 use crate::subscription::{
-    Queued, Subscription, SubscriptionEnd, SubscriptionEntry, SubscriptionParts,
+    Queued, Subscription, SubscriptionEnd, SubscriptionEntry, SubscriptionGuard, SubscriptionParts,
 };
 use crate::transport::{FrameSink, FrameSource, Transport, framing_error};
 use std::collections::HashMap;
@@ -79,6 +79,8 @@ pub(crate) enum PendingKind {
     Query,
     Subscribe,
     Control,
+    /// A ping; the reply must echo this nonce.
+    Ping(Nonce),
     /// Nobody waits for the reply (best-effort unsubscribe).
     Discard,
 }
@@ -138,6 +140,25 @@ fn violation(message: impl Into<String>) -> TransportError {
 }
 
 impl Shared {
+    fn new(
+        hello: ServerHello,
+        client_id: ClientId,
+        session_id: SessionId,
+        counter: Arc<AtomicU64>,
+        writer: mpsc::Sender<Outgoing>,
+    ) -> Arc<Self> {
+        let (connection, _) = watch::channel(ConnectionState::Connected);
+        Arc::new(Self {
+            hello,
+            client_id,
+            session_id,
+            counter,
+            state: Mutex::new(State::default()),
+            writer,
+            connection,
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -269,9 +290,14 @@ impl Shared {
         let _ = self.submit(body, PendingKind::Discard);
     }
 
-    fn handle_frame(&self, payload: &[u8]) -> Result<(), TransportError> {
+    fn handle_frame(self: &Arc<Self>, payload: &[u8]) -> Result<(), TransportError> {
         let frame: ServerFrame = decode_payload(payload)
             .map_err(|error| violation(format!("undecodable frame: {error}")))?;
+        // Deserializing only checks shape. Nothing the core sent reaches a
+        // caller before its sizes and relationships are checked too.
+        frame
+            .validate(&self.hello.limits)
+            .map_err(|error| violation(format!("frame breaks protocol limits: {error}")))?;
         match frame {
             ServerFrame::Reply(reply) => self.handle_reply(reply),
             ServerFrame::Event(event) => {
@@ -281,7 +307,7 @@ impl Shared {
         }
     }
 
-    fn handle_reply(&self, reply: ReplyEnvelope) -> Result<(), TransportError> {
+    fn handle_reply(self: &Arc<Self>, reply: ReplyEnvelope) -> Result<(), TransportError> {
         let Some(pending) = self.lock().pending.remove(&reply.request_id) else {
             return Err(violation(format!(
                 "reply for unknown or already answered request {}",
@@ -310,24 +336,25 @@ impl Shared {
 
     /// Check that the reply type fits the request type and build the result.
     fn complete(
-        &self,
+        self: &Arc<Self>,
         kind: PendingKind,
         payload: ReplyPayload,
     ) -> Result<Result<Completed, ClientError>, TransportError> {
-        let fits = matches!(
-            (kind, &payload),
+        let fits = match (kind, &payload) {
             (PendingKind::Command, ReplyPayload::Command(_))
-                | (PendingKind::Query, ReplyPayload::Query(_))
-                | (PendingKind::Subscribe, ReplyPayload::SubscriptionStarted(_))
-                | (
-                    PendingKind::Control | PendingKind::Discard,
-                    ReplyPayload::Pong { .. }
-                        | ReplyPayload::Unsubscribed { .. }
-                        | ReplyPayload::Ack
-                )
-        );
+            | (PendingKind::Query, ReplyPayload::Query(_))
+            | (PendingKind::Subscribe, ReplyPayload::SubscriptionStarted(_))
+            | (
+                PendingKind::Control | PendingKind::Discard,
+                ReplyPayload::Unsubscribed { .. } | ReplyPayload::Ack,
+            ) => true,
+            (PendingKind::Ping(sent), ReplyPayload::Pong { nonce }) => *nonce == sent,
+            _ => false,
+        };
         if !fits {
-            return Err(violation("reply type does not match the request type"));
+            return Err(violation(
+                "reply does not match the request it answers (type or ping nonce)",
+            ));
         }
         let ReplyPayload::SubscriptionStarted(started) = payload else {
             return Ok(Ok(Completed::Payload(payload)));
@@ -339,6 +366,12 @@ impl Shared {
         let end = Arc::new(Mutex::new(None));
         {
             let mut state = self.lock();
+            // Checked under the same lock that registers the entry: `close`
+            // takes this lock to settle subscriptions, so an entry can never
+            // be added after it and left waiting on a dead connection.
+            if let Some(reason) = &state.closed {
+                return Ok(Err(reason_for_new_request(reason).into()));
+            }
             if state.subscriptions.contains_key(&started.subscription_id) {
                 return Err(violation("subscription id is already in use"));
             }
@@ -355,6 +388,7 @@ impl Shared {
             );
         }
         Ok(Ok(Completed::Subscription(SubscriptionParts {
+            guard: SubscriptionGuard::new(self.clone(), started.subscription_id.clone()),
             started,
             rx,
             queued_bytes,
@@ -519,16 +553,13 @@ impl WorkbenchClient {
         // Room for every allowed in-flight request plus background unsubscribes.
         let (writer_tx, writer_rx) =
             mpsc::channel(server.limits.max_in_flight_requests as usize + 8);
-        let (connection, _) = watch::channel(ConnectionState::Connected);
-        let shared = Arc::new(Shared {
-            hello: server,
-            client_id: config.client_instance_id,
+        let shared = Shared::new(
+            server,
+            config.client_instance_id,
             session_id,
-            counter: config.request_counter,
-            state: Mutex::new(State::default()),
-            writer: writer_tx,
-            connection,
-        });
+            config.request_counter,
+            writer_tx,
+        );
         let writer = tokio::spawn(write_loop(sink, writer_rx, shared.clone()));
         let reader = tokio::spawn(read_loop(source, shared.clone()));
         Ok(Self {
@@ -615,9 +646,9 @@ impl WorkbenchClient {
     /// Round-trip a ping, to check that the core is still answering.
     pub async fn ping(&self, nonce: Nonce) -> Result<(), ClientError> {
         let body = RequestBody::Control(Control::Ping { nonce });
-        match self.inner.call(body, PendingKind::Control).await? {
-            Completed::Payload(ReplyPayload::Pong { nonce: echoed }) if echoed == nonce => Ok(()),
-            _ => Err(violation("ping was not answered with the same nonce").into()),
+        match self.inner.call(body, PendingKind::Ping(nonce)).await? {
+            Completed::Payload(ReplyPayload::Pong { .. }) => Ok(()),
+            _ => Err(violation("unexpected reply to a ping").into()),
         }
     }
 }
@@ -666,4 +697,90 @@ fn check_accepted(config: &ClientConfig, server: &ServerHello) -> Result<(), Tra
         .validate()
         .map_err(|error| violation(format!("core advertised unusable limits: {error}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workbench_protocol::events::{EventCursor, SubscriptionStarted};
+    use workbench_protocol::handshake::{ActivityCounts, CoreState, CoreStatus, WireLimits};
+    use workbench_protocol::wire::{InstanceEpoch, Sequence};
+
+    fn shared() -> (Arc<Shared>, mpsc::Receiver<Outgoing>) {
+        let build = BuildInfo {
+            name: "test".into(),
+            version: "0".into(),
+            revision: None,
+        };
+        let hello = ServerHello {
+            protocol_version: ProtocolVersion::CURRENT,
+            capabilities: Capability::ALL.to_vec(),
+            server_build: build,
+            core: CoreIdentity::new("core").unwrap(),
+            instance_epoch: InstanceEpoch(1),
+            limits: WireLimits::default(),
+            status: CoreStatus {
+                state: CoreState::Ready,
+                retention_reasons: vec![],
+                running: ActivityCounts::default(),
+            },
+        };
+        let (tx, rx) = mpsc::channel(8);
+        let shared = Shared::new(
+            hello,
+            ClientId::new("c").unwrap(),
+            SessionId::new("s").unwrap(),
+            Arc::new(AtomicU64::new(1)),
+            tx,
+        );
+        (shared, rx)
+    }
+
+    fn started(id: &str) -> ReplyPayload {
+        ReplyPayload::SubscriptionStarted(SubscriptionStarted {
+            subscription_id: SubscriptionId::new(id).unwrap(),
+            snapshot_id: None,
+            high_water: EventCursor {
+                core_epoch: InstanceEpoch(1),
+                sequence: Sequence(0),
+            },
+            initial_page: None,
+        })
+    }
+
+    /// The reader can be in the middle of a subscribe reply when another task
+    /// closes the connection. Whichever side takes the state lock first, no
+    /// registration may outlive the close: both orders are replayed here
+    /// deterministically.
+    #[tokio::test]
+    async fn a_subscription_cannot_be_registered_after_the_connection_closed() {
+        let (shared, _outgoing) = shared();
+        shared.close(TransportError::Disconnected);
+        let result = shared.complete(PendingKind::Subscribe, started("late"));
+        assert!(
+            matches!(
+                result,
+                Ok(Err(ClientError::Transport(TransportError::Disconnected)))
+            ),
+            "{:?}",
+            result.map(|r| r.map(|_| ()))
+        );
+        assert!(shared.lock().subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscription_registered_before_the_close_is_settled_by_it() {
+        let (shared, _outgoing) = shared();
+        let Ok(Ok(Completed::Subscription(parts))) =
+            shared.complete(PendingKind::Subscribe, started("early"))
+        else {
+            panic!("registration should succeed on a live connection");
+        };
+        let end = parts.end.clone();
+        shared.close(TransportError::Disconnected);
+        assert!(shared.lock().subscriptions.is_empty());
+        assert_eq!(*end.lock().unwrap(), Some(SubscriptionEnd::Disconnected));
+        // Releasing after the close finds nothing to release and sends nothing.
+        drop(parts);
+    }
 }

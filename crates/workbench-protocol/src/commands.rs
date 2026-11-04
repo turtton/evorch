@@ -129,7 +129,12 @@ pub struct PacketReference {
 
 /// How a goal is handed to agents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum Delegation {
     /// The thread's own orchestrator works the goal.
     Direct,

@@ -425,3 +425,10 @@ pub fn negotiate(
         capabilities,
     })
 }
+
+impl CoreStatus {
+    /// Bound a status received from a peer.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_count("retention_reasons", self.retention_reasons.len(), 16)
+    }
+}

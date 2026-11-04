@@ -7,8 +7,8 @@
 #   2. workbench-client reaches a workspace crate other than workbench-protocol,
 #   3. workbench-protocol or workbench-client declares a third-party
 #      dependency outside its small allowlist, or
-#   4. a core implementation crate (runtime, storage, sandbox, ...) depends on
-#      a workbench-* crate.
+#   4. a core implementation crate (runtime, storage, sandbox, ...) depends on,
+#      directly or through any other crate, a workbench-* crate.
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -121,10 +121,41 @@ external_violations() {
     }' "$work/edges.tsv"
 }
 
-reverse_violations() {
+# From every core crate, walk the whole dependency graph (through other
+# workspace crates and third-party crates alike) and report each workbench-*
+# crate that can be reached, with the path. Dev edges count only at the core
+# crate itself, as for the protocol crates above.
+core_reach_violations() {
   awk -F'\t' -v core=" $CORE_CRATES " '
-    $1 == "E" && $3 ~ /^workbench-/ && index(core, " " $2 " ") {
-      print "VIOLATION: core crate " $2 " must not depend on " $3 ": " $2 " -> " $3 " [" $4 "; " $5 "]"
+    $1 == "W" { ws[$2] = 1 }
+    $1 == "E" { n++; from[n] = $2; to[n] = $3; kind[n] = $4; note[n] = $5; out[$2] = out[$2] " " n }
+    END {
+      for (root in ws) {
+        if (!index(core, " " root " ")) continue
+        delete seen; delete via
+        queue[1] = root; head = 1; tail = 1; seen[root] = 1
+        while (head <= tail) {
+          node = queue[head++]
+          m = split(out[node], idx, " ")
+          for (k = 1; k <= m; k++) {
+            i = idx[k]
+            if (kind[i] == "dev" && node != root) continue
+            t = to[i]
+            if (t in seen) continue
+            seen[t] = 1; via[t] = i; queue[++tail] = t
+          }
+        }
+        for (node in seen) {
+          if (node !~ /^workbench-/) continue
+          path = ""; cur = node
+          while (cur != root) {
+            i = via[cur]
+            path = " -> " cur " [" kind[i] "; " note[i] "]" path
+            cur = from[i]
+          }
+          print "VIOLATION: core crate " root " must not depend on " node " (directly or transitively): " root path
+        }
+      }
     }' "$work/edges.tsv"
 }
 
@@ -132,7 +163,7 @@ closure_violations "$PROTOCOL" "" >> "$violations"
 closure_violations "$CLIENT" "$PROTOCOL" >> "$violations"
 external_violations "$PROTOCOL" "$PROTOCOL_EXTERNAL_ALLOW" >> "$violations"
 external_violations "$CLIENT" "$CLIENT_EXTERNAL_ALLOW" >> "$violations"
-reverse_violations >> "$violations"
+core_reach_violations >> "$violations"
 
 if [[ -s "$violations" ]]; then
   sort -u "$violations" >&2

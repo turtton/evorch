@@ -78,7 +78,11 @@ pub struct SubscriptionStarted {
     /// Present when the client must replace its state with the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<SnapshotId>,
-    /// Events up to and including this cursor are covered by the snapshot.
+    /// The point the event stream continues from; events at or before it are
+    /// never delivered. With a `snapshot_id` it is the last event the snapshot
+    /// already reflects (possibly in a new epoch). Without one the core is
+    /// replaying: it equals the requested `after` cursor and every later event
+    /// follows, so the client keeps the state it already holds.
     pub high_water: EventCursor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_page: Option<Page<SnapshotItem>>,
@@ -193,5 +197,50 @@ impl CursorTracker {
         }
         self.last = cursor;
         CursorDecision::Deliver
+    }
+}
+
+impl SnapshotItem {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::CoreStatus(status) => status.validate(),
+            Self::Project(project) => project.validate(),
+            Self::Thread(thread) => thread.validate(),
+            Self::Run(_) => Ok(()),
+            Self::Question(question) => question.validate(),
+            Self::Approval(approval) => approval.validate(),
+        }
+    }
+}
+
+impl SubscriptionStarted {
+    /// Bound a subscribe answer received from a peer, snapshot page included.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.initial_page
+            .as_ref()
+            .map_or(Ok(()), |page| page.validate_with(SnapshotItem::validate))
+    }
+}
+
+impl UiEvent {
+    /// Bound an event received from a peer.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::CoreStatusChanged { status } => status.validate(),
+            Self::ThreadChanged { thread } => thread.validate(),
+            Self::RunChanged { .. }
+            | Self::ResyncRequired { .. }
+            | Self::SubscriptionClosed { .. } => Ok(()),
+            Self::InputReceiptChanged { receipt } => receipt.validate(),
+            Self::QuestionChanged { question } => question.validate(),
+            Self::ApprovalChanged { approval } => approval.validate(),
+            Self::MessageCommitted { message } => message.validate(),
+        }
+    }
+}
+
+impl EventEnvelope {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.event.validate()
     }
 }

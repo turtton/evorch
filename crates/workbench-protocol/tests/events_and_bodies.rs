@@ -169,3 +169,25 @@ fn question_views_validate_their_provenance() {
     many.options = vec!["o".into(); 33];
     assert!(many.validate().is_err());
 }
+
+#[test]
+fn a_non_final_chunk_must_carry_text_and_offsets_must_not_overflow() {
+    let empty_but_not_last = BodyChunk {
+        body_id: body(),
+        offset: ByteOffset(4),
+        text: String::new(),
+        total_bytes: ByteOffset(11),
+        next_offset: Some(ByteOffset(4)),
+    };
+    assert!(empty_but_not_last.validate(64).is_err());
+
+    // The sum overflows u64; it must be an error, not a wrapped or saturated pass.
+    let overflowing = BodyChunk {
+        body_id: body(),
+        offset: ByteOffset(u64::MAX),
+        text: "x".into(),
+        total_bytes: ByteOffset(u64::MAX),
+        next_offset: None,
+    };
+    assert!(overflowing.validate(64).is_err());
+}

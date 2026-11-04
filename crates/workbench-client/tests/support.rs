@@ -235,3 +235,22 @@ pub async fn ping_and_expect_unsubscribe(
     server.reply(&pinged.unwrap(), ok(ReplyPayload::Pong { nonce: Nonce(1) }));
     ping.await.unwrap().expect("pong");
 }
+
+/// An event whose size is chosen by the caller, within the inline message bound.
+pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
+    event(
+        id,
+        cursor,
+        UiEvent::MessageCommitted {
+            message: CommittedMessage {
+                thread: thread(),
+                run: RunId::new("run-1").unwrap(),
+                index: Sequence(cursor.sequence.get()),
+                role: MessageRole::Assistant,
+                content: MessageContent::Inline {
+                    text: "x".repeat(bytes),
+                },
+            },
+        },
+    )
+}

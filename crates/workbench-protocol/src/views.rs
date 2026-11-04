@@ -8,10 +8,10 @@ use crate::ids::{
     ApprovalId, BodyId, PageCursor, ProjectId, QuestionId, RunId, SubmissionId, ThreadId,
 };
 use crate::limits::{
-    MAX_INLINE_MESSAGE_BYTES, MAX_OPTION_BYTES, MAX_OPTIONS, MAX_PAGE_SIZE, MAX_TITLE_BYTES,
-    MIN_BODY_CHUNK_BYTES,
+    MAX_INLINE_MESSAGE_BYTES, MAX_NAME_BYTES, MAX_OPTION_BYTES, MAX_OPTIONS, MAX_PAGE_SIZE,
+    MAX_TITLE_BYTES, MIN_BODY_CHUNK_BYTES,
 };
-use crate::validation::{ValidationError, check_bytes, check_count, check_line};
+use crate::validation::{ValidationError, check_bytes, check_count};
 use crate::wire::{ByteOffset, InstanceEpoch, Revision, Sequence, UnixMillis};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,15 @@ impl<T> Page<T> {
     /// Reject a page larger than the protocol allows.
     pub fn validate(&self) -> Result<(), ValidationError> {
         check_count("items", self.items.len(), MAX_PAGE_SIZE as usize)
+    }
+
+    /// Reject an oversized page, then check every item with `check`.
+    pub fn validate_with(
+        &self,
+        check: impl Fn(&T) -> Result<(), ValidationError>,
+    ) -> Result<(), ValidationError> {
+        self.validate()?;
+        self.items.iter().try_for_each(check)
     }
 }
 
@@ -166,11 +175,12 @@ pub struct QuestionView {
 
 impl QuestionView {
     pub fn validate(&self) -> Result<(), ValidationError> {
-        check_line("title", &self.title, MAX_TITLE_BYTES, false)?;
+        // Agent-authored text: bounded, not restricted to a character set.
+        check_bytes("title", &self.title, MAX_TITLE_BYTES, true)?;
         check_count("options", self.options.len(), MAX_OPTIONS)?;
         self.options
             .iter()
-            .try_for_each(|o| check_line("options", o, MAX_OPTION_BYTES, false))?;
+            .try_for_each(|o| check_bytes("options", o, MAX_OPTION_BYTES, true))?;
         self.raised_by.validate()?;
         if let Some(answer) = &self.answer {
             answer.answered_by.validate()?;
@@ -335,11 +345,25 @@ impl BodyChunk {
 
     pub fn validate(&self, max_chunk_bytes: u32) -> Result<(), ValidationError> {
         check_bytes("text", &self.text, max_chunk_bytes as usize, true)?;
-        let end = self.offset.get().saturating_add(self.text.len() as u64);
+        let end = self
+            .offset
+            .get()
+            .checked_add(self.text.len() as u64)
+            .ok_or(ValidationError::OutOfRange {
+                field: "offset",
+                reason: "offset plus chunk length overflows",
+            })?;
         if end > self.total_bytes.get() {
             return Err(ValidationError::Inconsistent {
                 field: "total_bytes",
                 reason: "chunk extends past the end of the body",
+            });
+        }
+        if self.text.is_empty() && self.next_offset.is_some() {
+            // A reader following next_offset would loop without making progress.
+            return Err(ValidationError::Inconsistent {
+                field: "text",
+                reason: "a chunk that is not the last must carry text",
             });
         }
         match self.next_offset {
@@ -355,5 +379,39 @@ impl BodyChunk {
             }),
             _ => Ok(()),
         }
+    }
+}
+
+impl ProjectSummary {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("display_name", &self.display_name, MAX_TITLE_BYTES, true)
+    }
+}
+
+impl ThreadSummary {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("title", &self.title, MAX_TITLE_BYTES, true)
+    }
+}
+
+impl ThreadView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.summary.validate()
+    }
+}
+
+impl ApprovalView {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("tool_name", &self.tool_name, MAX_NAME_BYTES, true)?;
+        check_bytes("summary", &self.summary, MAX_INLINE_MESSAGE_BYTES, true)?;
+        self.decided_by
+            .as_ref()
+            .map_or(Ok(()), Provenance::validate)
+    }
+}
+
+impl InputReceipt {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.sent_by.validate()
     }
 }

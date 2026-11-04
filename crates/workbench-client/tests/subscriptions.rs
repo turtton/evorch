@@ -112,9 +112,8 @@ async fn a_slow_subscriber_gets_resync_required_and_is_stopped() {
 async fn a_subscriber_over_its_byte_budget_is_slow_too() {
     let (client, mut server) = connected_with(server_hello(small_limits())).await;
     let mut sub = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
-    let big = "x".repeat(3000);
     for sequence in 1..=5 {
-        server.event(thread_changed("sub-1", cursor(7, sequence), &big));
+        server.event(big_event("sub-1", cursor(7, sequence), 3000));
     }
     ping_and_expect_unsubscribe(&client, &mut server, sub.id()).await;
 
@@ -292,4 +291,190 @@ async fn the_subscribe_reply_carries_the_snapshot() {
     );
     let sub = call.await.unwrap().unwrap();
     assert_eq!(sub.started(), &started);
+}
+
+// --- ownership of a subscription the caller never received -------------------------
+
+async fn expect_unsubscribe(server: &mut workbench_client::fake::FakeServer, id: &str) {
+    let request = server.recv_request().await.unwrap();
+    assert_eq!(
+        request.body,
+        RequestBody::Control(Control::Unsubscribe {
+            subscription_id: SubscriptionId::new(id).unwrap()
+        })
+    );
+    server.reply(&request.request_id, ok(ReplyPayload::Ack));
+}
+
+#[tokio::test]
+async fn a_subscribe_future_dropped_before_the_reply_does_not_leave_a_subscription() {
+    let (client, mut server) = connected().await;
+    let mut abandoned = Box::pin(client.subscribe(subscribe_all()));
+    poll_once(&mut abandoned).await;
+    let request = server.recv_request().await.unwrap();
+    drop(abandoned);
+
+    // The reply arrives for a caller that is gone: the core is told to stop.
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(started(
+            "sub-1",
+            cursor(7, 0),
+        ))),
+    );
+    expect_unsubscribe(&mut server, "sub-1").await;
+
+    // Registration is gone too: the same id can be used again.
+    let mut again = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
+    server.event(thread_changed("sub-1", cursor(7, 1), "live"));
+    assert_eq!(title(&again.next().await.unwrap()), "live");
+}
+
+#[tokio::test]
+async fn a_reply_the_caller_never_collected_does_not_leave_a_subscription() {
+    let (client, mut server) = connected().await;
+    let mut pending = Box::pin(client.subscribe(subscribe_all()));
+    poll_once(&mut pending).await;
+    let request = server.recv_request().await.unwrap();
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(started(
+            "sub-1",
+            cursor(7, 0),
+        ))),
+    );
+    // The pong follows the reply, so the reply has been handled and the
+    // subscription registered, but the dropped future never collects it.
+    barrier(&client, &mut server).await;
+    drop(pending);
+
+    expect_unsubscribe(&mut server, "sub-1").await;
+    let mut again = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
+    server.event(thread_changed("sub-1", cursor(7, 1), "live"));
+    assert_eq!(title(&again.next().await.unwrap()), "live");
+}
+
+#[tokio::test]
+async fn an_unsubscribe_after_a_close_sends_nothing_and_does_not_panic() {
+    let (client, mut server) = connected().await;
+    let sub = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
+    server.close();
+    client.closed().await;
+    drop(sub);
+}
+
+// --- resuming with a cursor ----------------------------------------------------------
+
+fn resume_from(sequence: u64) -> Subscribe {
+    Subscribe {
+        scope: SubscriptionScope::All,
+        after: Some(cursor(7, sequence)),
+    }
+}
+
+#[tokio::test]
+async fn resuming_replays_events_after_the_cursor_without_a_snapshot() {
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.subscribe(resume_from(41)).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    assert_eq!(
+        request.body,
+        RequestBody::Control(Control::Subscribe(resume_from(41)))
+    );
+    // Replay: no snapshot, and the stream continues from the requested cursor.
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(started(
+            "sub-1",
+            cursor(7, 41),
+        ))),
+    );
+    let mut sub = call.await.unwrap().unwrap();
+    assert_eq!(sub.started().snapshot_id, None);
+
+    for (sequence, label) in [(41, "already seen"), (42, "replayed"), (43, "live")] {
+        server.event(thread_changed("sub-1", cursor(7, sequence), label));
+    }
+    assert_eq!(title(&sub.next().await.unwrap()), "replayed");
+    assert_eq!(title(&sub.next().await.unwrap()), "live");
+}
+
+#[tokio::test]
+async fn a_cursor_the_core_cannot_replay_falls_back_to_a_snapshot_in_the_new_epoch() {
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.subscribe(resume_from(41)).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    let mut fallback = started("sub-1", cursor(8, 5));
+    fallback.snapshot_id = Some(SnapshotId::new("snap-1").unwrap());
+    fallback.initial_page = Some(workbench_protocol::views::Page {
+        items: vec![SnapshotItem::CoreStatus(status())],
+        next_cursor: None,
+        snapshot_revision: workbench_protocol::wire::Revision(3),
+    });
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(fallback)),
+    );
+    let mut sub = call.await.unwrap().unwrap();
+    assert!(sub.started().snapshot_id.is_some());
+    assert_eq!(sub.started().initial_page.as_ref().unwrap().items.len(), 1);
+
+    // The boundary is in epoch 8: its old events are covered by the snapshot,
+    // later ones are delivered, and an event of the previous epoch is not.
+    server.event(thread_changed("sub-1", cursor(8, 5), "covered by snapshot"));
+    server.event(thread_changed("sub-1", cursor(8, 6), "after snapshot"));
+    server.event(thread_changed("sub-1", cursor(7, 50), "stale epoch"));
+    assert_eq!(title(&sub.next().await.unwrap()), "after snapshot");
+    assert_eq!(
+        sub.next().await.unwrap().event,
+        UiEvent::ResyncRequired {
+            reason: ResyncReason::EpochChanged
+        }
+    );
+    assert_eq!(sub.next().await, None);
+}
+
+// --- received events are validated -------------------------------------------------------
+
+#[tokio::test]
+async fn an_event_breaking_its_bounds_closes_the_connection() {
+    let (client, mut server) = connected().await;
+    let mut sub = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
+    server.event(thread_changed("sub-1", cursor(7, 1), &"t".repeat(2000)));
+    assert!(matches!(
+        client.closed().await,
+        TransportError::ProtocolViolation(_)
+    ));
+    assert_eq!(sub.next().await, None);
+    assert_eq!(sub.end(), Some(SubscriptionEnd::Disconnected));
+}
+
+#[tokio::test]
+async fn a_snapshot_page_over_the_page_limit_fails_the_subscribe() {
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.subscribe(subscribe_all()).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    let mut oversized = started("sub-1", cursor(7, 0));
+    oversized.initial_page = Some(workbench_protocol::views::Page {
+        items: vec![SnapshotItem::CoreStatus(status()); 201],
+        next_cursor: None,
+        snapshot_revision: workbench_protocol::wire::Revision(1),
+    });
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(oversized)),
+    );
+    assert!(matches!(
+        call.await.unwrap().err(),
+        Some(ClientError::Transport(TransportError::ProtocolViolation(_)))
+    ));
 }

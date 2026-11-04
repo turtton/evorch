@@ -7,12 +7,14 @@ use serde_json::json;
 use workbench_protocol::commands::*;
 use workbench_protocol::envelope::*;
 use workbench_protocol::errors::*;
+use workbench_protocol::events::*;
 use workbench_protocol::framing::encode_frame;
 use workbench_protocol::handshake::*;
 use workbench_protocol::ids::*;
 use workbench_protocol::limits::*;
 use workbench_protocol::queries::*;
 use workbench_protocol::validation::ValidationError;
+use workbench_protocol::views::*;
 use workbench_protocol::wire::*;
 
 fn offer<'a>(
@@ -508,5 +510,184 @@ fn every_sample_request_validates() {
     for control in controls() {
         let bytes = serde_json::to_vec(&envelope(1, RequestBody::Control(control))).unwrap();
         decode_request(&bytes, &limits).unwrap();
+    }
+}
+
+// --- received frames ---------------------------------------------------------
+
+fn reply_frame(payload: ReplyPayload) -> ServerFrame {
+    ServerFrame::Reply(ReplyEnvelope {
+        request_id: request(1),
+        result: ReplyResult::Success(payload),
+    })
+}
+
+#[test]
+fn every_sample_server_frame_passes_validation() {
+    let limits = WireLimits::default();
+    for payload in reply_payloads() {
+        reply_frame(payload).validate(&limits).unwrap();
+    }
+    for reply in query_replies() {
+        reply_frame(ReplyPayload::Query(reply))
+            .validate(&limits)
+            .unwrap();
+    }
+    for event in ui_events() {
+        ServerFrame::Event(Box::new(event_envelope(event)))
+            .validate(&limits)
+            .unwrap();
+    }
+    ServerFrame::Reply(ReplyEnvelope {
+        request_id: request(1),
+        result: ReplyResult::Error(error()),
+    })
+    .validate(&limits)
+    .unwrap();
+}
+
+fn messages(n: usize, text: String) -> QueryReply {
+    QueryReply::CommittedHistory(Page {
+        items: vec![message(MessageContent::Inline { text }); n],
+        next_cursor: None,
+        snapshot_revision: Revision(1),
+    })
+}
+
+#[test]
+fn received_pages_chunks_and_text_over_their_bounds_fail_validation() {
+    let limits = WireLimits::default();
+    let invalid = |payload: ReplyPayload| {
+        assert!(reply_frame(payload).validate(&limits).is_err());
+    };
+    let valid = |payload: ReplyPayload| reply_frame(payload).validate(&limits).unwrap();
+
+    // Page size: 200 items pass, 201 do not.
+    valid(ReplyPayload::Query(messages(
+        MAX_PAGE_SIZE as usize,
+        "x".into(),
+    )));
+    invalid(ReplyPayload::Query(messages(
+        MAX_PAGE_SIZE as usize + 1,
+        "x".into(),
+    )));
+    // Inline message: the limit passes, one byte more does not.
+    valid(ReplyPayload::Query(messages(
+        1,
+        "x".repeat(MAX_INLINE_MESSAGE_BYTES),
+    )));
+    invalid(ReplyPayload::Query(messages(
+        1,
+        "x".repeat(MAX_INLINE_MESSAGE_BYTES + 1),
+    )));
+    // Body chunk against the negotiated chunk size.
+    let chunk = |len: usize| {
+        ReplyPayload::Query(QueryReply::Body(BodyChunk {
+            body_id: BodyId::new("b").unwrap(),
+            offset: ByteOffset(0),
+            text: "x".repeat(len),
+            total_bytes: ByteOffset(len as u64),
+            next_offset: None,
+        }))
+    };
+    valid(chunk(limits.max_body_chunk_bytes as usize));
+    invalid(chunk(limits.max_body_chunk_bytes as usize + 1));
+    // A subscribe answer's snapshot page is bounded like any other page.
+    let started = |items: usize| {
+        let mut started = SubscriptionStarted {
+            subscription_id: sub(),
+            snapshot_id: None,
+            high_water: cursor(7, 1),
+            initial_page: None,
+        };
+        started.initial_page = Some(Page {
+            items: vec![SnapshotItem::Thread(thread_summary()); items],
+            next_cursor: None,
+            snapshot_revision: Revision(1),
+        });
+        ReplyPayload::SubscriptionStarted(started)
+    };
+    valid(started(MAX_PAGE_SIZE as usize));
+    invalid(started(MAX_PAGE_SIZE as usize + 1));
+    // Text fields of views and errors.
+    let mut long_title = thread_summary();
+    long_title.title = "t".repeat(MAX_TITLE_BYTES + 1);
+    invalid(ReplyPayload::Query(QueryReply::Thread(ThreadView {
+        summary: long_title.clone(),
+        root_run: None,
+        active_run: None,
+        pending_questions: 0,
+        pending_approvals: 0,
+        queued_follow_ups: 0,
+    })));
+    let event = ServerFrame::Event(Box::new(event_envelope(UiEvent::ThreadChanged {
+        thread: long_title,
+    })));
+    assert!(event.validate(&limits).is_err());
+    let mut huge_error = error();
+    huge_error.message = "e".repeat(9 * 1024);
+    assert!(
+        ServerFrame::Reply(ReplyEnvelope {
+            request_id: request(1),
+            result: ReplyResult::Error(huge_error),
+        })
+        .validate(&limits)
+        .is_err()
+    );
+    let mut busy = status();
+    busy.retention_reasons = vec![RetentionReason::ActiveTurn; 17];
+    invalid(ReplyPayload::Query(QueryReply::CoreStatus(busy)));
+    // Incoherent provenance in a relayed view.
+    let mut bad_receipt = receipt();
+    bad_receipt.sent_by = Provenance {
+        agent_run_id: None,
+        ..agent()
+    };
+    invalid(ReplyPayload::Query(QueryReply::InputReceipts(Page {
+        items: vec![bad_receipt],
+        next_cursor: None,
+        snapshot_revision: Revision(1),
+    })));
+}
+
+#[test]
+fn agent_authored_question_text_may_contain_control_characters() {
+    let mut q = question(QuestionTarget::User);
+    q.title = "line one\nline two\u{1b}[0m".into();
+    q.options = vec!["a\tb".into()];
+    q.validate().unwrap();
+}
+
+// --- closed request shapes -------------------------------------------------------
+
+#[test]
+fn unknown_fields_are_refused_at_every_level_of_a_request() {
+    let cases = [
+        // Envelope level: a client-supplied provenance must not be ignored.
+        json!({"request_id": "req-9", "session_id": "s", "kind": "query",
+               "payload": {"type": "get_core_status"}, "provenance": {"actor": "agent"}}),
+        // Struct-like enum variants.
+        request_json(
+            "control",
+            json!({"type": "ping", "payload": {"nonce": "1", "extra": 1}}),
+        ),
+        request_json(
+            "control",
+            json!({"type": "unsubscribe", "payload": {"subscription_id": "s", "extra": 1}}),
+        ),
+        request_json(
+            "query",
+            json!({"type": "get_command_receipt", "payload": {"request_id": "r", "extra": 1}}),
+        ),
+        request_json(
+            "command",
+            json!({"type": "submit_goal", "payload": {
+            "project": "p", "thread": "t", "objective": "o",
+            "delegation": {"type": "reference", "payload": {"value": "v", "extra": 1}}}}),
+        ),
+    ];
+    for case in cases {
+        let rejection = decode(case.clone()).unwrap_err();
+        assert_eq!(rejection.error.code, ErrorCode::InvalidRequest, "{case}");
     }
 }

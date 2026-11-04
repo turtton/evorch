@@ -38,8 +38,9 @@ pub enum Surface {
 /// **The core's ingress attaches this; clients never send it.** It is derived
 /// from the authenticated transport and the session, so a client cannot claim
 /// to be an agent or another client. No request type has a provenance field,
-/// and request structs reject unknown fields, so a client that includes one is
-/// refused instead of ignored.
+/// and the request envelope, every command and query payload (including the
+/// fields of struct-like enum variants) reject unknown fields, so a client
+/// that includes one is refused instead of ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
@@ -97,7 +98,12 @@ impl Provenance {
 
 /// Connection-level requests that are neither commands nor queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum Control {
     Subscribe(Subscribe),
     Unsubscribe { subscription_id: SubscriptionId },
@@ -186,6 +192,22 @@ pub fn decode_request(
         request_id: request_id.clone(),
     };
 
+    // The envelope is a closed shape too: a stray top-level field (a client
+    // trying to supply provenance, say) is refused, not ignored.
+    if let Some(object) = probe.as_object()
+        && let Some(extra) = object.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "request_id" | "session_id" | "kind" | "payload"
+            )
+        })
+    {
+        return Err(rejection(WorkbenchError::invalid_request(format!(
+            "unexpected request field `{}`",
+            extra.escape_debug()
+        ))));
+    }
+
     let envelope: RequestEnvelope = match serde_json::from_value(probe.clone()) {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -253,4 +275,30 @@ pub struct ReplyEnvelope {
 pub enum ServerFrame {
     Reply(ReplyEnvelope),
     Event(Box<EventEnvelope>),
+}
+
+impl ReplyPayload {
+    /// Bound a success payload received from a peer.
+    pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
+        match self {
+            Self::Query(reply) => reply.validate(limits),
+            Self::SubscriptionStarted(started) => started.validate(),
+            Self::Command(_) | Self::Unsubscribed { .. } | Self::Pong { .. } | Self::Ack => Ok(()),
+        }
+    }
+}
+
+impl ServerFrame {
+    /// Check everything a peer-supplied frame carries against the protocol and
+    /// negotiated limits. Deserialization only checks shape; a receiver calls
+    /// this before acting on a frame.
+    pub fn validate(&self, limits: &WireLimits) -> Result<(), ValidationError> {
+        match self {
+            Self::Reply(reply) => match &reply.result {
+                ReplyResult::Success(payload) => payload.validate(limits),
+                ReplyResult::Error(error) => error.validate(),
+            },
+            Self::Event(event) => event.validate(),
+        }
+    }
 }

@@ -277,10 +277,20 @@ async fn ping_checks_the_nonce() {
         &request.request_id,
         ok(ReplyPayload::Pong { nonce: Nonce(6) }),
     );
-    assert!(matches!(
-        call.await.unwrap(),
-        Err(ClientError::Transport(TransportError::ProtocolViolation(_)))
-    ));
+    let result = call.await.unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(ClientError::Transport(TransportError::ProtocolViolation(_)))
+        ),
+        "{result:?}"
+    );
+    // A peer that answers a ping with the wrong nonce is not trustworthy: the
+    // connection is closed, and later requests fail instead of hanging.
+    let reason = client.closed().await;
+    assert!(matches!(reason, TransportError::ProtocolViolation(_)));
+    assert_eq!(client.connection_state(), ConnectionState::Closed(reason));
+    assert!(client.ping(Nonce(7)).await.is_err());
 }
 
 // --- not sent ---------------------------------------------------------------
@@ -578,5 +588,176 @@ async fn an_oversized_frame_from_the_core_is_refused_by_its_length_alone() {
             len: 9000,
             max: 8192
         }
+    );
+}
+
+// --- received replies are validated ---------------------------------------------
+
+fn page_of<T>(items: Vec<T>) -> workbench_protocol::views::Page<T> {
+    workbench_protocol::views::Page {
+        items,
+        next_cursor: None,
+        snapshot_revision: Revision(1),
+    }
+}
+
+fn history_message(text: String) -> workbench_protocol::views::CommittedMessage {
+    use workbench_protocol::views::*;
+    CommittedMessage {
+        thread: thread(),
+        run: RunId::new("run-1").unwrap(),
+        index: Sequence(1),
+        role: MessageRole::Assistant,
+        content: MessageContent::Inline { text },
+    }
+}
+
+/// Ask `query`, answer with `reply`, and return the client's result.
+async fn ask(
+    query: Query,
+    reply: QueryReply,
+) -> (WorkbenchClient, Result<QueryReply, ClientError>) {
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.query(query).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    server.reply(&request.request_id, ok(ReplyPayload::Query(reply)));
+    let result = call.await.unwrap();
+    (client, result)
+}
+
+fn read_body(max_bytes: u32) -> Query {
+    Query::ReadBody(ReadBody {
+        body_id: BodyId::new("b").unwrap(),
+        offset: ByteOffset(0),
+        max_bytes,
+    })
+}
+
+fn chunk(len: usize) -> QueryReply {
+    QueryReply::Body(workbench_protocol::views::BodyChunk {
+        body_id: BodyId::new("b").unwrap(),
+        offset: ByteOffset(0),
+        text: "x".repeat(len),
+        total_bytes: ByteOffset(len as u64),
+        next_offset: None,
+    })
+}
+
+#[tokio::test]
+async fn replies_within_their_bounds_are_delivered() {
+    let max_chunk = WireLimits::default().max_body_chunk_bytes as usize;
+    let (_, result) = ask(read_body(65_536), chunk(max_chunk)).await;
+    assert!(result.is_ok(), "{result:?}");
+    let (_, result) = ask(
+        Query::ReadCommittedHistory(ReadCommittedHistory {
+            thread: thread(),
+            run: None,
+            page: PageRequest::default(),
+        }),
+        QueryReply::CommittedHistory(page_of(vec![history_message("x".into()); 200])),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let (_, result) = ask(
+        Query::ReadCommittedHistory(ReadCommittedHistory {
+            thread: thread(),
+            run: None,
+            page: PageRequest::default(),
+        }),
+        QueryReply::CommittedHistory(page_of(vec![history_message("x".repeat(16 * 1024))])),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_reply_that_breaks_its_bounds_is_refused_and_closes_the_connection() {
+    let history = || {
+        Query::ReadCommittedHistory(ReadCommittedHistory {
+            thread: thread(),
+            run: None,
+            page: PageRequest::default(),
+        })
+    };
+    let max_chunk = WireLimits::default().max_body_chunk_bytes as usize;
+    let cases = [
+        (
+            "body chunk over 64 KiB",
+            read_body(65_536),
+            chunk(max_chunk + 1),
+        ),
+        (
+            "page over 200 items",
+            history(),
+            QueryReply::CommittedHistory(page_of(vec![history_message("x".into()); 201])),
+        ),
+        (
+            "inline message over 16 KiB",
+            history(),
+            QueryReply::CommittedHistory(page_of(vec![history_message("x".repeat(16 * 1024 + 1))])),
+        ),
+        (
+            "inconsistent chunk offsets",
+            read_body(65_536),
+            QueryReply::Body(workbench_protocol::views::BodyChunk {
+                body_id: BodyId::new("b").unwrap(),
+                offset: ByteOffset(0),
+                text: "abc".into(),
+                total_bytes: ByteOffset(2),
+                next_offset: None,
+            }),
+        ),
+    ];
+    for (name, query, reply) in cases {
+        let (client, result) = ask(query, reply).await;
+        assert!(
+            matches!(
+                result,
+                Err(ClientError::Transport(TransportError::ProtocolViolation(_)))
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(
+            matches!(client.closed().await, TransportError::ProtocolViolation(_)),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_chunk_larger_than_a_smaller_negotiated_limit_is_refused() {
+    let (client, mut server) = connected_with(server_hello(small_limits())).await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.query(read_body(512)).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    server.reply(&request.request_id, ok(ReplyPayload::Query(chunk(513))));
+    assert!(matches!(
+        call.await.unwrap(),
+        Err(ClientError::Transport(TransportError::ProtocolViolation(_)))
+    ));
+}
+
+#[tokio::test]
+async fn a_command_whose_reply_is_refused_reports_an_unknown_outcome() {
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.command(stop_chat("t")).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    let mut error = WorkbenchError::invalid_request("x");
+    error.message = "e".repeat(9 * 1024);
+    server.reply(&request.request_id, ReplyResult::Error(error));
+    // The command may have run; only the answer was unusable.
+    assert_eq!(
+        call.await.unwrap(),
+        Err(ClientError::Transport(TransportError::OutcomeUnknown {
+            request_id: request.request_id
+        }))
     );
 }
