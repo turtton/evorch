@@ -359,7 +359,7 @@ impl TombstoneSet {
     }
 
     /// The tombstoned identity an event belongs to, if any: its owning run, or
-    /// the thread of a thread goal / todo snapshot.
+    /// the thread of a thread goal / todo snapshot or of a pull request change.
     pub(crate) fn rejects(&self, kind: &EventKind) -> Option<StorageError> {
         if self.runs.is_empty() && self.threads.is_empty() {
             return None;
@@ -372,6 +372,7 @@ impl TombstoneSet {
             EventKind::Orchestrator(OrchestratorEvent::ThreadTodoUpdated { snapshot }) => {
                 Some(snapshot.thread_id.as_str())
             }
+            EventKind::PullRequest(event) => Some(event.thread_id()),
             _ => None,
         }
         .filter(|thread| self.contains_thread(thread));

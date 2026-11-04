@@ -95,6 +95,8 @@ type LearningRunReceivers = Mutex<HashMap<RunId, watch::Receiver<Option<Result<(
 
 pub(crate) struct Shared {
     pub(crate) thread_goals: Mutex<crate::thread_goals::ThreadGoals>,
+    /// Pull request tracking (ADR 0043), once the host started it.
+    pub(crate) pull_requests: OnceLock<crate::pull_requests::PullRequestService>,
     pub(crate) benchmark_recording: OnceLock<crate::benchmark::Recording>,
     pub(crate) benchmark_replays: Mutex<HashMap<RunId, crate::benchmark::BenchmarkCheckpoint>>,
     pub(crate) benchmark_executors: Mutex<HashMap<RunId, Arc<ToolExecutor>>>,
@@ -710,6 +712,7 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
@@ -1036,6 +1039,7 @@ impl AgentRuntime {
         Self {
             shared: Arc::new(Shared {
                 thread_goals: Mutex::new(crate::thread_goals::ThreadGoals::default()),
+                pull_requests: OnceLock::new(),
                 benchmark_recording: OnceLock::new(),
                 benchmark_replays: Mutex::new(HashMap::new()),
                 benchmark_executors: Mutex::new(HashMap::new()),
@@ -1949,13 +1953,15 @@ impl AgentRuntime {
                 return Err(reason);
             }
         };
+        let escalation_thread = event_bus::escalation_thread_id(&run_id.to_string());
         crate::thread_lineage::record_escalation(
             self,
             run_id,
             source_run_id,
-            parent_thread_id,
+            parent_thread_id.clone(),
             &config,
         );
+        self.inherit_pull_request(parent_thread_id, escalation_thread);
         Ok(self.spawn_run_with_handoff(
             run_id,
             None,

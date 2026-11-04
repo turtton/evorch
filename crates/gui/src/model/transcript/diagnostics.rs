@@ -132,6 +132,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
         | EventKind::Ownership(_)
+        | EventKind::PullRequest(_)
         | EventKind::Orchestrator(_) => None,
     }
 }

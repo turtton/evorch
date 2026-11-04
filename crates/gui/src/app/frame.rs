@@ -362,7 +362,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Orchestrator(_) => {}
+            | EventKind::Orchestrator(_)
+            // Shown by the pull request surfaces (ADR 0043 PR5), which read the database again.
+            | EventKind::PullRequest(_) => {}
         }
     }
 

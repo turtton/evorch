@@ -122,6 +122,7 @@ fn event_family(event: &Event) -> &'static str {
         EventKind::Diagnostic(_) => "diagnostic",
         EventKind::Ownership(_) => "ownership",
         EventKind::Ledger(_) => "ledger",
+        EventKind::PullRequest(_) => "pull_request",
     }
 }
 

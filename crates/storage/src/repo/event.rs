@@ -677,6 +677,7 @@ pub(crate) const fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Diagnostic(_) => "Diagnostic",
         EventKind::Ownership(_) => "Ownership",
         EventKind::Ledger(_) => "Ledger",
+        EventKind::PullRequest(_) => "PullRequest",
     }
 }
 

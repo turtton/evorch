@@ -370,7 +370,8 @@ pub fn map_event(event: &Event) -> Vec<MetricMeasurement> {
         // オーケストレーションイベントは semconv metrics の写像対象外。
         | EventKind::Orchestrator(_)
         | EventKind::Diagnostic(_)
-        | EventKind::Ownership(_) => Vec::new(),
+        | EventKind::Ownership(_)
+        | EventKind::PullRequest(_) => Vec::new(),
     }
 }
 

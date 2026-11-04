@@ -1,0 +1,334 @@
+//! Tests of the pull request service.
+//!
+//! Time is virtual (`start_paused`): a test moves it with `advance` and lets the service's tasks
+//! run with `settle`; it waits for what the service publishes, never for a duration. The
+//! blocking storage and registry calls run inline under `cfg(test)`, so the clock cannot move
+//! while one is outstanding. "Nothing happened" is shown by a marker event published after
+//! the quiet point: everything the service emitted before it is already in the receiver.
+
+mod candidates;
+mod inheritance;
+mod ownership;
+mod review;
+mod tracking;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use config::PullRequestsConfig;
+use event_bus::{Event, EventBus, EventKind, EventReceiver, PullRequestEvent};
+use storage::pull_requests::{
+    CheckConclusion, CheckKind, CheckStatus, LinkPullRequest, PullRequestCheck, PullRequestFacts,
+    PullRequestKey, PullRequestState, ReviewDecision,
+};
+use storage::{Storage, StorageConfig, StorageHandle};
+use tempfile::TempDir;
+
+use super::*;
+use crate::ownership::OwnerHost;
+use crate::pull_requests::{FakePullRequestSource, FetchedPullRequest};
+
+pub(super) const REPOSITORY: &str = "turtton/evorch";
+const MARKER_THREAD: &str = "__marker__";
+
+pub(super) fn key(number: u64) -> PullRequestKey {
+    PullRequestKey::github(REPOSITORY, number).unwrap()
+}
+
+pub(super) fn check(
+    name: &str,
+    status: CheckStatus,
+    conclusion: Option<CheckConclusion>,
+) -> PullRequestCheck {
+    PullRequestCheck {
+        provider_id: name.into(),
+        kind: CheckKind::CheckRun,
+        name: name.into(),
+        status,
+        conclusion,
+        head_sha: "a".repeat(40),
+    }
+}
+
+pub(super) fn running() -> Vec<PullRequestCheck> {
+    vec![check("ci", CheckStatus::InProgress, None)]
+}
+
+pub(super) fn passing() -> Vec<PullRequestCheck> {
+    vec![check(
+        "ci",
+        CheckStatus::Completed,
+        Some(CheckConclusion::Success),
+    )]
+}
+
+pub(super) fn failing() -> Vec<PullRequestCheck> {
+    vec![check(
+        "ci",
+        CheckStatus::Completed,
+        Some(CheckConclusion::Failure),
+    )]
+}
+
+pub(super) fn facts(state: PullRequestState, checks: Vec<PullRequestCheck>) -> PullRequestFacts {
+    PullRequestFacts {
+        state,
+        base_branch: "main".into(),
+        head_repository: Some(REPOSITORY.into()),
+        head_branch: "feat".into(),
+        head_sha: "a".repeat(40),
+        checks,
+        checks_complete: true,
+        review_decision: ReviewDecision::None,
+    }
+}
+
+pub(super) fn fetched(number: u64, facts: PullRequestFacts) -> FetchedPullRequest {
+    FetchedPullRequest {
+        requested: key(number),
+        canonical: key(number),
+        url: format!("https://github.com/{REPOSITORY}/pull/{number}"),
+        facts,
+        fetched_at_ns: 1_000,
+    }
+}
+
+pub(super) fn open_running(number: u64) -> FetchedPullRequest {
+    fetched(number, facts(PullRequestState::Open, running()))
+}
+
+pub(super) fn open_passing(number: u64) -> FetchedPullRequest {
+    fetched(number, facts(PullRequestState::Open, passing()))
+}
+
+pub(super) fn enabled() -> PullRequestsConfig {
+    PullRequestsConfig {
+        enabled: true,
+        ..PullRequestsConfig::default()
+    }
+}
+
+/// A clock the test sets.
+pub(super) struct ManualClock(AtomicI64);
+
+impl ManualClock {
+    pub(super) fn advance(&self, seconds: i64) {
+        self.0.fetch_add(seconds * 1_000_000_000, Ordering::SeqCst);
+    }
+}
+
+impl WallClock for ManualClock {
+    fn now_ns(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// What the service reads about threads.
+#[derive(Default)]
+pub(super) struct FakeEnvironment {
+    runs: Mutex<HashMap<String, String>>,
+}
+
+impl FakeEnvironment {
+    pub(super) fn bind(&self, run: &str, thread: &str) {
+        self.runs
+            .lock()
+            .unwrap()
+            .insert(run.to_owned(), thread.to_owned());
+    }
+}
+
+impl ThreadEnvironment for FakeEnvironment {
+    fn thread_of_run(&self, run_id: &str) -> Option<String> {
+        self.runs.lock().unwrap().get(run_id).cloned()
+    }
+
+    fn checkout_directories(&self, _thread_id: &str) -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
+/// A database and an ownership registry that several "processes" share.
+pub(super) struct World {
+    pub(super) dir: TempDir,
+    pub(super) clock: Arc<ManualClock>,
+}
+
+/// One "process": its own storage connection, host, bus, source and service.
+pub(super) struct Process {
+    pub(super) _storage: Storage,
+    pub(super) storage_handle: StorageHandle,
+    pub(super) host: Arc<OwnerHost>,
+    pub(super) bus: Arc<EventBus>,
+    pub(super) source: FakePullRequestSource,
+    pub(super) environment: Arc<FakeEnvironment>,
+    pub(super) service: PullRequestService,
+    pub(super) events: EventReceiver,
+}
+
+impl World {
+    pub(super) fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+            clock: Arc::new(ManualClock(AtomicI64::new(10_000_000_000))),
+        }
+    }
+
+    pub(super) fn process(&self, settings: PullRequestsConfig) -> Process {
+        let storage = Storage::open(StorageConfig {
+            db_path: self.dir.path().join("evorch.db"),
+            ..StorageConfig::default()
+        })
+        .unwrap();
+        let bus = Arc::new(EventBus::new(4096));
+        let host = Arc::new(
+            OwnerHost::open(
+                &self.dir.path().join("owners"),
+                config::OwnershipConfig::default(),
+                Arc::clone(&bus),
+            )
+            .unwrap(),
+        );
+        let source = FakePullRequestSource::new();
+        let environment = Arc::new(FakeEnvironment::default());
+        let events = bus.subscribe();
+        let service = PullRequestService::start(ServiceParts {
+            storage: storage.handle(),
+            source: Arc::new(source.clone()),
+            ownership: Arc::clone(&host) as Arc<dyn OwnershipView>,
+            environment: Arc::clone(&environment) as Arc<dyn ThreadEnvironment>,
+            bus: Arc::clone(&bus),
+            settings,
+            clock: Arc::clone(&self.clock) as Arc<dyn WallClock>,
+        })
+        .unwrap();
+        Process {
+            storage_handle: storage.handle(),
+            _storage: storage,
+            host,
+            bus,
+            source,
+            environment,
+            service,
+            events,
+        }
+    }
+}
+
+impl Process {
+    /// The permit for `thread`, starting its lease the way chat does when nobody owns it.
+    pub(super) fn permit(&self, thread: &str) -> OwnerPermit {
+        self.host
+            .owned_permit(thread)
+            .or_else(|_| self.host.start(thread))
+            .unwrap()
+    }
+
+    pub(super) fn state(&self, thread: &str) -> storage::pull_requests::ThreadPullRequestState {
+        self.storage_handle
+            .pull_request_thread_state(thread)
+            .unwrap()
+    }
+
+    /// Links through the service, as the GUI would.
+    pub(super) async fn link(
+        &self,
+        thread: &str,
+        number: u64,
+    ) -> storage::pull_requests::LinkReceipt {
+        let permit = self.permit(thread);
+        let revision = self.state(thread).lifecycle_revision;
+        self.service
+            .link(thread, &format!("{REPOSITORY}#{number}"), revision, &permit)
+            .await
+            .unwrap()
+    }
+
+    /// Links in the database only, as another process would.
+    pub(super) fn link_directly(&self, thread: &str, number: u64) {
+        let revision = self.state(thread).lifecycle_revision;
+        self.storage_handle
+            .link_pull_request(LinkPullRequest {
+                thread_id: thread.to_owned(),
+                key: key(number),
+                expected_revision: revision,
+                at_ns: 1,
+            })
+            .unwrap();
+    }
+
+    pub(super) fn marker(&self) {
+        self.bus.emit(Event::new(PullRequestEvent::Changed {
+            thread_id: MARKER_THREAD.into(),
+            link_revision: 0,
+            transition_seq: 0,
+            pull_request: Inner::reference(&key(1)),
+            fields: Vec::new(),
+            notifications: Vec::new(),
+        }));
+    }
+
+    /// Every pull request event published so far, once the service is quiet.
+    pub(super) async fn quiet_events(&mut self) -> Vec<PullRequestEvent> {
+        settle().await;
+        self.marker();
+        let mut events = Vec::new();
+        loop {
+            let event = self.events.recv().await.unwrap();
+            if let EventKind::PullRequest(event) = event.kind {
+                if event.thread_id() == MARKER_THREAD {
+                    return events;
+                }
+                events.push(event);
+            }
+        }
+    }
+
+    /// Every event of any kind published so far, once the service is quiet.
+    pub(super) async fn quiet_raw_events(&mut self) -> Vec<Event> {
+        settle().await;
+        self.marker();
+        let mut events = Vec::new();
+        loop {
+            let event = self.events.recv().await.unwrap();
+            if matches!(&event.kind, EventKind::PullRequest(e) if e.thread_id() == MARKER_THREAD) {
+                return events;
+            }
+            events.push(event);
+        }
+    }
+
+    /// The next pull request event, whatever else happens on the bus.
+    pub(super) async fn next(&mut self) -> PullRequestEvent {
+        loop {
+            let event = self.events.recv().await.unwrap();
+            if let EventKind::PullRequest(event) = event.kind {
+                return event;
+            }
+        }
+    }
+}
+
+/// Lets every task that can run, run. Under a paused clock and a single thread this reaches
+/// quiescence: no step of the service waits for anything but another task.
+pub(super) async fn settle() {
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Moves virtual time forward and lets the service react.
+pub(super) async fn pass(seconds: u64) {
+    tokio::time::advance(Duration::from_secs(seconds)).await;
+    settle().await;
+}
+
+pub(super) fn only_changed(events: &[PullRequestEvent]) -> Vec<&PullRequestEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event, PullRequestEvent::Changed { .. }))
+        .collect()
+}

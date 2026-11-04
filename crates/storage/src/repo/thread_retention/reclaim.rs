@@ -354,38 +354,60 @@ fn events_run(
     })
 }
 
-/// Thread todo snapshots carry no run: find them by the thread they name, scanning
-/// a bounded number of rows per step.
+/// The (kind, subkind) pairs whose rows name a thread but no run.
+fn thread_event_kinds() -> impl Iterator<Item = (&'static str, &'static str)> {
+    std::iter::once(("Orchestrator", "ThreadTodoUpdated")).chain(
+        event_bus::PullRequestEvent::SUBKINDS
+            .iter()
+            .map(|subkind| ("PullRequest", *subkind)),
+    )
+}
+
+/// Thread todo snapshots and pull request changes carry no run: find them by the thread
+/// they name, scanning a bounded number of rows per step.
+///
+/// Each (kind, subkind) is read through `idx_events_kind_subkind_id` in ID order, at most a
+/// step's rows however long the history is, and the branches are merged here. One query
+/// over all of them would sort in SQLite or scan every row after the cursor.
 fn events_thread(
     tx: &Transaction<'_>,
     family: &str,
     cursor: &mut Cursor,
 ) -> Result<Work, StorageError> {
-    let mut scanned = 0_usize;
-    let mut last = cursor.scan_after;
-    let mut ids = Vec::new();
-    let mut bytes = 0_u64;
+    let limit = i64::try_from(RECLAIM_SCAN_ROWS).unwrap_or(i64::MAX);
+    let mut seen: Vec<(i64, u64, bool)> = Vec::new();
     {
         let mut statement = tx.prepare_cached(
             "SELECT id, OCTET_LENGTH(payload), \
              EXISTS(SELECT 1 FROM thread_tombstones \
-                    WHERE thread_id = json_extract(payload, '$.payload.payload.snapshot.thread_id') \
-                      AND family_key = ?3) FROM events \
-             WHERE kind = 'Orchestrator' AND subkind = 'ThreadTodoUpdated' \
+                    WHERE thread_id = COALESCE(\
+                            json_extract(payload, '$.payload.payload.snapshot.thread_id'), \
+                            json_extract(payload, '$.payload.payload.thread_id')) \
+                      AND family_key = ?5) FROM events \
+             WHERE kind = ?3 AND subkind = ?4 \
              AND run_id IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
         )?;
-        let limit = i64::try_from(RECLAIM_SCAN_ROWS).unwrap_or(i64::MAX);
-        let mut rows = statement.query(params![cursor.scan_after, limit, family])?;
-        while let Some(row) = rows.next()? {
-            scanned += 1;
-            last = row.get(0)?;
+        for (kind, subkind) in thread_event_kinds() {
             // A point lookup per scanned row, so a family with many threads costs
             // no more than a small one.
-            if row.get::<_, bool>(2)? {
-                let size = row.get::<_, u64>(1)?;
-                ids.push(last);
-                bytes = bytes.saturating_add(size);
+            let mut rows =
+                statement.query(params![cursor.scan_after, limit, kind, subkind, family])?;
+            while let Some(row) = rows.next()? {
+                seen.push((row.get(0)?, row.get(1)?, row.get(2)?));
             }
+        }
+    }
+    seen.sort_unstable_by_key(|(id, _, _)| *id);
+    seen.truncate(RECLAIM_SCAN_ROWS);
+    let scanned = seen.len();
+    let mut last = cursor.scan_after;
+    let mut ids = Vec::new();
+    let mut bytes = 0_u64;
+    for (id, size, dead) in seen {
+        last = id;
+        if dead {
+            ids.push(id);
+            bytes = bytes.saturating_add(size);
         }
     }
     if !ids.is_empty() {
