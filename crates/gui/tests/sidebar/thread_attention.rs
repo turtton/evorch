@@ -158,6 +158,7 @@ fn render(window: &mut Window, unread: &[&ThreadId]) -> Harness<'static> {
     let sidebar = window.state.sidebar().clone();
     let phases: BTreeMap<String, ThreadRunPhase> = window.state.thread_phases().clone();
     let unread: BTreeSet<ThreadId> = unread.iter().map(|id| (*id).clone()).collect();
+    let view = window.state.sidebar_view().clone();
     let none = BTreeSet::new();
     let retention = BTreeMap::new();
     let mut harness = Harness::builder()
@@ -165,7 +166,7 @@ fn render(window: &mut Window, unread: &[&ThreadId]) -> Harness<'static> {
         .build_ui(move |ui| {
             gui::theme::install(ui.ctx());
             sidebar_pane_with_retention(
-                ui, &sidebar, &phases, &none, &none, &unread, &external, &retention,
+                ui, &sidebar, &phases, &none, &none, &unread, &external, &retention, &view,
             );
         });
     // A spinner requests repaints continuously; advance a bounded number of frames.

@@ -29,10 +29,10 @@ pub(crate) fn persist_escalation_seed(
     requires_ownership: bool,
     continuity: &crate::continuity::Continuity,
     pending_reference_id: Option<String>,
-) -> Result<(), SnapshotError> {
+) -> Result<u64, SnapshotError> {
     runtime.deny_deleted_run(&source_run_id.to_string())?;
     let Some(store) = runtime.shared.run_store.get() else {
-        return Ok(());
+        return Ok(0);
     };
     let descriptor = RunRestoreDescriptor {
         responses_replay: None,
@@ -105,10 +105,12 @@ pub(crate) fn persist_escalation_seed(
         updated_at_ns: i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())?,
         host_inputs_json: "[]".into(),
     };
-    let write = provenance.write(record)?;
-    store
+    // The run ID is new: the seed is its first snapshot. The caller hands the
+    // committed revision to the run it starts, which continues from the seed.
+    let write = provenance.write(record, 0)?;
+    let saved = store
         .handle
         .save_snapshot_bundle(&write)
         .map_err(super::provenance::storage_error)?;
-    Ok(())
+    Ok(saved.snapshot_revision)
 }

@@ -398,8 +398,25 @@ fn a_released_thread_stops_showing_its_runs_as_active() {
     // Given: B shows A's run as running
     let shared = Shared::new();
     let (mut a, mut b, thread) = working_owner_and_open_follower(&shared);
+    a.emit(Event::new(LifecycleEvent::AgentRunStarted {
+        run_id: "child-a".into(),
+        parent_run_id: Some("run-a".into()),
+        agent_name: "evaluator".into(),
+        role: "evaluator".into(),
+    }));
+    a.emit(phase(
+        "child-a",
+        AgentRunPhase::Pending,
+        AgentRunPhase::Running,
+    ));
     b.state.poll_shared_feed();
     assert_eq!(thread_state(&b.state, &thread), ThreadState::Running);
+    let child = workspace_ui::PanelId::new("agent-child-a");
+    let path = b.state.dock().find_tab(&child).expect("running child pane");
+    assert_eq!(
+        b.state.dock().leaf(path.node_path()).unwrap().active,
+        path.tab
+    );
 
     // When: A exits and releases the thread without a final phase event
     a.emit(Event::new(OwnershipEvent {
@@ -416,6 +433,14 @@ fn a_released_thread_stops_showing_its_runs_as_active() {
         Some(&ThreadRunPhase::Stopped)
     );
     assert_eq!(thread_state(&b.state, &thread), ThreadState::Stopped);
+    assert_eq!(
+        b.state.thread_phases().get("child-a"),
+        Some(&ThreadRunPhase::Stopped)
+    );
+    let path = b.state.dock().find_tab(&child).expect("parked child pane");
+    let leaf = b.state.dock().leaf(path.node_path()).unwrap();
+    assert_ne!(leaf.active, path.tab);
+    assert_eq!(leaf.tabs[0], workspace_ui::PanelId::new("subagents-home"));
 }
 
 #[test]

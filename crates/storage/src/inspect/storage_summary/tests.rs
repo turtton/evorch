@@ -38,13 +38,27 @@ fn context_named(
     messages: rusqlite::types::Value,
     plain_len: i64,
 ) {
+    // One message row per run; the summary reads sizes only, so the skeleton's content
+    // does not have to be a message.
+    let (codec, stored): (i64, Vec<u8>) = match messages {
+        rusqlite::types::Value::Text(text) => (0, text.into_bytes()),
+        rusqlite::types::Value::Blob(bytes) => (1, bytes),
+        other => panic!("{other:?}"),
+    };
     db.conn
         .execute(
-            "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json,
+            "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json,
                  checkpoints_json, terminal_phase, restorable, updated_at_ns, host_inputs_json,
-                 messages_len, checkpoints_len)
-             VALUES (?1, 'worker', ?2, ?3, '{}', ?4, '[]', 'Done', 0, 0, '[]', ?5, 2)",
-            rusqlite::params![run, name, parent, messages, plain_len],
+                 messages_len, checkpoints_len, config_len, message_count)
+             VALUES (?1, 'worker', ?2, ?3, '{}', '[]', 'Done', 0, 0, '[]', ?4, 2, 2, 1)",
+            rusqlite::params![run, name, parent, plain_len],
+        )
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO run_messages(run_id, ordinal, msg_sha256, plain_len, codec, skeleton)
+             VALUES (?1, 0, zeroblob(32), ?2, ?3, ?4)",
+            rusqlite::params![run, plain_len, codec, stored],
         )
         .unwrap();
 }
@@ -524,7 +538,7 @@ fn scans_of_large_columns_never_sort_or_build_temporary_trees() {
     // sorter; the detector must see that, or the checks below prove nothing.
     for grouped in [
         "SELECT run_id, SUM(OCTET_LENGTH(payload)) FROM events GROUP BY run_id",
-        "SELECT terminal_phase, SUM(OCTET_LENGTH(messages_json)) FROM run_contexts GROUP BY terminal_phase",
+        "SELECT codec, SUM(OCTET_LENGTH(skeleton)) FROM run_messages GROUP BY codec",
     ] {
         assert!(uses_temporary_structure(&db.conn, grouped), "{grouped}");
     }

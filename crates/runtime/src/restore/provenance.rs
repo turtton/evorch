@@ -172,9 +172,13 @@ impl ConversationProvenance {
         }
     }
 
+    /// `expected_snapshot_revision` is the revision the caller's `record` was
+    /// read at (0 for a run ID with no snapshot). Storage rejects the write with
+    /// `RevisionConflict` when another save has committed since.
     pub(crate) fn write(
         &self,
         record: storage::RunContextRecord,
+        expected_snapshot_revision: u64,
     ) -> Result<SnapshotWrite, serde_json::Error> {
         let messages: Vec<Message> = serde_json::from_str(&record.messages_json)?;
         let checkpoints: Vec<serde_json::Value> = serde_json::from_str(&record.checkpoints_json)?;
@@ -182,7 +186,7 @@ impl ConversationProvenance {
             map: self.map(&messages, checkpoints.len()),
             status: self.status.clone(),
             record,
-            expected_snapshot_revision: None,
+            expected_snapshot_revision: Some(expected_snapshot_revision),
             binding: None,
         })
     }
@@ -191,11 +195,26 @@ impl ConversationProvenance {
 #[cfg(test)]
 mod tests;
 
+/// A save failure for callers that report a string. A lost compare-and-swap
+/// says so, instead of the debug form of the raw storage error or the
+/// owner-generation wording of `StaleMutation`.
+pub(crate) fn save_failure_reason(error: storage::thread_index::SnapshotApiError) -> String {
+    match storage_error(error) {
+        storage::StorageError::StaleMutation => {
+            "the saved snapshot was replaced by a newer save after it was read".into()
+        }
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn storage_error(
     error: storage::thread_index::SnapshotApiError,
 ) -> storage::StorageError {
     match error {
         storage::thread_index::SnapshotApiError::Storage(error) => error,
+        storage::thread_index::SnapshotApiError::RevisionConflict => {
+            storage::StorageError::StaleMutation
+        }
         other => storage::StorageError::Serialization(format!("snapshot bundle: {other:?}")),
     }
 }

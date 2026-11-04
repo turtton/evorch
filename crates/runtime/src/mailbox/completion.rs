@@ -1,4 +1,4 @@
-//! Per-registration receipts shared by output snapshots and un-injected queues.
+//! Per-registration and idle-turn receipts shared by output snapshots and queues.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,7 +30,7 @@ impl CompletionNotice {
         self.observed.store(true, Ordering::Release);
     }
 
-    fn observed(&self) -> bool {
+    pub(crate) fn observed(&self) -> bool {
         self.observed.load(Ordering::Acquire)
     }
 }

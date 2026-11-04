@@ -54,6 +54,78 @@ fn memory_from_status(status: &str) -> (Option<u64>, Option<u64>) {
     (field("VmRSS:"), field("VmHWM:"))
 }
 
+/// What the first pass of the history restore read, as the numbers behind
+/// "how much of the history did it open".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstPassReport {
+    pub rows_scanned: u64,
+    /// Events decoded only to find a waiting state; the pass reads it from the
+    /// task decode, so any value above 0 is a regression.
+    pub waiting_event_decodes: u64,
+    /// Lifecycle events decoded in full for the delegated-task restore.
+    pub task_event_decodes: u64,
+    /// Stored-response slices expanded for their metadata (text is never kept).
+    pub message_part_rows: u64,
+    pub message_part_stored_bytes: u64,
+    pub message_part_expanded_bytes: u64,
+    /// Session markers, unclassifiable rows and thread probes.
+    pub other_decodes: u64,
+    pub isolated_events: u64,
+    /// `(events decoded, payload bytes read)` when the `subkind` column was not
+    /// backfilled and the pass had to decode the whole history.
+    pub fallback: Option<(u64, u64)>,
+}
+
+impl FirstPassReport {
+    /// One info line for the measurements, and a single warning when the
+    /// slow path was taken.
+    pub fn log(&self) {
+        tracing::info!(
+            target: "gui::restore",
+            rows_scanned = self.rows_scanned,
+            waiting_event_decodes = self.waiting_event_decodes,
+            task_event_decodes = self.task_event_decodes,
+            message_part_rows = self.message_part_rows,
+            message_part_stored_bytes = self.message_part_stored_bytes,
+            message_part_expanded_bytes = self.message_part_expanded_bytes,
+            other_decodes = self.other_decodes,
+            isolated_events = self.isolated_events,
+            "history first pass"
+        );
+        if let Some((events, bytes)) = self.fallback {
+            tracing::warn!(
+                first_pass_fallback_events_decoded = events,
+                first_pass_fallback_payload_bytes = bytes,
+                "history restore decoded every event: the event subkind column is not backfilled yet"
+            );
+        }
+    }
+}
+
+/// Reports the stored events the restore skipped because they could not be
+/// read, once per restore: the same event fails in both passes, so the caller
+/// keys them by event ID. Each is `(event ID, run from the run_id column,
+/// reason)`. The warning lists the first few; the caller keeps them all.
+pub fn report_unreadable_events<'a>(
+    events: impl ExactSizeIterator<Item = (i64, Option<&'a str>, &'a str)>,
+) {
+    const SHOWN: usize = 10;
+    let count = events.len();
+    if count == 0 {
+        return;
+    }
+    let sample: Vec<String> = events
+        .take(SHOWN)
+        .map(|(id, run, reason)| format!("#{id} run={} {reason}", run.unwrap_or("-")))
+        .collect();
+    tracing::warn!(
+        count,
+        omitted = count - sample.len(),
+        events = ?sample,
+        "history restore skipped stored events that could not be read"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::memory_from_status;

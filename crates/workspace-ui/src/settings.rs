@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{SettingsError, Workspace};
+use crate::{SettingsError, SidebarView, Workspace};
 
 pub const UI_SETTINGS_VERSION: u32 = 1;
 
@@ -65,6 +65,10 @@ pub struct UiSettings {
     pub keybinds: KeybindSettings,
     #[serde(default)]
     pub theme_preset: ThemePresetName,
+    /// Sort order and folded projects of the sidebar: this machine's view of the
+    /// project list, kept out of the sidebar state that processes merge.
+    #[serde(default, skip_serializing_if = "SidebarView::is_default")]
+    pub sidebar_view: SidebarView,
 }
 
 impl Default for UiSettings {
@@ -74,6 +78,7 @@ impl Default for UiSettings {
             layout: LayoutSettings::default(),
             keybinds: KeybindSettings::default(),
             theme_preset: ThemePresetName::default(),
+            sidebar_view: SidebarView::default(),
         }
     }
 }

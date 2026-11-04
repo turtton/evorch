@@ -60,6 +60,7 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) terminal_target: (crate::terminal::TerminalKey, std::path::PathBuf),
     pub(super) panels: &'a BTreeMap<PanelId, Panel>,
     pub(super) sidebar: &'a SidebarState,
+    pub(super) sidebar_view: &'a workspace_ui::SidebarView,
     pub(super) phases: &'a BTreeMap<String, workspace_ui::ThreadRunPhase>,
     pub(super) unread_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
     pub(super) externally_working_threads: &'a std::collections::BTreeSet<workspace_ui::ThreadId>,
@@ -334,6 +335,7 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     self.unread_threads,
                     self.externally_working_threads,
                     self.retention,
+                    self.sidebar_view,
                 ) {
                     *self.sidebar_action = Some(action);
                 }

@@ -376,7 +376,7 @@ fn every_variant() -> Vec<(&'static str, &'static str, Value, Option<&'static st
         (
             "Compaction",
             "Compacted",
-            json!({"run_id": "run-a", "reason": "automatic", "threshold": 0.8, "context_window_tokens": 1, "estimated_tokens_before": 2, "estimated_tokens_after": 1, "compacted_range_start": 0, "compacted_range_end": 1, "checkpoint_id": "c", "summary": "s"}),
+            json!({"operation_id": "op-1", "run_id": "run-a", "reason": "automatic", "threshold": 0.8, "context_window_tokens": 1, "estimated_tokens_before": 2, "estimated_tokens_after": 1, "compacted_range_start": 0, "compacted_range_end": 1, "checkpoint_id": "c", "summary": "s"}),
             Some("run-a"),
         ),
         (
@@ -557,7 +557,7 @@ fn migration_leaves_old_rows_unconverted_and_backfill_fills_them_resumably() {
     let total = kinds.len() as u64 + 2;
 
     // When: the current migrations are applied.
-    crate::migrations::apply_migrations(&conn).unwrap();
+    crate::migrations::apply_migrations_unchecked(&conn).unwrap();
     let database = Database { conn };
 
     // Then: no row has been converted yet, and opening did not convert any.

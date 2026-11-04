@@ -17,6 +17,7 @@ pub fn upsert(
 pub(crate) struct RedactedSnapshot {
     pub messages: serde_json::Value,
     pub messages_json: String,
+    pub checkpoints: serde_json::Value,
     pub checkpoints_json: String,
     pub checkpoint_count: usize,
 }
@@ -66,55 +67,20 @@ pub(crate) fn redact(record: &RunContextRecord) -> Result<Option<RedactedSnapsho
         checkpoint_count: checkpoints.as_array().map_or(0, Vec::len),
         messages,
         messages_json,
+        checkpoints,
         checkpoints_json,
     }))
 }
 
-/// Writes only the snapshot row; the bundle API owns binding, sidecar and state.
+/// Writes the header and the changed messages of the snapshot; the bundle API owns
+/// binding, sidecar and state. The caller holds the write transaction.
 pub(crate) fn write(
     conn: &Connection,
     record: &RunContextRecord,
     redacted: &RedactedSnapshot,
     snapshot_revision: u64,
 ) -> Result<(), StorageError> {
-    let snapshot_revision = i64::try_from(snapshot_revision)
-        .map_err(|_| StorageError::OutOfRange("snapshot revision"))?;
-    let host_inputs_json =
-        crate::repo::host_input_receipt::normalized_ids(&record.host_inputs_json)?;
-    let messages = crate::codec::encode(&redacted.messages_json);
-    let checkpoints = crate::codec::encode(&redacted.checkpoints_json);
-    conn.execute(
-        "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, messages_json, \
-         checkpoints_json, terminal_phase, restorable, updated_at_ns, snapshot_revision, host_inputs_json, \
-         messages_len, checkpoints_len) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
-         ON CONFLICT(run_id) DO UPDATE SET role = excluded.role, name = excluded.name, \
-         parent_run_id = excluded.parent_run_id, config_json = excluded.config_json, \
-         messages_json = excluded.messages_json, checkpoints_json = excluded.checkpoints_json, \
-         terminal_phase = excluded.terminal_phase, restorable = excluded.restorable, \
-         updated_at_ns = excluded.updated_at_ns, snapshot_revision = excluded.snapshot_revision, \
-         host_inputs_json = excluded.host_inputs_json, messages_len = excluded.messages_len, \
-         checkpoints_len = excluded.checkpoints_len",
-        params![
-            record.run_id,
-            record.role,
-            record.name,
-            record.parent_run_id,
-            record.config_json,
-            messages,
-            checkpoints,
-            record.terminal_phase,
-            record.restorable,
-            record.updated_at_ns,
-            snapshot_revision,
-            host_inputs_json,
-            i64::try_from(redacted.messages_json.len())
-                .map_err(|_| StorageError::OutOfRange("messages length"))?,
-            i64::try_from(redacted.checkpoints_json.len())
-                .map_err(|_| StorageError::OutOfRange("checkpoints length"))?
-        ],
-    )?;
-    Ok(())
+    crate::repo::run_messages::write_snapshot(conn, record, redacted, snapshot_revision)
 }
 
 /// Only payloads are redacted: roles, tool IDs/names, and checkpoint ranges stay intact.
@@ -237,22 +203,8 @@ fn reject_secret_bearing_responses_item(
     Ok(())
 }
 
-/// Columns decoded by [`from_row`], in order.
-pub(crate) const COLUMNS: &str = "run_id, role, name, parent_run_id, config_json, messages_json, \
-                                  checkpoints_json, terminal_phase, restorable, updated_at_ns, \
-                                  host_inputs_json";
-
 pub fn get(conn: &Connection, run_id: &str) -> Result<Option<RunContextRecord>, StorageError> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT {COLUMNS} FROM run_contexts WHERE run_id = ?1 \
-                 AND run_id NOT IN (SELECT run_id FROM run_tombstones)"
-            ),
-            [run_id],
-            from_row,
-        )
-        .optional()?)
+    crate::repo::run_messages::get(conn, run_id)
 }
 
 pub(crate) fn meta(
@@ -282,15 +234,7 @@ pub(crate) fn checkpoint_messages(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<String>, StorageError> {
-    Ok(conn
-        .query_row(
-            "SELECT messages_json FROM run_contexts \
-             WHERE run_id = ?1 AND terminal_phase = 'Checkpoint' \
-             AND run_id NOT IN (SELECT run_id FROM run_tombstones)",
-            [run_id],
-            |row| crate::codec::text_column(row, 0),
-        )
-        .optional()?)
+    crate::repo::run_messages::checkpoint_messages(conn, run_id)
 }
 
 pub(crate) fn headers(
@@ -317,22 +261,6 @@ pub(crate) fn headers(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunContextRecord> {
-    Ok(RunContextRecord {
-        run_id: row.get(0)?,
-        role: row.get(1)?,
-        name: row.get(2)?,
-        parent_run_id: row.get(3)?,
-        config_json: row.get(4)?,
-        messages_json: crate::codec::text_column(row, 5)?,
-        checkpoints_json: crate::codec::text_column(row, 6)?,
-        terminal_phase: row.get(7)?,
-        restorable: row.get(8)?,
-        updated_at_ns: row.get(9)?,
-        host_inputs_json: row.get(10)?,
-    })
-}
-
 pub fn compare_and_swap_restore_state(
     conn: &Connection,
     run_id: &str,
@@ -340,21 +268,17 @@ pub fn compare_and_swap_restore_state(
     retry_config: &str,
     retry_restorable: bool,
 ) -> Result<bool, StorageError> {
-    Ok(conn.execute(
-        "UPDATE run_contexts SET config_json = ?3, restorable = ?4 \
-         WHERE run_id = ?1 AND config_json = ?2 AND restorable = 0",
-        params![run_id, expected_config, retry_config, retry_restorable],
-    )? == 1)
+    crate::repo::run_messages::compare_and_swap_restore_state(
+        conn,
+        run_id,
+        expected_config,
+        retry_config,
+        retry_restorable,
+    )
 }
 
 pub fn invalidate(conn: &Connection, run_id: &str) -> Result<(), StorageError> {
-    conn.execute(
-        "UPDATE run_contexts SET restorable = 0, \
-         config_json = json_set(config_json, '$.restorable', json('false'), \
-         '$.non_restorable_reason', 'persist_failed') WHERE run_id = ?1",
-        [run_id],
-    )?;
-    Ok(())
+    crate::repo::run_messages::invalidate(conn, run_id)
 }
 
 /// `run_ids` and every run delegated from them, through the parent links of
@@ -463,12 +387,12 @@ mod tests {
             database.run_context_meta(&record.run_id).unwrap(),
             Some(expected.clone())
         );
-        // A non-codec BLOB is invalid to the full reader. Metadata must not
-        // touch it, and reading messages alone must not touch checkpoints.
+        // A damaged checkpoint list is invalid to the full reader. Metadata must not
+        // touch it, and reading messages alone must not touch it either.
         database
             .conn
             .execute(
-                "UPDATE run_contexts SET checkpoints_json = x'00' WHERE run_id = ?1",
+                "UPDATE run_contexts SET checkpoints_json = 'not json' WHERE run_id = ?1",
                 [&record.run_id],
             )
             .unwrap();
@@ -479,10 +403,12 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // A damaged message is an error, never an absent run or an empty conversation;
+        // the metadata still does not read it.
         database
             .conn
             .execute(
-                "UPDATE run_contexts SET messages_json = x'00' WHERE run_id = ?1",
+                "UPDATE run_messages SET codec = 0, skeleton = x'ff' WHERE run_id = ?1",
                 [&record.run_id],
             )
             .unwrap();

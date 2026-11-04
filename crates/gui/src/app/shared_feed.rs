@@ -254,11 +254,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.fold_user_question(event);
         self.apply_conversation_event(event);
+        self.apply_run_display_event(event);
         self.bind_goal_event(event);
         match &event.kind {
-            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) => {
-                self.phases.insert(run_id.clone(), super::frame::phase(*to));
-            }
             EventKind::Lifecycle(LifecycleEvent::TurnCompleted {
                 run_id,
                 context_len,
@@ -305,9 +303,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })
             .map(|(run, _)| run.clone())
             .collect();
-        for run in active {
+        for run in &active {
             let settled = ended
-                .and_then(|runs| runs.iter().find(|ended| ended.run_id == run))
+                .and_then(|runs| runs.iter().find(|ended| ended.run_id == run.as_str()))
                 .and_then(|ended| ended.terminal_phase.as_deref());
             let settled = match settled {
                 Some("Done") => ThreadRunPhase::Done,
@@ -315,7 +313,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 _ => ThreadRunPhase::Stopped,
             };
             self.phases.insert(run.clone(), settled);
-            self.transcripts.interrupt_run_tools(&run);
+            self.transcripts.interrupt_run_tools(run);
+        }
+        for run in active {
+            self.park_completed_subagent(&run);
         }
     }
 

@@ -29,6 +29,13 @@ pub const RECLAIM_SCAN_ROWS: usize = 2_000;
 /// Index blocks (and their text) purged by one reclaim transaction.
 pub const RECLAIM_INDEX_ROWS: usize = 200;
 pub const RECLAIM_INDEX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+/// Message rows deleted by one reclaim transaction (stored skeleton bytes are bounded by
+/// [`RECLAIM_ROW_BUDGET`] too).
+pub const RECLAIM_MESSAGE_ROWS: usize = 500;
+/// Reference rows a reclaim transaction may delete through `ON DELETE CASCADE` (each one
+/// also queues its blob), so a message or header that names more blobs than this is not
+/// worth a bounded step: it waits for the exclusive startup phase.
+pub const RECLAIM_MESSAGE_REFS: u64 = 2_000;
 /// A single row above this many stored bytes is not deleted by the bounded
 /// step; it is registered for the exclusive startup phase instead.
 pub const RECLAIM_ROW_BUDGET: u64 = 4 * 1024 * 1024;

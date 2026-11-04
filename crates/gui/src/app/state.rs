@@ -77,6 +77,8 @@ pub struct WorkbenchState<S> {
     pub(super) keymap: Keymap,
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
+    /// Local sort and folding of the project list; saved with the layout, never merged.
+    pub(super) sidebar_view: workspace_ui::SidebarView,
     pub(super) sidebar_path: Option<PathBuf>,
     pub(super) shared_sidebar: std::cell::RefCell<super::shared_sidebar::SharedSidebar>,
     pub(super) shared_feed: super::shared_feed::SharedFeedState,
@@ -84,6 +86,11 @@ pub struct WorkbenchState<S> {
     /// replay, then through events followed from other processes. Events
     /// after it are still to be shown; events up to it never are again.
     pub(super) shown_through_event: i64,
+    /// Stored events the history restore could not read, by event ID: the run
+    /// the `run_id` column named and why. Complete, however many there are;
+    /// the log shows only the first few.
+    pub(super) unreadable_history_events:
+        std::collections::BTreeMap<i64, super::history::UnreadableEvent>,
     pub(super) history: Vec<super::history::UserMessage>,
     pub(super) receipt_reconciliation: super::delivery::ReceiptReconciliation,
     pub(super) draft_dirty_at: std::cell::Cell<Option<std::time::Instant>>,
@@ -224,10 +231,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             keymap: Keymap::from_settings(&settings.keybinds),
             save_path: None,
             sidebar: SidebarState::default(),
+            sidebar_view: settings.sidebar_view.clone(),
             sidebar_path: None,
             shared_sidebar: Default::default(),
             shared_feed: Default::default(),
             shown_through_event: 0,
+            unreadable_history_events: std::collections::BTreeMap::new(),
             history: Vec::new(),
             receipt_reconciliation: Default::default(),
             draft_dirty_at: Default::default(),
@@ -422,6 +431,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .unwrap_or_default(),
             None,
         );
+        self.sidebar_view.retain_projects(&sidebar);
         self.sidebar = sidebar;
         self.sync_subagent_thread_panes();
         self.refresh_active_thread_workspace();
@@ -598,6 +608,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub fn issued(&self) -> &[WorkbenchCommand] {
         &self.issued
+    }
+    /// How the sidebar sorts and folds its projects (restored from the saved layout).
+    pub const fn sidebar_view(&self) -> &workspace_ui::SidebarView {
+        &self.sidebar_view
     }
     pub fn save_path(&self) -> Option<&PathBuf> {
         self.save_path.as_ref()

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 #[path = "sidebar/project_add.rs"]
 mod project_add;
+#[path = "sidebar/project_toolbar.rs"]
+mod project_toolbar;
 #[path = "sidebar/thread_attention.rs"]
 mod thread_attention;
 #[path = "sidebar/thread_read_dirs.rs"]

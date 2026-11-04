@@ -367,7 +367,7 @@ async fn followup_restores_legacy_oracle_chat_as_advisor() {
         drop(first);
         let conn = rusqlite::Connection::open(&config.db_path).unwrap();
         conn.execute(
-            "UPDATE run_contexts SET role = ?2, config_json = ?3 WHERE run_id = ?1",
+            "UPDATE run_contexts SET role = ?2, config_json = ?3, config_len = length(CAST(?3 AS BLOB)) WHERE run_id = ?1",
             rusqlite::params![prior.to_string(), legacy, descriptor.to_string()],
         )
         .unwrap();

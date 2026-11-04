@@ -628,7 +628,10 @@ fn compression_uses_writer_policy_and_recomputes_accounting() {
 }
 
 #[test]
-fn public_context_reader_round_trips_valid_messages_and_large_checkpoints_in_mixed_formats() {
+fn compaction_leaves_saved_conversations_byte_identical_and_foreign_keys_intact() {
+    // Conversations are `run_messages` rows whose skeletons are compressed when written,
+    // so the compaction has no context rewrite left: it must not change what a reader
+    // gets, and it ends with a clean foreign key check.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("events.db");
     let db = seed(&path);
@@ -645,41 +648,43 @@ fn public_context_reader_round_trips_valid_messages_and_large_checkpoints_in_mix
     .to_string();
     let runs = ["plain", "blob", "mixed"];
     for run in runs {
-        let messages_value = if run == "blob" {
-            codec::encode(&messages)
-        } else {
-            codec::Encoded::Plain(&messages)
-        };
-        let checkpoints_value = if run == "plain" {
-            codec::Encoded::Plain(&checkpoints)
-        } else {
-            codec::encode(&checkpoints)
-        };
-        db.conn.execute(
-            "INSERT INTO run_contexts(run_id,role,name,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns,messages_len,checkpoints_len)
-             VALUES(?1,'Worker','context','{}',?2,?3,'Done',1,42,?4,?5)",
-            params![run, messages_value, checkpoints_value, messages.len() as i64, checkpoints.len() as i64],
-        ).unwrap();
+        crate::repo::run_context::upsert(
+            &db.conn,
+            &crate::RunContextRecord {
+                run_id: run.into(),
+                role: "Worker".into(),
+                name: "context".into(),
+                parent_run_id: None,
+                config_json: "{}".into(),
+                messages_json: if run == "plain" {
+                    "[]".into()
+                } else {
+                    messages.clone()
+                },
+                checkpoints_json: if run == "blob" {
+                    "[]".into()
+                } else {
+                    checkpoints.clone()
+                },
+                terminal_phase: "Done".into(),
+                restorable: true,
+                updated_at_ns: 42,
+                host_inputs_json: "[]".into(),
+            },
+        )
+        .unwrap();
     }
     let before: Vec<_> = runs
         .iter()
         .map(|run| db.run_context(run).unwrap().unwrap())
         .collect();
     for record in &before {
-        assert_eq!(
-            serde_json::from_str::<Vec<providers::Message>>(&record.messages_json).unwrap(),
-            vec![message.clone()]
-        );
-        let checkpoint: serde_json::Value = serde_json::from_str(&record.checkpoints_json).unwrap();
-        assert_eq!(
-            checkpoint[0]["summary"],
-            serde_json::to_value(&message).unwrap()
-        );
+        let stored: Vec<providers::Message> = serde_json::from_str(&record.messages_json).unwrap();
+        assert!(stored.is_empty() || stored == vec![message.clone()]);
     }
     drop(db);
-    let preview = compact_events(&path, &options()).unwrap();
-    assert_eq!(preview.context_compression.eligible_values, 3);
-    for iteration in 0..2 {
+    compact_events(&path, &options()).unwrap();
+    for _ in 0..2 {
         let result = compact_events(
             &path,
             &CompactOptions {
@@ -688,30 +693,21 @@ fn public_context_reader_round_trips_valid_messages_and_large_checkpoints_in_mix
             },
         )
         .unwrap();
-        assert_eq!(
-            result.compressed_context_values,
-            if iteration == 0 { 3 } else { 0 }
-        );
+        assert_eq!(result.integrity_check.as_deref(), Some("ok"));
         let db = seed(&path);
         let after: Vec<_> = runs
             .iter()
             .map(|run| db.run_context(run).unwrap().unwrap())
             .collect();
         assert_eq!(before, after);
-        for run in runs {
-            let (messages_len, checkpoints_len): (usize, usize) = db
-                .conn
-                .query_row(
-                    "SELECT messages_len,checkpoints_len FROM run_contexts WHERE run_id=?1",
-                    [run],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(
-                (messages_len, checkpoints_len),
-                (messages.len(), checkpoints.len())
-            );
-        }
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 }
 
@@ -827,6 +823,7 @@ fn retention_preview_matches_apply_and_disabled_retention_preserves_observations
     insert(
         &db,
         Event::new(event_bus::LifecycleEvent::RunProgress {
+            compaction_operation_id: None,
             run_id: "a".into(),
             activity: event_bus::RunActivity::Model,
             context: None,
@@ -942,21 +939,17 @@ fn destructive_delta_mode_is_explicit_and_keeps_completed_responses() {
 }
 
 #[test]
-fn preview_compression_samples_at_most_one_thousand_values_without_rewriting_them() {
+fn preview_compression_samples_at_most_one_thousand_events_without_rewriting_them() {
     let db = Database::open_in_memory().unwrap();
     let body = "compressible ".repeat(200);
     let tx = db.conn.unchecked_transaction().unwrap();
-    for id in 0..1001 {
+    for _ in 0..1001 {
         tx.execute(
             "INSERT INTO events(schema_version,monotonic_ns,wall_clock_ns,kind,subkind,payload)
              VALUES(1,0,0,'Tool','ToolCompleted',?1)",
             [&body],
         )
         .unwrap();
-        tx.execute(
-            "INSERT INTO run_contexts(run_id,role,name,config_json,messages_json,checkpoints_json,terminal_phase,restorable,updated_at_ns)
-             VALUES(?1,'Worker','test','{}',?2,'[]','Done',0,0)", params![format!("run-{id}"), body]
-        ).unwrap();
     }
     tx.commit().unwrap();
     let (events, converted) = statistics::compress_events(&db.conn, &options(), None).unwrap();
@@ -966,13 +959,7 @@ fn preview_compression_samples_at_most_one_thousand_values_without_rewriting_the
         (1001, 1000)
     );
     assert_eq!(events.estimated_compressed_values, 1001);
-    let (contexts, converted) = statistics::compress_contexts(&db.conn, &options()).unwrap();
-    assert_eq!(converted, 0);
-    assert_eq!(
-        (contexts.eligible_values, contexts.sampled_values),
-        (1001, 1000)
-    );
-    assert!(events.estimated_saved_bytes > 0 && contexts.estimated_saved_bytes > 0);
+    assert!(events.estimated_saved_bytes > 0);
     assert_eq!(
         db.conn
             .query_row(
