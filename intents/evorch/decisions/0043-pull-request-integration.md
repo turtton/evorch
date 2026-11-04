@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。「未決事項」の項目は決めていない。実装は未着手。
+Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11 時点で Phase 1 の実装に着手。
 
 ## Context
 
@@ -36,21 +36,23 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 
 - ハーネス本体が sandbox の外で `gh pr view --json …`、`gh api`、`gh run view --log-failed` を実行する。evorch はトークンを保持しない。
 - `PullRequestSource` trait で取得を差し替え可能にし、テストは Fake を使う。
-- GitLab などは、保存する行に provider 列だけを持たせる。抽象は今は広げない。
+- 対応ホストは当面 GitHub.com のみ（GitHub Enterprise は非対応）。GitLab などは、保存する行に provider 列だけを持たせる。抽象は今は広げない。
 
 ### 紐づけ
 
-- 正は利用者の明示（GUI の Link 操作）である。
+- 正は利用者の明示（GUI の Link 操作）である。新規・再 Link はスレッド名の右クリック「Link PR…」と候補チップで行う。
 - `gh pr create` などのツール出力から検出した PR は、**候補として Phase 1 から提示**する。人がワンクリックで確定し、自動では確定しない。
 - agent 専用の紐づけツールは作らない。ToolSpec を途中で追加すると cache 契約に反し、agent の主張は検証が要るためである。
 - 紐づけ時にハーネスが照合する。PR のリポジトリとローカルの remote、PR の head ブランチと worktree のブランチを比べ、不一致なら警告付きで紐づける（拒否はしない）。
 - スレッドあたり active な紐づけは 1 件。再紐づけすると、前のものは superseded になる。
+- **Unlink**: active link を unlinked として終了できる。追跡を停止し、バッジ・PR バーを非表示にし、審査の `harness_facts` も出さない。派生済みの子スレッドの link には影響しない。
 - 保存先は新テーブル（例 `thread_pull_requests`）。互換性は維持しない（AGENTS.md の Compatibility policy）。
 
 ### 紐づけの引き継ぎ
 
-- **PR がマージされるまで**は、escalation・fork・rewind などで派生したスレッドにも紐づけを引き継ぐ。
-- **マージ後は引き継がない。** 候補として出すかどうかは未決（出さなくてもよい）。
+- **継承するのは open の PR のみ。Merged・Closed は引き継がない。** マージ済みか確認できないときは引き継ぎを保留する。
+- escalation・fork・rewind などで派生したスレッドに引き継ぐが、Lane（新しい派生種別）には引き継がない。
+- マージ後の派生スレッドに候補は出さない。
 
 ### 事実と未信頼テキストを分ける
 
@@ -117,16 +119,16 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 
 ### GUI
 
-最新の情報と操作（「agent に送る」、auto fix トグル）は画面下部に置く。mock で 3 案を比べ、案 A を採る。
+最新の情報と操作は画面下部に置く。mock で 3 案を比べ、案 A を採る。
 
-- **PR バー**: 会話の入力欄（composer）の直上に置く。折りたたみ時は 1 行で、展開すると上方向に伸びる。CI 失敗時は展開し、auto fix が動作中は畳む。check の一覧、head SHA、マージ状態、Link / 更新 / 「agent に送る」の操作、auto fix トグルを持つ。
+- **PR バー**: 会話の入力欄（composer）の直上に置く。折りたたみ時は 1 行で、展開すると上方向に伸びる。上限は会話欄の 40% とし、狭い画面は想定しない。CI 失敗時は展開する。check の一覧、head SHA、マージ状態を表示し、操作行には更新と「Unlink」を置く（「Link…」は置かず、新規・再 Link はスレッド名の右クリック「Link PR…」と候補チップで行う）。「agent に送る」操作と auto fix トグルは Phase 2 の機能のため Phase 1 では表示しない（Phase 2 では CI 失敗時に展開し、auto fix 動作中は畳む）。
   - PR はスレッド単位なので、subagent の transcript を開いている間も PR バーを表示する。
 - **スレッド一覧**: 行に PR バッジ（#番号と ✓ / ✗ / ● / merged）を出す。
 - **候補 PR**: `gh pr create` の出力の直下にチップ（Link PR / 無視）を出す。手動の「Link PR…」は、スレッド名の右クリックメニューに加える。
-- **ハーネスの通知**: transcript では `harness` タグ付きのカードにし、ユーザーの発言や agent のメッセージと区別する。CI ログの抜粋は「外部データ — 信頼しないこと」と明記した囲みに入れる。
+- **ハーネスの通知**: transcript では `harness` タグ付きのカードにし、ユーザーの発言や agent のメッセージと区別する。UI 上に表示する必要のない注意書き（「外部データ — 信頼しないこと」の明記や「ユーザー発言ではない」等の注記）は出さない。未信頼テキストの区別は agent / 審査への入力側（囲み・型）で保つ。
 - **Notifications**: CI failed、Merged、auto fix の上限到達を加える。
-- **テーマ**: merged 用に紫を加える（Graphite と Tokyo Night の両方）。
-- 細部（ピクセル、色の値）は実装時に決める。
+- **テーマ**: merged 用の紫は Graphite `#a371f7`、Tokyo Night `#bb9af7` に決定。
+- 細部（ピクセル等）は実装時に決める。
 
 採らなかった案:
 
@@ -151,7 +153,6 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 
 ## 未決事項
 
-- マージ後に、派生スレッドへ候補として PR を出すか。
 - 通知の回数上限と cooldown の既定値（叩き台は 3 回・10 分）。
 - 外部 push と思われる head の判定方法。
 - 複数ディレクトリがあるときの、PR とチェックアウトの照合方法の詳細。
