@@ -476,6 +476,7 @@ fn a_migration_failure_always_directs_recovery_to_the_starting_backup() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, _| {
             if point == Point::AfterMigrate {
