@@ -32,11 +32,11 @@
 
 - migration 採番、`event.rs`：A
 - `runtime.rs`、`meta/registry.rs`、`policy.rs` の統合配線：B
-- **`frame.rs`、`actions.rs`、wake に関係する `restoration.rs`：C**
+- **`frame.rs`、`actions.rs`、wake に関係する `restoration.rs`：C**（ただし単一コア構成検討に伴い GUI 作り込みは最小限）
 - sidebar/family、GUI の一般モジュール登録：D
 - cache テスト入口・filter：E
 
-C が **durable outbox → GUI の root 復元 → ACK の全往復** を統合責任として持つ。D に wake の半分だけを暗黙に委ねない。B/C/D が共有ファイルを同時編集しないよう、追加モジュールに処理を置き、配線を所有者へ渡す。
+C が **durable outbox → root 復元 → ACK の全往復** を統合責任として持つ。D に wake の半分だけを暗黙に委ねない。B/C/D が共有ファイルを同時編集しないよう、追加モジュールに処理を置き、配線を所有者へ渡す。なお、[ADR 0024](../intents/evorch/decisions/0024-process-owner-claim.md)（ownership）廃止および単一コア構成（thread-9gkyvvvf）が議論中であるため、GUI 側の wake 往復の作り込みは最小限（コアから呼べる入口程度）とし、runtime/storage 側（durable outbox、重複排除、受領記録、無進展往復 guard）の検証を先行させる（GUI 側往復は方針確定後に調整）。
 
 ---
 
@@ -196,6 +196,18 @@ DTO/API 確定 → A → B/D 並列 → E 統合。B の予算型変更は、lan
 
 ## Phase 1c — 質問配送、durable wake、介入通知
 
+### 設計制約（単一コア構成・GUI/core 分離・Web 操作対応）
+
+thread-9gkyvvvf（GUI/core 分離・Web（スマホ）操作）および [ADR 0024](../intents/evorch/decisions/0024-process-owner-claim.md)（ownership）廃止・コア一元化の議論を踏まえ、Phase 1c に以下の制約を適用する。
+
+1. **protocol DTO への写像可能性**:
+   次の情報は runtime 内部型に閉じず、共通 protocol の DTO に当てはめられる形（serde 可能な ID と列挙型）で定義する。
+   - 質問の宛先記録（responder routing）: 宛先（ユーザー / lead）、management revision、routing revision
+   - 元の requester: run・thread・root run
+   - 回答者: 人か agent か。将来「desktop / web」の区別を追加予定であるため、列挙型は拡張可能（non-exhaustive 等）に定義する。
+2. **wake 往復の実装順序**:
+   ADR 0024 廃止・単一コア構成が採用された場合、wake → root 復元 → ACK の往復と、他 GUI 所有 thread に対する NACK は GUI ではなくコア内で完結する。方針確定までの間、GUI 側の wake 往復（`frame.rs` / `actions.rs` / `restoration.rs` 等）の作り込みは最小限（コアから呼べる入口程度）にとどめ、runtime/storage 側（durable outbox、重複排除、受領記録、無進展往復 guard）を先行実装・検証する。GUI 側の全往復統合はコア構成の方針確定後に調整する。
+
 ### C の変更対象
 
 - `crates/runtime/src/meta/questions.rs`
@@ -205,13 +217,13 @@ DTO/API 確定 → A → B/D 並列 → E 統合。B の予算型変更は、lan
 - `crates/runtime/src/mailbox.rs`
 - `crates/storage/src/repo/user_questions.rs`
 - 1b の lane storage/runtime モジュール
-- **`crates/gui/src/app/frame.rs`**
-- **`crates/gui/src/app/actions.rs`**
+- **`crates/gui/src/app/frame.rs`**（単一コア構成確定までは最小限の接続）
+- **`crates/gui/src/app/actions.rs`**（単一コア構成確定までは最小限の接続）
 - `crates/gui/src/app/restoration.rs`
 - `crates/gui/src/app/questions.rs`
 - `crates/gui/src/app/composer.rs`
 
-現行の root wake は `frame.rs` の `RootWakeRequested` 処理から `actions.rs::wake_conversation_root` へ進む。この往復に batch ID、management revision、Stop/ownership 再確認、claim lease、ACK を接続する。
+現行の root wake は `frame.rs` の `RootWakeRequested` 処理から `actions.rs::wake_conversation_root` へ進む。この往復に batch ID、management revision、Stop/ownership 再確認、claim lease、ACK を接続する。ただし単一コア構成が議論中であるため、GUI 側往復の作り込みは最小限とし、runtime/storage 側で検証を先行する。
 
 C が処理全体を所有し、A が transaction/event 契約、B が runtime 配線を支援する。
 
@@ -229,7 +241,7 @@ C が処理全体を所有し、A が transaction/event 契約、B が runtime �
 - 通常終了済み lead は質問・failed・ready で wake。
 - working 等は保留し、次ターンに bounded に集約。
 - runtime と host の両方で Stop を確認。
-- **claim lease と NACK/解放**: host が処理できない場合（`thread_of_run` 不明、他 GUI 所有の `readonly_threads` 等）は明示的に NACK/lease 解放を行う。
+- **claim lease と NACK/解放**: host が処理できない場合（`thread_of_run` 不明、他 GUI 所有の `readonly_threads` 等）は明示的に NACK/lease 解放を行う（単一コア構成ではコア内で完結予定）。
 - **再駆動契機**: thread ownership 取得時、runtime 起動時の未 ACK 走査、ユーザー入力時。
 - 入力の永続受領と ACK、crash repair。
 - 直接対話の介入通知。
@@ -241,8 +253,8 @@ C が処理全体を所有し、A が transaction/event 契約、B が runtime �
 3. **lead 受信 32 件超**: 10 lane が各 4 件、計 40 件の質問を作る。元 requester は各 4 件、lead は全 40 件をページング取得・回答できる。lead 自身が既に 32 件の質問を持つ場合も lane の responder inbox と衝突しない。
 4. **容量ガード**: requester 32 件、全体未回答 1024 件の境界で明示エラーとなり、既存質問が消えない。容量不足診断が残り、自動再試行ループにならない。
 5. **暴走抑止**: 同じイベント再送、sequence だけの増加、無進展の質問・通知往復を検出する。抑止対象の通知は durable に残り、別 lane の正当な ready は配送される。
-6. **Stop と復元の競合**: wake 発行後・host 復元前に Stop しても再開しない。既に停止した lead の通知は保留される。
-7. **crash と ACK**: claim 後、復元後、入力保存後、ACK 前後で障害を注入し、通知消失・同一 ID の二重 append・二重 root がない。claim lease タイムアウトや host 不能時の NACK/再駆動が動作する。
+6. **Stop と復元の競合**: wake 発行後・復元前に Stop しても再開しない。既に停止した lead の通知は保留される。単一コア完結の可能性を踏まえ、まずは runtime/storage 側で検証し、GUI 側往復は方針確定後に調整する。
+7. **crash と ACK**: claim 後、復元後、入力保存後、ACK 前後で障害を注入し、通知消失・同一 ID の二重 append・二重 root がない。claim lease タイムアウトや処理不能時の NACK/再駆動が動作する。単一コア完結の可能性を踏まえ、まずは runtime/storage 側で検証し、GUI 側往復は方針確定後に調整する。
 8. **完了非ブロック**: lead に未処理 lane 質問や未検証 ready があっても finish/resume できる。配送済みの同じ質問だけで繰り返し wake しない。
 
 ### cache e2e

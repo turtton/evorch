@@ -196,6 +196,14 @@ lane では次を採用する。
 
 既存 requester の 32 件制限と全体未回答 1024 件は、保存容量・過剰生成のガードとして維持する。到達時は質問作成を明示的に失敗させ、受理済み質問を削除しない。lane に bounded な `question_capacity_blocked` 診断を残し、GUI に表示する。自動再試行ループは行わない。
 
+#### protocol DTO への写像可能性（Phase 1c 制約）
+
+GUI/core 分離および Web（スマホ）操作の作業（thread-9gkyvvvf）を見据え、Phase 1c の次の情報は runtime 内部型に閉じず、共通 protocol の DTO に当てはめられる形（serde 可能な ID と列挙型）で定義する。
+
+- **質問の宛先記録（responder routing）**: 宛先（ユーザー / lead）、management revision、routing revision
+- **元の requester**: run・thread・root run
+- **回答者**: 人か agent か。将来「desktop / web」の区別を追加予定であるため、列挙型は拡張可能（non-exhaustive 等）に定義する。
+
 ### 8. 終了済み lead への配送・wake・暴走抑止
 
 #### 宛先と wake 要否
@@ -257,6 +265,12 @@ summary の質問はユーザー宛てなので、それだけでは lead を wa
 - 未 ACK / 解放済み batch の再駆動契機は、(a) thread ownership 取得時、(b) runtime 起動時の未 ACK 走査、(c) 当該 thread へのユーザー入力時、とする。
 
 復元や ACK の前後で crash しても、通知が消えず、同じ通知 ID を会話へ二重追加しない。既に送った provider prefix は変更しない。
+
+#### 単一コア構成の検討と wake 往復の実装順序（Phase 1c 制約）
+
+[ADR 0024](0024-process-owner-claim.md)（ownership）を廃止し「コアを 1 つだけ起動し GUI と Web はそこへ接続する」構成が議論されている（thread-9gkyvvvf）。この構成が採用されると、wake → root 復元 → ACK の往復と、他 GUI 所有 thread に対する NACK は GUI ではなくコア内で完結する。
+
+方針確定までの間、GUI 側の wake 往復（`frame.rs` / `actions.rs` / `restoration.rs` 等）の作り込みは最小限（コアから呼べる入口程度）にとどめ、runtime/storage 側（durable outbox、重複排除、受領記録、無進展往復 guard）を先行実装・検証する。
 
 ### 9. 完了申告と検証
 
@@ -376,6 +390,8 @@ brief 検証
 
 作成再試行は冪等にし、GUI 保存前の crash で lane を失わない。保存失敗時は成功を返さない。
 
+Phase 1b（PR #477）で GUI 起動経路に入れた `recover_unstarted_lanes` の呼び出しと、lane root の command sink 登録（`bind_lane_root`）は、単一コア構成（thread-9gkyvvvf、[ADR 0024](0024-process-owner-claim.md) 廃止検討）になった場合はコア側へ移す対象である。
+
 既存 thread 全体を SQL 正本へ移す変更は行わない。ただし lane の存在、管理関係、policy、実行管理は台帳を正とし、sidebar はその投影を持つ。title 等の既存 GUI 管理属性は host が管理する。
 
 attached↔summary の変更は run を作り直さずに行う。
@@ -466,6 +482,7 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 | stall/nudge 閾値 | configurable、episode 単位。作業時間制限にはしない |
 | PR/CI 証拠 adapter | [ADR 0043](0043-pull-request-integration.md) の実装状況を再確認。未完成なら独立 Reviewer 証拠を先行 |
 | cursor 保持期間 | bounded な snapshot 保持と明示的 `stale_cursor`。現在の権限検査は省略しない |
+| 単一コア構成への移行 | [ADR 0024](0024-process-owner-claim.md) 廃止・コア集約（thread-9gkyvvvf）確定時の、`recover_unstarted_lanes` / `bind_lane_root` や wake 往復・NACK 処理のコア側移管 |
 | 導入タイミング | operator/orchestrator が旧 run の完了・停止状況を確認して決定 |
 
 ## Validation and limits
@@ -477,6 +494,7 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 
 - [ADR 0003](0003-cache-first-context-engine.md): キャッシュ第一コンテキストエンジン（run 内安定性）。
 - [ADR 0022](0022-parent-child-tree-addressing-and-nested-delegation.md): 親子・派生スレッドのアドレス指定。
+- [ADR 0024](0024-process-owner-claim.md): thread process owner / claim モデル（単一コア構成による廃止検討、thread-9gkyvvvf 参照）。
 - [ADR 0028](0028-thread-goals-and-completion-checks.md): スレッドゴールと完了チェック。
 - [ADR 0031](0031-remove-isolated-workspaces.md): workspace 衝突はシステム強制せず宣言と運用で解決。
 - [ADR 0033](0033-file-tool-path-boundary.md): ファイルパス境界と escalation 審査。
