@@ -720,6 +720,20 @@ impl Database {
         crate::repo::usage::list_requests(&self.conn, from_ns, to_ns)
     }
 
+    /// `usage_requests_between` の行数制限版です。`max_rows` 行までを返し、
+    /// それを超える行が存在したかも返します。
+    ///
+    /// # Errors
+    /// SQLite 操作または保存値の変換に失敗した場合にエラーを返します。
+    pub fn usage_requests_between_limited(
+        &self,
+        from_ns: i64,
+        to_ns: i64,
+        max_rows: usize,
+    ) -> Result<(Vec<crate::usage::UsageRequestRow>, bool), StorageError> {
+        crate::repo::usage::list_requests_limited(&self.conn, from_ns, to_ns, max_rows)
+    }
+
     /// inclusive なローカル日付範囲 (`YYYY-MM-DD`) の usage ledger 行を時刻順に返します。
     ///
     /// # Errors

@@ -422,6 +422,23 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
         // Then: the failure says where, keeps the backup, and the database is not usable.
         assert!(failure.detail.contains("injected"), "{point:?}: {failure}");
         assert!(failure.restore_required, "{point:?}");
+        let guidance = failure.to_string();
+        assert!(
+            guidance.contains("the database was changed; do not return it to normal use"),
+            "{point:?}: {guidance}"
+        );
+        assert!(
+            guidance.contains("recover only from the verified backup made before this conversion"),
+            "{point:?}: {guidance}"
+        );
+        assert!(
+            guidance.contains("Recovery (there is no resume)"),
+            "{point:?}: {guidance}"
+        );
+        assert!(
+            !guidance.contains("a normal start and this command refuse it"),
+            "{point:?}: {guidance}"
+        );
         assert_eq!(version(&path), 39, "{point:?}: not published");
         let backup = failure.backup.clone().unwrap();
         assert!(
@@ -452,6 +469,39 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
             assert_eq!(read(&conn, run.id).messages_json, run.messages, "{point:?}");
         }
     }
+}
+
+#[test]
+fn a_migration_failure_always_directs_recovery_to_the_starting_backup() {
+    let (_dir, path, _) = seeded_at(33);
+    let failure = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+        },
+        &mut |point, _| {
+            if point == Point::AfterMigrate {
+                return Err(StorageError::Serialization(
+                    "injected migration failure".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(failure.stage, "migrate");
+    assert!(failure.restore_required);
+    assert_eq!(version(&path), 39);
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(classify(&conn).unwrap(), Shape::Source);
+
+    let guidance = failure.to_string();
+    assert!(guidance.contains("verified backup made before this conversion"));
+    assert!(guidance.contains("do not return it to normal use"));
+    assert!(guidance.contains("use this changed database as the starting point for recovery"));
+    assert!(!guidance.contains("a normal start and this command refuse it"));
 }
 
 #[test]
