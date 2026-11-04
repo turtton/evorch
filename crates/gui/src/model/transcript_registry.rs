@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use event_bus::{AgentMessageEvent, Event, EventKind, MessageEvent, ToolEvent};
 
 use super::scoped_call::parse_scoped_call_id;
-use super::transcript::{MessageDirection, TranscriptEntry, TranscriptModel};
+use super::transcript::{Fill, MessageDirection, TranscriptEntry, TranscriptModel};
+use crate::body::{BodyRef, BodyText, FailureKind, HistoryRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptKey {
@@ -34,6 +35,8 @@ pub struct TranscriptRegistry {
     /// Events of other processes are being shown: nothing may be delivered to
     /// the open thread or the unowned fallback on their behalf.
     foreign_scope: bool,
+    /// The stored event being applied, for the entries it makes.
+    source: Option<(i64, i64)>,
 }
 
 impl Default for TranscriptRegistry {
@@ -68,7 +71,7 @@ impl TranscriptRegistry {
                     } => {
                         tool_input_bytes += input.as_ref().map_or(0, json_bytes);
                         tool_detail_bytes += detail.as_ref().map_or(0, json_bytes);
-                        tool_output_bytes += output.as_ref().map_or(0, String::len);
+                        tool_output_bytes += output.as_ref().map_or(0, BodyText::len);
                     }
                     TranscriptEntry::Message { text, .. } => message_bytes += text.len(),
                     TranscriptEntry::Reasoning { text, .. } => reasoning_bytes += text.len(),
@@ -133,7 +136,15 @@ impl TranscriptRegistry {
             ambiguous_calls: BTreeSet::new(),
             compaction_checkpoints: BTreeSet::new(),
             foreign_scope: false,
+            source: None,
         }
+    }
+
+    /// Says which stored event the events applied from now on come from (first
+    /// and last id, more than one for a response joined from slices). `None`
+    /// for events that are not in the log.
+    pub fn set_source(&mut self, source: Option<(i64, i64)>) {
+        self.source = source;
     }
 
     pub fn run_for_call<'a>(&'a self, call_id: &'a str) -> Option<&'a str> {
@@ -266,6 +277,11 @@ impl TranscriptRegistry {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        self.apply_with_body(event, None);
+    }
+
+    /// [`Self::apply`] for an event whose display body is still in the store.
+    pub fn apply_with_body(&mut self, event: &Event, body: Option<&BodyText>) {
         // A committed event may be rejected on receipt after authority changes.
         // Existing ownership signals therefore also settle live-only cards,
         // including saved compactions whose run phase was already terminal.
@@ -351,24 +367,28 @@ impl TranscriptRegistry {
         }
 
         if let EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) = &event.kind {
-            self.runs
-                .entry(message.sender_run_id.clone())
-                .or_default()
-                .push(TranscriptEntry::AgentMessage {
-                    direction: MessageDirection::Outgoing,
-                    peer_run_id: message.recipient_run_id.clone(),
-                    kind: message.kind.clone(),
-                    content: message.content.clone(),
-                });
-            self.runs
+            let source = self.source;
+            let sender = self.runs.entry(message.sender_run_id.clone()).or_default();
+            sender.set_source(source);
+            sender.push(TranscriptEntry::AgentMessage {
+                direction: MessageDirection::Outgoing,
+                peer_run_id: message.recipient_run_id.clone(),
+                kind: message.kind.clone(),
+                content: message.content.clone(),
+            });
+            sender.set_source(None);
+            let recipient = self
+                .runs
                 .entry(message.recipient_run_id.clone())
-                .or_default()
-                .push(TranscriptEntry::AgentMessage {
-                    direction: MessageDirection::Incoming,
-                    peer_run_id: message.sender_run_id.clone(),
-                    kind: message.kind.clone(),
-                    content: message.content.clone(),
-                });
+                .or_default();
+            recipient.set_source(source);
+            recipient.push(TranscriptEntry::AgentMessage {
+                direction: MessageDirection::Incoming,
+                peer_run_id: message.sender_run_id.clone(),
+                kind: message.kind.clone(),
+                content: message.content.clone(),
+            });
+            recipient.set_source(None);
             return;
         }
 
@@ -404,6 +424,7 @@ impl TranscriptRegistry {
         let child_terminal = matches!(&event.kind,
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Stopped | event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })
                 if !self.is_thread_root(run_id));
+        let source = self.source;
         for key in route {
             match key {
                 TranscriptKey::Thread => {
@@ -420,13 +441,193 @@ impl TranscriptRegistry {
                         Some(id) => self.threads.entry(id.clone()).or_default(),
                         None => &mut self.thread,
                     };
+                    model.set_deferred_body(body.cloned());
+                    model.set_source(source);
                     model.apply_thread(event, child_terminal);
+                    model.set_source(None);
+                    model.set_deferred_body(None);
                 }
                 TranscriptKey::Run(run_id) => {
-                    self.runs.entry(run_id).or_default().apply(event);
+                    let model = self.runs.entry(run_id).or_default();
+                    model.set_deferred_body(body.cloned());
+                    model.set_source(source);
+                    model.apply(event);
+                    model.set_source(None);
+                    model.set_deferred_body(None);
                 }
             }
         }
+    }
+
+    /// Marks, in every transcript that would have shown the event, the place
+    /// of a stored event that could not be read. Returns false when no
+    /// transcript owns it (no run recorded): nothing is guessed, the caller
+    /// reports it elsewhere.
+    pub fn push_unreadable(
+        &mut self,
+        event_id: i64,
+        run_id: Option<&str>,
+        kind: FailureKind,
+        reason: &str,
+        reference: Option<BodyRef>,
+    ) -> bool {
+        let Some(run) = run_id else {
+            return false;
+        };
+        for key in self.route_run(run) {
+            match key {
+                TranscriptKey::Thread => {
+                    // Only a bound run reaches a thread; the open thread is never a guess.
+                    if let Some(thread) = self.run_threads.get(run).cloned() {
+                        self.threads.entry(thread).or_default().push_unreadable(
+                            event_id,
+                            run_id,
+                            kind.clone(),
+                            reason,
+                            reference,
+                        );
+                    }
+                }
+                TranscriptKey::Run(run) => {
+                    self.runs.entry(run).or_default().push_unreadable(
+                        event_id,
+                        run_id,
+                        kind.clone(),
+                        reason,
+                        reference,
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    /// Replaces every body in every transcript (tests only).
+    #[cfg(test)]
+    pub(crate) fn map_bodies(&mut self, f: &mut dyn FnMut(&BodyText) -> BodyText) {
+        for model in self.models_mut() {
+            model.map_bodies(f);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deferred_bodies(&self) -> bool {
+        std::iter::once(&self.thread)
+            .chain(self.threads.values())
+            .chain(self.runs.values())
+            .any(TranscriptModel::has_deferred_bodies)
+    }
+
+    fn models_mut(&mut self) -> impl Iterator<Item = &mut TranscriptModel> {
+        std::iter::once(&mut self.thread)
+            .chain(self.threads.values_mut())
+            .chain(self.runs.values_mut())
+    }
+
+    /// Records why reading the event again failed, in every transcript that
+    /// shows it as unreadable.
+    pub fn update_unreadable(
+        &mut self,
+        event_id: i64,
+        kind: Option<&FailureKind>,
+        reason: &str,
+        reference: Option<BodyRef>,
+    ) {
+        for model in self.models_mut() {
+            model.update_unreadable(event_id, kind.cloned(), reason, reference);
+        }
+    }
+
+    /// Fills the gap of `event_id` in the transcripts of `run` from `rows`,
+    /// the rows of the run read again (their slices already joined). The run
+    /// is replayed into scratch transcripts the way a restart would show it,
+    /// and each shown transcript takes from that replay only what its gap
+    /// held, so nothing shown moves or changes identity. No notification, no
+    /// telemetry: only the transcripts are touched. Returns whether any
+    /// transcript showed the gap.
+    pub fn fill_unreadable(
+        &mut self,
+        run: &str,
+        event_id: i64,
+        rows: &[HistoryRow],
+        through: i64,
+    ) -> Fill {
+        let mut scratch = Self::new();
+        match self.run_threads.get(run) {
+            Some(thread) if self.is_thread_root(run) => scratch.bind_thread_root(thread, run),
+            Some(thread) => scratch.bind_run(run, thread),
+            None => {}
+        }
+        for row in rows {
+            match row {
+                HistoryRow::Event(row) => {
+                    scratch.set_source(Some((row.first_id.unwrap_or(row.id), row.id)));
+                    scratch.apply_with_body(&row.event, row.body.as_ref());
+                    scratch.set_source(None);
+                }
+                HistoryRow::Failure(failure) if failure.run_id.as_deref() == Some(run) => {
+                    scratch.push_unreadable(
+                        failure.id,
+                        Some(run),
+                        failure.kind.clone(),
+                        &failure.reason,
+                        failure.reference,
+                    );
+                }
+                HistoryRow::Failure(_) => {}
+            }
+        }
+        // Asked of every transcript first: a replacement is made in all of them
+        // or in none.
+        let mut outcome = Fill::Absent;
+        for apply in [false, true] {
+            for key in self.route_run(run) {
+                let result = match key {
+                    TranscriptKey::Thread => {
+                        let Some(thread) = self.run_threads.get(run).cloned() else {
+                            continue;
+                        };
+                        match (self.threads.get_mut(&thread), scratch.threads.get(&thread)) {
+                            (Some(model), Some(replayed)) => {
+                                model.fill_unreadable_from(event_id, replayed, through, apply)
+                            }
+                            _ => Fill::Absent,
+                        }
+                    }
+                    TranscriptKey::Run(run) => {
+                        match (self.runs.get_mut(&run), scratch.runs.get(&run)) {
+                            (Some(model), Some(replayed)) => {
+                                model.fill_unreadable_from(event_id, replayed, through, apply)
+                            }
+                            _ => Fill::Absent,
+                        }
+                    }
+                };
+                match result {
+                    Fill::Stale => return Fill::Stale,
+                    Fill::Filled => outcome = Fill::Filled,
+                    Fill::Absent => {}
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Drops the transcript of a deleted thread (and of its runs).
+    pub fn drop_thread(&mut self, thread: &str) -> Vec<String> {
+        let runs: Vec<String> = self
+            .run_threads
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == thread)
+            .map(|(run, _)| run.clone())
+            .collect();
+        self.threads.remove(thread);
+        self.thread_roots.remove(thread);
+        for run in &runs {
+            self.runs.remove(run);
+            self.run_threads.remove(run);
+        }
+        runs
     }
 
     pub fn get(&self, key: &TranscriptKey) -> Option<&TranscriptModel> {

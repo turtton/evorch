@@ -213,7 +213,7 @@ fn legacy_checkpoint_repairs_missing_stream_chunks_in_display_history() {
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::Message { text, run_id } if run_id.as_deref() == Some("run-102") => {
-                Some(text.as_str())
+                Some(text.inline_or_empty())
             }
             _ => None,
         })
@@ -283,7 +283,7 @@ fn persisted_completion_is_not_replayed_twice_from_checkpoint() {
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::Message { text, run_id } if run_id.as_deref() == Some("run-103") => {
-                Some(text.as_str())
+                Some(text.inline_or_empty())
             }
             _ => None,
         })
@@ -469,7 +469,7 @@ fn restored_after_retention(retention_days: u32) -> (Vec<String>, Vec<String>) {
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::Message { text, run_id } if run_id.as_deref() == Some("run-104") => {
-                Some(text.clone())
+                Some(text.inline_or_empty().to_owned())
             }
             _ => None,
         })

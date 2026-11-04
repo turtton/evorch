@@ -249,7 +249,7 @@ impl TranscriptModel {
             _ => return,
         };
         let shown = view(redactor(), name, &draft.raw, draft.trimmed);
-        self.entry_meta[position].revision += 1;
+        self.touch(position);
         if let TranscriptEntry::Tool {
             tool_name,
             call_id,
@@ -283,7 +283,7 @@ impl TranscriptModel {
         self.discard_matching(Some(run_id), |sealed| sealed);
         for key in self.drafts.keys_of(Some(run_id)) {
             if let Some(position) = self.draft_position(&key) {
-                self.entry_meta[position].revision += 1;
+                self.touch(position);
                 if let TranscriptEntry::Tool {
                     status: ToolStatus::Drafting { sealed, .. },
                     ..
@@ -363,7 +363,7 @@ impl TranscriptModel {
         };
         self.drafts.drafts.remove(&key);
         let pending = self.take_pending_reviews(run_id, call_id);
-        self.entry_meta[position].revision += 1;
+        self.touch(position);
         if let TranscriptEntry::Tool {
             tool_name: name,
             call_id: id,

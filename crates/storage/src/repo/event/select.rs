@@ -251,7 +251,7 @@ pub(crate) fn run_candidates(
 /// Whether the event is attributed to one of `runs`: it is the run's own
 /// event, an agent message sent to or from it, or an approval whose call ID
 /// (`<run>:<call>`) belongs to it.
-fn concerns_runs(event: &event_bus::Event, runs: &HashSet<&str>) -> bool {
+pub(crate) fn concerns_runs(event: &event_bus::Event, runs: &HashSet<&str>) -> bool {
     if event
         .primary_run_id()
         .is_some_and(|run_id| runs.contains(run_id))

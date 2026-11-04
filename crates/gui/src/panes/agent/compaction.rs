@@ -96,6 +96,8 @@ pub(super) fn show(ui: &mut Ui, id: Id, entry: &TranscriptEntry) {
             ui.label("Checkpoint saved");
             copy_id_button(ui, "Copy checkpoint ID", checkpoint_id);
         });
-        ui.add(Label::new(text.as_str()).wrap());
+        crate::body::ui::show_text(ui, id.with("summary"), text, |ui, text| {
+            ui.add(Label::new(text).wrap());
+        });
     });
 }

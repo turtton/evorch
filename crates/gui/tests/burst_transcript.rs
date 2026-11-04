@@ -105,7 +105,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
         .entries()
         .iter()
         .map(|entry| match entry {
-            TranscriptEntry::Message { text, .. } => text.as_str(),
+            TranscriptEntry::Message { text, .. } => text.inline_or_empty(),
             TranscriptEntry::Reasoning { .. }
             | TranscriptEntry::UserMessage { .. }
             | TranscriptEntry::Notice { .. }
@@ -118,6 +118,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
             | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
+            | TranscriptEntry::Unreadable { .. }
             | TranscriptEntry::Branch { .. } => panic!("unexpected transcript entry"),
         })
         .collect()

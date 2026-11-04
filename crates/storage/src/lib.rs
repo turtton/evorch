@@ -104,8 +104,9 @@ pub use migrations::backfill::{
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, RunContextMeta, StoredAgentMessage};
 pub use repo::event::deferred::{
-    BodyFailure, BodyFailureClass, BodyRef, DeferredRow, DeferredStoredEvent, MAX_RESOLVE_REFS,
-    StoredEventFailure, StoredEventFailureReason, for_each_event_ordered_deferred, resolve_bodies,
+    BodyFailure, BodyFailureClass, BodyRef, DeferredPage, DeferredRow, DeferredStoredEvent,
+    MAX_RESOLVE_REFS, StoredEventFailure, StoredEventFailureReason, deferred_events_after,
+    for_each_event_for_runs_deferred, for_each_event_ordered_deferred, resolve_bodies,
 };
 pub use repo::event::{EventPage, StoredEvent, StoredFormat};
 pub use repo::user_questions::AnswerMode;

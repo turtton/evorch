@@ -425,7 +425,7 @@ fn offline_compaction_preserves_legacy_sidebar_input_between_root_deltas() {
             .iter()
             .filter_map(|entry| match entry {
                 TranscriptEntry::Reasoning { text, .. } | TranscriptEntry::Message { text, .. } => {
-                    Some(text.as_str())
+                    Some(text.inline_or_empty())
                 }
                 TranscriptEntry::UserMessage { text, .. } => Some(text.as_str()),
                 _ => None,

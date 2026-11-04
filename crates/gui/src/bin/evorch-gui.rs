@@ -1350,6 +1350,22 @@ fn build_workbench(
             policy: Arc::clone(&retention_policy),
         }));
     }
+    // Bodies stay in the store until a pane shows them; this thread reads them.
+    let body_repaint: Arc<dyn Fn() + Send + Sync> = {
+        let context_slot = Arc::clone(&repaint_ctx);
+        Arc::new(move || {
+            if let Some(context) = context_slot.get() {
+                context.request_repaint();
+            }
+        })
+    };
+    state = state.with_body_resolver(gui::body::BodyResolver::spawn(
+        Arc::new(gui::body::StorageBodies::new(
+            storage_config.db_path.clone(),
+        )),
+        gui::body::ResolverConfig::default(),
+        Some(body_repaint),
+    ));
     let stage = gui::restore_metrics::RestoreTimer::new("startup_history");
     state.restore_history_with_ownership(
         &storage::Database::open(&storage_config)?,

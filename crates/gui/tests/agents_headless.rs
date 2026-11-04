@@ -633,6 +633,7 @@ fn assert_run_entries(
             | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
+            | TranscriptEntry::Unreadable { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -652,6 +653,7 @@ fn assert_run_entries(
             | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
+            | TranscriptEntry::Unreadable { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();

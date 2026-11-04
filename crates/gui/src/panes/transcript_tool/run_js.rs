@@ -300,10 +300,14 @@ pub fn run_js_card(
     let shown_input = display_input.as_deref().map(|display| &display.value);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let color = status_color(status, *is_error);
+    // A header summary never asks for a body: it uses one only if held.
+    let header_output = output
+        .as_ref()
+        .and_then(|output| crate::body::ui::peek_text(ui.ctx(), output));
     let mut header = header::tool_header(
         tool_name,
         shown_input,
-        output.as_deref(),
+        header_output.as_deref(),
         *is_error,
         context.repo_root,
         context.agents,
@@ -373,7 +377,14 @@ pub fn run_js_card(
                 });
         }
         if expanded && !running {
-            result(ui, output.as_deref(), detail.as_ref(), *is_error);
+            match output {
+                Some(output) => {
+                    crate::body::ui::show_text(ui, id.with("output"), output, |ui, output| {
+                        result(ui, Some(output), detail.as_ref(), *is_error)
+                    })
+                }
+                None => result(ui, None, detail.as_ref(), *is_error),
+            }
             if let ToolStatus::Denied { reason } = status {
                 code(ui, reason, palette().ERROR_FG);
             }
