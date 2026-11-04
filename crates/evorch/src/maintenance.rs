@@ -24,7 +24,7 @@ convert-bodies: one-time conversion of a database of version 33 to 43 to the cur
   database (messages already rows; 41 and 42 only add the lane ledger and the memory favorite flag) gets its maps and
   events converted; a version 43 one only its events. Stop ALL evorch
   processes first.
-  Default is a read-only preview (needs the .maintenance-lock file next to the database and an empty WAL; a
+  Default is a read-only preview (needs the <db>.maintenance-lock file next to the database (the full database file name plus .maintenance-lock, e.g. events.db.maintenance-lock) and an empty WAL; a
   non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
   run in its own transaction after comparing it byte for byte, then each provenance map after comparing it as a typed
   map, then the events in batches (--event-batch-rows rows, at most 16 MiB of payload each) after comparing each as

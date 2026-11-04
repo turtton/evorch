@@ -1204,11 +1204,18 @@ impl PostEditHook for WarningHook {
 /// How the summary line shows `text`: cut after `limit` characters with a "…". The paths
 /// and messages in it name the temporary directory, so whether they are cut depends on how
 /// long that directory is; a check derives what must be shown from the limit instead.
+/// Control characters are flattened to spaces and whitespace runs collapsed first, as the
+/// summary does.
 fn as_summarized(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
     }
-    format!("{}…", text.chars().take(limit).collect::<String>())
+    format!("{}…", flat.chars().take(limit).collect::<String>())
 }
 
 #[tokio::test]
