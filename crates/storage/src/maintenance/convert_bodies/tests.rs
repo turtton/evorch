@@ -2190,3 +2190,61 @@ fn the_preview_of_a_version_40_database_counts_what_the_reclaim_has_to_do() {
         (1, 1, 1)
     );
 }
+
+#[test]
+fn a_version_40_database_with_a_deleted_thread_to_reclaim_is_converted() {
+    // Given: a version 40 database (no lane tables yet) holding a deleted thread, a deleted
+    // run of it and the unfinished reclaim job of their family.
+    let (_dir, path, sidecars) = seeded_with_maps();
+    apply(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    take_back(&conn, 40);
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('lanes', 'lane_reports')"
+        ),
+        0
+    );
+    conn.execute(
+        "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) VALUES ('t', 'fam', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'fam')",
+        [&sidecars[0].0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO reclaim_jobs(family_key, state, created_at_ns, updated_at_ns) \
+         VALUES ('fam', 'db_pending', 1, 1)",
+        [],
+    )
+    .unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+    lease(&path);
+
+    // When: it is converted.
+    let summary = apply(&path).unwrap();
+
+    // Then: the family is reclaimed, the lane ledger is added afterwards, and every kept
+    // map is rows.
+    assert_eq!(summary.retention.reclaimed_runs, 1);
+    assert_eq!((summary.source_schema, summary.target_schema), (40, 42));
+    assert_eq!(version(&path), 42);
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('lanes', 'lane_reports')"
+        ),
+        2
+    );
+    assert_eq!(
+        single(&conn, "SELECT COUNT(*) FROM run_context_provenance"),
+        sidecars.len() as i64 - 1
+    );
+}
