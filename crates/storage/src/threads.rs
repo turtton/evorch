@@ -34,6 +34,9 @@ pub enum ThreadLineageKind {
     Rewind,
     /// An orchestrator conversation a worker run requested.
     Escalation,
+    /// An independent Orchestrator thread a lead opened (ADR 0044). Written only by
+    /// the lane ledger; the thread keeps it for good.
+    Lane,
 }
 
 impl ThreadLineageKind {
@@ -43,12 +46,13 @@ impl ThreadLineageKind {
             Self::Fork => "fork",
             Self::Rewind => "rewind",
             Self::Escalation => "escalation",
+            Self::Lane => "lane",
         }
     }
 
     #[must_use]
     pub fn parse(label: &str) -> Option<Self> {
-        [Self::Fork, Self::Rewind, Self::Escalation]
+        [Self::Fork, Self::Rewind, Self::Escalation, Self::Lane]
             .into_iter()
             .find(|kind| kind.as_str() == label)
     }
@@ -110,6 +114,9 @@ pub struct ThreadUpsert {
     /// Role name as used in run names (`Role::name()`, such as `Worker`).
     pub chat_role: Option<String>,
     pub parent_thread_id: Option<String>,
+    /// How the thread branched. [`ThreadLineageKind::Lane`] is owned by the lane
+    /// ledger: an upsert never writes it and never replaces it (a stored lane keeps
+    /// its kind whatever a host mirror sends).
     pub lineage_kind: Option<ThreadLineageKind>,
     /// Run whose completed turn the thread branched from.
     pub fork_point_run_id: Option<String>,

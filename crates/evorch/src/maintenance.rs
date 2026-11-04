@@ -24,7 +24,7 @@ convert-bodies: one-time conversion of a database of version 33 to 40 (conversat
   Default is a read-only preview (needs the .maintenance-lease file next to the database and an empty WAL; a
   non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
   run in its own transaction after comparing it byte for byte and then each provenance map after comparing it as a typed
-  map, then drops the columns, vacuums and publishes version 41. If it stops half way there is no resume: restore the backup and start over (the failure report
+  map, then drops the columns, vacuums and publishes version 42. If it stops half way there is no resume: restore the backup and start over (the failure report
   lists the steps). A converted database is left untouched by a rerun.
 backfill-events: safe next to live writers; converts legacy subkind/run_id columns only.
 vacuum: one-time switch of a legacy auto_vacuum=NONE database to INCREMENTAL (compact-events --apply does it too).

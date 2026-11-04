@@ -210,7 +210,7 @@ fn suspended_writer_cleanup_reclaims_space_and_resumes_context_writes() {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 900_000;
+    config.hard_limits.max_db_bytes = 960_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(handle.upsert_run_context(&context()).is_err());
@@ -244,7 +244,7 @@ fn maintenance_cleans_expired_diagnostics_and_recovers_suspended_writer() {
         storage.handle().append_event(None, &expired).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 900_000;
+    config.hard_limits.max_db_bytes = 960_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(handle.upsert_run_context(&context()).is_err());
@@ -276,7 +276,7 @@ fn legacy_database_reports_deletion_without_claiming_file_recovery() {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 900_000;
+    config.hard_limits.max_db_bytes = 960_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(

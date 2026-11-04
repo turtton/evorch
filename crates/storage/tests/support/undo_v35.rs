@@ -14,10 +14,10 @@ fn triggers(connection: &Connection) -> Vec<String> {
 }
 
 /// Restores the whole-conversation `run_contexts` shape migration v40 replaced (after
-/// restoring the whole-map `run_context_provenance` shape migration v41 replaced).
+/// restoring the whole-map `run_context_provenance` shape migration v42 replaced).
 pub fn undo_v40(connection: &Connection) {
     connection
-        .execute_batch(include_str!("undo_v41.sql"))
+        .execute_batch(include_str!("undo_v42.sql"))
         .unwrap();
     connection
         .execute_batch(include_str!("undo_v40.sql"))

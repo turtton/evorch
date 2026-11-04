@@ -11,7 +11,9 @@ use serde_json::Value;
 
 use crate::StorageError;
 use crate::body_ref::{BodyToken, tokenize_in_place};
-use crate::migrations::{MESSAGE_ROWS_VERSION, MIGRATIONS, require_current_format};
+use crate::migrations::{
+    MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, require_current_format,
+};
 use crate::repo::run_messages::to_json;
 
 use super::super::invalid;
@@ -43,7 +45,7 @@ const REQUIRED_TABLES: [&str; 4] = [
     "reclaim_jobs",
 ];
 
-/// Tables migrations v40 and v41 create: none of them may exist before the conversion
+/// Tables migrations v40 and v42 create: none of them may exist before the conversion
 /// starts.
 const TARGET_TABLES: [&str; 4] = [
     "run_messages",
@@ -52,7 +54,7 @@ const TARGET_TABLES: [&str; 4] = [
     "run_message_provenance",
 ];
 
-/// The columns migration v41 adds to `run_context_provenance`.
+/// The columns migration v42 adds to `run_context_provenance`.
 const PROVENANCE_HEADER_COLUMNS: [&str; 4] = [
     "map_version",
     "raw_message_count",
@@ -181,17 +183,22 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
             supported: current,
         });
     }
-    if version == current {
+    if version >= PROVENANCE_ROWS_VERSION {
+        // Already in the converted format; a version below the latest only lacks the
+        // later migrations, which an ordinary open applies.
         require_current_format(conn)?;
         return Ok(Shape::Converted);
     }
-    if version == MESSAGE_ROWS_VERSION {
+    if version >= MESSAGE_ROWS_VERSION {
+        // Messages are rows, the provenance maps are still a column (version 40, or a
+        // version 41 that only added the lane ledger on top of it).
         return classify_runs_converted(conn);
     }
     if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {
         return Err(invalid(format!(
-            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {} (and a version {MESSAGE_ROWS_VERSION} one, for its provenance maps); this one is version {version}",
-            MESSAGE_ROWS_VERSION - 1
+            "convert-bodies converts a database of version {MIN_SOURCE_VERSION} to {} (and a version {MESSAGE_ROWS_VERSION} or {} one, for its provenance maps); this one is version {version}",
+            MESSAGE_ROWS_VERSION - 1,
+            PROVENANCE_ROWS_VERSION - 1
         )));
     }
     let columns: Vec<String> = conn

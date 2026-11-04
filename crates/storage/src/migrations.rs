@@ -54,9 +54,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         include_str!("migrations/v40_drop.sql"),
         include_str!("migrations/v40_prepare.sql")
     ),
+    include_str!("migrations/v41.sql"),
     concat!(
-        include_str!("migrations/v41_drop.sql"),
-        include_str!("migrations/v41_prepare.sql")
+        include_str!("migrations/v42_drop.sql"),
+        include_str!("migrations/v42_prepare.sql")
     ),
 ];
 
@@ -69,13 +70,13 @@ pub(crate) const V40_PREPARE: &str = include_str!("migrations/v40_prepare.sql");
 /// command runs it once every run is converted.
 pub(crate) const V40_DROP: &str = include_str!("migrations/v40_drop.sql");
 
-/// Migration v41 without its last step: the header columns, the message table and the
+/// Migration v42 without its last step: the header columns, the message table and the
 /// triggers. The conversion command runs it while it moves the maps.
-pub(crate) const V41_PREPARE: &str = include_str!("migrations/v41_prepare.sql");
+pub(crate) const V42_PREPARE: &str = include_str!("migrations/v42_prepare.sql");
 
-/// The step of migration v41 that removes `run_context_provenance.map_json`; the
+/// The step of migration v42 that removes `run_context_provenance.map_json`; the
 /// conversion command runs it once every map is converted.
-pub(crate) const V41_DROP: &str = include_str!("migrations/v41_drop.sql");
+pub(crate) const V42_DROP: &str = include_str!("migrations/v42_drop.sql");
 
 /// The first schema version that stores a run's messages in `run_messages`. A database
 /// below it (and not empty) holds them in `run_contexts.messages_json`: this build
@@ -85,7 +86,7 @@ pub(crate) const MESSAGE_ROWS_VERSION: u32 = 40;
 /// The first schema version that stores a provenance map in `run_message_provenance`
 /// rows. A database below it (and not empty) holds the whole map in
 /// `run_context_provenance.map_json`: only the conversion command opens one.
-pub(crate) const PROVENANCE_ROWS_VERSION: u32 = 41;
+pub(crate) const PROVENANCE_ROWS_VERSION: u32 = 42;
 
 /// Refuses a database that is not in the current conversation format, before anything
 /// writes to it (no pragma, no migration, no row). A new (empty) database passes: it is
@@ -208,9 +209,9 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
     }
 }
 
-/// Reverts migration v41 (see `tests/support/undo_v41.sql`); apply it before [`UNDO_V40`].
+/// Reverts migration v42 (see `tests/support/undo_v42.sql`); apply it before [`UNDO_V40`].
 #[cfg(test)]
-pub(crate) const UNDO_V41: &str = include_str!("../tests/support/undo_v41.sql");
+pub(crate) const UNDO_V42: &str = include_str!("../tests/support/undo_v42.sql");
 
 /// Reverts migration v40 (see `tests/support/undo_v40.sql`); apply it before [`UNDO_V35`].
 #[cfg(test)]
@@ -279,3 +280,6 @@ DROP TABLE retention_unresolved; DROP TABLE retention_staging; DROP TABLE retent
 DROP TABLE run_ledger_delete_grants; DROP TABLE task_queue_delete_grants;
 DROP TABLE run_tombstones; DROP TABLE task_tombstones; DROP TABLE thread_tombstones;
 "#;
+
+#[cfg(test)]
+mod v41_tests;

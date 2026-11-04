@@ -183,6 +183,28 @@ pub fn list_requests(
     )
 }
 
+/// At most `max_rows` of the requests in `[from_ns, to_ns)`, and whether more exist.
+pub fn list_requests_limited(
+    conn: &Connection,
+    from_ns: i64,
+    to_ns: i64,
+    max_rows: usize,
+) -> Result<(Vec<UsageRequestRow>, bool), StorageError> {
+    let fetch = i64::try_from(max_rows)
+        .unwrap_or(i64::MAX - 1)
+        .saturating_add(1);
+    let mut rows = query_requests(
+        conn,
+        &format!(
+            "{REQUEST_COLUMNS} WHERE r.at_ns >= ?1 AND r.at_ns < ?2 ORDER BY r.at_ns, r.rowid LIMIT ?3"
+        ),
+        params![from_ns, to_ns, fetch],
+    )?;
+    let more = rows.len() > max_rows;
+    rows.truncate(max_rows);
+    Ok((rows, more))
+}
+
 /// Requests on the inclusive local days `[from_day, to_day]` (`YYYY-MM-DD`).
 pub fn list_requests_in_days(
     conn: &Connection,

@@ -91,6 +91,10 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
         },
         EventKind::Ledger(event) => match event {
             LedgerEvent::RunLedgerAppended { run_id, .. } => runs.push(run_id),
+            LedgerEvent::LaneCreated { origin_run_id, .. } => runs.push(origin_run_id),
+            LedgerEvent::LaneReportAppended { run_id, .. }
+            | LedgerEvent::LaneManagementChanged { run_id, .. }
+            | LedgerEvent::LaneBriefRevised { run_id, .. } => runs.extend(run_id.as_deref()),
         },
         EventKind::Diagnostic(event) => runs.extend(event.run_id.as_deref()),
         EventKind::Orchestrator(event) => match event {

@@ -14,6 +14,7 @@ mod project;
 mod reconcile;
 mod settings;
 mod sidebar;
+mod sidebar_view;
 mod thread;
 mod types;
 mod validate;
@@ -39,6 +40,7 @@ pub use settings::{
     UI_SETTINGS_VERSION, UiSettings,
 };
 pub use sidebar::{SIDEBAR_SCHEMA_VERSION, SidebarState};
+pub use sidebar_view::{ProjectSort, SidebarView, ordered_projects};
 pub use thread::{
     ForkPoint, LineageKind, ModelPreference, ThreadChatRole, ThreadId, ThreadLineage, ThreadRecord,
     ThreadRunPhase, ThreadState,

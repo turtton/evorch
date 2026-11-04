@@ -76,6 +76,8 @@ pub struct WorkbenchState<S> {
     pub(super) keymap: Keymap,
     pub(super) save_path: Option<PathBuf>,
     pub(super) sidebar: SidebarState,
+    /// Local sort and folding of the project list; saved with the layout, never merged.
+    pub(super) sidebar_view: workspace_ui::SidebarView,
     pub(super) sidebar_path: Option<PathBuf>,
     pub(super) shared_sidebar: std::cell::RefCell<super::shared_sidebar::SharedSidebar>,
     pub(super) shared_feed: super::shared_feed::SharedFeedState,
@@ -227,6 +229,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             keymap: Keymap::from_settings(&settings.keybinds),
             save_path: None,
             sidebar: SidebarState::default(),
+            sidebar_view: settings.sidebar_view.clone(),
             sidebar_path: None,
             shared_sidebar: Default::default(),
             shared_feed: Default::default(),
@@ -426,6 +429,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .unwrap_or_default(),
             None,
         );
+        self.sidebar_view.retain_projects(&sidebar);
         self.sidebar = sidebar;
         self.sync_subagent_thread_panes();
         self.refresh_active_thread_workspace();
@@ -602,6 +606,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
     pub fn issued(&self) -> &[WorkbenchCommand] {
         &self.issued
+    }
+    /// How the sidebar sorts and folds its projects (restored from the saved layout).
+    pub const fn sidebar_view(&self) -> &workspace_ui::SidebarView {
+        &self.sidebar_view
     }
     pub fn save_path(&self) -> Option<&PathBuf> {
         self.save_path.as_ref()

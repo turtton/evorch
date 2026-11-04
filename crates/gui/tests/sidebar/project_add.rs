@@ -514,3 +514,32 @@ fn allowed_directory_changes_declare_only_trusted_directories_that_exist() {
         ]
     );
 }
+
+#[test]
+fn add_project_is_one_toolbar_control_above_the_list_with_or_without_projects() {
+    // Given: a workbench with a project and one without any.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut with_project = typing_harness(state(
+        MockSource::default(),
+        sidebar_with_project(temp.path()),
+    ));
+    let mut empty = typing_harness(state(MockSource::default(), SidebarState::default()));
+    with_project.run_steps(4);
+    empty.run_steps(4);
+
+    // Then: each shows exactly one "Add project" control, and with a project it is
+    // above the project row rather than after the list.
+    assert_eq!(with_project.get_all_by_label("Add project").count(), 1);
+    assert_eq!(empty.get_all_by_label("Add project").count(), 1);
+    assert!(
+        with_project.get_by_label("Add project").rect().bottom()
+            <= with_project.get_by_label("demo").rect().top()
+    );
+    assert!(empty.query_by_label("No projects yet").is_some());
+
+    // When: the toolbar control is pressed on the empty sidebar.
+    click(&mut empty, "Add project");
+
+    // Then: it opens the add-project dialog.
+    assert!(empty.state().project_dialog().is_open());
+}

@@ -14,7 +14,7 @@ use storage::{Database, RunContextRecord, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
 
 const UNDO_V40: &str = include_str!("support/undo_v40.sql");
-const UNDO_V41: &str = include_str!("support/undo_v41.sql");
+const UNDO_V42: &str = include_str!("support/undo_v42.sql");
 
 fn config(dir: &TempDir) -> StorageConfig {
     StorageConfig {
@@ -886,7 +886,7 @@ fn old_format_database(path: &std::path::Path, version: u32) {
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(path).unwrap();
-    connection.execute_batch(UNDO_V41).unwrap();
+    connection.execute_batch(UNDO_V42).unwrap();
     connection.execute_batch(UNDO_V40).unwrap();
     connection
         .execute(
@@ -973,7 +973,7 @@ fn a_version_40_database_whose_maps_are_a_column_is_refused_by_every_entry_untou
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(&path).unwrap();
-    connection.execute_batch(UNDO_V41).unwrap();
+    connection.execute_batch(UNDO_V42).unwrap();
     connection.pragma_update(None, "user_version", 40).unwrap();
     connection
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))

@@ -47,7 +47,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v42.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;
@@ -56,6 +56,13 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
          DROP TABLE run_messages;
          DELETE FROM content_blob_gc_queue;
          DELETE FROM content_blobs;
+         DROP TABLE lane_list_snapshot_rows;
+         DROP TABLE lane_list_snapshots;
+         DROP TABLE lane_delivery_keys;
+         DROP TABLE lane_reports;
+         DROP TABLE lanes;
+         DROP TABLE lane_state;
+         DROP TRIGGER threads_lane_lineage_sticky;
          DROP TABLE run_contexts;",
     )?;
     for definition in &definitions {
