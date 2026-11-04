@@ -4,6 +4,7 @@ use event_bus::{EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 mod lease;
+mod questions;
 #[derive(Default)]
 struct Model {
     finish: AtomicBool,
@@ -11,6 +12,7 @@ struct Model {
     block_next: AtomicBool,
     blocked: tokio::sync::Notify,
     requests: Mutex<Vec<Vec<Message>>>,
+    next_tools: Mutex<HashMap<String, ContentBlock>>,
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
@@ -19,7 +21,7 @@ impl AgentModel for Model {
     }
     async fn complete(
         &self,
-        _: &AgentInvocationContext,
+        invocation: &AgentInvocationContext,
         _: Role,
         messages: &[Message],
         _: &[ToolSpec],
@@ -34,11 +36,15 @@ impl AgentModel for Model {
             });
         }
         self.requests.lock().unwrap().push(messages.to_vec());
+        let scripted = self.next_tools.lock().unwrap().remove(&invocation.run_id);
         let finish = self.finish.load(Ordering::SeqCst);
+        let tool_use = finish || scripted.is_some();
         Ok(providers::ChatResponse {
             message: Message {
                 role: providers::Role::Assistant,
-                content: if finish {
+                content: if let Some(tool) = scripted {
+                    vec![tool]
+                } else if finish {
                     vec![ContentBlock::ToolUse {
                         id: format!("finish-{}", messages.len()),
                         name: "finish".into(),
@@ -50,7 +56,7 @@ impl AgentModel for Model {
                     }]
                 },
             },
-            finish_reason: if finish {
+            finish_reason: if tool_use {
                 providers::FinishReason::ToolUse
             } else {
                 providers::FinishReason::Stop
@@ -623,6 +629,13 @@ async fn recovery_of_unpresented_receipt(fail_ack: bool) {
     }
     f.runtime.wait(lead).await.unwrap();
     assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    if fail_ack {
+        // The provider rejected before sending any input. Freeze the same saved
+        // receiver input at its pre-finalization crash phase, not Error/Done.
+        f.sql(&format!(
+            "UPDATE run_contexts SET terminal_phase='Checkpoint' WHERE run_id='{lead}'"
+        ));
+    }
     assert!(
         f.storage
             .handle()

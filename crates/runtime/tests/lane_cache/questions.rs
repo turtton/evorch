@@ -1,8 +1,8 @@
-//! B's headless routing/tool cache contract. Until C binds the delivery hooks,
-//! Bound source writes are injected at the storage adapter boundary; normal
-//! ask_user must remain user-routed. Continuation/wake is exercised by C.
+//! B/C's headless routing/tool cache contract.
+//! Runtime host binding selects the responder; actual ask_user/tool delivery
+//! must extend the lead provider prefix without rewriting earlier tool results.
 use super::*;
-use event_bus::lane::{LaneDeliveryBinding, QuestionRequester, QuestionResponder};
+use event_bus::lane::QuestionResponder;
 use event_bus::{AnswerOrigin, UserQuestion};
 
 fn lead_requests(h: &Harness) -> Vec<Value> {
@@ -20,36 +20,56 @@ fn lead_requests(h: &Harness) -> Vec<Value> {
         })
         .collect()
 }
-fn bound_question(
-    db: &storage::Storage,
-    lane: &storage::lanes::LaneRecord,
-    template: &UserQuestion,
-    id: &str,
-) -> UserQuestion {
-    let mut q = template.clone();
-    q.id = id.into();
-    q.title = id.into();
-    q.responder = None;
-    q.routing_revision = 0;
-    q.management_revision = None;
-    match db
-        .handle()
-        .create_lane_question(
-            lane.lane_id.clone(),
-            q.clone(),
-            QuestionRequester {
-                run_id: q.run_id.clone(),
-                root_run_id: q.root_run_id.clone(),
-                thread_id: lane.thread_id.clone(),
-            },
-            LaneDeliveryBinding::Bound,
-            1,
-        )
-        .unwrap()
+struct Host {
+    target: runtime::lane_delivery::LaneDeliveryTarget,
+    held: std::sync::atomic::AtomicBool,
+}
+impl runtime::lane_delivery::LaneDeliveryHost for Host {
+    fn resolve(
+        &self,
+        thread: &str,
+    ) -> Result<runtime::lane_delivery::LaneDeliveryTarget, storage::lane_delivery::LaneDeliveryNack>
     {
-        storage::lane_delivery::LaneQuestionCreated::Created(q) => *q,
-        other => panic!("{other:?}"),
+        if self.held.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(storage::lane_delivery::LaneDeliveryNack::Readonly);
+        }
+        if thread != "lead" {
+            return Err(storage::lane_delivery::LaneDeliveryNack::UnknownThread);
+        }
+        Ok(self.target.clone())
     }
+    fn now_ns(&self) -> i64 {
+        100
+    }
+}
+async fn bound_question(
+    h: &mut Harness,
+    lane: RunId,
+    id: &str,
+    events: &mut Vec<Event>,
+) -> UserQuestion {
+    input(
+        h,
+        lane,
+        "ask the managing lead",
+        vec![
+            call(id, "ask_user", json!({"title":id,"blocking":false})),
+            text_response("asked bound"),
+        ],
+        events,
+    )
+    .await;
+    let response = result(h, id);
+    let question = h
+        .runtime
+        .user_question(response["question_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        question.responder,
+        Some(QuestionResponder::Lead { .. })
+    ));
+    question
 }
 fn answer_input(q: &UserQuestion, operation: &str, action: Value) -> Value {
     json!({"question_id":q.id,"management_revision":q.management_revision.unwrap(),
@@ -106,18 +126,33 @@ async fn attached_questions_list_answer_and_user_reroute_preserve_lead_cache_pre
         .unwrap()
         .unwrap();
     assert_eq!(template.responder, Some(QuestionResponder::User));
-    // A stopped lane cannot produce unsolicited mock requests during the lead
-    // tool turns. Saved answers stay in its outbox until explicit restoration.
+    let host = Arc::new(Host {
+        target: runtime::lane_delivery::LaneDeliveryTarget {
+            root_run_id: lead,
+            generation: 1,
+            authority: RunConfig {
+                conversation: true,
+                ..Default::default()
+            },
+        },
+        held: std::sync::atomic::AtomicBool::new(true),
+    });
+    h.runtime
+        .bind_lane_delivery_host(host.clone())
+        .unwrap()
+        .abort();
+    let answered = bound_question(&mut h, lane, "question-cache-agent", &mut events).await;
+    let routed = bound_question(&mut h, lane, "question-cache-human", &mut events).await;
+    // The lead receives both durable questions as one bounded append. Saved
+    // answers remain held on the explicitly stopped lane until user resumption.
     h.runtime.stop(lane, runtime::StopScope::SelfOnly).unwrap();
     events.extend(through_phase(&mut h.receiver, lane, AgentRunPhase::Stopped).await);
     h.runtime.wait(lane).await.unwrap();
-    let lead_thread = template
-        .root_name
-        .strip_prefix("chat:Orchestrator:")
-        .unwrap();
-    let record = db.handle().lane_by_thread(lead_thread).unwrap().unwrap();
-    let answered = bound_question(&db, &record, &template, "question-cache-agent");
-    let routed = bound_question(&db, &record, &template, "question-cache-human");
+    h.mock
+        .enqueue(vec![text_response("received bound notifications")]);
+    host.held.store(false, std::sync::atomic::Ordering::SeqCst);
+    h.runtime.drive_pending_lane_deliveries().await.unwrap();
+    events.extend(through_phase(&mut h.receiver, lead, AgentRunPhase::Waiting).await);
     input(
         &mut h,
         lead,

@@ -20,7 +20,20 @@ pub(crate) trait LaneQuestionBindingSource {
         Ok(())
     }
 }
-impl LaneQuestionBindingSource for AgentRuntime {}
+impl LaneQuestionBindingSource for AgentRuntime {
+    fn lane_question_binding(&self) -> LaneDeliveryBinding {
+        self.lane_delivery_binding()
+    }
+    fn schedule_lane_question_delivery(&self, thread_id: &str) {
+        self.schedule_lane_deliveries(thread_id);
+    }
+    fn record_lane_question_report_progress(
+        &self,
+        report: &event_bus::LaneReport,
+    ) -> Result<(), LaneError> {
+        self.record_lane_report_progress(report)
+    }
+}
 
 pub(crate) struct LaneAnswerRequest {
     pub question_id: String,
