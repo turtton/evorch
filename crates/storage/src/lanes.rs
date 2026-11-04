@@ -102,6 +102,8 @@ pub struct LaneRecord {
     /// Raised by every changed brief. Starts at 1.
     pub brief_revision: u64,
     pub start_seed: String,
+    /// A cancelled or locally failed creation intent. Never recovered automatically.
+    pub start_blocked_reason: Option<String>,
     /// The current root run; `None` until the first start.
     pub root_run_id: Option<String>,
     /// 0 until the root started, then raised by every start or restart.
@@ -285,7 +287,8 @@ impl crate::Database {
         crate::repo::lanes::reports(&self.conn, lane_id, after_seq, limit)
     }
 
-    /// Lanes whose root never started, in lane ID order (at most 200).
+    /// Recoverable creation intents whose root never started, in lane ID order
+    /// (at most 200). Explicitly cancelled or locally failed intents are excluded.
     ///
     /// # Errors
     /// Returns an error if SQLite access or row decoding fails.

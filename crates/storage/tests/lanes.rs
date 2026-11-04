@@ -604,6 +604,83 @@ fn a_root_start_is_a_compare_and_swap_and_unstarted_lanes_are_found_again() {
 }
 
 #[test]
+fn v43_migration_keeps_pending_v42_intents_recoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("lanes.db"),
+        ..Default::default()
+    };
+    let original = {
+        let storage = Storage::open(config.clone()).unwrap();
+        let lane = storage.handle().create_lane(new_lane(1, 10)).unwrap().lane;
+        storage.close();
+        lane
+    };
+    {
+        let conn = Connection::open(&config.db_path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=42;",
+        )
+        .unwrap();
+    }
+    let storage = Storage::open(config).unwrap();
+    let h = storage.handle();
+    assert_eq!(h.unstarted_lanes(10).unwrap(), [original]);
+    assert!(
+        h.block_lane_start("lane-001", "cancelled", 20)
+            .unwrap()
+            .changed
+    );
+    assert!(h.unstarted_lanes(10).unwrap().is_empty());
+    storage.close();
+}
+
+#[test]
+fn a_blocked_intent_is_durable_idempotent_and_cannot_start_but_started_lanes_are_unchanged() {
+    let f = Fixture::new();
+    let h = f.handle();
+    h.create_lane(new_lane(1, 10)).unwrap();
+    h.create_lane(new_lane(2, 11)).unwrap();
+    let stopped = h.block_lane_start("lane-001", "cancelled", 12).unwrap();
+    assert!(stopped.changed);
+    let again = h
+        .block_lane_start("lane-001", "another reason", 13)
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(again.lane, stopped.lane);
+    let reopened = f.database();
+    assert_eq!(reopened.lane("lane-001").unwrap().unwrap(), stopped.lane);
+    assert_eq!(
+        reopened
+            .unstarted_lanes(10)
+            .unwrap()
+            .iter()
+            .map(|l| l.lane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-002"]
+    );
+    assert_eq!(
+        h.start_lane_run("lane-001", 0, "root-1", 14).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    let retry = h.create_lane(new_lane(1, 10)).unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.lane, stopped.lane);
+    h.start_lane_run("lane-002", 0, "root-2", 20).unwrap();
+    assert!(
+        !h.block_lane_start("lane-002", "cancel running", 21)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        h.start_lane_run("lane-002", 1, "root-3", 22)
+            .unwrap()
+            .generation,
+        2
+    );
+}
+
+#[test]
 fn a_brief_is_revised_from_the_revision_read_and_keeps_the_lane_policy() {
     let f = Fixture::new();
     let handle = f.handle();

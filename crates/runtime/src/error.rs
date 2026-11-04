@@ -27,6 +27,8 @@ pub enum RuntimeError {
     OrchestratorChildDenied { parent: String },
     #[error("run ownership generation is stale: {run_id}")]
     StaleOwnership { run_id: String },
+    #[error("cannot durably cancel lane startup {run_id}: {reason}")]
+    LaneCancellation { run_id: String, reason: String },
     /// 存在しない AgentRun が参照された。
     #[error("未知の AgentRun が指定されました: {run_id}")]
     UnknownRun {

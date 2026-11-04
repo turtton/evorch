@@ -79,6 +79,7 @@ fn record(n: u32, lead: Option<&str>, policy: LedgerPolicy, revision: u64) -> La
         },
         brief_revision: 1,
         start_seed: "seed".into(),
+        start_blocked_reason: None,
         root_run_id: Some(format!("lane-root-{n}")),
         generation: 1,
         latest_report_seq: 0,

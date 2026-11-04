@@ -22,7 +22,7 @@ const LIVE: &str = "thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
 
 const COLUMNS: &str = "lane_id, thread_id, origin_thread_id, origin_run_id, creation_key, scope, \
     lead_thread_id, policy, management_revision, brief_json, brief_revision, start_seed, \
-    root_run_id, generation, latest_report_seq, created_at_ns, updated_at_ns, last_activity_at_ns";
+    root_run_id, generation, latest_report_seq, created_at_ns, updated_at_ns, last_activity_at_ns, start_blocked_reason";
 
 const REPORT_COLUMNS: &str = "lane_id, report_seq, status, summary, artifact_refs_json, \
     needs_human, question_refs_json, reason_code, producer, management_revision, brief_revision, \
@@ -147,6 +147,7 @@ fn record_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<LaneRecord> {
         created_at_ns: row.get(at(15))?,
         updated_at_ns: row.get(at(16))?,
         last_activity_at_ns: row.get(at(17))?,
+        start_blocked_reason: row.get(at(18))?,
     })
 }
 
@@ -213,7 +214,7 @@ fn require(conn: &Connection, lane_id: &str) -> Result<LaneRecord, StorageError>
 pub(crate) fn unstarted(conn: &Connection, limit: usize) -> Result<Vec<LaneRecord>, StorageError> {
     let limit = i64::try_from(limit.clamp(1, 200)).unwrap_or(200);
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND {LIVE} ORDER BY lane_id LIMIT ?1"
+        "SELECT {COLUMNS} FROM lanes WHERE generation = 0 AND start_blocked_reason IS NULL AND {LIVE} ORDER BY lane_id LIMIT ?1"
     ))?;
     Ok(statement
         .query_map([limit], from_row)?
@@ -424,6 +425,9 @@ pub(crate) fn start_run(
     check_id("root_run_id", root_run_id)?;
     let tx = immediate(conn)?;
     let lane = require(&tx, lane_id)?;
+    if lane.start_blocked_reason.is_some() {
+        return Err(StorageError::LaneConflict(LaneConflictReason::StartBlocked));
+    }
     if lane.generation != expected_generation {
         return Err(StorageError::StaleRevision {
             kind: "generation",
@@ -441,6 +445,47 @@ pub(crate) fn start_run(
     let lane = require(&tx, lane_id)?;
     tx.commit()?;
     Ok(lane)
+}
+
+/// Permanently exclude a never-started intent from automatic recovery.
+pub(crate) fn block_start(
+    conn: &Connection,
+    lane_id: &str,
+    reason: &str,
+    at_ns: i64,
+) -> Result<LaneUpdate, StorageError> {
+    if reason.trim().is_empty() {
+        return Err(invalid("start_blocked_reason", LaneValidationKind::Empty));
+    }
+    if reason.len() > crate::lanes::LANE_SUMMARY_MAX_BYTES {
+        return Err(invalid(
+            "start_blocked_reason",
+            LaneValidationKind::TooLarge {
+                max: crate::lanes::LANE_SUMMARY_MAX_BYTES,
+                actual: reason.len(),
+            },
+        ));
+    }
+    guard_texts("lane startup", [("start_blocked_reason", reason)])?;
+    let tx = immediate(conn)?;
+    let lane = require(&tx, lane_id)?;
+    if lane.is_started() || lane.start_blocked_reason.is_some() {
+        return Ok(LaneUpdate {
+            lane,
+            changed: false,
+        });
+    }
+    tx.execute(
+        "UPDATE lanes SET start_blocked_reason = ?2, updated_at_ns = max(updated_at_ns, ?3) WHERE lane_id = ?1",
+        params![lane_id, reason, at_ns],
+    )?;
+    bump_revision(&tx)?;
+    let lane = require(&tx, lane_id)?;
+    tx.commit()?;
+    Ok(LaneUpdate {
+        lane,
+        changed: true,
+    })
 }
 
 pub(crate) fn append_report(
@@ -991,6 +1036,7 @@ mod tests {
             },
             brief_revision: 1,
             start_seed: String::new(),
+            start_blocked_reason: None,
             root_run_id: None,
             generation: 0,
             latest_report_seq: 0,

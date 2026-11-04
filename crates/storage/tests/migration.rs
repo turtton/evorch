@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 42;
+const LATEST_SCHEMA: u32 = 43;
 
 const EXPECTED_TABLES: [&str; 76] = [
     "lane_state",
@@ -1130,6 +1130,11 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     let path = temp_dir.path().join("v41.db");
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
+    // This fixture starts from the latest database: undo the later lane-only v43
+    // column before reconstructing v41, so migration v43 runs exactly once.
+    connection
+        .execute_batch("ALTER TABLE lanes DROP COLUMN start_blocked_reason;")
+        .unwrap();
     undo_v42(&connection);
     connection
         .execute_batch(

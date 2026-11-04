@@ -876,6 +876,7 @@ mod tests {
             },
             brief_revision: 1,
             start_seed: String::new(),
+            start_blocked_reason: None,
             root_run_id: None,
             generation: 1,
             latest_report_seq: 1,

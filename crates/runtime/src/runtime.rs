@@ -2539,7 +2539,9 @@ impl AgentRuntime {
     /// Unlike [`Self::stop`], cancellation is inherited by future descendants.
     ///
     /// # Errors
-    /// Returns [`RuntimeError::UnknownRun`] if the root has no run or spawn intent.
+    /// Returns [`RuntimeError::UnknownRun`] if the root has no run or spawn intent,
+    /// or [`RuntimeError::LaneCancellation`] if a pending lane cannot be durably
+    /// cancelled. No success is acknowledged before its intent is blocked.
     pub fn cancel_subtree(&self, run_id: RunId) -> Result<(), RuntimeError> {
         // Collection and the inherited fence use I -> A -> R. Cancellation of
         // the collected executions happens only after releasing these locks.
@@ -2560,6 +2562,7 @@ impl AgentRuntime {
         {
             return Err(unknown_run(run_id));
         }
+        self.persist_pending_lane_cancellation(run_id, &runs, &admissions)?;
         let mut cancellations = Vec::new();
         for target in Self::collect_subtree_ids(run_id, &intents, &runs) {
             if let Some(execution) =

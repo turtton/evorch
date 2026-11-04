@@ -84,6 +84,8 @@ pub enum LaneConflictReason {
     IdentityTaken,
     /// The thread already exists with a lineage that is not a lane.
     ThreadNotLane,
+    /// The creation intent was cancelled or failed before its first root started.
+    StartBlocked,
 }
 
 /// Why a `lane_list` cursor cannot continue a listing.
@@ -294,6 +296,9 @@ impl fmt::Display for StorageError {
                 ),
                 LaneConflictReason::IdentityTaken => {
                     write!(formatter, "the lane or thread ID belongs to another lane")
+                }
+                LaneConflictReason::StartBlocked => {
+                    write!(formatter, "the lane creation intent is blocked")
                 }
                 LaneConflictReason::ThreadNotLane => {
                     write!(formatter, "the thread already exists and is not a lane")

@@ -13,6 +13,9 @@ use storage::lanes::{LaneRecord, NewLane};
 pub(crate) struct LaneRuntime {
     // Serialize retries until the run or its admission reservation is installed.
     pub(crate) opening: Mutex<HashSet<String>>,
+    // Installed before admission; removed only after the durable first start.
+    // Cancellation can look up a pending lane without I/O for ordinary runs.
+    pub(crate) creation_intents: Mutex<std::collections::HashMap<RunId, String>>,
     pub(crate) started: Mutex<std::collections::HashMap<RunId, Vec<String>>>,
     #[cfg(test)]
     activity_time: Mutex<Option<i64>>,
@@ -128,6 +131,43 @@ impl AgentRuntime {
                 self.shared.bus.emit(Event::new(lane.created_event()));
             }
         }
+        self.shared
+            .lanes
+            .creation_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run_id);
+        Ok(())
+    }
+
+    pub(crate) fn persist_lane_start_cancellation(
+        &self,
+        run_id: RunId,
+        ownership: Option<&crate::ownership::OwnerPermit>,
+    ) -> Result<(), LaneError> {
+        let lane_id = self
+            .shared
+            .lanes
+            .creation_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run_id)
+            .cloned();
+        let Some(lane_id) = lane_id else {
+            return Ok(());
+        };
+        let _guard = ownership
+            .map(|permit| permit.mutation_guard())
+            .transpose()
+            .map_err(|error| LaneError::new("lane_creation_denied", error))?;
+        let store = self.shared.run_store.get().ok_or_else(|| {
+            LaneError::new("storage_unavailable", "lane ledger is not configured")
+        })?;
+        store.handle.block_lane_start(
+            &lane_id,
+            "cancelled before root start",
+            self.lane_activity_time(),
+        )?;
         Ok(())
     }
 
@@ -294,6 +334,29 @@ impl AgentRuntime {
             } else {
                 None
             };
+            // A local terminal is not process loss. Hold its intent rather than
+            // scanning an unstartable registered root forever or reviving it later.
+            if let Ok(local) = self.inspect_agent(seed.run_id)
+                && matches!(
+                    local.phase,
+                    event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error
+                )
+            {
+                let _guard = ownership
+                    .as_ref()
+                    .map(|permit| permit.mutation_guard())
+                    .transpose()
+                    .map_err(|error| LaneError::new("lane_creation_denied", error))?;
+                let reason = format!(
+                    "local root {} ended in {:?} before its first start committed",
+                    seed.run_id, local.phase
+                );
+                store
+                    .handle
+                    .block_lane_start(&lane.lane_id, &reason, self.lane_activity_time())?;
+                tracing::warn!(lane_id = %lane.lane_id, %reason, "lane startup held after local terminal failure");
+                continue;
+            }
             let (id, started) = self.start_lane_intent(
                 &lane,
                 &RunConfig {
@@ -315,6 +378,9 @@ impl AgentRuntime {
     ) -> Result<(RunId, bool), LaneError> {
         let seed: StartSeed = serde_json::from_str(&lane.start_seed)
             .map_err(|e| LaneError::new("restore_failed", e))?;
+        if let Some(reason) = &lane.start_blocked_reason {
+            return Err(LaneError::new("lane_creation_denied", reason));
+        }
         let mut opening = self
             .shared
             .lanes
@@ -367,6 +433,12 @@ impl AgentRuntime {
             .run_store
             .get()
             .expect("lane intent requires storage");
+        self.shared
+            .lanes
+            .creation_intents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(seed.run_id, lane.lane_id.clone());
         if store.restore_record(seed.run_id)?.is_some() {
             // Crash after the prepared context was saved but before its ledger
             // generation committed: continue that exact context, not a new brief.
