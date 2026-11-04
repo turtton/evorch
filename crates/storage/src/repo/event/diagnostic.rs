@@ -1,7 +1,7 @@
 //! Diagnostic-only selection and deletion on the writer connection.
 
 use event_bus::EventKind;
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{DiagnosticCleanupScope, DiagnosticCleanupSummary, StorageError};
 
@@ -12,7 +12,6 @@ pub(crate) type Cursor = (i64, i64);
 
 struct Candidate {
     cursor: Cursor,
-    session_id: Option<String>,
     payload: String,
 }
 
@@ -49,7 +48,7 @@ fn query_candidates(
     limit: usize,
 ) -> Result<Vec<Candidate>, StorageError> {
     let mut sql = String::from(
-        "SELECT wall_clock_ns, id, session_id, payload FROM events \
+        "SELECT wall_clock_ns, id, payload FROM events \
          INDEXED BY idx_events_diagnostic_retention WHERE kind = 'Diagnostic'",
     );
     let mut values = Vec::new();
@@ -73,8 +72,7 @@ fn query_candidates(
         .query_map(rusqlite::params_from_iter(values), |row| {
             Ok(Candidate {
                 cursor: (row.get(0)?, row.get(1)?),
-                session_id: row.get(2)?,
-                payload: row.get(3)?,
+                payload: row.get(2)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?)
@@ -97,15 +95,8 @@ fn process_batch(
         let bytes = candidate.payload.len() as u64;
         if delete {
             conn.execute("DELETE FROM events WHERE id = ?1", [candidate.cursor.1])?;
-            // v12 DELETE triggers maintain authoritative quota aggregates. The
-            // session projection also exposes a byte total and must agree.
-            if let Some(session) = &candidate.session_id {
-                conn.execute(
-                    "UPDATE sessions SET total_event_bytes = MAX(0, total_event_bytes - ?1) \
-                     WHERE id = ?2",
-                    params![candidate.payload.len() as i64, session],
-                )?;
-            }
+            // The accounting triggers maintain the quota aggregates and the session
+            // projection's byte total.
         }
         summary.event_count = summary.event_count.saturating_add(1);
         summary.payload_bytes = summary.payload_bytes.saturating_add(bytes);

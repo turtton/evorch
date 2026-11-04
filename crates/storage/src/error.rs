@@ -242,6 +242,54 @@ impl fmt::Display for StorageError {
     }
 }
 
+/// What kind of failure a [`StorageError`] is, for callers that report it without
+/// depending on SQLite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// The file is not a database, or is damaged.
+    Corrupt,
+    /// The database's schema is newer or older than this build understands.
+    SchemaUnsupported,
+    /// The operating system or SQLite refused access.
+    Permission,
+    /// Another connection holds the database; trying again later can succeed.
+    Busy,
+    /// A size or row limit was exceeded.
+    Limit,
+    /// The database could not be opened, for a reason SQLite does not say.
+    CannotOpen,
+    Other,
+}
+
+impl StorageError {
+    pub fn class(&self) -> FailureClass {
+        use rusqlite::ErrorCode;
+        match self {
+            // A database that needs the conversion command is older than this build
+            // reads, like any other older schema.
+            Self::SchemaTooNew { .. } | Self::ConversionRequired { .. } => {
+                FailureClass::SchemaUnsupported
+            }
+            Self::Serialization(message) if message.contains(crate::inspect::OLDER_SCHEMA) => {
+                FailureClass::SchemaUnsupported
+            }
+            Self::LimitExceeded { .. } => FailureClass::Limit,
+            Self::Sqlite(error) => match error.sqlite_error_code() {
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => FailureClass::Corrupt,
+                Some(
+                    ErrorCode::PermissionDenied
+                    | ErrorCode::ReadOnly
+                    | ErrorCode::AuthorizationForStatementDenied,
+                ) => FailureClass::Permission,
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => FailureClass::Busy,
+                Some(ErrorCode::CannotOpen) => FailureClass::CannotOpen,
+                _ => FailureClass::Other,
+            },
+            _ => FailureClass::Other,
+        }
+    }
+}
+
 impl std::error::Error for StorageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

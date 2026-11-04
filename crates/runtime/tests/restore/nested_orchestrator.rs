@@ -30,9 +30,13 @@ async fn saved_child_orchestrator_is_refused_and_its_snapshot_kept() {
     descriptor["role"] = serde_json::json!("Orchestrator");
     drop(first);
     let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+    // The header records the configuration's UTF-8 length, which the rewrite changes.
+    let descriptor = descriptor.to_string();
+    let config_len = i64::try_from(descriptor.len()).unwrap();
     conn.execute(
-        "UPDATE run_contexts SET role = 'Orchestrator', config_json = ?2 WHERE run_id = ?1",
-        rusqlite::params![child.to_string(), descriptor.to_string()],
+        "UPDATE run_contexts SET role = 'Orchestrator', config_json = ?2, config_len = ?3 \
+         WHERE run_id = ?1",
+        rusqlite::params![child.to_string(), descriptor, config_len],
     )
     .unwrap();
     let saved = database.run_context(&child.to_string()).unwrap().unwrap();

@@ -61,12 +61,16 @@ const STEP_CANDIDATES: i64 = 64;
 const C_GC: u64 = 24;
 
 /// Frames the migrations may write: v39's two new tables and hash index, v40's message
-/// table, reference tables, indexes and header columns (all on empty tables here), the
-/// schema page, page 1 and the pointer-map pages that account for the new pages (6 frames
-/// with 10 rows and 12 with 100,000 when v39 alone was first measured; 19 and 34 with
-/// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema),
-/// whatever the number of rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 40;
+/// table, reference tables, indexes and header columns, v41's provenance header columns
+/// and message table, and the event body format's two columns, reference table and three
+/// accounting triggers (all on empty tables here), the schema page, page 1 and the
+/// pointer-map pages that account for the new pages (6 frames with 10 rows and 12 with
+/// 100,000 when v39 alone was first measured; 19 and 34 with v40 added: its DROP COLUMN
+/// rewrites the table and each ADD COLUMN the schema; 29 and 48 with v41 added; 38 and
+/// 62 with the event body format added on an empty `events` table), whatever the
+/// number of rows it leaves alone: the profiler counts the same VM steps with 10 and with
+/// 100,000 rows.
+const MIGRATION_FRAMES: u64 = 72;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -290,13 +294,17 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     let observer = Connection::open(&path).unwrap();
     observer
         .execute_batch(&format!(
-            "{undo_v40}
+            "{undo_v42}
+             {undo_v41}
+             {undo_v40}
              DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
              PRAGMA user_version = 38;
              WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x + 1 FROM n WHERE x < {rows} - 1)
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
+            undo_v42 = include_str!("support/undo_v42.sql"),
+            undo_v41 = include_str!("support/undo_v41.sql"),
             undo_v40 = include_str!("support/undo_v40.sql"),
         ))
         .unwrap();

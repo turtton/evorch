@@ -129,6 +129,8 @@ fn latest_columns_match_the_credential_free_schema() {
                 column("payload", "TEXT", 1, None, 0),
                 column("subkind", "TEXT", 0, None, 0),
                 column("run_id", "TEXT", 0, None, 0),
+                column("body_format", "INTEGER", 1, Some("0"), 0),
+                column("blob_bytes", "INTEGER", 1, Some("0"), 0),
             ],
         ),
         (

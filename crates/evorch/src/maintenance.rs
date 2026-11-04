@@ -14,15 +14,21 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
                  [--provider-retention-days <N>] [--delta-mode <preserve|delete>] [--sidebar <path>]
   backfill-events [--batch-rows <1..100000>] [--max-rows <N>]
   vacuum [--apply] [--backup <new-path>]
-  convert-bodies [--apply] [--backup <new-path>]
+  convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
-convert-bodies: one-time conversion of a database of version 33 to 39 (conversations in run_contexts.messages_json;
-  migrations 34 to 39 are applied first, after the backup) to the current format (run_messages and content_blobs), removing the old column. Stop ALL evorch processes first.
+convert-bodies: one-time conversion of a database of version 33 to 41 to the current format: the conversations in
+  run_contexts.messages_json (version 33 to 39; migrations 34 to 39 are applied first, after the backup) become
+  run_messages and content_blobs, each provenance map becomes run_message_provenance rows, the two old columns are
+  removed, and the long strings of Message, compaction and Tool events become blobs. A regular version 40 database
+  (messages already rows) gets its maps and events converted; a version 41 one only its events. Stop ALL evorch
+  processes first.
   Default is a read-only preview (needs the .maintenance-lease file next to the database and an empty WAL; a
   non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
-  run in its own transaction after comparing it byte for byte, then drops the column, vacuums and publishes
-  version 40. If it stops half way there is no resume: restore the backup and start over (the failure report
+  run in its own transaction after comparing it byte for byte, then each provenance map after comparing it as a typed
+  map, then the events in batches (--event-batch-rows rows, at most 16 MiB of payload each) after comparing each as
+  a JSON value, then drops the columns, vacuums and publishes the current version. If it stops half way there is no
+  resume: restore the backup and start over (the failure report
   lists the steps). A converted database is left untouched by a rerun.
 backfill-events: safe next to live writers; converts legacy subkind/run_id columns only.
 vacuum: one-time switch of a legacy auto_vacuum=NONE database to INCREMENTAL (compact-events --apply does it too).
@@ -93,6 +99,16 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<MaintenanceArgs,
             }
             "--apply" if args.convert_bodies.is_some() => {
                 args.convert_bodies.as_mut().unwrap().apply = true;
+            }
+            "--event-batch-rows" if args.convert_bodies.is_some() => {
+                args.convert_bodies.as_mut().unwrap().event_batch_rows = Some(
+                    argv.next()
+                        .ok_or(USAGE)?
+                        .parse()
+                        .ok()
+                        .filter(|n| (1..=100_000).contains(n))
+                        .ok_or(USAGE)?,
+                );
             }
             "--backup" if args.convert_bodies.is_some() => {
                 args.convert_bodies.as_mut().unwrap().backup =

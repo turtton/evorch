@@ -478,6 +478,7 @@ fn assert_restore_matches_legacy_inner(
             &storage::maintenance::ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -23,6 +23,7 @@ use crate::threads::ThreadRunRow;
 mod dependencies;
 #[allow(dead_code)]
 mod index;
+pub(crate) mod provenance_rows;
 use crate::{RunContextReceipt, RunContextRecord, RunLedgerEntry, StorageError};
 pub(crate) use dependencies::LegacyDependencies;
 #[allow(unused_imports)]
@@ -668,25 +669,35 @@ fn write_sidecar(conn: &Connection, sidecar: &SnapshotProvenance) -> Result<(), 
         ProvenanceStatus::Verified { evidence } => ("verified", None, Some(to_json(evidence)?)),
         ProvenanceStatus::Unknown { reason } => ("unknown", Some(serde_name(reason)?), None),
     };
-    conn.execute(
+    let header = provenance_rows::MapHeader::of(&sidecar.map).columns()?;
+    // The header first: the message rows name it in a foreign key.
+    conn.prepare_cached(
         "INSERT INTO run_context_provenance(run_id, snapshot_revision, snapshot_sha256, \
-         format_version, status, reason_code, evidence_json, map_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(run_id) DO UPDATE SET \
+         format_version, status, reason_code, evidence_json, map_version, raw_message_count, \
+         checkpoint_count, map_message_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(run_id) DO UPDATE SET \
          snapshot_revision = excluded.snapshot_revision, \
          snapshot_sha256 = excluded.snapshot_sha256, format_version = excluded.format_version, \
          status = excluded.status, reason_code = excluded.reason_code, \
-         evidence_json = excluded.evidence_json, map_json = excluded.map_json",
-        params![
-            sidecar.run_id,
-            sidecar.snapshot_revision,
-            sidecar.snapshot_sha256,
-            sidecar.format_version,
-            status,
-            reason,
-            evidence,
-            to_json(&sidecar.map)?,
-        ],
-    )?;
+         evidence_json = excluded.evidence_json, map_version = excluded.map_version, \
+         raw_message_count = excluded.raw_message_count, \
+         checkpoint_count = excluded.checkpoint_count, \
+         map_message_count = excluded.map_message_count",
+    )?
+    .execute(params![
+        sidecar.run_id,
+        sidecar.snapshot_revision,
+        sidecar.snapshot_sha256,
+        sidecar.format_version,
+        status,
+        reason,
+        evidence,
+        header[0],
+        header[1],
+        header[2],
+        header[3],
+    ])?;
+    provenance_rows::write_entries(conn, &sidecar.run_id, &sidecar.map.messages)?;
     Ok(())
 }
 
@@ -701,12 +712,13 @@ pub(crate) fn read_sidecar(
         String,
         Option<String>,
         Option<String>,
-        String,
+        [i64; 4],
     );
     let row: Option<Row> = conn
         .query_row(
             "SELECT snapshot_revision, snapshot_sha256, format_version, status, reason_code, \
-             evidence_json, map_json FROM run_context_provenance WHERE run_id = ?1",
+             evidence_json, map_version, raw_message_count, checkpoint_count, \
+             map_message_count FROM run_context_provenance WHERE run_id = ?1",
             [run_id],
             |row| {
                 Ok((
@@ -716,13 +728,20 @@ pub(crate) fn read_sidecar(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
-                    row.get(6)?,
+                    [row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?],
                 ))
             },
         )
         .optional()?;
-    let Some((snapshot_revision, snapshot_sha256, format_version, status, reason, evidence, map)) =
-        row
+    let Some((
+        snapshot_revision,
+        snapshot_sha256,
+        format_version,
+        status,
+        reason,
+        evidence,
+        columns,
+    )) = row
     else {
         return Ok(None);
     };
@@ -739,9 +758,20 @@ pub(crate) fn read_sidecar(
             .unwrap_or(unsupported.clone()),
         _ => unsupported.clone(),
     };
-    let (status, map) = match serde_json::from_str::<ProvenanceMap>(&map) {
-        Ok(map) => (status, map),
-        Err(_) => (
+    let map = match provenance_rows::MapHeader::from_columns(columns) {
+        Some(header) => provenance_rows::read_entries(conn, run_id, &header)?
+            .ok()
+            .map(|messages| ProvenanceMap {
+                version: header.version,
+                raw_message_count: header.raw_message_count,
+                checkpoint_count: header.checkpoint_count,
+                messages,
+            }),
+        None => None,
+    };
+    let (status, map) = match map {
+        Some(map) => (status, map),
+        None => (
             unsupported,
             ProvenanceMap {
                 version: 0,

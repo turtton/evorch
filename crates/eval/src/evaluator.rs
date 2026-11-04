@@ -21,6 +21,7 @@ use tools::{Permissions, Tool, ToolError, ToolExecutionContext, ToolExecutionMod
 
 use crate::conversation;
 use crate::cost::{Cost, PriceTable, RequestUsage};
+use crate::inspection::LaunchMonitor;
 use crate::metrics::{self, RunMetrics, RunRecord};
 use crate::output::{self, Manifest};
 use crate::report::{self, Report};
@@ -89,7 +90,7 @@ pub struct EvaluatorContext {
 struct Shared {
     context: EvaluatorContext,
     catalog: tokio::sync::OnceCell<Option<Arc<ModelCatalog>>>,
-    groups: groups::Groups,
+    groups: LaunchMonitor,
 }
 
 impl Shared {
@@ -134,12 +135,20 @@ impl Shared {
 
 /// The Evaluator's tools, named as in [`agents::EVALUATOR_TOOLS`].
 pub fn tools(context: EvaluatorContext) -> Vec<Arc<dyn Tool>> {
+    tools_with_monitor(context).0
+}
+
+/// The Evaluator's tools and a read-only view of the evaluations they launch,
+/// for an [`crate::inspection::EvaluationInspector`] that must tell a process
+/// this one started from one it did not.
+pub fn tools_with_monitor(context: EvaluatorContext) -> (Vec<Arc<dyn Tool>>, LaunchMonitor) {
+    let monitor = LaunchMonitor::default();
     let shared = Arc::new(Shared {
         context,
         catalog: tokio::sync::OnceCell::new(),
-        groups: groups::Groups::default(),
+        groups: monitor.clone(),
     });
-    vec![
+    let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ListThreads(Arc::clone(&shared))),
         Arc::new(InspectThread(Arc::clone(&shared))),
         Arc::new(SaveSample(Arc::clone(&shared))),
@@ -147,7 +156,8 @@ pub fn tools(context: EvaluatorContext) -> Vec<Arc<dyn Tool>> {
         Arc::new(start::StartEvaluation(Arc::clone(&shared))),
         Arc::new(ReadReport(Arc::clone(&shared))),
         Arc::new(apply::ApplyConfig(shared)),
-    ]
+    ];
+    (tools, monitor)
 }
 
 /// Show `summary` to the user as an approval request and wait for the answer.
@@ -672,11 +682,24 @@ fn evaluation_dir(root: &Path, dir: &str) -> Result<PathBuf, String> {
 }
 
 fn progress(manifest: &Manifest) -> Value {
+    progress_value(
+        manifest.repeat as usize * manifest.configurations.len(),
+        manifest.runs.len(),
+        manifest
+            .runs
+            .iter()
+            .filter(|run| run.finished_at.is_some())
+            .count(),
+        manifest.finished_at.is_some(),
+    )
+}
+
+fn progress_value(planned: usize, runs: usize, finished_runs: usize, finished: bool) -> Value {
     json!({
-        "planned_runs": manifest.repeat as usize * manifest.configurations.len(),
-        "runs": manifest.runs.len(),
-        "finished_runs": manifest.runs.iter().filter(|run| run.finished_at.is_some()).count(),
-        "finished": manifest.finished_at.is_some(),
+        "planned_runs": planned,
+        "runs": runs,
+        "finished_runs": finished_runs,
+        "finished": finished,
     })
 }
 

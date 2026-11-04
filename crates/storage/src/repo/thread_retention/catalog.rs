@@ -58,7 +58,12 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
         "run_context_provenance",
         ReclaimRun,
-        "sidecar of the snapshot",
+        "sidecar of the snapshot; its message rows are reclaimed first",
+    ),
+    (
+        "run_message_provenance",
+        ReclaimRun,
+        "one provenance entry per row; reclaimed before the sidecar header it points at",
     ),
     ("run_ledger", ReclaimRun, "run notes, deleted with a grant"),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
@@ -91,6 +96,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "content_blobs",
         GcUnreferenced,
         "collected once no content_blob_refs_* table names the blob",
+    ),
+    (
+        "content_blob_refs_event",
+        CascadeOwner,
+        "follows its event row; the trigger queues the blob",
     ),
     (
         "content_blob_refs_header",

@@ -34,13 +34,7 @@ fn insert(conn: &Connection, kind: &str, tag: &str, converted: bool, wall_clock_
         params![wall_clock_ns, kind, payload, converted.then_some(tag)],
     )
     .unwrap();
-    let id = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE sessions SET total_event_bytes = total_event_bytes + OCTET_LENGTH(?1) WHERE id = 's'",
-        [payload],
-    )
-    .unwrap();
-    id
+    conn.last_insert_rowid()
 }
 
 fn ids(conn: &Connection) -> Vec<i64> {

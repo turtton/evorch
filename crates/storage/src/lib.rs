@@ -90,7 +90,7 @@ pub use config::{HardLimits, LimitKind, StorageConfig};
 pub use db::{Database, ns_to_system_time, system_time_to_ns, watch_exclusions};
 pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, DiagnosticCleanupSummary};
 pub use entity::CatalogUpdateRecord;
-pub use error::StorageError;
+pub use error::{FailureClass, StorageError};
 pub use host_input::{
     HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };
@@ -102,7 +102,11 @@ pub use migrations::backfill::{
 };
 pub use projection::{ReconcileSummary, SessionSnapshot};
 pub use read::{RunContextHeader, RunContextMeta, StoredAgentMessage};
-pub use repo::event::{EventPage, StoredEvent};
+pub use repo::event::deferred::{
+    BodyFailure, BodyFailureClass, BodyRef, DeferredRow, DeferredStoredEvent, MAX_RESOLVE_REFS,
+    StoredEventFailure, StoredEventFailureReason, for_each_event_ordered_deferred, resolve_bodies,
+};
+pub use repo::event::{EventPage, StoredEvent, StoredFormat};
 pub use repo::user_questions::AnswerMode;
 pub use review::{AssistantReferenceRow, EvidenceAttachment, LineageEdge, ReviewEvidenceRow};
 pub use run::{RunContextReceipt, RunContextRecord, RunLedgerEntry};

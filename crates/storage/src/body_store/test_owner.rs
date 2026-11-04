@@ -28,7 +28,7 @@ pub(crate) const OWNER: OwnerSpec = OwnerSpec {
     owner_table: "test_owner",
     keys: KEY_A,
     container_columns: &["body"],
-    codec_column: None,
+    encoding: crate::body_store::ContainerEncoding::JsonText,
     filter: None,
     run_column: Some("run_id"),
 };
@@ -40,7 +40,7 @@ pub(crate) const OWNER_B: OwnerSpec = OwnerSpec {
     owner_table: "test_owner_b",
     keys: KEY_B,
     container_columns: &["body"],
-    codec_column: None,
+    encoding: crate::body_store::ContainerEncoding::JsonText,
     filter: Some("tokenized = 1"),
     run_column: None,
 };
@@ -52,6 +52,7 @@ pub(crate) const OWNERS: &[OwnerSpec] = &[
     OWNER_B,
     crate::body_store::MESSAGE_OWNER,
     crate::body_store::HEADER_OWNER,
+    crate::body_store::EVENT_OWNER,
 ];
 
 /// Creates the owner tables and their reference tables on `conn`.

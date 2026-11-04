@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 use storage::Database;
 use storage::improvement::{ImprovementCandidate, ImprovementStatus};
 use storage::inspect::{
-    BlobOptions, BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, StorageSummaryOptions, event_json,
+    BlobOptions, BodyCheckScope, DEFAULT_TOP_THREADS, EventScope, InspectBodies,
+    InspectEventsOptions, StorageSummaryOptions, event_json,
 };
 
 pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
@@ -17,6 +18,7 @@ pub const USAGE: &str = "usage: evorch inspect [--db <path>] <command>
   candidate <candidate-id>
   run <run-id> [--full | --messages <from>..<to>]   (ordinals count System messages)
   events (--run <run-id> | --around <unix-ns> [--window-ms <ms>]) [--limit <n>]
+         [--bodies resolved|refs] [--contains <text>]   (refs shows token hash/length, reads no blob)
   storage [--physical] [--top <n>]
   blob <hash-prefix, 12+ hex digits> [--content] [--ref-offset <n>] [--ref-limit <n>]
   check-bodies [--run <run-id> | --thread <thread-id>] [--verify]
@@ -42,6 +44,8 @@ pub enum InspectCommand {
     Events {
         scope: Scope,
         limit: usize,
+        bodies: InspectBodies,
+        contains: Option<String>,
     },
     /// Where the database's bytes go; `physical` adds the slow page-level walk.
     Storage {
@@ -174,6 +178,12 @@ pub fn parse_args(argv: impl Iterator<Item = String>) -> Result<InspectArgs, Str
             InspectCommand::Events {
                 scope,
                 limit: limit(take("--limit"))?,
+                bodies: match take("--bodies").as_deref() {
+                    None | Some("resolved") => InspectBodies::Resolved,
+                    Some("refs") => InspectBodies::Refs,
+                    Some(_) => return Err(format!("--bodies must be resolved or refs\n{USAGE}")),
+                },
+                contains: take("--contains"),
             }
         }
         ("storage", [], false) => InspectCommand::Storage {
@@ -272,12 +282,21 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
             db.inspect_run_detail(&run_id, detail)
                 .map_err(|error| error.to_string())?
         }
-        InspectCommand::Events { scope, limit } => {
+        InspectCommand::Events {
+            scope,
+            limit,
+            bodies,
+            contains,
+        } => {
+            let options = InspectEventsOptions {
+                bodies,
+                contains: contains.as_deref(),
+            };
             let scope_value;
             let (events, truncated) = match &scope {
                 Scope::Run(run_id) => {
                     scope_value = json!({ "run_id": run_id });
-                    db.inspect_events(EventScope::Run(run_id), limit)
+                    db.inspect_events_with(EventScope::Run(run_id), limit, options)
                 }
                 Scope::Around { at_ns, window_ms } => {
                     let window_ns = window_ms.saturating_mul(1_000_000);
@@ -286,7 +305,7 @@ pub fn run(args: InspectArgs) -> Result<Value, String> {
                         at_ns.saturating_add(window_ns),
                     );
                     scope_value = json!({ "from_ns": from_ns, "to_ns": to_ns });
-                    db.inspect_events(EventScope::Window { from_ns, to_ns }, limit)
+                    db.inspect_events_with(EventScope::Window { from_ns, to_ns }, limit, options)
                 }
             }
             .map_err(|error| error.to_string())?;
