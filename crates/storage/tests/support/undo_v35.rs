@@ -13,8 +13,60 @@ fn triggers(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
-/// Restores the whole-conversation `run_contexts` shape migration v40 replaced.
+/// Rebuilds the lesson tables as they were before migration v42: no favorite flag, and a
+/// ledger that only knows the 'lesson', 'finding' and 'eval_trace' kinds. The tables are
+/// left empty.
+pub fn undo_v42(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE memory_entries;
+             DROP TABLE memory_ledger;
+             CREATE TABLE memory_ledger (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 entry_id TEXT NOT NULL, project TEXT NOT NULL, task_id TEXT NOT NULL,
+                 content TEXT NOT NULL, evidence TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK(status IN ('candidate','validated','promoted','rejected'))
+             );
+             ALTER TABLE memory_ledger ADD COLUMN kind TEXT NOT NULL DEFAULT 'lesson'
+                 CHECK(kind IN ('lesson', 'finding', 'eval_trace'));
+             ALTER TABLE memory_ledger ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'
+                 CHECK(scope IN ('project', 'harness', 'user'));
+             CREATE INDEX idx_memory_ledger_entry ON memory_ledger(entry_id, seq);
+             CREATE UNIQUE INDEX idx_eval_trace_identity ON memory_ledger(entry_id) WHERE kind='eval_trace';
+             CREATE INDEX idx_eval_trace_project ON memory_ledger(project, seq) WHERE kind='eval_trace';
+             CREATE TRIGGER memory_ledger_no_update BEFORE UPDATE ON memory_ledger
+             BEGIN SELECT RAISE(ABORT, 'memory ledger is append-only'); END;
+             CREATE TRIGGER memory_ledger_no_delete BEFORE DELETE ON memory_ledger
+             BEGIN SELECT RAISE(ABORT, 'memory ledger is append-only'); END;
+             CREATE TABLE memory_entries (
+                 id TEXT PRIMARY KEY, project TEXT NOT NULL, task_id TEXT NOT NULL,
+                 content TEXT NOT NULL, evidence TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK(status IN ('candidate','validated','promoted','rejected')),
+                 ledger_seq INTEGER NOT NULL REFERENCES memory_ledger(seq)
+             );
+             ALTER TABLE memory_entries ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'
+                 CHECK(scope IN ('project', 'harness', 'user'));
+             CREATE INDEX idx_memory_entries_project_status ON memory_entries(project, status);
+             CREATE INDEX idx_memory_entries_scope_status ON memory_entries(scope, status);
+             CREATE TRIGGER memory_entries_insert AFTER INSERT ON memory_entries BEGIN
+                 INSERT INTO memory_fts(rowid, content) VALUES(new.rowid, new.content);
+             END;
+             CREATE TRIGGER memory_entries_update AFTER UPDATE ON memory_entries BEGIN
+                 INSERT INTO memory_fts(memory_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                 INSERT INTO memory_fts(rowid, content) VALUES(new.rowid, new.content);
+             END;
+             CREATE TRIGGER memory_entries_delete AFTER DELETE ON memory_entries BEGIN
+                 INSERT INTO memory_fts(memory_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+             END;
+             INSERT INTO memory_fts(memory_fts) VALUES('delete-all');",
+        )
+        .unwrap();
+}
+
+/// Restores the whole-conversation `run_contexts` shape migration v40 replaced, after
+/// undoing v42.
 pub fn undo_v40(connection: &Connection) {
+    undo_v42(connection);
     connection
         .execute_batch(include_str!("undo_v40.sql"))
         .unwrap();
@@ -57,7 +109,7 @@ pub fn undo_v37(connection: &Connection) {
         .unwrap();
 }
 
-/// Removes the columns migrations v36 to v38 added to tables the older schema keeps.
+/// Removes the columns migrations v36 to v39 added to tables the older schema keeps.
 /// (Its indexes are created with `IF NOT EXISTS`, so replaying leaves them be.)
 pub fn undo_v36(connection: &Connection) {
     undo_v37(connection);
@@ -72,7 +124,7 @@ pub fn undo_v36(connection: &Connection) {
         .unwrap();
 }
 
-/// Removes everything migrations v35 to v38 changed to the tables a hand-built
+/// Removes everything migrations v35 to v39 changed to the tables a hand-built
 /// older schema keeps, so that the test can replay the migrations from its version.
 pub fn undo_v35(connection: &Connection) {
     undo_v36(connection);

@@ -1,7 +1,7 @@
 //! Append-only lesson history and its searchable current projection.
 
 use crate::{Database, StorageError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +87,27 @@ pub struct Lesson {
 pub struct MemoryEntry {
     pub lesson: Lesson,
     pub status: MemoryStatus,
+    /// The user's approval mark. Independent of `status`; any status except
+    /// `Rejected` may carry it, and a favorite cannot be rejected until it is cleared.
+    /// In [`Database::memory_history`] rows this is the flag as of that row.
+    pub favorite: bool,
+}
+
+/// Narrows [`Database::search_memory_filtered`]; `None` leaves a dimension open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryFilter {
+    pub status: Option<MemoryStatus>,
+    /// `Some(true)` keeps favorites only, `Some(false)` the unconfirmed ones.
+    pub favorite: Option<bool>,
+}
+
+/// One change of a lesson's favorite flag, oldest first in [`Database::favorite_history`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FavoriteChange {
+    /// The flag after the change.
+    pub favorite: bool,
+    /// The lesson's status when the change was made.
+    pub status: MemoryStatus,
 }
 
 pub(crate) fn append_finding(
@@ -117,7 +138,7 @@ pub(crate) fn append_finding(
 
 impl Database {
     pub fn findings(&self, project: &str) -> Result<Vec<Lesson>, StorageError> {
-        let mut statement = self.conn.prepare("SELECT entry_id,project,task_id,content,evidence,status,scope FROM memory_ledger WHERE project=?1 AND kind='finding' ORDER BY seq")?;
+        let mut statement = self.conn.prepare("SELECT entry_id,project,task_id,content,evidence,status,scope,0 FROM memory_ledger WHERE project=?1 AND kind='finding' ORDER BY seq")?;
         statement
             .query_map([project], entry_row)?
             .map(|row| decode(row?).map(|entry| entry.lesson))
@@ -130,17 +151,51 @@ impl Database {
         query: &str,
         status: Option<MemoryStatus>,
     ) -> Result<Vec<MemoryEntry>, StorageError> {
+        self.search_memory_filtered(
+            project,
+            query,
+            MemoryFilter {
+                status,
+                favorite: None,
+            },
+        )
+    }
+
+    pub fn search_memory_filtered(
+        &self,
+        project: &str,
+        query: &str,
+        filter: MemoryFilter,
+    ) -> Result<Vec<MemoryEntry>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries
-             WHERE project = ?1 AND (?2 IS NULL OR status = ?2)
+            "SELECT id, project, task_id, content, evidence, status, scope, favorite FROM memory_entries
+             WHERE project = ?1 AND (?2 IS NULL OR status = ?2) AND (?4 IS NULL OR favorite = ?4)
              AND (?3 = '' OR rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?3))
              ORDER BY ledger_seq DESC LIMIT 100",
         )?;
         let rows = statement.query_map(
-            params![project, status.map(MemoryStatus::as_str), query],
+            params![
+                project,
+                filter.status.map(MemoryStatus::as_str),
+                query,
+                filter.favorite
+            ],
             entry_row,
         )?;
         rows.map(|row| decode(row?)).collect()
+    }
+
+    /// The current projection of one lesson, or `None` when it does not exist.
+    pub fn memory_entry(&self, id: &str) -> Result<Option<MemoryEntry>, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, project, task_id, content, evidence, status, scope, favorite FROM memory_entries WHERE id = ?1",
+                [id],
+                entry_row,
+            )
+            .optional()?
+            .map(decode)
+            .transpose()
     }
 
     /// Promoted lessons a task in `project` may see: that project's own project
@@ -148,7 +203,7 @@ impl Database {
     /// task prompts; they feed self-improvement intake instead.
     pub fn boundary_memory(&self, project: &str) -> Result<Vec<MemoryEntry>, StorageError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, project, task_id, content, evidence, status, scope FROM memory_entries
+            "SELECT id, project, task_id, content, evidence, status, scope, favorite FROM memory_entries
              WHERE status = 'promoted'
              AND ((project = ?1 AND scope = 'project') OR scope = 'user')
              ORDER BY ledger_seq DESC LIMIT 100",
@@ -158,16 +213,43 @@ impl Database {
     }
 
     pub fn memory_history(&self, id: &str) -> Result<Vec<MemoryEntry>, StorageError> {
-        let mut statement = self.conn.prepare("SELECT entry_id, project, task_id, content, evidence, status, scope FROM memory_ledger WHERE entry_id = ?1 AND kind='lesson' ORDER BY seq")?;
+        let mut statement = self.conn.prepare(
+            "SELECT l.entry_id, l.project, l.task_id, l.content, l.evidence, l.status, l.scope,
+                    COALESCE((SELECT f.kind = 'favorite' FROM memory_ledger f
+                              WHERE f.entry_id = l.entry_id AND f.seq <= l.seq
+                                AND f.kind IN ('favorite', 'unfavorite')
+                              ORDER BY f.seq DESC LIMIT 1), 0)
+             FROM memory_ledger l WHERE l.entry_id = ?1 AND l.kind = 'lesson' ORDER BY l.seq",
+        )?;
         statement
             .query_map([id], entry_row)?
             .map(|row| decode(row?))
             .collect()
     }
+
+    /// Every favorite flag change of a lesson, oldest first.
+    pub fn favorite_history(&self, id: &str) -> Result<Vec<FavoriteChange>, StorageError> {
+        let mut statement = self.conn.prepare(
+            "SELECT kind = 'favorite', status FROM memory_ledger
+             WHERE entry_id = ?1 AND kind IN ('favorite', 'unfavorite') ORDER BY seq",
+        )?;
+        statement
+            .query_map([id], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                let (favorite, status) = row?;
+                Ok(FavoriteChange {
+                    favorite,
+                    status: MemoryStatus::parse(&status)?,
+                })
+            })
+            .collect()
+    }
 }
 
-/// Row of `id, project, task_id, content, evidence, status, scope` in that order.
-pub(crate) type EntryRow = (Lesson, String, String);
+/// Row of `id, project, task_id, content, evidence, status, scope, favorite` in that order.
+pub(crate) type EntryRow = (Lesson, String, String, bool);
 
 pub(crate) fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
     Ok((
@@ -181,13 +263,17 @@ pub(crate) fn entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
         },
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
     ))
 }
 
-pub(crate) fn decode((mut lesson, status, scope): EntryRow) -> Result<MemoryEntry, StorageError> {
+pub(crate) fn decode(
+    (mut lesson, status, scope, favorite): EntryRow,
+) -> Result<MemoryEntry, StorageError> {
     lesson.scope = LessonScope::parse(&scope)?;
     Ok(MemoryEntry {
         lesson,
         status: MemoryStatus::parse(&status)?,
+        favorite,
     })
 }

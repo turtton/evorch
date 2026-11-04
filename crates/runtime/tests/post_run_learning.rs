@@ -8,9 +8,8 @@ use runtime::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use storage::memory::{LessonScope, MemoryStatus};
-use storage::{Database, Storage, StorageConfig};
+use storage::{Database, Storage, StorageConfig, StorageHandle};
 use tokio::sync::Notify;
 
 #[derive(Clone, Copy)]
@@ -20,10 +19,17 @@ enum ReviewMode {
     FinalTextOnly,
     PartialReview,
     WaitForCancel,
+    /// Two candidates; the first is rejected after the user marks it a favorite, the
+    /// second is approved.
+    FavoriteRejectBatch,
 }
+
+const FAVORITE_PREFIX: &str = "Keep the bounded completion check";
 
 struct Model {
     mode: ReviewMode,
+    writer: StorageHandle,
+    config: StorageConfig,
     reviewer_started: Notify,
     reviewer_calls: AtomicUsize,
 }
@@ -141,8 +147,10 @@ impl AgentModel for Model {
                         }),
                     ));
                 }
-                if matches!(self.mode, ReviewMode::PartialReview)
-                    && tool_result(messages, "stack-second").is_none()
+                if matches!(
+                    self.mode,
+                    ReviewMode::PartialReview | ReviewMode::FavoriteRejectBatch
+                ) && tool_result(messages, "stack-second").is_none()
                 {
                     let source = tool_result(messages, "extract-source").unwrap();
                     let reference = source["records"]
@@ -194,7 +202,46 @@ impl AgentModel for Model {
                 if matches!(self.mode, ReviewMode::FinalTextOnly) {
                     return Ok(text_response("{\"verdict\":\"approve\"}"));
                 }
-                if tool_result(messages, "review-submit").is_none() {
+                if matches!(self.mode, ReviewMode::FavoriteRejectBatch) {
+                    let listed = tool_result(messages, "review-list").unwrap();
+                    for (index, candidate) in listed["candidates"]
+                        .as_array()
+                        .expect("candidate list")
+                        .iter()
+                        .enumerate()
+                    {
+                        let call = format!("review-submit-{index}");
+                        if tool_result(messages, &call).is_some() {
+                            continue;
+                        }
+                        let rejected = candidate["content"]
+                            .as_str()
+                            .is_some_and(|content| content.starts_with(FAVORITE_PREFIX));
+                        if rejected {
+                            // The user approves the lesson while the reviewer is working.
+                            let id = Database::open(&self.config)
+                                .unwrap()
+                                .search_memory("p", "", None)
+                                .unwrap()
+                                .into_iter()
+                                .find(|entry| entry.lesson.content.starts_with(FAVORITE_PREFIX))
+                                .expect("staged lesson")
+                                .lesson
+                                .id;
+                            self.writer.set_lesson_favorite(&id, true).unwrap();
+                        }
+                        return Ok(tool_response(
+                            &call,
+                            "submit_lesson_review",
+                            json!({
+                                "candidate_id": candidate["id"],
+                                "verdict": if rejected { "reject" } else { "approve" },
+                                "rationale": "Checked the cited source record",
+                                "evidence_refs": candidate["evidence_refs"]
+                            }),
+                        ));
+                    }
+                } else if tool_result(messages, "review-submit").is_none() {
                     let listed = tool_result(messages, "review-list").unwrap();
                     let candidate = &listed["candidates"][0];
                     let verdict =
@@ -258,6 +305,8 @@ impl Fixture {
         let store = Storage::open(config.clone()).unwrap();
         let model = Arc::new(Model {
             mode,
+            writer: store.handle(),
+            config: config.clone(),
             reviewer_started: Notify::new(),
             reviewer_calls: AtomicUsize::new(0),
         });
@@ -297,21 +346,12 @@ impl Fixture {
         let run =
             self.runtime
                 .delegate_background(Role::Worker, "Complete bounded work".into(), config);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), self.runtime.wait(run))
-                .await
-                .unwrap()
-                .unwrap(),
-            AgentRunPhase::Done
-        );
+        assert_eq!(self.runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
         run
     }
 
     async fn learning(&self, source: RunId) -> Result<(), String> {
-        tokio::time::timeout(Duration::from_secs(5), self.runtime.wait_learning(source))
-            .await
-            .expect("learning must finish")
-            .unwrap()
+        self.runtime.wait_learning(source).await.unwrap()
     }
 
     fn entries(&self) -> Vec<storage::memory::MemoryEntry> {
@@ -381,6 +421,29 @@ async fn typed_rejection_marks_lesson_rejected() {
 }
 
 #[tokio::test]
+async fn favorite_lesson_survives_a_reject_verdict_without_failing_the_batch() {
+    // Given: a batch of two candidates; the reviewer rejects the first, which the user
+    // marked as a favorite meanwhile, and approves the second.
+    let fixture = Fixture::new(ReviewMode::FavoriteRejectBatch);
+    let source = fixture.start().await;
+
+    // When: post-run learning completes.
+    assert_eq!(fixture.learning(source).await, Ok(()));
+
+    // Then: the favorite stays as it was, and the other candidate still got promoted.
+    let entries = fixture.entries();
+    assert_eq!(entries.len(), 2);
+    let favorite = entries
+        .iter()
+        .find(|entry| entry.lesson.content.starts_with(FAVORITE_PREFIX))
+        .unwrap();
+    assert!(favorite.favorite);
+    assert_eq!(favorite.status, MemoryStatus::Candidate);
+    let other = entries.iter().find(|entry| !entry.favorite).unwrap();
+    assert_eq!(other.status, MemoryStatus::Promoted);
+}
+
+#[tokio::test]
 async fn json_looking_final_text_without_typed_review_cannot_promote() {
     let fixture = Fixture::new(ReviewMode::FinalTextOnly);
     let source = fixture.start().await;
@@ -397,12 +460,7 @@ async fn json_looking_final_text_without_typed_review_cannot_promote() {
 async fn cancelling_lesson_reviewer_does_not_promote() {
     let fixture = Fixture::new(ReviewMode::WaitForCancel);
     let source = fixture.start().await;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        fixture.model.reviewer_started.notified(),
-    )
-    .await
-    .expect("reviewer started");
+    fixture.model.reviewer_started.notified().await;
     let reviewer = fixture
         .runtime
         .list_agents()

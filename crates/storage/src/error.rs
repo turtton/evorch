@@ -162,6 +162,12 @@ pub enum StorageError {
         run_id: Option<String>,
         thread_id: Option<String>,
     },
+    /// The lesson is a favorite (the user's approval mark), so it cannot be rejected
+    /// until the mark is cleared.
+    LessonFavorite {
+        /// The protected lesson.
+        id: String,
+    },
     /// A body token could not be turned back into its text, or a body could not be
     /// stored consistently. Never a soft failure: the caller must not substitute an
     /// empty or placeholder text, nor show the raw token as if it were the body.
@@ -257,6 +263,10 @@ impl fmt::Display for StorageError {
                 "run {} / thread {} was deleted by retention",
                 run_id.as_deref().unwrap_or("-"),
                 thread_id.as_deref().unwrap_or("-")
+            ),
+            Self::LessonFavorite { id } => write!(
+                formatter,
+                "lesson {id} is a favorite; clear the approval mark before rejecting it"
             ),
             Self::BodyUnresolved {
                 owner,
@@ -380,6 +390,7 @@ impl std::error::Error for StorageError {
             | Self::AssistantReferenceUnavailable
             | Self::QuestionAlreadyAnswered
             | Self::Tombstoned { .. }
+            | Self::LessonFavorite { .. }
             | Self::BodyUnresolved { .. }
             | Self::LaneInvalid(_)
             | Self::LaneNotFound { .. }

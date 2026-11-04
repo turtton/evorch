@@ -55,6 +55,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         include_str!("migrations/v40_prepare.sql")
     ),
     include_str!("migrations/v41.sql"),
+    include_str!("migrations/v42.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
