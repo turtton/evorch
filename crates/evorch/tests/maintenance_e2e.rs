@@ -258,5 +258,10 @@ fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(stderr.contains("non-empty WAL"), "{stderr}");
         assert!(stderr.contains("the database was not changed"), "{stderr}");
+        assert!(!stderr.contains("the database was changed"), "{stderr}");
+        assert!(
+            !stderr.contains("recover only from the verified backup"),
+            "{stderr}"
+        );
     }
 }
