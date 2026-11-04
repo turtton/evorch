@@ -1446,7 +1446,10 @@ impl AgentRuntime {
         {
             turn.prompt_id.clone_from(id);
         }
-        if config.budget == crate::budget_tracker::BudgetSettings::default()
+        if (config.budget == crate::budget_tracker::BudgetSettings::default()
+            || (parent.is_none()
+                && config.lane_scope.is_some()
+                && config.budget == crate::budget_tracker::BudgetSettings::lane_scope()))
             && let Some(budget) = self.shared.budget.get()
         {
             config.budget = budget.clone();

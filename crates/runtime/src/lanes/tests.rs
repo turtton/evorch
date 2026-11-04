@@ -679,3 +679,33 @@ async fn creation_event_can_project_committed_root_and_never_promotes_brief_to_h
         f.cancel(id).await;
     }
 }
+
+#[tokio::test]
+async fn lane_unlimited_quantities_preserve_configured_runtime_runaway_thresholds() {
+    use crate::budget_tracker::{BudgetSettings, ResourceLimit};
+    let mut f = Fixture::new();
+    let mut config = config::Config::default();
+    config.budget.max_no_progress_rounds = 7;
+    config.budget.max_identical_tool_call_repeats = 3;
+    config.budget.max_file_rereads = 11;
+    f.runtime = f.runtime.with_model_resolution(&config, None, None);
+    let lead = f.lead().await;
+    let lane = f
+        .runtime
+        .open_lane(lead, "configured-budget", brief())
+        .unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let expected = BudgetSettings::from(&config.budget);
+    assert_eq!(f.config(lead).budget, expected);
+    assert_eq!(
+        f.config(lane.root_run_id).budget,
+        expected.with_unlimited_resources()
+    );
+    assert_eq!(
+        f.config(lead).budget.max_tool_calls,
+        ResourceLimit::Bounded(400)
+    );
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
