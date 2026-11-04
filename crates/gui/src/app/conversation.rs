@@ -57,7 +57,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 ..
             }) => {
                 if let Some(thread) = chat_thread(agent_name) {
-                    self.bind_conversation_run(thread, run_id, true)
+                    let known = self
+                        .sidebar
+                        .threads
+                        .iter()
+                        .any(|candidate| candidate.id.to_string() == thread);
+                    if !known {
+                        self.lanes.note_early_root(thread, run_id);
+                    }
+                    let bound = self.bind_conversation_run(thread, run_id, true);
+                    self.bind_lane_root(thread);
+                    bound
                 } else {
                     let owner = self.thread_for_run(run_id).or_else(|| {
                         parent_run_id

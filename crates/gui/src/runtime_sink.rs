@@ -274,6 +274,13 @@ impl CommandSink for RuntimeCommandSink {
         }
     }
 
+    fn bind_lane_root(&mut self, thread: &str, run: &str) {
+        if let Ok(id) = run.parse::<RunId>() {
+            self.rebind_conversation_root(thread, id);
+            self.chat_runs.insert(thread.into(), id);
+        }
+    }
+
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
         if let Ok(id) = run.parse::<RunId>() {
             self.rebind_conversation_root(thread, id);

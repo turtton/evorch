@@ -20,7 +20,7 @@
 //! Reading, redrawing and polling never change a lane's place: its order comes from real
 //! activity (conversation, Report) only.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -204,6 +204,9 @@ pub(super) struct LaneState {
     scan: ScanPhase,
     results: Receiver<Loaded>,
     sender: Sender<Loaded>,
+    /// Chat roots whose thread the sidebar did not have yet: the runtime starts a lane root
+    /// before the creation event places its thread.
+    early_roots: BTreeMap<String, String>,
 }
 
 impl Default for LaneState {
@@ -222,11 +225,21 @@ impl Default for LaneState {
             scan: ScanPhase::Pending,
             results,
             sender,
+            early_roots: BTreeMap::new(),
         }
     }
 }
 
 impl LaneState {
+    pub(super) fn note_early_root(&mut self, thread_id: &str, run_id: &str) {
+        const KEPT: usize = 64;
+        self.early_roots
+            .insert(thread_id.to_owned(), run_id.to_owned());
+        while self.early_roots.len() > KEPT {
+            self.early_roots.pop_first();
+        }
+    }
+
     fn request(&mut self, thread_id: &str) {
         self.failed.remove(thread_id);
         if self.in_flight.contains(thread_id) {
@@ -489,7 +502,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         event.meta.wall_clock,
                     )
                 });
-                self.link_lane_thread(thread_id, link) | created
+                let linked = self.link_lane_thread(thread_id, link);
+                let rootless = self.sidebar.threads.iter().any(|thread| {
+                    thread.id.to_string() == *thread_id && thread.root_run_id.is_none()
+                });
+                let adopted = rootless
+                    && self
+                        .lanes
+                        .early_roots
+                        .remove(thread_id)
+                        .is_some_and(|run| self.bind_conversation_run(thread_id, &run, true));
+                self.bind_lane_root(thread_id);
+                linked | created | adopted | created
             }
             LedgerEvent::LaneManagementChanged {
                 lane_id,
@@ -531,6 +555,22 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
             _ => false,
         }
+    }
+
+    /// Gives the command sink the lane's current root. The runtime starts a lane root
+    /// itself, so no submission from this window ever bound it; without the binding a
+    /// Stop on the lane would find no run. Events own which root is current.
+    pub(super) fn bind_lane_root(&mut self, thread_id: &str) {
+        let Some(root) = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id.to_string() == thread_id && thread.lane.is_some())
+            .and_then(|thread| thread.root_run_id.clone())
+        else {
+            return;
+        };
+        self.sink.bind_lane_root(thread_id, &root);
     }
 
     fn project_of_thread(&self, id: &ThreadId) -> Option<ProjectId> {
@@ -635,6 +675,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         {
             changed |= self.bind_conversation_run(&thread_id, &root, true);
         }
+        self.bind_lane_root(&thread_id);
         let current = self.lanes.details.get(&thread_id);
         let newer =
             current.is_none_or(|current| detail_key(&snapshot.detail) >= detail_key(current));
