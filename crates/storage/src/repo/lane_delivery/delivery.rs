@@ -21,6 +21,28 @@ pub(crate) fn inbox(
     }
     Ok(result)
 }
+pub(crate) fn destination(
+    conn: &Connection,
+    thread: &str,
+) -> Result<Option<LaneDeliveryDestination>, StorageError> {
+    live_thread(conn, thread)?;
+    let row: Option<(u64, bool, Option<String>)> = conn
+        .query_row(
+            "SELECT epoch,stopped,owner_json FROM lane_delivery_destinations WHERE thread_id=?1",
+            [thread],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    row.map(|(epoch, stopped, owner)| {
+        Ok(LaneDeliveryDestination {
+            thread_id: thread.into(),
+            epoch,
+            stopped,
+            owner: owner.as_deref().map(parse).transpose()?,
+        })
+    })
+    .transpose()
+}
 /// Binding or Stop changes fence every previous claimant. Only the authenticated
 /// host's explicit resume may clear Stop; caller holds its ownership mutation guard.
 pub(crate) fn bind_destination(
@@ -91,6 +113,25 @@ pub(crate) fn claim(
     if until.is_some_and(|until| until > request.now_ns) {
         return Ok(LaneClaimResult::Busy);
     }
+    // A committed receipt is enough to repair sender ACK state without a wake.
+    // Do not touch a current claimant: owner/epoch and the lease were checked above.
+    // Limit the work and require the exact non-user receipt, not just a matching ID.
+    let repaired = tx.execute(
+        &format!(
+            "UPDATE lane_notifications SET state='acked' WHERE notification_id IN (
+         SELECT n.notification_id FROM lane_notifications n
+         JOIN host_input_receipts r ON r.prompt_id=n.receipt_prompt_id
+         WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE}
+           AND r.prompt_id='lane-notification:'||n.notification_id AND r.status='delivered'
+           AND json_extract(r.provenance_json,'$.kind')='lane_notification'
+           AND json_extract(r.provenance_json,'$.notification_id')=n.notification_id
+           AND json_extract(r.provenance_json,'$.destination_thread_id')=n.destination_thread_id
+           AND r.run_id NOT IN (SELECT run_id FROM run_tombstones)
+           AND r.root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+         ORDER BY n.notification_id LIMIT 20)"
+        ),
+        [&request.destination_thread_id],
+    )?;
     let mut statement=tx.prepare(&format!("SELECT n.payload FROM lane_notifications n JOIN lanes l ON l.lane_id=n.lane_id WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE} AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0) AND (?2 OR n.event_kind IN ('question','ready','failed','answer')) ORDER BY n.notification_id LIMIT 20"))?;
     let values = statement
         .query_map(
@@ -108,6 +149,9 @@ pub(crate) fn claim(
         notifications.push(notice);
     }
     if notifications.is_empty() {
+        if repaired != 0 {
+            tx.commit()?;
+        }
         return Ok(LaneClaimResult::Empty);
     }
     let claim_epoch = claim_epoch

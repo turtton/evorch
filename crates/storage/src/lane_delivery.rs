@@ -51,6 +51,16 @@ pub struct LaneDeliveryOwner {
     pub ownership_generation: u64,
 }
 
+/// Durable destination binding, readable after restart or a lost bind reply.
+/// This is an observation for CAS, never an ownership permit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneDeliveryDestination {
+    pub thread_id: String,
+    pub epoch: u64,
+    pub stopped: bool,
+    pub owner: Option<LaneDeliveryOwner>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneDeliveryClaim {
     pub destination_thread_id: String,

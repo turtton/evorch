@@ -6,6 +6,11 @@ use storage::{
     Database, RunContextRecord, Storage, StorageConfig, StorageError, StorageHandle,
     lane_delivery::*, lanes::*, thread_index::*,
 };
+#[path = "lane_delivery/recovery.rs"]
+mod recovery;
+#[path = "lane_delivery/rollback.rs"]
+mod rollback;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     config: StorageConfig,
@@ -21,6 +26,20 @@ impl Fixture {
         let storage = Storage::open(config.clone()).unwrap();
         Self {
             _dir: dir,
+            config,
+            storage,
+        }
+    }
+    fn reopen(self) -> Self {
+        let Self {
+            _dir,
+            config,
+            storage,
+        } = self;
+        storage.close();
+        let storage = Storage::open(config.clone()).unwrap();
+        Self {
+            _dir,
             config,
             storage,
         }
@@ -175,6 +194,22 @@ fn snapshot() -> SnapshotWrite {
         },
     }
 }
+fn user_receipt() -> storage::HostInputReceipt {
+    storage::HostInputReceipt {
+        prompt_id: "input-1".into(),
+        run_id: "run-1".into(),
+        root_run_id: "run-1".into(),
+        text: "private user instructions".into(),
+        image_count: 0,
+        status: storage::HostInputStatus::Accepted,
+        reason: None,
+        accepted_at_ns: 3,
+        status_at_ns: 3,
+        evidence_id: None,
+        provenance: storage::HostInputProvenance::User,
+    }
+}
+
 fn mutation(q: u32, action: LaneQuestionAction) -> LaneQuestionMutation {
     LaneQuestionMutation {
         lane_id: "lane-1".into(),
@@ -391,40 +426,31 @@ fn snapshot_receipt_rollback_and_crash_ack_repair_are_idempotent() {
             .messages_json,
         "[]"
     );
-    // Reopen the storage owner after the receipt committed but before ACK.
-    let storage = Storage::open(StorageConfig {
-        db_path: f._dir.path().join("unused.db"),
-        ..Default::default()
-    })
-    .unwrap();
-    drop(std::mem::replace(&mut f.storage, storage));
-    f.storage = Storage::open(f.config.clone()).unwrap();
-    let repaired = claim(&f.h(), 110);
+    // An expired claimant is repaired from receipts without re-waking/re-appending.
+    f = f.reopen();
+    assert!(matches!(
+        f.h().claim_lane_deliveries(request(110)).unwrap(),
+        LaneClaimResult::Empty
+    ));
+    f.h().ack_lane_delivery(old.clone(), 112).unwrap();
+    f.h().ack_lane_delivery(old, 113).unwrap();
+    assert_eq!(f.count("host_input_receipts"), 1);
     assert_eq!(
-        repaired.notifications[0].notification_id,
-        old.notifications[0].notification_id
-    );
-    assert_eq!(
-        f.h()
-            .lane_delivery_received_ids(repaired.clone())
+        f.db()
+            .run_context("lead-root")
             .unwrap()
-            .len(),
-        1
+            .unwrap()
+            .messages_json,
+        "[]"
     );
     assert!(
         f.h()
-            .accept_lane_delivery(repaired.clone(), snapshot(), 111)
+            .pending_lane_delivery_destinations(String::new())
             .unwrap()
-            .is_none()
+            .is_empty()
     );
-    f.h().ack_lane_delivery(repaired.clone(), 112).unwrap();
-    f.h().ack_lane_delivery(repaired, 113).unwrap();
-    assert_eq!(f.count("host_input_receipts"), 1);
-    assert!(matches!(
-        f.h().claim_lane_deliveries(request(114)).unwrap(),
-        LaneClaimResult::Empty
-    ));
 }
+
 #[test]
 fn guard_survives_retries_unknown_revision_and_new_question_ids() {
     let f = Fixture::new();
@@ -566,19 +592,7 @@ fn intervention_uses_actual_input_receipt_but_outbox_never_copies_its_text() {
     let f = Fixture::new();
     f.lane(1, LanePolicy::Summary);
     f.h().start_lane_run("lane-1", 0, "run-1", 2).unwrap();
-    let receipt = storage::HostInputReceipt {
-        prompt_id: "input-1".into(),
-        run_id: "run-1".into(),
-        root_run_id: "run-1".into(),
-        text: "private user instructions".into(),
-        image_count: 0,
-        status: storage::HostInputStatus::Accepted,
-        reason: None,
-        accepted_at_ns: 3,
-        status_at_ns: 3,
-        evidence_id: None,
-        provenance: storage::HostInputProvenance::User,
-    };
+    let receipt = user_receipt();
     f.h()
         .accept_lane_user_input("lane-1".into(), receipt.clone())
         .unwrap();

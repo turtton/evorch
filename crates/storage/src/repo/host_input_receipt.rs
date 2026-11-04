@@ -242,7 +242,8 @@ pub(crate) fn origins(
          LEFT JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
              AND evidence.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
              AND evidence.target_run_id NOT IN (SELECT run_id FROM run_tombstones) \
-         WHERE receipt.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         WHERE json_extract(receipt.provenance_json,'$.kind')='user' \
+           AND receipt.run_id NOT IN (SELECT run_id FROM run_tombstones) \
            AND receipt.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
     )?;

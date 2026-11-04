@@ -76,6 +76,16 @@ impl StorageHandle {
             crate::repo::lane_delivery::inbox(conn, &destination, &after)
         })
     }
+    /// Reads the durable epoch/Stop/owner without creating a binding. Use its epoch
+    /// for rebind/claim after restart, including when the previous bind reply was lost.
+    pub fn lane_delivery_destination(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<LaneDeliveryDestination>, StorageError> {
+        self.lane_job(false, move |conn| {
+            crate::repo::lane_delivery::destination(conn, &thread_id)
+        })
+    }
     /// CAS root/owner/Stop binding. The caller authenticates explicit resume; progress alone never clears Stop.
     pub fn bind_lane_delivery_destination(
         &self,
@@ -95,6 +105,9 @@ impl StorageHandle {
         })
     }
     /// Claims one bounded batch, single-flight per destination. Lease expiry uses the injected clock.
+    /// After fencing an expired/no lease, repairs already-received notices before
+    /// wake filtering (even for suppressed lanes). Empty may commit receipt-only ACKs;
+    /// it never requires a snapshot rewrite or a runtime wake.
     pub fn claim_lane_deliveries(
         &self,
         request: LaneClaimRequest,
