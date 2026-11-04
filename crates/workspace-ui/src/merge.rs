@@ -23,13 +23,14 @@ impl SidebarState {
             |project| project.id.clone(),
             merge_project,
         );
-        let threads = merge_keyed(
+        let mut threads = merge_keyed(
             &base.threads,
             &local.threads,
             &disk.threads,
             |thread| thread.id.clone(),
             merge_thread,
         );
+        keep_newest_lanes(&mut threads, [base, local, disk]);
         // A thread created on one side must not lose its project because the
         // other side deleted it unchanged.
         for thread in &threads {
@@ -182,6 +183,24 @@ fn merge_project(
     }
 }
 
+/// A lane's management relation only moves forward: whichever side the record was taken
+/// from, it ends with the highest management revision any side holds. An unchanged
+/// side following a stale file, or a stale file overwriting a newer edit, therefore never
+/// brings an ended relation back (ADR 0044 §10, §15).
+fn keep_newest_lanes(threads: &mut [ThreadRecord], sides: [&SidebarState; 3]) {
+    for thread in threads {
+        let candidates = sides.map(|side| {
+            side.threads
+                .iter()
+                .find(|other| other.id == thread.id)
+                .and_then(|other| other.lane.as_ref())
+        });
+        // The merged record's own copy first, so a tie keeps it.
+        let newest = crate::lane::newest(std::iter::once(thread.lane.as_ref()).chain(candidates));
+        thread.lane = newest.cloned();
+    }
+}
+
 fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) -> ThreadRecord {
     let mut run_ids = local.run_ids.clone();
     run_ids.extend(
@@ -234,5 +253,7 @@ fn merge_thread(base: &ThreadRecord, local: &ThreadRecord, disk: &ThreadRecord) 
         ),
         lineage: pick(&base.lineage, &local.lineage, &disk.lineage),
         superseded: pick(&base.superseded, &local.superseded, &disk.superseded),
+        // Settled by `keep_newest_lanes` over every side.
+        lane: local.lane.clone(),
     }
 }

@@ -167,6 +167,10 @@ pub struct ThreadRecord {
     /// A rewound version kept for restoration but hidden behind its visible version.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub superseded: bool,
+    /// The lane ledger's projection when this thread is a lane (ADR 0044). The ledger
+    /// owns it; the sidebar only keeps the latest revision it has seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<crate::LaneLink>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,7 +235,28 @@ impl ThreadRecord {
             escalation_source_run_id: None,
             lineage: None,
             superseded: false,
+            lane: None,
         }
+    }
+
+    /// The thread this one hangs under in the sidebar tree and whose family it joins: the
+    /// single rule every view (display, family, mirror, retention) uses. A lane follows
+    /// its current management (the ledger), never `parent_thread_id`, so a detached lane
+    /// is a top-level thread of its own family; any other thread follows its parent.
+    #[must_use]
+    pub fn tree_parent(&self) -> Option<&ThreadId> {
+        match &self.lane {
+            Some(lane) => lane.managing_lead(),
+            None => self.parent_thread_id.as_ref(),
+        }
+    }
+
+    /// Whether a lead manages this thread as a lane (attached or summary).
+    #[must_use]
+    pub fn is_managed_lane(&self) -> bool {
+        self.lane
+            .as_ref()
+            .is_some_and(|lane| lane.managing_lead().is_some())
     }
 
     /// When the conversation last had activity, never earlier than its creation.
@@ -282,10 +307,13 @@ impl ThreadRecord {
         // Only a displayed root can be pinned; a child hangs under its parent
         // whatever a stale pin says.
         let pinned = |thread: &Self| thread.pinned && lineage.display_parent(&thread.id).is_none();
+        // A managed lane sits among its lead's children by its own latest activity only:
+        // a run starting or ending must not reorder it (ADR 0044 §10).
+        let lifts = |thread: &Self| !thread.is_managed_lane() && running.contains(&thread.id);
         main.sort_by(|left, right| {
             pinned(right)
                 .cmp(&pinned(left))
-                .then_with(|| running.contains(&right.id).cmp(&running.contains(&left.id)))
+                .then_with(|| lifts(right).cmp(&lifts(left)))
                 .then_with(|| newest_first(&activity, left, right))
         });
         let activity = subtree_activity(&archived, lineage);
