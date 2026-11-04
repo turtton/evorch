@@ -1,7 +1,7 @@
 # ストレージ保守手順
 
 イベント DB（`evorch-events.db`）を縮小・整備する `evorch maintenance` の
-`compact-events`、`backfill-events`、`vacuum` の手順書。コマンド一覧は
+`convert-bodies`、`compact-events`、`backfill-events`、`vacuum` の手順書。コマンド一覧は
 `evorch maintenance` の USAGE（`crates/evorch/src/maintenance.rs`）が正本。
 永続化されるイベントの種別と保持方針は
 [io-performance.md](io-performance.md#イベントの永続化と保持) を、タスク進捗の
@@ -12,9 +12,120 @@
 - `evorch maintenance backfill-events` は、既存イベントの `subkind` / `run_id` 列だけを埋める軽量コマンド。GUI/runtime の稼働中にも使用できる。DB の物理サイズ縮小や delta の集約は行わない。
 - `evorch maintenance compact-events` は、既定で読み取り専用 preview。実際の変換には `--apply` が必要。preview と apply の両方で、対象 DB を使うすべての GUI/runtime/reader を停止する。
 - `evorch maintenance vacuum` は、旧 DB の `auto_vacuum` を INCREMENTAL に一度だけ切り替える軽量コマンド（[auto_vacuum の一回限りの移行](#auto_vacuum-の一回限りの移行)）。イベントの変換は行わない。
-- いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない。compact・backfill・`strip-task-progress-cursor` は、会話を `run_messages` に持つ現行の形式（schema 40）の DB だけを受け付ける。会話を `run_contexts.messages_json` に持つ旧形式の DB は `ConversionRequired` で拒否し、何も変更しない（`vacuum` はファイルの再構築だけで会話を解釈しないため対象外）。旧形式の DB は、すべての GUI/runtime を停止したうえで、変換コマンドを含むリリースの `evorch maintenance convert-bodies` で変換する。このコマンドは別の変更で追加する。
+- `evorch maintenance convert-bodies` は、schema 33〜43 の旧形式 DB を一度だけ現行形式（schema 44）へ変換する。既定は読み取り専用 preview で、`--apply` で変換する。変換が済むまで、旧形式の DB は他のコマンドでも GUI でも開けない（[convert-bodies による変換](#convert-bodies-による変換)）。
+- いずれも runtime やモデル呼び出しを開始せず、暗黙の schema migration は行わない（`convert-bodies` だけが、変換の一部として migration を明示的に適用する）。compact・backfill・`strip-task-progress-cursor` は、現行の形式（schema 44。会話は `run_messages`、provenance は `run_message_provenance`、events の大きな本文は token）の DB だけを受け付ける。それより古い形式の DB は `ConversionRequired` で拒否し、何も変更しない（`vacuum` はファイルの再構築だけで会話を解釈しないため対象外）。旧形式の DB は、すべての GUI/runtime を停止したうえで、[`evorch maintenance convert-bodies`](#convert-bodies-による変換) で変換する。
 
 以下の `$DB` は対象を確認した DB の絶対パスに置き換える。既定パスはユーザー設定ディレクトリ内の `evorch-events.db`。
+
+## 本文の保存方式（概要）
+
+- **本文の正本は `run_messages` と `content_blobs`。** run の会話は `run_contexts`（header）と、メッセージ 1 件ごとの `run_messages` 行に保存する。UTF-8 で 2 KiB（2,048 バイト）以上の文字列は、内容アドレスの `content_blobs` に置いて骨組みには token だけを残す。blob は zstd レベル 3 で圧縮し、縮む場合だけ圧縮形式を採用する（しきい値は `body_ref.rs` の `TOKEN_THRESHOLD_BYTES`、圧縮は `body_store.rs` の `ZSTD_LEVEL`）。保存は変更のあったメッセージだけを書き（差分保存）、保存直後の全量読み戻しは行わない。詳細は[会話の保存形式](#会話の保存形式run_messages)。
+- **provenance は 1 メッセージ 1 行。** 以前は run ごとに `run_context_provenance.map_json` の 1 列へ全体を保存していた。現在は header と `run_message_provenance` の行に分割する。
+- **events の大きな本文も token 化されている。** Tool / Message / compaction の events の payload のうち、2 KiB 以上の文字列を同じ `content_blobs` に置く（`events.body_format`）。読み出しは token を本文に戻す。`evorch inspect events --bodies refs` は blob を読まずに token の hash と長さだけを示す。
+- **GUI は本文を遅延して読み込む。** 保存済みの本文はペインに表示されるまで参照のまま保持する。読み込み中はスピナーとサイズ、失敗時は "Couldn't load content" と Retry / Copy details を出す。busy や一時的な失敗は自動で再試行する（最大 3 回。`AUTO_RETRIES`）。missing / corrupt の整合性エラーは自動では再試行せず、1 回だけ報告する。読めない stored event は transcript 上で前後の位置に gap として表示する。読み出しは専用スレッドで行い、1 バッチは最大 256 本・16 MiB、キャッシュ（LRU）は 64 MiB（`crates/gui/src/body/resolver.rs`）。
+- **旧形式は開かない。** schema 44 未満の DB は、`Database::open`・GUI の起動・`evorch inspect`・保守コマンドのいずれでも `ConversionRequired` で拒否され、DB は変更されない（[回復手順](#回復手順)）。
+
+## 保守コマンドの早見表
+
+| 目的 | コマンド | 節 |
+| --- | --- | --- |
+| 容量の調査（読み取り専用。稼働中も可） | `evorch inspect [--db <path>] storage [--physical] [--top <n>]` | [容量の確認](#容量の確認evorch-inspect-storage) |
+| 旧形式 DB の変換（停止中のみ） | `evorch maintenance convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]` | [convert-bodies](#convert-bodies-による変換) |
+| `auto_vacuum` の一回限りの切替（停止中のみ） | `evorch maintenance vacuum [--apply] [--backup <new-path>]` | [auto_vacuum](#auto_vacuum-の一回限りの移行) |
+| events の縮小（停止中のみ） | `evorch maintenance compact-events …` | [オフライン縮小](#オフライン縮小preview--必須バックアップ--apply) |
+| アーカイブ済みスレッドの期限削除 | 設定 `[storage.thread_retention] archived_delete_after_days`（既定 30、0 で新規の確定を無効化） | [runtime](#スレッドの期限削除runtime起動フェーズ束縛回収)、[GUI](#スレッドの期限削除gui起動表示採番) |
+
+期限削除に専用のコマンドはない。設定の既定値は 30 日で、GUI を起動すると、起動の排他フェーズ（他の evorch プロセスが動いていない起動だけ）が期限の来たアーカイブ済み family を確定し、以後は背景の回収が DB の行を少しずつ消す。`archived_delete_after_days = 0` にすると新規の確定は行われない（回収や巨大行の保守は続く）。時刻を持たない古いアーカイブは日数に関係なく直ちに対象になり、pin・評価サンプル・実行中の family は除外される。確定した削除は取り消せない。GUI での起動手順・表示（アーカイブ一覧のホバーに "Deletes in N days" など）・通知は[GUI の節](#スレッドの期限削除gui起動表示採番)を参照。
+
+## convert-bodies による変換
+
+`evorch maintenance convert-bodies` は、旧形式の DB を一度だけ現行形式（schema 44）へ変換するオフライン専用コマンド。変換元は schema 33〜43 の DB で、成功すると 44 になる。runtime やモデル呼び出しは開始しない。
+
+| 変換元 | 変換する内容 |
+| --- | --- |
+| v33〜v39 | migration 34〜39 を（バックアップ後に）先に適用し、会話本文を `run_messages` / `content_blobs` へ、provenance を行へ、events の大きな本文を token へ変換し、旧列（`run_contexts.messages_json` など）を削除する |
+| v40〜v42 | 会話本文は変換済み。**provenance と events** を変換する（USAGE によると v41・v42 は lane ledger と memory favorite の追加だけの差） |
+| v43 | provenance も変換済み。**events だけ**を変換する |
+| v44 | 変換済み。`already_converted: true` で、何も書かずに終わる |
+
+v33 未満の DB と、現行（44）より新しい DB は変換できず拒否される。
+
+### 手順
+
+1. すべての evorch GUI とすべての evorch プロセス（headless・reader を含む）を停止する。
+2. preview（既定。読み取り専用）を実行する。
+
+   ```sh
+   evorch maintenance convert-bodies --db "$DB"
+   ```
+
+   preview は、DB の隣に保守リース `<db>.maintenance-lock` が既にあること、`-wal` が空であることを要求する。リースが無い DB（リース導入前のビルドしか動かしていない DB や、変換用に作ったコピー）では、空ファイル（mode 0600）を先に作るよう案内するエラーになる。`--apply` はリースを自動で作る。非空の WAL は preview でも apply でも必ず拒否する。
+   JSON の `source_schema` / `target_schema`、`source_runs`、`required_free_space_bytes` と `space_requirements`（DB・バックアップ先・SQLite の一時領域の各 volume に必要な空き）、`estimated_growth_bytes`、`analysis`（変換できない run・event、サイズ超過、回収が終わらない原因など）を確認する。変換できないデータがあると message は "preview found data that cannot be converted; --apply would refuse" になり、apply も何も変更せずに拒否する。
+3. 空き容量を用意する。DB サイズの 4 倍（バックアップと VACUUM の分）が目安で、volume ごとの必要量は `space_requirements` にある。SQLite の一時領域は `SQLITE_TMPDIR`、`TMPDIR`、`/var/tmp` の順で選ばれるので、空きの小さい volume なら空きのある場所へ向ける。
+4. apply する。
+
+   ```sh
+   evorch maintenance convert-bodies --db "$DB" \
+     --backup "/secure/path/evorch-before-convert-bodies.db" --apply
+   ```
+
+   events は 1 transaction あたり 1,000 行（`--event-batch-rows` で 1〜100,000 を指定。ただし 1 transaction のデコード済み payload は 16 MiB まで）ずつ変換する。バックアップ・run ごとの検証・VACUUM に、数分以上かかりうる。
+5. 成功 JSON の `integrity_check: "ok"`、`foreign_key_check: "ok"`、`vacuum: true`、`checkpoint_truncated: true`、`auto_vacuum_after: 2`、`mismatched_runs: 0`、`unconverted_runs_remaining: 0` を確認する。`file_bytes_before` / `file_bytes_after` でサイズ変化、`events` で events の変換件数を確認する。GUI を起動して履歴が表示されることを確認してから、バックアップの保存方針を決める。
+
+### バックアップ
+
+- apply は最初の変更の前に、検証済みバックアップ（`VACUUM INTO` → `integrity_check` → fsync）を必ず作る。無効化オプションはない。作成した場所は stderr に `Verified maintenance backup: <path>` として出る（失敗時のレポートにも出る）。
+- `--backup <new-path>` を指定した場合はそのパス（既存ファイルの上書きは拒否）。省略時は `<DB のパス>.before-convert-bodies-<unix ナノ秒>.db`、つまり **DB と同じディレクトリ**に作る。
+- Unix でバックアップの mode は 0600。元の会話・ツール出力を含むため、安全な場所に保管する。バックアップは、変換した DB を起動して確認し終えるまで消さない。
+- 空き容量は事前に検査するが予約はしない。変換中に他の処理が空きを使い切らないようにする。
+
+### 変換が行うこと・拒否すること
+
+- **非空の WAL は拒否する。** WAL の復旧はバックアップ前に DB 本体を書き換えるため、このコマンドは復旧しない。変換前の DB を書いたビルドの evorch を正常終了させ、WAL を checkpoint してから実行する。変換が中断した後に WAL が残っているときは、バックアップから戻す（[回復手順](#回復手順)）。
+- **未変換の DB では起動が拒否される（`ConversionRequired`）。** schema 44 未満の DB を `Database::open` や GUI の起動で開くと、DB を変更せずに拒否する。エラーは "stop every evorch process and run the conversion command (`evorch maintenance convert-bodies` …)" と案内する。`evorch inspect` や他の `evorch maintenance` コマンドも同様。
+- **tombstone は変換前に retention で回収する。** 確定済みの期限削除（tombstone）の run の行は、変換の前に既存の回収処理（有界の回収と排他フェーズの回収）で DB から消し、変換の対象にしない。回収が終わらない場合はコマンドが止まる。新しい削除対象は選ばず、DB 外のファイルには触れない。結果は JSON の `retention` にある。
+- **`canonicalized_runs`。** 復元できない run（`restorable = 0`）は provider へ再送されないため、旧列のバイト列がシリアライザの出力と違っていても、同じ JSON 値であることを確認したうえでシリアライザのキー順で保存する。この run は会話の索引が snapshot hash と合わなくなるため、索引も再生成する。件数と run ID は JSON の `canonicalized_runs.count` / `run_ids` に出る（preview では `analysis.canonicalizable_runs`）。実 DB の変換では 51 件の run が並べ直された。復元できる run のバイト列が違うときは変換せず、停止する。
+- **検証。** 各 run は自分の transaction で変換し、通常の reader で読み戻して旧列とバイト単位で比較してから commit する。provenance は型付き map として、events は JSON 値として比較する。最後に旧列を削除し、スキーマを新規 DB と比較し、VACUUM（`auto_vacuum=INCREMENTAL`）・WAL TRUNCATE・`integrity_check` を行ってから `user_version` を 44 にする。公開が最後の書き込みなので、途中で止まった DB は通常の起動で拒否される。
+- 変換済みの DB に再実行しても何も書かれない（`already_converted: true`）。
+
+## 計測値
+
+実 DB での計測（運用時の実測値で、コードやテストからは再現できない）。
+
+- **v33 → v40 の変換（会話本文の変換）。** ファイルサイズは +11.5% だった。これは書込量の削減（差分保存）を優先した結果で、サイズの縮小は目的にしていない。
+- **events の token 化。** コピーした DB で 2.45 GB → 2.27 GB（約 7% 減）になった。
+- **token 化のしきい値。** 2 KiB（UTF-8 で 2,048 バイト以上の文字列）。これより短い文字列は本文に残る。
+
+これらは特定の DB の値で、他の DB のサイズ変化は保証されない。preview の `estimated_growth_bytes` は VACUUM 前の増加の上限の見積もりで、最終サイズではない。縮小の確認は、変換後の `file_bytes_after` と `evorch inspect storage --physical` の `freelist_bytes` で行う。
+
+## 回復手順
+
+### 変換の失敗・中断（`convert-bodies`）
+
+変換に再開（resume）はない。失敗時の stderr のレポートは、失敗した段階（`input` / `lock` / `analyze` / `backup` / `migrate` / `prepare` / `prepare_events` / `retention` / `convert` / `provenance` / `convert_events` / `verify` / `drop_column` / `vacuum` / `publish`）、run、`reason`（`mismatch` / `sqlite` / `io` / `refused`）、変換済みの run 数、検証済みバックアップのパスを示し、末尾が次のどちらかになる。
+
+- **"the database was not changed"。** バックアップより前の失敗（preview の拒否、変換できないデータ、空き容量不足、使用中、非空の WAL など）。DB は変わっていない。原因を取り除いて同じコマンドをやり直す。
+- **"the database was changed"。** バックアップ後の失敗（プロセスの kill や停電による中断も同じ扱い）。変わった DB を出発点にせず、見かけが古い schema でも、**変換前に作ったバックアップだけ**から戻す。
+  1. すべての evorch プロセスを停止したまま、その DB では起動しない。
+  2. DB 本体と `-wal` / `-shm` を、まとめて検査用の安全な場所へ移す。
+  3. 検証済みバックアップを DB のパスへコピーする（古い `-wal` / `-shm` と組み合わせない）。
+  4. 所有者と mode を確認する。
+  5. `convert-bodies` を preview し、新しい `--backup` のパスを指定して `--apply` をやり直す。
+  6. 変換した DB を起動して確認し終えるまで、最初のバックアップを保持する。
+
+  `.maintenance-lock` を削除・作り直して排他を迂回しない。
+
+### 起動の拒否（`ConversionRequired`）
+
+GUI・`evorch inspect`・保守コマンドが "the database (schema version N) uses the old conversation storage (…)" で止まるのは、DB が schema 44 未満のとき、または変換が途中で止まった形のとき。このエラーでは DB は変更されない。
+
+- 単に未変換の DB なら、すべての evorch プロセスを停止し、[手順](#手順)で `convert-bodies` を preview → `--apply` する。
+- detail が "an interrupted conversion" の DB は、変換の中断の跡なので、上の「the database was changed」の手順でバックアップから戻して変換をやり直す。
+- `SchemaTooNew`（DB の schema が、この evorch の対応より新しい）は、より新しい evorch で開く。
+
+### バックアップからの復元
+
+上の手順 1〜4 と同じ。稼働中の DB 本体だけをコピーして「バックアップ」と見なさない。元のファイルや最初のバックアップを上書きで失わないこと。復元した DB は変換前の schema のままなので、再度 `convert-bodies` を行うまで GUI の起動は `ConversionRequired` で拒否される。`compact-events` / `vacuum` のバックアップからの復元も同じ手順（[中断・再実行・復元](#中断再実行復元)）。
 
 ## オンラインの列バックフィル
 
@@ -129,7 +240,7 @@ run の会話は、`run_contexts`（header: 構成・checkpoint 一覧・各種�
 `msg_sha256`）の読み取りだけで済む。読み出しは、トークンを本文に戻して同じ直列化で
 連結するため、保存した JSON とバイト単位で一致する。
 
-- **旧形式は開かない。** `schema 40` 未満の DB（会話が `messages_json` 列にある）と、旧列が
+- **旧形式は開かない。** schema 44 未満の DB（schema 40 未満は会話が `messages_json` 列にある）と、旧列が
   残ったまま止まった変換の途中状態は、`Database::open`・読み取り専用接続・
   `evorch inspect`・保守コマンドのいずれも `ConversionRequired` で拒否し、ファイルを変更しない。
 - **`config_json` は正規化して保存する。** JSON として同じ内容で、キーは辞書順になる。
