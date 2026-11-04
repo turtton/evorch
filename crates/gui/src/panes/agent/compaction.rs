@@ -6,6 +6,16 @@ use crate::theme::tokens::palette;
 use crate::theme::widgets::copy_id_button;
 
 pub(super) fn summary(entry: &TranscriptEntry) -> Option<String> {
+    if let TranscriptEntry::CompactionProgress { progress } = entry {
+        return Some(
+            if progress.active {
+                "Compacting context…"
+            } else {
+                "Context compaction interrupted"
+            }
+            .into(),
+        );
+    }
     let TranscriptEntry::Compaction {
         reason,
         estimated_tokens_before,
@@ -29,6 +39,21 @@ pub(super) fn summary(entry: &TranscriptEntry) -> Option<String> {
 }
 
 pub(super) fn show(ui: &mut Ui, id: Id, entry: &TranscriptEntry) {
+    if let TranscriptEntry::CompactionProgress { progress } = entry {
+        ui.horizontal(|ui| {
+            if progress.active {
+                ui.spinner();
+            }
+            ui.label(summary(entry).unwrap_or_default());
+            if let Some(mode) = progress.mode {
+                ui.label(format!("{mode:?}"));
+            }
+        });
+        if !progress.text.is_empty() {
+            ui.add(Label::new(&progress.text).wrap());
+        }
+        return;
+    }
     let (
         Some(summary),
         TranscriptEntry::Compaction {

@@ -121,11 +121,24 @@ async fn lag_faults_and_run_progress_are_counted_but_not_stored() {
     }
     for _ in 0..4 {
         bus.emit(Event::new(LifecycleEvent::RunProgress {
+            compaction_operation_id: None,
             run_id: "run".into(),
             activity: RunActivity::Model,
             context: Some(ContextComposition::default()),
         }));
     }
+    bus.emit(Event::new(event_bus::CompactionEvent::Progress {
+        run_id: "run".into(),
+        operation_id: "op".into(),
+        mode: event_bus::CompactionMode::ModelSummary,
+        attempt: 1,
+        revision: 1,
+        delta: "live only".into(),
+    }));
+    bus.emit(Event::new(event_bus::CompactionEvent::Aborted {
+        run_id: "run".into(),
+        operation_id: "op".into(),
+    }));
     let marker = Event::new(LifecycleEvent::Started {
         session_id: "session".into(),
     });

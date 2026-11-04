@@ -215,6 +215,7 @@ impl TelemetryOverlay {
                 run_id,
                 activity,
                 context,
+                ..
             }) => {
                 let row = self.rows.entry(run_id.clone()).or_default();
                 row.activity = Some(*activity);

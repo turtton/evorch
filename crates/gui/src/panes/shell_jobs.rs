@@ -1,6 +1,7 @@
 //! Shell jobs pane: the active conversation's background shell commands and
 //! the selected job's output, following new lines while it runs.
 
+use crate::model::transcript::redacted_text_for_display;
 use egui::{Color32, RichText, Ui};
 
 use crate::model::transcript::shell_jobs::{ShellJob, ShellJobKey};
@@ -114,7 +115,10 @@ impl ShellJobsPane {
             .inner_margin(SP_2)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let command = job.command.as_deref().unwrap_or("(command unavailable)");
+                let command = job.command.as_deref().map_or_else(
+                    || "(command unavailable)".to_owned(),
+                    redacted_text_for_display,
+                );
                 ui.add(egui::Label::new(RichText::new(format!("$ {command}")).monospace()).wrap());
             });
         if let Some(path) = &job.artifact {
@@ -140,7 +144,12 @@ impl ShellJobsPane {
 fn command_label(job: &ShellJob) -> String {
     job.command
         .as_deref()
-        .map(|command| command.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|command| {
+            redacted_text_for_display(command)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_else(|| format!("job {}", job.short_id()))
 }
 

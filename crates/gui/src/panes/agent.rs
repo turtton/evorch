@@ -395,7 +395,7 @@ fn run_detail_body(
                             ui,
                             entry,
                             &children,
-                            pane_id.with(("tool-entry", entry_id)),
+                            model_id.with(("tool-entry", entry_id)),
                             crate::panes::transcript_tool::ToolCardContext {
                                 repo_root,
                                 jobs: model.shell_jobs(),
@@ -419,7 +419,7 @@ fn run_detail_body(
                         tool_card_group(
                             ui,
                             group,
-                            pane_id.with(("tool-entry", entry_id)),
+                            model_id.with(("tool-entry", entry_id)),
                             crate::panes::transcript_tool::ToolCardContext {
                                 repo_root,
                                 jobs: model.shell_jobs(),
@@ -499,6 +499,7 @@ fn run_detail_body(
                             | TranscriptEntry::Diagnostic { .. }
                             | TranscriptEntry::SandboxReview { .. }
                             | TranscriptEntry::Compaction { .. }
+                            | TranscriptEntry::CompactionProgress { .. }
                             | TranscriptEntry::Tool { .. }
                             | TranscriptEntry::AgentMessage { .. }
                             | TranscriptEntry::TurnEnd { .. }
@@ -527,7 +528,9 @@ fn run_detail_body(
                             sandbox_review::show(ui, text, call_id.as_deref());
                             return;
                         }
-                        if let TranscriptEntry::Compaction { .. } = entry {
+                        if let TranscriptEntry::Compaction { .. }
+                        | TranscriptEntry::CompactionProgress { .. } = entry
+                        {
                             compaction::show(ui, pane_id.with(("compaction", entry_id)), entry);
                             return;
                         }
@@ -649,6 +652,7 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::UserMessage { .. }
         | TranscriptEntry::SandboxReview { .. }
         | TranscriptEntry::Compaction { .. }
+        | TranscriptEntry::CompactionProgress { .. }
         | TranscriptEntry::Message { .. }
         | TranscriptEntry::Reasoning { .. }
         | TranscriptEntry::Tool { .. }
@@ -669,7 +673,9 @@ fn entry_frame(entry: &TranscriptEntry) -> egui::Frame {
             ..
         } => palette().ERROR_SURFACE,
         TranscriptEntry::SandboxReview { .. } => palette().WARNING_SURFACE,
-        TranscriptEntry::Compaction { .. } => palette().SURFACE,
+        TranscriptEntry::Compaction { .. } | TranscriptEntry::CompactionProgress { .. } => {
+            palette().SURFACE
+        }
         _ => {
             return egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(SP_1 as i8, SP_1 as i8));
@@ -760,7 +766,9 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         TranscriptEntry::Unreadable { event_id, .. } => {
             format!("Event {event_id} could not be read")
         }
-        TranscriptEntry::Compaction { .. } => compaction::summary(entry).unwrap_or_default(),
+        TranscriptEntry::Compaction { .. } | TranscriptEntry::CompactionProgress { .. } => {
+            compaction::summary(entry).unwrap_or_default()
+        }
         TranscriptEntry::Tool {
             tool_name,
             call_id,

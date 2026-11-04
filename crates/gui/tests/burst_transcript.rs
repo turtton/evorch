@@ -115,6 +115,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }
             | TranscriptEntry::Compaction { .. }
+            | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }

@@ -342,7 +342,9 @@ async fn collect_compactions(receiver: &mut EventReceiver, run_id: &str) -> Vec<
     loop {
         let event = receiver.recv().await.expect("event bus remains open");
         match event.kind {
-            EventKind::Compaction(event) => compacted.push(event),
+            EventKind::Compaction(event @ CompactionEvent::Compacted { .. }) => {
+                compacted.push(event)
+            }
             EventKind::Lifecycle(LifecycleEvent::BackgroundTaskCompleted { task_id })
                 if task_id == run_id =>
             {
@@ -520,6 +522,7 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
     // (a) 自動圧縮はちょうど 1 回
     assert_eq!(events.len(), 1);
     let CompactionEvent::Compacted {
+        operation_id: _,
         run_id: event_run_id,
         reason,
         threshold,
@@ -531,7 +534,10 @@ async fn long_session_compacts_once_preserves_agent_messages_and_continues() {
         compacted_range_end,
         checkpoint_id,
         summary,
-    } = &events[0];
+    } = &events[0]
+    else {
+        panic!("expected committed compaction");
+    };
     assert_eq!(event_run_id, &child.to_string());
     assert_eq!(*reason, CompactionReason::Automatic);
     assert!((*threshold - 0.75).abs() < f64::EPSILON);

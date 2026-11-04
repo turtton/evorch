@@ -268,19 +268,24 @@ fn folded_poll_title_and_shell_log_action_remain_reachable_while_pinned() {
 }
 
 #[test]
-fn running_call_remains_disabled_and_finished_call_can_stick() {
+fn running_call_never_sticks_and_finished_call_can_stick() {
     let mut harness = harness();
     if let TranscriptEntry::Tool { status, .. } = &mut harness.state_mut().entries[0] {
         *status = ToolStatus::Running;
     }
     harness.run_steps(3);
     let running = "Shell long-output";
-    harness.get_by_label(running).click();
-    harness.run_steps(3);
-    assert!(harness.query_by_label("Output").is_none());
+    // A running call has no finished output to read, so its header scrolls away.
     scroll(&mut harness, 450.0);
     assert!(harness.get_by_label(running).rect().bottom() < harness.state().viewport.top());
     scroll(&mut harness, 0.0);
+    // Expanding it only shows the command, never a finished call's output.
+    harness.get_by_label(running).click();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("Output").is_none());
+    harness.get_by_label("long-output");
+    harness.get_by_label(running).click();
+    harness.run_steps(3);
     if let TranscriptEntry::Tool { status, .. } = &mut harness.state_mut().entries[0] {
         *status = ToolStatus::Succeeded;
     }

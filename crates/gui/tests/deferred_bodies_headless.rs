@@ -434,6 +434,7 @@ fn thinking_and_tool_output_and_compaction_summaries_are_read_only_once_opened()
                 compacted_range_start: 0,
                 compacted_range_end: 40,
                 checkpoint_id: "cp-1".into(),
+                operation_id: "op-1".into(),
                 summary: String::new(),
             }),
             Some(&BodyText::deferred(backend.deferred(

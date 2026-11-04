@@ -1,4 +1,4 @@
-//! The thread search modal opened with Ctrl+K or the sidebar search button.
+//! The thread search modal opened with Ctrl+K or a project row's search button.
 
 use std::path::Path;
 
@@ -54,6 +54,11 @@ pub fn thread_search_modal(
             );
             ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
             ui.label(h3("Search threads"));
+            if let Some(target) = modal.project()
+                && let Some(record) = sidebar.projects.iter().find(|p| &p.id == target)
+            {
+                ui.label(muted(format!("Project: {}", record.name)));
+            }
             let query = ui.add(
                 egui::TextEdit::singleline(&mut modal.query)
                     .hint_text(QUERY_HINT)

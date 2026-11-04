@@ -1,6 +1,7 @@
 pub(crate) mod cut;
 pub(crate) mod estimator;
 pub(crate) mod policy;
+pub(crate) mod progress;
 pub(crate) mod summary;
 
 #[cfg(test)]
@@ -95,6 +96,8 @@ pub(crate) async fn compact_now(
     state: &mut LoopState,
     reason: CompactionReason,
 ) -> Result<CompactionOutcome, CompactionError> {
+    let mut operation =
+        progress::Operation::new(state.shared.bus.clone(), state.caller_run_id().to_string());
     let mut candidate = state.context.clone();
     let previous_compaction = state.compaction.clone();
     let mut events = Vec::new();
@@ -103,7 +106,7 @@ pub(crate) async fn compact_now(
     let result = tokio::select! {
         biased;
         _ = preparation_interrupted(&mut cancel) => Err(CompactionError::PrepareFailed("context preparation interrupted".into())),
-        result = compact_candidate(state, &mut candidate, reason, None, &mut events) => result,
+        result = compact_candidate(state, &mut candidate, reason, None, &mut events, &mut operation) => result,
     };
     state.compaction.in_flight = false;
     state
@@ -123,7 +126,9 @@ pub(crate) async fn compact_now(
         state.compaction = previous_compaction;
         return Err(error);
     }
-    committed_context(state, events);
+    if committed_context(state, events).contains(&operation.id) {
+        operation.committed();
+    }
     Ok(result)
 }
 
@@ -133,8 +138,9 @@ pub(crate) async fn compact_candidate(
     reason: CompactionReason,
     selected: Option<&str>,
     events: &mut Vec<Event>,
+    operation: &mut progress::Operation,
 ) -> Result<CompactionOutcome, CompactionError> {
-    state.activity(event_bus::RunActivity::Compaction);
+    operation.start(state);
     let settings = state.shared.compaction.clone();
     let visible = context.visible_messages();
     let estimated_before = if selected.is_some() {
@@ -298,6 +304,9 @@ pub(crate) async fn compact_candidate(
         }
     };
     let (summary_result, summary_usage) = if let Some(result) = &official {
+        // Before the response we only know that compaction is running.
+        // Unsupported/failed native calls must never be classified as Official.
+        operation.path(event_bus::CompactionMode::Official);
         (
             Ok("[provider-side API compaction]".to_owned()),
             Some(if result.usage_reported {
@@ -338,6 +347,7 @@ pub(crate) async fn compact_candidate(
                     },
                     false,
                     protected,
+                    operation,
                 )
                 .await
             }
@@ -436,6 +446,7 @@ pub(crate) async fn compact_candidate(
     state.compaction.auto_suspended = true;
     state.compaction.last_estimated_tokens = estimated_after;
     events.push(Event::new(CompactionEvent::Compacted {
+        operation_id: operation.id.clone(),
         run_id: state.caller_run_id().to_string(),
         reason,
         threshold: settings.threshold,
@@ -464,17 +475,20 @@ async fn summarize_range(
     input: &SummaryInput<'_>,
     text_tool_history: bool,
     protected: Option<&str>,
+    operation: &mut progress::Operation,
 ) -> (
     Result<String, summary::SummarizeError>,
     Option<providers::Usage>,
 ) {
     let settings = &state.shared.compaction;
     if settings.summarizer == SummarizerKindSel::Structural {
+        operation.path(event_bus::CompactionMode::Structural);
         return (
             structural_summary(input, protected, settings.max_summary_bytes).await,
             None,
         );
     }
+    let mut summary_progress = operation.path(event_bus::CompactionMode::ModelSummary);
     let (result, usage) = ModelSummarizer {
         turn: Some(state.turn.clone()),
         model: state.shared.model.clone(),
@@ -485,11 +499,12 @@ async fn summarize_range(
         idle_timeout: std::time::Duration::from_secs(settings.summary_idle_timeout_secs),
         timeout: std::time::Duration::from_secs(settings.summary_timeout_secs),
     }
-    .summarize_with_usage_for_switch(input, text_tool_history)
+    .summarize_with_progress(input, text_tool_history, Some(&mut summary_progress))
     .await;
     match result {
         Ok(summary) => (Ok(summary), usage),
         Err(error) => {
+            operation.path(event_bus::CompactionMode::Structural);
             failure_diagnostic(
                 state,
                 reason,
@@ -590,6 +605,12 @@ async fn prepare_candidate(
     resummarize: bool,
     mut candidate: crate::AgentContext,
 ) -> Result<(), CompactionError> {
+    let mut operation =
+        progress::Operation::new(state.shared.bus.clone(), state.caller_run_id().to_string());
+    // Re-summary and a subsequent fit compaction are separate operations,
+    // even though their checkpoints commit at the same request boundary.
+    let mut fit_operation =
+        progress::Operation::new(state.shared.bus.clone(), state.caller_run_id().to_string());
     let previous_compaction = state.compaction.clone();
     let original_checkpoints = candidate.checkpoints().len();
     let mut events = Vec::new();
@@ -597,7 +618,7 @@ async fn prepare_candidate(
     cancel.borrow_and_update();
     let preparation = async {
         if resummarize {
-            resummarize_history(state, &mut candidate, &mut events).await?;
+            resummarize_history(state, &mut candidate, &mut events, &mut operation).await?;
         }
         let settings = state.shared.compaction.clone();
         let (window, _) = policy::resolve_window(
@@ -615,6 +636,7 @@ async fn prepare_candidate(
                 CompactionReason::ModelSwitch,
                 Some(selected),
                 &mut events,
+                &mut fit_operation,
             )
             .await
         {
@@ -649,7 +671,13 @@ async fn prepare_candidate(
             ));
         }
         install_prepared_context(state, candidate, replaced)?;
-        committed_context(state, events);
+        let published = committed_context(state, events);
+        if published.contains(&operation.id) {
+            operation.committed();
+        }
+        if published.contains(&fit_operation.id) {
+            fit_operation.committed();
+        }
         Ok(())
     };
     let result = tokio::select! {
@@ -675,6 +703,7 @@ async fn resummarize_history(
     state: &mut LoopState,
     context: &mut crate::AgentContext,
     events: &mut Vec<Event>,
+    operation: &mut progress::Operation,
 ) -> Result<(), CompactionError> {
     let messages = &context.messages;
     let mut start = usize::from(
@@ -715,7 +744,7 @@ async fn resummarize_history(
     if start >= end {
         return Ok(());
     }
-    state.activity(event_bus::RunActivity::Compaction);
+    operation.start(state);
     let settings = state.shared.compaction.clone();
     let estimated_before = state.estimated_context_tokens(&context.visible_messages());
     let (window, window_source) = state.resolved_context_window();
@@ -745,6 +774,7 @@ async fn resummarize_history(
         &SummaryInput { goal, compacted },
         true,
         protected,
+        operation,
     )
     .await;
     state.compaction.in_flight = false;
@@ -787,6 +817,7 @@ async fn resummarize_history(
     state.compaction.checkpoint_seq = state.compaction.checkpoint_seq.saturating_add(1);
     state.compaction.last_estimated_tokens = estimated_after;
     events.push(Event::new(CompactionEvent::Compacted {
+        operation_id: operation.id.clone(),
         run_id: state.caller_run_id().to_string(),
         reason: CompactionReason::ModelSwitch,
         threshold: settings.threshold,
@@ -813,16 +844,28 @@ async fn preparation_interrupted(cancel: &mut tokio::sync::watch::Receiver<crate
     }
 }
 
-fn committed_context(state: &mut LoopState, events: Vec<Event>) {
+fn committed_context(state: &mut LoopState, events: Vec<Event>) -> Vec<String> {
     if !events.is_empty() {
         state.todo_context_pending = true;
         state.todo_context_deferred = false;
     }
     state.last_usage = None;
     state.compaction.last_usage_estimated_tokens = None;
+    let mut published = Vec::new();
     for event in events {
-        state.shared.bus.emit(event);
+        let operation = match &event.kind {
+            event_bus::EventKind::Compaction(CompactionEvent::Compacted {
+                operation_id, ..
+            }) => Some(operation_id.clone()),
+            _ => None,
+        };
+        if state.shared.bus.emit(event) > 0
+            && let Some(operation) = operation
+        {
+            published.push(operation);
+        }
     }
+    published
 }
 
 fn install_prepared_context(

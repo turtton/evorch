@@ -6,6 +6,7 @@ use crate::body::{BodyText, FailureKind};
 mod branch;
 mod compaction;
 mod diagnostics;
+mod draft_text;
 mod drafts;
 mod lifecycle;
 mod reviews;
@@ -13,6 +14,7 @@ pub mod shell_jobs;
 mod thinking;
 mod unreadable;
 
+pub use drafts::{redacted_for_display, redacted_text_for_display};
 pub use reviews::ToolReview;
 
 #[cfg(test)]
@@ -37,12 +39,19 @@ pub enum ToolStatus {
     /// The run ended before the call reported a result, for example because
     /// the process exited mid-call. A late completion still replaces it.
     Interrupted,
-    /// The model is still composing the call; `arguments` is the raw text
-    /// streamed so far. `ToolStarted` turns the card into a running call.
+    /// The model is still composing the call. `ToolStarted` turns the card into
+    /// a running call. Both texts are redacted and bounded; see `drafts.rs`.
     Drafting {
         /// Position of the call within the streamed response.
         index: usize,
+        /// The newest part of the argument JSON streamed so far.
         arguments: String,
+        /// The string a card reads best as text (a delegate's `prompt`, a
+        /// shell's `command`), decoded with its line breaks; empty when the
+        /// tool has none or it has not started.
+        text: String,
+        /// Older streamed text no longer fits in `arguments` / `text`.
+        omitted: bool,
         /// The response finished, so the call is waiting for its start event.
         sealed: bool,
     },
@@ -102,6 +111,9 @@ pub enum TranscriptEntry {
         text: String,
         run_id: Option<String>,
         call_id: Option<String>,
+    },
+    CompactionProgress {
+        progress: compaction::CompactionProgressModel,
     },
     Compaction {
         reason: CompactionReason,
@@ -189,6 +201,7 @@ pub struct TranscriptModel {
     /// The display body of the event being applied, when it is still in the
     /// store. Set only for the duration of [`Self::apply_with_body`].
     deferred_body: Option<BodyText>,
+    closed_compactions: std::collections::VecDeque<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +243,7 @@ impl TranscriptModel {
             approvals_while_running: std::collections::BTreeSet::new(),
             drafts: drafts::DraftIndex::default(),
             deferred_body: None,
+            closed_compactions: Default::default(),
         }
     }
 
@@ -387,6 +401,9 @@ impl TranscriptModel {
     }
 
     pub fn apply(&mut self, event: &Event) {
+        if self.apply_compaction(event) {
+            return;
+        }
         self.finish_thinking(event);
         self.finish_drafts(event);
         if let event_bus::EventKind::Diagnostic(diagnostic) = &event.kind
@@ -450,13 +467,7 @@ impl TranscriptModel {
                     }
                 }
             }
-            event_bus::EventKind::Compaction(event) => {
-                let summary = match event {
-                    event_bus::CompactionEvent::Compacted { summary, .. } => summary,
-                };
-                let summary = self.body_of(summary);
-                self.push(compaction::entry(event, summary));
-            }
+            event_bus::EventKind::Compaction(_) => {},
             event_bus::EventKind::Tool(event_bus::ToolEvent::ArtifactsPresented {
                 presentation, ..
             }) => self.push(TranscriptEntry::Artifacts {
@@ -718,6 +729,7 @@ impl TranscriptModel {
                     | TranscriptEntry::Diagnostic { .. }
                     | TranscriptEntry::SandboxReview { .. }
                     | TranscriptEntry::Compaction { .. }
+                    | TranscriptEntry::CompactionProgress { .. }
                     | TranscriptEntry::Tool { .. }
                     | TranscriptEntry::AgentMessage { .. }
                     | TranscriptEntry::TurnEnd { .. }
@@ -1243,6 +1255,7 @@ mod tests {
         let mut model = TranscriptModel::new();
         model.push_message("before");
         let event = Event::new(CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-1".into(),
             reason: CompactionReason::Automatic,
             threshold: 0.8,

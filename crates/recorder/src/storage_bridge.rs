@@ -46,6 +46,10 @@ impl Default for PersistencePolicy {
 impl PersistencePolicy {
     fn skip(self, event: &Event, monitor: &StorageBridgeMonitor) -> bool {
         match &event.kind {
+            EventKind::Compaction(
+                event_bus::CompactionEvent::Progress { .. }
+                | event_bus::CompactionEvent::Aborted { .. },
+            ) => true,
             EventKind::Ownership(event) if event.action == OwnershipAction::Heartbeat => {
                 monitor.skipped_heartbeat();
                 true

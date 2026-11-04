@@ -12,7 +12,7 @@ use egui::{RichText, Ui};
 
 use super::{
     INTERRUPTED_META, INTERRUPTED_NOTE, ToolCardContext, code, fitted_header_job, header,
-    pretty_json, review_line, status_color, status_mark, sticky, tool_card_group,
+    live_detail, pretty_json, review_line, status_color, status_mark, sticky, tool_card_group,
 };
 use crate::model::transcript::{ToolStatus, TranscriptEntry};
 use crate::theme::tokens::{FONT_SMALL, R_SM, SP_1, palette};
@@ -282,21 +282,22 @@ pub fn run_js_card(
 ) {
     let TranscriptEntry::Tool {
         tool_name,
-        call_id,
         input,
         output,
         detail,
         is_error,
         status,
-        run_id,
         reviews,
         ..
     } = entry
     else {
         return;
     };
-    let id = pane_id.with(("tool-expanded", run_id, call_id));
+    let id = pane_id.with("tool-expanded");
     let running = matches!(status, ToolStatus::Running);
+    // The program is drawn from a redacted copy, like every card's input.
+    let display_input = live_detail::DisplayInput::cached(ui, id, input.as_ref(), false);
+    let shown_input = display_input.as_deref().map(|display| &display.value);
     let mut expanded = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
     let color = status_color(status, *is_error);
     // A header summary never asks for a body: it uses one only if held.
@@ -305,7 +306,7 @@ pub fn run_js_card(
         .and_then(|output| crate::body::ui::peek_text(ui.ctx(), output));
     let mut header = header::tool_header(
         tool_name,
-        input.as_ref(),
+        shown_input,
         header_output.as_deref(),
         *is_error,
         context.repo_root,
@@ -324,8 +325,7 @@ pub fn run_js_card(
     let header_text = header.text();
     let (glyph, mark) = status_mark(status, *is_error, header.icon);
     let label = format!("{mark}{header_text}");
-    let source = input
-        .as_ref()
+    let source = shown_input
         .and_then(|input| input.get("code"))
         .and_then(serde_json::Value::as_str);
     crate::theme::widgets::soft_frame(palette().SURFACE).show(ui, |ui| {
@@ -334,7 +334,7 @@ pub fn run_js_card(
             review_line(ui, review);
         }
         if expanded {
-            match (source, input) {
+            match (source, shown_input) {
                 (Some(source), _) => {
                     ui.label("Code");
                     code(ui, source, palette().TEXT);
