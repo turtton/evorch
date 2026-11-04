@@ -446,6 +446,9 @@ fn user_visible_questions_are_tracked_until_answered() {
         ..Observed::default()
     };
     let question = UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "q-1".into(),
         run_id: "root".into(),
         root_run_id: "root".into(),
@@ -585,6 +588,9 @@ async fn events_a_small_bus_overwrote_before_the_observer_stops_are_counted() {
 
 fn root_question(id: &str, answer: Option<&str>) -> UserQuestion {
     UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: id.into(),
         run_id: "root".into(),
         root_run_id: "root".into(),

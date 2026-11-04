@@ -226,6 +226,11 @@ pub struct LaneBrief {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneReportInput {
+    #[serde(default)]
+    pub artifact_revision: Option<ArtifactRevision>,
+    /// Runtime-held failure episode, not regenerated for every report.
+    #[serde(default)]
+    pub failure_episode: Option<String>,
     pub status: LaneStatus,
     pub summary: String,
     #[serde(default)]
@@ -242,6 +247,10 @@ pub struct LaneReportInput {
 /// One stored report (ADR 0044 §6). Immutable once appended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneReport {
+    #[serde(default)]
+    pub artifact_revision: Option<ArtifactRevision>,
+    #[serde(default)]
+    pub failure_episode: Option<String>,
     pub lane_id: String,
     /// Assigned by the ledger: 1, 2, 3, … per lane, never reused.
     pub report_seq: u64,
@@ -363,6 +372,19 @@ impl LaneReportInput {
     /// # Errors
     /// Returns the first field that is empty, too large or has too many entries.
     pub fn validate(&self) -> Result<(), LaneValidationError> {
+        if self
+            .artifact_revision
+            .as_ref()
+            .is_some_and(|revision| revision.fingerprint().is_none())
+        {
+            return Err(LaneValidationError::new(
+                "artifact_revision",
+                LaneValidationKind::Invalid("requires full commit SHA or SHA-256"),
+            ));
+        }
+        if let Some(episode) = &self.failure_episode {
+            required_text("failure_episode", episode, 256)?;
+        }
         required_text("summary", &self.summary, LANE_SUMMARY_MAX_BYTES)?;
         text_list(
             "artifact_refs",
@@ -404,6 +426,11 @@ impl LaneReportInput {
     #[must_use]
     pub fn guarded_texts(&self) -> Vec<(&'static str, &str)> {
         let mut texts = vec![("summary", self.summary.as_str())];
+        texts.extend(
+            self.failure_episode
+                .as_deref()
+                .map(|s| ("failure_episode", s)),
+        );
         texts.extend(
             self.artifact_refs
                 .iter()
@@ -560,6 +587,8 @@ mod tests {
 
     fn report() -> LaneReportInput {
         LaneReportInput {
+            artifact_revision: None,
+            failure_episode: None,
             status: LaneStatus::Working,
             summary: "step done".into(),
             artifact_refs: vec![],
@@ -652,6 +681,8 @@ mod tests {
 
         // And: the stored form, with its identity and counters, is checked too.
         let stored = |summary: String| LaneReport {
+            artifact_revision: None,
+            failure_episode: None,
             lane_id: "lane".into(),
             report_seq: 1,
             status: LaneStatus::Working,
@@ -745,4 +776,106 @@ mod tests {
         }
         assert!(!LaneScope::Lane.can_open_lanes());
     }
+}
+
+/// Immutable provenance of the original question, independent of its responder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionRequester {
+    pub run_id: String,
+    pub thread_id: String,
+    pub root_run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QuestionResponder {
+    User,
+    Lead { thread_id: String },
+}
+
+/// Bound only after a durable lane-delivery host adapter is installed. The default
+/// is deliberately fail-safe: Phase 1b's user routing survives partial rollout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LaneDeliveryBinding {
+    #[default]
+    Unbound,
+    Bound,
+}
+impl LaneDeliveryBinding {
+    pub fn responder(self, policy: LanePolicy, lead: Option<&str>) -> QuestionResponder {
+        match (self, policy, lead) {
+            (Self::Bound, LanePolicy::Attached, Some(thread_id)) => QuestionResponder::Lead {
+                thread_id: thread_id.into(),
+            },
+            _ => QuestionResponder::User,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionRouting {
+    pub question_id: String,
+    pub lane_id: String,
+    pub requester: QuestionRequester,
+    pub responder: QuestionResponder,
+    pub management_revision: u64,
+    pub routing_revision: u64,
+}
+
+/// A verifiable immutable artifact identifier, not a report sequence or mutable path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ArtifactRevision {
+    CommitSha(String),
+    Sha256(String),
+}
+impl ArtifactRevision {
+    pub fn fingerprint(&self) -> Option<String> {
+        let (prefix, value, lengths): (&str, &str, &[usize]) = match self {
+            Self::CommitSha(v) => ("commit", v, &[40, 64]),
+            Self::Sha256(v) => ("sha256", v, &[64]),
+        };
+        (lengths.contains(&value.len()) && value.bytes().all(|c| c.is_ascii_hexdigit()))
+            .then(|| format!("{prefix}:{}", value.to_ascii_lowercase()))
+    }
+}
+
+/// Both lead-bound notices and lead answers addressed to the lane use this outbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LaneNotificationKind {
+    Question {
+        question_id: String,
+        routing_revision: u64,
+    },
+    Answer {
+        question_id: String,
+        routing_revision: u64,
+    },
+    Ready {
+        revision: Option<ArtifactRevision>,
+    },
+    Failed {
+        episode: String,
+        revision: Option<ArtifactRevision>,
+    },
+    Milestone,
+    Intervention {
+        input_id: String,
+    },
+}
+
+/// References only: input text and full question/report bodies are not duplicated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneNotification {
+    pub notification_id: String,
+    pub lane_id: String,
+    pub management_revision: u64,
+    pub source_thread_id: String,
+    pub destination_thread_id: String,
+    pub kind: LaneNotificationKind,
+    pub report_seq: Option<u64>,
+    pub created_at_ns: i64,
 }

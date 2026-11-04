@@ -100,6 +100,21 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         ReclaimThread,
         "follows its lane row through ON DELETE CASCADE",
     ),
+    (
+        "lane_question_routes",
+        ReclaimThread,
+        "requester/responder thread; also cascades with question/lane",
+    ),
+    (
+        "lane_notifications",
+        ReclaimThread,
+        "source/destination thread, before receipts can disappear",
+    ),
+    (
+        "lane_delivery_destinations",
+        ReclaimThread,
+        "destination thread control and lease",
+    ),
     ("lane_state", Keep, "ledger revision singleton"),
     (
         "lane_list_snapshots",

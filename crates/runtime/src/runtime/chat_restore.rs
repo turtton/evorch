@@ -293,6 +293,7 @@ impl AgentRuntime {
                     .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
                 let now = crate::run_store::review_time_ns();
                 host_input.inserts.push(storage::HostInputReceipt {
+                    provenance: storage::HostInputProvenance::User,
                     prompt_id: prompt_id.clone(),
                     run_id: run_id.to_string(),
                     root_run_id: String::new(),
@@ -775,6 +776,7 @@ impl AgentRuntime {
                         edges.as_slice(),
                         consumed,
                         &storage::HostInputReceipt {
+                            provenance: storage::HostInputProvenance::User,
                             prompt_id: prompt_id.clone(),
                             run_id: run_id.to_string(),
                             root_run_id: review.root_run_id.clone(),

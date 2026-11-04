@@ -92,6 +92,9 @@ mod tests {
     #[test]
     fn restored_answer_requires_matching_user_message_not_model_claim() {
         let question = UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-1".into(),
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),

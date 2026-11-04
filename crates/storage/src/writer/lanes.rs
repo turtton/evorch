@@ -29,7 +29,7 @@ impl StorageHandle {
         self.lane_job(false, work)
     }
 
-    fn lane_job<T: Send + 'static>(
+    pub(super) fn lane_job<T: Send + 'static>(
         &self,
         writes: bool,
         work: impl FnOnce(&Connection) -> Result<T, StorageError> + Send + 'static,

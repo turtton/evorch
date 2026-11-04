@@ -10,9 +10,9 @@ impl TranscriptModel {
             let name = self.agent_names.get(&question.run_id);
             // Who answered is shown; an unknown origin keeps the plain wording.
             let by = match &question.answer_origin {
-                Some(event_bus::AnswerOrigin::Host) => " from you",
+                Some(event_bus::AnswerOrigin::Host { .. }) => " from you",
                 Some(event_bus::AnswerOrigin::ParentAgent { .. }) => " from parent agent",
-                None => "",
+                _ => "",
             };
             let text = match (&question.answer, name) {
                 (Some(answer), Some(name)) => {

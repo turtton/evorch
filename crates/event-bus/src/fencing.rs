@@ -530,6 +530,9 @@ mod question_tests {
         let fences = MutationFences::default();
         assert!(fences.register("run-1".into(), Arc::new(|| false)));
         let mut question = crate::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-1".into(),
             run_id: "run-1".into(),
             root_run_id: "run-1".into(),

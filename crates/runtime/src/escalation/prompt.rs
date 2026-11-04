@@ -84,6 +84,9 @@ mod tests {
         };
 
         let question = event_bus::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-original".into(),
             run_id: "run-7".into(),
             root_run_id: "run-7".into(),
@@ -96,6 +99,9 @@ mod tests {
             answer_origin: None,
         };
         let answered = event_bus::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "question-answered".into(),
             answer: Some("解決済み".into()),
             ..question.clone()

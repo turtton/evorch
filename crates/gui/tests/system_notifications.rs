@@ -85,6 +85,9 @@ fn phase(run: &str, to: AgentRunPhase, reason: Option<&str>) -> Event {
 fn question(id: &str, run: &str, root: &str, answer: Option<&str>) -> Event {
     Event::new(ToolEvent::UserQuestionUpdated {
         question: UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: id.into(),
             run_id: run.into(),
             root_run_id: root.into(),

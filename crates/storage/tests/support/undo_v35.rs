@@ -67,7 +67,10 @@ pub fn undo_v42(connection: &Connection) {
 /// undoing v45 (lane start reason), v44 (event bodies), v43 (provenance rows) and v42.
 pub fn undo_v40(connection: &Connection) {
     connection
-        .execute_batch(include_str!("undo_v45.sql"))
+        .execute_batch(concat!(
+            include_str!("undo_v46.sql"),
+            include_str!("undo_v45.sql")
+        ))
         .unwrap();
     connection
         .execute_batch(include_str!("undo_v44.sql"))

@@ -122,6 +122,9 @@ async fn state_restores_goals_and_answers_cannot_revive_a_deleted_thread() {
         }],
     };
     let question = event_bus::UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "question-of-gone".into(),
         run_id: gone.to_string(),
         root_run_id: gone.to_string(),

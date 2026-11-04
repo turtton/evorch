@@ -11,9 +11,12 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 45;
+const LATEST_SCHEMA: u32 = 46;
 
-const EXPECTED_TABLES: [&str; 78] = [
+const EXPECTED_TABLES: [&str; 81] = [
+    "lane_question_routes",
+    "lane_notifications",
+    "lane_delivery_destinations",
     "lane_state",
     "lanes",
     "lane_reports",
@@ -94,7 +97,9 @@ const EXPECTED_TABLES: [&str; 78] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 76] = [
+const EXPECTED_INDICES: [&str; 78] = [
+    "lane_notifications_pending",
+    "lane_routes_responder",
     "idx_content_blob_refs_event_blob",
     "idx_lanes_lead_activity",
     "idx_lanes_origin",
@@ -1153,6 +1158,9 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     let path = temp_dir.path().join("v41.db");
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v46.sql"))
+        .unwrap();
     // This fixture starts from the latest database: undo the later lane-only v45
     // column before reconstructing v41, so migration v45 runs exactly once.
     connection

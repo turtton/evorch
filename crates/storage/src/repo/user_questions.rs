@@ -30,7 +30,9 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
         |row| row.get(0),
     )?;
     if count >= 32 {
-        return Err(invalid("question limit reached (32 per run)"));
+        return Err(StorageError::QuestionCapacity(
+            crate::lane_delivery::QuestionCapacity::Requester,
+        ));
     }
     let pending: i64 = conn.query_row(
         "SELECT count(*) FROM user_questions WHERE answered=0 \
@@ -39,8 +41,8 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
         |row| row.get(0),
     )?;
     if pending >= 1024 {
-        return Err(invalid(
-            "pending question limit reached (1024); answer existing questions first",
+        return Err(StorageError::QuestionCapacity(
+            crate::lane_delivery::QuestionCapacity::Global,
         ));
     }
     let payload = serde_json::to_string(question).map_err(|e| invalid(&e.to_string()))?;
@@ -216,6 +218,16 @@ fn list(conn: &Connection, sql: &str, arg: &str) -> Result<Vec<UserQuestion>, St
 fn hydrate(conn: &Connection, payload: &str) -> Result<UserQuestion, StorageError> {
     let mut question: UserQuestion =
         serde_json::from_str(payload).map_err(|e| invalid(&e.to_string()))?;
+    if let Some(route) = crate::repo::lane_delivery::routing(conn, &question.id)? {
+        question.responder = Some(route.responder);
+        question.routing_revision = route.routing_revision;
+        question.management_revision = Some(route.management_revision);
+    } else {
+        // No canonical route means legacy routing, never a stale serialized Lead.
+        question.responder = None;
+        question.routing_revision = 0;
+        question.management_revision = None;
+    }
     // Links, not a stale event/payload projection, are canonical consumer routing.
     // Insertion order retains the continuation path, including across restarts.
     let mut statement = conn.prepare(

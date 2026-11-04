@@ -103,6 +103,8 @@ pub enum LaneCursorError {
 // `rusqlite::Error` が `Eq` を実装しないため、ワークスペースの慣例に反して `Eq` は導出しません。
 #[derive(Debug, PartialEq)]
 pub enum StorageError {
+    QuestionCapacity(crate::lane_delivery::QuestionCapacity),
+    LaneDeliveryConflict(&'static str),
     StaleMutation,
     /// SQLite 操作が失敗しました。
     Sqlite(rusqlite::Error),
@@ -218,6 +220,14 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::QuestionCapacity(capacity) => write!(
+                formatter,
+                "question capacity {capacity:?} reached ({})",
+                capacity.limit()
+            ),
+            Self::LaneDeliveryConflict(reason) => {
+                write!(formatter, "lane delivery conflict: {reason}")
+            }
             Self::StaleMutation => write!(formatter, "mutation owner generation is stale"),
             Self::Sqlite(error) => write!(formatter, "SQLite error: {error}"),
             Self::Migration { version, message } => {
@@ -359,7 +369,7 @@ impl StorageError {
             Self::Serialization(message) if message.contains(crate::inspect::OLDER_SCHEMA) => {
                 FailureClass::SchemaUnsupported
             }
-            Self::LimitExceeded { .. } => FailureClass::Limit,
+            Self::LimitExceeded { .. } | Self::QuestionCapacity(_) => FailureClass::Limit,
             Self::Sqlite(error) => match error.sqlite_error_code() {
                 Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt) => FailureClass::Corrupt,
                 Some(
@@ -381,7 +391,9 @@ impl std::error::Error for StorageError {
         match self {
             Self::Sqlite(error) => Some(error),
             Self::Io(_) => Some(&IO_SOURCE),
-            Self::Migration { .. }
+            Self::QuestionCapacity(_)
+            | Self::LaneDeliveryConflict(_)
+            | Self::Migration { .. }
             | Self::StaleMutation
             | Self::SchemaTooNew { .. }
             | Self::ConversionRequired { .. }

@@ -72,7 +72,10 @@ const C_GC: u64 = 24;
 /// and v44 (the event body format: two columns, the reference table and three accounting
 /// triggers on an empty `events` table; 106 and 146 frames with v44 added), whatever the number of
 /// `thread_runs` rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 160;
+// v46 adds three empty delivery tables/indexes and bounded metadata columns.
+// Observed 183 frames for 100,000 existing rows; the independent VM-step
+// comparison below still rejects any migration scanning those rows.
+const MIGRATION_FRAMES: u64 = 192;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -306,7 +309,10 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
-            undo_v45 = include_str!("support/undo_v45.sql"),
+            undo_v45 = concat!(
+                include_str!("support/undo_v46.sql"),
+                include_str!("support/undo_v45.sql")
+            ),
             undo_v44 = include_str!("support/undo_v44.sql"),
             undo_v43 = include_str!("support/undo_v43.sql"),
             undo_v40 = include_str!("support/undo_v40.sql"),

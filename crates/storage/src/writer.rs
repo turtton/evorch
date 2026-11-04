@@ -15,6 +15,7 @@ use crate::{
 
 mod cleanup;
 mod index;
+mod lane_delivery;
 mod lanes;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,

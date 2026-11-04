@@ -232,6 +232,9 @@ fn child_question_and_answer_notify_only_the_owning_conversation() {
     registry.bind_thread_root("owner", "root");
     registry.select_thread(Some("other".into()));
     let mut question = UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "question-1".into(),
         run_id: "child".into(),
         root_run_id: "root".into(),
@@ -441,6 +444,9 @@ fn answer_notice_names_who_answered() {
         registry.select_thread(Some("owner".into()));
         registry.apply(&Event::new(ToolEvent::UserQuestionUpdated {
             question: UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "question-1".into(),
                 run_id: "root".into(),
                 root_run_id: "root".into(),
@@ -460,7 +466,9 @@ fn answer_notice_names_who_answered() {
         other => panic!("unexpected entries: {other:?}"),
     };
     assert_eq!(
-        text(notice(Some(event_bus::AnswerOrigin::Host))),
+        text(notice(Some(event_bus::AnswerOrigin::Host {
+            channel: Default::default()
+        }))),
         "Answer from you: Use A"
     );
     assert_eq!(
@@ -490,7 +498,9 @@ fn child_question_answer_names_who_answered_in_thread_and_child_run() {
     // (origin, thread wording without / with the child's name, child run wording)
     let cases = [
         (
-            Some(AnswerOrigin::Host),
+            Some(AnswerOrigin::Host {
+                channel: Default::default(),
+            }),
             "Answer from you sent to a subagent: Use A",
             "Answer from you sent to subagent worker: Use A",
             "Answer from you: Use A",
@@ -523,6 +533,9 @@ fn child_question_answer_names_who_answered_in_thread_and_child_run() {
                 }));
             }
             let question = UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "question-1".into(),
                 run_id: "child".into(),
                 root_run_id: "root".into(),

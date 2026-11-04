@@ -15,7 +15,10 @@ use tempfile::TempDir;
 
 const UNDO_V40: &str = include_str!("support/undo_v40.sql");
 const UNDO_V43: &str = include_str!("support/undo_v43.sql");
-const UNDO_V45: &str = include_str!("support/undo_v45.sql");
+const UNDO_V45: &str = concat!(
+    include_str!("support/undo_v46.sql"),
+    include_str!("support/undo_v45.sql")
+);
 const UNDO_V44: &str = include_str!("support/undo_v44.sql");
 
 fn config(dir: &TempDir) -> StorageConfig {
