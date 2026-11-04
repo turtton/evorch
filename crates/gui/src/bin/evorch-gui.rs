@@ -1335,6 +1335,9 @@ fn build_workbench(
         )
         .with_usage_ledger(storage.handle(), usage_pricing)
         .with_thread_mirror(storage.handle())
+        .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
+            storage_config.db_path.clone(),
+        )))
         .with_tombstones(prelude.tombstones.clone());
     if pruned > 0 {
         state.save_sidebar();

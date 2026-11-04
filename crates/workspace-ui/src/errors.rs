@@ -65,6 +65,8 @@ pub enum ThreadError {
     DuplicateThread,
     #[error("unknown thread")]
     UnknownThread,
+    #[error("the thread already belongs to another lane")]
+    LaneConflict,
     #[error("invalid extra read directory: {0}")]
     InvalidReadDirectory(String),
     #[error("the thread's family cannot be resolved: {0}")]

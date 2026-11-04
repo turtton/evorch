@@ -475,6 +475,8 @@ enum BranchKind {
     Escalation,
     /// The user forked the parent conversation.
     Fork,
+    /// An independent Orchestrator thread its lead manages (ADR 0044).
+    Lane,
 }
 
 /// A rewind replaces its source in place, so the kind comes from the original
@@ -483,7 +485,9 @@ fn branch_kind(lineage: &LineageIndex<'_>, thread: &ThreadRecord) -> Option<Bran
     let original = lineage
         .get(lineage.version_root(&thread.id))
         .unwrap_or(thread);
-    if original.escalation_source_run_id.is_some() {
+    if original.is_managed_lane() {
+        Some(BranchKind::Lane)
+    } else if original.escalation_source_run_id.is_some() {
         Some(BranchKind::Escalation)
     } else if original
         .lineage
@@ -507,6 +511,11 @@ fn branch_kind_icon(ui: &Ui, slot: Rect, response: egui::Response, kind: BranchK
             icons::GIT_FORK,
             "Forked thread",
             "Forked from its parent thread",
+        ),
+        BranchKind::Lane => (
+            icons::STACK,
+            "Lane thread",
+            "Lane: an independent Orchestrator thread managed by its lead. It follows the lead's pin and archive.",
         ),
     };
     ui.painter().text(
@@ -857,9 +866,14 @@ fn thread_title(
         let label = format!("↳ {}", thread.title);
         title.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     }
+    let lane = thread
+        .lane
+        .as_ref()
+        .map(|lane| format!("Lane · {}\n", lane.policy.label()))
+        .unwrap_or_default();
     let title = title.on_hover_text(match note {
-        Some(note) => format!("{note}\nthread ID: {}", thread.id),
-        None => format!("thread ID: {}", thread.id),
+        Some(note) => format!("{lane}{note}\nthread ID: {}", thread.id),
+        None => format!("{lane}thread ID: {}", thread.id),
     });
     title.context_menu(|ui| {
         if ui.button("Copy thread ID").clicked() {
