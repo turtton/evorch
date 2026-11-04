@@ -9,7 +9,7 @@ use crate::ids::{
 };
 use crate::limits::{
     MAX_INLINE_MESSAGE_BYTES, MAX_NAME_BYTES, MAX_OPTION_BYTES, MAX_OPTIONS, MAX_PAGE_SIZE,
-    MAX_TITLE_BYTES, MIN_BODY_CHUNK_BYTES,
+    MAX_TEXT_BYTES, MAX_TITLE_BYTES, MIN_BODY_CHUNK_BYTES,
 };
 use crate::validation::{ValidationError, check_bytes, check_count};
 use crate::wire::{ByteOffset, InstanceEpoch, Revision, Sequence, UnixMillis};
@@ -152,6 +152,13 @@ pub struct QuestionAnswer {
     pub answered_by: Provenance,
 }
 
+impl QuestionAnswer {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        check_bytes("answer.text", &self.text, MAX_TEXT_BYTES, true)?;
+        self.answered_by.validate()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuestionView {
@@ -183,7 +190,7 @@ impl QuestionView {
             .try_for_each(|o| check_bytes("options", o, MAX_OPTION_BYTES, true))?;
         self.raised_by.validate()?;
         if let Some(answer) = &self.answer {
-            answer.answered_by.validate()?;
+            answer.validate()?;
         }
         Ok(())
     }

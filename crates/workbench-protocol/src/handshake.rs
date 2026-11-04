@@ -432,3 +432,44 @@ impl CoreStatus {
         check_count("retention_reasons", self.retention_reasons.len(), 16)
     }
 }
+
+const MAX_REJECTION_MESSAGE_BYTES: usize = 8 * 1024;
+
+impl ServerHello {
+    /// Check everything a peer-supplied hello carries before a connection is
+    /// built on it: build identity, status and limits. The version, core
+    /// identity and capabilities are checked against the client's request by
+    /// the caller.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.server_build.validate()?;
+        self.status.validate()?;
+        check_count(
+            "capabilities",
+            self.capabilities.len(),
+            Capability::ALL.len(),
+        )?;
+        self.limits.validate()
+    }
+}
+
+impl HandshakeRejected {
+    /// Bound a rejection received from a peer.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        crate::validation::check_bytes(
+            "message",
+            &self.message,
+            MAX_REJECTION_MESSAGE_BYTES,
+            true,
+        )?;
+        check_count(
+            "supported_versions",
+            self.supported_versions.len(),
+            MAX_HELLO_VERSIONS,
+        )?;
+        check_count(
+            "missing_capabilities",
+            self.missing_capabilities.len(),
+            MAX_HELLO_CAPABILITIES,
+        )
+    }
+}

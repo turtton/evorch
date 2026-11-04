@@ -35,6 +35,8 @@ pub(crate) struct Queued {
 
 /// Client-side half of a subscription, owned by the reader task.
 pub(crate) struct SubscriptionEntry {
+    /// Which registration of the id this is; see `SubscriptionGuard`.
+    pub(crate) generation: u64,
     pub(crate) tx: mpsc::Sender<Queued>,
     pub(crate) tracker: workbench_protocol::events::CursorTracker,
     pub(crate) queued_bytes: Arc<AtomicUsize>,
@@ -60,14 +62,19 @@ impl SubscriptionEntry {
 pub(crate) struct SubscriptionGuard {
     shared: Arc<Shared>,
     id: SubscriptionId,
+    /// The registration this guard owns. A subscription that ended earlier
+    /// may be followed by a new one reusing the id; only the matching
+    /// generation may release it.
+    generation: u64,
     armed: bool,
 }
 
 impl SubscriptionGuard {
-    pub(crate) fn new(shared: Arc<Shared>, id: SubscriptionId) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>, id: SubscriptionId, generation: u64) -> Self {
         Self {
             shared,
             id,
+            generation,
             armed: true,
         }
     }
@@ -81,7 +88,7 @@ impl SubscriptionGuard {
 impl Drop for SubscriptionGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.shared.release_subscription(&self.id);
+            self.shared.release_subscription(&self.id, self.generation);
         }
     }
 }
@@ -168,7 +175,15 @@ impl Subscription {
     /// Stop the subscription and wait for the core to confirm.
     pub async fn unsubscribe(mut self) -> Result<(), ClientError> {
         self.guard.disarm();
-        self.client.shared.drop_subscription(self.id());
+        let current = self
+            .client
+            .shared
+            .drop_subscription(self.id(), self.guard.generation);
+        if !current {
+            // Already over (ended by the core, a resync or a close). The id may
+            // belong to a newer subscription now, which must not be told to stop.
+            return Ok(());
+        }
         let body = RequestBody::Control(Control::Unsubscribe {
             subscription_id: self.id().clone(),
         });

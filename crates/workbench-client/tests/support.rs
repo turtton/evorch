@@ -200,6 +200,11 @@ pub async fn barrier(client: &WorkbenchClient, server: &mut FakeServer) {
         async move { client.ping(Nonce(99)).await }
     });
     let request = server.recv_request().await.expect("ping");
+    assert!(
+        matches!(request.body, RequestBody::Control(Control::Ping { .. })),
+        "the next request must be the ping, got {:?}",
+        request.body
+    );
     server.reply(
         &request.request_id,
         ok(ReplyPayload::Pong { nonce: Nonce(99) }),
@@ -253,4 +258,28 @@ pub fn big_event(id: &str, cursor: EventCursor, bytes: usize) -> EventEnvelope {
             },
         },
     )
+}
+
+pub fn answered_question(answer: String) -> QuestionView {
+    let run = RunId::new("run-1").unwrap();
+    QuestionView {
+        id: QuestionId::new("q-1").unwrap(),
+        requester: QuestionRequester {
+            run: run.clone(),
+            thread: thread(),
+            root_run: run.clone(),
+        },
+        target: QuestionTarget::User,
+        management_revision: Revision(1),
+        routing_revision: Revision(1),
+        blocking: true,
+        title: "Proceed?".into(),
+        options: vec![],
+        answer: Some(QuestionAnswer {
+            text: answer,
+            answered_by: Provenance::human(Surface::Web, ClientId::new("client-2").unwrap()),
+        }),
+        revision: Revision(2),
+        raised_by: Provenance::agent(run),
+    }
 }

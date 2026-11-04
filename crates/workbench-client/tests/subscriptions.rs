@@ -478,3 +478,155 @@ async fn a_snapshot_page_over_the_page_limit_fails_the_subscribe() {
         Some(ClientError::Transport(TransportError::ProtocolViolation(_)))
     ));
 }
+
+// --- answers on the snapshot and event paths --------------------------------------------------
+
+#[tokio::test]
+async fn a_question_answer_over_256_kib_is_refused_in_a_snapshot_and_in_an_event() {
+    // The limit itself passes on both paths.
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.subscribe(subscribe_all()).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    let mut snapshot = started("sub-1", cursor(7, 0));
+    snapshot.initial_page = Some(workbench_protocol::views::Page {
+        items: vec![SnapshotItem::Question(answered_question(
+            "x".repeat(256 * 1024),
+        ))],
+        next_cursor: None,
+        snapshot_revision: workbench_protocol::wire::Revision(1),
+    });
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(snapshot)),
+    );
+    let mut sub = call.await.unwrap().unwrap();
+    server.event(event(
+        "sub-1",
+        cursor(7, 1),
+        UiEvent::QuestionChanged {
+            question: answered_question("x".repeat(256 * 1024)),
+        },
+    ));
+    assert!(matches!(
+        sub.next().await.unwrap().event,
+        UiEvent::QuestionChanged { .. }
+    ));
+
+    // One byte more is refused: on the snapshot...
+    let (client, mut server) = connected().await;
+    let call = tokio::spawn({
+        let client = client.clone();
+        async move { client.subscribe(subscribe_all()).await }
+    });
+    let request = server.recv_request().await.unwrap();
+    let mut snapshot = started("sub-1", cursor(7, 0));
+    snapshot.initial_page = Some(workbench_protocol::views::Page {
+        items: vec![SnapshotItem::Question(answered_question(
+            "x".repeat(256 * 1024 + 1),
+        ))],
+        next_cursor: None,
+        snapshot_revision: workbench_protocol::wire::Revision(1),
+    });
+    server.reply(
+        &request.request_id,
+        ok(ReplyPayload::SubscriptionStarted(snapshot)),
+    );
+    assert!(matches!(
+        call.await.unwrap().err(),
+        Some(ClientError::Transport(TransportError::ProtocolViolation(_)))
+    ));
+
+    // ...and on an event.
+    let (client, mut server) = connected().await;
+    let mut sub = subscribe(&client, &mut server, "sub-1", cursor(7, 0)).await;
+    server.event(event(
+        "sub-1",
+        cursor(7, 1),
+        UiEvent::QuestionChanged {
+            question: answered_question("x".repeat(256 * 1024 + 1)),
+        },
+    ));
+    assert!(matches!(
+        client.closed().await,
+        TransportError::ProtocolViolation(_)
+    ));
+    assert_eq!(sub.next().await, None);
+}
+
+// --- a finished subscription must not release its successor ---------------------------------------
+
+/// Subscribe "sub-1", let the core end it, subscribe "sub-1" again, and return both.
+async fn ended_then_reused(
+    client: &workbench_client::WorkbenchClient,
+    server: &mut workbench_client::fake::FakeServer,
+) -> (
+    workbench_client::Subscription,
+    workbench_client::Subscription,
+) {
+    let mut old = subscribe(client, server, "sub-1", cursor(7, 0)).await;
+    server.event(event(
+        "sub-1",
+        cursor(7, 1),
+        UiEvent::SubscriptionClosed {
+            reason: CloseReason::ScopeRemoved,
+        },
+    ));
+    assert!(matches!(
+        old.next().await.unwrap().event,
+        UiEvent::SubscriptionClosed { .. }
+    ));
+    assert_eq!(old.next().await, None);
+    assert_eq!(old.end(), Some(SubscriptionEnd::EndedByCore));
+    let new = subscribe(client, server, "sub-1", cursor(7, 1)).await;
+    (old, new)
+}
+
+#[tokio::test]
+async fn dropping_a_finished_subscription_leaves_one_that_reused_its_id() {
+    let (client, mut server) = connected().await;
+    let (old, mut new) = ended_then_reused(&client, &mut server).await;
+    drop(old);
+    server.event(thread_changed("sub-1", cursor(7, 2), "for the new one"));
+    assert_eq!(title(&new.next().await.unwrap()), "for the new one");
+    // barrier insists the next request the core sees is its ping, so no
+    // Unsubscribe for the reused id was sent.
+    barrier(&client, &mut server).await;
+    assert_eq!(new.end(), None);
+}
+
+#[tokio::test]
+async fn unsubscribing_a_finished_subscription_leaves_one_that_reused_its_id() {
+    let (client, mut server) = connected().await;
+    let (old, mut new) = ended_then_reused(&client, &mut server).await;
+    old.unsubscribe()
+        .await
+        .expect("already over: nothing to ask the core");
+    server.event(thread_changed("sub-1", cursor(7, 2), "for the new one"));
+    assert_eq!(title(&new.next().await.unwrap()), "for the new one");
+    barrier(&client, &mut server).await;
+    assert_eq!(new.end(), None);
+}
+
+#[tokio::test]
+async fn the_current_subscription_is_still_released_by_drop_and_by_unsubscribe() {
+    let (client, mut server) = connected().await;
+    let (old, new) = ended_then_reused(&client, &mut server).await;
+    drop(old);
+    drop(new);
+    expect_unsubscribe(&mut server, "sub-1").await;
+
+    let sub = subscribe(&client, &mut server, "sub-1", cursor(7, 5)).await;
+    let call = tokio::spawn(async move { sub.unsubscribe().await });
+    let request = server.recv_request().await.unwrap();
+    assert_eq!(
+        request.body,
+        RequestBody::Control(Control::Unsubscribe {
+            subscription_id: SubscriptionId::new("sub-1").unwrap()
+        })
+    );
+    server.reply(&request.request_id, ok(ReplyPayload::Ack));
+    call.await.unwrap().unwrap();
+}

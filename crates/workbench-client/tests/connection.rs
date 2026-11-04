@@ -761,3 +761,97 @@ async fn a_command_whose_reply_is_refused_reports_an_unknown_outcome() {
         }))
     );
 }
+
+// --- the handshake reply is validated before a connection exists ------------------------
+
+async fn connect_with_hello(hello: ServerHello) -> Result<WorkbenchClient, ClientError> {
+    let (transport, mut server) = FakeTransport::pair();
+    let (result, _) = tokio::join!(WorkbenchClient::connect(transport, config()), async {
+        server.recv_hello().await;
+        server.accept(&hello);
+        server
+    });
+    result
+}
+
+#[tokio::test]
+async fn a_hello_within_its_bounds_connects() {
+    let mut hello = server_hello(WireLimits::default());
+    hello.server_build.name = "n".repeat(256);
+    hello.status.retention_reasons = vec![RetentionReason::ActiveTurn; 16];
+    connect_with_hello(hello).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_hello_that_breaks_its_bounds_is_refused_without_a_connection() {
+    type Mutate = fn(&mut ServerHello);
+    let cases: [(&str, Mutate); 5] = [
+        ("build name of 257 bytes", |h| {
+            h.server_build.name = "n".repeat(257)
+        }),
+        ("empty build version", |h| {
+            h.server_build.version = String::new()
+        }),
+        ("oversized build revision", |h| {
+            h.server_build.revision = Some("r".repeat(257))
+        }),
+        ("17 retention reasons", |h| {
+            h.status.retention_reasons = vec![RetentionReason::ActiveTurn; 17]
+        }),
+        ("limits", |h| h.limits.subscription_queue_events = 0),
+    ];
+    for (name, mutate) in cases {
+        let mut hello = server_hello(WireLimits::default());
+        mutate(&mut hello);
+        let result = connect_with_hello(hello).await;
+        assert!(
+            matches!(
+                result.as_ref().err(),
+                Some(ClientError::Transport(TransportError::ProtocolViolation(_)))
+            ),
+            "{name}: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_rejection_is_a_protocol_violation() {
+    let (transport, mut server) = FakeTransport::pair();
+    let rejected = HandshakeRejected {
+        reason: RejectReason::CoreNotReady,
+        message: "m".repeat(9 * 1024),
+        supported_versions: vec![],
+        missing_capabilities: vec![],
+        recommended_action: RecommendedAction::RetryLater,
+    };
+    let (result, _) = tokio::join!(WorkbenchClient::connect(transport, config()), async {
+        server.recv_hello().await;
+        server.send(&HandshakeReply::Rejected(rejected));
+    });
+    assert!(matches!(
+        result.err(),
+        Some(ClientError::Transport(TransportError::ProtocolViolation(_)))
+    ));
+}
+
+// --- answers on every received path ---------------------------------------------------------
+
+#[tokio::test]
+async fn a_question_answer_over_256_kib_is_refused_on_reply_and_the_limit_passes() {
+    let list = || {
+        Query::ListQuestions(PendingQuery {
+            thread: None,
+            pending_only: false,
+            page: PageRequest::default(),
+        })
+    };
+    let reply = |text: String| QueryReply::Questions(page_of(vec![answered_question(text)]));
+    let (_, ok_result) = ask(list(), reply("x".repeat(256 * 1024))).await;
+    assert!(ok_result.is_ok(), "{ok_result:?}");
+    let (_, refused) = ask(list(), reply("x".repeat(256 * 1024 + 1))).await;
+    assert!(matches!(
+        refused,
+        Err(ClientError::Transport(TransportError::ProtocolViolation(_)))
+    ));
+}

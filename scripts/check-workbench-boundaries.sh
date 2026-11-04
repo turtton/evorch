@@ -25,7 +25,9 @@ CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
 # client protocol; a core-side adapter crate (a later step) is where DTO
 # conversion belongs. gui, evorch and workspace-ui are the clients and are
 # deliberately not listed.
-CORE_CRATES="agents apply-patch browser browser-cef catalog config event-bus js-engine model providers recorder routing runtime sandbox secret-guard storage tools"
+CORE_CRATES="${WORKBENCH_BOUNDARY_CORE_CRATES:-agents apply-patch browser browser-cef catalog config event-bus js-engine model providers recorder routing runtime sandbox secret-guard storage tools}"
+# WORKBENCH_BOUNDARY_CORE_CRATES exists only so the fixture tests can use small
+# graphs; CI runs the script with the built-in list.
 
 command -v jq >/dev/null || { echo "check-workbench-boundaries: jq is required" >&2; exit 2; }
 
@@ -75,6 +77,14 @@ violations="$work/violations.txt"
 for crate in "$PROTOCOL" "$CLIENT"; do
   if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
     echo "boundary check: workspace member '$crate' not found; the check would pass vacuously" >> "$violations"
+  fi
+done
+
+# Every core crate named above must still exist. A renamed or removed crate
+# would otherwise drop out of the reverse-dependency check without a sound.
+for crate in $CORE_CRATES; do
+  if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
+    echo "boundary check: core crate '$crate' is not a workspace member; it was renamed or removed, so update CORE_CRATES in $0" >> "$violations"
   fi
 done
 

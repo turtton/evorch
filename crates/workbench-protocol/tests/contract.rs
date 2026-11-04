@@ -691,3 +691,105 @@ fn unknown_fields_are_refused_at_every_level_of_a_request() {
         assert_eq!(rejection.error.code, ErrorCode::InvalidRequest, "{case}");
     }
 }
+
+// --- answers and handshake replies --------------------------------------------------
+
+fn answered(text: String) -> QuestionView {
+    let mut q = question(QuestionTarget::User);
+    q.answer = Some(QuestionAnswer {
+        text,
+        answered_by: human(),
+    });
+    q
+}
+
+#[test]
+fn a_question_answer_is_bounded_on_every_received_path() {
+    let limits = WireLimits::default();
+    let frames = |q: QuestionView| {
+        vec![
+            reply_frame(ReplyPayload::Query(QueryReply::Questions(one_page(
+                q.clone(),
+            )))),
+            reply_frame(ReplyPayload::SubscriptionStarted(SubscriptionStarted {
+                subscription_id: sub(),
+                snapshot_id: None,
+                high_water: cursor(7, 1),
+                initial_page: Some(one_page(SnapshotItem::Question(q.clone()))),
+            })),
+            ServerFrame::Event(Box::new(event_envelope(UiEvent::QuestionChanged {
+                question: q,
+            }))),
+        ]
+    };
+    for frame in frames(answered("x".repeat(MAX_TEXT_BYTES))) {
+        frame.validate(&limits).unwrap();
+    }
+    for frame in frames(answered("x".repeat(MAX_TEXT_BYTES + 1))) {
+        assert!(frame.validate(&limits).is_err());
+    }
+    let mut incoherent = answered("ok".into());
+    incoherent.answer.as_mut().unwrap().answered_by = Provenance {
+        agent_run_id: None,
+        ..agent()
+    };
+    assert!(incoherent.validate().is_err());
+}
+
+#[test]
+fn a_server_hello_is_checked_field_by_field() {
+    server_hello().validate().unwrap();
+    type Mutate = fn(&mut ServerHello);
+    let broken: Vec<(&str, Mutate)> = vec![
+        ("build name", |h| {
+            h.server_build.name = "n".repeat(MAX_NAME_BYTES + 1)
+        }),
+        ("build version", |h| {
+            h.server_build.version = "v".repeat(MAX_NAME_BYTES + 1)
+        }),
+        ("build revision", |h| {
+            h.server_build.revision = Some("r".repeat(MAX_NAME_BYTES + 1))
+        }),
+        ("build control char", |h| {
+            h.server_build.name = "a\nb".into()
+        }),
+        ("status reasons", |h| {
+            h.status.retention_reasons = vec![RetentionReason::ActiveTurn; 17]
+        }),
+        ("limits", |h| h.limits.max_frame_bytes = 0),
+        ("capabilities", |h| {
+            h.capabilities = vec![Capability::Commands; Capability::ALL.len() + 1]
+        }),
+    ];
+    for (name, mutate) in broken {
+        let mut hello = server_hello();
+        mutate(&mut hello);
+        assert!(hello.validate().is_err(), "{name}");
+    }
+    let mut at_limit = server_hello();
+    at_limit.server_build.name = "n".repeat(MAX_NAME_BYTES);
+    at_limit.status.retention_reasons = vec![RetentionReason::ActiveTurn; 16];
+    at_limit.validate().unwrap();
+}
+
+#[test]
+fn a_handshake_rejection_is_bounded() {
+    rejected().validate().unwrap();
+    let mut long = rejected();
+    long.message = "m".repeat(8 * 1024 + 1);
+    assert!(long.validate().is_err());
+    let mut many = rejected();
+    many.missing_capabilities = vec![CapabilityName::new("x").unwrap(); 33];
+    assert!(many.validate().is_err());
+    let mut versions = rejected();
+    versions.supported_versions = vec![ProtocolVersion(1); 17];
+    assert!(versions.validate().is_err());
+}
+
+fn one_page<T>(item: T) -> Page<T> {
+    Page {
+        items: vec![item],
+        next_cursor: None,
+        snapshot_revision: Revision(1),
+    }
+}

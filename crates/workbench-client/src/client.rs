@@ -110,6 +110,8 @@ struct State {
     pending: HashMap<RequestId, Pending>,
     subscriptions: HashMap<SubscriptionId, SubscriptionEntry>,
     closed: Option<TransportError>,
+    /// Numbers each registration so a stale owner of a reused id can be told apart.
+    next_generation: u64,
 }
 
 pub(crate) struct Shared {
@@ -265,19 +267,23 @@ impl Shared {
             .send_replace(ConnectionState::Closed(reason));
     }
 
-    pub(crate) fn drop_subscription(&self, id: &SubscriptionId) -> bool {
-        match self.lock().subscriptions.remove(id) {
-            Some(entry) => {
-                entry.finish(SubscriptionEnd::Unsubscribed);
-                true
-            }
-            None => false,
+    /// Unregister generation `generation` of `id`. Returns false, touching
+    /// nothing, when that registration is already gone, including when the id
+    /// has since been registered again by a newer subscription.
+    pub(crate) fn drop_subscription(&self, id: &SubscriptionId, generation: u64) -> bool {
+        let mut state = self.lock();
+        if state.subscriptions.get(id).map(|entry| entry.generation) != Some(generation) {
+            return false;
         }
+        let entry = state.subscriptions.remove(id).expect("present");
+        drop(state);
+        entry.finish(SubscriptionEnd::Unsubscribed);
+        true
     }
 
     /// Stop a subscription locally and tell the core, without waiting.
-    pub(crate) fn release_subscription(&self, id: &SubscriptionId) {
-        if self.drop_subscription(id) {
+    pub(crate) fn release_subscription(&self, id: &SubscriptionId, generation: u64) {
+        if self.drop_subscription(id, generation) {
             self.unsubscribe_in_background(id);
         }
     }
@@ -364,6 +370,7 @@ impl Shared {
         let (tx, rx) = mpsc::channel(limits.subscription_queue_events as usize);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let end = Arc::new(Mutex::new(None));
+        let generation;
         {
             let mut state = self.lock();
             // Checked under the same lock that registers the entry: `close`
@@ -377,9 +384,12 @@ impl Shared {
             }
             // Registered before the reader looks at the next frame, so no
             // event for this subscription can slip past it.
+            state.next_generation += 1;
+            generation = state.next_generation;
             state.subscriptions.insert(
                 started.subscription_id.clone(),
                 SubscriptionEntry {
+                    generation,
                     tx,
                     tracker: CursorTracker::new(started.high_water),
                     queued_bytes: queued_bytes.clone(),
@@ -388,7 +398,11 @@ impl Shared {
             );
         }
         Ok(Ok(Completed::Subscription(SubscriptionParts {
-            guard: SubscriptionGuard::new(self.clone(), started.subscription_id.clone()),
+            guard: SubscriptionGuard::new(
+                self.clone(),
+                started.subscription_id.clone(),
+                generation,
+            ),
             started,
             rx,
             queued_bytes,
@@ -538,6 +552,9 @@ impl WorkbenchClient {
             .map_err(|error| violation(format!("undecodable handshake reply: {error}")))?;
         let server = match reply {
             HandshakeReply::Rejected(rejected) => {
+                rejected
+                    .validate()
+                    .map_err(|error| violation(format!("unusable handshake rejection: {error}")))?;
                 return Err(ClientError::HandshakeRejected(rejected));
             }
             HandshakeReply::Accepted(server) => server,
@@ -692,10 +709,10 @@ fn check_accepted(config: &ClientConfig, server: &ServerHello) -> Result<(), Tra
     {
         return Err(violation("core identity is not the one requested"));
     }
+    // Build identity, status and limits: nothing is built on a hello that breaks them.
     server
-        .limits
         .validate()
-        .map_err(|error| violation(format!("core advertised unusable limits: {error}")))?;
+        .map_err(|error| violation(format!("core sent an unusable hello: {error}")))?;
     Ok(())
 }
 

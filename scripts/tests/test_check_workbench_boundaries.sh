@@ -45,7 +45,8 @@ run_case() {
   local name=$1 expect=$2 needle=$3
   make_metadata > "$work/$name.json"
   local status=0
-  "$checker" "$work/$name.json" > "$work/$name.out" 2>&1 || status=$?
+  WORKBENCH_BOUNDARY_CORE_CRATES="${CASE_CORE_CRATES:-runtime storage config}" \
+    "$checker" "$work/$name.json" > "$work/$name.out" 2>&1 || status=$?
   local ok=1
   if [[ $expect == ok && $status -ne 0 ]]; then ok=0; fi
   if [[ $expect == fail && $status -ne 1 ]]; then ok=0; fi
@@ -144,6 +145,26 @@ SPEC
 
 run_case protocol_package_missing fail "workspace member 'workbench-protocol' not found" <<SPEC
 {"workspace": ["workbench-client","runtime"], $EXT, "deps": [{"from":"workbench-client","to":"tokio"}]}
+SPEC
+
+# A core crate that was renamed must make the check fail, not silently stop
+# covering it. These cases list the crates the fixture was written against.
+CASE_CORE_CRATES="runtime storage config"
+run_case core_crate_renamed fail "core crate 'storage' is not a workspace member" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","runtime","storage-v2","config"], $EXT,
+ "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+CASE_CORE_CRATES="runtime storage config"
+run_case core_crate_missing_from_a_small_workspace fail "core crate 'config' is not a workspace member" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","runtime","storage"], $EXT,
+ "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+# The built-in list is what CI uses; a graph that lacks its crates fails.
+CASE_CORE_CRATES="agents apply-patch browser browser-cef catalog config event-bus js-engine model providers recorder routing runtime sandbox secret-guard storage tools"
+run_case built_in_core_list_requires_every_listed_crate fail "core crate 'agents' is not a workspace member" <<SPEC
+{$WS, $EXT, "deps": [$GOOD]}
 SPEC
 
 echo "$pass passed, $fail failed"
