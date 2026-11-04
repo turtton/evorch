@@ -411,6 +411,7 @@ fn kind_name_maps_compaction_events() {
             wall_clock: UNIX_EPOCH + Duration::from_nanos(1),
         },
         kind: CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-1".into(),
             reason: CompactionReason::Manual,
             threshold: 0.8,

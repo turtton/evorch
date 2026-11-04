@@ -337,6 +337,10 @@ impl SecretGuard {
                 self.check_text("event", "Compacted.checkpoint_id", checkpoint_id)?;
                 self.check_text("event", "Compacted.run_id", run_id)
             }
+            EventKind::Compaction(CompactionEvent::Progress { delta, .. }) => {
+                self.check_text("event", "CompactionProgress.delta", delta)
+            }
+            EventKind::Compaction(CompactionEvent::Aborted { .. }) => Ok(()),
             EventKind::Message(MessageEvent::StreamRetried { .. })
             | EventKind::Lifecycle(_)
             | EventKind::Tool(_)
@@ -533,6 +537,7 @@ mod tests {
             (
                 "Compacted.summary",
                 CompactionEvent::Compacted {
+                    operation_id: "fixture-compaction".into(),
                     run_id: "r".into(),
                     reason: CompactionReason::Automatic,
                     threshold: 0.8,
@@ -550,6 +555,7 @@ mod tests {
             (
                 "Compacted.checkpoint_id",
                 CompactionEvent::Compacted {
+                    operation_id: "fixture-compaction".into(),
                     run_id: "r".into(),
                     reason: CompactionReason::Automatic,
                     threshold: 0.8,
@@ -567,6 +573,7 @@ mod tests {
             (
                 "Compacted.run_id",
                 CompactionEvent::Compacted {
+                    operation_id: "fixture-compaction".into(),
                     run_id: format!("run {KNOWN_VALUE}"),
                     reason: CompactionReason::Automatic,
                     threshold: 0.8,

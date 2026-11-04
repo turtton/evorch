@@ -102,6 +102,7 @@ fn bulky_kinds_are_compressed_and_everything_else_stays_text() {
     );
     let compaction = event_at(
         CompactionEvent::Compacted {
+            operation_id: "fixture-compaction".into(),
             run_id: "run-a".into(),
             reason: event_bus::CompactionReason::Automatic,
             threshold: 0.8,

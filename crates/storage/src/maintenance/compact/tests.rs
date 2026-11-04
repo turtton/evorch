@@ -823,6 +823,7 @@ fn retention_preview_matches_apply_and_disabled_retention_preserves_observations
     insert(
         &db,
         Event::new(event_bus::LifecycleEvent::RunProgress {
+            compaction_operation_id: None,
             run_id: "a".into(),
             activity: event_bus::RunActivity::Model,
             context: None,

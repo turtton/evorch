@@ -291,6 +291,7 @@ fn assert_run_transcript(
             | TranscriptEntry::AgentMessage { .. }
             | TranscriptEntry::Error { .. }
             | TranscriptEntry::Compaction { .. }
+            | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Branch { .. } => None,
@@ -309,6 +310,7 @@ fn assert_run_transcript(
             | TranscriptEntry::Tool { .. }
             | TranscriptEntry::Error { .. }
             | TranscriptEntry::Compaction { .. }
+            | TranscriptEntry::CompactionProgress { .. }
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Branch { .. } => None,
