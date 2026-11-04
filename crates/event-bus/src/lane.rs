@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 /// Largest summary of one report, in UTF-8 bytes.
 pub const LANE_SUMMARY_MAX_BYTES: usize = 1024;
-/// Largest report as a whole: the summary, the reason code and every reference.
+/// Largest report as a whole: its serialized JSON form (`LaneReport` as stored and
+/// returned, escapes and structure included), not the sum of its texts.
 pub const LANE_REPORT_MAX_BYTES: usize = 4096;
 /// Most artifact references one report carries.
 pub const LANE_ARTIFACT_REFS_MAX: usize = 8;
@@ -33,6 +34,9 @@ pub const LANE_BRIEF_ITEMS_MAX: usize = 32;
 pub const LANE_WORKSPACE_FIELD_MAX_BYTES: usize = 512;
 /// Largest workspace note, in UTF-8 bytes.
 pub const LANE_WORKSPACE_NOTES_MAX_BYTES: usize = 1024;
+/// Largest workspace declaration, serialized. Keeps one `lane_list` entry far below the
+/// page budget however many characters the JSON has to escape.
+pub const LANE_WORKSPACE_MAX_BYTES: usize = 4096;
 /// Largest brief as a whole, serialized.
 pub const LANE_BRIEF_MAX_BYTES: usize = 16 * 1024;
 /// Most entries one `lane_list` page returns.
@@ -381,10 +385,9 @@ impl LaneReportInput {
                 ));
             }
         }
-        let total = self.summary.len()
-            + self.reason_code.as_ref().map_or(0, String::len)
-            + self.artifact_refs.iter().map(String::len).sum::<usize>()
-            + self.question_refs.iter().map(String::len).sum::<usize>();
+        // The report body alone must already fit; `LaneReport::validate_size` checks the
+        // stored form with its identity and counters.
+        let total = serde_json::to_string(self).map_or(usize::MAX, |json| json.len());
         if total > LANE_REPORT_MAX_BYTES {
             return Err(LaneValidationError::new(
                 "report",
@@ -417,6 +420,27 @@ impl LaneReportInput {
                 .map(|text| ("reason_code", text)),
         );
         texts
+    }
+}
+
+impl LaneReport {
+    /// Checks the report as it is stored and returned: its serialized form, escapes,
+    /// structure, identity and counters included, is at most 4 KiB.
+    ///
+    /// # Errors
+    /// `TooLarge` for the field `report`.
+    pub fn validate_size(&self) -> Result<(), LaneValidationError> {
+        let total = serde_json::to_string(self).map_or(usize::MAX, |json| json.len());
+        if total > LANE_REPORT_MAX_BYTES {
+            return Err(LaneValidationError::new(
+                "report",
+                LaneValidationKind::TooLarge {
+                    max: LANE_REPORT_MAX_BYTES,
+                    actual: total,
+                },
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -468,6 +492,17 @@ impl LaneBrief {
             self.workspace.notes.as_ref(),
             LANE_WORKSPACE_NOTES_MAX_BYTES,
         )?;
+        let workspace =
+            serde_json::to_string(&self.workspace).map_or(usize::MAX, |json| json.len());
+        if workspace > LANE_WORKSPACE_MAX_BYTES {
+            return Err(LaneValidationError::new(
+                "workspace",
+                LaneValidationKind::TooLarge {
+                    max: LANE_WORKSPACE_MAX_BYTES,
+                    actual: workspace,
+                },
+            ));
+        }
         let total = serde_json::to_string(self).map_or(usize::MAX, |json| json.len());
         if total > LANE_BRIEF_MAX_BYTES {
             return Err(LaneValidationError::new(
@@ -580,6 +615,73 @@ mod tests {
         at_limit.summary = "x".repeat(LANE_SUMMARY_MAX_BYTES);
         at_limit.artifact_refs = vec!["y".into(); LANE_ARTIFACT_REFS_MAX];
         assert_eq!(at_limit.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_report_limit_counts_the_serialized_report_not_the_sum_of_its_texts() {
+        // Given: texts that each fit and sum to 3,840 bytes, below the old 4 KiB sum.
+        let mut sum_fits = report();
+        sum_fits.summary = "x".repeat(LANE_SUMMARY_MAX_BYTES);
+        sum_fits.artifact_refs = vec!["y".repeat(LANE_REF_MAX_BYTES); LANE_ARTIFACT_REFS_MAX];
+        sum_fits.question_refs = vec!["q".repeat(LANE_REF_MAX_BYTES); 3];
+        let texts: usize = sum_fits.summary.len()
+            + sum_fits
+                .artifact_refs
+                .iter()
+                .chain(&sum_fits.question_refs)
+                .map(String::len)
+                .sum::<usize>();
+        assert!(texts < LANE_REPORT_MAX_BYTES);
+        // Then: the report body alone still fits, but the report as stored and returned
+        // (with its identity and counters) is over 4 KiB, so that form is refused.
+        assert_eq!(sum_fits.validate(), Ok(()));
+
+        // And: escapes count. 1,024 quotes are 2,048 bytes once serialized.
+        let mut escaped = report();
+        escaped.summary = "\"".repeat(LANE_SUMMARY_MAX_BYTES);
+        escaped.question_refs = vec!["\"".repeat(LANE_REF_MAX_BYTES); 4];
+        assert!(
+            escaped
+                .guarded_texts()
+                .iter()
+                .map(|(_, t)| t.len())
+                .sum::<usize>()
+                < LANE_REPORT_MAX_BYTES
+        );
+        assert_eq!(escaped.validate().unwrap_err().field, "report");
+
+        // And: the stored form, with its identity and counters, is checked too.
+        let stored = |summary: String| LaneReport {
+            lane_id: "lane".into(),
+            report_seq: 1,
+            status: LaneStatus::Working,
+            summary,
+            artifact_refs: vec![],
+            needs_human: false,
+            question_refs: vec![],
+            reason_code: None,
+            producer: LaneReportProducer::LaneAgent,
+            management_revision: 1,
+            brief_revision: 1,
+            created_at_ns: 1,
+        };
+        assert_eq!(stored("s".into()).validate_size(), Ok(()));
+        let mut big = stored(sum_fits.summary.clone());
+        big.artifact_refs = sum_fits.artifact_refs.clone();
+        big.question_refs = sum_fits.question_refs.clone();
+        assert_eq!(big.validate_size().unwrap_err().field, "report");
+    }
+
+    #[test]
+    fn a_workspace_that_escapes_to_a_large_form_is_refused() {
+        let mut brief = brief();
+        brief.workspace = LaneWorkspaceDeclaration {
+            branch: Some("\u{1}".repeat(LANE_WORKSPACE_FIELD_MAX_BYTES)),
+            worktree: Some("\u{1}".repeat(LANE_WORKSPACE_FIELD_MAX_BYTES)),
+            notes: None,
+        };
+        let error = brief.validate().unwrap_err();
+        assert_eq!(error.field, "workspace");
     }
 
     #[test]

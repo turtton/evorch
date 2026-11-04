@@ -256,11 +256,7 @@ fn latest_report(conn: &Connection, lane: &LaneRecord) -> Result<Option<LaneRepo
         .optional()?)
 }
 
-fn tombstone_check(
-    conn: &Connection,
-    thread_ids: &[&str],
-    run_id: &str,
-) -> Result<(), StorageError> {
+fn tombstone_threads(conn: &Connection, thread_ids: &[&str]) -> Result<(), StorageError> {
     for thread_id in thread_ids {
         let hit: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM thread_tombstones WHERE thread_id = ?1)",
@@ -274,6 +270,15 @@ fn tombstone_check(
             });
         }
     }
+    Ok(())
+}
+
+fn tombstone_check(
+    conn: &Connection,
+    thread_ids: &[&str],
+    run_id: &str,
+) -> Result<(), StorageError> {
+    tombstone_threads(conn, thread_ids)?;
     let hit: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
         [run_id],
@@ -454,6 +459,23 @@ pub(crate) fn append_report(
     let lane = require(&tx, lane_id)?;
     let seq = lane.latest_report_seq + 1;
     let seq_param = to_i64(seq, "report sequence")?;
+    // The limit is on the report as stored and returned, identity and counters included.
+    LaneReport {
+        lane_id: lane_id.to_owned(),
+        report_seq: seq,
+        status: input.status,
+        summary: input.summary.clone(),
+        artifact_refs: input.artifact_refs.clone(),
+        needs_human: input.needs_human,
+        question_refs: input.question_refs.clone(),
+        reason_code: input.reason_code.clone(),
+        producer: input.producer,
+        management_revision: lane.management_revision,
+        brief_revision: lane.brief_revision,
+        created_at_ns: at_ns,
+    }
+    .validate_size()
+    .map_err(StorageError::LaneInvalid)?;
     tx.execute(
         &format!(
             "INSERT INTO lane_reports ({REPORT_COLUMNS}) \
@@ -530,7 +552,9 @@ pub(crate) fn change_management(
         });
     }
     if let Some(lead) = &change.lead_thread_id {
-        tombstone_check(&tx, &[lead], &lane.origin_run_id)?;
+        // Only the lead it moves to: a deleted origin does not block a later management
+        // change, since the origin is history and not part of the relation.
+        tombstone_threads(&tx, &[lead])?;
     }
     tx.execute(
         "UPDATE lanes SET lead_thread_id = ?2, policy = ?3, \
@@ -659,12 +683,23 @@ pub(crate) fn register_delivery_key(
     Ok(inserted > 0)
 }
 
+/// The start of the objective whose serialized form is at most
+/// [`LANE_OBJECTIVE_PREVIEW_MAX_BYTES`] bytes (escapes counted), cut at a character
+/// boundary.
 fn preview(objective: &str) -> String {
-    let mut end = objective.len().min(LANE_OBJECTIVE_PREVIEW_MAX_BYTES);
-    while !objective.is_char_boundary(end) {
-        end -= 1;
+    let mut used = 0;
+    let mut preview = String::new();
+    for character in objective.chars() {
+        let mut buffer = [0_u8; 4];
+        let escaped = serde_json::to_string(character.encode_utf8(&mut buffer))
+            .map_or(usize::MAX, |json| json.len() - 2);
+        if used + escaped > LANE_OBJECTIVE_PREVIEW_MAX_BYTES {
+            break;
+        }
+        used += escaped;
+        preview.push(character);
     }
-    objective[..end].to_owned()
+    preview
 }
 
 fn item(conn: &Connection, lane: LaneRecord) -> Result<LaneListItem, StorageError> {
@@ -714,15 +749,28 @@ fn decode_cursor(token: &str) -> Result<(i64, i64, &str), StorageError> {
     Ok((snapshot, position, filter))
 }
 
-/// Takes entries from `rows` (position, lane) while the page limit and byte budget
-/// allow; at least one entry is always taken.
+/// The longest cursor [`encode_cursor`] can produce, for sizing a page before its cursor
+/// exists.
+fn worst_cursor() -> String {
+    encode_cursor(i64::MAX, i64::MAX, &"f".repeat(16))
+}
+
+/// Takes entries from `rows` (position, lane) while the entry count and the serialized
+/// size of the whole page (items, the cursor it may carry and its fixed fields) stay
+/// inside the limits. Returns the items and the position of the first entry left out.
+///
+/// # Errors
+/// A single entry that cannot fit a page by itself is an error, never returned
+/// anyway: write-side limits keep an entry far below the budget, so this means a
+/// stored lane that breaks them.
 fn fill_page(
     conn: &Connection,
     rows: Vec<(i64, LaneRecord)>,
     limit: usize,
+    snapshot_revision: u64,
 ) -> Result<(Vec<LaneListItem>, Option<i64>), StorageError> {
-    let mut items = Vec::new();
-    let mut bytes = 0_usize;
+    let worst = worst_cursor();
+    let mut items: Vec<LaneListItem> = Vec::new();
     let mut next = None;
     for (position, lane) in rows {
         if items.len() >= limit {
@@ -730,15 +778,31 @@ fn fill_page(
             break;
         }
         let entry = item(conn, lane)?;
-        let size = serde_json::to_vec(&entry)
+        let mut candidate = items.clone();
+        candidate.push(entry);
+        let page = LaneListPage {
+            items: candidate,
+            next_cursor: Some(worst.clone()),
+            has_more: true,
+            snapshot_revision,
+        };
+        let size = serde_json::to_vec(&page)
             .map_err(|error| StorageError::Serialization(error.to_string()))?
             .len();
-        if !items.is_empty() && bytes + size > LANE_LIST_PAGE_MAX_BYTES {
+        if size > LANE_LIST_PAGE_MAX_BYTES {
+            if items.is_empty() {
+                return Err(invalid(
+                    "lane_list_item",
+                    LaneValidationKind::TooLarge {
+                        max: LANE_LIST_PAGE_MAX_BYTES,
+                        actual: size,
+                    },
+                ));
+            }
             next = Some(position);
             break;
         }
-        bytes += size;
-        items.push(entry);
+        items = page.items;
     }
     Ok((items, next))
 }
@@ -795,7 +859,13 @@ pub(crate) fn list(
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
             drop(statement);
-            let (items, next) = fill_page(&tx, rows, limit)?;
+            let (items, next) = fill_page(
+                &tx,
+                rows,
+                limit,
+                u64::try_from(as_of)
+                    .map_err(|_| StorageError::OutOfRange("lane ledger revision"))?,
+            )?;
             LaneListPage {
                 items,
                 next_cursor: next.map(|next| encode_cursor(snapshot_id, next, &filter)),
@@ -832,7 +902,7 @@ fn first_page(
         .enumerate()
         .map(|(index, lane)| (i64::try_from(index).unwrap_or(i64::MAX), lane))
         .collect();
-    let (items, next) = fill_page(tx, positioned, limit)?;
+    let (items, next) = fill_page(tx, positioned, limit, as_of)?;
     let Some(next) = next else {
         return Ok(LaneListPage {
             items,
@@ -888,4 +958,74 @@ fn evict_snapshots(tx: &Transaction<'_>, lead_thread_id: &str) -> Result<(), Sto
         [i64::try_from(LANE_LIST_SNAPSHOTS_MAX).unwrap_or(i64::MAX)],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lanes::{LaneScope, LaneWorkspaceDeclaration};
+
+    fn record(n: u32, notes: usize) -> LaneRecord {
+        LaneRecord {
+            lane_id: format!("lane-{n}"),
+            thread_id: format!("thread-{n}"),
+            origin_thread_id: "lead".into(),
+            origin_run_id: "run".into(),
+            creation_key: format!("k{n}"),
+            scope: LaneScope::Lane,
+            lead_thread_id: Some("lead".into()),
+            policy: LanePolicy::Attached,
+            management_revision: 1,
+            brief: LaneBrief {
+                objective: "o".into(),
+                inputs: vec![],
+                deliverables: vec![],
+                acceptance_criteria: vec!["c".into()],
+                constraints: vec![],
+                workspace: LaneWorkspaceDeclaration {
+                    branch: None,
+                    worktree: None,
+                    notes: Some("n".repeat(notes)),
+                },
+                report_policy: LanePolicy::Attached,
+            },
+            brief_revision: 1,
+            start_seed: String::new(),
+            root_run_id: None,
+            generation: 0,
+            latest_report_seq: 0,
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            last_activity_at_ns: 1,
+        }
+    }
+
+    #[test]
+    fn a_single_entry_larger_than_a_page_is_an_error_never_returned_anyway() {
+        let conn = crate::Database::open_in_memory().unwrap();
+        let rows = vec![(0, record(1, LANE_LIST_PAGE_MAX_BYTES + 1))];
+        let error = fill_page(&conn.conn, rows, 20, 1).unwrap_err();
+        assert!(matches!(
+            error,
+            StorageError::LaneInvalid(ref e) if e.field == "lane_list_item"
+        ));
+    }
+
+    #[test]
+    fn entries_are_counted_with_the_cursor_and_fixed_fields_of_the_whole_page() {
+        let conn = crate::Database::open_in_memory().unwrap();
+        // Three entries of about 6 KiB each: two fit under 16 KiB with the page's own
+        // structure and cursor, the third does not.
+        let rows = (0..3).map(|n| (i64::from(n), record(n, 6_000))).collect();
+        let (items, next) = fill_page(&conn.conn, rows, 20, 1).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(next, Some(2));
+        let page = LaneListPage {
+            items,
+            next_cursor: Some(worst_cursor()),
+            has_more: true,
+            snapshot_revision: 1,
+        };
+        assert!(serde_json::to_vec(&page).unwrap().len() <= LANE_LIST_PAGE_MAX_BYTES);
+    }
 }

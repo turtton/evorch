@@ -108,10 +108,7 @@ fn ids(page: &LaneListPage) -> Vec<String> {
 }
 
 fn page_bytes(page: &LaneListPage) -> usize {
-    page.items
-        .iter()
-        .map(|item| serde_json::to_vec(item).unwrap().len())
-        .sum()
+    serde_json::to_vec(page).unwrap().len()
 }
 
 fn all_pages(handle: &StorageHandle) -> Vec<String> {
@@ -873,14 +870,14 @@ fn a_cursor_is_stale_after_its_listing_is_evicted_and_bound_to_its_filter() {
 
 #[test]
 fn a_page_stops_at_sixteen_kib_and_the_rest_follows_through_the_cursor() {
-    // Given: 20 lanes whose latest reports are each near the 4 KiB report limit.
+    // Given: 20 lanes whose latest reports are each large (about 3 KiB serialized).
     let f = Fixture::new();
     let handle = f.handle();
     for n in 1..=20 {
         handle.create_lane(new_lane(n, i64::from(n))).unwrap();
         let mut big = report(LaneStatus::Working, &"s".repeat(1024));
-        big.artifact_refs = vec!["a".repeat(256); 8];
-        big.question_refs = vec!["q".repeat(256); 3];
+        big.artifact_refs = vec!["a".repeat(256); 6];
+        big.question_refs = vec!["q".repeat(256)];
         big.reason_code = Some("r".repeat(64));
         handle
             .append_lane_report(&format!("lane-{n:03}"), big, 1_000 + i64::from(n))
@@ -902,7 +899,7 @@ fn a_page_stops_at_sixteen_kib_and_the_rest_follows_through_the_cursor() {
         }
     }
 
-    // Then: no page passed the byte budget, several pages were needed and every lane
+    // Then: no whole page (items, cursor and fixed fields, serialized) passed the budget, several pages were needed and every lane
     // appeared exactly once.
     assert!(
         sizes.iter().all(|size| *size <= LANE_LIST_PAGE_MAX_BYTES),
@@ -1020,4 +1017,237 @@ fn events_describe_the_committed_state_and_a_replay_is_not_an_event() {
             .append_lane_report("lane-001", report(LaneStatus::Ready, ""), 12)
             .is_err()
     );
+}
+
+#[test]
+fn a_report_is_limited_by_its_serialized_size_and_a_refusal_leaves_the_history_alone() {
+    let f = Fixture::new();
+    let handle = f.handle();
+    handle.create_lane(new_lane(1, 10)).unwrap();
+    let revision = handle
+        .lane_list(list_request(None))
+        .unwrap()
+        .snapshot_revision;
+
+    // Texts that each fit and sum to 3,840 bytes (below 4 KiB), but whose serialized
+    // report is over: the limit is on the report, not on the sum of its texts.
+    let mut by_sum = report(LaneStatus::Working, &"x".repeat(1024));
+    by_sum.artifact_refs = vec!["y".repeat(256); 8];
+    by_sum.question_refs = vec!["q".repeat(256); 3];
+    // Escapes inflate a text once serialized: 2,048 quotes become 4,096 bytes.
+    let mut escaped = report(LaneStatus::Working, &"\"".repeat(1024));
+    escaped.question_refs = vec!["\"".repeat(256); 4];
+    for oversized in [by_sum, escaped] {
+        let error = handle
+            .append_lane_report("lane-001", oversized, 11)
+            .unwrap_err();
+        assert!(
+            matches!(error, StorageError::LaneInvalid(ref e) if e.field == "report"),
+            "{error:?}"
+        );
+    }
+
+    // The refusals left no report, no sequence and no ledger change behind.
+    assert!(
+        f.database()
+            .lane_reports("lane-001", 0, 50)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        handle.lane("lane-001").unwrap().unwrap().latest_report_seq,
+        0
+    );
+    assert_eq!(
+        handle
+            .lane_list(list_request(None))
+            .unwrap()
+            .snapshot_revision,
+        revision
+    );
+
+    // At the boundary: the longest report the ledger accepts serializes to at most
+    // 4,096 bytes, and one more byte per question reference is refused.
+    let mut accepted = 0_usize;
+    let mut refused_at = None;
+    for length in 1..=256 {
+        let mut candidate = report(LaneStatus::Working, &"x".repeat(1024));
+        candidate.artifact_refs = vec!["y".repeat(256); 8];
+        candidate.question_refs = vec!["q".repeat(length); 3];
+        match handle.append_lane_report("lane-001", candidate, 12) {
+            Ok(appended) => {
+                accepted = serde_json::to_string(&appended.report).unwrap().len();
+                assert!(accepted <= 4096, "{accepted} bytes accepted");
+            }
+            Err(error) => {
+                assert!(matches!(error, StorageError::LaneInvalid(_)), "{error:?}");
+                refused_at = Some(length);
+                break;
+            }
+        }
+    }
+    assert!(refused_at.is_some(), "the limit must be reached");
+    assert!(
+        accepted + 3 > 4096,
+        "the last accepted report was {accepted} bytes"
+    );
+}
+
+#[test]
+fn a_workspace_that_serializes_large_is_refused_so_a_list_entry_stays_small() {
+    let f = Fixture::new();
+    let handle = f.handle();
+    let mut escaping = new_lane(1, 10);
+    escaping.brief.workspace = LaneWorkspaceDeclaration {
+        branch: Some("\u{1}".repeat(512)),
+        worktree: Some("\u{1}".repeat(512)),
+        notes: None,
+    };
+    assert!(matches!(
+        handle.create_lane(escaping).unwrap_err(),
+        StorageError::LaneInvalid(ref e) if e.field == "workspace"
+    ));
+
+    // A workspace of quotes (doubled by escaping) that fits is listed within the budget,
+    // next to a report that is as large as the ledger allows.
+    for n in 1..=20 {
+        let mut lane = new_lane(n, i64::from(n));
+        lane.brief.objective = "\"".repeat(600);
+        lane.brief.workspace = LaneWorkspaceDeclaration {
+            branch: Some("\"".repeat(512)),
+            worktree: Some("\"".repeat(512)),
+            notes: None,
+        };
+        handle.create_lane(lane).unwrap();
+        let mut big = report(LaneStatus::Working, &"\"".repeat(400));
+        big.artifact_refs = vec!["a".repeat(256); 6];
+        big.question_refs = vec!["q".repeat(200)];
+        handle
+            .append_lane_report(&format!("lane-{n:03}"), big, 1_000 + i64::from(n))
+            .unwrap();
+    }
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = handle.lane_list(list_request(cursor)).unwrap();
+        assert!(
+            page_bytes(&page) <= LANE_LIST_PAGE_MAX_BYTES,
+            "{}",
+            page_bytes(&page)
+        );
+        // The preview is cut by its serialized size, escapes included.
+        assert!(page.items.iter().all(|item| {
+            serde_json::to_string(&item.objective_preview)
+                .unwrap()
+                .len()
+                <= 256 + 2
+        }));
+        seen.extend(ids(&page));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.iter().collect::<BTreeSet<_>>().len(), 20);
+}
+
+#[test]
+fn a_write_that_fails_half_way_leaves_nothing_behind() {
+    let f = Fixture::new();
+    let handle = f.handle();
+    handle.create_lane(new_lane(1, 10)).unwrap();
+    let revision = handle
+        .lane_list(list_request(None))
+        .unwrap()
+        .snapshot_revision;
+    let conn = f.sql();
+
+    // A report whose last step (moving the lane's latest sequence) fails.
+    conn.execute_batch(
+        "CREATE TRIGGER inject_report BEFORE UPDATE OF latest_report_seq ON lanes \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    assert!(
+        handle
+            .append_lane_report("lane-001", report(LaneStatus::Working, "x"), 11)
+            .is_err()
+    );
+    conn.execute_batch("DROP TRIGGER inject_report").unwrap();
+    assert!(
+        f.database()
+            .lane_reports("lane-001", 0, 50)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A creation whose lane row fails after its thread row was written.
+    conn.execute_batch(
+        "CREATE TRIGGER inject_create BEFORE INSERT ON lanes \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    assert!(handle.create_lane(new_lane(2, 12)).is_err());
+    assert!(f.database().thread("thread-002").unwrap().is_none());
+    assert!(handle.lane("lane-002").unwrap().is_none());
+    conn.execute_batch("DROP TRIGGER inject_create").unwrap();
+
+    // Nothing moved, and the same requests succeed once the fault is gone.
+    assert_eq!(
+        handle
+            .lane_list(list_request(None))
+            .unwrap()
+            .snapshot_revision,
+        revision
+    );
+    assert_eq!(
+        handle
+            .append_lane_report("lane-001", report(LaneStatus::Working, "x"), 13)
+            .unwrap()
+            .report
+            .report_seq,
+        1
+    );
+    assert!(handle.create_lane(new_lane(2, 14)).unwrap().created);
+}
+
+#[test]
+fn a_reopened_database_keeps_the_creation_and_its_unstarted_intent() {
+    // Given: a lane created, and the process ends before its root started.
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("lanes.db"),
+        ..StorageConfig::default()
+    };
+    let created = {
+        let storage = Storage::open(config.clone()).unwrap();
+        let created = storage.handle().create_lane(new_lane(1, 10)).unwrap();
+        storage.close();
+        created
+    };
+
+    // When: it is opened again and the same creation is retried.
+    let storage = Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let retried = handle.create_lane(new_lane(1, 99)).unwrap();
+
+    // Then: the retry is the same lane, and the intent is found for the start.
+    assert!(!retried.created);
+    assert_eq!(retried.lane, created.lane);
+    let pending = Database::open(&config)
+        .unwrap()
+        .unstarted_lanes(10)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].start_seed, "seed");
+    let started = handle.start_lane_run("lane-001", 0, "root-1", 20).unwrap();
+    assert!(started.is_started());
+    assert!(
+        Database::open(&config)
+            .unwrap()
+            .unstarted_lanes(10)
+            .unwrap()
+            .is_empty()
+    );
+    storage.close();
 }

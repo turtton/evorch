@@ -3447,3 +3447,70 @@ fn the_fence_covers_message_rows_and_a_deleted_runs_conversation_stays_hidden() 
             .is_empty()
     );
 }
+
+#[test]
+fn a_capture_above_the_step_budget_does_not_keep_the_lane_rows_of_its_thread() {
+    // Given: a confirmed family whose thread has a 5 MiB captured file (left to the
+    // exclusive phase) and a lane with reports and a delivery key.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    untracked_capture(&f, "A", "ra", true);
+    f.lane("lane-a", "A", 3);
+    f.sql("INSERT INTO lane_delivery_keys(lane_id, management_revision, event_kind, dedupe_key, ledger_revision, created_at_ns) VALUES ('lane-a', 1, 'question', 'q2', 0, 1)");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: only the oversized capture waits; no lane row was left behind.
+    assert_eq!(last.unwrap().oversized_pending, 1);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_start_untracked WHERE LENGTH(content) > 4194304"),
+        1
+    );
+
+    // And: after the exclusive phase nothing of the family remains.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 10);
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_start_untracked"), 0);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+}

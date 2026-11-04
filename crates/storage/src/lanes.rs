@@ -239,10 +239,10 @@ pub struct LaneListItem {
 }
 
 /// One page of `lane_list`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaneListPage {
-    /// At most [`LANE_LIST_PAGE_MAX`] entries and [`LANE_LIST_PAGE_MAX_BYTES`] bytes
-    /// serialized (a single entry is always returned).
+    /// At most [`LANE_LIST_PAGE_MAX`] entries; the whole page, serialized, is at most
+    /// [`LANE_LIST_PAGE_MAX_BYTES`] bytes (cursor and fixed fields counted).
     pub items: Vec<LaneListItem>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
