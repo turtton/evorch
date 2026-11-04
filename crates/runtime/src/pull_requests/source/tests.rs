@@ -304,15 +304,22 @@ async fn fork_pull_requests_keep_base_and_head_repositories_apart() {
     assert_eq!(fetched.canonical.repository, "turtton/evorch-next");
 }
 
-// Given: no checks at all / When: fetched / Then: an empty, complete list
+// Given: a check list that is missing, null or an explicit empty list / When: fetched / Then:
+// only the explicit empty list is a known "no checks"; a missing one is incomplete
 #[tokio::test]
-async fn a_pull_request_without_checks_has_a_complete_empty_list() {
-    for rollup in [Value::Null, json!([])] {
-        let mut value = pr();
-        value["statusCheckRollup"] = rollup;
-        let facts = fetch_json(&value).await.unwrap().facts;
-        assert!(facts.checks.is_empty() && facts.checks_complete);
-    }
+async fn only_an_explicit_empty_check_list_is_complete() {
+    let mut value = pr();
+    value["statusCheckRollup"] = json!([]);
+    let known = fetch_json(&value).await.unwrap().facts;
+    assert!(known.checks.is_empty() && known.checks_complete);
+
+    value["statusCheckRollup"] = Value::Null;
+    let null = fetch_json(&value).await.unwrap().facts;
+    assert!(null.checks.is_empty() && !null.checks_complete);
+
+    value.as_object_mut().unwrap().remove("statusCheckRollup");
+    let absent = fetch_json(&value).await.unwrap().facts;
+    assert!(absent.checks.is_empty() && !absent.checks_complete);
 }
 
 // Given: more checks than the limit / When: fetched / Then: failing and running ones are kept
@@ -494,6 +501,7 @@ async fn output_over_the_limit_is_an_error() {
         stdout: pr().to_string().into_bytes(),
         stdout_truncated: true,
         stderr: Vec::new(),
+        stderr_truncated: false,
     });
 
     let error = source(&runner).fetch(&key(), DEADLINE).await.unwrap_err();
@@ -671,6 +679,26 @@ async fn diagnostics_are_bounded_single_line_and_redacted() {
     );
 }
 
+// Given: stderr that the limit cut / When: the failure is classified / Then: the class is still
+// found, and none of the cut text is quoted
+#[tokio::test]
+async fn cut_stderr_classifies_the_failure_but_is_not_quoted() {
+    let runner = FakeProcessRunner::new();
+    runner.push_output(ProcessOutput {
+        exit_code: Some(1),
+        stderr: b"HTTP 403: API rate limit exceeded; token ghp_A1b2C3".to_vec(),
+        stderr_truncated: true,
+        ..ProcessOutput::default()
+    });
+
+    let error = source(&runner).fetch(&key(), DEADLINE).await.unwrap_err();
+
+    assert!(matches!(error, FetchError::RateLimited(_)), "{error:?}");
+    let text = error.to_string();
+    assert!(!text.contains("ghp_") && !text.contains("A1b2"), "{text}");
+    assert!(text.contains("not quoted"), "{text}");
+}
+
 // Given: a gh that never answers / When: fetched under a paused clock / Then: Timeout
 #[tokio::test(start_paused = true)]
 async fn a_fetch_that_outlives_its_deadline_times_out() {
@@ -774,6 +802,32 @@ mod processes {
         assert_eq!(output.stderr.len(), 64);
         assert_eq!(output.stdout, b"done\n");
         assert_eq!(output.exit_code, Some(0));
+    }
+
+    // Given: a gh whose stderr is cut by the limit in the middle of a credential / When: the
+    // failure is reported / Then: nothing of the cut text is quoted
+    #[tokio::test]
+    async fn a_credential_cut_by_the_stderr_limit_is_never_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+        let program = script(
+            dir.path(),
+            "cut.sh",
+            &format!(
+                "head -c {} /dev/zero | tr '\\0' ' ' >&2; printf '%s' '{token}' >&2; exit 1",
+                GH_STDERR_LIMIT - 4
+            ),
+        );
+
+        let error = GhSource::new()
+            .with_program(program.to_string_lossy())
+            .fetch(&key(), DEADLINE)
+            .await
+            .unwrap_err();
+
+        for text in [error.to_string(), error.failure().message] {
+            assert!(!text.contains("ghp_") && !text.contains("A1b2"), "{text}");
+        }
     }
 
     // Given: a program that is not there / When: run / Then: NotFound

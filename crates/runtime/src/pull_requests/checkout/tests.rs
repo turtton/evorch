@@ -70,7 +70,7 @@ impl Fixture {
         branch: &str,
     ) -> CheckoutResolution {
         let dirs: Vec<PathBuf> = dirs.iter().map(|dir| dir.to_path_buf()).collect();
-        resolve_with(&self.reader(), &dirs, head_repository, branch, &|_| {})
+        resolve_with(&self.reader(), &dirs, head_repository, branch, &|_, _| {})
     }
 }
 
@@ -189,7 +189,7 @@ fn an_unknown_head_repository_matches_nothing() {
             std::slice::from_ref(&repo),
             repository,
             "feat/x",
-            &|_| {},
+            &|_, _| {},
         );
         assert_eq!(
             missing(&resolution),
@@ -326,7 +326,7 @@ fn directories_without_a_checkout_are_ignored() {
         &dirs,
         Some("turtton/evorch"),
         "feat/x",
-        &|_| {},
+        &|_, _| {},
     );
     let mixed = f.resolve(
         &[&plain, &f.path("missing"), &repo],
@@ -348,8 +348,10 @@ fn a_branch_switch_during_the_read_gives_no_commit() {
     let f = Fixture::new();
     let repo = f.repo("project", "feat/x", ORIGIN);
     git(&repo, &["branch", "other"]);
-    let switch = |path: &Path| {
-        git(path, &["checkout", "--quiet", "other"]);
+    let switch = |stage: Stage, path: &Path| {
+        if stage == Stage::BetweenReads {
+            git(path, &["checkout", "--quiet", "other"]);
+        }
     };
 
     let resolution = resolve_with(
@@ -368,8 +370,10 @@ fn a_branch_switch_during_the_read_gives_no_commit() {
 fn a_new_commit_during_the_read_gives_no_commit() {
     let f = Fixture::new();
     let repo = f.repo("project", "feat/x", ORIGIN);
-    let commit = |path: &Path| {
-        git(path, &["commit", "--quiet", "--allow-empty", "-m", "more"]);
+    let commit = |stage: Stage, path: &Path| {
+        if stage == Stage::BetweenReads {
+            git(path, &["commit", "--quiet", "--allow-empty", "-m", "more"]);
+        }
     };
 
     let resolution = resolve_with(
@@ -381,6 +385,36 @@ fn a_new_commit_during_the_read_gives_no_commit() {
     );
 
     assert_eq!(missing(&resolution), CheckoutMiss::Changed);
+}
+
+// Given: one checkout that matches and one that cannot be read / When: resolved / Then: no
+// commit, because the unreadable one may be a second match
+#[test]
+fn an_unreadable_candidate_means_no_commit_even_when_another_one_matches() {
+    let f = Fixture::new();
+    let good = f.repo("a-good", "feat/x", ORIGIN);
+    let broken = f.repo("b-broken", "feat/x", ORIGIN);
+    let dirs = [good.clone(), broken.clone()];
+    let corrupt = |stage: Stage, path: &Path| {
+        if stage == Stage::BeforeRead && path.ends_with("b-broken") {
+            std::fs::rename(path.join(".git"), path.join("git-gone")).unwrap();
+        }
+    };
+
+    let resolution = resolve_with(
+        &f.reader(),
+        &dirs,
+        Some("turtton/evorch"),
+        "feat/x",
+        &corrupt,
+    );
+
+    assert_eq!(missing(&resolution), CheckoutMiss::ReadFailed);
+    // The undamaged checkout alone is a clean match.
+    assert_eq!(
+        found(f.resolve(&[&good], Some("turtton/evorch"), "feat/x")).path,
+        good
+    );
 }
 
 // Given: more checkouts than the limit / When: resolved / Then: TooManyCandidates, not a guess
@@ -419,7 +453,7 @@ fn an_expired_deadline_is_reported() {
         std::slice::from_ref(&repo),
         Some("turtton/evorch"),
         "feat/x",
-        &|_| {},
+        &|_, _| {},
     );
 
     assert_eq!(missing(&resolution), CheckoutMiss::TimedOut);

@@ -109,7 +109,16 @@ pub fn resolve_blocking(
     budget: Duration,
 ) -> CheckoutResolution {
     let reader = GitReader::new(Instant::now() + budget);
-    resolve_with(&reader, dirs, head_repository, head_branch, &|_| {})
+    resolve_with(&reader, dirs, head_repository, head_branch, &|_, _| {})
+}
+
+/// Where in the inspection of a candidate a test hook is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// Before anything of the candidate is read.
+    BeforeRead,
+    /// After the first read of HEAD and the remotes, before the second read of HEAD.
+    BetweenReads,
 }
 
 /// What one candidate looked like.
@@ -125,7 +134,7 @@ pub(crate) fn resolve_with(
     dirs: &[PathBuf],
     head_repository: Option<&str>,
     head_branch: &str,
-    between_reads: &dyn Fn(&Path),
+    hook: &dyn Fn(Stage, &Path),
 ) -> CheckoutResolution {
     use CheckoutResolution::Missing;
     let head_repository = head_repository
@@ -148,7 +157,7 @@ pub(crate) fn resolve_with(
     let mut matches = Vec::new();
     let (mut detached, mut read_failed) = (false, false);
     for path in &candidates {
-        match inspect(reader, path, &head_repository, head_branch, between_reads) {
+        match inspect(reader, path, &head_repository, head_branch, hook) {
             Ok(Inspection::Match(checkout)) => matches.push(checkout),
             Ok(Inspection::NoMatch) => {}
             Ok(Inspection::Detached) => detached = true,
@@ -156,10 +165,13 @@ pub(crate) fn resolve_with(
             Err(miss) => return Missing(miss),
         }
     }
+    // A candidate that could not be read may be a second match, so no commit is named.
+    if read_failed {
+        return Missing(CheckoutMiss::ReadFailed);
+    }
     match matches.len() {
         1 => CheckoutResolution::Found(matches.remove(0)),
         0 if detached => Missing(CheckoutMiss::Detached),
-        0 if read_failed => Missing(CheckoutMiss::ReadFailed),
         0 => Missing(CheckoutMiss::NoCheckout),
         _ => Missing(CheckoutMiss::Ambiguous),
     }
@@ -326,12 +338,13 @@ fn inspect(
     path: &Path,
     head_repository: &str,
     head_branch: &str,
-    between_reads: &dyn Fn(&Path),
+    hook: &dyn Fn(Stage, &Path),
 ) -> Result<Inspection, CheckoutMiss> {
     let soft = |miss: CheckoutMiss| match miss {
         CheckoutMiss::TimedOut => Err(CheckoutMiss::TimedOut),
         _ => Ok(Inspection::ReadFailed),
     };
+    hook(Stage::BeforeRead, path);
     let first = match read_head(reader, path) {
         Ok(Some(head)) => head,
         Ok(None) => return Ok(Inspection::NoMatch),
@@ -342,7 +355,7 @@ fn inspect(
         Ok(None) => return Ok(Inspection::NoMatch),
         Err(miss) => return soft(miss),
     };
-    between_reads(path);
+    hook(Stage::BetweenReads, path);
     let second = match read_head(reader, path) {
         Ok(Some(head)) => head,
         Ok(None) => return Err(CheckoutMiss::Changed),

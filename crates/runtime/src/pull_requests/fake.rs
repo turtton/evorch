@@ -159,6 +159,7 @@ impl FakeProcessRunner {
             stdout: stdout.as_bytes().to_vec(),
             stdout_truncated: false,
             stderr: stderr.as_bytes().to_vec(),
+            stderr_truncated: false,
         });
     }
 

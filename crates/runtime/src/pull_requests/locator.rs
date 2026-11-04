@@ -14,8 +14,8 @@ use super::FetchError;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LocatorError {
     /// The URL is not on exactly github.com over https.
-    #[error("only https://github.com pull requests are supported: {0}")]
-    InvalidHost(String),
+    #[error("only https://github.com pull requests are supported ({0})")]
+    InvalidHost(&'static str),
     /// The text is not a pull request reference.
     #[error("not a pull request reference: {0}")]
     Malformed(&'static str),
@@ -24,7 +24,7 @@ pub enum LocatorError {
 impl From<LocatorError> for FetchError {
     fn from(error: LocatorError) -> Self {
         match error {
-            LocatorError::InvalidHost(detail) => Self::InvalidHost(super::clean_text(&detail, 64)),
+            LocatorError::InvalidHost(reason) => Self::InvalidHost((*reason).to_owned()),
             LocatorError::Malformed(detail) => Self::InvalidReference(detail.to_owned()),
         }
     }
@@ -60,10 +60,12 @@ fn parse_url(scheme: &str, rest: &str) -> Result<PullRequestKey, LocatorError> {
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     if !scheme.eq_ignore_ascii_case("https") {
-        return Err(LocatorError::InvalidHost("the scheme must be https".into()));
+        return Err(LocatorError::InvalidHost("the scheme must be https"));
     }
     if !authority.eq_ignore_ascii_case("github.com") {
-        return Err(LocatorError::InvalidHost(format!("host {authority:?}")));
+        return Err(LocatorError::InvalidHost(
+            "the host must be exactly github.com",
+        ));
     }
     let path = tail
         .split(['?', '#'])

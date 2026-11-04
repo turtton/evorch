@@ -19,7 +19,9 @@
 //! `gh pr view --json statusCheckRollup` follows GitHub's pagination itself (100 checks per
 //! page, all pages, in `cli/cli` `pkg/cmd/pr/shared/finder.go: preloadPrChecks`), and its JSON
 //! carries neither `pageInfo` nor a total. So a list that arrives is the whole list, and a
-//! failure while paging is a failed `gh`. The adapter adds its own bound: more than
+//! failure while paging is a failed `gh`. A missing or `null` list (gh prints `null` when it
+//! found no check data) is not known to be complete; only an explicit `[]` is a known "no
+//! checks", and even that is not a success. The adapter adds its own bound: more than
 //! [`PULL_REQUEST_CHECKS_MAX`] checks are cut (failing and running ones are kept first) and
 //! the list is marked incomplete. The output is bounded too ([`GH_STDOUT_LIMIT`]); output
 //! over the bound is an error, not a shorter answer. The checks belong to the head commit
@@ -117,6 +119,9 @@ pub struct ProcessOutput {
     pub stdout_truncated: bool,
     /// Stderr, at most `stderr_limit` bytes.
     pub stderr: Vec<u8>,
+    /// Whether stderr was longer than the limit. A cut text can end in the middle of a
+    /// credential, so it is used to classify the failure but never quoted.
+    pub stderr_truncated: bool,
 }
 
 /// Why a process could not be run at all.
@@ -190,7 +195,8 @@ impl ProcessRunner for TokioProcessRunner {
         );
         let (stdout, stdout_truncated) =
             out.map_err(|error| ProcessError::Io(error.to_string()))?;
-        let (stderr, _) = err.map_err(|error| ProcessError::Io(error.to_string()))?;
+        let (stderr, stderr_truncated) =
+            err.map_err(|error| ProcessError::Io(error.to_string()))?;
         let status = child
             .wait()
             .await
@@ -200,6 +206,7 @@ impl ProcessRunner for TokioProcessRunner {
             stdout,
             stdout_truncated,
             stderr,
+            stderr_truncated,
         })
     }
 }
@@ -357,7 +364,14 @@ fn classify_failure(output: &ProcessOutput) -> FetchError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let lower = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
-    let detail = if stderr.trim().is_empty() {
+    // Text that was cut at the limit may end inside a credential that no rule can recognize
+    // any more, so it classifies the failure but is not quoted.
+    let detail = if output.stderr_truncated {
+        format!(
+            "exit code {:?}; stderr over the size limit (not quoted)",
+            output.exit_code
+        )
+    } else if stderr.trim().is_empty() {
         format!("exit code {:?}", output.exit_code)
     } else {
         stderr.into_owned()
@@ -508,7 +522,12 @@ pub fn parse_output(
     let head_branch = branch(required(raw.head_ref_name, "headRefName")?, "headRefName")?;
     let head_sha = commit_id(&required(raw.head_ref_oid, "headRefOid")?)?;
     let head_repository = head_repository(raw.head_repository, raw.head_repository_owner)?;
-    let (checks, checks_complete) = checks(raw.status_check_rollup.unwrap_or_default(), &head_sha)?;
+    // An explicit `[]` is a known "no checks"; a missing or null list is not known to be
+    // complete (gh prints null when it found no check data at all).
+    let (checks, checks_complete) = match raw.status_check_rollup {
+        Some(list) => checks(list, &head_sha)?,
+        None => (Vec::new(), false),
+    };
     Ok((
         canonical,
         url,
