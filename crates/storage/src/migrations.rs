@@ -56,7 +56,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ),
     include_str!("migrations/v41.sql"),
     include_str!("migrations/v42.sql"),
-    include_str!("migrations/v43.sql"),
+    concat!(
+        include_str!("migrations/v43_drop.sql"),
+        include_str!("migrations/v43_prepare.sql")
+    ),
+    include_str!("migrations/event_bodies.sql"),
+    include_str!("migrations/v45.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -68,10 +73,33 @@ pub(crate) const V40_PREPARE: &str = include_str!("migrations/v40_prepare.sql");
 /// command runs it once every run is converted.
 pub(crate) const V40_DROP: &str = include_str!("migrations/v40_drop.sql");
 
+/// Migration v43 without its last step: the header columns, the message table and the
+/// triggers. The conversion command runs it while it moves the maps.
+pub(crate) const V43_PREPARE: &str = include_str!("migrations/v43_prepare.sql");
+
+/// The step of migration v43 that removes `run_context_provenance.map_json`; the
+/// conversion command runs it once every map is converted.
+pub(crate) const V43_DROP: &str = include_str!("migrations/v43_drop.sql");
+
+/// Migration 44 (event bodies as tokens): the new `events` columns, the event reference
+/// table and the accounting triggers. The conversion command runs it as its "events
+/// prepare" step, after the runs and the maps are converted and before the events are.
+pub(crate) const EVENT_BODIES: &str = include_str!("migrations/event_bodies.sql");
+
+/// The first schema version whose `events` rows may hold their payload in token form
+/// (`body_format` 1). A database below it (and not empty) is converted by the
+/// conversion command, never by a normal start.
+pub(crate) const EVENT_BODIES_VERSION: u32 = 44;
+
 /// The first schema version that stores a run's messages in `run_messages`. A database
 /// below it (and not empty) holds them in `run_contexts.messages_json`: this build
 /// never opens it. Only the conversion command may turn one into the current format.
 pub(crate) const MESSAGE_ROWS_VERSION: u32 = 40;
+
+/// The first schema version that stores a provenance map in `run_message_provenance`
+/// rows. A database below it (and not empty) holds the whole map in
+/// `run_context_provenance.map_json`: only the conversion command opens one.
+pub(crate) const PROVENANCE_ROWS_VERSION: u32 = 43;
 
 /// Refuses a database that is not in the current conversation format, before anything
 /// writes to it (no pragma, no migration, no row). A new (empty) database passes: it is
@@ -96,6 +124,18 @@ pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageErr
             detail: "a run's messages are one column of run_contexts",
         });
     }
+    if found < PROVENANCE_ROWS_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "a run's provenance map is one column of run_context_provenance",
+        });
+    }
+    if found < EVENT_BODIES_VERSION {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "the payloads of events are not in the token format",
+        });
+    }
     let columns: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('run_contexts')")?
         .query_map([], |row| row.get(0))?
@@ -105,6 +145,28 @@ pub(crate) fn require_current_format(conn: &Connection) -> Result<(), StorageErr
         return Err(StorageError::ConversionRequired {
             found,
             detail: "run_contexts is not in the header format (an interrupted conversion)",
+        });
+    }
+    let provenance_columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('run_context_provenance')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has_provenance = |name: &str| provenance_columns.iter().any(|column| column == name);
+    if has_provenance("map_json") || !has_provenance("map_message_count") {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "run_context_provenance is not in the header format (an interrupted conversion)",
+        });
+    }
+    let event_columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('events')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has_event = |name: &str| event_columns.iter().any(|column| column == name);
+    if !has_event("body_format") || !has_event("blob_bytes") {
+        return Err(StorageError::ConversionRequired {
+            found,
+            detail: "events is not in the token format (an interrupted conversion)",
         });
     }
     Ok(())
@@ -176,6 +238,18 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
         message: error.to_string(),
     }
 }
+
+/// Reverts migration v45 (see `tests/support/undo_v45.sql`); apply it before [`UNDO_V44`].
+#[cfg(test)]
+pub(crate) const UNDO_V45: &str = include_str!("../tests/support/undo_v45.sql");
+
+/// Reverts migration v44 (see `tests/support/undo_v44.sql`); apply it before [`UNDO_V43`].
+#[cfg(test)]
+pub(crate) const UNDO_V44: &str = include_str!("../tests/support/undo_v44.sql");
+
+/// Reverts migration v43 (see `tests/support/undo_v43.sql`); apply it before [`UNDO_V40`].
+#[cfg(test)]
+pub(crate) const UNDO_V43: &str = include_str!("../tests/support/undo_v43.sql");
 
 /// Reverts migration v40 (see `tests/support/undo_v40.sql`); apply it before [`UNDO_V35`].
 #[cfg(test)]

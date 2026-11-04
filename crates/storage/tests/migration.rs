@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 43;
+const LATEST_SCHEMA: u32 = 45;
 
-const EXPECTED_TABLES: [&str; 76] = [
+const EXPECTED_TABLES: [&str; 78] = [
     "lane_state",
     "lanes",
     "lane_reports",
@@ -22,6 +22,7 @@ const EXPECTED_TABLES: [&str; 76] = [
     "lane_list_snapshot_rows",
     "content_blobs",
     "content_blob_gc_queue",
+    "content_blob_refs_event",
     "content_blob_refs_header",
     "content_blob_refs_message",
     "run_messages",
@@ -43,6 +44,7 @@ const EXPECTED_TABLES: [&str; 76] = [
     "learning_claims",
     "learning_claim_roots",
     "run_context_provenance",
+    "run_message_provenance",
     "thread_index_runs",
     "conversation_blocks",
     "conversation_fts",
@@ -92,7 +94,8 @@ const EXPECTED_TABLES: [&str; 76] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 75] = [
+const EXPECTED_INDICES: [&str; 76] = [
+    "idx_content_blob_refs_event_blob",
     "idx_lanes_lead_activity",
     "idx_lanes_origin",
     "idx_lanes_unstarted",
@@ -1121,6 +1124,26 @@ fn entry_rows(connection: &Connection) -> Vec<EntryRow> {
         .unwrap()
 }
 
+/// Runs the offline conversion on `path`, which holds a version 41 database whose
+/// provenance maps are still a column.
+fn convert_to_current(path: &Path) {
+    let lock = path.with_extension("db.maintenance-lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    drop(options.open(&lock).unwrap());
+    storage::maintenance::convert_bodies(
+        path,
+        &storage::maintenance::ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+            event_batch_rows: None,
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     // Given: a v41 database whose projection rowids and ledger sequence numbers are in
@@ -1130,8 +1153,8 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     let path = temp_dir.path().join("v41.db");
     drop(Database::open(&config_for(&path)).unwrap());
     let connection = Connection::open(&path).unwrap();
-    // This fixture starts from the latest database: undo the later lane-only v43
-    // column before reconstructing v41, so migration v43 runs exactly once.
+    // This fixture starts from the latest database: undo the later lane-only v45
+    // column before reconstructing v41, so migration v45 runs exactly once.
     connection
         .execute_batch("ALTER TABLE lanes DROP COLUMN start_blocked_reason;")
         .unwrap();
@@ -1155,10 +1178,22 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
                  (5, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 8, 'project');",
         )
         .unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v44.sql"))
+        .unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v43.sql"))
+        .unwrap();
     connection.pragma_update(None, "user_version", 41).unwrap();
+    connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
     let ledger_before = ledger_rows(&connection);
     let entries_before = entry_rows(&connection);
     drop(connection);
+    // A database whose provenance maps are still a column opens only after the conversion
+    // command has run; that command applies the migrations after version 40 (v42 here).
+    convert_to_current(&path);
     let ids = |entries: Vec<storage::memory::MemoryEntry>| -> Vec<String> {
         entries.into_iter().map(|entry| entry.lesson.id).collect()
     };

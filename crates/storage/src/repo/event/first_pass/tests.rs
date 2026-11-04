@@ -176,7 +176,11 @@ fn part(run: &str, response: &str, index: usize, total: usize, text: &str) -> Ev
 
 /// Large enough that the codec stores it compressed.
 fn bulky(label: &str) -> String {
-    format!("{label} bulky body ").repeat(2048)
+    // Compressible and just below the token threshold: the payload is a zstd BLOB and the
+    // text stays inline. (A longer string is a token: see `tokenized_parts_*`.)
+    let mut text = format!("{label} bulky body ").repeat(2048);
+    text.truncate(1_990);
+    text
 }
 
 fn blobs_decoded() -> usize {

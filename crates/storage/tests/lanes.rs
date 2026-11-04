@@ -604,7 +604,7 @@ fn a_root_start_is_a_compare_and_swap_and_unstarted_lanes_are_found_again() {
 }
 
 #[test]
-fn v43_migration_keeps_pending_v42_intents_recoverable() {
+fn v45_migration_keeps_pending_v44_intents_recoverable() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig {
         db_path: dir.path().join("lanes.db"),
@@ -619,7 +619,7 @@ fn v43_migration_keeps_pending_v42_intents_recoverable() {
     {
         let conn = Connection::open(&config.db_path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=42;",
+            "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=44;",
         )
         .unwrap();
     }

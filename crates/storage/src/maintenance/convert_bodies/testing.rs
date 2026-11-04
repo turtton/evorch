@@ -51,9 +51,27 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     let definitions = definitions_of("'run_contexts'")?;
     // The lesson tables v42 rebuilt (favorite flag, two more ledger kinds), as v39 had them.
     let lesson_definitions = definitions_of("'memory_ledger', 'memory_entries'")?;
+    let accounting: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('events_accounting_insert', 'events_accounting_delete', \
+                          'events_accounting_update') ORDER BY name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    // Tokenized events are written back as plain ones while their blobs still exist.
+    resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
+         DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
+         DROP TABLE IF EXISTS content_blob_refs_event;
+         DROP TRIGGER events_accounting_insert;
+         DROP TRIGGER events_accounting_delete;
+         DROP TRIGGER events_accounting_update;
+         ALTER TABLE events DROP COLUMN body_format;
+         ALTER TABLE events DROP COLUMN blob_bytes;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;
          DROP TABLE content_blob_refs_message;
          DROP TABLE content_blob_refs_header;
@@ -72,6 +90,19 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     for definition in &definitions {
         conn.execute_batch(definition)?;
     }
+    for definition in &accounting {
+        conn.execute_batch(definition)?;
+    }
+    conn.execute_batch(
+        "DELETE FROM event_session_bytes;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events \
+             WHERE session_id IS NOT NULL GROUP BY session_id;
+         DELETE FROM event_day_bytes;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns / 86400000000000 \
+             - (wall_clock_ns % 86400000000000 < 0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         UPDATE sessions SET total_event_bytes = COALESCE( \
+             (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
+    )?;
     take_lessons_back(&conn, &lesson_definitions)?;
     for (record, revision) in &rows {
         conn.execute(
@@ -103,6 +134,155 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
+}
+
+/// Writes every tokenized event back as a plain one (its bodies resolved), the form a
+/// database before the event body format holds.
+fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
+    let ids: Vec<(i64, String, Option<String>)> = conn
+        .prepare("SELECT id, kind, subkind FROM events WHERE body_format = 1 ORDER BY id")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (id, kind, subkind) in ids {
+        let plain = conn.query_row("SELECT payload FROM events WHERE id = ?1", [id], |row| {
+            crate::repo::event::resolved_payload_json(
+                conn,
+                row.get_ref(0)?,
+                crate::repo::event::StoredFormat::Tokenized,
+                "downgrade",
+            )
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })?;
+        let subkind = subkind.unwrap_or_default();
+        let encoded = crate::repo::event::encode_payload(&kind, &subkind, &plain);
+        conn.execute(
+            "UPDATE events SET payload = ?2, body_format = 0 WHERE id = ?1",
+            params![id, encoded],
+        )?;
+    }
+    Ok(())
+}
+
+/// Rewrites `path` as a version 43 database: what a build before the event body format
+/// wrote. Tokenized events are written back as plain ones, and the event columns, the
+/// reference table and the accounting triggers of the format are removed; the runs and
+/// the provenance rows stay as they are.
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let fresh = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..43] {
+        fresh.execute_batch(migration)?;
+    }
+    let accounting: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('events_accounting_insert', 'events_accounting_delete', \
+                          'events_accounting_update') ORDER BY name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    resolve_tokenized_events(&conn)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
+         DROP TABLE IF EXISTS content_blob_refs_event;
+         DROP TRIGGER events_accounting_insert;
+         DROP TRIGGER events_accounting_delete;
+         DROP TRIGGER events_accounting_update;
+         ALTER TABLE events DROP COLUMN body_format;
+         ALTER TABLE events DROP COLUMN blob_bytes;",
+    )?;
+    for definition in &accounting {
+        conn.execute_batch(definition)?;
+    }
+    conn.execute_batch(
+        "DELETE FROM event_session_bytes;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events \
+             WHERE session_id IS NOT NULL GROUP BY session_id;
+         DELETE FROM event_day_bytes;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns / 86400000000000 \
+             - (wall_clock_ns % 86400000000000 < 0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         UPDATE sessions SET total_event_bytes = COALESCE( \
+             (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
+    )?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v45.sql"))?;
+    conn.pragma_update(None, "user_version", 43)?;
+    conn.execute_batch("COMMIT")?;
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Rewrites `path` as a version 40 database: a version 43 one (see [`downgrade_to_v43`])
+/// whose memory favorite flag and lane ledger are gone and whose provenance maps are one
+/// column again; the runs stay as they are.
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v40(path: &Path) -> Result<(), StorageError> {
+    downgrade_provenance(path, 40)
+}
+
+/// Rewrites `path` as a version 41 database: a version 43 one (see [`downgrade_to_v43`])
+/// whose memory favorite flag is gone and whose provenance maps are one column again (the
+/// lane ledger stays).
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v41(path: &Path) -> Result<(), StorageError> {
+    downgrade_provenance(path, 41)
+}
+
+/// Rewrites `path` as a version 42 database: a version 43 one (see [`downgrade_to_v43`])
+/// whose provenance maps are one column again (the lane ledger and the favorite flag stay).
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v42(path: &Path) -> Result<(), StorageError> {
+    downgrade_provenance(path, 42)
+}
+
+fn downgrade_provenance(path: &Path, version: u32) -> Result<(), StorageError> {
+    downgrade_to_v43(path)?;
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
+    if version <= 41 {
+        take_lessons_back_to_v41(&conn)?;
+    }
+    if version <= 40 {
+        conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+    }
+    conn.pragma_update(None, "user_version", version)?;
+    conn.execute_batch("COMMIT")?;
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Takes the lesson tables of a database in the current format back to their version 41
+/// shape (what migration v42 found), for a test that rebuilds an older database by hand.
+///
+/// # Errors
+/// Fails when the tables cannot be rebuilt.
+pub(crate) fn take_lessons_back_to_v41(conn: &Connection) -> Result<(), StorageError> {
+    let fresh = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..39] {
+        fresh.execute_batch(migration)?;
+    }
+    let definitions: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE tbl_name IN ('memory_ledger', 'memory_entries') \
+             AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    take_lessons_back(conn, &definitions)
 }
 
 /// Rebuilds the lesson tables as migration v42 found them, keeping every lesson in its
