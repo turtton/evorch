@@ -25,7 +25,7 @@ pub const PROJECT_CONFIG_DIR: &str = ".evorch";
 const DROPIN_DIR: &str = "config.d";
 /// Sections only defaults and user/global files may set: they run programs or
 /// widen agent capabilities, so project files, env and CLI overrides cannot.
-const TRUSTED_SECTIONS: &[&str] = &["comment_checker", "tools"];
+const TRUSTED_SECTIONS: &[&str] = &["comment_checker", "tools", "pull_requests"];
 
 /// [`Config::load`] の読み込みオプション。
 #[derive(Debug, Clone)]
@@ -246,6 +246,11 @@ impl Config {
             ConfigError::Migration(format!("invalid trusted tools config: {err}"))
         })?;
 
+        let pull_requests: crate::PullRequestsConfig =
+            trusted["pull_requests"].clone().try_into().map_err(|err| {
+                ConfigError::Migration(format!("invalid trusted pull requests config: {err}"))
+            })?;
+
         if !standalone && let Some(dir) = &opts.project_dir {
             merge_project_layer(&mut merged.value, dir, &opts.file_overrides, source)?;
         }
@@ -274,11 +279,14 @@ impl Config {
             .map_err(|err| ConfigError::Migration(err.to_string()))?;
         merged["tools"] =
             toml::Value::try_from(tools).map_err(|err| ConfigError::Migration(err.to_string()))?;
+        merged["pull_requests"] = toml::Value::try_from(pull_requests)
+            .map_err(|err| ConfigError::Migration(err.to_string()))?;
         let config: Config = merged.try_into().map_err(|err| {
             ConfigError::Migration(format!("failed to deserialize merged config: {err}"))
         })?;
         config.self_improvement.validate()?;
         config.storage.validate()?;
+        config.pull_requests.validate()?;
         // 未定義 route の参照とモデルの種別の不一致 (ADR 0038) は、厳格な読み込みではエラー、
         // 通常の読み込みではそのチェーンを使う時点のエラーに委ねて警告だけにする
         // (他のロールは動かせる)。

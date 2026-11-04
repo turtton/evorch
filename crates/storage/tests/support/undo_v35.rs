@@ -64,8 +64,11 @@ pub fn undo_v42(connection: &Connection) {
 }
 
 /// Restores the whole-conversation `run_contexts` shape migration v40 replaced, after
-/// undoing v45 (lane start reason), v44 (event bodies), v43 (provenance rows) and v42.
+/// undoing v46 (pull request tables), v45 (lane start reason), v44 (event bodies), v43 (provenance rows) and v42.
 pub fn undo_v40(connection: &Connection) {
+    connection
+        .execute_batch(include_str!("undo_v46.sql"))
+        .unwrap();
     connection
         .execute_batch(include_str!("undo_v45.sql"))
         .unwrap();
