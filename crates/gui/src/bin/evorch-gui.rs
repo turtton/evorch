@@ -38,6 +38,19 @@ use workspace_ui::{ProjectId, SidebarState, ThreadId, TrustState, UiSettings};
 
 const EVENT_CAPACITY: usize = 2048;
 
+#[cfg(test)]
+#[path = "evorch-gui/lane_startup_tests.rs"]
+mod lane_startup_tests;
+
+/// Called only after the current host and retention fence are installed.
+fn start_owned_runtime(
+    runtime: &AgentRuntime,
+    ownership: &Arc<runtime::ownership::OwnerHost>,
+) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
+    runtime.set_thread_scratch(ownership.thread_scratch());
+    runtime.recover_lanes_on_startup(ownership)
+}
+
 /// Keeps the Rust heap out of glibc malloc. CEF runs its browser process inside this
 /// one, and its memory dumps read glibc's `mallinfo()`, whose `int` fields overflow
 /// once the glibc heap passes 2 GiB; Chromium then fails a CHECK and kills the GUI.
@@ -1230,8 +1243,6 @@ fn build_workbench(
     // Deleted threads and runs are refused from here on. The set was read after the
     // start-up locks became shared, so no other process can add to it meanwhile.
     install_host_tombstones(&ownership, &prelude.tombstones);
-    // Thread scratch lives as long as this process owns the thread (ADR 0033).
-    runtime.set_thread_scratch(ownership.thread_scratch());
     // Install the retained host before any later fallible startup work. State
     // and command-sink locals may drop first, but cannot release this generation.
     let storage = GuiStorageResources {
@@ -1241,6 +1252,10 @@ fn build_workbench(
         _storage_fallback: storage_fallback,
         _leases: prelude.leases,
     };
+    // Recover durable lane intents under this host, never serialized authority.
+    // Keep the retained storage/host guard alive before starting any root.
+    start_owned_runtime(&runtime, &ownership)
+        .map_err(|error| GuiError::Startup(format!("lane recovery: {error}")))?;
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
     #[cfg(feature = "cef")]

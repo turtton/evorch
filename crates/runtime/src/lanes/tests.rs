@@ -9,6 +9,8 @@ struct Model {
     hold_admission: std::sync::atomic::AtomicBool,
     reject_admission: std::sync::atomic::AtomicBool,
     hold_execution: std::sync::atomic::AtomicBool,
+    switch_lane: std::sync::atomic::AtomicBool,
+    switched: Mutex<HashSet<String>>,
     lead: Mutex<Option<String>>,
     admission_entered: tokio::sync::Notify,
     release_admission: tokio::sync::Notify,
@@ -31,6 +33,31 @@ impl crate::AgentModel for Model {
             && messages.iter().any(|m| m.role == providers::Role::User && m.content.iter().any(|b| matches!(b,ContentBlock::Text {text} if text.contains("Agent-authored lane brief")))) {
             self.execution_entered.notify_one();
             std::future::pending::<()>().await;
+        }
+        if self.switch_lane.load(std::sync::atomic::Ordering::SeqCst)
+            && messages.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("Agent-authored lane brief"))))
+            && self.switched.lock().unwrap().insert(ctx.run_id.clone())
+        {
+            return Err(crate::RuntimeError::ModelSwitch { selected: "alternate/test".into(), resummarize: false });
+        }
+        if messages.last().is_some_and(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "list lanes"))
+        }) {
+            return Ok(providers::ChatResponse {
+                message: Message {
+                    role: providers::Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: format!("lane-list-{}", messages.len()),
+                        name: "lane_list".into(),
+                        input: serde_json::json!({}),
+                    }],
+                },
+                finish_reason: providers::FinishReason::ToolUse,
+                usage: Default::default(),
+                usage_reported: true,
+            });
         }
         Ok(providers::ChatResponse {
             message: Message {
@@ -71,6 +98,14 @@ impl crate::AgentModel for Model {
             self.release_admission.notified().await;
         }
         Ok(())
+    }
+    fn selected_model_for_run(&self, id: &str, _: Role, _: Option<&str>) -> String {
+        if self.switched.lock().unwrap().contains(id) {
+            "alternate/test"
+        } else {
+            "test"
+        }
+        .into()
     }
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "test".into()
@@ -704,6 +739,202 @@ async fn lane_unlimited_quantities_preserve_configured_runtime_runaway_threshold
     assert_eq!(
         f.config(lead).budget.max_tool_calls,
         ResourceLimit::Bounded(400)
+    );
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+
+impl Fixture {
+    fn activity_time(&self, at_ns: i64) {
+        *self.runtime.shared.lanes.activity_time.lock().unwrap() = Some(at_ns);
+    }
+    async fn list(&mut self, lead: RunId) -> serde_json::Value {
+        self.runtime
+            .send_message(lead, "list lanes".into())
+            .unwrap();
+        self.phase(lead, AgentRunPhase::Waiting).await;
+        let requests = self.model.requests.lock().unwrap();
+        let (_, messages, _) = requests
+            .iter()
+            .rev()
+            .find(|(id, _, _)| id == &lead.to_string())
+            .unwrap();
+        let result = messages
+            .iter()
+            .rev()
+            .flat_map(|m| m.content.iter())
+            .find_map(|b| {
+                if let ContentBlock::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                } = b
+                    && tool_call_id.starts_with("lane-list-")
+                {
+                    assert!(!is_error, "{content:?}");
+                    return Some(
+                        content
+                            .iter()
+                            .filter_map(|c| {
+                                if let providers::ToolResultContent::Text { text } = c {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<String>(),
+                    );
+                }
+                None
+            })
+            .unwrap();
+        serde_json::from_str(&result).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn real_turn_without_report_reorders_lanes_but_list_reads_do_not_touch_activity() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    f.activity_time(100);
+    let a = f.runtime.open_lane(lead, "a", brief()).unwrap();
+    f.phase(a.root_run_id, AgentRunPhase::Waiting).await;
+    f.activity_time(200);
+    let b = f.runtime.open_lane(lead, "b", brief()).unwrap();
+    f.phase(b.root_run_id, AgentRunPhase::Waiting).await;
+    let first = f.list(lead).await;
+    assert_eq!(first["items"][0]["lane_id"], b.lane_id);
+    f.activity_time(300);
+    f.runtime
+        .send_message(a.root_run_id, "normal input without a report".into())
+        .unwrap();
+    f.phase(a.root_run_id, AgentRunPhase::Waiting).await;
+    let changed = f.list(lead).await;
+    assert_eq!(changed["items"][0]["lane_id"], a.lane_id);
+    assert_eq!(changed["items"][0]["last_activity_at_ns"], 300);
+    assert_eq!(changed["items"][1]["last_activity_at_ns"], 200);
+    assert!(
+        changed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["latest_report"].is_null())
+    );
+    f.activity_time(400);
+    let reread = f.list(lead).await;
+    assert_eq!(reread["items"], changed["items"]);
+    assert_eq!(
+        f.storage
+            .handle()
+            .lane(&a.lane_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at_ns,
+        300
+    );
+    assert_eq!(
+        f.storage
+            .handle()
+            .lane(&b.lane_id)
+            .unwrap()
+            .unwrap()
+            .last_activity_at_ns,
+        200
+    );
+    for id in [a.root_run_id, b.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+
+#[tokio::test]
+async fn lane_child_message_restore_preserves_scope_and_rejects_nested_open() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    let lane = f.runtime.open_lane(lead, "child-restore", brief()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let child = f
+        .runtime
+        .delegate_background_as_child(lane.root_run_id, Role::Worker, "work", RunConfig::default())
+        .unwrap();
+    assert_eq!(f.runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    f.runtime
+        .send_agent_message(
+            lane.root_run_id,
+            child,
+            event_bus::AgentMessageKind::Send,
+            "restore",
+            None,
+        )
+        .unwrap();
+    assert_eq!(f.runtime.wait(child).await.unwrap(), AgentRunPhase::Done);
+    assert_eq!(f.config(child).lane_scope, Some(LaneScope::Lane));
+    assert_eq!(
+        f.runtime
+            .open_lane(child, "escape", brief())
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    let turns: Vec<_> = f
+        .model
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(id, _, _)| id == &child.to_string())
+        .cloned()
+        .collect();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].2, turns[1].2);
+    assert!(
+        turns
+            .iter()
+            .all(|(_, _, tools)| !tools.iter().any(|t| t.name == "lane_open"))
+    );
+    for id in [lane.root_run_id, lead] {
+        f.cancel(id).await;
+    }
+}
+
+#[tokio::test]
+async fn lane_model_switch_keeps_fixed_schema_and_rejects_nested_open() {
+    let mut f = Fixture::new();
+    let lead = f.lead().await;
+    f.model
+        .switch_lane
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let lane = f.runtime.open_lane(lead, "model-switch", brief()).unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    assert!(
+        f.model
+            .switched
+            .lock()
+            .unwrap()
+            .contains(&lane.root_run_id.to_string())
+    );
+    assert_eq!(
+        f.runtime
+            .open_lane(lane.root_run_id, "escape", brief())
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    let turns: Vec<_> = f
+        .model
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(id, _, _)| id == &lane.root_run_id.to_string())
+        .cloned()
+        .collect();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].2, turns[1].2);
+    assert!(
+        turns
+            .iter()
+            .all(|(_, _, tools)| !tools.iter().any(|t| t.name == "lane_open"))
     );
     for id in [lane.root_run_id, lead] {
         f.cancel(id).await;

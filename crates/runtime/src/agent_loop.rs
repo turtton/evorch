@@ -1158,6 +1158,16 @@ impl LoopState {
                     return;
                 }
             }
+            // Only an actual lane-root request advances activity. In particular,
+            // lane_list reads and a completed-turn restore waiting for input do not.
+            if self.task.parent.is_none()
+                && self.task.config.lane_scope.is_some()
+                && let Some(runtime) = self.runtime()
+                && let Err(error) = runtime.record_lane_activity(self.task.run_id)
+            {
+                self.finish_error(format!("Cannot persist lane activity: {error}"));
+                return;
+            }
             self.publish_context(&visible_messages, estimated, window);
             if let Some(runtime) = self.runtime()
                 && !runtime.goal_model_request(

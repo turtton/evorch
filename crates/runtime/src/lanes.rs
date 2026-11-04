@@ -14,6 +14,8 @@ pub(crate) struct LaneRuntime {
     // Serialize retries until the run or its admission reservation is installed.
     pub(crate) opening: Mutex<HashSet<String>>,
     pub(crate) started: Mutex<std::collections::HashMap<RunId, Vec<String>>>,
+    #[cfg(test)]
+    activity_time: Mutex<Option<i64>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +112,7 @@ impl AgentRuntime {
                 &lane.lane_id,
                 lane.generation,
                 &run_id.to_string(),
-                crate::run_store::review_time_ns(),
+                self.lane_activity_time(),
             )?;
             if first {
                 if let Ok(origin) = lane.origin_run_id.parse() {
@@ -126,6 +128,38 @@ impl AgentRuntime {
                 self.shared.bus.emit(Event::new(lane.created_event()));
             }
         }
+        Ok(())
+    }
+
+    fn lane_activity_time(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(at_ns) = *self.shared.lanes.activity_time.lock().unwrap() {
+            return at_ns;
+        }
+        crate::run_store::review_time_ns()
+    }
+
+    /// A real root model turn is activity; observing its ledger is not.
+    pub(crate) fn record_lane_activity(&self, run_id: RunId) -> Result<(), LaneError> {
+        self.validate_run_mutation(run_id)
+            .map_err(|e| LaneError::new("lane_unavailable", e))?;
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(());
+        };
+        let Some(thread) = self.goal_thread(run_id) else {
+            return Ok(());
+        };
+        let Some(lane) = store.handle.lane_by_thread(&thread)? else {
+            return Ok(());
+        };
+        if lane.root_run_id.as_deref() != Some(&run_id.to_string()) {
+            return Err(LaneError::new(
+                "lane_unavailable",
+                "not the current lane root",
+            ));
+        }
+        let at_ns = self.lane_activity_time();
+        store.handle.touch_lane_activity(&lane.lane_id, at_ns)?;
         Ok(())
     }
 
@@ -164,7 +198,7 @@ impl AgentRuntime {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             title: None,
-            at_ns: crate::run_store::review_time_ns(),
+            at_ns: self.lane_activity_time(),
         })?;
         let (run_id, scheduled) = self.start_lane_intent(&creation.lane, &config)?;
         let started = scheduled && self.inspect_agent(run_id).is_ok();
@@ -176,6 +210,43 @@ impl AgentRuntime {
             created: creation.created,
             started,
         })
+    }
+
+    /// Start host recovery without retaining the window/runtime across lease waits.
+    /// An unresponsive old host may still have an unexpired lease at startup;
+    /// retry until those intents start, rather than requiring another restart.
+    pub fn recover_lanes_on_startup(
+        &self,
+        host: &std::sync::Arc<crate::ownership::OwnerHost>,
+    ) -> Result<tokio::task::JoinHandle<()>, LaneError> {
+        self.recover_unstarted_lanes(Some(host))?;
+        let runtime = self.downgrade();
+        let host = std::sync::Arc::downgrade(host);
+        Ok(tokio::spawn(async move {
+            // External host death/lease expiry has no in-process notification.
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let (Some(runtime), Some(host)) = (runtime.upgrade(), host.upgrade()) else {
+                    return;
+                };
+                let Some(store) = runtime.shared.run_store.get() else {
+                    return;
+                };
+                match store.handle.unstarted_lanes(1) {
+                    Ok(pending) if pending.is_empty() => return,
+                    Err(error) => {
+                        tracing::warn!(%error, "lane startup recovery scan failed");
+                        return;
+                    }
+                    Ok(_) => {}
+                }
+                if let Err(error) = runtime.recover_unstarted_lanes(Some(&host)) {
+                    tracing::warn!(%error, "lane startup recovery failed");
+                    return;
+                }
+            }
+        }))
     }
 
     /// Recover durable intents after a crash before registration. Authority is current
@@ -195,17 +266,31 @@ impl AgentRuntime {
                 let host = host.ok_or_else(|| {
                     LaneError::new("lane_creation_denied", "a current owner host is required")
                 })?;
-                Some(
-                    match host.attach(&lane.thread_id) {
-                        Ok(owner) if owner.lease.owner_id == host.owner_id() => {
-                            host.owned_permit(&lane.thread_id)
-                        }
-                        Ok(owner) => host.claim(&owner),
-                        Err(crate::ownership::RegistryError::Absent) => host.start(&lane.thread_id),
-                        Err(e) => Err(e),
+                let permit = match host.attach(&lane.thread_id) {
+                    Ok(owner) if owner.lease.owner_id == host.owner_id() => {
+                        host.owned_permit(&lane.thread_id)
                     }
-                    .map_err(|e| LaneError::new("lane_creation_denied", e))?,
-                )
+                    Ok(owner) => host.claim(&owner),
+                    Err(crate::ownership::RegistryError::Absent) => host.start(&lane.thread_id),
+                    Err(e) => Err(e),
+                };
+                match permit {
+                    Ok(permit) => Some(permit),
+                    // Another live host may be admitting this same intent. Startup
+                    // must neither steal it nor fail the entire new window.
+                    Err(
+                        crate::ownership::RegistryError::Ownership(
+                            crate::ownership::OwnershipError::NotClaimable
+                            | crate::ownership::OwnershipError::OwnerResponsive
+                            | crate::ownership::OwnershipError::Fenced
+                            | crate::ownership::OwnershipError::Active
+                            | crate::ownership::OwnershipError::Quiescing,
+                        )
+                        | crate::ownership::RegistryError::Exists
+                        | crate::ownership::RegistryError::ThreadDeleted(_),
+                    ) => continue,
+                    Err(error) => return Err(LaneError::new("lane_creation_denied", error)),
+                }
             } else {
                 None
             };
