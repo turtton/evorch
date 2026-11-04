@@ -485,3 +485,161 @@ fn settle(workbench: &mut WorkbenchState<DemoSource>) {
         workbench.pump_lanes();
     }
 }
+
+/// The retention input the GUI builds and the storage closure agree on the unit of
+/// deletion: a lead and the lanes it manages, but not a detached lane.
+#[test]
+fn retention_deletes_a_lead_with_its_managed_lanes_and_never_with_a_detached_one() {
+    use storage::lanes::NewLane;
+    use storage::thread_retention::{
+        ExploreBudget, FamilyState, RetentionInput, ThreadRetentionPolicy,
+    };
+    use storage::threads::ThreadUpsert;
+
+    // Given: a stored lead, an attached lane and a detached lane, as the runtime writes them
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    handle
+        .upsert_threads_host(&[ThreadUpsert {
+            thread_id: "thread".into(),
+            project_root: Some(root.clone()),
+            created_at_ns: 1,
+            updated_at_ns: 1,
+            ..Default::default()
+        }])
+        .unwrap();
+    let mut brief = record(1, Some("thread"), LedgerPolicy::Attached, 1).brief;
+    for (n, policy) in [(1, LedgerPolicy::Attached), (2, LedgerPolicy::Detached)] {
+        brief.report_policy = policy;
+        handle
+            .create_lane(NewLane {
+                lane_id: format!("lane-{n}"),
+                thread_id: format!("lane-thread-{n}"),
+                origin_thread_id: "thread".into(),
+                origin_run_id: "lead-run".into(),
+                creation_key: format!("call-{n}"),
+                brief: brief.clone(),
+                start_seed: "seed".into(),
+                project_id: Some("test".into()),
+                project_root: Some(root.clone()),
+                title: None,
+                at_ns: 1,
+            })
+            .unwrap();
+    }
+
+    // And: the sidebar as the events build it, with the lead's family archived
+    let mut workbench = state(&dir.path().join("sidebar.json"));
+    for (n, lead, policy) in [
+        (1, Some("thread"), LedgerPolicy::Attached),
+        (2, None, LedgerPolicy::Detached),
+    ] {
+        workbench.apply_conversation_event(&created(&record(n, lead, policy, 1)));
+    }
+    workbench
+        .sidebar
+        .set_family_archived(&ThreadId::new("thread"), true, 1)
+        .unwrap();
+    let input = RetentionInput {
+        threads: crate::startup::sidebar_threads(&workbench.sidebar),
+        sidebar_path: "/sidebar.json".into(),
+        ownership_root: "/root".into(),
+        now_ns: i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+        .unwrap()
+            + 400 * 86_400 * 1_000_000_000,
+    };
+
+    // When: retention explores the archived families on the real database
+    let database = storage::Database::open(&config).unwrap();
+    let states = database
+        .retention_explore(
+            &input,
+            &ThreadRetentionPolicy::default(),
+            ExploreBudget { max_edges: 100_000 },
+        )
+        .unwrap();
+
+    // Then: the lead and its managed lane are one family to delete; the detached lane,
+    // which the sidebar keeps active, is not part of it
+    let families: Vec<Vec<String>> = states
+        .iter()
+        .filter_map(|(_, state)| match state {
+            FamilyState::Explored { threads, .. } => Some(threads.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        families,
+        [["lane-thread-1", "thread"].map(String::from).to_vec()],
+        "{states:?}"
+    );
+}
+
+#[test]
+fn an_event_that_arrives_while_a_read_is_in_flight_triggers_one_more_read() {
+    // Given: a spawner that holds the jobs, and a lane whose first read sees no report
+    let ledger = Arc::new(FakeLedger::default());
+    let lane = record(1, Some("thread"), LedgerPolicy::Attached, 1);
+    ledger.put(snapshot(lane.clone(), None));
+    type Job = Box<dyn FnOnce() + Send>;
+    let held: Arc<Mutex<Vec<Job>>> = Arc::default();
+    let spawner: Spawner = {
+        let held = Arc::clone(&held);
+        Arc::new(move |job| held.lock().unwrap().push(job))
+    };
+    let (workbench, _dir) = workbench(None);
+    let mut workbench = workbench
+        .with_lane_ledger(Arc::clone(&ledger) as Arc<dyn LaneLedgerReader>)
+        .with_lane_spawner(spawner);
+    let run_held = || {
+        let jobs: Vec<_> = held.lock().unwrap().drain(..).collect();
+        for job in jobs {
+            job();
+        }
+    };
+    workbench.apply_conversation_event(&created(&lane));
+    workbench.pump_lanes();
+    run_held();
+
+    // When: the read has finished but is not collected yet, a Report is appended and its
+    // event is folded
+    let mut updated = lane.clone();
+    updated.latest_report_seq = 1;
+    ledger.put(snapshot(updated, Some(report(1, 1, LaneStatus::Ready))));
+    workbench.apply_conversation_event(&Event::new(LedgerEvent::LaneReportAppended {
+        lane_id: "lane-1".into(),
+        thread_id: "lane-thread-1".into(),
+        run_id: None,
+        report_seq: 1,
+        status: LaneStatus::Ready,
+        needs_human: false,
+    }));
+    workbench.pump_lanes();
+    assert!(
+        workbench.lanes.details["lane-thread-1"]
+            .latest_report
+            .is_none()
+    );
+    run_held();
+    workbench.pump_lanes();
+
+    // Then: the stale result is replaced by a second read, not kept until the next event
+    assert_eq!(
+        workbench.lanes.details["lane-thread-1"].status(),
+        Some(LaneStatus::Ready)
+    );
+}

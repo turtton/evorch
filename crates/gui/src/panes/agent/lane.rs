@@ -6,7 +6,7 @@
 use event_bus::lane::{LaneBrief, LaneStatus};
 
 use super::{AgentPaneAction, LaneContext};
-use crate::model::lanes::status_label;
+use crate::model::lanes::{PREVIEW_NOTICE, status_label};
 use crate::theme::{text::muted, tokens::*, widgets::badge};
 
 /// Badge colors of a Report status; `ready` stays a warning color until verified.
@@ -62,6 +62,7 @@ pub(super) fn lane_card(
             ));
         }
     });
+    ui.label(muted(PREVIEW_NOTICE));
     if let Some(report) = &detail.latest_report {
         let mut line = format!("Report #{}: {}", report.report_seq, report.summary);
         if report.needs_human {

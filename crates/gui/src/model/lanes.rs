@@ -7,6 +7,11 @@
 use event_bus::lane::{LaneReport, LaneStatus};
 use storage::lanes::LaneRecord;
 
+/// What Phase 1b does not do yet, shown with every lane (docs/lane-phased-implementation-plan.md):
+/// questions go to the user whatever the policy, and nothing wakes the lead or tells it about
+/// your messages; the lead reads Reports with `lane_list`.
+pub const PREVIEW_NOTICE: &str = "Phase 1b preview: every lane's questions come to you, and there is no automatic wake or lead notification yet.";
+
 /// A lane's ledger record with its latest Report, as last read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneDetail {

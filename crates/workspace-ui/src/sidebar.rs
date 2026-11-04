@@ -190,6 +190,23 @@ impl SidebarState {
         id: &ThreadId,
         link: crate::LaneLink,
     ) -> Result<bool, ThreadError> {
+        let changed = self.set_lane_link(id, link)?;
+        if changed {
+            self.refresh_derived();
+        }
+        Ok(changed)
+    }
+
+    /// [`Self::apply_lane_link`] without recomputing the derived archive and pin fields,
+    /// for a caller applying many links that calls [`Self::refresh_derived`] once after.
+    ///
+    /// # Errors
+    /// As [`Self::apply_lane_link`].
+    pub fn set_lane_link(
+        &mut self,
+        id: &ThreadId,
+        link: crate::LaneLink,
+    ) -> Result<bool, ThreadError> {
         let thread = self.thread_mut(id)?;
         if let Some(current) = &thread.lane {
             if current.lane_id != link.lane_id {
@@ -202,9 +219,6 @@ impl SidebarState {
         let changed = thread.lane.as_ref() != Some(&link) || thread.parent_thread_id.is_some();
         thread.lane = Some(link);
         thread.parent_thread_id = None;
-        if changed {
-            self.refresh_derived();
-        }
         Ok(changed)
     }
 

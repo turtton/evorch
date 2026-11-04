@@ -936,6 +936,11 @@ mod tests {
 
         assert!(harness.query_by_label("ready (unverified)").is_some());
         assert!(harness.query_by_label("lane · attached").is_some());
+        assert!(
+            harness
+                .query_by_label(crate::model::lanes::PREVIEW_NOTICE)
+                .is_some()
+        );
         assert!(harness.query_by_label("Report #1: all done").is_some());
     }
 }

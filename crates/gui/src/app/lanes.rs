@@ -198,6 +198,9 @@ pub(super) struct LaneState {
     in_flight: BTreeSet<String>,
     /// Threads whose last read failed: read again only when something asks for it.
     failed: BTreeSet<String>,
+    /// Threads asked for again while a read of them was in flight: that read may predate
+    /// what the request is about, so one more read follows it.
+    dirty: BTreeSet<String>,
     scan: ScanPhase,
     results: Receiver<Loaded>,
     sender: Sender<Loaded>,
@@ -215,6 +218,7 @@ impl Default for LaneState {
             queued: BTreeSet::new(),
             in_flight: BTreeSet::new(),
             failed: BTreeSet::new(),
+            dirty: BTreeSet::new(),
             scan: ScanPhase::Pending,
             results,
             sender,
@@ -225,7 +229,9 @@ impl Default for LaneState {
 impl LaneState {
     fn request(&mut self, thread_id: &str) {
         self.failed.remove(thread_id);
-        if !self.in_flight.contains(thread_id) {
+        if self.in_flight.contains(thread_id) {
+            self.dirty.insert(thread_id.to_owned());
+        } else {
             self.queued.insert(thread_id.to_owned());
         }
     }
@@ -330,27 +336,32 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match loaded {
             Loaded::Snapshot(thread, result) => {
                 self.lanes.in_flight.remove(&thread);
-                match result {
+                let again = self.lanes.dirty.remove(&thread);
+                let changed = match result {
                     Ok(Some(snapshot)) => {
                         let changed = self.apply_lane_snapshot(*snapshot);
                         // A ledger behind the sidebar is not asked again until an event says
                         // it moved: polling must not turn into a read loop.
                         if self.lane_details_lag(&thread) {
-                            self.lanes.failed.insert(thread);
+                            self.lanes.failed.insert(thread.clone());
                         }
                         changed
                     }
                     // Not a lane (any more): do not ask again until something says so.
                     Ok(None) => {
-                        self.lanes.failed.insert(thread);
+                        self.lanes.failed.insert(thread.clone());
                         false
                     }
                     Err(error) => {
                         tracing::warn!(%thread, %error, "lane ledger read failed");
-                        self.lanes.failed.insert(thread);
+                        self.lanes.failed.insert(thread.clone());
                         false
                     }
+                };
+                if again {
+                    self.lanes.request(&thread);
                 }
+                changed
             }
             Loaded::Scan(result) => {
                 self.lanes.scan = ScanPhase::Done;
@@ -440,6 +451,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// the thread appears or moves at once; the rest is read from the ledger. Returns
     /// whether the sidebar changed.
     pub(super) fn apply_lane_event(&mut self, event: &Event) -> bool {
+        let changed = self.fold_lane_event(event);
+        if changed {
+            self.sidebar.refresh_derived();
+        }
+        changed
+    }
+
+    fn fold_lane_event(&mut self, event: &Event) -> bool {
         let EventKind::Ledger(ledger) = &event.kind else {
             return false;
         };
@@ -553,10 +572,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn link_lane_thread(&mut self, thread_id: &str, link: LaneLink) -> bool {
-        match self
-            .sidebar
-            .apply_lane_link(&ThreadId::new(thread_id), link)
-        {
+        match self.sidebar.set_lane_link(&ThreadId::new(thread_id), link) {
             Ok(changed) => changed,
             Err(error) => {
                 tracing::debug!(%thread_id, %error, "lane projection not applied");
