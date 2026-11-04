@@ -90,13 +90,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             return;
         };
         loop {
+            // Asked before the results are taken: a read that is over by now
+            // has left its result behind, in the same step that ended it.
+            let busy = resolver.has_rows_work();
             if !resolver.has_worker() {
                 resolver.pump_all();
             }
             self.apply_rows_results();
             // Events of other processes that waited for the history are shown.
             self.retry_pending_shared_events();
-            if !resolver.has_rows_work() {
+            if !busy && !resolver.has_rows_work() {
                 break;
             }
             std::thread::yield_now();
