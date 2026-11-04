@@ -143,6 +143,8 @@ pub(super) fn report(
         ));
     }
     let report = LaneReportInput {
+        artifact_revision: None,
+        failure_episode: None,
         status: args.status,
         summary: args.summary,
         artifact_refs: args.artifact_refs,

@@ -170,6 +170,7 @@ async fn shell_then_finish_preserves_simultaneous_and_post_receiver_input_once()
                 &[],
                 None,
                 &storage::HostInputReceipt {
+                    provenance: storage::HostInputProvenance::User,
                     prompt_id: "followup".into(),
                     run_id: run.to_string(),
                     root_run_id: run.to_string(),

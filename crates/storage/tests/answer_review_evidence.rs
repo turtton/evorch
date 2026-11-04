@@ -4,6 +4,9 @@ use storage::{AnswerMode, Database, ReviewEvidenceRow, Storage, StorageConfig, S
 
 fn question() -> UserQuestion {
     UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "question-atomic".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),
@@ -50,7 +53,9 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
         handle.answer_user_question_with_evidence(
             &question().id,
             "yes",
-            &AnswerOrigin::Host,
+            &AnswerOrigin::Host {
+                channel: Default::default()
+            },
             &[evidence(), invalid]
         ),
         Err(StorageError::SecretDetected {
@@ -68,7 +73,9 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
             .answer_user_question_with_evidence(
                 &question().id,
                 "yes",
-                &AnswerOrigin::Host,
+                &AnswerOrigin::Host {
+                    channel: Default::default(),
+                },
                 &[evidence()],
             )
             .unwrap();
@@ -81,7 +88,9 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
             .answer_user_question_with_evidence(
                 &question().id,
                 "no",
-                &AnswerOrigin::Host,
+                &AnswerOrigin::Host {
+                    channel: Default::default()
+                },
                 &[conflicting]
             )
             .is_err()
@@ -103,7 +112,7 @@ fn answer_and_evidence_are_atomic_idempotent_and_first_answer_wins() {
     suspended.hard_limits.max_db_bytes = 1;
     let storage = Storage::open(suspended).unwrap();
     assert!(
-        matches!(storage.handle().answer_user_question_with_evidence(&question().id, "yes", &AnswerOrigin::Host, &[evidence()]),
+        matches!(storage.handle().answer_user_question_with_evidence(&question().id, "yes", &AnswerOrigin::Host { channel: Default::default() }, &[evidence()]),
         Err(StorageError::Serialization(message)) if message.contains("writes suspended"))
     );
     assert_eq!(
@@ -136,7 +145,9 @@ fn concurrent_answers_commit_only_the_winners_evidence() {
                     handle.answer_user_question_with_evidence(
                         &question().id,
                         answer,
-                        &AnswerOrigin::Host,
+                        &AnswerOrigin::Host {
+                            channel: Default::default(),
+                        },
                         &[row],
                     ),
                 )
@@ -188,7 +199,9 @@ fn simultaneous_first_only_answers_with_the_same_text_commit_one_evidence_row() 
                 let result = handle.answer_user_question_with_evidence_and_mode(
                     &question().id,
                     "yes",
-                    &AnswerOrigin::Host,
+                    &AnswerOrigin::Host {
+                        channel: Default::default(),
+                    },
                     &[row.clone()],
                     AnswerMode::FirstOnly,
                 );

@@ -617,6 +617,7 @@ impl AgentRuntime {
                 &[],
                 reference.map(|pending| pending.reference_id.as_str()),
                 &storage::HostInputReceipt {
+                    provenance: storage::HostInputProvenance::User,
                     prompt_id: prompt_id.into(),
                     run_id: run_id.to_string(),
                     root_run_id: review.root_run_id.clone(),

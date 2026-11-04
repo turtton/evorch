@@ -446,9 +446,9 @@ impl TranscriptModel {
             event_bus::EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) => {
                 self.push(TranscriptEntry::Notice {text:match &question.answer {
                     Some(answer)=>match &question.answer_origin {
-                        Some(event_bus::AnswerOrigin::Host)=>format!("Answer from you: {answer}"),
+                        Some(event_bus::AnswerOrigin::Host { .. })=>format!("Answer from you: {answer}"),
                         Some(event_bus::AnswerOrigin::ParentAgent{..})=>format!("Answer from parent agent: {answer}"),
-                        None=>format!("Answer: {answer}"),
+                        _=>format!("Answer: {answer}"),
                     },
                     None=>format!("Question: {}",question.title),
                 }});

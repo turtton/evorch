@@ -498,6 +498,9 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     ] {
         state.apply_events([Event::new(ToolEvent::UserQuestionUpdated {
             question: UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: run.into(),
                 run_id: run.into(),
                 root_run_id: "run-2".into(),
@@ -521,6 +524,9 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     gui.state_mut()
         .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
             question: UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "run-3".into(),
                 run_id: "run-3".into(),
                 root_run_id: "run-2".into(),
@@ -541,6 +547,9 @@ fn subagent_questions_wait_for_orchestrator_and_only_root_questions_reach_user()
     gui.state_mut()
         .apply_events([Event::new(ToolEvent::UserQuestionUpdated {
             question: UserQuestion {
+                responder: None,
+                routing_revision: 0,
+                management_revision: None,
                 id: "direct-question".into(),
                 run_id: "run-1".into(),
                 root_run_id: "run-1".into(),

@@ -1635,6 +1635,9 @@ mod tests {
         }
         // Even a bound consumer may not turn a child-to-parent question into a user prompt.
         let child = event_bus::UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id: "child".into(),
             root_run_id: "run-98".into(),
             ..question.clone()

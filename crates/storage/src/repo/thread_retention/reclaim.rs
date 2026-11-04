@@ -1033,6 +1033,41 @@ fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, St
 /// DELETE, so reclaim always progresses, and each step is bounded.
 fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    // New Phase 1c tables do not exist during older-format offline conversion.
+    let delivery_tables: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_notifications')",
+        [],
+        |r| r.get(0),
+    )?;
+    if delivery_tables {
+        for (table, predicate, bytes_expr) in [
+            (
+                "lane_question_routes",
+                "requester_thread_id=?1 OR responder_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(operation_json),0)",
+            ),
+            (
+                "lane_notifications",
+                "source_thread_id=?1 OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "OCTET_LENGTH(payload)",
+            ),
+            (
+                "lane_delivery_destinations",
+                "thread_id=?1",
+                "COALESCE(OCTET_LENGTH(owner_json),0)",
+            ),
+        ] {
+            let (rows, bytes): (u64,u64)=tx.query_row(&format!("SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT {bytes_expr} AS bytes FROM {table} WHERE {predicate} LIMIT ?2)"),params![thread,limit],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            if rows > 0 {
+                tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"),params![thread,limit])?;
+                return Ok(Work {
+                    rows,
+                    bytes,
+                    ..Work::default()
+                });
+            }
+        }
+    }
     let (rows, bytes): (u64, u64) = tx.query_row(
         "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(summary) + OCTET_LENGTH(artifact_refs_json) \
             + OCTET_LENGTH(question_refs_json)), 0) FROM \
@@ -1697,4 +1732,67 @@ pub(crate) fn jobs_in_state(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod lane_delivery_tests {
+    use super::*;
+    #[test]
+    fn deleting_a_destination_reclaims_cross_thread_delivery_rows_in_bounded_steps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::migrations::apply_migrations(&conn).unwrap();
+        crate::repo::lanes::create(
+            &conn,
+            &crate::lanes::NewLane {
+                lane_id: "lane".into(),
+                thread_id: "source".into(),
+                origin_thread_id: "destination".into(),
+                origin_run_id: "root".into(),
+                creation_key: "open".into(),
+                brief: crate::lanes::LaneBrief {
+                    objective: "task".into(),
+                    inputs: vec![],
+                    deliverables: vec![],
+                    acceptance_criteria: vec!["test".into()],
+                    constraints: vec![],
+                    workspace: Default::default(),
+                    report_policy: crate::lanes::LanePolicy::Attached,
+                },
+                start_seed: "seed".into(),
+                project_id: None,
+                project_root: None,
+                title: None,
+                at_ns: 1,
+            },
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO user_questions(id,run_id,root_run_id,root_name,payload) VALUES ('q','r','r','root','{}');
+            INSERT INTO lane_question_routes(question_id,lane_id,requester_run_id,requester_root_run_id,requester_thread_id,responder_thread_id,management_revision,routing_revision,payload) VALUES ('q','lane','r','r','source','destination',1,1,'{}');
+            INSERT INTO lane_notifications(notification_id,lane_id,management_revision,event_kind,semantic_key,source_thread_id,destination_thread_id,payload) VALUES ('n','lane',1,'ready','sha','source','destination','{}');
+            INSERT INTO lane_delivery_destinations(thread_id) VALUES ('destination');").unwrap();
+        let mut removed = 0;
+        loop {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let work = take_lane_rows(&tx, "destination").unwrap();
+            assert!(work.rows <= RECLAIM_ROWS as u64);
+            removed += work.rows;
+            tx.commit().unwrap();
+            if work.rows == 0 {
+                break;
+            }
+        }
+        assert_eq!(removed, 3);
+        for table in [
+            "lane_question_routes",
+            "lane_notifications",
+            "lane_delivery_destinations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        assert!(crate::repo::lanes::get(&conn, "lane").unwrap().is_some());
+    }
 }

@@ -108,6 +108,7 @@ async fn same_run_restore_reconciles_old_receipts_before_inserting_the_new_input
     );
     let handle = fixture.storage.handle();
     let old = storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "old".into(),
         run_id: run.to_string(),
         root_run_id: run.to_string(),

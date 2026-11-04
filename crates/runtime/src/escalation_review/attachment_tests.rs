@@ -178,6 +178,9 @@ fn an_answer_to_a_question_attaches_nothing() {
     let run = ReviewRunContext::empty("run-1");
     run.add_user_request_with_skills("run-1", "go", Vec::new());
     let question = event_bus::UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "q1".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),

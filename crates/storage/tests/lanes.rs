@@ -84,6 +84,8 @@ fn new_lane(n: u32, at_ns: i64) -> NewLane {
 
 fn report(status: LaneStatus, summary: &str) -> LaneReportInput {
     LaneReportInput {
+        artifact_revision: None,
+        failure_episode: None,
         status,
         summary: summary.into(),
         artifact_refs: vec![],
@@ -618,8 +620,11 @@ fn v45_migration_keeps_pending_v44_intents_recoverable() {
     };
     {
         let conn = Connection::open(&config.db_path).unwrap();
-        conn.execute_batch(include_str!("../undo/undo_v46.sql"))
-            .unwrap();
+        conn.execute_batch(concat!(
+            include_str!("../undo/undo_v47.sql"),
+            include_str!("../undo/undo_v46.sql")
+        ))
+        .unwrap();
         conn.execute_batch(
             "ALTER TABLE lanes DROP COLUMN start_blocked_reason; PRAGMA user_version=44;",
         )
