@@ -1,66 +1,47 @@
 use egui::{Align, Layout, RichText, Sense, Ui};
-use workspace_ui::{ProjectRecord, SidebarState};
+use workspace_ui::{ProjectRecord, SidebarState, SidebarView};
 
 use crate::theme::icons;
 use crate::theme::text::{medium, muted};
 use crate::theme::tokens::{FONT_SMALL, ROW_DENSE, SP_1, SP_2, palette};
-use crate::theme::widgets::{
-    compact_row, empty_state, ghost_icon_button, icon_button, icon_text, row_title,
-};
+use crate::theme::widgets::{compact_row, empty_state, icon_button, icon_text, row_title};
 
 use super::{SidebarAction, SidebarUiState};
 
-/// Projects stay listed in registration order; each expands to its threads.
+/// Lists the projects in `order` (a view over `sidebar.projects`); each expands to its
+/// threads unless `view` has it folded.
 pub fn render(
     ui: &mut Ui,
     sidebar: &SidebarState,
-    selected: Option<&ProjectRecord>,
+    order: &[&ProjectRecord],
+    view: &SidebarView,
     pane_state: &SidebarUiState,
     action: &mut Option<SidebarAction>,
     mut threads: impl FnMut(&mut Ui, &ProjectRecord, &mut Option<SidebarAction>),
 ) {
-    if sidebar.projects.is_empty()
-        && empty_state(
+    let selected = super::selected_project(sidebar);
+    if sidebar.projects.is_empty() {
+        // The toolbar above owns the one "Add project" control.
+        empty_state(
             ui,
             "No projects yet",
             "Add a repository root to start orchestrating.",
-            Some("Add project"),
-        )
-    {
-        *action = Some(SidebarAction::OpenAddProject);
+            None,
+        );
     }
 
-    for project in &sidebar.projects {
+    for project in order {
         let selected_project = selected.map(|p| &p.id) == Some(&project.id);
-        let id = egui::Id::new(("sidebar-project-threads", &project.id));
-        let mut expansion =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        let open = !view.is_collapsed(&project.id);
         ui.push_id(&project.id, |ui| {
-            project_row(
-                ui,
-                sidebar,
-                project,
-                selected_project,
-                &mut expansion,
-                action,
-            );
+            project_row(ui, sidebar, project, selected_project, open, action);
         });
-        expansion.store(ui.ctx());
-        if expansion.is_open() {
+        if open {
             ui.push_id(("threads", &project.id), |ui| threads(ui, project, action));
         } else {
             let limit = super::threads::family_limit_id(&project.id);
             ui.ctx().data_mut(|data| data.remove::<usize>(limit));
         }
-    }
-
-    if !sidebar.projects.is_empty() {
-        ui.add_space(SP_1);
-        ui.horizontal(|ui| {
-            if ghost_icon_button(ui, icons::PLUS, "Add project").clicked() {
-                *action = Some(SidebarAction::OpenAddProject);
-            }
-        });
     }
 
     if let Some(error) = &pane_state.error {
@@ -73,15 +54,17 @@ fn project_row(
     sidebar: &SidebarState,
     project: &ProjectRecord,
     selected_project: bool,
-    expansion: &mut egui::collapsing_header::CollapsingState,
+    open: bool,
     action: &mut Option<SidebarAction>,
 ) {
     compact_row(ui, selected_project, |ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
         let (rect, toggle) = ui.allocate_exact_size(egui::vec2(16.0, ROW_DENSE), Sense::click());
-        let open = expansion.is_open();
         if toggle.clicked() {
-            expansion.toggle(ui);
+            *action = Some(SidebarAction::SetProjectCollapsed {
+                project: project.id.clone(),
+                collapsed: open,
+            });
         }
         toggle.widget_info(|| {
             egui::WidgetInfo::labeled(

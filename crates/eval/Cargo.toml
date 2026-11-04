@@ -22,7 +22,7 @@ providers = { path = "../providers" }
 recorder = { path = "../recorder" }
 routing = { path = "../routing" }
 runtime = { path = "../runtime" }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 sandbox = { path = "../sandbox" }
 secret-guard = { path = "../secret-guard" }
 serde = { workspace = true }
