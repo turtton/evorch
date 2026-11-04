@@ -6,164 +6,30 @@
 //! overlay and each process's output. The processes end with the GUI process,
 //! so a group a later GUI session finds unfinished was interrupted.
 
-use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Shared, read_json};
-use crate::output::{self, Manifest};
+use crate::output;
 use crate::report::{self, Report};
 use crate::runner::{BASELINE, CANDIDATE};
 
-pub(super) const GROUPS_DIR: &str = ".groups";
-const GROUP_FILE: &str = "group.json";
-const OVERLAY_FILE: &str = "candidate.toml";
 const CLI: &str = "evorch";
 const TAIL_BYTES: u64 = 16 * 1024;
 const TAIL_CHARS: usize = 1_200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Purpose {
-    Target,
-    Regression,
-}
-
-impl Purpose {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Target => "target",
-            Self::Regression => "regression",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Exit {
-    pub code: Option<i32>,
-    pub signal: Option<i32>,
-    /// Why the process could not be started or waited for.
-    pub error: Option<String>,
-    pub finished_at: String,
-}
-
-impl Exit {
-    fn now(code: Option<i32>, signal: Option<i32>, error: Option<String>) -> Self {
-        Self {
-            code,
-            signal,
-            error,
-            finished_at: output::timestamp(SystemTime::now()),
-        }
-    }
-
-    fn of(status: std::process::ExitStatus) -> Self {
-        use std::os::unix::process::ExitStatusExt;
-        Self::now(status.code(), status.signal(), None)
-    }
-
-    fn succeeded(&self) -> bool {
-        self.code == Some(0)
-    }
-
-    fn describe(&self) -> String {
-        match (&self.error, self.code, self.signal) {
-            (Some(error), ..) => error.clone(),
-            (None, Some(code), _) => format!("exit code {code}"),
-            (None, None, Some(signal)) => format!("killed by signal {signal}"),
-            (None, None, None) => "exited".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct Member {
-    pub thread_id: String,
-    pub purpose: Purpose,
-    pub repeat: u32,
-    pub dir: PathBuf,
-    pub pid: Option<u32>,
-    pub stdout: PathBuf,
-    pub stderr: PathBuf,
-    pub exit: Option<Exit>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct GroupRecord {
-    pub id: String,
-    /// The Evaluator run that started the group.
-    pub run_id: String,
-    pub started_at: String,
-    pub candidate: PathBuf,
-    pub members: Vec<Member>,
-    pub finished_at: Option<String>,
-    /// The run the completion notice reached, or why it reached none.
-    pub notice: Option<String>,
-}
-
-impl GroupRecord {
-    fn dir(&self) -> Option<&Path> {
-        self.candidate.parent()
-    }
-
-    fn save(&self) {
-        let Some(dir) = self.dir() else { return };
-        if let Err(error) = output::write_json(&dir.join(GROUP_FILE), self) {
-            tracing::warn!(%error, group = %self.id, "evaluation group record not saved");
-        }
-    }
-}
-
-/// Groups this process started, so their unfinished members are known to be running.
-#[derive(Default)]
-pub(super) struct Groups {
-    live: Mutex<HashMap<String, Arc<Mutex<GroupRecord>>>>,
-}
-
-impl Groups {
-    fn insert(&self, record: Arc<Mutex<GroupRecord>>) {
-        let id = lock(&record).id.clone();
-        self.live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, record);
-    }
-
-    fn is_live(&self, id: &str) -> bool {
-        self.live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(id)
-    }
-
-    pub(super) fn running_dirs(&self) -> HashSet<OsString> {
-        self.live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .flat_map(|record| {
-                lock(record)
-                    .members
-                    .iter()
-                    .filter(|member| member.exit.is_none())
-                    .filter_map(|member| member.dir.file_name().map(OsStr::to_os_string))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
+pub(super) use crate::inspection::Purpose;
+use crate::inspection::{
+    Artifact, EvaluationGroupSnapshot, EvaluationInspector, EvaluationMemberSnapshot, GROUP_SCHEMA,
+    GROUPS_DIR, GroupRecord, Member, OVERLAY_FILE, ProcessExit as Exit, lock,
+};
 
 /// The `evorch` CLI next to `exe`, as Cargo and the Nix package install it
 /// beside `evorch-gui`, or else the first one on `path`.
@@ -338,6 +204,7 @@ pub(super) fn launch(
         members.push(member);
     }
     let mut record = GroupRecord {
+        schema: GROUP_SCHEMA,
         id,
         run_id: run_id.to_owned(),
         started_at: output::timestamp(now),
@@ -510,100 +377,91 @@ fn tail(path: &Path) -> String {
     text.chars().skip(skip).collect()
 }
 
-fn member_state(member: &Member, live: bool) -> &'static str {
-    match &member.exit {
-        Some(exit) if exit.succeeded() => "finished",
-        Some(_) => "failed",
-        None if live => "running",
-        None => "interrupted",
-    }
-}
-
-fn record_path(root: &Path, id: &str) -> Result<PathBuf, String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return Err(format!("{id:?} is not an evaluation group id"));
-    }
-    Ok(root.join(GROUPS_DIR).join(id).join(GROUP_FILE))
+fn inspector(shared: &Shared, root: &Path) -> EvaluationInspector {
+    EvaluationInspector::new(root).with_monitor(shared.groups.clone())
 }
 
 pub(super) fn list(shared: &Shared, root: &Path, limit: usize) -> Vec<Value> {
-    let Ok(entries) = std::fs::read_dir(root.join(GROUPS_DIR)) else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
-    ids.sort();
-    ids.reverse();
-    ids.iter()
-        .take(limit)
-        .filter_map(|id| {
-            let record: GroupRecord = read_json(&record_path(root, id).ok()?).ok()?;
-            let live = shared.groups.is_live(id);
-            Some(json!({
-                "group": record.id,
-                "started_at": record.started_at,
-                "finished_at": record.finished_at,
-                "evaluations": record.members.iter().map(|member| json!({
+    inspector(shared, root)
+        .list_groups(limit)
+        .entries
+        .into_iter()
+        .filter_map(|entry| entry.group.into_present())
+        .map(|group| {
+            json!({
+                "group": group.id,
+                "started_at": group.started_at,
+                "finished_at": group.finished_at,
+                "evaluations": group.members.iter().map(|member| json!({
                     "thread_id": member.thread_id,
                     "purpose": member.purpose,
-                    "dir": member.dir.file_name().map(|name| name.to_string_lossy()),
-                    "state": member_state(member, live),
+                    "dir": member.dir_name,
+                    "state": member.phase.legacy_state(),
+                    "phase": member.phase.as_str(),
                 })).collect::<Vec<_>>(),
-            }))
+            })
         })
         .collect()
 }
 
-pub(super) fn detail(shared: &Shared, root: &Path, id: &str) -> Result<Value, String> {
-    let record: GroupRecord = read_json(&record_path(root, id)?)?;
-    let live = shared.groups.is_live(id);
-    let mut reports = Vec::new();
-    let evaluations: Vec<Value> = record
+fn evaluation_value(member: &EvaluationMemberSnapshot, report: Option<&Report>) -> Value {
+    let mut value = json!({
+        "thread_id": member.thread_id,
+        "purpose": member.purpose,
+        "repeat": member.repeat,
+        "dir": member.dir_name,
+        "state": member.phase.legacy_state(),
+        "phase": member.phase.as_str(),
+    });
+    if let Some(progress) = member.progress {
+        value["progress"] = super::progress_value(
+            progress.planned,
+            progress.started,
+            progress.finished,
+            progress.manifest_finished,
+        );
+    }
+    if let Some(report) = report {
+        value["report"] = Value::String(report_line(report));
+    } else if let Some(failure) = &member.failure {
+        value["failure"] = Value::String(failure.clone());
+        value["stderr_tail"] = Value::String(member.stderr_tail.clone().unwrap_or_default());
+    }
+    value
+}
+
+fn group_value(group: &EvaluationGroupSnapshot, reports: &[Option<Report>]) -> Value {
+    let evaluations: Vec<Value> = group
         .members
         .iter()
-        .map(|member| {
-            let mut value = json!({
-                "thread_id": member.thread_id,
-                "purpose": member.purpose,
-                "repeat": member.repeat,
-                "dir": member.dir.file_name().map(|name| name.to_string_lossy()),
-                "state": member_state(member, live),
-            });
-            if let Ok(manifest) = read_json::<Manifest>(&member.dir.join(output::MANIFEST_FILE)) {
-                value["progress"] = super::progress(&manifest);
-            }
-            match read_json::<Report>(&member.dir.join(output::REPORT_JSON_FILE)) {
-                Ok(report) => {
-                    value["report"] = Value::String(report_line(&report));
-                    reports.push(report);
-                }
-                Err(_) => {
-                    if let Some(exit) = member.exit.as_ref().filter(|exit| !exit.succeeded()) {
-                        value["failure"] = Value::String(exit.describe());
-                        value["stderr_tail"] = Value::String(tail(&member.stderr));
-                    }
-                }
-            }
-            value
-        })
+        .zip(reports)
+        .map(|(member, report)| evaluation_value(member, report.as_ref()))
         .collect();
     let mut value = json!({
-        "group": record.id,
-        "started_at": record.started_at,
-        "finished_at": record.finished_at,
-        "notice": record.notice,
-        "candidate": std::fs::read_to_string(&record.candidate)
-            .map(|text| text.chars().take(super::ANALYSIS_CHARS).collect::<String>())
-            .ok(),
+        "group": group.id,
+        "started_at": group.started_at,
+        "finished_at": group.finished_at,
+        "notice": group.notice,
+        "candidate": group
+            .candidate
+            .present()
+            .map(|overlay| overlay.text.chars().take(super::ANALYSIS_CHARS).collect::<String>()),
         "evaluations": evaluations,
         "note": "read one evaluation in full with eval_report and its dir",
     });
+    let reports: Vec<Report> = reports.iter().flatten().cloned().collect();
     if reports.len() > 1 {
         value["table"] = Value::String(report::cross_thread_table(&reports));
     }
-    Ok(value)
+    value
+}
+
+pub(super) fn detail(shared: &Shared, root: &Path, id: &str) -> Result<Value, String> {
+    match inspector(shared, root).inspect_group(id, false) {
+        Artifact::Present(inspected) => Ok(group_value(&inspected.snapshot, &inspected.reports)),
+        Artifact::Missing => Err(format!("no evaluation group {id:?}")),
+        Artifact::Problem(problem) => Err(problem.to_string()),
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
