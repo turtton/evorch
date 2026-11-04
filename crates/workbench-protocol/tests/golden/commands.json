@@ -1,0 +1,134 @@
+{
+  "answer_user_question": {
+    "payload": {
+      "answer": "yes",
+      "question_id": "q-1",
+      "question_revision": "4",
+      "thread": "thr-1"
+    },
+    "type": "answer_user_question"
+  },
+  "compact_chat": {
+    "payload": {
+      "thread": "thr-1"
+    },
+    "type": "compact_chat"
+  },
+  "continue_chat": {
+    "payload": {
+      "composer_role": "worker",
+      "project": "proj-1",
+      "thread": "thr-1"
+    },
+    "type": "continue_chat"
+  },
+  "decide_tool_approval": {
+    "payload": {
+      "approval_id": "ap-1",
+      "approval_revision": "2",
+      "core_epoch": "7",
+      "decision": "deny"
+    },
+    "type": "decide_tool_approval"
+  },
+  "deliver_follow_ups_next_turn": {
+    "payload": {
+      "thread": "thr-1"
+    },
+    "type": "deliver_follow_ups_next_turn"
+  },
+  "send_chat": {
+    "payload": {
+      "composer_role": "orchestrator",
+      "fork_seed": {
+        "context_len": "9007199254740993",
+        "source_run_id": "run-0"
+      },
+      "images": [
+        {
+          "attachment_id": "att-1",
+          "mime_type": "image/png"
+        }
+      ],
+      "model_preference": {
+        "model": "gpt",
+        "profile": "default",
+        "reasoning_effort": "high"
+      },
+      "project": "proj-1",
+      "skills": [
+        "git"
+      ],
+      "submission_id": "sub-a",
+      "text": "hello\nworld",
+      "thread": "thr-1"
+    },
+    "type": "send_chat"
+  },
+  "set_agent_web_tools_enabled": {
+    "payload": {
+      "enabled": true
+    },
+    "type": "set_agent_web_tools_enabled"
+  },
+  "set_goal_checks_paused": {
+    "payload": {
+      "goal": "goal-1",
+      "paused": false,
+      "thread": "thr-1"
+    },
+    "type": "set_goal_checks_paused"
+  },
+  "set_goal_review": {
+    "payload": {
+      "enabled": true,
+      "goal": "goal-1",
+      "thread": "thr-1"
+    },
+    "type": "set_goal_review"
+  },
+  "stop_chat": {
+    "payload": {
+      "thread": "thr-1"
+    },
+    "type": "stop_chat"
+  },
+  "stop_run": {
+    "payload": {
+      "run": "run-1",
+      "thread": "thr-1"
+    },
+    "type": "stop_run"
+  },
+  "submit_goal": {
+    "payload": {
+      "constraints": [
+        "no network"
+      ],
+      "delegation": {
+        "payload": {
+          "value": "packet-3"
+        },
+        "type": "reference"
+      },
+      "objective": "ship it",
+      "project": "proj-1",
+      "references": [
+        {
+          "kind": "issue",
+          "value": "#12"
+        }
+      ],
+      "thread": "thr-1"
+    },
+    "type": "submit_goal"
+  },
+  "withdraw_follow_up": {
+    "payload": {
+      "run": "run-1",
+      "submission_id": "sub-a",
+      "thread": "thr-1"
+    },
+    "type": "withdraw_follow_up"
+  }
+}

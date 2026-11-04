@@ -1,0 +1,35 @@
+{
+  "ping": {
+    "payload": {
+      "nonce": "1"
+    },
+    "type": "ping"
+  },
+  "pong": {
+    "payload": {
+      "nonce": "1"
+    },
+    "type": "pong"
+  },
+  "subscribe": {
+    "payload": {
+      "after": {
+        "core_epoch": "7",
+        "sequence": "41"
+      },
+      "scope": {
+        "payload": {
+          "thread": "thr-1"
+        },
+        "type": "thread"
+      }
+    },
+    "type": "subscribe"
+  },
+  "unsubscribe": {
+    "payload": {
+      "subscription_id": "sub-1"
+    },
+    "type": "unsubscribe"
+  }
+}

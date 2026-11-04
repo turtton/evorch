@@ -1,0 +1,94 @@
+{
+  "get_command_receipt": {
+    "payload": {
+      "request_id": "req-3"
+    },
+    "type": "get_command_receipt"
+  },
+  "get_core_status": {
+    "type": "get_core_status"
+  },
+  "get_input_receipts": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "thread": "thr-1"
+    },
+    "type": "get_input_receipts"
+  },
+  "get_thread": {
+    "payload": {
+      "thread": "thr-1"
+    },
+    "type": "get_thread"
+  },
+  "list_approvals": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "pending_only": true,
+      "thread": "thr-1"
+    },
+    "type": "list_approvals"
+  },
+  "list_projects": {
+    "payload": {
+      "cursor": "cur-1",
+      "limit": 25
+    },
+    "type": "list_projects"
+  },
+  "list_questions": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "pending_only": true,
+      "thread": "thr-1"
+    },
+    "type": "list_questions"
+  },
+  "list_runs": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "thread": "thr-1"
+    },
+    "type": "list_runs"
+  },
+  "list_threads": {
+    "payload": {
+      "page": {
+        "limit": 50
+      },
+      "project": "proj-1"
+    },
+    "type": "list_threads"
+  },
+  "read_body": {
+    "payload": {
+      "body_id": "body-1",
+      "max_bytes": 65536,
+      "offset": "65536"
+    },
+    "type": "read_body"
+  },
+  "read_committed_history": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "run": "run-1",
+      "thread": "thr-1"
+    },
+    "type": "read_committed_history"
+  }
+}

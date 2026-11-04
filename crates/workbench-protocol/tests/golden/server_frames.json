@@ -1,0 +1,29 @@
+{
+  "event": {
+    "payload": {
+      "caused_by_request_id": "req-1",
+      "cursor": {
+        "core_epoch": "7",
+        "sequence": "42"
+      },
+      "event": {
+        "payload": {
+          "reason": "cursor_too_old"
+        },
+        "type": "resync_required"
+      },
+      "subscription_id": "sub-1"
+    },
+    "type": "event"
+  },
+  "reply": {
+    "payload": {
+      "payload": {
+        "type": "ack"
+      },
+      "request_id": "req-1",
+      "status": "success"
+    },
+    "type": "reply"
+  }
+}

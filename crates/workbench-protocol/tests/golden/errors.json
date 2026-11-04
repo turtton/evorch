@@ -1,0 +1,120 @@
+{
+  "already_resolved": {
+    "code": "already_resolved",
+    "message": "message",
+    "retry": "after_reconnect"
+  },
+  "busy": {
+    "code": "busy",
+    "message": "message",
+    "retry": "never"
+  },
+  "capability": {
+    "code": "unsupported_capability",
+    "details": {
+      "payload": {
+        "capabilities": [
+          "approvals.v1"
+        ]
+      },
+      "type": "missing_capabilities"
+    },
+    "message": "capability approvals.v1 was not negotiated",
+    "retry": "never"
+  },
+  "conflict": {
+    "code": "conflict",
+    "message": "message",
+    "retry": "after_resync"
+  },
+  "draining": {
+    "code": "draining",
+    "message": "message",
+    "retry": "same_request"
+  },
+  "epoch": {
+    "code": "stale_epoch",
+    "details": {
+      "payload": {
+        "actual": "2",
+        "expected": "1"
+      },
+      "type": "epoch"
+    },
+    "message": "the core restarted since the epoch the client saw",
+    "retry": "after_reconnect"
+  },
+  "internal": {
+    "code": "internal",
+    "message": "message",
+    "retry": "never"
+  },
+  "invalid_request": {
+    "code": "invalid_request",
+    "message": "message",
+    "retry": "never"
+  },
+  "limit_exceeded": {
+    "code": "limit_exceeded",
+    "message": "message",
+    "retry": "after_resync"
+  },
+  "not_found": {
+    "code": "not_found",
+    "message": "message",
+    "retry": "same_request"
+  },
+  "permission_denied": {
+    "code": "permission_denied",
+    "message": "message",
+    "retry": "same_request"
+  },
+  "restore_blocked": {
+    "code": "restore_blocked",
+    "message": "message",
+    "retry": "user_action_required"
+  },
+  "resync_required": {
+    "code": "resync_required",
+    "message": "message",
+    "retry": "user_action_required"
+  },
+  "stale_epoch": {
+    "code": "stale_epoch",
+    "message": "message",
+    "retry": "after_reconnect"
+  },
+  "stale_revision": {
+    "code": "stale_revision",
+    "message": "message",
+    "retry": "after_resync"
+  },
+  "storage_unavailable": {
+    "code": "storage_unavailable",
+    "message": "message",
+    "retry": "after_reconnect"
+  },
+  "unsupported_capability": {
+    "code": "unsupported_capability",
+    "message": "message",
+    "retry": "never"
+  },
+  "unsupported_version": {
+    "code": "unsupported_version",
+    "message": "message",
+    "retry": "user_action_required"
+  },
+  "with_details": {
+    "code": "stale_revision",
+    "correlation_id": "req-1",
+    "details": {
+      "payload": {
+        "actual": "2",
+        "expected": "1"
+      },
+      "type": "revision"
+    },
+    "message": "the entity changed since it was read",
+    "retry": "after_resync"
+  }
+}

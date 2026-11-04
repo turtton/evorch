@@ -1,0 +1,12 @@
+{
+  "agent": {
+    "actor": "agent",
+    "agent_run_id": "run-1",
+    "surface": "none"
+  },
+  "human": {
+    "actor": "human",
+    "client_id": "client-1",
+    "surface": "web"
+  }
+}

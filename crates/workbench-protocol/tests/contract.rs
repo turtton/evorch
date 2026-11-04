@@ -1,0 +1,512 @@
+//! Negotiation, rejection of bad requests, provenance and size limits.
+
+mod common;
+
+use common::*;
+use serde_json::json;
+use workbench_protocol::commands::*;
+use workbench_protocol::envelope::*;
+use workbench_protocol::errors::*;
+use workbench_protocol::framing::encode_frame;
+use workbench_protocol::handshake::*;
+use workbench_protocol::ids::*;
+use workbench_protocol::limits::*;
+use workbench_protocol::queries::*;
+use workbench_protocol::validation::ValidationError;
+use workbench_protocol::wire::*;
+
+fn offer<'a>(
+    core: &'a CoreIdentity,
+    versions: &'a [ProtocolVersion],
+    capabilities: &'a [Capability],
+) -> ServerOffer<'a> {
+    ServerOffer {
+        core,
+        versions,
+        capabilities,
+    }
+}
+
+fn core() -> CoreIdentity {
+    CoreIdentity::new("core-abc").unwrap()
+}
+
+// --- handshake ---------------------------------------------------------
+
+#[test]
+fn negotiation_picks_the_highest_common_version_and_requested_capabilities() {
+    let core = core();
+    let versions = [ProtocolVersion(1), ProtocolVersion(2)];
+    let mut hello = client_hello();
+    hello.supported_versions = vec![ProtocolVersion(1), ProtocolVersion(2), ProtocolVersion(3)];
+    hello.optional_capabilities = vec![
+        Capability::SnapshotEvents.into(),
+        CapabilityName::new("from_the_future.v9").unwrap(),
+        Capability::SafeRestart.into(), // asked for but not offered: dropped, not fatal
+    ];
+    let offered = [
+        Capability::Queries,
+        Capability::Commands,
+        Capability::SnapshotEvents,
+    ];
+    let negotiated = negotiate(&hello, &offer(&core, &versions, &offered)).unwrap();
+    assert_eq!(negotiated.version, ProtocolVersion(2));
+    assert_eq!(
+        negotiated.capabilities,
+        [
+            Capability::Commands,
+            Capability::Queries,
+            Capability::SnapshotEvents
+        ]
+    );
+}
+
+#[test]
+fn version_mismatch_is_rejected_with_a_direction() {
+    let core = core();
+    let hello = client_hello();
+    let newer_core = negotiate(
+        &hello,
+        &offer(&core, &[ProtocolVersion(2)], &Capability::ALL),
+    )
+    .unwrap_err();
+    assert_eq!(newer_core.reason, RejectReason::UnsupportedVersion);
+    assert_eq!(
+        newer_core.recommended_action,
+        RecommendedAction::UpgradeClient
+    );
+    assert_eq!(newer_core.supported_versions, [ProtocolVersion(2)]);
+
+    let mut newer_client = client_hello();
+    newer_client.supported_versions = vec![ProtocolVersion(5)];
+    let rejected = negotiate(
+        &newer_client,
+        &offer(&core, &[ProtocolVersion(1)], &Capability::ALL),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.recommended_action, RecommendedAction::UpgradeCore);
+}
+
+#[test]
+fn missing_and_unknown_required_capabilities_are_rejected_by_name() {
+    let core = core();
+    let mut hello = client_hello();
+    hello.required_capabilities = vec![
+        Capability::Commands.into(),
+        Capability::Approvals.into(),
+        CapabilityName::new("teleport.v1").unwrap(),
+    ];
+    let rejected = negotiate(
+        &hello,
+        &offer(&core, &[ProtocolVersion::CURRENT], &[Capability::Commands]),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.reason, RejectReason::MissingCapabilities);
+    let names: Vec<&str> = rejected
+        .missing_capabilities
+        .iter()
+        .map(CapabilityName::as_str)
+        .collect();
+    assert_eq!(names, ["approvals.v1", "teleport.v1"]);
+}
+
+#[test]
+fn a_different_core_and_a_malformed_hello_are_rejected() {
+    let other = CoreIdentity::new("core-other").unwrap();
+    let rejected = negotiate(
+        &client_hello(),
+        &offer(&other, &[ProtocolVersion::CURRENT], &Capability::ALL),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.reason, RejectReason::CoreMismatch);
+
+    let mut hello = client_hello();
+    hello.supported_versions.clear();
+    let rejected = negotiate(
+        &hello,
+        &offer(&core(), &[ProtocolVersion::CURRENT], &Capability::ALL),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.reason, RejectReason::InvalidHello);
+}
+
+#[test]
+fn unknown_capability_in_a_server_hello_is_not_silently_accepted() {
+    let mut wire = serde_json::to_value(server_hello()).unwrap();
+    wire["capabilities"] = json!(["commands.v1", "teleport.v1"]);
+    assert!(serde_json::from_value::<ServerHello>(wire).is_err());
+}
+
+#[test]
+fn wire_limits_defaults_match_the_spec_and_bad_values_are_refused() {
+    let limits = WireLimits::default();
+    assert_eq!(limits.max_frame_bytes, 1024 * 1024);
+    assert_eq!(limits.max_body_chunk_bytes, 64 * 1024);
+    assert_eq!(limits.max_in_flight_requests, 64);
+    limits.validate().unwrap();
+
+    let broken: [fn(&mut WireLimits); 6] = [
+        |l| l.max_frame_bytes = 0,
+        |l| l.max_frame_bytes = HARD_MAX_FRAME_BYTES + 1,
+        |l| l.max_body_chunk_bytes = l.max_frame_bytes,
+        |l| l.max_in_flight_requests = 0,
+        |l| l.subscription_queue_events = 0,
+        |l| l.subscription_queue_bytes = 1,
+    ];
+    for mutate in broken {
+        let mut l = WireLimits::default();
+        mutate(&mut l);
+        assert!(l.validate().is_err(), "{l:?}");
+    }
+}
+
+// --- request decoding ---------------------------------------------------
+
+fn decode(value: serde_json::Value) -> Result<RequestEnvelope, RequestRejection> {
+    decode_request(&serde_json::to_vec(&value).unwrap(), &WireLimits::default())
+}
+
+fn request_json(kind: &str, payload: serde_json::Value) -> serde_json::Value {
+    json!({"request_id": "req-9", "session_id": "sess-1", "kind": kind, "payload": payload})
+}
+
+#[test]
+fn unknown_command_query_and_control_types_are_refused_as_unsupported() {
+    for (kind, ty) in [
+        ("command", "launch_missiles"),
+        ("query", "get_secrets"),
+        ("control", "reboot"),
+    ] {
+        let rejection = decode(request_json(kind, json!({"type": ty, "payload": {}}))).unwrap_err();
+        assert_eq!(
+            rejection.error.code,
+            ErrorCode::UnsupportedCapability,
+            "{kind}/{ty}"
+        );
+        assert_eq!(rejection.request_id, Some(request(9)));
+        assert_eq!(rejection.error.correlation_id, Some(request(9)));
+        assert_eq!(rejection.error.retry, RetryAdvice::Never);
+    }
+}
+
+#[test]
+fn malformed_requests_are_invalid_not_unsupported() {
+    let cases = [
+        request_json("command", json!({"type": "stop_chat", "payload": {}})), // missing thread
+        request_json(
+            "command",
+            json!({"type": "stop_chat", "payload": {"thread": "t", "x": 1}}),
+        ),
+        request_json(
+            "teleport",
+            json!({"type": "stop_chat", "payload": {"thread": "t"}}),
+        ),
+        json!({"session_id": "s", "kind": "query", "payload": {"type": "get_core_status"}}),
+    ];
+    for case in cases {
+        let rejection = decode(case.clone()).unwrap_err();
+        assert_eq!(rejection.error.code, ErrorCode::InvalidRequest, "{case}");
+    }
+    let rejection = decode_request(b"\xff\xfenot json", &WireLimits::default()).unwrap_err();
+    assert_eq!(rejection.error.code, ErrorCode::InvalidRequest);
+    assert_eq!(rejection.request_id, None);
+}
+
+#[test]
+fn clients_cannot_supply_provenance_or_automatic_continuation() {
+    let mut send = serde_json::to_value(Command::SendChat(send_chat())).unwrap();
+    send["payload"]["provenance"] =
+        json!({"actor": "agent", "surface": "none", "agent_run_id": "run-1"});
+    let rejection = decode(request_json("command", send)).unwrap_err();
+    assert_eq!(rejection.error.code, ErrorCode::InvalidRequest);
+
+    let rejection = decode(request_json(
+        "command",
+        json!({"type": "continue_chat", "payload": {"project": "p", "thread": "t", "automatic": true}}),
+    ))
+    .unwrap_err();
+    assert_eq!(rejection.error.code, ErrorCode::InvalidRequest);
+}
+
+#[test]
+fn provenance_must_describe_a_possible_actor() {
+    human().validate().unwrap();
+    agent().validate().unwrap();
+    let bad = [
+        Provenance {
+            agent_run_id: None,
+            ..agent()
+        },
+        Provenance {
+            surface: Surface::Cli,
+            ..agent()
+        },
+        Provenance {
+            agent_run_id: Some(run()),
+            ..human()
+        },
+        Provenance {
+            surface: Surface::None,
+            ..human()
+        },
+    ];
+    for provenance in bad {
+        assert!(provenance.validate().is_err(), "{provenance:?}");
+    }
+}
+
+#[test]
+fn invalid_field_values_map_to_structured_errors() {
+    let mut chat = send_chat();
+    chat.text = "x".repeat(MAX_TEXT_BYTES + 1);
+    let rejection = decode(request_json(
+        "command",
+        serde_json::to_value(Command::SendChat(chat)).unwrap(),
+    ))
+    .unwrap_err();
+    assert_eq!(rejection.error.code, ErrorCode::LimitExceeded);
+    assert_eq!(
+        rejection.error.details,
+        Some(ErrorDetails::Field {
+            field: "text".into()
+        })
+    );
+
+    let mut chat = send_chat();
+    chat.text = "bell\u{7}".into();
+    assert_eq!(
+        Command::SendChat(chat).validate(),
+        Err(ValidationError::InvalidChars { field: "text" })
+    );
+}
+
+#[test]
+fn command_collections_and_strings_are_bounded() {
+    let too_many_skills = SendChat {
+        skills: vec!["s".into(); MAX_SKILLS + 1],
+        ..send_chat()
+    };
+    assert!(matches!(
+        too_many_skills.validate(),
+        Err(ValidationError::TooMany {
+            field: "skills",
+            ..
+        })
+    ));
+
+    let too_many_images = SendChat {
+        images: vec![send_chat().images.remove(0); MAX_IMAGES + 1],
+        ..send_chat()
+    };
+    assert!(too_many_images.validate().is_err());
+
+    let not_an_image = SendChat {
+        images: vec![ImageRef {
+            attachment_id: AttachmentId::new("a").unwrap(),
+            mime_type: "text/html".into(),
+        }],
+        ..send_chat()
+    };
+    assert!(not_an_image.validate().is_err());
+
+    let empty = SendChat {
+        text: String::new(),
+        images: vec![],
+        ..send_chat()
+    };
+    assert!(matches!(
+        empty.validate(),
+        Err(ValidationError::Empty { .. })
+    ));
+    let images_only = SendChat {
+        text: String::new(),
+        ..send_chat()
+    };
+    images_only.validate().unwrap();
+
+    let goal = |objective: String, constraints: Vec<String>| SubmitGoal {
+        project: project(),
+        thread: thread(),
+        objective,
+        references: vec![],
+        constraints,
+        delegation: None,
+    };
+    assert!(goal(String::new(), vec![]).validate().is_err());
+    assert!(
+        goal("x".repeat(MAX_OBJECTIVE_BYTES + 1), vec![])
+            .validate()
+            .is_err()
+    );
+    assert!(
+        goal("o".into(), vec!["c".into(); MAX_CONSTRAINTS + 1])
+            .validate()
+            .is_err()
+    );
+    goal("o".into(), vec!["c".into(); MAX_CONSTRAINTS])
+        .validate()
+        .unwrap();
+
+    let blank = Command::AnswerUserQuestion(AnswerUserQuestion {
+        thread: thread(),
+        question_id: QuestionId::new("q").unwrap(),
+        answer: String::new(),
+        question_revision: Revision(1),
+    });
+    assert!(blank.validate().is_err());
+}
+
+#[test]
+fn ids_reject_empty_oversized_and_control_characters_at_parse_time() {
+    assert!(ThreadId::new("").is_err());
+    assert!(ThreadId::new("a".repeat(MAX_ID_BYTES + 1)).is_err());
+    assert!(ThreadId::new("a\nb").is_err());
+    assert!(ThreadId::new("a".repeat(MAX_ID_BYTES)).is_ok());
+    assert!(serde_json::from_value::<ThreadId>(json!("")).is_err());
+    assert!(serde_json::from_value::<ThreadId>(json!(7)).is_err());
+}
+
+#[test]
+fn the_largest_valid_command_fits_the_default_frame() {
+    // Quotes escape to two bytes, the worst case the text rules allow.
+    let worst = "\"".repeat(MAX_TEXT_BYTES);
+    let chat = SendChat {
+        text: worst.clone(),
+        skills: vec!["\"".repeat(MAX_NAME_BYTES); MAX_SKILLS],
+        images: vec![
+            ImageRef {
+                attachment_id: AttachmentId::new("a".repeat(MAX_ID_BYTES)).unwrap(),
+                mime_type: format!("image/{}", "\"".repeat(MAX_MIME_BYTES - 6)),
+            };
+            MAX_IMAGES
+        ],
+        ..send_chat()
+    };
+    chat.validate().unwrap();
+    let goal = SubmitGoal {
+        project: project(),
+        thread: thread(),
+        objective: "\"".repeat(MAX_OBJECTIVE_BYTES),
+        references: vec![
+            PacketReference {
+                kind: ReferenceKind::Packet,
+                value: "\"".repeat(MAX_REFERENCE_BYTES)
+            };
+            MAX_REFERENCES
+        ],
+        constraints: vec!["\"".repeat(MAX_CONSTRAINT_BYTES); MAX_CONSTRAINTS],
+        delegation: Some(Delegation::Reference {
+            value: "\"".repeat(MAX_REFERENCE_BYTES),
+        }),
+    };
+    goal.validate().unwrap();
+    let answer = Command::AnswerUserQuestion(AnswerUserQuestion {
+        thread: thread(),
+        question_id: QuestionId::new("q").unwrap(),
+        answer: worst,
+        question_revision: Revision(1),
+    });
+    answer.validate().unwrap();
+
+    for command in [Command::SendChat(chat), Command::SubmitGoal(goal), answer] {
+        let frame = encode_frame(
+            &envelope(1, RequestBody::Command(command)),
+            DEFAULT_FRAME_BYTES,
+        )
+        .expect("fits the default frame");
+        assert!(frame.len() < DEFAULT_FRAME_BYTES as usize);
+    }
+}
+
+// --- queries ------------------------------------------------------------
+
+#[test]
+fn page_and_body_requests_are_bounded() {
+    let limits = WireLimits::default();
+    let page = |limit| {
+        Query::ListProjects(PageRequest {
+            cursor: None,
+            limit,
+        })
+    };
+    page(1).validate(&limits).unwrap();
+    page(MAX_PAGE_SIZE).validate(&limits).unwrap();
+    assert!(page(0).validate(&limits).is_err());
+    assert!(page(MAX_PAGE_SIZE + 1).validate(&limits).is_err());
+
+    let read = |max_bytes| {
+        Query::ReadBody(ReadBody {
+            body_id: BodyId::new("b").unwrap(),
+            offset: ByteOffset(0),
+            max_bytes,
+        })
+    };
+    read(limits.max_body_chunk_bytes).validate(&limits).unwrap();
+    read(MIN_BODY_CHUNK_BYTES).validate(&limits).unwrap();
+    assert!(
+        read(limits.max_body_chunk_bytes + 1)
+            .validate(&limits)
+            .is_err()
+    );
+    assert!(read(0).validate(&limits).is_err());
+    // A smaller negotiated chunk limit applies.
+    let small = WireLimits {
+        max_body_chunk_bytes: 1024,
+        ..limits
+    };
+    assert!(read(2048).validate(&small).is_err());
+}
+
+#[test]
+fn page_request_defaults_apply_when_fields_are_omitted() {
+    let query: Query =
+        serde_json::from_value(json!({"type": "list_threads", "payload": {"project": "p"}}))
+            .unwrap();
+    let Query::ListThreads(list) = query else {
+        panic!()
+    };
+    assert_eq!(list.page.limit, DEFAULT_PAGE_SIZE);
+    assert_eq!(list.page.cursor, None);
+}
+
+// --- capability gating ---------------------------------------------------
+
+#[test]
+fn requests_name_the_capability_they_need() {
+    let capability = |body: RequestBody| body.required_capability();
+    assert_eq!(
+        capability(RequestBody::Command(commands().remove(10))),
+        Some(Capability::Questions)
+    );
+    assert_eq!(
+        capability(RequestBody::Command(commands().remove(11))),
+        Some(Capability::Approvals)
+    );
+    assert_eq!(
+        capability(RequestBody::Query(queries().remove(10))),
+        Some(Capability::CommittedBodies)
+    );
+    assert_eq!(
+        capability(RequestBody::Control(controls().remove(0))),
+        Some(Capability::SnapshotEvents)
+    );
+    assert_eq!(capability(RequestBody::Control(controls().remove(2))), None);
+}
+
+#[test]
+fn every_sample_request_validates() {
+    let limits = WireLimits::default();
+    for command in commands() {
+        command.validate().unwrap();
+        let bytes = serde_json::to_vec(&envelope(1, RequestBody::Command(command))).unwrap();
+        decode_request(&bytes, &limits).unwrap();
+    }
+    for query in queries() {
+        let bytes = serde_json::to_vec(&envelope(1, RequestBody::Query(query))).unwrap();
+        decode_request(&bytes, &limits).unwrap();
+    }
+    for control in controls() {
+        let bytes = serde_json::to_vec(&envelope(1, RequestBody::Control(control))).unwrap();
+        decode_request(&bytes, &limits).unwrap();
+    }
+}

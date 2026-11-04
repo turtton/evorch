@@ -1,0 +1,235 @@
+{
+  "approvals": {
+    "payload": {
+      "items": [
+        {
+          "core_epoch": "7",
+          "decided_by": {
+            "actor": "human",
+            "client_id": "client-1",
+            "surface": "web"
+          },
+          "id": "ap-1",
+          "revision": "2",
+          "run": "run-1",
+          "state": "pending",
+          "summary": "rm -rf build",
+          "thread": "thr-1",
+          "tool_name": "shell"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "approvals"
+  },
+  "body": {
+    "payload": {
+      "body_id": "body-1",
+      "next_offset": "6",
+      "offset": "0",
+      "text": "héllo",
+      "total_bytes": "10"
+    },
+    "type": "body"
+  },
+  "command_receipt": {
+    "payload": {
+      "request_id": "req-3",
+      "state": {
+        "payload": {
+          "reply": {
+            "disposition": "accepted",
+            "run_id": "run-1",
+            "submission_id": "sub-a",
+            "thread_revision": "13"
+          }
+        },
+        "type": "applied"
+      }
+    },
+    "type": "command_receipt"
+  },
+  "committed_history": {
+    "payload": {
+      "items": [
+        {
+          "content": {
+            "payload": {
+              "text": "hi"
+            },
+            "type": "inline"
+          },
+          "index": "17",
+          "role": "assistant",
+          "run": "run-1",
+          "thread": "thr-1"
+        },
+        {
+          "content": {
+            "payload": {
+              "body_id": "body-1",
+              "total_bytes": "1099511627776"
+            },
+            "type": "body"
+          },
+          "index": "17",
+          "role": "assistant",
+          "run": "run-1",
+          "thread": "thr-1"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "committed_history"
+  },
+  "core_status": {
+    "payload": {
+      "retention_reasons": [
+        "active_turn",
+        "connected_clients"
+      ],
+      "running": {
+        "clients": 3,
+        "shell_jobs": 1,
+        "tool_calls": 2,
+        "turns": 1,
+        "waiting_lanes": 0
+      },
+      "state": "ready"
+    },
+    "type": "core_status"
+  },
+  "input_receipts": {
+    "payload": {
+      "items": [
+        {
+          "revision": "8",
+          "run": "run-1",
+          "sent_by": {
+            "actor": "human",
+            "client_id": "client-1",
+            "surface": "web"
+          },
+          "state": "delivered",
+          "submission_id": "sub-a",
+          "thread": "thr-1"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "input_receipts"
+  },
+  "projects": {
+    "payload": {
+      "items": [
+        {
+          "display_name": "evorch",
+          "id": "proj-1",
+          "revision": "1",
+          "thread_count": 4
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "projects"
+  },
+  "questions": {
+    "payload": {
+      "items": [
+        {
+          "answer": {
+            "answered_by": {
+              "actor": "human",
+              "client_id": "client-1",
+              "surface": "web"
+            },
+            "text": "yes"
+          },
+          "blocking": true,
+          "id": "q-1",
+          "management_revision": "2",
+          "options": [
+            "yes",
+            "no"
+          ],
+          "raised_by": {
+            "actor": "agent",
+            "agent_run_id": "run-1",
+            "surface": "none"
+          },
+          "requester": {
+            "root_run": "run-root",
+            "run": "run-1",
+            "thread": "thr-1"
+          },
+          "revision": "5",
+          "routing_revision": "1",
+          "target": {
+            "type": "user"
+          },
+          "title": "Proceed?"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "questions"
+  },
+  "runs": {
+    "payload": {
+      "items": [
+        {
+          "id": "run-1",
+          "parent_run": "run-0",
+          "phase": "waiting_for_approval",
+          "revision": "3",
+          "role": "worker",
+          "thread": "thr-1"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "runs"
+  },
+  "thread": {
+    "payload": {
+      "pending_approvals": 0,
+      "pending_questions": 1,
+      "queued_follow_ups": 2,
+      "root_run": "run-1",
+      "summary": {
+        "id": "thr-1",
+        "lead_thread": "thr-lead",
+        "project": "proj-1",
+        "revision": "12",
+        "state": "waiting_for_user",
+        "title": "Fix login",
+        "updated_at": "1793799134000"
+      }
+    },
+    "type": "thread"
+  },
+  "threads": {
+    "payload": {
+      "items": [
+        {
+          "id": "thr-1",
+          "lead_thread": "thr-lead",
+          "project": "proj-1",
+          "revision": "12",
+          "state": "waiting_for_user",
+          "title": "Fix login",
+          "updated_at": "1793799134000"
+        }
+      ],
+      "next_cursor": "cur-2",
+      "snapshot_revision": "100"
+    },
+    "type": "threads"
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "workbench-protocol"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Wire protocol shared by the evorch core and its desktop, web and CLI clients (ADR 0045)."
+
+# This crate must stay free of workspace dependencies and of runtime types.
+# scripts/check-workbench-boundaries.sh enforces that in CI.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
