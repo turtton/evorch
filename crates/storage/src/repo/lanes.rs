@@ -469,7 +469,10 @@ pub(crate) fn block_start(
     guard_texts("lane startup", [("start_blocked_reason", reason)])?;
     let tx = immediate(conn)?;
     let lane = require(&tx, lane_id)?;
-    if lane.is_started() || lane.start_blocked_reason.is_some() {
+    // The first reason wins, except that an operator stop (resumable) hardens into a
+    // cancellation or a failure (permanent); the reverse never loosens anything.
+    let hardens = lane.is_operator_stopped() && reason != crate::lanes::LANE_START_OPERATOR_STOP;
+    if lane.is_started() || (lane.start_blocked_reason.is_some() && !hardens) {
         return Ok(LaneUpdate {
             lane,
             changed: false,

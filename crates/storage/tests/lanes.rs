@@ -1382,3 +1382,53 @@ fn an_operator_stopped_intent_is_not_recovered_and_only_it_can_be_resumed() {
     );
     assert!(!h.resume_lane_start("lane-003", 22).unwrap().changed);
 }
+
+#[test]
+fn an_operator_stop_hardens_into_a_cancellation_but_a_cancellation_is_never_loosened() {
+    let f = Fixture::new();
+    let h = f.handle();
+    for n in 1..=2 {
+        h.create_lane(new_lane(n, 10)).unwrap();
+    }
+    let stop = storage::lanes::LANE_START_OPERATOR_STOP;
+
+    // Stop, then cancel: the cancellation replaces the resumable reason, once.
+    assert!(h.block_lane_start("lane-001", stop, 11).unwrap().changed);
+    assert!(
+        !h.block_lane_start("lane-001", stop, 12).unwrap().changed,
+        "a repeated stop is unchanged"
+    );
+    let hardened = h
+        .block_lane_start("lane-001", "cancelled before root start", 13)
+        .unwrap();
+    assert!(hardened.changed);
+    assert!(!hardened.lane.is_operator_stopped());
+    assert_eq!(
+        h.resume_lane_start("lane-001", 14).unwrap_err(),
+        StorageError::LaneConflict(LaneConflictReason::StartBlocked)
+    );
+    assert!(
+        !h.block_lane_start("lane-001", "another failure", 15)
+            .unwrap()
+            .changed
+    );
+
+    // Cancel, then stop: the cancellation stays.
+    h.block_lane_start("lane-002", "cancelled before root start", 11)
+        .unwrap();
+    let kept = h.block_lane_start("lane-002", stop, 12).unwrap();
+    assert!(!kept.changed);
+    assert_eq!(
+        kept.lane.start_blocked_reason.as_deref(),
+        Some("cancelled before root start")
+    );
+    assert_eq!(
+        f.database()
+            .lane("lane-001")
+            .unwrap()
+            .unwrap()
+            .start_blocked_reason
+            .as_deref(),
+        Some("cancelled before root start")
+    );
+}

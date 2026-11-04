@@ -310,6 +310,8 @@ impl AgentRuntime {
     /// durable state `Runtime::stop` leaves). Cancelled and failed intents stay blocked,
     /// and a restart never does this on its own.
     ///
+    /// The stop is lifted only after the authority to start is in hand (a current owner
+    /// host when the lane needs ownership); when that is missing the stop is kept.
     /// A process that already tried to start this lane keeps its settled admission, so
     /// the resume needs a new runtime (`lane_unavailable` otherwise).
     pub fn resume_stopped_lane(
@@ -349,11 +351,30 @@ impl AgentRuntime {
                 "this process already attempted the start; resume after a restart",
             ));
         }
-        let lane = store
+        let seed: StartSeed = serde_json::from_str(&lane.start_seed)
+            .map_err(|e| LaneError::new("restore_failed", e))?;
+        let Some(ownership) = Self::lane_authority(&lane, &seed, host)? else {
+            return Err(LaneError::new(
+                "lane_creation_denied",
+                "another owner holds the lane thread; the stop is kept",
+            ));
+        };
+        let resumed = store
             .handle
             .resume_lane_start(&lane.lane_id, self.lane_activity_time())?
             .lane;
-        self.recover_lane(&lane, host)
+        match self.start_recovered(&resumed, &seed, ownership) {
+            Ok(started) => Ok(started),
+            Err(error) => {
+                // Nothing started: the operator's stop stays in force.
+                let _ = store.handle.block_lane_start(
+                    &lane.lane_id,
+                    storage::lanes::LANE_START_OPERATOR_STOP,
+                    self.lane_activity_time(),
+                );
+                Err(error)
+            }
+        }
     }
 
     fn recover_lane(
@@ -361,75 +382,117 @@ impl AgentRuntime {
         lane: &LaneRecord,
         host: Option<&crate::ownership::OwnerHost>,
     ) -> Result<Option<RunId>, LaneError> {
+        let seed: StartSeed = serde_json::from_str(&lane.start_seed)
+            .map_err(|e| LaneError::new("restore_failed", e))?;
+        match Self::lane_authority(lane, &seed, host)? {
+            Some(ownership) => self.start_recovered(lane, &seed, ownership),
+            None => Ok(None),
+        }
+    }
+
+    /// The ownership a start of this lane needs from the current host. `Ok(None)` when
+    /// another live host holds the thread: it may be admitting this same intent, and
+    /// startup must neither steal it nor fail the entire new window.
+    fn lane_authority(
+        lane: &LaneRecord,
+        seed: &StartSeed,
+        host: Option<&crate::ownership::OwnerHost>,
+    ) -> Result<Option<Option<crate::ownership::OwnerPermit>>, LaneError> {
+        if !seed.requires_ownership {
+            return Ok(Some(None));
+        }
+        let host = host.ok_or_else(|| {
+            LaneError::new("lane_creation_denied", "a current owner host is required")
+        })?;
+        let permit = match host.attach(&lane.thread_id) {
+            Ok(owner) if owner.lease.owner_id == host.owner_id() => {
+                host.owned_permit(&lane.thread_id)
+            }
+            Ok(owner) => host.claim(&owner),
+            Err(crate::ownership::RegistryError::Absent) => host.start(&lane.thread_id),
+            Err(e) => Err(e),
+        };
+        match permit {
+            Ok(permit) => Ok(Some(Some(permit))),
+            Err(
+                crate::ownership::RegistryError::Ownership(
+                    crate::ownership::OwnershipError::NotClaimable
+                    | crate::ownership::OwnershipError::OwnerResponsive
+                    | crate::ownership::OwnershipError::Fenced
+                    | crate::ownership::OwnershipError::Active
+                    | crate::ownership::OwnershipError::Quiescing,
+                )
+                | crate::ownership::RegistryError::Exists
+                | crate::ownership::RegistryError::ThreadDeleted(_),
+            ) => Ok(None),
+            Err(error) => Err(LaneError::new("lane_creation_denied", error)),
+        }
+    }
+
+    fn start_recovered(
+        &self,
+        lane: &LaneRecord,
+        seed: &StartSeed,
+        ownership: Option<crate::ownership::OwnerPermit>,
+    ) -> Result<Option<RunId>, LaneError> {
         let store = self.shared.run_store.get().ok_or_else(|| {
             LaneError::new("storage_unavailable", "lane ledger is not configured")
         })?;
+        // A local terminal is not process loss. Hold its intent rather than
+        // scanning an unstartable registered root forever or reviving it later.
+        if let Ok(local) = self.inspect_agent(seed.run_id)
+            && matches!(
+                local.phase,
+                event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error
+            )
         {
-            let seed: StartSeed = serde_json::from_str(&lane.start_seed)
-                .map_err(|e| LaneError::new("restore_failed", e))?;
-            let ownership = if seed.requires_ownership {
-                let host = host.ok_or_else(|| {
-                    LaneError::new("lane_creation_denied", "a current owner host is required")
-                })?;
-                let permit = match host.attach(&lane.thread_id) {
-                    Ok(owner) if owner.lease.owner_id == host.owner_id() => {
-                        host.owned_permit(&lane.thread_id)
-                    }
-                    Ok(owner) => host.claim(&owner),
-                    Err(crate::ownership::RegistryError::Absent) => host.start(&lane.thread_id),
-                    Err(e) => Err(e),
-                };
-                match permit {
-                    Ok(permit) => Some(permit),
-                    // Another live host may be admitting this same intent. Startup
-                    // must neither steal it nor fail the entire new window.
-                    Err(
-                        crate::ownership::RegistryError::Ownership(
-                            crate::ownership::OwnershipError::NotClaimable
-                            | crate::ownership::OwnershipError::OwnerResponsive
-                            | crate::ownership::OwnershipError::Fenced
-                            | crate::ownership::OwnershipError::Active
-                            | crate::ownership::OwnershipError::Quiescing,
-                        )
-                        | crate::ownership::RegistryError::Exists
-                        | crate::ownership::RegistryError::ThreadDeleted(_),
-                    ) => return Ok(None),
-                    Err(error) => return Err(LaneError::new("lane_creation_denied", error)),
-                }
-            } else {
-                None
-            };
-            // A local terminal is not process loss. Hold its intent rather than
-            // scanning an unstartable registered root forever or reviving it later.
-            if let Ok(local) = self.inspect_agent(seed.run_id)
-                && matches!(
-                    local.phase,
-                    event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error
-                )
-            {
-                let _guard = ownership
-                    .as_ref()
-                    .map(|permit| permit.mutation_guard())
-                    .transpose()
-                    .map_err(|error| LaneError::new("lane_creation_denied", error))?;
-                let reason = format!(
-                    "local root {} ended in {:?} before its first start committed",
-                    seed.run_id, local.phase
-                );
-                store
-                    .handle
-                    .block_lane_start(&lane.lane_id, &reason, self.lane_activity_time())?;
-                tracing::warn!(lane_id = %lane.lane_id, %reason, "lane startup held after local terminal failure");
-                return Ok(None);
-            }
-            let (id, started) = self.start_lane_intent(
-                lane,
-                &RunConfig {
-                    ownership,
-                    ..RunConfig::default()
-                },
-            )?;
-            Ok(started.then_some(id))
+            let _guard = ownership
+                .as_ref()
+                .map(|permit| permit.mutation_guard())
+                .transpose()
+                .map_err(|error| LaneError::new("lane_creation_denied", error))?;
+            let reason = format!(
+                "local root {} ended in {:?} before its first start committed",
+                seed.run_id, local.phase
+            );
+            store
+                .handle
+                .block_lane_start(&lane.lane_id, &reason, self.lane_activity_time())?;
+            tracing::warn!(lane_id = %lane.lane_id, %reason, "lane startup held after local terminal failure");
+            return Ok(None);
+        }
+        let (id, started) = self.start_lane_intent(
+            lane,
+            &RunConfig {
+                ownership,
+                ..RunConfig::default()
+            },
+        )?;
+        Ok(started.then_some(id))
+    }
+
+    /// Whether `run` is the root of the lane on `thread_id`: a lane-scoped root with no
+    /// parent that the runtime bound to that thread, or the root the ledger records for
+    /// it. A name or a child run never qualifies, so a host binds nothing else as the
+    /// target of a lane's Stop.
+    #[must_use]
+    pub fn is_lane_root(&self, thread_id: &str, run: RunId) -> bool {
+        let live = self
+            .shared
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&run)
+            .map(|entry| entry.parent.is_none() && entry.config.lane_scope.is_some());
+        match live {
+            Some(true) => self.goal_thread(run).as_deref() == Some(thread_id),
+            Some(false) => false,
+            None => self
+                .shared
+                .run_store
+                .get()
+                .and_then(|store| store.handle.lane_by_thread(thread_id).ok().flatten())
+                .is_some_and(|lane| lane.root_run_id.as_deref() == Some(&run.to_string())),
         }
     }
 

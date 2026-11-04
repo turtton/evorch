@@ -427,3 +427,93 @@ async fn a_cancelled_pending_intent_cannot_be_resumed_like_a_stopped_one() {
     first.wait(lead).await.unwrap();
     assert!(!host.quiesce().unwrap());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_intent_that_is_then_cancelled_cannot_be_resumed() {
+    let f = Fixture::new();
+    let (first, host, model, lead, lane) = pending_lane(&f).await;
+    first
+        .stop(lane.root_run_id, runtime::StopScope::SelfOnly)
+        .unwrap();
+    assert!(
+        f.storage
+            .handle()
+            .lane(&lane.lane_id)
+            .unwrap()
+            .unwrap()
+            .is_operator_stopped()
+    );
+    first.cancel(lane.root_run_id).unwrap();
+    let record = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+    assert!(record.start_blocked_reason.is_some() && !record.is_operator_stopped());
+    model.release.notify_one();
+    assert!(matches!(
+        first.wait(lane.root_run_id).await,
+        Err(RuntimeError::RunTerminated { .. })
+    ));
+    first.cancel(lead).unwrap();
+    first.wait(lead).await.unwrap();
+    assert!(!host.quiesce().unwrap());
+    drop(first);
+    drop(host);
+    f.crashed_lease(&lane, 0);
+
+    let bus = Arc::new(EventBus::new(256));
+    let next = runtime(&f.config, &f.storage, bus.clone(), Arc::default());
+    let current = f.host(bus);
+    assert_eq!(
+        next.resume_stopped_lane(&lane.lane_id, Some(&current))
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resume_without_the_authority_to_start_keeps_the_stop() {
+    let f = Fixture::new();
+    let (first, host, model, lead, lane) = pending_lane(&f).await;
+    first
+        .stop(lane.root_run_id, runtime::StopScope::SelfOnly)
+        .unwrap();
+    let bus = Arc::new(EventBus::new(256));
+    let next_model = Arc::new(AdmissionGate::default());
+    let next = runtime(&f.config, &f.storage, bus.clone(), next_model.clone());
+    let other = f.host(bus);
+    let stopped = || {
+        f.storage
+            .handle()
+            .lane(&lane.lane_id)
+            .unwrap()
+            .unwrap()
+            .is_operator_stopped()
+    };
+
+    // No owner host at all, and a host while the first one still holds the thread.
+    assert_eq!(
+        next.resume_stopped_lane(&lane.lane_id, None)
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    assert!(stopped());
+    assert_eq!(
+        next.resume_stopped_lane(&lane.lane_id, Some(&other))
+            .unwrap_err()
+            .code,
+        "lane_creation_denied"
+    );
+    assert!(stopped());
+    assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
+    assert_eq!(next_model.completions.load(Ordering::SeqCst), 0);
+
+    model.release.notify_one();
+    assert!(matches!(
+        first.wait(lane.root_run_id).await,
+        Err(RuntimeError::RunTerminated { .. })
+    ));
+    first.cancel(lead).unwrap();
+    first.wait(lead).await.unwrap();
+    assert!(!host.quiesce().unwrap());
+}

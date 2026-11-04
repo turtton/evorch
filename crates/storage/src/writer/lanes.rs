@@ -85,8 +85,10 @@ impl StorageHandle {
         })
     }
 
-    /// Permanently blocks a cancelled or locally failed creation intent. A started
-    /// lane and an already blocked intent are unchanged; the first reason wins.
+    /// Blocks a creation intent that was cancelled, failed locally or stopped by the
+    /// operator. A started lane and an already blocked intent are unchanged; the first
+    /// reason wins, except that an operator stop (resumable) is hardened by a later
+    /// cancellation or failure (permanent), never the other way round.
     ///
     /// # Errors
     /// Invalid or secret-bearing reason (maximum 1 KiB), missing lane, suspended
