@@ -199,7 +199,7 @@ async fn parallel_completed_search_usage_survives_success_errors_and_exhaustion(
             "query".into(),
             RunConfig {
                 budget: runtime::budget_tracker::BudgetSettings {
-                    max_tokens: Some(30),
+                    max_tokens: runtime::budget_tracker::ResourceLimit::Bounded(30),
                     ..Default::default()
                 },
                 ..Default::default()

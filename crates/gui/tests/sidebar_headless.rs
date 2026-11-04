@@ -4,6 +4,8 @@ use std::collections::HashMap;
 mod project_add;
 #[path = "sidebar/project_toolbar.rs"]
 mod project_toolbar;
+#[path = "sidebar/thread_attention.rs"]
+mod thread_attention;
 #[path = "sidebar/thread_read_dirs.rs"]
 mod thread_read_dirs;
 #[path = "sidebar/workspace_visibility.rs"]

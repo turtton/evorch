@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use event_bus::AgentRunPhase;
 use routing::EnvLookup;
+use runtime::budget_tracker::ResourceLimit;
 use runtime::snapshot::SnapshotStore;
 use runtime::{Role, RunConfig};
 
@@ -121,9 +122,9 @@ async fn record_inner(
         .clone()
         .with_benchmark_recorder(spec.target.clone(), recorder.clone())?;
     let budget = runtime::budget_tracker::BudgetSettings {
-        max_tokens: Some(spec.budget.max_tokens),
-        max_tool_calls: spec.budget.max_tool_calls,
-        max_elapsed: Duration::from_secs(spec.budget.timeout_seconds),
+        max_tokens: ResourceLimit::Bounded(spec.budget.max_tokens),
+        max_tool_calls: ResourceLimit::Bounded(spec.budget.max_tool_calls),
+        max_elapsed: ResourceLimit::Bounded(Duration::from_secs(spec.budget.timeout_seconds)),
         ..Default::default()
     };
     let run = runtime.delegate_background(

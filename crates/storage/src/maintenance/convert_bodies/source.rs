@@ -45,7 +45,7 @@ const REQUIRED_TABLES: [&str; 4] = [
     "reclaim_jobs",
 ];
 
-/// Tables migrations v40 to v43 create: none of them may exist before the conversion
+/// Tables migrations v40, v43 and v44 create: none of them may exist before the conversion
 /// starts.
 const TARGET_TABLES: [&str; 5] = [
     "run_messages",
@@ -55,7 +55,7 @@ const TARGET_TABLES: [&str; 5] = [
     "content_blob_refs_event",
 ];
 
-/// The columns migration v42 adds to `run_context_provenance`.
+/// The columns migration v43 adds to `run_context_provenance`.
 const PROVENANCE_HEADER_COLUMNS: [&str; 4] = [
     "map_version",
     "raw_message_count",
@@ -121,11 +121,11 @@ const MAX_LISTED_PROBLEMS: usize = 20;
 pub(super) enum Shape {
     /// A regular database of version 33 to 39: the whole conversion applies.
     Source,
-    /// A regular version 40 or 41 database (41 added only the lane ledger): the runs are
-    /// already rows, the provenance maps and the events are converted. (Explicit conversion only; no running build reads
-    /// version 40.)
+    /// A regular version 40, 41 or 42 database (41 added only the lane ledger, 42 only the
+    /// memory favorite flag): the runs are already rows, the provenance maps and the events
+    /// are converted. (Explicit conversion only; no running build reads version 40.)
     RunsConverted,
-    /// A regular version 42 database: the runs and the provenance maps are converted, only
+    /// A regular version 43 database: the runs and the provenance maps are converted, only
     /// the events are not in token form. No run and no map is touched.
     EventsPending,
     /// Already in the current format: nothing to do.
@@ -184,7 +184,7 @@ fn events_started(conn: &Connection) -> Result<bool, StorageError> {
         || table_exists(conn, "content_blob_refs_event")?)
 }
 
-/// A version 42 database: the run tables and the provenance rows are in their final
+/// A version 43 database: the run tables and the provenance rows are in their final
 /// format, and nothing of the event body format exists yet.
 fn classify_events_pending(conn: &Connection) -> Result<Shape, StorageError> {
     let runs = column_names(conn, "run_contexts")?;
@@ -247,7 +247,7 @@ pub(super) fn classify(conn: &Connection) -> Result<Shape, StorageError> {
     }
     if version >= MESSAGE_ROWS_VERSION {
         // Messages are rows, the provenance maps are still a column (version 40, or a
-        // version 41 that only added the lane ledger on top of it).
+        // version 41 or 42 that only added the lane ledger or the favorite flag on top of it).
         return classify_runs_converted(conn);
     }
     if !(MIN_SOURCE_VERSION..MESSAGE_ROWS_VERSION).contains(&version) {

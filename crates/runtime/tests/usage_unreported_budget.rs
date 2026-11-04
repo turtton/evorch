@@ -55,7 +55,7 @@ async fn run(usage_reported: bool) -> (Result<AgentRunPhase, runtime::RuntimeErr
         "read it".into(),
         RunConfig {
             budget: BudgetSettings {
-                max_tokens: Some(1_000),
+                max_tokens: runtime::budget_tracker::ResourceLimit::Bounded(1_000),
                 ..Default::default()
             },
             ..Default::default()

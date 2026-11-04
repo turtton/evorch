@@ -66,12 +66,13 @@ const C_GC: u64 = 24;
 /// with 10 rows and 12 with 100,000 when v39 alone was first measured; 19 and 34 with
 /// v40 added: its DROP COLUMN rewrites the table and each ADD COLUMN the schema), and
 /// v41's lane tables and indexes plus the rebuilt `threads` table (53 and 86 frames with v41
-/// added; the threads copy of this empty table costs no rows), and v42's provenance header
-/// columns and message table (64 and 99 frames with v42 added), and v43's event body format (two
-/// columns, the reference table and three accounting triggers on an empty `events` table;
-/// 77 and 117 frames with v43 added), whatever the number of `thread_runs` rows it leaves
-/// alone.
-const MIGRATION_FRAMES: u64 = 128;
+/// added; the threads copy of this empty table costs no rows), and v42 (the empty lesson
+/// tables and their full-text triggers are rebuilt: 86 and 120 frames with v42 added), and
+/// v43 (the provenance header columns and message table: 97 and 133 frames with v43 added),
+/// and v44 (the event body format: two columns, the reference table and three accounting
+/// triggers on an empty `events` table; 106 and 146 frames with v44 added), whatever the number of
+/// `thread_runs` rows it leaves alone.
+const MIGRATION_FRAMES: u64 = 160;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -287,7 +288,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v43) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest (v44) to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -295,8 +296,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     let observer = Connection::open(&path).unwrap();
     observer
         .execute_batch(&format!(
-            "{undo_v43}
-             {undo_v42}
+            "{undo_v44}
+             {undo_v43}
              {undo_v40}
              DROP TABLE content_blob_gc_queue; DROP TABLE content_blobs;
              PRAGMA user_version = 38;
@@ -304,8 +305,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              INSERT INTO thread_runs(run_id, thread_id, root_run_id, depth)
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
+            undo_v44 = include_str!("support/undo_v44.sql"),
             undo_v43 = include_str!("support/undo_v43.sql"),
-            undo_v42 = include_str!("support/undo_v42.sql"),
             undo_v40 = include_str!("support/undo_v40.sql"),
         ))
         .unwrap();
@@ -319,7 +320,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v43 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v44 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

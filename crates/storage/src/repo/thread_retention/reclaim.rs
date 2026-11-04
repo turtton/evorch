@@ -282,7 +282,7 @@ fn do_phase(
         Phase::RunMessages => run_messages(tx, family, cursor),
         Phase::RunContexts => run_contexts(tx, family, cursor, layout),
         Phase::Tasks => tasks(tx, family, cursor),
-        Phase::ThreadTables => thread_tables(tx, family, cursor, layout),
+        Phase::ThreadTables => thread_tables(tx, family, cursor),
         Phase::Finished => Ok(Work::default()),
     }
 }
@@ -912,7 +912,6 @@ fn thread_tables(
     tx: &Transaction<'_>,
     family: &str,
     cursor: &mut Cursor,
-    layout: Layout,
 ) -> Result<Work, StorageError> {
     let Some(thread) = cursor.thread.clone() else {
         enter(tx, family, cursor, Phase::Finished)?;
@@ -921,9 +920,14 @@ fn thread_tables(
     let mut work = Work::default();
     match cursor.table_idx {
         0 => {
-            // A database being converted is still at version 40: it has no lane tables
-            // (and so no lanes) yet.
-            if layout == Layout::Converting {
+            // A database the conversion command works on can still be at version 40: it
+            // has no lane tables (and so no lanes) yet, whatever the layout of its runs.
+            let lane_ledger: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lanes')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !lane_ledger {
                 cursor.table_idx = 1;
             } else {
                 work = take_lane_rows(tx, &thread)?;

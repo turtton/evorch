@@ -11,7 +11,7 @@ mod vacuum;
 pub use compact::{CompactOptions, CompactSummary, DeltaMode, backfill_events, compact_events};
 #[cfg(any(test, feature = "unchecked-open"))]
 pub use convert_bodies::testing::{
-    downgrade_to_v39, downgrade_to_v40, downgrade_to_v41, downgrade_to_v42,
+    downgrade_to_v39, downgrade_to_v40, downgrade_to_v41, downgrade_to_v42, downgrade_to_v43,
 };
 pub use convert_bodies::{
     Analysis, CanonicalizedRuns, ConvertBodiesFailure, ConvertBodiesOptions, ConvertBodiesSummary,

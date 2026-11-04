@@ -17,12 +17,12 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   convert-bodies [--apply] [--backup <new-path>] [--event-batch-rows <1..100000>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
-convert-bodies: one-time conversion of a database of version 33 to 42 to the current format: the conversations in
+convert-bodies: one-time conversion of a database of version 33 to 43 to the current format: the conversations in
   run_contexts.messages_json (version 33 to 39; migrations 34 to 39 are applied first, after the backup) become
   run_messages and content_blobs, each provenance map becomes run_message_provenance rows, the two old columns are
-  removed, and the long strings of Message, compaction and Tool events become blobs. A regular version 40 database
-  (messages already rows; a version 41 one only adds the lane ledger) gets its maps and events converted; a
-  version 42 one only its events. Stop ALL evorch
+  removed, and the long strings of Message, compaction and Tool events become blobs. A regular version 40 to 42
+  database (messages already rows; 41 and 42 only add the lane ledger and the memory favorite flag) gets its maps and
+  events converted; a version 43 one only its events. Stop ALL evorch
   processes first.
   Default is a read-only preview (needs the .maintenance-lease file next to the database and an empty WAL; a
   non-empty WAL is always refused). --apply takes a verified backup, reclaims rows of deleted runs, converts each
