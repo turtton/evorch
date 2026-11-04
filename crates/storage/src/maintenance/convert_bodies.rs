@@ -834,7 +834,8 @@ fn run(
     summary.blobs_created = blobs_after.saturating_sub(blobs_before);
     summary.blob_bytes_created = blob_bytes_after.saturating_sub(blob_bytes_before);
     summary.references_created = references_after.saturating_sub(references_before);
-    summary.events.references_created = summary.references_created;
+    summary.events.references_created =
+        count(&conn, "SELECT COUNT(*) FROM content_blob_refs_event")?;
 
     progress.enter("verify");
     hook(Point::BeforeVerify, &conn)?;

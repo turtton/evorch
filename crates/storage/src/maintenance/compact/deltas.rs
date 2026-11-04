@@ -312,7 +312,7 @@ fn flush(
         // written in a write transaction: the row keeps its id, time and charge.
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        crate::repo::event::rewrite_payload(
+        let written = crate::repo::event::rewrite_payload(
             &tx,
             pending.first.id,
             "Message",
@@ -331,6 +331,8 @@ fn flush(
             ));
         }
         tx.commit()?;
+        stage.blobs_created += written.created.count;
+        stage.blob_stored_bytes_created += written.created.stored_bytes;
     }
     Ok(())
 }

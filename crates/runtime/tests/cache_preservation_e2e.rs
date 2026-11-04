@@ -1368,6 +1368,15 @@ async fn a_version_40_database_converted_for_its_events_resumes_with_the_interru
     }
 }
 
+#[tokio::test]
+async fn a_version_41_database_with_the_lane_ledger_converts_its_maps_and_events_and_resumes() {
+    // Version 41 only added the lane ledger to version 40: the maps are still a column and
+    // the events plain, and the same command converts both before the restore.
+    for (compacted, above_threshold) in [(false, false), (true, false), (true, true)] {
+        resume_unfinished_model_request(compacted, true, above_threshold, Some(41)).await;
+    }
+}
+
 /// A runtime composed again on the same project, as a new process would. With `storage`
 /// it restores from that store; without, it holds no connection to the database.
 fn recompose_runtime(
@@ -1509,10 +1518,10 @@ async fn resume_unfinished_model_request(
         // that no process holds the database, as the command requires.
         recompose_runtime(&mut harness, &config, None);
         storage.close();
-        if source == 39 {
-            storage::maintenance::downgrade_to_v39(&config.db_path).unwrap();
-        } else {
-            storage::maintenance::downgrade_to_v40(&config.db_path).unwrap();
+        match source {
+            39 => storage::maintenance::downgrade_to_v39(&config.db_path).unwrap(),
+            40 => storage::maintenance::downgrade_to_v40(&config.db_path).unwrap(),
+            _ => storage::maintenance::downgrade_to_v41(&config.db_path).unwrap(),
         }
         // A normal start refuses the file and says to convert it, until it is converted.
         let refused = storage::Database::open(&config).unwrap_err();
