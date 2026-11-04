@@ -57,6 +57,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     // Tokenized events are written back as plain ones while their blobs still exist.
     resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
@@ -149,18 +150,36 @@ fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Rewrites `path` as a version 40 database: what a build before the event body format
-/// wrote. Tokenized events are written back as plain ones, and the event columns, the
-/// reference table and the accounting triggers of the format are removed; the runs stay
-/// as they are.
+/// Rewrites `path` as a version 40 database: a version 41 one (see [`downgrade_to_v41`])
+/// whose provenance maps are one column again; the runs stay as they are.
 ///
 /// # Errors
 /// Fails when the database cannot be read or rewritten.
 pub fn downgrade_to_v40(path: &Path) -> Result<(), StorageError> {
+    downgrade_to_v41(path)?;
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+    conn.pragma_update(None, "user_version", 40)?;
+    conn.execute_batch("COMMIT")?;
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+/// Rewrites `path` as a version 41 database: what a build before the event body format
+/// wrote. Tokenized events are written back as plain ones, and the event columns, the
+/// reference table and the accounting triggers of the format are removed; the runs and
+/// the provenance rows stay as they are.
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v41(path: &Path) -> Result<(), StorageError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     let fresh = Connection::open_in_memory()?;
-    for migration in &MIGRATIONS[..40] {
+    for migration in &MIGRATIONS[..41] {
         fresh.execute_batch(migration)?;
     }
     let accounting: Vec<String> = fresh
@@ -196,7 +215,7 @@ pub fn downgrade_to_v40(path: &Path) -> Result<(), StorageError> {
          UPDATE sessions SET total_event_bytes = COALESCE( \
              (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
     )?;
-    conn.pragma_update(None, "user_version", 40)?;
+    conn.pragma_update(None, "user_version", 41)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())

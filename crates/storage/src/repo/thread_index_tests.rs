@@ -423,6 +423,7 @@ fn snapshot_and_note_faults_at_every_boundary_leave_the_old_bundle() {
     for table in [
         "run_contexts",
         "run_context_provenance",
+        "run_message_provenance",
         "thread_runs",
         "thread_index_runs",
     ] {
@@ -1878,4 +1879,384 @@ fn a_thread_unarchived_during_the_backfill_keeps_its_remaining_runs() {
         0,
         "the rest of an unarchived thread stays indexed"
     );
+}
+
+// ---- Provenance map rows (PR A2c) ----
+
+fn provenance_rows(conn: &Connection, run_id: &str) -> Vec<(i64, i64, String)> {
+    conn.prepare(
+        "SELECT map_index, id, entry_json FROM run_message_provenance \
+         WHERE run_id = ?1 ORDER BY map_index",
+    )
+    .unwrap()
+    .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+fn message_source(run_id: &str, ordinal: usize) -> CopySource {
+    CopySource::Message {
+        run_id: run_id.into(),
+        snapshot_revision: 3,
+        ordinal,
+        block_index: 0,
+    }
+}
+
+/// A map with every origin shape, an excluded block, and an entry order that is not the
+/// raw order: what a typed map can hold that a native one cannot.
+fn varied_map(count: usize) -> ProvenanceMap {
+    let origin = |index: usize| match index % 4 {
+        0 => BlockOrigin::Native,
+        1 => BlockOrigin::ContinuityCopy {
+            source: message_source("run-src", index),
+        },
+        2 => BlockOrigin::ForkCopy {
+            source: CopySource::WorkingNote {
+                run_id: "run-src".into(),
+                note_seq: 4,
+            },
+            original_origin: Box::new(BlockOrigin::ContinuityCopy {
+                source: CopySource::FrozenHistory {
+                    history_source_id: "frozen-1".into(),
+                    record_index: 9,
+                },
+            }),
+            boundary: ForkBoundary {
+                run_id: "run-src".into(),
+                snapshot_revision: 3,
+                context_len: 7,
+            },
+        },
+        _ => BlockOrigin::Native,
+    };
+    ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: count + 1,
+        checkpoint_count: 2,
+        messages: (0..count)
+            .map(|index| MessageProvenance {
+                // The first raw index is the System message the map skips.
+                raw_index: index + 1,
+                ordinal: index,
+                blocks: vec![
+                    BlockProvenance {
+                        block_index: 0,
+                        origin: origin(index),
+                        excluded_reason: (index % 5 == 4)
+                            .then_some(ExcludedReason::GeneratedBoundary),
+                    },
+                    BlockProvenance {
+                        block_index: 1,
+                        origin: BlockOrigin::Native,
+                        excluded_reason: None,
+                    },
+                ],
+            })
+            .collect(),
+    }
+}
+
+fn with_status(
+    mut write: SnapshotWrite,
+    status: ProvenanceStatus,
+    map: ProvenanceMap,
+) -> SnapshotWrite {
+    write.status = status;
+    write.map = map;
+    write
+}
+
+fn conversation(count: usize) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|index| {
+                text(
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &format!("m{index}"),
+                )
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn every_kind_of_map_reads_back_as_the_map_that_was_saved() {
+    // Given: maps of every shape, each saved under a status it may carry.
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let unknown = |reason| ProvenanceStatus::Unknown { reason };
+    let incomplete = ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: 9,
+        checkpoint_count: 0,
+        // Repeated and out-of-order raw indexes, and an entry without blocks.
+        messages: vec![
+            MessageProvenance {
+                raw_index: 5,
+                ordinal: 0,
+                blocks: Vec::new(),
+            },
+            MessageProvenance {
+                raw_index: 5,
+                ordinal: 0,
+                blocks: Vec::new(),
+            },
+            MessageProvenance {
+                raw_index: 2,
+                ordinal: 7,
+                blocks: Vec::new(),
+            },
+        ],
+    };
+    let empty = ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: 0,
+        checkpoint_count: 0,
+        messages: Vec::new(),
+    };
+    let messages = conversation(6);
+    let cases = [
+        ("native", verified("run-native", &messages, 0, 10)),
+        (
+            "system-mixed",
+            verified(
+                "run-system",
+                &json!([
+                    text("system", "rules"),
+                    text("user", "a"),
+                    text("assistant", "b")
+                ]),
+                0,
+                10,
+            ),
+        ),
+        (
+            "varied",
+            with_status(
+                verified("run-varied", &messages, 2, 10),
+                unknown(ProvenanceUnknownReason::IncompleteMap),
+                varied_map(6),
+            ),
+        ),
+        (
+            "incomplete",
+            with_status(
+                verified("run-incomplete", &messages, 0, 10),
+                unknown(ProvenanceUnknownReason::IncompleteMap),
+                incomplete,
+            ),
+        ),
+        (
+            "empty",
+            with_status(
+                verified("run-empty", &json!([]), 0, 10),
+                unknown(ProvenanceUnknownReason::LegacyUnproven),
+                empty,
+            ),
+        ),
+    ];
+
+    // When: they are saved and loaded.
+    for (name, write) in &cases {
+        save(&conn, write);
+        let loaded = bundle(&conn, &write.record.run_id);
+        let provenance = loaded.provenance.expect(name);
+
+        // Then: the status and the map are those that were saved, entry for entry.
+        assert_eq!(provenance.map, write.map, "{name}");
+        assert_eq!(provenance.status, write.status, "{name}");
+        assert_eq!(
+            provenance_rows(&conn, &write.record.run_id).len(),
+            write.map.messages.len(),
+            "{name}: one row per entry"
+        );
+    }
+}
+
+#[test]
+fn a_changed_map_writes_only_the_entries_that_differ() {
+    // Given: a saved conversation of ten messages with a varied map.
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let messages = conversation(10);
+    let first = with_status(
+        verified("run-a", &messages, 2, 10),
+        ProvenanceStatus::Unknown {
+            reason: ProvenanceUnknownReason::IncompleteMap,
+        },
+        varied_map(10),
+    );
+    save(&conn, &first);
+    let stored = provenance_rows(&conn, "run-a");
+    assert_eq!(stored.len(), 10);
+
+    // When/Then: the same map again keeps every row (ids and text).
+    let mut again = first.clone();
+    again.record.updated_at_ns = 11;
+    save(&conn, &again);
+    assert_eq!(provenance_rows(&conn, "run-a"), stored);
+
+    // One more message: the old rows are kept, one is added.
+    let longer = conversation(11);
+    let mut appended = with_status(
+        verified("run-a", &longer, 2, 12),
+        first.status.clone(),
+        varied_map(11),
+    );
+    appended.expected_snapshot_revision = None;
+    save(&conn, &appended);
+    let rows = provenance_rows(&conn, "run-a");
+    assert_eq!(&rows[..10], &stored[..]);
+    assert_eq!(rows.len(), 11);
+    assert_eq!(bundle(&conn, "run-a").provenance.unwrap().map, appended.map);
+
+    // One entry changed: only its row differs, and keeps its id.
+    let mut changed = appended.clone();
+    changed.record.updated_at_ns = 13;
+    changed.map.messages[3].blocks[1].excluded_reason = Some(ExcludedReason::GeneratedBoundary);
+    save(&conn, &changed);
+    let after = provenance_rows(&conn, "run-a");
+    let differing: Vec<usize> = (0..11)
+        .filter(|&index| after[index] != rows[index])
+        .collect();
+    assert_eq!(differing, vec![3]);
+    assert_eq!(after[3].1, rows[3].1, "the row is updated in place");
+    assert_eq!(bundle(&conn, "run-a").provenance.unwrap().map, changed.map);
+
+    // A rewind to four messages removes the tail and keeps the rest.
+    let rewound = with_status(
+        verified("run-a", &conversation(4), 2, 14),
+        first.status.clone(),
+        varied_map(4),
+    );
+    save(&conn, &rewound);
+    let rows = provenance_rows(&conn, "run-a");
+    assert_eq!(rows.len(), 4);
+    assert_eq!(bundle(&conn, "run-a").provenance.unwrap().map, rewound.map);
+
+    // A fork is another run with its own rows; the first is untouched.
+    let fork = with_status(
+        verified("run-fork", &conversation(3), 2, 15),
+        first.status.clone(),
+        varied_map(3),
+    );
+    save(&conn, &fork);
+    assert_eq!(provenance_rows(&conn, "run-a"), rows);
+    assert_eq!(provenance_rows(&conn, "run-fork").len(), 3);
+}
+
+#[test]
+fn a_conflicting_save_leaves_every_provenance_row_as_it_was() {
+    let dir = TempDir::new().unwrap();
+    let conn = open(&dir);
+    let first = with_status(
+        verified("run-a", &conversation(5), 2, 10),
+        ProvenanceStatus::Unknown {
+            reason: ProvenanceUnknownReason::IncompleteMap,
+        },
+        varied_map(5),
+    );
+    save(&conn, &first);
+    let rows = provenance_rows(&conn, "run-a");
+    let before = bundle(&conn, "run-a");
+
+    let mut stale = with_status(
+        verified("run-a", &conversation(8), 2, 20),
+        first.status.clone(),
+        varied_map(8),
+    );
+    stale.expected_snapshot_revision = Some(0);
+    assert_eq!(
+        SqliteSnapshotStore::new(&conn).save_snapshot_bundle(&stale),
+        Err(SnapshotApiError::RevisionConflict)
+    );
+    assert_eq!(provenance_rows(&conn, "run-a"), rows);
+    assert_eq!(bundle(&conn, "run-a"), before);
+}
+
+#[test]
+fn rows_that_do_not_make_a_map_are_never_read_as_verified() {
+    // Each damage is applied to a fresh copy of a saved, verified run.
+    type Damage = fn(&Connection);
+    let damages: [(&str, Damage); 7] = [
+        ("a missing middle row", |conn| {
+            conn.execute("DELETE FROM run_message_provenance WHERE map_index = 2", [])
+                .unwrap();
+        }),
+        ("a missing last row", |conn| {
+            conn.execute("DELETE FROM run_message_provenance WHERE map_index = 4", [])
+                .unwrap();
+        }),
+        ("a row beyond the header's count", |conn| {
+            conn.execute(
+                "UPDATE run_context_provenance SET map_message_count = map_message_count - 1",
+                [],
+            )
+            .unwrap();
+        }),
+        ("a header that counts more rows", |conn| {
+            conn.execute(
+                "UPDATE run_context_provenance SET map_message_count = map_message_count + 1",
+                [],
+            )
+            .unwrap();
+        }),
+        ("text that its hash does not describe", |conn| {
+            conn.execute(
+                "UPDATE run_message_provenance SET entry_json = replace(entry_json, 'native', 'Native') \
+                 WHERE map_index = 1",
+                [],
+            )
+            .unwrap();
+        }),
+        ("a length that is not the text's", |conn| {
+            conn.execute(
+                "UPDATE run_message_provenance SET entry_len = entry_len + 1 WHERE map_index = 0",
+                [],
+            )
+            .unwrap();
+        }),
+        ("text that is not a message provenance", |conn| {
+            use sha2::{Digest, Sha256};
+            let text = "{\"raw_index\":\"one\"}";
+            conn.execute(
+                "UPDATE run_message_provenance SET entry_json = ?1, entry_len = ?2, \
+                 entry_sha256 = ?3 WHERE map_index = 3",
+                params![
+                    text,
+                    text.len() as i64,
+                    Sha256::digest(text.as_bytes()).as_slice()
+                ],
+            )
+            .unwrap();
+        }),
+    ];
+    for (name, damage) in damages {
+        let dir = TempDir::new().unwrap();
+        let conn = open(&dir);
+        let write = verified("run-a", &conversation(5), 0, 10);
+        save(&conn, &write);
+        assert!(matches!(
+            bundle(&conn, "run-a").provenance.unwrap().status,
+            ProvenanceStatus::Verified { .. }
+        ));
+        let body = bundle(&conn, "run-a").record;
+
+        damage(&conn);
+
+        // The sidecar can only block indexing; the snapshot itself still loads.
+        let loaded = bundle(&conn, "run-a");
+        let provenance = loaded.provenance.unwrap();
+        assert_eq!(
+            provenance.status,
+            ProvenanceStatus::Unknown {
+                reason: ProvenanceUnknownReason::UnsupportedVersion
+            },
+            "{name}"
+        );
+        assert!(provenance.map.messages.is_empty(), "{name}");
+        assert_eq!(loaded.record, body, "{name}");
+    }
 }

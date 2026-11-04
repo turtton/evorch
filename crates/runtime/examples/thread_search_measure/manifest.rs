@@ -18,6 +18,7 @@ pub fn seed_identity(seed: &Path) -> Result<String> {
     for query in [
         "SELECT * FROM run_contexts ORDER BY run_id",
         "SELECT * FROM run_context_provenance ORDER BY run_id",
+        "SELECT * FROM run_message_provenance ORDER BY id",
         "SELECT * FROM run_ledger ORDER BY seq",
         "SELECT * FROM threads ORDER BY thread_id",
         "SELECT * FROM thread_runs ORDER BY run_id",

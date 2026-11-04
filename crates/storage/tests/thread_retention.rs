@@ -119,8 +119,14 @@ impl Fixture {
         .unwrap();
         c.execute(
             "INSERT INTO run_context_provenance(run_id, snapshot_revision, snapshot_sha256, \
-             format_version, status, reason_code, evidence_json, map_json) \
-             VALUES (?1, 0, 'x', 1, 'unknown', 'missing_sidecar', NULL, '{}')",
+             format_version, status, reason_code, evidence_json) \
+             VALUES (?1, 0, 'x', 1, 'unknown', 'missing_sidecar', NULL)",
+            [id],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, \
+             entry_json) VALUES (?1, 0, zeroblob(32), 2, '{}')",
             [id],
         )
         .unwrap();
@@ -426,6 +432,7 @@ const FAMILY_RUN_TABLES: &[(&str, &str)] = &[
     ("events", "run_id"),
     ("run_contexts", "run_id"),
     ("run_context_provenance", "run_id"),
+    ("run_message_provenance", "run_id"),
     ("run_ledger", "run_id"),
     ("host_input_receipts", "run_id"),
     ("review_evidence", "target_run_id"),
@@ -1152,7 +1159,11 @@ fn the_fence_rejects_writers_but_not_deletes_after_confirmation() {
     );
     reject("INSERT INTO run_ledger(run_id, body, created_at_ns) VALUES ('rp', 'b', 1);");
     reject(
-        "INSERT INTO run_context_provenance(run_id, snapshot_revision, snapshot_sha256, format_version, status, reason_code, evidence_json, map_json) VALUES ('rp2', 0, 'x', 1, 'unknown', 'missing_sidecar', NULL, '{}');",
+        "INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) VALUES ('rp', 9, zeroblob(32), 2, '{}');",
+    );
+    reject("UPDATE run_message_provenance SET entry_len = 3 WHERE run_id = 'rp';");
+    reject(
+        "INSERT INTO run_context_provenance(run_id, snapshot_revision, snapshot_sha256, format_version, status, reason_code, evidence_json) VALUES ('rp2', 0, 'x', 1, 'unknown', 'missing_sidecar', NULL);",
     );
     reject(
         "INSERT INTO host_input_receipts(prompt_id, run_id, root_run_id, text, status, accepted_at_ns, status_at_ns) VALUES ('n', 'rp', 'rp', 't', 'accepted', 1, 1);",
@@ -3386,4 +3397,60 @@ fn the_fence_covers_message_rows_and_a_deleted_runs_conversation_stays_hidden() 
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn provenance_entries_are_reclaimed_in_bounded_steps_and_before_their_header() {
+    // Given: a confirmed family whose first run has 1,200 provenance entries.
+    let f = Fixture::new();
+    build_family(&f);
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1200) \
+         INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         SELECT 'rp', x, zeroblob(32), 2, '{}' FROM n;",
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp'"),
+        1201
+    );
+    drop(confirm_family(&f));
+
+    // When: the writer reclaims it one transaction at a time.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+    let mut previous = 1201;
+    let mut steps_with_entries = 0;
+    for _ in 0..10_000 {
+        let progress = handle
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 1,
+            })
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let entries = f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp'");
+        let header = f.count("SELECT COUNT(*) FROM run_context_provenance WHERE run_id = 'rp'");
+
+        // Then: a step deletes at most the row budget of entries, and the header
+        // outlives every entry.
+        assert!(
+            previous - entries <= 500,
+            "a step deleted {} entries",
+            previous - entries
+        );
+        assert!(
+            entries == 0 || header == 1,
+            "the header was deleted before its entries"
+        );
+        steps_with_entries += i64::from(entries != previous);
+        previous = entries;
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+    assert!(
+        steps_with_entries >= 3,
+        "1,201 entries need three steps at 500 rows each"
+    );
+    assert_eq!(family_residue(&f), vec![]);
 }

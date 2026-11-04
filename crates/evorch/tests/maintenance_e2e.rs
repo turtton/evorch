@@ -246,7 +246,10 @@ fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_
         );
         let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(summary["already_converted"], true);
-        assert_eq!(summary["scope"], "run_contexts,events");
+        assert_eq!(
+            summary["scope"],
+            "run_contexts, run_context_provenance, events"
+        );
         assert!(summary["backup"].is_null());
     }
 

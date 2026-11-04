@@ -1487,7 +1487,7 @@ fn an_older_database_and_unconvertible_data_in_a_version_33_one_are_refused_unch
     // When/Then: both modes refuse it and nothing changes.
     for run in [preview(&path), apply(&path)] {
         let failure = run.unwrap_err();
-        assert!(failure.detail.contains("version 33 to 40"), "{failure}");
+        assert!(failure.detail.contains("version 33 to 39"), "{failure}");
         assert!(!failure.restore_required);
     }
     assert_eq!(files(&path), before);
@@ -1506,4 +1506,531 @@ fn an_older_database_and_unconvertible_data_in_a_version_33_one_are_refused_unch
     assert_eq!(failure.stage, "analyze");
     assert!(failure.backup.is_none() && !failure.restore_required);
     assert_eq!(files(&path), before);
+}
+
+// ---- Provenance maps (PR A2c) ----
+
+use crate::thread_index::{
+    BlockOrigin, BlockProvenance, CopySource, ExcludedReason, MessageProvenance,
+    PROVENANCE_FORMAT_VERSION, ProvenanceEvidence, ProvenanceMap, ProvenanceStatus,
+    ProvenanceUnknownReason,
+};
+
+fn entry(raw_index: usize, ordinal: usize, origin: BlockOrigin) -> MessageProvenance {
+    MessageProvenance {
+        raw_index,
+        ordinal,
+        blocks: vec![BlockProvenance {
+            block_index: 0,
+            origin,
+            excluded_reason: (ordinal == 2).then_some(ExcludedReason::GeneratedBoundary),
+        }],
+    }
+}
+
+/// A native map of `count` messages after a System one.
+fn native_map(count: usize) -> ProvenanceMap {
+    ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: count + 1,
+        checkpoint_count: 0,
+        messages: (0..count)
+            .map(|ordinal| entry(ordinal + 1, ordinal, BlockOrigin::Native))
+            .collect(),
+    }
+}
+
+/// An incomplete map: a repeated raw index, a copy, an order that is not the raw order.
+fn incomplete_map() -> ProvenanceMap {
+    ProvenanceMap {
+        version: PROVENANCE_FORMAT_VERSION,
+        raw_message_count: 9,
+        checkpoint_count: 1,
+        messages: vec![
+            entry(5, 0, BlockOrigin::Native),
+            entry(
+                5,
+                1,
+                BlockOrigin::ContinuityCopy {
+                    source: CopySource::WorkingNote {
+                        run_id: "run-x".into(),
+                        note_seq: 2,
+                    },
+                },
+            ),
+            entry(2, 2, BlockOrigin::Native),
+        ],
+    }
+}
+
+/// What the old column held for each run, and the status columns beside it.
+fn insert_sidecar(
+    conn: &Connection,
+    run_id: &str,
+    status: &ProvenanceStatus,
+    revision: i64,
+    map_json: &str,
+) {
+    let (status_name, reason, evidence) = match status {
+        ProvenanceStatus::Verified { evidence } => (
+            "verified",
+            None,
+            Some(serde_json::to_string(evidence).unwrap()),
+        ),
+        ProvenanceStatus::Unknown { reason } => (
+            "unknown",
+            Some(
+                serde_json::to_value(reason)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            ),
+            None,
+        ),
+    };
+    conn.execute(
+        "INSERT INTO run_context_provenance(run_id, snapshot_revision, snapshot_sha256, \
+         format_version, status, reason_code, evidence_json, map_json) \
+         VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            revision,
+            format!("sha-{run_id}"),
+            status_name,
+            reason,
+            evidence,
+            map_json
+        ],
+    )
+    .unwrap();
+}
+
+/// The seeded runs with a sidecar each: complete, incomplete (unknown) and empty.
+pub(super) fn seeded_with_maps() -> (
+    tempfile::TempDir,
+    PathBuf,
+    Vec<(&'static str, ProvenanceStatus, ProvenanceMap)>,
+) {
+    let (dir, path, _runs) = seeded();
+    let sidecars = vec![
+        (
+            "run-b-small",
+            ProvenanceStatus::Verified {
+                evidence: ProvenanceEvidence::CompletePositionMap,
+            },
+            native_map(1),
+        ),
+        (
+            "run-big",
+            ProvenanceStatus::Unknown {
+                reason: ProvenanceUnknownReason::IncompleteMap,
+            },
+            incomplete_map(),
+        ),
+        (
+            "run-d-shares",
+            ProvenanceStatus::Unknown {
+                reason: ProvenanceUnknownReason::LegacyUnproven,
+            },
+            ProvenanceMap {
+                version: PROVENANCE_FORMAT_VERSION,
+                raw_message_count: 0,
+                checkpoint_count: 0,
+                messages: Vec::new(),
+            },
+        ),
+    ];
+    let conn = Connection::open(&path).unwrap();
+    for (index, (run, status, map)) in sidecars.iter().enumerate() {
+        insert_sidecar(
+            &conn,
+            run,
+            status,
+            i64::try_from(index).unwrap() + 4,
+            &serde_json::to_string(map).unwrap(),
+        );
+    }
+    drop(conn);
+    (dir, path, sidecars)
+}
+
+fn sidecar_columns(path: &Path) -> Vec<String> {
+    let conn = Connection::open(path).unwrap();
+    conn.prepare("SELECT name FROM pragma_table_info('run_context_provenance')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+type SidecarIdentity = (
+    String,
+    i64,
+    String,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+/// Everything of the sidecars except their maps, in `run_id` order.
+fn sidecar_identities(conn: &Connection) -> Vec<SidecarIdentity> {
+    conn.prepare(
+        "SELECT run_id, snapshot_revision, snapshot_sha256, format_version, status, \
+         reason_code, evidence_json FROM run_context_provenance ORDER BY run_id",
+    )
+    .unwrap()
+    .query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+#[test]
+fn provenance_maps_become_rows_with_their_status_and_entries_unchanged() {
+    // Given: a version 39 database whose runs have a complete, an incomplete and an empty map.
+    let (_dir, path, sidecars) = seeded_with_maps();
+    let before = sidecar_identities(&Connection::open(&path).unwrap());
+
+    // When: it is converted.
+    let summary = apply(&path).unwrap();
+
+    // Then: every map is rows, the old column is gone, and the sidecars read back as saved.
+    assert_eq!(summary.converted_provenance_maps, 3);
+    assert_eq!(summary.provenance_entries_created, 4);
+    assert_eq!((summary.source_schema, summary.target_schema), (39, LATEST));
+    assert!(summary.stage_elapsed_seconds.contains_key("provenance"));
+    assert!(summary.peak_provenance_wal_frames > 0);
+    assert!(!sidecar_columns(&path).contains(&"map_json".to_owned()));
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        sidecar_identities(&conn),
+        before,
+        "no revision, status or evidence moved"
+    );
+    for (run, status, map) in &sidecars {
+        let sidecar = crate::repo::thread_index::read_sidecar(&conn, run)
+            .unwrap()
+            .unwrap();
+        assert_eq!((&sidecar.status, &sidecar.map), (status, map), "{run}");
+    }
+    assert_eq!(
+        single(&conn, "SELECT COUNT(*) FROM run_message_provenance"),
+        4
+    );
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM thread_index_runs WHERE source_revision > 1"
+        ),
+        0,
+        "the index's source revision was not advanced"
+    );
+}
+
+#[test]
+fn a_provenance_map_that_is_not_a_typed_map_is_refused_before_anything_changes() {
+    // Given: one sidecar whose map is valid JSON of another shape.
+    let (_dir, path, _sidecars) = seeded_with_maps();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE run_context_provenance SET map_json = '{\"version\":1}' WHERE run_id = 'run-big'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let before = files(&path);
+
+    // When/Then: preview reports it and apply refuses; neither changes anything, and no
+    // map is replaced by an empty one.
+    let report = preview(&path).unwrap();
+    let analysis = report.analysis.as_ref().unwrap();
+    assert_eq!(analysis.unconvertible_provenance, 1);
+    assert_eq!(analysis.problems[0].run_id, "run-big");
+    assert!(report.message.contains("would refuse"));
+    let failure = apply(&path).unwrap_err();
+    assert!(failure.detail.contains("provenance maps"), "{failure}");
+    assert!(!failure.restore_required);
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn a_stop_in_the_middle_of_the_maps_is_refused_and_recovered_from_the_backup() {
+    // Given: a failure at the commit of the second map.
+    let (_dir, path, sidecars) = seeded_with_maps();
+    let mut seen = 0;
+    let failure = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+            ..Default::default()
+        },
+        &mut |at, _| {
+            if at == Point::Provenance(ProvenancePoint::BeforeCommit) {
+                seen += 1;
+                if seen == 2 {
+                    return Err(StorageError::Serialization("injected".into()));
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
+    // Then: the first map is rows, the second is untouched, and nothing is published.
+    assert_eq!(failure.stage, "provenance");
+    assert!(failure.restore_required);
+    assert_eq!(failure.run_id.as_deref(), Some("run-big"));
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT map_message_count FROM run_context_provenance WHERE run_id = 'run-b-small'"
+        ),
+        1
+    );
+    assert_eq!(
+        single(
+            &conn,
+            "SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'run-big'"
+        ),
+        0
+    );
+    assert_eq!(version(&path), 39);
+    drop(conn);
+    // A normal start and a rerun both refuse the half converted database.
+    assert!(
+        Database::open(&StorageConfig {
+            db_path: path.clone(),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    assert!(apply(&path).is_err());
+
+    // When: the verified backup is restored, the command starts over.
+    let backup = failure.backup.clone().unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut target = path.clone().into_os_string();
+        target.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(target));
+    }
+    fs::copy(&backup, &path).unwrap();
+    lease(&path);
+    let summary = apply(&path).unwrap();
+
+    // Then: it completes with every map.
+    assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
+    assert_eq!(version(&path), LATEST);
+}
+
+#[test]
+fn a_version_40_database_converts_only_its_maps_and_leaves_the_runs_as_they_are() {
+    // Given: a database converted to the current format, then taken back to version 40
+    // (messages are rows, the maps are one column again).
+    let (_dir, path, sidecars) = seeded_with_maps();
+    apply(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(crate::migrations::UNDO_V42).unwrap();
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))
+        .unwrap();
+    conn.pragma_update(None, "user_version", 40).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let runs_before: Vec<(i64, String, i64, Vec<u8>)> = conn
+        .prepare("SELECT m.id, m.run_id, m.ordinal, m.msg_sha256 FROM run_messages m ORDER BY m.id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let headers_before = single(&conn, "SELECT SUM(header_rev) FROM run_contexts");
+    drop(conn);
+    lease(&path);
+
+    // When: it is converted.
+    let summary = apply(&path).unwrap();
+
+    // Then: no run is converted again (ids, hashes and header revisions are those of
+    // before), and every map is rows.
+    assert_eq!((summary.source_schema, summary.target_schema), (40, LATEST));
+    assert_eq!(summary.converted_runs, 0);
+    assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
+    assert_eq!(version(&path), LATEST);
+    let conn = Connection::open(&path).unwrap();
+    let runs_after: Vec<(i64, String, i64, Vec<u8>)> = conn
+        .prepare("SELECT m.id, m.run_id, m.ordinal, m.msg_sha256 FROM run_messages m ORDER BY m.id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(runs_after, runs_before);
+    assert_eq!(
+        single(&conn, "SELECT SUM(header_rev) FROM run_contexts"),
+        headers_before
+    );
+    for (run, status, map) in &sidecars {
+        let sidecar = crate::repo::thread_index::read_sidecar(&conn, run)
+            .unwrap()
+            .unwrap();
+        assert_eq!((&sidecar.status, &sidecar.map), (status, map), "{run}");
+    }
+    drop(conn);
+
+    // And: a normal start now works and restores every run it held.
+    let database = crate::Database::open(&crate::StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    for (run, _, _) in &sidecars {
+        assert!(database.run_context(run).unwrap().is_some(), "{run}");
+    }
+}
+
+#[test]
+fn a_version_40_database_that_is_not_converted_yet_refuses_a_normal_start() {
+    // Given: a converted database taken back to version 40 (maps are one column again).
+    let (_dir, path, _sidecars) = seeded_with_maps();
+    apply(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(crate::migrations::UNDO_V42).unwrap();
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))
+        .unwrap();
+    conn.pragma_update(None, "user_version", 40).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+
+    // When/Then: a normal start fails closed and names the conversion command.
+    let error = crate::Database::open(&crate::StorageConfig {
+        db_path: path,
+        ..Default::default()
+    })
+    .unwrap_err();
+    assert!(
+        matches!(error, StorageError::ConversionRequired { found: 40, .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_half_converted_version_40_database_is_refused() {
+    // Given: a version 40 database that already has the provenance tables.
+    let (_dir, path, _sidecars) = seeded_with_maps();
+    apply(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(crate::migrations::UNDO_V42).unwrap();
+    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))
+        .unwrap();
+    conn.execute_batch(crate::migrations::V41_PREPARE).unwrap();
+    conn.pragma_update(None, "user_version", 40).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+    lease(&path);
+    let before = files(&path);
+
+    // When/Then: both modes refuse it, and nothing changes.
+    for run in [preview(&path), apply(&path)] {
+        let failure = run.unwrap_err();
+        assert!(failure.detail.contains("did not finish"), "{failure}");
+        assert!(!failure.restore_required);
+    }
+    assert_eq!(files(&path), before);
+}
+
+#[test]
+fn one_map_writes_a_log_in_proportion_to_the_entries_it_stores() {
+    // Given: version 39 runs with maps of 1, 2,000, 10,000 and no entries.
+    let (_dir, path, _runs) = seeded();
+    let sizes = [
+        ("run-a-empty", 1_usize),
+        ("run-b-small", 2_000),
+        ("run-big", 10_000),
+        ("run-d-shares", 0),
+    ];
+    let conn = Connection::open(&path).unwrap();
+    let mut entry_bytes = BTreeMap::new();
+    for (run, count) in sizes {
+        let map = native_map(count);
+        let bytes: usize = map
+            .messages
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap().len())
+            .sum();
+        entry_bytes.insert(run, (count as u64, bytes as u64));
+        insert_sidecar(
+            &conn,
+            run,
+            &ProvenanceStatus::Unknown {
+                reason: ProvenanceUnknownReason::IncompleteMap,
+            },
+            1,
+            &serde_json::to_string(&map).unwrap(),
+        );
+    }
+    let page: u64 = conn
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .unwrap();
+    drop(conn);
+
+    // When: converted, with the frames of each map's transaction read after it commits.
+    let mut frames_seen = Vec::new();
+    let summary = convert_with(
+        &path,
+        &ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+            ..Default::default()
+        },
+        &mut |point, _| {
+            if let Point::AfterProvenance { frames } = point {
+                frames_seen.push(frames);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    // Then: a map's transaction wrote at most ceil(2 * S / page) + 256 frames, with S the
+    // entry text, a generous allowance per row (columns and the unique index) and the
+    // header; the figure is the length's, not a function of anything else.
+    let order: Vec<&str> = {
+        let mut runs: Vec<&str> = sizes.iter().map(|(run, _)| *run).collect();
+        runs.sort_unstable();
+        runs
+    };
+    assert_eq!(frames_seen.len(), order.len());
+    for (run, frames) in order.iter().zip(&frames_seen) {
+        let (count, bytes) = entry_bytes[run];
+        let changed = bytes + 160 * count + 2_048;
+        let budget = (2 * changed).div_ceil(page) + 256;
+        assert!(
+            *frames <= budget,
+            "map of {run} wrote {frames} frames, budget {budget} (S = {changed})"
+        );
+    }
+    assert_eq!(
+        summary.peak_provenance_wal_frames,
+        *frames_seen.iter().max().unwrap()
+    );
 }

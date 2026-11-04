@@ -132,6 +132,8 @@ const RUN_TABLES: &[(&str, &str)] = &[
         "run_id = ?1 OR question_id IN (SELECT id FROM user_questions WHERE run_id = ?1)",
     ),
     ("user_questions", "run_id = ?1"),
+    // The message rows name the header in a RESTRICT foreign key: they go first.
+    ("run_message_provenance", "run_id = ?1"),
     ("run_context_provenance", "run_id = ?1"),
 ];
 
@@ -423,13 +425,29 @@ fn run_tables(
         )?;
     }
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
-    let deleted = tx.execute(
-        &format!(
+    let mut bytes = 0_u64;
+    let deleted = if table == "run_message_provenance" {
+        // The stored entries have a size of their own, which the step's work counts.
+        let mut statement = tx.prepare(&format!(
             "DELETE FROM {table} WHERE rowid IN \
-             (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"
-        ),
-        params![run, limit],
-    )?;
+             (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2) RETURNING entry_len"
+        ))?;
+        let mut rows = statement.query(params![run, limit])?;
+        let mut deleted = 0_usize;
+        while let Some(row) = rows.next()? {
+            bytes += u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0);
+            deleted += 1;
+        }
+        deleted
+    } else {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE rowid IN \
+                 (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"
+            ),
+            params![run, limit],
+        )?
+    };
     if table == "run_ledger" {
         tx.execute(
             "DELETE FROM run_ledger_delete_grants WHERE run_id = ?1",
@@ -441,7 +459,7 @@ fn run_tables(
     }
     Ok(Work {
         rows: deleted as u64,
-        bytes: 0,
+        bytes,
         ..Work::default()
     })
 }
