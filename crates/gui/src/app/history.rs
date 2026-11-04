@@ -415,7 +415,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     deferred.map_or(0, crate::body::BodyText::byte_len),
                 );
                 self.transcripts.select_thread(None);
+                self.transcripts.set_source(Some((
+                    assembled.first_id.unwrap_or(assembled.id),
+                    assembled.id,
+                )));
                 self.apply_conversation_event_with_body(event, deferred);
+                self.transcripts.set_source(None);
                 self.seed_system_notification(event);
                 if let event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::TurnCompleted {
                     run_id,

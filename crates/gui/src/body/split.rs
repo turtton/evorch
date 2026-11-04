@@ -176,6 +176,7 @@ pub fn deferred_event(
             kind: split.kind,
         },
         body: split.body,
+        first_id: None,
     })
 }
 

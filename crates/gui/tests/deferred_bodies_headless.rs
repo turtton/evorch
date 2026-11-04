@@ -577,6 +577,7 @@ fn an_unreadable_event_stands_between_its_neighbours_and_reading_it_again_fills_
                 text: text.into(),
             }),
             body: None,
+            first_id: None,
         })
     };
     rig.backend.script_rows(Ok(vec![

@@ -116,36 +116,128 @@ fn a_gap_ends_the_message_being_streamed_so_the_stream_cannot_continue_across_it
     assert_eq!(model.entries().len(), 3);
 }
 
+fn streamed(model: &mut TranscriptModel, id: i64, event: &Event) {
+    model.set_source(Some((id, id)));
+    model.apply(event);
+    model.set_source(None);
+}
+
+fn shown(model: &TranscriptModel) -> Vec<String> {
+    model
+        .entries()
+        .iter()
+        .map(|entry| match entry {
+            TranscriptEntry::Message { text, .. } => format!("message {}", text.inline_or_empty()),
+            TranscriptEntry::Notice { text } => format!("notice {text}"),
+            TranscriptEntry::Unreadable { event_id, .. } => format!("gap {event_id}"),
+            _ => "other".into(),
+        })
+        .collect()
+}
+
 #[test]
-fn entries_that_replace_a_gap_keep_stable_ids_and_the_rest_of_the_transcript_still_updates() {
+fn a_gap_in_the_middle_of_a_stream_is_replaced_by_the_whole_stream_and_nothing_is_shown_twice() {
+    // Shown: the slices before and after the unreadable one, as separate entries.
     let mut model = TranscriptModel::new();
     model.push_message("one");
-    model.push_unreadable(5, Some("run"), FailureKind::Unreadable, "damaged", None);
-    model.push_message("three");
+    streamed(&mut model, 7, &delta("before "));
+    model.push_unreadable(8, Some("run"), FailureKind::Unreadable, "damaged", None);
+    streamed(&mut model, 9, &delta("after"));
+    model.push_message("last");
+    assert_eq!(
+        shown(&model),
+        [
+            "message one",
+            "message before ",
+            "gap 8",
+            "message after",
+            "message last"
+        ]
+    );
     let ids: Vec<_> = model.visible_entry_ids().collect();
+    // Replayed with the slice readable, the stream is one entry.
+    let mut replayed = TranscriptModel::new();
+    for (id, text) in [(7, "before "), (8, "the middle "), (9, "after")] {
+        streamed(&mut replayed, id, &delta(text));
+    }
+    assert_eq!(shown(&replayed), ["message before the middle after"]);
 
-    assert!(model.replace_unreadable(
-        5,
-        vec![
-            TranscriptEntry::Notice { text: "a".into() },
-            TranscriptEntry::Notice { text: "b".into() },
+    assert!(model.fill_unreadable_from(8, &replayed));
+
+    assert_eq!(
+        shown(&model),
+        [
+            "message one",
+            "message before the middle after",
+            "message last"
         ],
-    ));
-
+        "the whole stream stands where its first slice was, and neither half is left over"
+    );
     let after: Vec<_> = model.visible_entry_ids().collect();
-    assert_eq!(after.len(), 4);
-    assert_eq!(after[0], ids[0]);
-    assert_eq!(after[3], ids[2], "what followed keeps its id");
-    // Every id still finds its entry and its revision.
+    assert_eq!(after[0], ids[0], "what is before keeps its id");
+    assert_eq!(
+        after[1], ids[1],
+        "the stream keeps the id of its first slice"
+    );
+    assert_eq!(after[2], ids[4], "what follows keeps its id");
     for id in &after {
         assert!(model.entry_revision(*id).is_some(), "id {id}");
     }
-    // A result for an entry after the gap still reaches that entry.
-    model.apply(&delta("more"));
-    assert_eq!(model.entries().len(), 5);
-    // Closing a gap with nothing leaves no trace.
+}
+
+#[test]
+fn a_completion_that_replaces_what_was_streamed_takes_its_place_not_a_second_one() {
+    let mut model = TranscriptModel::new();
+    streamed(&mut model, 3, &delta("partial "));
+    model.push_unreadable(4, Some("run"), FailureKind::Unreadable, "damaged", None);
+    model.push_message("later notice");
+    assert_eq!(
+        shown(&model),
+        ["message partial ", "gap 4", "message later notice"]
+    );
+    let mut replayed = TranscriptModel::new();
+    streamed(&mut replayed, 3, &delta("partial "));
+    streamed(&mut replayed, 4, &completed("the full answer"));
+    assert_eq!(shown(&replayed), ["message the full answer"]);
+
+    assert!(model.fill_unreadable_from(4, &replayed));
+
+    assert_eq!(
+        shown(&model),
+        ["message the full answer", "message later notice"]
+    );
+}
+
+#[test]
+fn an_entry_made_from_other_events_is_not_taken_for_the_gaps_stream() {
+    // A separate message of the same run, made by an event outside the gap's span.
+    let mut model = TranscriptModel::new();
+    streamed(&mut model, 1, &completed("an earlier answer"));
+    model.push_unreadable(5, Some("run"), FailureKind::Unreadable, "damaged", None);
+    streamed(&mut model, 9, &completed("a later answer"));
+    let mut replayed = TranscriptModel::new();
+    streamed(&mut replayed, 1, &completed("an earlier answer"));
+    streamed(&mut replayed, 5, &completed("the middle answer"));
+    streamed(&mut replayed, 9, &completed("a later answer"));
+
+    assert!(model.fill_unreadable_from(5, &replayed));
+
+    assert_eq!(
+        shown(&model),
+        [
+            "message an earlier answer",
+            "message the middle answer",
+            "message a later answer"
+        ]
+    );
+}
+
+#[test]
+fn a_gap_whose_event_made_nothing_closes_without_a_trace() {
+    let mut model = TranscriptModel::new();
+    model.push_message("one");
     model.push_unreadable(6, None, FailureKind::Unreadable, "damaged", None);
-    assert!(model.replace_unreadable(6, Vec::new()));
-    assert!(!model.replace_unreadable(6, Vec::new()));
-    assert_eq!(model.entries().len(), 5);
+    assert!(model.fill_unreadable_from(6, &TranscriptModel::new()));
+    assert!(!model.fill_unreadable_from(6, &TranscriptModel::new()));
+    assert_eq!(shown(&model), ["message one"]);
 }

@@ -275,8 +275,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             // A deleted thread shows nothing: not its transcript, not a body
             // or a failure held for it, and a read finishing later is dropped.
             let bound = self.transcripts.drop_thread(thread);
+            let gone: Vec<&String> = runs.iter().chain(&bound).collect();
+            let held_for_gone =
+                |run: &Option<String>| run.as_ref().is_some_and(|run| gone.contains(&run));
+            self.shared_feed
+                .failures
+                .retain(|_, failure| !held_for_gone(&failure.run_id));
+            self.unreadable_history_events
+                .retain(|_, event| !held_for_gone(&event.run_id));
+            self.shared_feed.rehydrating.remove(thread);
             if let Some(resolver) = &self.body_resolver {
-                for run in runs.iter().chain(&bound) {
+                for run in gone {
                     resolver.forget_run(run);
                 }
             }

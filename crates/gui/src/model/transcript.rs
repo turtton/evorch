@@ -203,6 +203,9 @@ pub struct TranscriptModel {
     /// The display body of the event being applied, when it is still in the
     /// store. Set only for the duration of [`Self::apply_with_body`].
     deferred_body: Option<BodyText>,
+    /// The stored event being applied (first and last id, more than one for a
+    /// response joined from slices), when it came from the log.
+    source: Option<(i64, i64)>,
     closed_compactions: std::collections::VecDeque<(String, String)>,
 }
 
@@ -210,6 +213,10 @@ pub struct TranscriptModel {
 struct EntryMeta {
     id: usize,
     revision: u64,
+    /// The first and last stored event that made or changed this entry, when
+    /// it was built from stored events. A gap that is read again is filled by
+    /// what these ranges say belongs to its event, not by comparing text.
+    src: Option<(i64, i64)>,
 }
 
 impl Default for TranscriptModel {
@@ -245,6 +252,7 @@ impl TranscriptModel {
             approvals_while_running: std::collections::BTreeSet::new(),
             drafts: drafts::DraftIndex::default(),
             deferred_body: None,
+            source: None,
             closed_compactions: Default::default(),
         }
     }
@@ -290,8 +298,29 @@ impl TranscriptModel {
     }
 
     fn entry_mut(&mut self, index: usize) -> Option<&mut TranscriptEntry> {
-        self.entry_meta.get_mut(index)?.revision += 1;
+        self.entry_meta.get(index)?;
+        self.touch(index);
         self.entries.get_mut(index)
+    }
+
+    /// Marks the entry as changed, by the stored event being applied if there
+    /// is one.
+    fn touch(&mut self, index: usize) {
+        let source = self.source;
+        let meta = &mut self.entry_meta[index];
+        meta.revision += 1;
+        if let Some((first, last)) = source {
+            meta.src = Some(match meta.src {
+                Some((was_first, was_last)) => (was_first.min(first), was_last.max(last)),
+                None => (first, last),
+            });
+        }
+    }
+
+    /// Says which stored event the entries made from now on come from; `None`
+    /// for an event that is not in the log (a live one).
+    pub(crate) fn set_source(&mut self, source: Option<(i64, i64)>) {
+        self.source = source;
     }
 
     pub fn set_view_window(&mut self, start: usize, len: usize) {
@@ -459,8 +488,8 @@ impl TranscriptModel {
                         self.entries.swap(0, 1);
                         // Keep allocated IDs sorted for ID lookup; both slots
                         // now contain different displayed content.
-                        self.entry_meta[0].revision += 1;
-                        self.entry_meta[1].revision += 1;
+                        self.touch(0);
+                        self.touch(1);
                     }
                 }
             }
@@ -898,7 +927,7 @@ impl TranscriptModel {
             });
             return;
         };
-        self.entry_meta[index].revision += 1;
+        self.touch(index);
         let TranscriptEntry::Tool {
             status: current, ..
         } = &mut self.entries[index]
@@ -1011,6 +1040,7 @@ impl TranscriptModel {
         self.entry_meta.push(EntryMeta {
             id: self.next_entry_id,
             revision: 0,
+            src: self.source,
         });
         self.next_entry_id += 1;
         if self.entries.len() > self.capacity {

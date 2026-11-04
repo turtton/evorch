@@ -18,6 +18,8 @@ const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Pending {
+    /// The id of the slice that began the response.
+    first_id: i64,
     response_id: String,
     total: usize,
     next: usize,
@@ -147,6 +149,7 @@ impl DeferredPartAssembler {
             self.open.insert(
                 run_id.clone(),
                 Pending {
+                    first_id: row.id,
                     response_id: response_id.clone(),
                     total: *total,
                     next: 0,
@@ -182,6 +185,7 @@ impl DeferredPartAssembler {
         };
         Accepted::Completed(Box::new(completion(
             row.id,
+            done.first_id,
             event,
             run_id.clone(),
             done.body,
@@ -191,7 +195,13 @@ impl DeferredPartAssembler {
 
 /// A completion for `body`: when none of it is in the store the text is
 /// inline in the event, as a reader that knows nothing of bodies expects.
-fn completion(id: i64, source: &Event, run_id: String, body: BodyText) -> DeferredEvent {
+fn completion(
+    id: i64,
+    first_id: i64,
+    source: &Event,
+    run_id: String,
+    body: BodyText,
+) -> DeferredEvent {
     let (text, body) = match body.inline() {
         Some(text) => (text.to_owned(), None),
         None => (String::new(), Some(body)),
@@ -203,6 +213,7 @@ fn completion(id: i64, source: &Event, run_id: String, body: BodyText) -> Deferr
             kind: EventKind::Message(MessageEvent::MessageCompleted { run_id, text }),
         },
         body,
+        first_id: Some(first_id),
     }
 }
 
@@ -228,6 +239,7 @@ mod tests {
                 total,
             }),
             body: (!body.segments().is_empty() && body.inline().is_none()).then_some(body),
+            first_id: None,
         }
     }
 
@@ -343,6 +355,7 @@ mod tests {
                 run_id: Some("a".into()),
             }),
             body: None,
+            first_id: None,
         };
         assert!(matches!(assembler.accept(&boundary), Accepted::Event(_)));
         assert!(assembler.open.is_empty());

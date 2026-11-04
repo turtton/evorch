@@ -36,6 +36,7 @@ fn event(id: i64, kind: impl Into<event_bus::EventKind>) -> HistoryRow {
         id,
         event: Event::new(kind),
         body: None,
+        first_id: None,
     })
 }
 
@@ -47,6 +48,7 @@ fn deferred_message(id: i64, body: BodyText) -> HistoryRow {
             text: String::new(),
         }),
         body: Some(body),
+        first_id: None,
     })
 }
 
@@ -677,4 +679,117 @@ fn a_history_read_that_a_deleted_thread_outlives_is_dropped_and_nothing_is_recre
         state.shared_feed.rehydrating.is_empty(),
         "and the feed does not wait for a read nobody will apply"
     );
+}
+
+fn delta_row(id: i64, text: &str) -> HistoryRow {
+    event(
+        id,
+        MessageEvent::MessageDelta {
+            run_id: Some("run-1".into()),
+            delta: text.into(),
+        },
+    )
+}
+
+#[test]
+fn a_repaired_slice_of_a_stream_gives_one_message_not_the_halves_and_the_whole() {
+    // The restore shows the stream before the unreadable delta and the one after it
+    // as two messages with the gap between.
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            delta_row(2, "A "),
+            failure(3, Some("run-1")),
+            delta_row(4, "C"),
+        ],
+        &[],
+    );
+    assert_eq!(thread_entries(&state), ["message:A ", "gap:3", "message:C"]);
+    backend.script_rows(Ok(vec![
+        started(),
+        delta_row(2, "A "),
+        delta_row(3, "B "),
+        delta_row(4, "C"),
+    ]));
+
+    resolver.request_gap("run-1", 3);
+    state.settle_body_rows();
+
+    assert_eq!(
+        thread_entries(&state),
+        ["message:A B C"],
+        "the stream is whole once, not as [A, A B C, C]"
+    );
+    assert!(state.unreadable_history_events.is_empty());
+}
+
+#[test]
+fn a_repaired_completion_replaces_what_was_streamed_before_it() {
+    let completed = |id: i64, text: &str| message(id, text);
+    let (mut state, backend, resolver, _clock, _dir) = restored_with_user_messages(
+        vec![
+            started(),
+            delta_row(2, "partial "),
+            failure(3, Some("run-1")),
+            message(4, "after"),
+        ],
+        &[],
+    );
+    // The completion after the gap ends the stream, so it takes the streamed entry's place.
+    assert_eq!(thread_entries(&state), ["message:after", "gap:3"]);
+    backend.script_rows(Ok(vec![
+        started(),
+        delta_row(2, "partial "),
+        completed(3, "the full answer"),
+        message(4, "after"),
+    ]));
+
+    resolver.request_gap("run-1", 3);
+    state.settle_body_rows();
+
+    assert_eq!(
+        thread_entries(&state),
+        ["message:the full answer", "message:after"]
+    );
+}
+
+#[test]
+fn deleting_a_thread_drops_the_unreadable_rows_held_for_its_runs() {
+    let (mut state, ..) = restored_with_user_messages(
+        vec![started(), message(2, "first"), failure(3, Some("run-1"))],
+        &[],
+    );
+    // A row of the run that the shared feed holds back, and one of another run.
+    let held = |id: i64, run: &str| EventFailure {
+        id,
+        run_id: Some(run.to_owned()),
+        kind: FailureKind::Unreadable,
+        reason: "damaged".into(),
+        reference: None,
+        wall_clock: None,
+    };
+    state.shared_feed.failures.insert(8, held(8, "run-1"));
+    state
+        .shared_feed
+        .failures
+        .insert(9, held(9, "run-elsewhere"));
+    assert!(state.unreadable_history_events.contains_key(&3));
+
+    state = state.with_tombstones(storage::thread_retention::TombstoneSet {
+        threads: ["t1".to_owned()].into_iter().collect(),
+        ..Default::default()
+    });
+    state.prune_deleted_threads();
+
+    assert_eq!(
+        state
+            .shared_feed
+            .failures
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [9],
+        "only the other run's row is still waiting to be shown"
+    );
+    assert!(state.unreadable_history_events.is_empty());
 }

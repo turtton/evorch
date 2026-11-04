@@ -186,7 +186,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.show_unreadable_event(&failure, &mut unreadable);
                 }
                 HistoryRow::Event(row) => {
+                    self.transcripts
+                        .set_source(Some((row.first_id.unwrap_or(row.id), row.id)));
                     self.apply_conversation_event_with_body(&row.event, row.body.as_ref());
+                    self.transcripts.set_source(None);
                 }
             }
         }

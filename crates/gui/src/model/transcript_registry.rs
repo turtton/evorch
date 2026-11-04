@@ -35,6 +35,8 @@ pub struct TranscriptRegistry {
     /// Events of other processes are being shown: nothing may be delivered to
     /// the open thread or the unowned fallback on their behalf.
     foreign_scope: bool,
+    /// The stored event being applied, for the entries it makes.
+    source: Option<(i64, i64)>,
 }
 
 impl Default for TranscriptRegistry {
@@ -134,7 +136,15 @@ impl TranscriptRegistry {
             ambiguous_calls: BTreeSet::new(),
             compaction_checkpoints: BTreeSet::new(),
             foreign_scope: false,
+            source: None,
         }
+    }
+
+    /// Says which stored event the events applied from now on come from (first
+    /// and last id, more than one for a response joined from slices). `None`
+    /// for events that are not in the log.
+    pub fn set_source(&mut self, source: Option<(i64, i64)>) {
+        self.source = source;
     }
 
     pub fn run_for_call<'a>(&'a self, call_id: &'a str) -> Option<&'a str> {
@@ -357,24 +367,28 @@ impl TranscriptRegistry {
         }
 
         if let EventKind::AgentMessage(AgentMessageEvent::Delivered { message, .. }) = &event.kind {
-            self.runs
-                .entry(message.sender_run_id.clone())
-                .or_default()
-                .push(TranscriptEntry::AgentMessage {
-                    direction: MessageDirection::Outgoing,
-                    peer_run_id: message.recipient_run_id.clone(),
-                    kind: message.kind.clone(),
-                    content: message.content.clone(),
-                });
-            self.runs
+            let source = self.source;
+            let sender = self.runs.entry(message.sender_run_id.clone()).or_default();
+            sender.set_source(source);
+            sender.push(TranscriptEntry::AgentMessage {
+                direction: MessageDirection::Outgoing,
+                peer_run_id: message.recipient_run_id.clone(),
+                kind: message.kind.clone(),
+                content: message.content.clone(),
+            });
+            sender.set_source(None);
+            let recipient = self
+                .runs
                 .entry(message.recipient_run_id.clone())
-                .or_default()
-                .push(TranscriptEntry::AgentMessage {
-                    direction: MessageDirection::Incoming,
-                    peer_run_id: message.sender_run_id.clone(),
-                    kind: message.kind.clone(),
-                    content: message.content.clone(),
-                });
+                .or_default();
+            recipient.set_source(source);
+            recipient.push(TranscriptEntry::AgentMessage {
+                direction: MessageDirection::Incoming,
+                peer_run_id: message.sender_run_id.clone(),
+                kind: message.kind.clone(),
+                content: message.content.clone(),
+            });
+            recipient.set_source(None);
             return;
         }
 
@@ -410,6 +424,7 @@ impl TranscriptRegistry {
         let child_terminal = matches!(&event.kind,
             EventKind::Lifecycle(event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to: event_bus::AgentRunPhase::Stopped | event_bus::AgentRunPhase::Done | event_bus::AgentRunPhase::Error, .. })
                 if !self.is_thread_root(run_id));
+        let source = self.source;
         for key in route {
             match key {
                 TranscriptKey::Thread => {
@@ -427,13 +442,17 @@ impl TranscriptRegistry {
                         None => &mut self.thread,
                     };
                     model.set_deferred_body(body.cloned());
+                    model.set_source(source);
                     model.apply_thread(event, child_terminal);
+                    model.set_source(None);
                     model.set_deferred_body(None);
                 }
                 TranscriptKey::Run(run_id) => {
                     let model = self.runs.entry(run_id).or_default();
                     model.set_deferred_body(body.cloned());
+                    model.set_source(source);
                     model.apply(event);
+                    model.set_source(None);
                     model.set_deferred_body(None);
                 }
             }
@@ -535,7 +554,11 @@ impl TranscriptRegistry {
         }
         for row in rows {
             match row {
-                HistoryRow::Event(row) => scratch.apply_with_body(&row.event, row.body.as_ref()),
+                HistoryRow::Event(row) => {
+                    scratch.set_source(Some((row.first_id.unwrap_or(row.id), row.id)));
+                    scratch.apply_with_body(&row.event, row.body.as_ref());
+                    scratch.set_source(None);
+                }
                 HistoryRow::Failure(failure) if failure.run_id.as_deref() == Some(run) => {
                     scratch.push_unreadable(
                         failure.id,

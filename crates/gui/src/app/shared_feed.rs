@@ -219,7 +219,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.shared_feed.blocked_since = None;
             self.fold_shared_failures(Some(next_id));
             if let Some(fed) = self.shared_feed.pending.pop_front() {
+                self.transcripts.set_source(Some((fed.id, fed.id)));
                 self.fold_shared_event(&fed.event);
+                self.transcripts.set_source(None);
                 self.shown_through_event = self.shown_through_event.max(fed.id);
             }
         }

@@ -3,43 +3,44 @@
 use super::{EntryMeta, TranscriptEntry, TranscriptModel};
 use crate::body::{BodyRef, FailureKind};
 
-/// How an entry of a fresh replay relates to one already shown.
-enum Slot {
-    /// The same entry.
-    Same,
-    /// The same call, with a result the shown one lacks.
-    Completed,
-    /// Another entry.
-    Other,
-}
-
-fn slot(shown: &TranscriptEntry, replayed: &TranscriptEntry) -> Slot {
-    if shown == replayed {
-        return Slot::Same;
-    }
+/// Whether two entries are the same stream of one run: the pieces of what a
+/// replay shows as one entry (the slices of a reasoning, the deltas of a
+/// message, a call's start and result) are, whatever their text.
+fn same_stream(shown: &TranscriptEntry, replayed: &TranscriptEntry) -> bool {
     match (shown, replayed) {
+        (TranscriptEntry::Unreadable { .. }, _) | (_, TranscriptEntry::Unreadable { .. }) => false,
         (
-            TranscriptEntry::Unreadable { event_id, .. },
-            TranscriptEntry::Unreadable {
-                event_id: replayed_id,
-                ..
-            },
-        ) if event_id == replayed_id => Slot::Same,
-        (
-            TranscriptEntry::Tool {
-                call_id,
-                run_id,
-                output: None,
-                ..
-            },
-            TranscriptEntry::Tool {
-                call_id: replayed_call,
+            TranscriptEntry::Message { run_id, .. },
+            TranscriptEntry::Message {
                 run_id: replayed_run,
-                output: Some(_),
                 ..
             },
-        ) if call_id == replayed_call && run_id == replayed_run => Slot::Completed,
-        _ => Slot::Other,
+        )
+        | (
+            TranscriptEntry::Reasoning { run_id, .. },
+            TranscriptEntry::Reasoning {
+                run_id: replayed_run,
+                ..
+            },
+        ) => run_id == replayed_run,
+        (
+            TranscriptEntry::Tool {
+                run_id, call_id, ..
+            },
+            TranscriptEntry::Tool {
+                run_id: replayed_run,
+                call_id: replayed_call,
+                ..
+            },
+        ) => run_id == replayed_run && call_id == replayed_call,
+        (
+            TranscriptEntry::Compaction { checkpoint_id, .. },
+            TranscriptEntry::Compaction {
+                checkpoint_id: replayed_checkpoint,
+                ..
+            },
+        ) => checkpoint_id == replayed_checkpoint,
+        (shown, replayed) => std::mem::discriminant(shown) == std::mem::discriminant(replayed),
     }
 }
 
@@ -57,6 +58,7 @@ impl TranscriptModel {
         if self.unreadable_index(event_id).is_some() {
             return;
         }
+        let source = self.source.replace((event_id, event_id));
         self.push(TranscriptEntry::Unreadable {
             event_id,
             run_id: run_id.map(str::to_owned),
@@ -64,6 +66,7 @@ impl TranscriptModel {
             reason: reason.to_owned(),
             reference,
         });
+        self.source = source;
     }
 
     fn unreadable_index(&self, event_id: i64) -> Option<usize> {
@@ -98,48 +101,16 @@ impl TranscriptModel {
         }
     }
 
-    /// Puts `replacements` where the unreadable event was: the first in its
-    /// place, the rest right after it. With none, the gap simply closes.
-    /// Returns whether the event was shown as unreadable here.
-    pub(crate) fn replace_unreadable(
-        &mut self,
-        event_id: i64,
-        replacements: Vec<TranscriptEntry>,
-    ) -> bool {
-        let Some(index) = self.unreadable_index(event_id) else {
-            return false;
-        };
-        let mut replacements = replacements.into_iter();
-        let Some(first) = replacements.next() else {
-            self.remove_entry(index);
-            return true;
-        };
-        self.entries[index] = first;
-        self.entry_meta[index].revision += 1;
-        for (at, entry) in (index + 1..).zip(replacements) {
-            self.entries.insert(at, entry);
-            self.entry_meta.insert(
-                at,
-                EntryMeta {
-                    id: self.next_entry_id,
-                    revision: 0,
-                },
-            );
-            self.next_entry_id += 1;
-            if self.view_start >= at {
-                self.view_start += 1;
-            }
-        }
-        true
-    }
-
     /// Fills the gap of `event_id` from `replayed`, a model built afresh from
-    /// the rows of the same run. The entries the two models share around the
-    /// gap are matched in order, so everything shown keeps its place and its
-    /// identity; what lies between them in the replay is what the gap held. A
-    /// call that the replay shows with its result takes that result in place.
-    /// Entries only this model has (host inputs, what arrived since the rows
-    /// were read) are left where they are. Returns whether the gap was here.
+    /// the rows of the same run. What the event is part of is read from the
+    /// stored events each entry was made from, not from its text: the entries
+    /// of the replay that the event touched take the place of the entries here
+    /// that were made from the same events (the gap, the pieces of a response
+    /// that the missing slice completes, a call shown without its result), so
+    /// a response never shows twice. Entries made from other events, host
+    /// inputs, and what arrived since the rows were read are left where they
+    /// are, and the entries that stay keep their identity. Returns whether the
+    /// gap was here.
     pub(crate) fn fill_unreadable_from(
         &mut self,
         event_id: i64,
@@ -148,41 +119,97 @@ impl TranscriptModel {
         let Some(gap) = self.unreadable_index(event_id) else {
             return false;
         };
-        let fresh = replayed.entries();
-        let shown = &self.entries;
-        let mut completed: Vec<(usize, TranscriptEntry)> = Vec::new();
-        let mut start = 0;
-        for (index, entry) in shown[..gap].iter().enumerate() {
-            let Some(next) = fresh.get(start) else { break };
-            match slot(entry, next) {
-                Slot::Same => start += 1,
-                Slot::Completed => {
-                    completed.push((index, next.clone()));
-                    start += 1;
+        let candidates: Vec<(TranscriptEntry, (i64, i64))> = replayed
+            .entries
+            .iter()
+            .zip(&replayed.entry_meta)
+            .filter(|(entry, _)| !matches!(entry, TranscriptEntry::Unreadable { .. }))
+            .filter_map(|(entry, meta)| meta.src.map(|src| (entry.clone(), src)))
+            .collect();
+        let overlap = |left: (i64, i64), right: (i64, i64)| left.0 <= right.1 && right.0 <= left.1;
+        // The entries of the replay the event touched, and every entry on either
+        // side that was made from the same events (a response whose first
+        // slice and completion both fall in the span, say), until no more join.
+        let mut taken: Vec<bool> = candidates
+            .iter()
+            .map(|(_, src)| src.0 <= event_id && event_id <= src.1)
+            .collect();
+        let mut slots: Vec<usize> = Vec::new();
+        loop {
+            let mut changed = false;
+            for (index, (entry, meta)) in self.entries.iter().zip(&self.entry_meta).enumerate() {
+                let Some(src) = meta.src else { continue };
+                if index == gap || slots.contains(&index) {
+                    continue;
                 }
-                Slot::Other => {}
+                let related = candidates
+                    .iter()
+                    .zip(&taken)
+                    .any(|((replayed, span), taken)| {
+                        *taken && overlap(src, *span) && same_stream(entry, replayed)
+                    });
+                if related {
+                    slots.push(index);
+                    changed = true;
+                }
             }
-        }
-        let mut end = fresh.len();
-        for (index, entry) in shown.iter().enumerate().skip(gap + 1).rev() {
-            if end <= start {
+            for index in 0..candidates.len() {
+                if taken[index] {
+                    continue;
+                }
+                let (replayed, span) = &candidates[index];
+                let related = slots.iter().any(|slot| {
+                    self.entry_meta[*slot]
+                        .src
+                        .is_some_and(|src| overlap(src, *span))
+                        && same_stream(&self.entries[*slot], replayed)
+                });
+                if related {
+                    taken[index] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
                 break;
             }
-            match slot(entry, &fresh[end - 1]) {
-                Slot::Same => end -= 1,
-                Slot::Completed => {
-                    completed.push((index, fresh[end - 1].clone()));
-                    end -= 1;
-                }
-                Slot::Other => {}
+        }
+        let fresh: Vec<(TranscriptEntry, (i64, i64))> = candidates
+            .into_iter()
+            .zip(taken)
+            .filter(|(_, taken)| *taken)
+            .map(|(candidate, _)| candidate)
+            .collect();
+        slots.push(gap);
+        slots.sort_unstable();
+        slots.dedup();
+        let placed = slots.len().min(fresh.len());
+        let mut fresh = fresh.into_iter();
+        for (slot, (entry, src)) in slots.iter().zip(fresh.by_ref()) {
+            self.entries[*slot] = entry;
+            self.entry_meta[*slot].revision += 1;
+            self.entry_meta[*slot].src = Some(src);
+        }
+        // More entries than places: the rest follow the last place.
+        let after_last = slots.get(placed.wrapping_sub(1)).map_or(gap, |last| *last) + 1;
+        for (at, (entry, src)) in (after_last..).zip(fresh) {
+            self.entries.insert(at, entry);
+            self.entry_meta.insert(
+                at,
+                EntryMeta {
+                    id: self.next_entry_id,
+                    revision: 0,
+                    src: Some(src),
+                },
+            );
+            self.next_entry_id += 1;
+            if self.view_start >= at {
+                self.view_start += 1;
             }
         }
-        let between = fresh[start..end.max(start)].to_vec();
-        for (index, entry) in completed {
-            if let Some(shown) = self.entry_mut(index) {
-                *shown = entry;
-            }
+        // Fewer: the places left over close.
+        for slot in slots[placed..].iter().rev() {
+            self.remove_entry(*slot);
         }
-        self.replace_unreadable(event_id, between)
+        true
     }
 }

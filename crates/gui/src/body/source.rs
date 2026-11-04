@@ -117,6 +117,7 @@ fn event_row(
             id: stored.id,
             event: stored.event,
             body: None,
+            first_id: None,
         });
     }
     let wall_clock = Some(stored.event.meta.wall_clock);

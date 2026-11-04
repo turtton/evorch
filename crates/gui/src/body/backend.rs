@@ -20,6 +20,9 @@ pub struct DeferredEvent {
     /// The event's one display body (message text, tool output, ...), still in
     /// the store, possibly in several pieces.
     pub body: Option<BodyText>,
+    /// The id of the first slice when this event was joined from the slices of
+    /// a response: the response stands for every id from there to `id`.
+    pub first_id: Option<i64>,
 }
 
 /// Why a stored event cannot be shown.
