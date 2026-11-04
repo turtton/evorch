@@ -266,6 +266,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             })),
             EventKind::Ownership(ownership) => {
                 self.ownership_status.invalidate();
+                self.external_work.invalidate();
                 if matches!(
                     ownership.action,
                     event_bus::OwnershipAction::Released | event_bus::OwnershipAction::Handoff
@@ -422,6 +423,66 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.shared_feed
             .foreign_runs
             .extend(active.map(|(run, _)| run.clone()));
+    }
+
+    /// Threads with a run that other processes started or changed and that is
+    /// still Running or Pending: the shared feed's evidence of work elsewhere,
+    /// before ownership is taken into account.
+    fn foreign_active_threads(&self) -> std::collections::BTreeSet<String> {
+        if self.shared_feed.foreign_runs.is_empty() {
+            return std::collections::BTreeSet::new();
+        }
+        self.sidebar
+            .threads
+            .iter()
+            .filter(|thread| {
+                thread.run_ids.iter().any(|run| {
+                    self.shared_feed.foreign_runs.contains(run)
+                        && matches!(
+                            self.phases.get(run),
+                            Some(ThreadRunPhase::Running | ThreadRunPhase::Pending)
+                        )
+                })
+            })
+            .map(|thread| thread.id.to_string())
+            .collect()
+    }
+
+    /// Frame hook: lets the background probe of who holds those threads pick up
+    /// its answer and, when due, look again. Never reads the registry itself.
+    pub(super) fn refresh_external_work(&mut self, repaint: Option<&egui::Context>) {
+        let candidates = self.foreign_active_threads();
+        self.external_work.refresh(&candidates, repaint);
+    }
+
+    /// Runs one probe round now and waits for it, for headless runs that draw
+    /// no frames.
+    pub fn observe_external_work_now(&mut self) {
+        self.refresh_external_work(None);
+        self.external_work.wait_current();
+    }
+
+    /// Threads another process is working on, shown from what the shared feed
+    /// already folded: a run of the thread that other processes started or
+    /// changed and that is still Running or Pending, in a thread whose record
+    /// does not name this process as holder. A run merely missing from this
+    /// process's runtime, one waiting for an answer, and a thread whose holder
+    /// could not be read are not enough. Draws on the last background probe;
+    /// nothing is claimed, renewed or written, and no frame reads the registry.
+    pub fn externally_working_threads(&self) -> std::collections::BTreeSet<workspace_ui::ThreadId> {
+        let candidates = self.foreign_active_threads();
+        if candidates.is_empty() {
+            return std::collections::BTreeSet::new();
+        }
+        self.sidebar
+            .threads
+            .iter()
+            .filter(|thread| {
+                let id = thread.id.to_string();
+                candidates.contains(&id) && self.external_work.not_owned_here(&id)
+            })
+            .map(|thread| thread.id.clone())
+            .collect()
     }
 
     fn thread_owned_here(&self, thread_id: &str) -> bool {

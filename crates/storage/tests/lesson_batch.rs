@@ -65,6 +65,29 @@ fn replay_preserves_promoted_status_and_history() {
 }
 
 #[test]
+fn replay_keeps_the_favorite_mark_and_adds_no_history() {
+    // Given: a completed batch whose worker lesson the user marked as a favorite.
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        db_path: dir.path().join("memory.db"),
+        ..Default::default()
+    };
+    let store = Storage::open(config.clone()).unwrap();
+    let lessons = [lesson("worker"), lesson("reviewer")];
+    let writer = store.handle();
+    writer.append_lessons(&lessons).unwrap();
+    writer.set_lesson_favorite("worker", true).unwrap();
+    // When: retry the same append.
+    writer.append_lessons(&lessons).unwrap();
+    // Then: the mark and the history are untouched.
+    let db = Database::open(&config).unwrap();
+    assert!(db.memory_entry("worker").unwrap().unwrap().favorite);
+    assert!(!db.memory_entry("reviewer").unwrap().unwrap().favorite);
+    assert_eq!(db.memory_history("worker").unwrap().len(), 1);
+    assert_eq!(db.favorite_history("worker").unwrap().len(), 1);
+}
+
+#[test]
 fn conflicting_replay_rolls_back_new_members() {
     // Given: an existing lesson and a conflicting duplicate after a new member.
     let dir = tempfile::tempdir().unwrap();

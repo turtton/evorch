@@ -214,7 +214,18 @@ impl LearningQueue {
                     status,
                     Some(MemoryStatus::Candidate | MemoryStatus::Validated)
                 ) {
-                    self.writer.reject_lesson(&lesson.id)?;
+                    match self.writer.reject_lesson(&lesson.id) {
+                        // The user approved this lesson (favorite) while it was under
+                        // review. An automatic verdict must not override that, and it
+                        // must not fail the other candidates of the batch either.
+                        Err(storage::StorageError::LessonFavorite { id }) => {
+                            tracing::warn!(
+                                lesson = %id,
+                                "kept a favorite lesson despite a reject verdict from learning review"
+                            );
+                        }
+                        result => result?,
+                    }
                 }
                 continue;
             }

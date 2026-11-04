@@ -72,6 +72,7 @@ pub fn sidebar_pane(
         question_threads,
         approval_threads,
         unread_threads,
+        &BTreeSet::new(),
         &BTreeMap::new(),
         &SidebarView::default(),
     )
@@ -87,6 +88,7 @@ pub fn sidebar_pane_with_retention(
     question_threads: &BTreeSet<ThreadId>,
     approval_threads: &BTreeSet<ThreadId>,
     unread_threads: &BTreeSet<ThreadId>,
+    externally_working_threads: &BTreeSet<ThreadId>,
     retention: &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
     view: &SidebarView,
 ) -> Option<SidebarAction> {
@@ -96,6 +98,7 @@ pub fn sidebar_pane_with_retention(
         question_threads,
         approval_threads,
         unread_threads,
+        externally_working: externally_working_threads,
         active_runs: &active_runs,
         retention,
     };

@@ -35,6 +35,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(permit) => {
                 self.readonly_threads.remove(thread);
                 self.ownership_action_error = None;
+                self.external_work.invalidate();
                 Ok(Some(permit))
             }
             Err(RegistryError::Ownership(
@@ -45,6 +46,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub fn with_ownership(mut self, host: Arc<OwnerHost>) -> Self {
+        self.external_work
+            .set_source(super::external_work::Source::of_host(&host));
         self.ownership = Some(host);
         self
     }
@@ -128,6 +131,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             .clicked()
             {
                 self.open_usage_tab();
+            }
+            if crate::theme::widgets::ghost_icon_button(
+                ui,
+                crate::theme::icons::FLASK,
+                "Evaluations",
+            )
+            .on_hover_text("Evaluations the Evaluator started")
+            .clicked()
+            {
+                self.open_evaluations_tab();
             }
             let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
             if self.telemetry.quota.configured() {
@@ -273,6 +286,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         result: Result<T, RegistryError>,
     ) {
         self.ownership_status.invalidate();
+        self.external_work.invalidate();
         self.ownership_action_error = result.err().map(|error| OwnershipActionError {
             operation,
             detail: error.to_string(),

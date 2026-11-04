@@ -259,3 +259,49 @@ fn duplicate_panel_across_main_floating_and_extra_windows_is_invalid() {
         })
     );
 }
+
+#[test]
+fn evaluations_panel_roundtrips_as_a_targetless_panel() {
+    // Given: a workspace that docks the Evaluations panel next to the agent.
+    let id = PanelId::new("evaluations-main");
+    let agent = PanelId::new("agent-main");
+    let panels = BTreeMap::from([
+        (agent.clone(), panel("agent-main", PanelKind::Agent)),
+        (
+            id.clone(),
+            panel("evaluations-main", PanelKind::Evaluations),
+        ),
+    ]);
+    let workspace = workspace_with(
+        LayoutNode::Tabs(Tabs {
+            panels: vec![agent, id.clone()],
+            active: 1,
+        }),
+        panels,
+    );
+    assert_eq!(validate(&workspace), Ok(()));
+
+    // When: it is saved and loaded again.
+    let json = serde_json::to_string(&workspace).expect("workspace serialization must succeed");
+    let restored = workspace_ui::from_json(&json).expect("workspace must load");
+
+    // Then: the kind is stored under its stable snake_case name and survives the load.
+    assert!(json.contains("\"kind\":\"evaluations\""), "{json}");
+    assert_eq!(restored.panels[&id].kind, PanelKind::Evaluations);
+    assert_eq!(restored.panels[&id].title, "Evaluations");
+    // (The load adds the notification tab, so the layout is checked for the panel, not equality.)
+    let LayoutNode::Tabs(tabs) = &restored.main.root else {
+        panic!("tabs root");
+    };
+    assert!(tabs.panels.contains(&id));
+
+    // And: a target is rejected like for every other global panel.
+    let mut targeted = workspace;
+    targeted.panels.get_mut(&id).expect("panel").target = Some("group".into());
+    assert_eq!(
+        validate(&targeted),
+        Err(LayoutError::UnexpectedTarget {
+            panel_id: id.to_string()
+        })
+    );
+}

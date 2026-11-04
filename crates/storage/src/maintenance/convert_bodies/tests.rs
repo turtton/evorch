@@ -33,6 +33,12 @@ fn database_at(dir: &Path, version: usize) -> PathBuf {
     path
 }
 
+/// The schema version a converted database ends at: the conversion applies every migration
+/// after v40 before it publishes.
+fn latest_schema() -> u32 {
+    u32::try_from(MIGRATIONS.len()).unwrap()
+}
+
 fn v39(dir: &Path) -> PathBuf {
     database_at(dir, 39)
 }
@@ -205,12 +211,15 @@ fn every_run_reads_back_as_the_bytes_the_old_column_held() {
 
     // Then: the format is current and every run reads back byte for byte.
     assert_eq!(summary.converted_runs, 4);
-    assert_eq!((summary.source_schema, summary.target_schema), (39, 42));
+    assert_eq!(
+        (summary.source_schema, summary.target_schema),
+        (39, latest_schema())
+    );
     assert_eq!(summary.unconverted_runs_remaining, 0);
     assert_eq!(summary.mismatched_runs, 0);
     assert_eq!(summary.events_tokenized, 0);
     assert!(summary.checkpoint_truncated && summary.vacuum);
-    assert_eq!(version(&path), 42);
+    assert_eq!(version(&path), latest_schema());
     assert!(!columns(&path).contains(&"messages_json".to_owned()));
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
@@ -712,7 +721,7 @@ fn a_deleted_thread_of_a_pending_job_is_reclaimed_before_the_lane_tables_exist()
         ),
         1
     );
-    assert_eq!(version(&path), 42);
+    assert_eq!(version(&path), latest_schema());
     for run in &runs {
         assert_eq!(read(&conn, run.id).messages_json, run.messages);
     }
@@ -1497,11 +1506,14 @@ fn a_version_33_database_is_migrated_and_converted_by_the_one_command() {
 
     // Then: migrations 34 to 39 ran after the backup, every run converted, and the result
     // is a current database that a normal start accepts.
-    assert_eq!((summary.source_schema, summary.target_schema), (33, 42));
+    assert_eq!(
+        (summary.source_schema, summary.target_schema),
+        (33, latest_schema())
+    );
     assert_eq!(summary.migrations_applied, 6);
     assert_eq!(summary.converted_runs, 4);
     assert!(summary.stage_elapsed_seconds.contains_key("migrate"));
-    assert_eq!(version(&path), 42);
+    assert_eq!(version(&path), latest_schema());
     let conn = Connection::open(&path).unwrap();
     for run in &runs {
         assert_eq!(
@@ -1812,7 +1824,10 @@ fn provenance_maps_become_rows_with_their_status_and_entries_unchanged() {
     // Then: every map is rows, the old column is gone, and the sidecars read back as saved.
     assert_eq!(summary.converted_provenance_maps, 3);
     assert_eq!(summary.provenance_entries_created, 4);
-    assert_eq!((summary.source_schema, summary.target_schema), (39, 42));
+    assert_eq!(
+        (summary.source_schema, summary.target_schema),
+        (39, latest_schema())
+    );
     assert!(summary.stage_elapsed_seconds.contains_key("provenance"));
     assert!(summary.peak_provenance_wal_frames > 0);
     assert!(!sidecar_columns(&path).contains(&"map_json".to_owned()));
@@ -1935,14 +1950,17 @@ fn a_stop_in_the_middle_of_the_maps_is_refused_and_recovered_from_the_backup() {
 
     // Then: it completes with every map.
     assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
-    assert_eq!(version(&path), 42);
+    assert_eq!(version(&path), latest_schema());
 }
 
-/// Takes a converted database back to `version` (40: before the lane ledger and the
-/// provenance rows; 41: with the lane ledger, maps still one column).
+/// Takes a converted database back to `version` (40: before the lane ledger; 41: with it;
+/// 42: with the favorite flag too; the maps are one column again in all of them).
 fn take_back(conn: &Connection, version: u32) {
-    conn.execute_batch(include_str!("../../../tests/support/undo_v42.sql"))
+    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))
         .unwrap();
+    if version <= 41 {
+        super::testing::take_lessons_back_to_v41(conn).unwrap();
+    }
     if version <= 40 {
         conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))
             .unwrap();
@@ -1958,6 +1976,11 @@ fn a_version_40_database_converts_only_its_maps_and_leaves_the_runs_as_they_are(
 #[test]
 fn a_version_41_database_with_the_lane_ledger_converts_only_its_maps_too() {
     converts_only_its_maps_from(41);
+}
+
+#[test]
+fn a_version_42_database_with_the_favorite_flag_converts_only_its_maps_too() {
+    converts_only_its_maps_from(42);
 }
 
 fn converts_only_its_maps_from(from: u32) {
@@ -1987,10 +2010,13 @@ fn converts_only_its_maps_from(from: u32) {
 
     // Then: no run is converted again (ids, hashes and header revisions are those of
     // before), and every map is rows.
-    assert_eq!((summary.source_schema, summary.target_schema), (from, 42));
+    assert_eq!(
+        (summary.source_schema, summary.target_schema),
+        (from, latest_schema())
+    );
     assert_eq!(summary.converted_runs, 0);
     assert_eq!(summary.converted_provenance_maps, sidecars.len() as u64);
-    assert_eq!(version(&path), 42);
+    assert_eq!(version(&path), latest_schema());
     let conn = Connection::open(&path).unwrap();
     let runs_after: Vec<(i64, String, i64, Vec<u8>)> = conn
         .prepare("SELECT m.id, m.run_id, m.ordinal, m.msg_sha256 FROM run_messages m ORDER BY m.id")
@@ -2055,7 +2081,7 @@ fn a_half_converted_version_40_database_is_refused() {
     apply(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
     take_back(&conn, 40);
-    conn.execute_batch(crate::migrations::V42_PREPARE).unwrap();
+    conn.execute_batch(crate::migrations::V43_PREPARE).unwrap();
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
     drop(conn);
@@ -2193,18 +2219,27 @@ fn the_preview_of_a_version_40_database_counts_what_the_reclaim_has_to_do() {
 
 #[test]
 fn a_version_40_database_with_a_deleted_thread_to_reclaim_is_converted() {
-    // Given: a version 40 database (no lane tables yet) holding a deleted thread, a deleted
-    // run of it and the unfinished reclaim job of their family.
+    reclaims_a_deleted_thread_while_converting_from(40);
+}
+
+#[test]
+fn a_version_41_database_with_a_deleted_thread_to_reclaim_is_converted() {
+    reclaims_a_deleted_thread_while_converting_from(41);
+}
+
+fn reclaims_a_deleted_thread_while_converting_from(from: u32) {
+    // Given: a database of version `from` holding a deleted thread, a deleted run of it and
+    // the unfinished reclaim job of their family. Version 40 has no lane tables yet.
     let (_dir, path, sidecars) = seeded_with_maps();
     apply(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
-    take_back(&conn, 40);
+    take_back(&conn, from);
     assert_eq!(
         single(
             &conn,
             "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('lanes', 'lane_reports')"
         ),
-        0
+        if from == 40 { 0 } else { 2 }
     );
     conn.execute(
         "INSERT INTO thread_tombstones(thread_id, family_key, deleted_at_ns) VALUES ('t', 'fam', 1)",
@@ -2230,11 +2265,14 @@ fn a_version_40_database_with_a_deleted_thread_to_reclaim_is_converted() {
     // When: it is converted.
     let summary = apply(&path).unwrap();
 
-    // Then: the family is reclaimed, the lane ledger is added afterwards, and every kept
+    // Then: the family is reclaimed, the lane ledger is there afterwards, and every kept
     // map is rows.
     assert_eq!(summary.retention.reclaimed_runs, 1);
-    assert_eq!((summary.source_schema, summary.target_schema), (40, 42));
-    assert_eq!(version(&path), 42);
+    assert_eq!(
+        (summary.source_schema, summary.target_schema),
+        (from, latest_schema())
+    );
+    assert_eq!(version(&path), latest_schema());
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
         single(

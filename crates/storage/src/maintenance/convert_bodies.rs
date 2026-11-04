@@ -38,8 +38,8 @@ use serde::Serialize;
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
 use crate::migrations::{
-    MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, V40_DROP, V40_PREPARE, V42_DROP,
-    V42_PREPARE,
+    MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, V40_DROP, V40_PREPARE, V43_DROP,
+    V43_PREPARE,
 };
 use crate::repo::thread_retention::reclaim::Layout;
 
@@ -672,7 +672,7 @@ fn run(
     if convert_runs {
         conn.execute_batch(V40_PREPARE)?;
     }
-    conn.execute_batch(V42_PREPARE)?;
+    conn.execute_batch(V43_PREPARE)?;
     conn.execute_batch("COMMIT")?;
     checkpoint_passive(&conn)?;
     gauge.sample();
@@ -755,13 +755,13 @@ fn run(
     if convert_runs {
         conn.execute_batch(V40_DROP)?;
     }
-    conn.execute_batch(V42_DROP)?;
+    conn.execute_batch(V43_DROP)?;
     conn.execute_batch("COMMIT")?;
     hook(Point::AfterDrop, &conn)?;
     // Migrations after v40 are written for a database that already has the converted
     // shape, so they run now; `user_version` is set once, at publish.
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    // Version 42 is not among them: its two halves ran as `V42_PREPARE` and `V42_DROP`.
+    // Version 43 is not among them: its two halves ran as `V43_PREPARE` and `V43_DROP`.
     let first = source_schema.max(MESSAGE_ROWS_VERSION);
     for migration in &MIGRATIONS[usize::try_from(first)
         .map_err(|_| StorageError::OutOfRange("migration version"))?

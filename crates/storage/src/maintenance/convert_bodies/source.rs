@@ -45,7 +45,7 @@ const REQUIRED_TABLES: [&str; 4] = [
     "reclaim_jobs",
 ];
 
-/// Tables migrations v40 and v42 create: none of them may exist before the conversion
+/// Tables migrations v40 and v43 create: none of them may exist before the conversion
 /// starts.
 const TARGET_TABLES: [&str; 4] = [
     "run_messages",
@@ -54,7 +54,7 @@ const TARGET_TABLES: [&str; 4] = [
     "run_message_provenance",
 ];
 
-/// The columns migration v42 adds to `run_context_provenance`.
+/// The columns migration v43 adds to `run_context_provenance`.
 const PROVENANCE_HEADER_COLUMNS: [&str; 4] = [
     "map_version",
     "raw_message_count",

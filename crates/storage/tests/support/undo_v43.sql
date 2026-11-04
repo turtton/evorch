@@ -1,4 +1,4 @@
--- Restores the `run_context_provenance` shape migration v42 replaced (the whole map in
+-- Restores the `run_context_provenance` shape migration v43 replaced (the whole map in
 -- `map_json`), for tests that rebuild an older schema by hand and replay the migrations
 -- from there. Every map is rebuilt from the message rows, so that a conversion of the
 -- result can be compared with the original.

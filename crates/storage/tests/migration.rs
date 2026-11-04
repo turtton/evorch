@@ -9,9 +9,9 @@ mod undo_v35;
 
 use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
-use undo_v35::{undo_v35, undo_v36, undo_v38};
+use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 42;
+const LATEST_SCHEMA: u32 = 43;
 
 const EXPECTED_TABLES: [&str; 77] = [
     "lane_state",
@@ -1073,4 +1073,146 @@ fn v38_drops_the_unnumbered_writer_markers_and_keeps_the_series() {
         )
         .unwrap();
     assert_eq!(markers, 0);
+}
+
+type LedgerRow = (i64, String, String, String, String, String, String, String);
+type EntryRow = (i64, String, String, i64, String);
+
+fn ledger_rows(connection: &Connection) -> Vec<LedgerRow> {
+    let mut statement = connection
+        .prepare(
+            "SELECT seq, entry_id, project, content, evidence, status, kind, scope
+             FROM memory_ledger ORDER BY seq",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn entry_rows(connection: &Connection) -> Vec<EntryRow> {
+    let mut statement = connection
+        .prepare("SELECT rowid, id, status, ledger_seq, scope FROM memory_entries ORDER BY rowid")
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Runs the offline conversion on `path`, which holds a version 41 database whose
+/// provenance maps are still a column.
+fn convert_to_current(path: &Path) {
+    let lock = path.with_extension("db.maintenance-lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    drop(options.open(&lock).unwrap());
+    storage::maintenance::convert_bodies(
+        path,
+        &storage::maintenance::ConvertBodiesOptions {
+            apply: true,
+            backup: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
+    // Given: a v41 database whose projection rowids and ledger sequence numbers are in
+    // different orders, with lessons of several scopes and statuses, a finding and an
+    // eval trace in the ledger.
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("v41.db");
+    drop(Database::open(&config_for(&path)).unwrap());
+    let connection = Connection::open(&path).unwrap();
+    undo_v42(&connection);
+    connection
+        .execute_batch(
+            "INSERT INTO memory_ledger(seq, entry_id, project, task_id, content, evidence, status, kind, scope) VALUES
+                 (1, 'a', 'p', 't', 'alpha quokka', 'ev', 'candidate', 'lesson', 'project'),
+                 (2, 'b', 'p', 't', 'bravo wombat', 'ev', 'candidate', 'lesson', 'project'),
+                 (3, 'f', 'p', 't', 'finding text', 'ev', 'candidate', 'finding', 'project'),
+                 (4, 'b', 'p', 't', 'bravo wombat', 'ev', 'validated', 'lesson', 'project'),
+                 (5, 'c', 'p', 't', 'charlie quokka', 'ev', 'candidate', 'lesson', 'user'),
+                 (6, 'a', 'p', 't', 'alpha quokka', 'ev', 'validated', 'lesson', 'project'),
+                 (7, 'e', 'p', 't', 'eval trace', 'ev', 'candidate', 'eval_trace', 'project'),
+                 (8, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 'lesson', 'project'),
+                 (9, 'c', 'p', 't', 'charlie quokka', 'ev', 'promoted', 'lesson', 'user'),
+                 (10, 'a', 'p', 't', 'alpha quokka', 'ev', 'promoted', 'lesson', 'project');
+             INSERT INTO memory_entries(rowid, id, project, task_id, content, evidence, status, ledger_seq, scope) VALUES
+                 (7, 'c', 'p', 't', 'charlie quokka', 'ev', 'promoted', 9, 'user'),
+                 (3, 'a', 'p', 't', 'alpha quokka', 'ev', 'promoted', 10, 'project'),
+                 (5, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 8, 'project');",
+        )
+        .unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v43.sql"))
+        .unwrap();
+    connection.pragma_update(None, "user_version", 41).unwrap();
+    connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let ledger_before = ledger_rows(&connection);
+    let entries_before = entry_rows(&connection);
+    drop(connection);
+    // A database whose provenance maps are still a column opens only after the conversion
+    // command has run; that command applies the migrations after version 40 (v42 here).
+    convert_to_current(&path);
+    let ids = |entries: Vec<storage::memory::MemoryEntry>| -> Vec<String> {
+        entries.into_iter().map(|entry| entry.lesson.id).collect()
+    };
+
+    // When: the current schema opens it.
+    let database = Database::open(&config_for(&path)).unwrap();
+    let connection = Connection::open(&path).unwrap();
+
+    // Then: every ledger row, projection rowid and ledger sequence is unchanged.
+    assert_eq!(ledger_rows(&connection), ledger_before);
+    assert_eq!(entry_rows(&connection), entries_before);
+    // And: lessons list and are injected in the same order as before, unmarked.
+    let listed = database.search_memory("p", "", None).unwrap();
+    assert!(listed.iter().all(|entry| !entry.favorite));
+    assert_eq!(ids(listed), ["a", "c", "b"]);
+    assert_eq!(ids(database.boundary_memory("p").unwrap()), ["a", "c", "b"]);
+    // And: full-text search is aligned with the rebuilt projection.
+    assert_eq!(
+        ids(database.search_memory("p", "quokka", None).unwrap()),
+        ["a", "c"]
+    );
+    assert_eq!(database.findings("p").unwrap().len(), 1);
+    assert_eq!(database.memory_history("a").unwrap().len(), 3);
+
+    // And: the rebuilt tables take the new ledger kinds, and sequence numbers go on.
+    drop(database);
+    let storage = storage::Storage::open(config_for(&path)).unwrap();
+    storage.handle().set_lesson_favorite("b", true).unwrap();
+    let after = ledger_rows(&connection);
+    assert_eq!(after.len(), ledger_before.len() + 1);
+    assert_eq!((after[10].0, after[10].6.as_str()), (11, "favorite"));
+    assert_eq!(entry_rows(&connection), entries_before);
 }

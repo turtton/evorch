@@ -39,15 +39,20 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     for migration in &MIGRATIONS[..39] {
         fresh.execute_batch(migration)?;
     }
-    let definitions: Vec<String> = fresh
-        .prepare(
-            "SELECT sql FROM sqlite_master WHERE tbl_name = 'run_contexts' AND sql IS NOT NULL \
-             ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name",
-        )?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<_, _>>()?;
+    let definitions_of = |tables: &str| -> Result<Vec<String>, StorageError> {
+        Ok(fresh
+            .prepare(&format!(
+                "SELECT sql FROM sqlite_master WHERE tbl_name IN ({tables}) AND sql IS NOT NULL \
+                 ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name"
+            ))?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    };
+    let definitions = definitions_of("'run_contexts'")?;
+    // The lesson tables v42 rebuilt (favorite flag, two more ledger kinds), as v39 had them.
+    let lesson_definitions = definitions_of("'memory_ledger', 'memory_entries'")?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v42.sql"))?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS run_messages_drop_refs;
@@ -68,6 +73,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     for definition in &definitions {
         conn.execute_batch(definition)?;
     }
+    take_lessons_back(&conn, &lesson_definitions)?;
     for (record, revision) in &rows {
         conn.execute(
             "INSERT INTO run_contexts(run_id, role, name, parent_run_id, config_json, \
@@ -97,5 +103,57 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     conn.pragma_update(None, "user_version", 39)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+/// Takes the lesson tables of a database in the current format back to their version 41
+/// shape (what migration v42 found), for a test that rebuilds an older database by hand.
+///
+/// # Errors
+/// Fails when the tables cannot be rebuilt.
+pub(crate) fn take_lessons_back_to_v41(conn: &Connection) -> Result<(), StorageError> {
+    let fresh = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..39] {
+        fresh.execute_batch(migration)?;
+    }
+    let definitions: Vec<String> = fresh
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE tbl_name IN ('memory_ledger', 'memory_entries') \
+             AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    take_lessons_back(conn, &definitions)
+}
+
+/// Rebuilds the lesson tables as migration v42 found them, keeping every lesson in its
+/// position: favorite marks and the ledger rows that record them are dropped.
+fn take_lessons_back(conn: &Connection, definitions: &[String]) -> Result<(), StorageError> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE ledger_keep AS
+             SELECT seq, entry_id, project, task_id, content, evidence, status, kind, scope
+             FROM memory_ledger WHERE kind IN ('lesson', 'finding', 'eval_trace');
+         CREATE TEMP TABLE entries_keep AS
+             SELECT rowid AS entry_rowid, id, project, task_id, content, evidence, status,
+                    ledger_seq, scope
+             FROM memory_entries;
+         DROP TABLE memory_entries;
+         DROP TABLE memory_ledger;",
+    )?;
+    for definition in definitions {
+        conn.execute_batch(definition)?;
+    }
+    conn.execute_batch(
+        "INSERT INTO memory_ledger(seq, entry_id, project, task_id, content, evidence, status, kind, scope)
+             SELECT seq, entry_id, project, task_id, content, evidence, status, kind, scope
+             FROM ledger_keep ORDER BY seq;
+         INSERT INTO memory_entries(rowid, id, project, task_id, content, evidence, status, ledger_seq, scope)
+             SELECT entry_rowid, id, project, task_id, content, evidence, status, ledger_seq, scope
+             FROM entries_keep ORDER BY entry_rowid;
+         INSERT INTO memory_fts(memory_fts) VALUES('rebuild');
+         DROP TABLE ledger_keep;
+         DROP TABLE entries_keep;",
+    )?;
     Ok(())
 }

@@ -198,6 +198,54 @@ fn dynamic_agent_pane_roundtrips_through_save_load() {
 }
 
 #[test]
+fn evaluations_panel_survives_save_load_and_reset_restores_the_default() {
+    // Given: a workbench that opened the Evaluations panel (twice: it is a single panel)
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let path = temp_dir.path().join("workspace.json");
+    let state = WorkbenchState::new(Source(Vec::new()), &UiSettings::default())
+        .expect("build workbench")
+        .with_save_path(&path);
+    let mut workbench = HeadlessWorkbench::new(state, [1280.0, 720.0]);
+    workbench.run();
+    workbench.state_mut().open_evaluations_tab();
+    workbench.state_mut().open_evaluations_tab();
+    workbench.run();
+    let evaluations = PanelId::new("evaluations-main");
+    assert!(workbench.state().dock().find_tab(&evaluations).is_some());
+
+    // When: the layout is saved and loaded into a fresh workbench
+    workbench.key_press(Modifiers::COMMAND, Key::S);
+    workbench.run();
+    let loaded = workspace_ui::load_from(&path).expect("load saved workspace");
+    assert_eq!(
+        loaded
+            .panels
+            .values()
+            .filter(|panel| panel.kind == PanelKind::Evaluations)
+            .count(),
+        1
+    );
+    let mut settings = UiSettings::default();
+    settings.layout.workspace = Some(loaded);
+    let reloaded = WorkbenchState::new(Source(Vec::new()), &settings).expect("reload workbench");
+
+    // Then: the panel is back, without a target
+    assert!(reloaded.dock().find_tab(&evaluations).is_some());
+
+    // When: the layout is reset to the default
+    workbench.key_press(Modifiers::COMMAND | Modifiers::SHIFT, Key::R);
+    workbench.run();
+
+    // Then: the default panels return and the Evaluations panel is not part of the default
+    assert_work_tabs(workbench.state());
+    assert!(workbench.state().dock().find_tab(&evaluations).is_none());
+    // And: it can be opened again
+    workbench.state_mut().open_evaluations_tab();
+    workbench.run();
+    assert!(workbench.state().dock().find_tab(&evaluations).is_some());
+}
+
+#[test]
 fn undock_to_floating_and_reload_preserves_v02_panels() {
     // Given: a default v0.2 workbench with Diff detached to a floating window
     let temp_dir = tempfile::tempdir().expect("temp dir");

@@ -1,6 +1,6 @@
 -- Removes the lane ledger migration v41 added (its tables and the lineage trigger; the
 -- rebuilt `threads` table is a superset of the old one and stays), for tests that take a
--- converted database back to version 40. Apply it after `undo_v42.sql`.
+-- converted database back to version 40. Apply it after `undo_v43.sql`.
 DROP TABLE IF EXISTS lane_list_snapshot_rows;
 DROP TABLE IF EXISTS lane_list_snapshots;
 DROP TABLE IF EXISTS lane_delivery_keys;
