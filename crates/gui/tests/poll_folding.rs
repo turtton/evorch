@@ -2,7 +2,7 @@
 
 use event_bus::{Event, ToolEvent};
 use gui::model::transcript::{TranscriptEntry, TranscriptModel};
-use gui::panes::transcript_tool::{card_len, draft_preview_lines};
+use gui::panes::transcript_tool::card_len;
 use serde_json::{Value, json};
 
 fn call(
@@ -126,24 +126,4 @@ fn other_tools_and_a_running_poll_never_fold() {
         model.entries().last(),
         Some(TranscriptEntry::Tool { .. })
     ));
-}
-
-#[test]
-fn draft_preview_keeps_the_end_of_a_long_single_line() {
-    // Given: a long one-line JSON and a many-line body.
-    let long = format!("{{\"content\":\"{}TAIL\"}}", "x".repeat(10_000));
-    let lines = draft_preview_lines(&long);
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with('…') && lines[0].ends_with("TAIL\"}"));
-    assert!(lines[0].chars().count() <= 121);
-
-    // Then: only the newest lines are kept.
-    let body = (0..20)
-        .map(|n| format!("line {n}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        draft_preview_lines(&body),
-        ["line 16", "line 17", "line 18", "line 19"]
-    );
 }

@@ -4,7 +4,7 @@
 
 Proposed。
 
-利用者が合意した lane の基本要件、報告ポリシー、lead の lifecycle 独立、表示・family 操作、Orchestrator delegate の全面廃止を具体化する草案。未決事項（ユーザー確認待ち）は末尾に列挙する。
+利用者が合意した lane の基本要件、報告ポリシー、lead の lifecycle 独立、表示・family 操作、Orchestrator delegate の全面廃止を具体化する草案。Phase 3 に関するユーザー決定と実装時に確定する技術事項は末尾に列挙する。
 
 ## Context
 
@@ -220,27 +220,27 @@ summary の質問はユーザー宛てなので、それだけでは lead を wa
 
 代わりに Phase 1c から以下を実装する。
 
-1. **永続 outbox**  
+1. **永続 outbox**
    受理した重要通知を先に保存する。
 
-2. **意味に基づく重複排除**  
+2. **意味に基づく重複排除**
    キーは lane、management revision、イベント種別、質問 ID／成果物 revision／失敗 episode 等。Report sequence の増加や同じ状態の再送だけで別の重要イベントにしない。
 
-3. **lead 単位の single-flight wake**  
+3. **lead 単位の single-flight wake**
    未配送通知を lane×イベント単位で束ね、1 つの wake 要求にする。同じ lead の復元を重複実行しない。大量の質問本文を一括注入せず、短い Report と永続 inbox の参照・件数を届ける。
 
-4. **累積量ではなく、無進展の往復を抑止（リセット信号の限定）**  
-   発生元 lane ごとに、実進展を伴わない因果的な wake 往復を追跡する。初期値は 20 回の連続した無進展 wake batch とする。これは会話全体の総回数上限ではない。  
-   リセット信号は以下に限定する：  
-   (a) lead または対象 lane への実ユーザー入力（`reset_auto_wakes` 相当）  
-   (b) ready または failed に伴う成果物 revision の変化  
-   (c) ユーザーによる明示的な再開操作  
+4. **累積量ではなく、無進展の往復を抑止（リセット信号の限定）**
+   発生元 lane ごとに、実進展を伴わない因果的な wake 往復を追跡する。初期値は 20 回の連続した無進展 wake batch とする。これは会話全体の総回数上限ではない。
+   リセット信号は以下に限定する：
+   (a) lead または対象 lane への実ユーザー入力（`reset_auto_wakes` 相当）
+   (b) ready または failed に伴う成果物 revision の変化
+   (c) ユーザーによる明示的な再開操作
    **新規質問 ID の生成は進展に数えない**（質問→回答→新規質問の往復ループを抑止するため）。通知 ACK、heartbeat、Report sequence の増加、状態の往復、agent 同士の返信でもリセットしない。
 
-5. **抑止は発生元単位**  
+5. **抑止は発生元単位**
    1 lane のループによって、別 lane の新しい ready や質問を止めない。
 
-6. **停止時も durable に保留**  
+6. **停止時も durable に保留**
    抑止された通知は残し、GUI に理由・対象 lane・再開操作を表示する。手動再開や実進展で再評価する。明示 Stop は手動解除なしに解除しない。
 
 この設計により、独立した正常イベントが続く限り、ユーザー入力をリセット条件にせず 20 回以上の wake を処理できる。一方、同じ情報の再配送や無進展の相互起動を止められる。
@@ -290,8 +290,12 @@ detach は成功 close ではなく、管理関係の終了である。
 
 - トップレベルの独立 thread。
 - 独立した pin/archive を持つ。
+- detached の間は通常 thread と同様に自由に pin/archive できる。detach 直後は未 pin・未 archive で開始し、lead family の状態を引き継がない。
 - 元 lead の archive に巻き込まれない。
 - detach 時も thread ID、会話、goal を維持し、表示位置と family 所属だけを変更する。
+- 再 attach はユーザー操作のみとし、サイドバーで lane を lane 外の root Orchestrator へドラッグ＆ドロップして行う。lead からの一方的な再 attach はできず、lane 外 root Orchestrator 以外へのドロップは拒否する。
+- pin または archive 中の detached lane は再 attach できない。ドロップ時に理由を表示して拒否し、先に pin/archive を解除する。
+- 再 attach 後は managed lane として lead family に従い、単体 pin/archive を持たない。
 
 immutable な作成元と、現在の表示親・管理親を分離する。GUI、mirror、retention は同じ有効 family 解決規則を使う。古い sidebar 保存で管理関係を復活させない。
 
@@ -387,6 +391,10 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 
 遅延した旧 lead の回答・close は拒否する。送信済み会話は改変しない。
 
+再 attach はユーザー操作のみで行う。GUI サイドバーで detached lane を lane 外の root Orchestrator へドラッグ＆ドロップする方式とし、lead からの一方的な操作や他の宛先へのドロップは拒否する。pin または archive 中の lane は、理由を表示してドロップを拒否し、先に解除する。再 attach 後の report policy は `summary` を既定とし、後から変更できる。
+
+再 attach でも detach と対称に management revision を更新する。stale な GUI 保存と同時 detach/attach の競合は revision で拒否・解決し、旧管理関係に基づく操作を受け付けない。
+
 ### 16. escalation の統合
 
 公開名は次を推奨する。
@@ -441,14 +449,14 @@ detach は management revision を更新し、以下を一つの管理遷移と�
 - **lane 質問をすべて lead に継承する**：32 件制限・finish gate・provenance を誤用する。
 - **固定 lane 数上限・workspace lock を先行導入する**：現時点で必要性の根拠がない。
 
-## 未決事項
+## 未決事項と決定済み事項
 
-### ユーザー確認待ち（Phase 3 前に解消）
+### Phase 3 に関するユーザー決定（解消済み）
 
-| 項目 | 推奨案 | 影響 |
+| 項目 | 決定 |
 |---|---|---|
-| detached からの再接続 | ユーザーの明示操作のみ。旧 lead の一方的な再 attach は不可 | 親エージェント判断で推奨案を採用。ユーザー未確認のため、Phase 3 着手前に確認する。未確定なら再接続機能を提供しない |
-| detach 時の pin/archive 初期値 | 遷移時点の有効状態を snapshot として独立 family へ移す | 常に未 archive・未 pin で独立させる案との UX 差があるため、Phase 3 前に確認する |
+| detached からの再接続 | ユーザーがサイドバーで lane を lane 外の root Orchestrator へドラッグ＆ドロップして行う。lead の一方的な再 attach と他の宛先へのドロップは不可。pin/archive 中は理由を表示して拒否し、先に解除する。再 attach 後の既定 policy は `summary` とし、後から変更できる |
+| detached 中と detach 直後の pin/archive | detached 中は通常 thread 同様に自由に pin/archive できる。detach 直後は未 pin・未 archive で開始し、lead 側の状態は引き継がない |
 
 ### 実装時に確定する技術事項
 

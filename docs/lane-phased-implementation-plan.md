@@ -308,18 +308,22 @@ detached は lane close・lane 専用管理一覧から除外する。
 
 実装内容:
 - attached↔summary の動的変更。
-- detach 時の管理 revision 更新。
+- detach・再 attach 時の管理 revision 更新。
 - 質問宛先変更、未配送通知失効、旧 lead 回答・close 拒否。
 - 進行中検証を成功扱いせず管理終了。
 - 同一 thread のトップレベル・独立 family 移動。
 - 古い sidebar 保存による再所属を防止。
 - lane 専用監視から通常 thread 扱いへ切替。
+- detached lane は通常 thread 同様に pin/archive できる。detach 直後は未 pin・未 archive で開始し、lead 側の状態を引き継がない。
+- 再 attach はユーザー操作のみとし、サイドバーで detached lane を lane 外の root Orchestrator へドラッグ＆ドロップする。他の宛先へのドロップと lead からの一方的な再 attach は拒否する。
+- pin/archive 中の detached lane は、理由を表示してドロップを拒否する。再 attach 前に pin/archive を解除する。
+- 再 attach 後の report policy は `summary` を既定とし、後から変更可能にする。
 
 DB と GUI ファイルを一つの transaction にできると仮定しない。台帳の遷移を確定し、revision 付き投影を冪等に補修する。不確かな中間状態では retention を保守的に止める。
 
-**ユーザー確認待ち事項**（Phase 3 前に確認）：
-1. detached からの再接続はユーザーの明示操作のみとし、旧 lead の一方的な再 attach は不可とするか。
-2. detach 時の pin/archive 初期値（スナップショット維持 vs 常に未 pin/未 archive）。
+**ユーザー決定済み事項**：
+1. 再 attach はユーザーがサイドバーで lane を lane 外の root Orchestrator へドラッグ＆ドロップして行う。lead からの一方的な再 attach と他の宛先へのドロップは不可。pin/archive 中は理由を表示して拒否し、先に解除する。再 attach 後の既定 policy は `summary` とし、後から変更できる。
+2. detached 中は通常 thread 同様に自由に pin/archive できる。detach 直後は未 pin・未 archive で開始し、lead 側の状態は引き継がない。
 
 ### B. escalation 統合（`handoff_to_lane`）
 
@@ -350,6 +354,11 @@ DB と GUI ファイルを一つの transaction にできると仮定しない�
 
 - policy 変更・detach で schema/order を変更しない。
 - 古い lead 宛 wake・回答・close を revision で拒否。
+- ユーザーがサイドバーで detached lane を lane 外の root Orchestrator へドラッグ＆ドロップすると再 attach でき、その他の宛先は拒否される。
+- lead の一方的な再 attach はできず、pin/archive 中の lane は理由を表示して拒否され、解除後に再 attach できる。
+- detach 直後は未 pin・未 archive で、detached 中は pin/archive が可能。
+- 再 attach 後の既定 policy は `summary` であり、後から変更できる。
+- 再 attach でも detach と対称に management revision を更新し、stale GUI 保存や同時 detach/attach の競合を revision で拒否・解決する。
 - 未回答質問の ID/requester を維持。
 - ready、回答、検証完了、archive との競合で二重所属・誤 close がない。
 - thread・会話・goal・成果物を保ったまま表示移動。

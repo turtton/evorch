@@ -279,6 +279,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::Diagnostic { .. }
                         | TranscriptEntry::SandboxReview { .. }
                         | TranscriptEntry::Compaction { .. }
+                        | TranscriptEntry::CompactionProgress { .. }
                         | TranscriptEntry::Message { .. }
                         | TranscriptEntry::Reasoning { .. }
                         | TranscriptEntry::AgentMessage { .. }
@@ -409,7 +410,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.thread_search_available()
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
         {
-            self.thread_search.toggle();
+            self.toggle_thread_search();
         }
         // While the search is up every key belongs to it, not to shortcuts behind it.
         if self.search_owns_input() {

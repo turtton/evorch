@@ -1,5 +1,7 @@
+use super::drafts::{PREVIEW_BYTES, RAW_WINDOW_BYTES, view};
 use super::{ToolStatus, TranscriptEntry, TranscriptModel};
 use event_bus::{AgentRunPhase, Event, LifecycleEvent, MessageEvent, ToolEvent};
+use secret_guard::SecretRedactor;
 use serde_json::json;
 
 const RUN: &str = "run-1";
@@ -232,10 +234,11 @@ fn oversized_arguments_keep_a_bounded_redacted_tail() {
     }
     model.apply(&delta(0, None, None, "END"));
 
-    // Then: the entry holds only a short tail and its newest text is intact.
+    // Then: the entry holds only a bounded tail and its newest text is intact.
     let (_, _, arguments) = &drafts(&model)[0];
-    assert!(arguments.len() <= 2 * 1024);
+    assert!(arguments.len() <= PREVIEW_BYTES);
     assert!(arguments.ends_with("END"));
+    assert!(views(&model)[0].omitted, "the cut is reported");
 }
 
 #[test]
@@ -405,4 +408,397 @@ fn waiting_with_nothing_in_flight_is_idle_and_drops_sealed_drafts() {
 
     // Then: the orphaned draft is dropped.
     assert!(drafts(&model).is_empty());
+}
+
+/// What each card shows: the decoded text, the argument tail and the omission flag.
+struct Shown {
+    text: String,
+    arguments: String,
+    omitted: bool,
+}
+
+fn views(model: &TranscriptModel) -> Vec<Shown> {
+    model
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Tool {
+                status:
+                    ToolStatus::Drafting {
+                        text,
+                        arguments,
+                        omitted,
+                        ..
+                    },
+                ..
+            } => Some(Shown {
+                text: text.clone(),
+                arguments: arguments.clone(),
+                omitted: *omitted,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The JSON a provider streams for `{"<field>": "<value>"}`, written the way a
+/// model writes it: line breaks and quotes escaped.
+fn json_string_arguments(prefix: &str, field: &str, value: &str) -> String {
+    format!(
+        "{{{prefix}\"{field}\":{}}}",
+        serde_json::to_string(value).unwrap()
+    )
+}
+
+/// Streams `arguments` in `step`-byte pieces (on character boundaries).
+fn stream(model: &mut TranscriptModel, name: &str, arguments: &str, step: usize) {
+    let mut rest = arguments;
+    let mut first = true;
+    while !rest.is_empty() {
+        let mut cut = step.min(rest.len());
+        while !rest.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let (piece, tail) = rest.split_at(cut);
+        model.apply(&if first {
+            delta(0, Some("call-1"), Some(name), piece)
+        } else {
+            delta(0, None, None, piece)
+        });
+        first = false;
+        rest = tail;
+    }
+}
+
+#[test]
+fn a_multi_line_prompt_and_command_are_decoded_into_readable_text() {
+    // Given: a delegate prompt and a shell command written with line breaks.
+    let prompt = "Fix the parser.\n\n1. Read \"lexer.rs\"\n2. Add a test\n日本語も読める";
+    let command = "cd crates/gui &&\n  cargo test \\\n  --locked";
+    for (tool, field, text) in [
+        ("delegate", "prompt", prompt),
+        ("shell", "command", command),
+    ] {
+        let arguments = json_string_arguments("\"name\":\"w\",", field, text);
+        // When: it streams in pieces of every small size, cutting inside escapes.
+        for step in 1..=9 {
+            let mut model = TranscriptModel::new();
+            stream(&mut model, tool, &arguments, step);
+
+            // Then: the card holds the decoded text, line breaks kept.
+            let shown = &views(&model)[0];
+            assert_eq!(shown.text, text, "{tool} step {step}");
+            assert!(!shown.omitted);
+        }
+    }
+}
+
+#[test]
+fn text_decoded_midway_never_shows_half_an_escape() {
+    // Given/When: a prompt cut after every byte of the stream.
+    let arguments = json_string_arguments("", "prompt", "a\nb \"q\" \u{1F600} c");
+    for end in (0..=arguments.len()).filter(|end| arguments.is_char_boundary(*end)) {
+        let mut model = TranscriptModel::new();
+        model.apply(&delta(
+            0,
+            Some("call-1"),
+            Some("delegate"),
+            &arguments[..end],
+        ));
+
+        // Then: the decoded text is a prefix of the final one, with no stray backslash.
+        let text = &views(&model)[0].text;
+        assert!(
+            "a\nb \"q\" \u{1F600} c".starts_with(text.as_str()),
+            "{end}: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_prompt_beyond_the_old_two_kib_limit_is_readable_and_bounded() {
+    // Given: a prompt of many lines, several times the former 2 KiB / 4 line view.
+    let lines: Vec<String> = (0..600).map(|n| format!("line {n:03}: details")).collect();
+    let prompt = lines.join("\n");
+    assert!(prompt.len() > 4 * 2 * 1024);
+    let arguments = json_string_arguments("", "prompt", &prompt);
+
+    // When: it streams in.
+    let mut model = TranscriptModel::new();
+    stream(&mut model, "delegate", &arguments, 700);
+
+    // Then: all of it is kept, because it fits the preview.
+    let shown = &views(&model)[0];
+    assert_eq!(shown.text, prompt);
+    assert!(!shown.omitted);
+
+    // And: one far beyond the window keeps its newest lines, says so, and stays bounded.
+    let huge: Vec<String> = (0..20_000)
+        .map(|n| format!("row {n:05} of the prompt"))
+        .collect();
+    let huge = huge.join("\n");
+    let mut model = TranscriptModel::new();
+    stream(
+        &mut model,
+        "delegate",
+        &json_string_arguments("", "prompt", &huge),
+        4000,
+    );
+    let shown = &views(&model)[0];
+    assert!(shown.omitted);
+    assert!(shown.text.len() <= PREVIEW_BYTES && shown.arguments.len() <= PREVIEW_BYTES);
+    assert!(
+        shown.text.ends_with("row 19999 of the prompt"),
+        "{}",
+        shown.text
+    );
+}
+
+/// A token whose body has no run in common with ordinary words or the redaction markers.
+const BODY: &str = "Zx9Qw3Lm7Tb2Vc5Nk8Rd4Hf6Jg1Ps0YaEu";
+
+fn assert_hides_body(shown: &Shown, context: &str) {
+    assert_hides(shown, BODY, context);
+}
+
+/// No stretch of `secret` of six characters is displayed, in either view.
+fn assert_hides(shown: &Shown, secret: &str, context: &str) {
+    const LEAK: usize = 6;
+    let chars: Vec<char> = secret.chars().collect();
+    for window in chars.windows(LEAK) {
+        let fragment: String = window.iter().collect();
+        for (what, text) in [("text", &shown.text), ("arguments", &shown.arguments)] {
+            assert!(
+                !text.contains(&fragment),
+                "{context}: {fragment} leaked in {what}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_credential_is_hidden_at_every_fragment_boundary() {
+    // Given: a command and a prompt that carry a token, plain and JSON-escaped.
+    let token = format!("ghp_{BODY}");
+    let escaped_opening = format!("\\u0067hp_{BODY}");
+    for (tool, field) in [("shell", "command"), ("delegate", "prompt")] {
+        for secret in [token.clone(), escaped_opening.clone()] {
+            let value = format!("curl -H 'Authorization: {secret}'\nthen 日本語 more");
+            let arguments =
+                json_string_arguments("", field, &value).replace("\\\\u0067", "\\u0067");
+            // When: the stream is cut after every character boundary.
+            for end in (0..=arguments.len()).filter(|end| arguments.is_char_boundary(*end)) {
+                let mut model = TranscriptModel::new();
+                model.apply(&delta(0, Some("call-1"), Some(tool), &arguments[..end]));
+
+                // Then: no part of the token is ever displayed.
+                assert_hides_body(&views(&model)[0], &format!("{tool} at {end}"));
+            }
+        }
+    }
+}
+
+/// The token with `escaped` written as a JSON `\\u` escape inside a JSON string.
+fn token_forms() -> Vec<(&'static str, String)> {
+    let middle = format!("ghp_{}\\u004c{}", &BODY[..6], &BODY[7..]);
+    vec![
+        ("plain", format!("ghp_{BODY}")),
+        ("escaped opening", format!("\\u0067hp_{BODY}")),
+        ("escaped middle", middle),
+    ]
+}
+
+#[test]
+fn a_credential_with_an_escape_after_a_complete_prefix_is_hidden_at_every_fragment_boundary() {
+    // Given: a token whose first 30 characters already make a complete credential
+    // in the raw JSON (the redaction count is the same either way), followed by
+    // `\u0042` and a long second half that looks like ordinary text in the raw JSON.
+    const FIRST: &str = "Qm4Xz8Kd2Wv6Ty0Hn3Bc7Lf9Pj5Rs1";
+    const SECOND: &str = "Ug8Ea2Ox6Nw4Mi0Vt7Yb3Cl5Dh9Fk1Jq";
+    for tool in ["write", "shell", "delegate"] {
+        let field = if tool == "delegate" {
+            "prompt"
+        } else {
+            "command"
+        };
+        let arguments = format!("{{\"{field}\":\"use ghp_{FIRST}\\u0042{SECOND} now\"}}");
+        // When: the stream is cut after every character boundary.
+        for end in (0..=arguments.len()).filter(|end| arguments.is_char_boundary(*end)) {
+            let mut model = TranscriptModel::new();
+            model.apply(&delta(0, Some("call-1"), Some(tool), &arguments[..end]));
+
+            // Then: no stretch of either half is displayed, in either view.
+            let shown = &views(&model)[0];
+            assert_hides(shown, FIRST, &format!("{tool} at {end}"));
+            assert_hides(shown, SECOND, &format!("{tool} at {end}"));
+        }
+    }
+}
+
+#[test]
+fn a_credential_cut_by_the_window_start_is_never_shown() {
+    // Given: a token, then a private key block that redaction collapses to one
+    // marker, so the cut token's remnant would sit inside a shown tail that
+    // were taken after redaction.
+    let key = format!(
+        "-----BEGIN PRIVATE KEY-----\n{}",
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".repeat(RAW_WINDOW_BYTES / 40)
+    );
+    for (form, token) in token_forms() {
+        for cut_in in 0..=token.len() {
+            let mut stream_text = format!("{token} ok {key}");
+            // The window start lands `cut_in` bytes into the token.
+            let excess = stream_text.len().saturating_sub(RAW_WINDOW_BYTES);
+            let pad = cut_in.saturating_sub(excess);
+            stream_text = format!("{token} ok {}{key}", "pad ".repeat(pad / 4));
+            let total = stream_text.len();
+            stream_text
+                .push_str(&" w".repeat((RAW_WINDOW_BYTES + cut_in).saturating_sub(total) / 2));
+
+            for step in [stream_text.len(), 5_000] {
+                let mut model = TranscriptModel::new();
+                let arguments = format!("{{\"command\":\"{}", stream_text.replace('\n', "\\n"));
+                stream(&mut model, "shell", &arguments, step);
+
+                // Then: the cut remnant is not displayed in either view.
+                let context = format!("{form} cut {cut_in} step {step}");
+                assert_hides_body(&views(&model)[0], &context);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cut_window_shows_nothing_near_its_start_even_when_later_credentials_shrink() {
+    // Given: a cut token remnant followed by hundreds of whole tokens that
+    // redaction shrinks, so the shown tail would reach back to the window start.
+    let tokens = format!("ghp_{BODY} ").repeat(300);
+    let raw = format!("{}{tokens}tail", &format!("ghp_{BODY}")[20..]);
+    let redactor = SecretRedactor::with_known_values([]);
+    let shown = view(&redactor, "write", &raw, true);
+
+    // Then: only text beyond the guard distance from the start remains.
+    assert!(shown.omitted);
+    assert_no_fragment(&shown.arguments, &BODY[8..]);
+    assert!(shown.arguments.ends_with("tail"));
+}
+
+#[test]
+fn a_known_credential_longer_than_the_designed_bound_is_still_kept_out() {
+    // Given: a configured credential well beyond the designed length.
+    let known: String = (0..9_000)
+        .map(|n| char::from(b'a' + u8::try_from((n * 7 + n / 26) % 26).unwrap()))
+        .collect();
+    let redactor = SecretRedactor::with_known_values([known.clone()]);
+    assert!(redactor.max_credential_len() >= known.len());
+
+    // When: the window starts in the middle of it.
+    let raw = format!("{} then 日本語 text\n{known} end", &known[2_000..]);
+    let shown = view(&redactor, "write", &raw, true);
+
+    // Then: neither the cut remnant nor the whole value is displayed.
+    assert_no_fragment(&shown.arguments, &known[3_000..3_020]);
+    assert_no_fragment(&shown.arguments, &known[100..120]);
+}
+
+fn assert_no_fragment(shown: &str, secret: &str) {
+    let chars: Vec<char> = secret.chars().collect();
+    for window in chars.windows(10) {
+        let fragment: String = window.iter().collect();
+        assert!(!shown.contains(&fragment), "{fragment} leaked");
+    }
+}
+
+#[test]
+fn the_raw_window_is_bounded_and_leaves_room_for_the_guard_and_a_preview() {
+    // Given/When: far more text than the window streams in.
+    let mut model = TranscriptModel::new();
+    model.apply(&delta(0, Some("call-1"), Some("write"), ""));
+    for _ in 0..30 {
+        model.apply(&delta(0, None, None, &"é".repeat(5_000)));
+    }
+
+    // Then: what is shown is bounded and the default guard fits the window.
+    let shown = &views(&model)[0];
+    assert!(shown.arguments.len() <= PREVIEW_BYTES);
+    assert!(
+        SecretRedactor::with_known_values([]).max_credential_len() + PREVIEW_BYTES
+            <= RAW_WINDOW_BYTES
+    );
+}
+
+#[test]
+fn drafts_of_different_calls_and_runs_keep_their_own_text() {
+    // Given: two delegate drafts of one run and one of another run.
+    let mut model = TranscriptModel::new();
+    model.apply(&delta(
+        0,
+        Some("a"),
+        Some("delegate"),
+        "{\"prompt\":\"alpha\\none\"",
+    ));
+    model.apply(&delta(
+        1,
+        Some("b"),
+        Some("shell"),
+        "{\"command\":\"echo b\\n",
+    ));
+    model.apply(&Event::new(MessageEvent::ToolCallDelta {
+        run_id: Some("other".into()),
+        index: 0,
+        call_id: Some("c".into()),
+        tool_name: Some("delegate".into()),
+        arguments_delta: "{\"prompt\":\"gamma".into(),
+    }));
+    model.apply(&delta(0, None, None, "}"));
+
+    // Then: no text leaks across calls or runs.
+    let texts: Vec<_> = views(&model).into_iter().map(|shown| shown.text).collect();
+    assert_eq!(texts, ["alpha\none", "echo b\n", "gamma"]);
+}
+
+#[test]
+fn a_draft_keeps_its_place_and_card_when_the_call_starts_and_a_retry_clears_the_text() {
+    // Given: a long prompt being composed, then confirmed by the runtime.
+    let mut model = TranscriptModel::new();
+    model.apply(&text("Delegating."));
+    model.apply(&delta(
+        0,
+        Some("call-1"),
+        Some("delegate"),
+        "{\"prompt\":\"first\\nsecond",
+    ));
+    let before = model.entries().len();
+    model.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "delegate".into(),
+        call_id: "call-1".into(),
+        input: Some(json!({"prompt": "first\nsecond"})),
+        run_id: Some(RUN.into()),
+        parent_call_id: None,
+    }));
+
+    // Then: the same entry became the running call, with the accepted input.
+    assert_eq!(model.entries().len(), before);
+    assert!(matches!(
+        &model.entries()[1],
+        TranscriptEntry::Tool { call_id, status: ToolStatus::Running, input: Some(input), .. }
+            if call_id == "call-1" && input["prompt"] == "first\nsecond"
+    ));
+
+    // And: a retried attempt starts its draft from nothing.
+    model.apply(&delta(
+        0,
+        Some("call-2"),
+        Some("delegate"),
+        "{\"prompt\":\"stale",
+    ));
+    model.apply(&retried());
+    model.apply(&delta(
+        0,
+        Some("call-2"),
+        Some("delegate"),
+        "{\"prompt\":\"fresh",
+    ));
+    let texts: Vec<_> = views(&model).into_iter().map(|shown| shown.text).collect();
+    assert_eq!(texts, ["fresh"]);
 }

@@ -133,21 +133,25 @@ async fn automatic_compaction_records_catalog_window_through_live_runtime() {
     runtime.send_message(run, "continue".into()).unwrap();
     runtime.wait(run).await.unwrap();
     // Then: both trigger and compaction use the real 32K catalog window.
-    let compacted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let event_bus::EventKind::Compaction(event) = receiver.recv().await.unwrap().kind {
-                break event;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let compacted = receiver
+        .drain_pending_snapshot()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            event_bus::EventKind::Compaction(
+                event @ event_bus::CompactionEvent::Compacted { .. },
+            ) => Some(event),
+            _ => None,
+        })
+        .expect("committed compaction before run termination");
     let event_bus::CompactionEvent::Compacted {
         context_window_tokens,
         window_source,
         estimated_tokens_before,
         ..
-    } = compacted;
+    } = compacted
+    else {
+        panic!("expected completed compaction");
+    };
     assert_eq!(context_window_tokens, 32_000);
     assert_eq!(window_source, event_bus::WindowSource::Catalog);
     assert!((24_000..150_000).contains(&estimated_tokens_before));
