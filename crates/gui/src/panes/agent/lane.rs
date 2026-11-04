@@ -1,12 +1,13 @@
 //! The lane card of a lane's thread header (ADR 0044): policy, latest Report status,
 //! the brief and the branch/worktree declaration, read from the lane ledger.
 //!
-//! Phase 1b words `ready` as unverified: the lane's claim, not a checked result.
+//! `ready` is worded as unverified: the lane's claim, not a checked result. Delivery
+//! notices (capacity, paused wake, stopped lead) come with the operation that clears them.
 
 use event_bus::lane::{LaneBrief, LaneStatus};
 
-use super::{AgentPaneAction, LaneContext};
-use crate::model::lanes::{PREVIEW_NOTICE, status_label};
+use super::{AgentPaneAction, LaneAction, LaneContext, LeadContext};
+use crate::model::lanes::{LaneDeliveryView, routing_notice, status_label};
 use crate::theme::{text::muted, tokens::*, widgets::badge};
 
 /// Badge colors of a Report status; `ready` stays a warning color until verified.
@@ -62,7 +63,13 @@ pub(super) fn lane_card(
             ));
         }
     });
-    ui.label(muted(PREVIEW_NOTICE));
+    ui.label(muted(routing_notice(record.policy, lane.delivery_bound)));
+    delivery_lines(
+        ui,
+        &detail.delivery,
+        record.lead_thread_id.as_deref(),
+        action,
+    );
     if let Some(report) = &detail.latest_report {
         let mut line = format!("Report #{}: {}", report.report_seq, report.summary);
         if report.needs_human {
@@ -79,6 +86,80 @@ pub(super) fn lane_card(
         .show(ui, |ui| {
             brief_body(ui, &record.brief, &detail.workspace_lines())
         });
+}
+
+/// The delivery notices of one lane, each with the operation that clears it.
+fn delivery_lines(
+    ui: &mut egui::Ui,
+    delivery: &LaneDeliveryView,
+    lead: Option<&str>,
+    action: &mut Option<AgentPaneAction>,
+) {
+    if let Some(line) = delivery.capacity_line() {
+        ui.colored_label(palette().WARNING_FG, line);
+    }
+    if let Some(line) = delivery.suppressed_line() {
+        ui.colored_label(palette().WARNING_FG, line);
+        if let Some(lead) = lead
+            && ui
+                .small_button("Resume notifications")
+                .on_hover_text("Deliver this lane's held notices to its lead again")
+                .clicked()
+        {
+            *action = Some(AgentPaneAction::Lane(LaneAction::ResumeDelivery {
+                lead: lead.to_owned(),
+            }));
+        }
+    }
+    if delivery.lead_stopped {
+        ui.colored_label(
+            palette().WARNING_FG,
+            "The lead was stopped: its notices are held, not lost, and it is not woken.",
+        );
+        if let Some(lead) = lead
+            && ui
+                .small_button("Continue lead")
+                .on_hover_text("Resume the lead's conversation; held notices are then delivered")
+                .clicked()
+        {
+            *action = Some(AgentPaneAction::Lane(LaneAction::ContinueLead {
+                lead: lead.to_owned(),
+            }));
+        }
+    }
+}
+
+/// What a lead thread shows of the lanes it manages: questions waiting for its answer and
+/// the delivery notices of those lanes. Nothing is drawn while there is nothing to say.
+pub(super) fn lead_card(
+    ui: &mut egui::Ui,
+    lead: &LeadContext<'_>,
+    action: &mut Option<AgentPaneAction>,
+) {
+    if lead.waiting_questions > 0 {
+        ui.label(muted(format!(
+            "{} lane question(s) wait for your answer here. Read them with lane_questions; they are not in your question list.",
+            lead.waiting_questions
+        )));
+    }
+    for lane in &lead.lanes {
+        if lane.delivery.capacity_blocked.is_none() && !lane.delivery.guard.suppressed {
+            continue;
+        }
+        ui.label(muted(format!("Lane {}", lane.record.lane_id)));
+        let own = LaneDeliveryView {
+            lead_stopped: false,
+            ..lane.delivery.clone()
+        };
+        delivery_lines(ui, &own, Some(lead.thread_id), action);
+    }
+    if lead.lanes.iter().any(|lane| lane.delivery.lead_stopped) {
+        let stopped = LaneDeliveryView {
+            lead_stopped: true,
+            ..Default::default()
+        };
+        delivery_lines(ui, &stopped, Some(lead.thread_id), action);
+    }
 }
 
 fn brief_body(ui: &mut egui::Ui, brief: &LaneBrief, workspace: &[String]) {

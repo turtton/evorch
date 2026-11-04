@@ -34,7 +34,7 @@ use storage::threads::ThreadLineageKind;
 use workspace_ui::{LaneLink, LanePolicy, ProjectId, ThreadChatRole, ThreadId, ThreadRecord};
 
 use super::WorkbenchState;
-use crate::model::lanes::LaneDetail;
+use crate::model::lanes::{LaneDeliveryView, LaneDetail};
 use crate::model::tasks::AgentRunSource;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -102,6 +102,19 @@ fn snapshot_of(db: &Database, thread_id: &str) -> Result<Option<LaneSnapshot>, S
             .next()
     };
     let row = db.thread(thread_id).map_err(fail)?;
+    let delivery = LaneDeliveryView {
+        capacity_blocked: db
+            .lane_question_capacity_diagnostic(&record.lane_id)
+            .map_err(fail)?,
+        guard: db.lane_wake_guard(&record.lane_id).map_err(fail)?,
+        lead_stopped: match record.lead_thread_id.as_deref() {
+            Some(lead) => db
+                .lane_delivery_destination(lead)
+                .map_err(fail)?
+                .is_some_and(|destination| destination.stopped),
+            None => false,
+        },
+    };
     Ok(Some(LaneSnapshot {
         project_id: row.as_ref().and_then(|row| row.project_id.clone()),
         title: row.as_ref().and_then(|row| row.title.clone()),
@@ -115,6 +128,7 @@ fn snapshot_of(db: &Database, thread_id: &str) -> Result<Option<LaneSnapshot>, S
         detail: LaneDetail {
             record,
             latest_report,
+            delivery,
         },
     }))
 }
@@ -207,6 +221,8 @@ pub(super) struct LaneState {
     /// Chat roots whose thread the sidebar did not have yet: the runtime starts a lane root
     /// before the creation event places its thread.
     early_roots: VecDeque<(String, String)>,
+    /// The thread whose delivery state was last asked for, so showing a thread reads it once.
+    shown: Option<String>,
 }
 
 impl Default for LaneState {
@@ -226,6 +242,7 @@ impl Default for LaneState {
             results,
             sender,
             early_roots: VecDeque::new(),
+            shown: None,
         }
     }
 }
@@ -349,6 +366,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         while let Ok(loaded) = self.lanes.results.try_recv() {
             changed |= self.apply_loaded_lanes(loaded);
         }
+        self.refresh_shown_lanes();
         self.queue_stale_lanes();
         self.start_lane_reads();
         if changed {
@@ -401,6 +419,61 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+    }
+
+    /// Delivery state (capacity, paused wake, Stop) has no event of its own, so it is read when
+    /// a lane or a lead is shown, when the runtime reports a delivery problem and after the
+    /// user acts on it: never on a timer.
+    fn refresh_shown_lanes(&mut self) {
+        let Some(active) = self.sidebar.active_thread.as_ref().map(ToString::to_string) else {
+            return;
+        };
+        if self.lanes.shown.as_ref() == Some(&active) {
+            return;
+        }
+        self.lanes.shown = Some(active.clone());
+        self.request_delivery_reads(&active);
+    }
+
+    /// Asks for a read of `thread` when it is a lane, and of every lane it leads.
+    fn request_delivery_reads(&mut self, thread: &str) {
+        let wanted: Vec<String> = self
+            .sidebar
+            .threads
+            .iter()
+            .filter(|candidate| {
+                candidate.lane.as_ref().is_some_and(|lane| {
+                    candidate.id.to_string() == thread
+                        || lane
+                            .lead_thread_id
+                            .as_ref()
+                            .is_some_and(|lead| lead.to_string() == thread)
+                })
+            })
+            .map(|candidate| candidate.id.to_string())
+            .collect();
+        for id in wanted {
+            self.lanes.request(&id);
+        }
+    }
+
+    /// Runs what a delivery notice offered. The runtime decides what each operation does.
+    pub(super) fn apply_lane_action(&mut self, action: crate::panes::agent::LaneAction) {
+        use crate::model::commands::WorkbenchCommand;
+        use crate::panes::agent::LaneAction;
+        let lead = match &action {
+            LaneAction::ResumeDelivery { lead } | LaneAction::ContinueLead { lead } => lead.clone(),
+        };
+        let command = match action {
+            LaneAction::ResumeDelivery { .. } => WorkbenchCommand::ResumeLaneDeliveries {
+                thread_id: lead.clone(),
+            },
+            LaneAction::ContinueLead { .. } => WorkbenchCommand::ContinueChat(
+                self.chat_continuation(&ThreadId::new(lead.clone()), false),
+            ),
+        };
+        self.submit_command(command);
+        self.request_delivery_reads(&lead);
     }
 
     /// A lane thread the ledger has not been read for, or whose details lag the sidebar's
@@ -484,6 +557,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     fn fold_lane_event(&mut self, event: &Event) -> bool {
+        if let EventKind::Diagnostic(diagnostic) = &event.kind
+            && diagnostic.source == "lane_delivery"
+            && let Some(active) = self.sidebar.active_thread.as_ref().map(ToString::to_string)
+        {
+            self.request_delivery_reads(&active);
+            return false;
+        }
         let EventKind::Ledger(ledger) = &event.kind else {
             return false;
         };

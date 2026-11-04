@@ -104,6 +104,11 @@ pub(super) fn header_strip(
             {
                 super::lane::lane_card(ui, lane, action);
             }
+            if identity.is_none()
+                && let Some(lead) = &ctx.lead
+            {
+                super::lane::lead_card(ui, lead, action);
+            }
             if identity.is_none() && (ctx.parent_thread.is_some() || !ctx.child_threads.is_empty())
             {
                 ui.horizontal_wrapped(|ui| {

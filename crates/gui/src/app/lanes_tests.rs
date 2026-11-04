@@ -116,6 +116,7 @@ fn snapshot(record: LaneRecord, latest_report: Option<LaneReport>) -> LaneSnapsh
         detail: LaneDetail {
             record,
             latest_report,
+            delivery: Default::default(),
         },
     }
 }
@@ -861,4 +862,271 @@ fn a_ledger_read_that_disagrees_with_the_events_does_not_rebind_the_sink() {
         bindings.latest("lane-thread-1").as_deref(),
         Some("lane-root-x")
     );
+}
+
+/// What the Workbench asked of its command sink, observed from outside it.
+#[derive(Default)]
+struct Observed {
+    commands: Vec<crate::model::commands::WorkbenchCommand>,
+    scheduled: Vec<String>,
+}
+
+struct Recorder(Arc<Mutex<Observed>>);
+
+impl crate::model::commands::CommandSink for Recorder {
+    fn submit(
+        &mut self,
+        command: crate::model::commands::WorkbenchCommand,
+    ) -> Vec<crate::model::commands::LoopEvent> {
+        self.0.lock().unwrap().commands.push(command);
+        Vec::new()
+    }
+
+    fn lane_delivery_bound(&self) -> bool {
+        true
+    }
+
+    fn schedule_lane_deliveries(&mut self, thread: &str) {
+        self.0.lock().unwrap().scheduled.push(thread.to_owned());
+    }
+}
+
+fn observed(
+    workbench: WorkbenchState<DemoSource>,
+) -> (WorkbenchState<DemoSource>, Arc<Mutex<Observed>>) {
+    let seen = Arc::new(Mutex::new(Observed::default()));
+    (
+        workbench.with_command_sink(Box::new(Recorder(seen.clone()))),
+        seen,
+    )
+}
+
+#[test]
+fn the_database_reader_reports_a_paused_wake_and_a_stopped_lead() {
+    use storage::lane_delivery::{
+        LANE_NO_PROGRESS_LIMIT, LaneDeliveryOwner, LaneDestinationAction, LaneGuardSignal,
+    };
+    use storage::lanes::NewLane;
+
+    // Given: a stored attached lane whose wakes made no progress 20 times and whose lead was stopped
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("events.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
+    let handle = storage.handle();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    handle
+        .create_lane(NewLane {
+            lane_id: "lane-1".into(),
+            thread_id: "lane-thread-1".into(),
+            origin_thread_id: "thread".into(),
+            origin_run_id: "lead-run".into(),
+            creation_key: "call-1".into(),
+            brief: record(1, Some("thread"), LedgerPolicy::Attached, 1).brief,
+            start_seed: "seed".into(),
+            project_id: Some("test".into()),
+            project_root: Some(root),
+            title: None,
+            at_ns: 5_000_000_000,
+        })
+        .unwrap();
+    for batch in 0..LANE_NO_PROGRESS_LIMIT {
+        let guard = handle.lane_wake_guard("lane-1".into()).unwrap();
+        handle
+            .update_lane_wake_guard(
+                "lane-1".into(),
+                guard.revision,
+                LaneGuardSignal::WakeBatch {
+                    batch_id: format!("batch-{batch}"),
+                },
+            )
+            .unwrap();
+    }
+    handle
+        .bind_lane_delivery_destination(
+            "thread".into(),
+            0,
+            LaneDeliveryOwner {
+                root_run_id: "lead-run".into(),
+                generation: 0,
+                ownership_generation: 0,
+            },
+            LaneDestinationAction::Stop,
+        )
+        .unwrap();
+
+    // When: the reader reads the lane
+    let reader = super::lanes::StorageLaneReader::new(config.db_path.clone());
+    let snapshot = reader.snapshot("lane-thread-1").unwrap().unwrap();
+
+    // Then: the view carries both, with words for the user
+    let delivery = snapshot.detail.delivery;
+    assert!(delivery.guard.suppressed);
+    assert!(delivery.lead_stopped);
+    assert!(delivery.suppressed_line().unwrap().contains("20 wakes"));
+    assert!(delivery.capacity_blocked.is_none());
+}
+
+#[test]
+fn resuming_asks_the_runtime_for_the_lead_and_continuing_uses_the_users_own_path() {
+    use crate::model::commands::WorkbenchCommand;
+    use crate::panes::agent::LaneAction;
+
+    let (workbench, _dir) = workbench(None);
+    let (mut workbench, seen) = observed(workbench);
+
+    workbench.apply_lane_action(LaneAction::ResumeDelivery {
+        lead: "thread".into(),
+    });
+    workbench.apply_lane_action(LaneAction::ContinueLead {
+        lead: "thread".into(),
+    });
+
+    let commands = &seen.lock().unwrap().commands;
+    assert!(matches!(
+        &commands[0],
+        WorkbenchCommand::ResumeLaneDeliveries { thread_id } if thread_id == "thread"
+    ));
+    assert!(matches!(
+        &commands[1],
+        WorkbenchCommand::ContinueChat(chat) if chat.thread_id == "thread" && !chat.automatic
+    ));
+}
+
+#[test]
+fn showing_a_lane_or_its_lead_reads_the_delivery_state_again_but_polling_does_not() {
+    // Given: an attached lane read once, and a lead that is shown
+    let ledger = Arc::new(FakeLedger::default());
+    let lane = record(1, Some("thread"), LedgerPolicy::Attached, 1);
+    ledger.put(snapshot(lane.clone(), None));
+    let (mut workbench, _dir) = workbench(Some(ledger.clone()));
+    workbench.apply_conversation_event(&created(&lane));
+    settle(&mut workbench);
+    let lane_thread = ThreadId::new("lane-thread-1");
+    assert!(
+        !workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .guard
+            .suppressed
+    );
+
+    // When: the ledger now says the wake is paused
+    let mut paused = snapshot(lane.clone(), None);
+    paused.detail.delivery.guard.suppressed = true;
+    ledger.put(paused);
+    settle(&mut workbench);
+    assert!(
+        !workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .guard
+            .suppressed,
+        "polling alone does not read it again"
+    );
+    workbench.switch_thread(lane_thread.clone()).unwrap();
+    settle(&mut workbench);
+    assert!(
+        workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .guard
+            .suppressed,
+        "showing the lane reads it"
+    );
+
+    // And: the lane resumed and the lead is shown again
+    ledger.put(snapshot(lane, None));
+    workbench.switch_thread(ThreadId::new("thread")).unwrap();
+    settle(&mut workbench);
+    assert!(
+        !workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .guard
+            .suppressed,
+        "showing the lead reads the lanes it leads"
+    );
+}
+
+#[test]
+fn a_lane_delivery_diagnostic_refreshes_what_is_shown() {
+    let ledger = Arc::new(FakeLedger::default());
+    let lane = record(1, Some("thread"), LedgerPolicy::Attached, 1);
+    ledger.put(snapshot(lane.clone(), None));
+    let (mut workbench, _dir) = workbench(Some(ledger.clone()));
+    workbench.apply_conversation_event(&created(&lane));
+    settle(&mut workbench);
+    let lane_thread = ThreadId::new("lane-thread-1");
+
+    let mut blocked = snapshot(lane, None);
+    blocked.detail.delivery.capacity_blocked =
+        Some(storage::lane_delivery::QuestionCapacityBlocked {
+            capacity: storage::lane_delivery::QuestionCapacity::Requester,
+            attempts: 1,
+            first_at_ns: 1,
+            last_at_ns: 1,
+        });
+    ledger.put(blocked);
+    workbench.apply_conversation_event(&Event::new(event_bus::DiagnosticEvent {
+        source: "lane_delivery".into(),
+        severity: event_bus::DiagnosticSeverity::Warning,
+        code: "lane_delivery_failed".into(),
+        detail: String::new(),
+        run_id: None,
+        thread_id: None,
+        call_id: None,
+    }));
+    settle(&mut workbench);
+
+    assert!(
+        workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .capacity_line()
+            .unwrap()
+            .contains("32 unanswered")
+    );
+}
+
+#[test]
+fn acquiring_ownership_of_a_thread_asks_the_runtime_to_redrive_its_deliveries() {
+    use event_bus::{OwnershipAction, OwnershipEvent};
+
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(
+        runtime::ownership::OwnerHost::open(
+            dir.path(),
+            Default::default(),
+            Arc::new(event_bus::EventBus::new(64)),
+        )
+        .unwrap(),
+    );
+    let (workbench, _dir) = workbench(None);
+    let (workbench, seen) = observed(workbench);
+    let mut workbench = workbench.with_ownership(host.clone());
+    let claimed = |owner: &str| {
+        Event::new(OwnershipEvent {
+            thread_id: "thread".into(),
+            owner_id: owner.into(),
+            generation: 1,
+            action: OwnershipAction::Claimed,
+        })
+    };
+
+    workbench.apply_events([claimed("another-window")]);
+    assert!(seen.lock().unwrap().scheduled.is_empty());
+    workbench.apply_events([claimed(host.owner_id())]);
+
+    assert_eq!(seen.lock().unwrap().scheduled, ["thread"]);
 }

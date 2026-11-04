@@ -344,6 +344,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             {
                 self.external_work.invalidate();
                 self.settle_claimed_receipts(thread_id, receipts);
+                // A newly owned thread may hold notices an earlier NACK left pending.
+                self.sink.schedule_lane_deliveries(thread_id);
             }
             EventKind::Ownership(_) => self.external_work.invalidate(),
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {

@@ -696,7 +696,12 @@ impl AgentRuntime {
             .map_err(|e| Self::review_error(run, e))?;
         Ok(())
     }
-    pub(crate) fn explicitly_resume_lane_delivery(
+    /// The user's explicit resume of lane notices for the lead thread whose root is `run`:
+    /// clears a durable Stop on its destination, resets the wake guards of the lanes it leads
+    /// and schedules a delivery. Call it only for a user action (a button, `/continue`), never
+    /// for an agent- or timer-driven path; progress alone never resumes a stopped destination.
+    /// A lead whose root the operator stopped still needs its chat resumed ([`Self::resume_chat`]).
+    pub fn explicitly_resume_lane_delivery(
         &self,
         run: RunId,
         ownership: Option<&crate::ownership::OwnerPermit>,

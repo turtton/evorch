@@ -19,6 +19,26 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 }
 
+/// Pending questions the runtime routed to `lead_thread` rather than to the user. They are
+/// answered by the lead (or passed to the user) through its lane tools, so the question list
+/// never shows them; this count is how the lead's view tells you they exist.
+pub(super) fn lead_routed_count<'a>(
+    questions: impl IntoIterator<Item = &'a UserQuestion>,
+    lead_thread: &str,
+) -> usize {
+    questions
+        .into_iter()
+        .filter(|question| {
+            question.answer.is_none()
+                && matches!(
+                    &question.responder,
+                    Some(event_bus::lane::QuestionResponder::Lead { thread_id })
+                        if thread_id == lead_thread
+                )
+        })
+        .count()
+}
+
 // Child questions are addressed to their orchestrator. Only root questions,
 // including explicit ask_user requests, are addressed to the person at the UI.
 pub(super) fn user_visible(question: &UserQuestion) -> bool {
@@ -39,6 +59,68 @@ pub(super) fn belongs_to_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_routed_to_the_lead_is_hidden_from_the_user_and_counted_for_the_lead() {
+        let mut routed = question("lane-q", "lane-root");
+        routed.responder = Some(event_bus::lane::QuestionResponder::Lead {
+            thread_id: "lead".into(),
+        });
+        assert!(!user_visible(&routed));
+        assert!(!belongs_to_thread(&routed, "lane", &["lane-root".into()]));
+        let other = {
+            let mut other = routed.clone();
+            other.id = "other".into();
+            other.responder = Some(event_bus::lane::QuestionResponder::Lead {
+                thread_id: "another-lead".into(),
+            });
+            other
+        };
+        let user = {
+            let mut user = question("user-q", "lane-root");
+            user.responder = Some(event_bus::lane::QuestionResponder::User);
+            user
+        };
+        let all = [routed.clone(), other, user.clone()];
+        assert_eq!(lead_routed_count(&all, "lead"), 1);
+        assert_eq!(lead_routed_count(&all, "another-lead"), 1);
+        assert_eq!(lead_routed_count(&all, "nobody"), 0);
+
+        // Passing it to the user (the same question, answered by routing) makes it visible there.
+        routed.responder = Some(event_bus::lane::QuestionResponder::User);
+        assert!(user_visible(&routed));
+        assert!(belongs_to_thread(&routed, "lane", &["lane-root".into()]));
+        assert!(user_visible(&user));
+        assert_eq!(lead_routed_count([&routed], "lead"), 0);
+    }
+
+    #[test]
+    fn an_answered_lead_question_is_no_longer_waiting() {
+        let mut routed = question("lane-q", "lane-root");
+        routed.responder = Some(event_bus::lane::QuestionResponder::Lead {
+            thread_id: "lead".into(),
+        });
+        routed.answer = Some("decided".into());
+        assert_eq!(lead_routed_count([&routed], "lead"), 0);
+    }
+
+    fn question(id: &str, root: &str) -> UserQuestion {
+        UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
+            id: id.into(),
+            run_id: root.into(),
+            root_run_id: root.into(),
+            root_name: "chat:Orchestrator:lane".into(),
+            recipient_run_ids: Vec::new(),
+            title: "scope".into(),
+            options: vec![],
+            blocking: true,
+            answer: None,
+            answer_origin: None,
+        }
+    }
 
     #[test]
     fn durable_chat_identity_recovers_a_question_without_a_run_start_event() {

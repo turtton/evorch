@@ -529,6 +529,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// The runtime holds subagent reports for this finished root: resume it
     /// under the thread's current authority so it receives them. The user did
     /// not ask for this, so routine notices about its state stay quiet.
+    ///
+    /// This is the ordinary held-report path only. Lane notifications never come through
+    /// here: the runtime's durable lane delivery resolves its destination with
+    /// `GuiLaneDeliveryHost`, restores the root itself and answers an unknown or read-only
+    /// thread with a typed NACK instead of silently ignoring it.
     pub(super) fn wake_conversation_root(&mut self, run_id: &str) {
         let Some(thread_id) = self.thread_of_run(run_id) else {
             return;

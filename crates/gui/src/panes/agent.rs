@@ -45,6 +45,24 @@ pub struct AgentIdentity<'a> {
 pub struct LaneContext<'a> {
     pub detail: &'a crate::model::lanes::LaneDetail,
     pub origin: Option<&'a workspace_ui::ThreadRecord>,
+    /// Whether this window runs the runtime's durable lane delivery (words the routing line).
+    pub delivery_bound: bool,
+}
+
+/// The lanes a shown lead thread manages and the questions waiting for its answer.
+pub struct LeadContext<'a> {
+    pub thread_id: &'a str,
+    pub lanes: Vec<&'a crate::model::lanes::LaneDetail>,
+    pub waiting_questions: usize,
+}
+
+/// Operations a delivery notice offers; the runtime decides what each one does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneAction {
+    /// The user's explicit resume of held lane notices for a lead thread.
+    ResumeDelivery { lead: String },
+    /// Continue a stopped lead so its held notices can be delivered.
+    ContinueLead { lead: String },
 }
 
 /// 会話ペインが描画される文脈です。
@@ -62,6 +80,8 @@ pub struct ConversationContext<'a> {
     pub child_threads: Vec<&'a workspace_ui::ThreadRecord>,
     /// Present when the shown thread is a lane whose ledger record has been read.
     pub lane: Option<LaneContext<'a>>,
+    /// Present when the shown thread leads lanes.
+    pub lead: Option<LeadContext<'a>>,
     pub thread_metrics: Option<crate::model::telemetry::ThreadMetrics>,
     pub phase: Option<ThreadRunPhase>,
     pub model_picker: crate::panes::model_picker::ModelPickerContext<'a>,
@@ -81,6 +101,7 @@ pub enum AgentPaneAction {
     Composer(ComposerAction),
     ModelPreference(Option<workspace_ui::ModelPreference>),
     Request(super::requests::RequestAction),
+    Lane(LaneAction),
 }
 
 /// トランスクリプトモデルを egui 上に描画します。
@@ -965,6 +986,7 @@ mod tests {
                         parent_thread: None,
                         child_threads: Vec::new(),
                         lane: None,
+                        lead: None,
                         thread_metrics: None,
                         phase: Some(phase),
                         sandbox_picker: Default::default(),
@@ -984,8 +1006,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lane_header_words_a_ready_report_as_unverified() {
+    fn ready_lane_detail() -> crate::model::lanes::LaneDetail {
         use event_bus::lane::{
             LaneBrief, LanePolicy, LaneReport, LaneReportProducer, LaneScope, LaneStatus,
             LaneWorkspaceDeclaration,
@@ -1020,7 +1041,7 @@ mod tests {
             updated_at_ns: 0,
             last_activity_at_ns: 0,
         };
-        let detail = crate::model::lanes::LaneDetail {
+        crate::model::lanes::LaneDetail {
             record,
             latest_report: Some(LaneReport {
                 artifact_revision: None,
@@ -1038,7 +1059,15 @@ mod tests {
                 brief_revision: 1,
                 created_at_ns: 0,
             }),
-        };
+            delivery: Default::default(),
+        }
+    }
+
+    #[test]
+    fn lane_header_words_a_ready_report_as_unverified() {
+        use event_bus::lane::LanePolicy;
+
+        let detail = ready_lane_detail();
         let mut harness = Harness::builder()
             .with_size(egui::vec2(480.0, 200.0))
             .build_ui(move |ui| {
@@ -1057,7 +1086,9 @@ mod tests {
                     lane: Some(LaneContext {
                         detail: &detail,
                         origin: None,
+                        delivery_bound: true,
                     }),
+                    lead: None,
                     thread_metrics: None,
                     phase: None,
                     sandbox_picker: Default::default(),
@@ -1077,9 +1108,199 @@ mod tests {
         assert!(harness.query_by_label("lane · attached").is_some());
         assert!(
             harness
-                .query_by_label(crate::model::lanes::PREVIEW_NOTICE)
+                .query_by_label(crate::model::lanes::routing_notice(
+                    LanePolicy::Attached,
+                    true
+                ))
                 .is_some()
         );
         assert!(harness.query_by_label("Report #1: all done").is_some());
+    }
+
+    type Captured = std::rc::Rc<std::cell::RefCell<Option<AgentPaneAction>>>;
+
+    /// Draws a thread header for a lane and/or a lead, collecting the action a click raises.
+    fn delivery_header(
+        lane: Option<crate::model::lanes::LaneDetail>,
+        lead: Option<(Vec<crate::model::lanes::LaneDetail>, usize)>,
+        bound: bool,
+    ) -> (Harness<'static>, Captured) {
+        let captured: Captured = Default::default();
+        let sink = captured.clone();
+        let harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 400.0))
+            .build_ui(move |ui| {
+                crate::theme::install(ui.ctx());
+                let ctx = ConversationContext {
+                    todo: None,
+                    goal: None,
+                    requests: None,
+                    task_rows: &[],
+                    phase_unread: false,
+                    has_project: true,
+                    active_thread_title: Some("Thread"),
+                    extra_read_dirs: &[],
+                    parent_thread: None,
+                    child_threads: Vec::new(),
+                    lane: lane.as_ref().map(|detail| LaneContext {
+                        detail,
+                        origin: None,
+                        delivery_bound: bound,
+                    }),
+                    lead: lead.as_ref().map(|(lanes, waiting)| LeadContext {
+                        thread_id: "lead",
+                        lanes: lanes.iter().collect(),
+                        waiting_questions: *waiting,
+                    }),
+                    thread_metrics: None,
+                    phase: None,
+                    sandbox_picker: Default::default(),
+                    model_picker: crate::panes::model_picker::ModelPickerContext {
+                        profiles: &[],
+                        preference: None,
+                        default_model: None,
+                        enabled: false,
+                    },
+                    branch: None,
+                };
+                let mut action = None;
+                header_strip(ui, &None, &ctx, &mut action);
+                if action.is_some() {
+                    *sink.borrow_mut() = action;
+                }
+            });
+        (harness, captured)
+    }
+
+    fn blocked() -> storage::lane_delivery::QuestionCapacityBlocked {
+        storage::lane_delivery::QuestionCapacityBlocked {
+            capacity: storage::lane_delivery::QuestionCapacity::Requester,
+            attempts: 3,
+            first_at_ns: 1,
+            last_at_ns: 2,
+        }
+    }
+
+    #[test]
+    fn the_lane_card_words_routing_by_policy_and_by_whether_delivery_runs() {
+        use event_bus::lane::LanePolicy;
+        for (policy, bound) in [
+            (LanePolicy::Attached, true),
+            (LanePolicy::Summary, true),
+            (LanePolicy::Detached, true),
+            (LanePolicy::Attached, false),
+        ] {
+            let mut detail = ready_lane_detail();
+            detail.record.policy = policy;
+            let (mut harness, _) = delivery_header(Some(detail), None, bound);
+            harness.run_steps(2);
+            assert!(
+                harness
+                    .query_by_label(crate::model::lanes::routing_notice(policy, bound))
+                    .is_some(),
+                "{policy:?} bound={bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lane_card_shows_a_capacity_diagnostic_and_offers_no_retry() {
+        let mut detail = ready_lane_detail();
+        detail.delivery.capacity_blocked = Some(blocked());
+        let (mut harness, captured) = delivery_header(Some(detail), None, true);
+        harness.run_steps(2);
+
+        let line = crate::model::lanes::LaneDeliveryView {
+            capacity_blocked: Some(blocked()),
+            ..Default::default()
+        }
+        .capacity_line()
+        .unwrap();
+        assert!(harness.query_by_label(&line).is_some());
+        assert!(harness.query_by_label("Resume notifications").is_none());
+        assert!(captured.borrow().is_none());
+    }
+
+    #[test]
+    fn a_paused_wake_shows_why_and_its_resume_button_resumes_the_lead() {
+        let mut detail = ready_lane_detail();
+        detail.delivery.guard.suppressed = true;
+        detail.delivery.guard.no_progress_batches = 20;
+        let (mut harness, captured) = delivery_header(Some(detail.clone()), None, true);
+        harness.run_steps(2);
+
+        assert!(
+            harness
+                .query_by_label(&detail.delivery.suppressed_line().unwrap())
+                .is_some()
+        );
+        harness.get_by_label("Resume notifications").click();
+        harness.run_steps(2);
+        assert_eq!(
+            captured.borrow().as_ref().map(|action| match action {
+                AgentPaneAction::Lane(action) => action.clone(),
+                _ => panic!("another action"),
+            }),
+            Some(LaneAction::ResumeDelivery {
+                lead: "lead".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_stopped_lead_is_continued_by_the_users_own_path_not_by_progress() {
+        let mut detail = ready_lane_detail();
+        detail.delivery.lead_stopped = true;
+        let (mut harness, captured) = delivery_header(Some(detail), None, true);
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("Resume notifications").is_none());
+        harness.get_by_label("Continue lead").click();
+        harness.run_steps(2);
+        assert!(matches!(
+            captured.borrow().as_ref(),
+            Some(AgentPaneAction::Lane(LaneAction::ContinueLead { lead })) if lead == "lead"
+        ));
+    }
+
+    #[test]
+    fn a_lead_sees_how_many_lane_questions_wait_for_it_and_nothing_when_all_is_quiet() {
+        let (mut harness, _) = delivery_header(None, Some((vec![ready_lane_detail()], 2)), true);
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label_contains("2 lane question(s) wait for your answer here")
+                .is_some()
+        );
+
+        let (mut quiet, _) = delivery_header(None, Some((vec![ready_lane_detail()], 0)), true);
+        quiet.run_steps(2);
+        assert!(quiet.query_by_label_contains("lane question(s)").is_none());
+        assert!(quiet.query_by_label_contains("Wake paused").is_none());
+    }
+
+    #[test]
+    fn a_lead_view_lists_the_paused_and_blocked_lanes_with_the_resume_operation() {
+        let mut paused = ready_lane_detail();
+        paused.delivery.guard.suppressed = true;
+        paused.delivery.guard.no_progress_batches = 20;
+        let mut full = ready_lane_detail();
+        full.record.lane_id = "lane-2".into();
+        full.delivery.capacity_blocked = Some(blocked());
+        let (mut harness, captured) = delivery_header(None, Some((vec![paused, full], 0)), true);
+        harness.run_steps(2);
+
+        assert!(
+            harness
+                .query_by_label_contains("Question capacity reached")
+                .is_some()
+        );
+        assert!(harness.query_by_label("Lane lane-2").is_some());
+        harness.get_by_label("Resume notifications").click();
+        harness.run_steps(2);
+        assert!(matches!(
+            captured.borrow().as_ref(),
+            Some(AgentPaneAction::Lane(LaneAction::ResumeDelivery { lead })) if lead == "lead"
+        ));
     }
 }
