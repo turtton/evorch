@@ -60,12 +60,6 @@ pub fn render(
             if ghost_icon_button(ui, icons::PLUS, "Add project").clicked() {
                 *action = Some(SidebarAction::OpenAddProject);
             }
-            if ghost_icon_button(ui, icons::MAGNIFYING_GLASS, "Search threads")
-                .on_hover_text("Search threads (Ctrl+K)")
-                .clicked()
-            {
-                *action = Some(SidebarAction::OpenThreadSearch);
-            }
         });
     }
 
@@ -137,6 +131,12 @@ fn project_row(
             }
             if count > 0 {
                 ui.label(muted(count.to_string()));
+            }
+            // Drawn after the count in this right-to-left layout, so it sits to
+            // its left on screen. It stays for a project without threads.
+            let search = format!("Search threads in {}", project.name);
+            if icon_button(ui, icons::MAGNIFYING_GLASS, &search).clicked() {
+                *action = Some(SidebarAction::OpenThreadSearch(project.id.clone()));
             }
             let title = if selected_project {
                 medium(&project.name).color(palette().TEXT)

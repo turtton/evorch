@@ -38,6 +38,8 @@ type Search = (String, Option<String>, Answer);
 struct Requests {
     searches: Arc<Mutex<Vec<Search>>>,
     commands: Arc<Mutex<Vec<WorkbenchCommand>>>,
+    /// The project root each search request was made for.
+    projects: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
 
 impl Requests {
@@ -48,6 +50,10 @@ impl Requests {
             .iter()
             .map(|(query, _, _)| query.clone())
             .collect()
+    }
+
+    fn projects(&self) -> Vec<std::path::PathBuf> {
+        self.projects.lock().unwrap().clone()
     }
 
     fn cursor(&self, index: usize) -> Option<String> {
@@ -78,12 +84,13 @@ impl CommandSink for ManualSink {
 
     fn search_threads(
         &self,
-        _project: std::path::PathBuf,
+        project: std::path::PathBuf,
         query: String,
         _limit: usize,
         cursor: Option<String>,
     ) -> Option<gui::model::thread_search::ThreadSearchReceiver> {
         let (sender, receiver) = std::sync::mpsc::channel();
+        self.0.projects.lock().unwrap().push(project);
         self.0
             .searches
             .lock()
@@ -116,6 +123,59 @@ fn fixture(root: &std::path::Path) -> (HeadlessWorkbench<EmptySource>, Requests)
     let requests = Requests::default();
     let state = state(root).with_command_sink(Box::new(ManualSink(requests.clone())));
     (HeadlessWorkbench::new(state, [1200.0, 800.0]), requests)
+}
+
+/// Projects A (alpha, beta), B (gamma, delta) and C (no thread) with A selected
+/// and `alpha` active. Returns the roots of A and B.
+fn projects_fixture(
+    root: &std::path::Path,
+) -> (
+    HeadlessWorkbench<EmptySource>,
+    Requests,
+    [std::path::PathBuf; 2],
+) {
+    let mut sidebar = SidebarState::default();
+    let roots = ["a", "b", "c"].map(|name| {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    });
+    for (id, name, dir) in [("a", "Alpha project", 0), ("b", "Beta project", 1)]
+        .into_iter()
+        .chain([("c", "Empty project", 2)])
+    {
+        sidebar
+            .add_project(ProjectId::new(id), name, &roots[dir])
+            .unwrap();
+    }
+    for (project, id, title) in [
+        ("a", "alpha", "Alpha"),
+        ("a", "beta", "Beta"),
+        ("b", "gamma", "Gamma"),
+        ("b", "delta", "Delta"),
+    ] {
+        sidebar.threads.push(ThreadRecord::new(
+            ThreadId::new(id),
+            ProjectId::new(project),
+            title,
+        ));
+    }
+    sidebar.select_project(&ProjectId::new("a")).unwrap();
+    sidebar.switch_thread(&ThreadId::new("alpha")).unwrap();
+    let requests = Requests::default();
+    let state = WorkbenchState::new(EmptySource, &UiSettings::default())
+        .unwrap()
+        .with_sidebar(sidebar)
+        .with_sidebar_path(root.join("sidebar.json"))
+        .with_command_sink(Box::new(ManualSink(requests.clone())));
+    let mut gui = HeadlessWorkbench::new(state, [1200.0, 800.0]);
+    gui.run();
+    let [a, b, _] = roots;
+    (gui, requests, [a, b])
+}
+
+fn selected(gui: &HeadlessWorkbench<EmptySource>) -> Option<ProjectId> {
+    gui.state().sidebar().selected_project.clone()
 }
 
 fn hit(thread: &str, snippet: Option<&str>) -> HostThreadHit {
@@ -216,11 +276,11 @@ fn ctrl_k_search_selects_a_result_with_the_keyboard_and_opens_its_thread() {
 }
 
 #[test]
-fn sidebar_search_button_opens_the_modal_and_escape_closes_it() {
+fn a_project_rows_search_button_opens_the_modal_and_escape_closes_it() {
     let temp = tempfile::tempdir().unwrap();
     let (mut gui, requests) = fixture(temp.path());
     gui.run();
-    gui.click_label("Search threads");
+    gui.click_label("Search threads in Project");
     gui.run();
     assert!(gui.state().thread_search().is_open());
     assert!(gui.has_label(SEARCHING_LABEL));
@@ -231,6 +291,168 @@ fn sidebar_search_button_opens_the_modal_and_escape_closes_it() {
     assert!(!gui.state().thread_search().is_open());
     assert!(!requests.answer(0, found(vec![hit("beta", None)])));
     assert_eq!(active(&gui), Some(ThreadId::new("alpha")));
+}
+
+#[test]
+fn a_row_searches_only_its_own_project_and_leaves_the_selection_alone() {
+    // Given: project A selected with its thread active, and B listed below it.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut gui, requests, [root_a, root_b]) = projects_fixture(temp.path());
+
+    // When: the search icon of B's row is pressed.
+    gui.click_label("Search threads in Beta project");
+    gui.run();
+
+    // Then: only B is searched, and neither the selection nor the active thread moved.
+    assert!(gui.state().thread_search().is_open());
+    assert_eq!(requests.projects(), std::slice::from_ref(&root_b));
+    assert_ne!(requests.projects(), [root_a]);
+    assert_eq!(selected(&gui), Some(ProjectId::new("a")));
+    assert_eq!(active(&gui), Some(ThreadId::new("alpha")));
+    assert!(gui.has_label("Project: Beta project"));
+
+    // And its results are B's: a hit opens B's thread.
+    assert!(requests.answer(0, found(vec![hit("delta", None)])));
+    gui.run();
+    gui.key_press(Modifiers::NONE, Key::Enter);
+    gui.run();
+    assert_eq!(active(&gui), Some(ThreadId::new("delta")));
+}
+
+#[test]
+fn ctrl_k_searches_the_project_selected_when_it_opened_even_after_the_selection_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut gui, requests, [root_a, _root_b]) = projects_fixture(temp.path());
+    gui.key_press(Modifiers::COMMAND, Key::K);
+    gui.run();
+    assert_eq!(requests.projects(), std::slice::from_ref(&root_a));
+
+    // When: the selection moves to B while the modal is open, then A's first page answers.
+    gui.state_mut().select_project(ProjectId::new("b")).unwrap();
+    assert!(requests.answer(0, page(vec![hit("beta", None)], Some("c1"))));
+    gui.run();
+
+    // Then: the search still belongs to A: its continuation asks A, never B.
+    assert_eq!(requests.cursor(1).as_deref(), Some("c1"));
+    assert_eq!(requests.projects(), [root_a.clone(), root_a]);
+    assert!(gui.has_label("Project: Alpha project"));
+
+    // And Ctrl+K again closes it.
+    gui.key_press(Modifiers::COMMAND, Key::K);
+    gui.run();
+    assert!(!gui.state().thread_search().is_open());
+}
+
+#[test]
+fn a_late_answer_for_one_project_is_not_adopted_by_another() {
+    // Given: a search for A is running, then the user searches B instead.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut gui, requests, [root_a, root_b]) = projects_fixture(temp.path());
+    gui.state_mut().open_thread_search_in(ProjectId::new("a"));
+    gui.run();
+    gui.state_mut().open_thread_search_in(ProjectId::new("b"));
+    gui.run();
+    assert_eq!(requests.projects(), [root_a, root_b]);
+
+    // When: A's slow answer arrives, Then it has nowhere to go (its session is gone).
+    assert!(!requests.answer(0, found(vec![hit("beta", None)])));
+    gui.run();
+    assert!(gui.state().thread_search().outcome().is_none());
+
+    // When: B's own answer arrives, Then it alone is listed.
+    assert!(requests.answer(1, found(vec![hit("gamma", None)])));
+    gui.run();
+    let rows: Vec<_> = gui
+        .state()
+        .thread_search()
+        .rows(gui.state().sidebar())
+        .iter()
+        .map(|row| row.thread.to_string())
+        .collect();
+    assert_eq!(rows, ["gamma"]);
+}
+
+#[test]
+fn a_projects_search_icon_stays_for_an_empty_project_and_sits_left_of_the_thread_count() {
+    let temp = tempfile::tempdir().unwrap();
+    let (gui, _requests, _roots) = projects_fixture(temp.path());
+    // Both counted rows read "2": A's row first, then B's.
+    let counts = gui.label_rects("2");
+    for (name, count) in [("Alpha project", counts[0]), ("Beta project", counts[1])] {
+        let icons = gui.label_rects(&format!("Search threads in {name}"));
+        assert_eq!(icons.len(), 1, "{name}");
+        // On screen the icon is left of the count and on the same row.
+        assert!(
+            icons[0].max.x <= count.min.x,
+            "{name}: {:?} {count:?}",
+            icons[0]
+        );
+        assert!(icons[0].center().y > count.min.y && icons[0].center().y < count.max.y);
+    }
+    // The project without threads has no count but still has the icon.
+    assert_eq!(gui.label_rects("Search threads in Empty project").len(), 1);
+    // The old search icon below the list is gone.
+    assert!(!gui.has_label("Search threads"));
+}
+
+#[test]
+fn a_search_for_a_project_that_is_gone_says_so_and_never_falls_back() {
+    // Given: a search opened for a project the sidebar does not list.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut gui, requests, _roots) = projects_fixture(temp.path());
+    gui.state_mut()
+        .open_thread_search_in(ProjectId::new("removed"));
+    gui.run();
+    // Then: it reports the project as unavailable and asks nobody, not the selected project.
+    assert!(gui.has_label(gui::model::thread_search::PROJECT_UNAVAILABLE));
+    assert!(requests.queries().is_empty());
+    assert_eq!(selected(&gui), Some(ProjectId::new("a")));
+}
+
+#[test]
+fn losing_the_target_project_while_a_request_runs_reports_it_and_drops_the_request() {
+    use gui::model::thread_search::{PROJECT_UNAVAILABLE, ThreadSearchModal};
+    // Given: a search for a project with its first request waiting for an answer
+    // (the sink answers only when the test says so), and another project listed.
+    let temp = tempfile::tempdir().unwrap();
+    let other = temp.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let mut sidebar = state(temp.path()).sidebar().clone();
+    sidebar
+        .add_project(ProjectId::new("other"), "Other", &other)
+        .unwrap();
+    let requests = Requests::default();
+    let sink = ManualSink(requests.clone());
+    let mut modal = ThreadSearchModal::default();
+    modal.open(Some(ProjectId::new("project")));
+    let root = modal.root(&sidebar);
+    assert!(root.is_some());
+    assert!(modal.poll(&sink, root.as_deref(), &sidebar));
+    assert_eq!(requests.queries(), [""]);
+
+    // When: the project disappears while that request is still running.
+    sidebar
+        .projects
+        .retain(|project| project.id != ProjectId::new("project"));
+    let root = modal.root(&sidebar);
+    assert!(root.is_none());
+    let pending = modal.poll(&sink, root.as_deref(), &sidebar);
+
+    // Then: the error shows at once, nothing waits, and no other project is searched.
+    assert!(!pending);
+    let outcome = modal.outcome().expect("the error is shown immediately");
+    assert_eq!(outcome.result.as_ref().unwrap_err(), PROJECT_UNAVAILABLE);
+    assert!(!modal.is_searching(root.as_deref()));
+    assert_eq!(requests.queries(), [""]);
+
+    // And the old request's answer, arriving later, is not adopted.
+    assert!(!requests.answer(0, found(vec![hit("alpha", None)])));
+    assert!(!modal.poll(&sink, root.as_deref(), &sidebar));
+    assert_eq!(
+        modal.outcome().unwrap().result.as_ref().unwrap_err(),
+        PROJECT_UNAVAILABLE
+    );
+    assert_eq!(requests.queries(), [""]);
 }
 
 #[test]

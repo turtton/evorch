@@ -9,10 +9,32 @@ use super::WorkbenchState;
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    /// Opens the search unless another modal owns input: two modals never stack.
+    /// Opens the search for the project selected now (the Ctrl+K target),
+    /// unless another modal owns input: two modals never stack. The search
+    /// keeps that project even if the selection changes while it is open.
     pub fn open_thread_search(&mut self) {
+        let selected = self.sidebar.selected_project.clone();
+        self.open_thread_search_for(selected);
+    }
+
+    /// Opens the search for `project`, the one a sidebar row names. Neither the
+    /// selected project nor the active thread changes.
+    pub fn open_thread_search_in(&mut self, project: workspace_ui::ProjectId) {
+        self.open_thread_search_for(Some(project));
+    }
+
+    /// Ctrl+K: closes the open search, or opens it for the selected project.
+    pub(super) fn toggle_thread_search(&mut self) {
+        if self.thread_search.is_open() {
+            self.thread_search.close();
+        } else {
+            self.open_thread_search();
+        }
+    }
+
+    fn open_thread_search_for(&mut self, project: Option<workspace_ui::ProjectId>) {
         if self.thread_search_available() {
-            self.thread_search.open();
+            self.thread_search.open(project);
         }
     }
 
@@ -40,12 +62,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.thread_search.close();
             return;
         }
-        let project = self
-            .sidebar
-            .selected_project
-            .as_ref()
-            .and_then(|selected| self.sidebar.projects.iter().find(|p| &p.id == selected))
-            .map(|project| project.repo_root.clone());
+        // The project fixed when the modal opened, not the current selection.
+        let project = self.thread_search.root(&self.sidebar);
         let mut pending = self
             .thread_search
             .poll(&*self.sink, project.as_deref(), &self.sidebar);
