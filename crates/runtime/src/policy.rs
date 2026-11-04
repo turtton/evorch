@@ -58,7 +58,7 @@ impl ExecutionPolicy {
                     let lane_tools: &[&str] = if config.lane_scope.is_some() {
                         &["lane_report"]
                     } else {
-                        &["lane_open", "lane_list"]
+                        &["lane_open", "lane_list", "lane_questions", "lane_answer"]
                     };
                     self.capabilities
                         .allowed_tools
@@ -480,6 +480,8 @@ mod tests {
                         "inspect_artifact",
                         "lane_open",
                         "lane_list",
+                        "lane_questions",
+                        "lane_answer",
                     ]
                     .map(str::to_owned),
                 );
