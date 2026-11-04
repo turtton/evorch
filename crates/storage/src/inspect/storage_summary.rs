@@ -143,7 +143,7 @@ impl Queries {
         }
         let mut take = |table: &str| value_bytes.remove(table).unwrap_or_else(|| "0".into());
         let events = format!(
-            "SELECT kind, subkind, run_id, OCTET_LENGTH(payload), {} FROM events",
+            "SELECT kind, subkind, run_id, OCTET_LENGTH(payload), {}, blob_bytes, body_format FROM events",
             take("events")
         );
         // The header row carries the lengths of the resolved documents; the stored size
@@ -313,6 +313,10 @@ struct EventScan {
     rows: i64,
     payload_bytes: i64,
     value_bytes: i64,
+    /// Sum of `events.blob_bytes`: what the events are charged for the blobs they created.
+    /// An accounting figure; the bytes the blobs occupy are in the `content_blobs` table.
+    charged_blob_bytes: i64,
+    tokenized_rows: i64,
     unbackfilled: i64,
     by_kind: Vec<(String, Option<String>, Tally)>,
     by_run: ByRun,
@@ -329,6 +333,8 @@ impl EventScan {
         json!({
             "rows": self.rows,
             "payload_bytes": self.payload_bytes,
+            "tokenized_rows": self.tokenized_rows,
+            "accounted_blob_bytes": self.charged_blob_bytes,
             "unbackfilled_rows": self.unbackfilled,
             "by_kind": self.by_kind
                 .into_iter()
@@ -348,6 +354,8 @@ fn scan_events(conn: &Connection, sql: &str) -> Result<EventScan, StorageError> 
         rows: 0,
         payload_bytes: 0,
         value_bytes: 0,
+        charged_blob_bytes: 0,
+        tokenized_rows: 0,
         unbackfilled: 0,
         by_kind: Vec::new(),
         by_run: ByRun::default(),
@@ -363,6 +371,8 @@ fn scan_events(conn: &Connection, sql: &str) -> Result<EventScan, StorageError> 
         scan.rows += 1;
         scan.payload_bytes += payload;
         scan.value_bytes += value;
+        scan.charged_blob_bytes += row.get::<_, i64>(5)?;
+        scan.tokenized_rows += i64::from(row.get::<_, i64>(6)? == 1);
         scan.unbackfilled += i64::from(subkind.is_none());
         scan.by_run.add(text(row, 2)?, payload);
 

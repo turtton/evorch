@@ -63,6 +63,10 @@ pub struct CompactSummary {
     pub provider_observations: Stage,
     pub event_compression: CompressionSample,
     pub compressed_event_rows: u64,
+    /// Blobs the apply created for merged delta text (physical figures; an event's charged
+    /// `blob_bytes` is never rewritten by the merge).
+    pub blobs_created: u64,
+    pub blob_stored_bytes_created: u64,
     /// Existing individual rows over 64 KiB cannot be split without changing IDs.
     pub oversized_rows: u64,
     pub backup: Option<PathBuf>,
@@ -98,7 +102,10 @@ pub fn backfill_events(
     check_schema(&conn, 30)?;
     check_current_format(&conn)?;
     offline::enable_foreign_keys(&conn)?;
-    Database { conn }.backfill_event_columns(options)
+    let db = Database { conn };
+    let summary = db.backfill_event_columns(options)?;
+    offline::require_no_foreign_key_violations(&db.conn)?;
+    Ok(summary)
 }
 
 fn validate_batch(rows: usize) -> Result<(), StorageError> {
@@ -215,6 +222,8 @@ pub fn compact_events(
         provider_observations: Stage::default(),
         event_compression: CompressionSample::default(),
         compressed_event_rows: 0,
+        blobs_created: 0,
+        blob_stored_bytes_created: 0,
         oversized_rows: 0,
         backup: None,
         required_free_space_bytes: basis.saturating_mul(4),
@@ -268,6 +277,10 @@ pub fn compact_events(
         boundaries.as_deref(),
     )?;
     summary.reasoning_deltas = reasoning;
+    summary.blobs_created =
+        summary.message_deltas.blobs_created + summary.reasoning_deltas.blobs_created;
+    summary.blob_stored_bytes_created = summary.message_deltas.blob_stored_bytes_created
+        + summary.reasoning_deltas.blob_stored_bytes_created;
     summary.oversized_rows += oversized;
     if let Some(cutoff) = cutoff {
         summary.provider_observations = delete_matching(&db.conn, options, Some(cutoff))?;
@@ -277,6 +290,7 @@ pub fn compact_events(
     summary.compressed_event_rows = rows;
     if options.apply {
         recalculate_accounting(&db.conn)?;
+        collect_unreferenced_blobs(&db.conn)?;
         offline::require_space(parent(path), basis.saturating_mul(2))?;
         // Existing databases stay auto_vacuum=NONE unless the rebuild also
         // switches the mode; this is the only place that is safe to do so.
@@ -418,7 +432,7 @@ fn delete_matching(
             "kind IN ('Fault','Lifecycle')"
         };
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, kind, subkind, payload, OCTET_LENGTH(payload),session_id FROM events WHERE id > ?1 AND {filter} ORDER BY id LIMIT ?2"
+            "SELECT id, kind, subkind, payload, OCTET_LENGTH(payload) FROM events WHERE id > ?1 AND {filter} ORDER BY id LIMIT ?2"
         ))?;
         let mut rows = stmt.query(rusqlite::params_from_iter(
             [after, options.batch_rows as i64].into_iter().chain(cutoff),
@@ -442,16 +456,15 @@ fn delete_matching(
             if matched {
                 let bytes = row.get::<_, u64>(4)?;
                 stage.deleted(&kind, &subkind, bytes);
-                ids.push((after, row.get::<_, Option<String>>(5)?, bytes));
+                ids.push(after);
             }
         }
         drop(rows);
         drop(stmt);
         if options.apply && !ids.is_empty() {
             let tx = conn.unchecked_transaction()?;
-            for (id, session, bytes) in ids {
+            for id in ids {
                 tx.execute("DELETE FROM events WHERE id=?1", [id])?;
-                adjust_session_bytes(&tx, session.as_deref(), bytes, 0)?;
             }
             tx.commit()?;
             checkpoint(conn)?;
@@ -468,26 +481,35 @@ fn checkpoint(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// events' triggers maintain the day/session indexes, but sessions' cached
-/// total is application-owned. Update it in the SAME transaction as each
-/// committed rewrite, not only in the final reconciliation.
-pub(crate) fn adjust_session_bytes(
-    conn: &Connection,
-    session: Option<&str>,
-    before: u64,
-    after: u64,
-) -> Result<(), StorageError> {
-    if let Some(session) = session {
-        conn.execute(
-            "UPDATE sessions SET total_event_bytes=MAX(0,total_event_bytes-?2+?3) WHERE id=?1",
-            rusqlite::params![
-                session,
-                i64::try_from(before)
-                    .map_err(|_| StorageError::OutOfRange("session payload bytes"))?,
-                i64::try_from(after)
-                    .map_err(|_| StorageError::OutOfRange("session payload bytes"))?
-            ],
-        )?;
+/// Deletes the blobs nothing refers to any more, before a VACUUM: the collector's bounded
+/// steps until its queue is empty, then the exclusive phase for the blobs it registered as
+/// too large for a step. A blob a row still names is never deleted for the sake of space.
+pub(super) fn collect_unreferenced_blobs(conn: &Connection) -> Result<(), StorageError> {
+    use crate::repo::content_blobs::gc_step;
+    use crate::repo::thread_retention::reclaim::{Layout, reclaim_oversized_step_in};
+    loop {
+        let step = gc_step(conn)?;
+        if step.candidates == 0 && !step.deferred {
+            break;
+        }
+    }
+    loop {
+        let step = reclaim_oversized_step_in(conn, 64 * 1024 * 1024, Layout::Current)?;
+        if let Some(error) = step.last_error {
+            return Err(invalid(format!("blob collection failed: {error}")));
+        }
+        if step.remaining == 0 {
+            break;
+        }
+        if step.rows == 0 && step.stored_bytes == 0 {
+            return Err(invalid("blob collection made no progress"));
+        }
+    }
+    loop {
+        let step = gc_step(conn)?;
+        if step.candidates == 0 && !step.deferred {
+            break;
+        }
     }
     Ok(())
 }
@@ -496,9 +518,9 @@ fn recalculate_accounting(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DELETE FROM event_session_bytes;
-         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload)) FROM events WHERE session_id IS NOT NULL GROUP BY session_id;
+         INSERT INTO event_session_bytes SELECT session_id, SUM(OCTET_LENGTH(payload) + blob_bytes) FROM events WHERE session_id IS NOT NULL GROUP BY session_id;
          DELETE FROM event_day_bytes;
-         INSERT INTO event_day_bytes SELECT wall_clock_ns/86400000000000-(wall_clock_ns%86400000000000<0), SUM(OCTET_LENGTH(payload)) FROM events GROUP BY 1;
+         INSERT INTO event_day_bytes SELECT wall_clock_ns/86400000000000-(wall_clock_ns%86400000000000<0), SUM(OCTET_LENGTH(payload) + blob_bytes) FROM events GROUP BY 1;
          UPDATE sessions SET total_event_bytes=COALESCE((SELECT payload_bytes FROM event_session_bytes WHERE session_id=sessions.id),0);
          COMMIT;"
     )?;

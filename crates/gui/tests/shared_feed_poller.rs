@@ -232,7 +232,9 @@ fn compressed_event_payloads_are_followed_like_plain_ones() {
             tool_name: "shell".into(),
             call_id: format!("call-{label}"),
             is_error: false,
-            output: Some(format!("{label} output line\n").repeat(500)),
+            // Compressible and below the token threshold: the payload is a zstd BLOB of an
+            // inline event.
+            output: Some(format!("{label} output line\n").repeat(500)[..1_990].to_owned()),
             detail: None,
             run_id: Some("run-other".into()),
             parent_call_id: None,

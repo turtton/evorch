@@ -241,12 +241,6 @@ impl Fixture {
                 params![session, NOW_NS, kind, "x".repeat(size), subkind, run],
             )
             .unwrap();
-        self.conn
-            .execute(
-                "UPDATE sessions SET total_event_bytes = total_event_bytes + ?2 WHERE id = ?1",
-                params![session, size as i64],
-            )
-            .unwrap();
     }
 
     fn todo_event(&self, session: &str, thread: &str) {
@@ -263,18 +257,11 @@ impl Fixture {
             &Event::new(OrchestratorEvent::ThreadTodoUpdated { snapshot }).kind,
         )
         .unwrap();
-        let size = payload.len();
         self.conn
             .execute(
                 "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
                  payload, subkind, run_id) VALUES (?1, 1, 1, ?2, 'Orchestrator', ?3, 'ThreadTodoUpdated', NULL)",
                 params![session, NOW_NS, payload],
-            )
-            .unwrap();
-        self.conn
-            .execute(
-                "UPDATE sessions SET total_event_bytes = total_event_bytes + ?2 WHERE id = ?1",
-                params![session, size as i64],
             )
             .unwrap();
     }
@@ -620,15 +607,15 @@ fn a_confirmed_family_is_reclaimed_completely_and_the_rest_is_untouched() {
     f.sql("INSERT INTO conversation_fts(conversation_fts) VALUES('integrity-check');");
     assert_eq!(
         f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_session_bytes"),
-        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id IS NOT NULL")
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload) + blob_bytes), 0) FROM events WHERE session_id IS NOT NULL")
     );
     assert_eq!(
         f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes"),
-        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events")
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload) + blob_bytes), 0) FROM events")
     );
     assert_eq!(
         f.count("SELECT total_event_bytes FROM sessions WHERE id = 'session-1'"),
-        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = 'session-1'")
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload) + blob_bytes), 0) FROM events WHERE session_id = 'session-1'")
     );
     assert_eq!(
         f.count("SELECT COALESCE(SUM(charged_bytes), 0) FROM thread_index_runs"),
@@ -2848,11 +2835,11 @@ fn single_rows_above_the_step_budget_wait_for_the_exclusive_phase_whatever_their
     );
     assert_eq!(
         f.count("SELECT total_event_bytes FROM sessions WHERE id = 'session-1'"),
-        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events WHERE session_id = 'session-1'")
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload) + blob_bytes), 0) FROM events WHERE session_id = 'session-1'")
     );
     assert_eq!(
         f.count("SELECT COALESCE(SUM(payload_bytes), 0) FROM event_day_bytes"),
-        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload)), 0) FROM events")
+        f.count("SELECT COALESCE(SUM(OCTET_LENGTH(payload) + blob_bytes), 0) FROM events")
     );
 }
 

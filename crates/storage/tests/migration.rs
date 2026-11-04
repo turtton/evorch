@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 43;
+const LATEST_SCHEMA: u32 = 44;
 
-const EXPECTED_TABLES: [&str; 77] = [
+const EXPECTED_TABLES: [&str; 78] = [
     "lane_state",
     "lanes",
     "lane_reports",
@@ -22,6 +22,7 @@ const EXPECTED_TABLES: [&str; 77] = [
     "lane_list_snapshot_rows",
     "content_blobs",
     "content_blob_gc_queue",
+    "content_blob_refs_event",
     "content_blob_refs_header",
     "content_blob_refs_message",
     "run_messages",
@@ -93,7 +94,8 @@ const EXPECTED_TABLES: [&str; 77] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 75] = [
+const EXPECTED_INDICES: [&str; 76] = [
+    "idx_content_blob_refs_event_blob",
     "idx_lanes_lead_activity",
     "idx_lanes_origin",
     "idx_lanes_unstarted",
@@ -1136,6 +1138,7 @@ fn convert_to_current(path: &Path) {
         &storage::maintenance::ConvertBodiesOptions {
             apply: true,
             backup: None,
+            event_batch_rows: None,
         },
     )
     .unwrap();
@@ -1169,6 +1172,9 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
                  (3, 'a', 'p', 't', 'alpha quokka', 'ev', 'promoted', 10, 'project'),
                  (5, 'b', 'p', 't', 'bravo wombat', 'ev', 'promoted', 8, 'project');",
         )
+        .unwrap();
+    connection
+        .execute_batch(include_str!("support/undo_v44.sql"))
         .unwrap();
     connection
         .execute_batch(include_str!("support/undo_v43.sql"))

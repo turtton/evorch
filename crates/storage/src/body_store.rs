@@ -69,6 +69,9 @@ pub(crate) struct StoredBlob {
     pub token: BodyToken,
     /// Whether this call inserted the row.
     pub created: bool,
+    /// The bytes the row stores (`data`), when this call inserted it; 0 for a row that
+    /// was there already (it is never read or measured).
+    pub created_bytes: u64,
 }
 
 /// Stores `text` (once per distinct content) and returns its row.
@@ -88,9 +91,11 @@ pub(crate) fn put_blob(conn: &Connection, text: &str) -> Result<StoredBlob, Stor
             id,
             token,
             created: false,
+            created_bytes: 0,
         });
     }
     let (codec, data) = encode(text)?;
+    let stored_len = data.len() as u64;
     let inserted = conn
         .prepare_cached(
             "INSERT INTO content_blobs(hash, byte_len, codec, data) VALUES (?1, ?2, ?3, ?4) \
@@ -107,6 +112,7 @@ pub(crate) fn put_blob(conn: &Connection, text: &str) -> Result<StoredBlob, Stor
             id: conn.last_insert_rowid(),
             token,
             created: true,
+            created_bytes: stored_len,
         });
     }
     // Only another row with this hash makes the insert do nothing; take its id, after
@@ -122,6 +128,7 @@ pub(crate) fn put_blob(conn: &Connection, text: &str) -> Result<StoredBlob, Stor
         id,
         token,
         created: false,
+        created_bytes: 0,
     })
 }
 
@@ -316,7 +323,6 @@ pub(crate) fn load_blob(
 
 /// Replaces every token of `container` with its body, reading blobs through `conn`.
 /// `owner` labels errors. Any unresolvable token fails the whole call.
-#[allow(dead_code)] // B1's readers call this; the header and message readers resolve per token.
 pub(crate) fn resolve_container(
     conn: &Connection,
     owner: &str,
@@ -335,6 +341,19 @@ pub(crate) struct KeyColumn {
     pub sql_type: &'static str,
 }
 
+/// How an owner's container column holds its JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContainerEncoding {
+    /// JSON text.
+    JsonText,
+    /// A BLOB tagged by the named column of the same row: 0 plain, 1 one zstd frame. Such
+    /// an owner has exactly one container column.
+    CodecColumn(&'static str),
+    /// JSON text, or a zstd frame in a BLOB that tells itself apart (`codec`): the form
+    /// of `events.payload`.
+    Transparent,
+}
+
 /// Registry entry of one owner of blobs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OwnerSpec {
@@ -346,10 +365,8 @@ pub(crate) struct OwnerSpec {
     pub keys: &'static [KeyColumn],
     /// Columns of the owner table that hold JSON with tokens.
     pub container_columns: &'static [&'static str],
-    /// Column holding the codec (0 plain, 1 zstd) of the container column, when the
-    /// container is a codec-tagged BLOB instead of JSON text. Such an owner has exactly
-    /// one container column.
-    pub codec_column: Option<&'static str>,
+    /// How the container columns hold their JSON.
+    pub encoding: ContainerEncoding,
     /// Condition selecting owner rows in token form (for a table where only some rows
     /// are), or `None` when every row is.
     pub filter: Option<&'static str>,
@@ -360,7 +377,7 @@ pub(crate) struct OwnerSpec {
 /// The owners registered in production. A2b and B1 add theirs; the collector does not
 /// depend on this list (it honours every `content_blob_refs_*` table), the integrity
 /// check does.
-pub(crate) const PRODUCTION_OWNERS: &[OwnerSpec] = &[MESSAGE_OWNER, HEADER_OWNER];
+pub(crate) const PRODUCTION_OWNERS: &[OwnerSpec] = &[MESSAGE_OWNER, HEADER_OWNER, EVENT_OWNER];
 
 /// One provider message of a run: `run_messages.skeleton`, a codec-tagged BLOB.
 pub(crate) const MESSAGE_OWNER: OwnerSpec = OwnerSpec {
@@ -373,7 +390,7 @@ pub(crate) const MESSAGE_OWNER: OwnerSpec = OwnerSpec {
         sql_type: "INTEGER",
     }],
     container_columns: &["skeleton"],
-    codec_column: Some("codec"),
+    encoding: ContainerEncoding::CodecColumn("codec"),
     filter: None,
     run_column: Some("run_id"),
 };
@@ -389,8 +406,26 @@ pub(crate) const HEADER_OWNER: OwnerSpec = OwnerSpec {
         sql_type: "TEXT",
     }],
     container_columns: &["config_json", "checkpoints_json"],
-    codec_column: None,
+    encoding: ContainerEncoding::JsonText,
     filter: None,
+    run_column: Some("run_id"),
+};
+
+/// A tokenized event: `events.payload`, JSON text or (for a large one) a zstd BLOB that
+/// decodes to the JSON of the event with its long strings as tokens. Only the rows with
+/// `body_format = 1` are in token form.
+pub(crate) const EVENT_OWNER: OwnerSpec = OwnerSpec {
+    name: "event",
+    ref_table: "content_blob_refs_event",
+    owner_table: "events",
+    keys: &[KeyColumn {
+        ref_column: "event_id",
+        owner_column: "id",
+        sql_type: "INTEGER",
+    }],
+    container_columns: &["payload"],
+    encoding: ContainerEncoding::Transparent,
+    filter: Some("body_format = 1"),
     run_column: Some("run_id"),
 };
 
@@ -495,17 +530,66 @@ pub(crate) fn put_owner_with_stored<R>(
     stored: &[&Value],
     write_row: impl FnOnce(&Connection, &[Value]) -> Result<R, StorageError>,
 ) -> Result<R, StorageError> {
-    require_write_transaction(conn)?;
     if key.len() != owner.keys.len() {
         return Err(StorageError::OutOfRange("owner key arity"));
     }
+    let (result, _) = put_owner_core(conn, owner, containers, stored, |conn, containers, _| {
+        Ok((key.to_vec(), write_row(conn, containers)?))
+    })?;
+    Ok(result)
+}
+
+/// The blobs a [`put_owner_keyed`] call created (the ones it found are not counted, and a
+/// body that occurs several times in the containers counts once).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CreatedBlobs {
+    pub count: u64,
+    /// The bytes those rows store.
+    pub stored_bytes: u64,
+}
+
+/// [`put_owner`] for an owner whose key exists only once its row is written (an `events`
+/// row gets its id from the INSERT). `write_row` receives the tokenized containers and
+/// what the tokenizing created, writes the row and returns its key; the reference rows are
+/// registered for that key. Everything stays in one savepoint, so an error from
+/// `write_row` (a quota, say) also removes the blobs this call created.
+pub(crate) fn put_owner_keyed<R>(
+    conn: &Connection,
+    owner: &OwnerSpec,
+    containers: &mut [Value],
+    write_row: impl FnOnce(
+        &Connection,
+        &[Value],
+        CreatedBlobs,
+    ) -> Result<(Vec<SqlValue>, R), StorageError>,
+) -> Result<(R, CreatedBlobs), StorageError> {
+    put_owner_core(conn, owner, containers, &[], write_row)
+}
+
+fn put_owner_core<R>(
+    conn: &Connection,
+    owner: &OwnerSpec,
+    containers: &mut [Value],
+    stored: &[&Value],
+    write_row: impl FnOnce(
+        &Connection,
+        &[Value],
+        CreatedBlobs,
+    ) -> Result<(Vec<SqlValue>, R), StorageError>,
+) -> Result<(R, CreatedBlobs), StorageError> {
+    require_write_transaction(conn)?;
     conn.execute_batch("SAVEPOINT body_put_owner")?;
     let outcome = (|| {
         let mut blob_ids = BTreeSet::new();
+        let mut created = CreatedBlobs::default();
         for container in containers.iter_mut() {
             tokenize_in_place(container, &mut |text| {
                 let stored = put_blob(conn, text)?;
                 blob_ids.insert(stored.id);
+                if stored.created {
+                    created.count += 1;
+                    created.stored_bytes += stored.created_bytes;
+                }
                 Ok(stored.token)
             })?;
         }
@@ -514,9 +598,12 @@ pub(crate) fn put_owner_with_stored<R>(
                 blob_ids.insert(existing_blob_id(conn, &token, owner.name)?);
             }
         }
-        let result = write_row(conn, containers)?;
-        sync_refs(conn, owner, key, &blob_ids)?;
-        Ok(result)
+        let (key, result) = write_row(conn, containers, created)?;
+        if key.len() != owner.keys.len() {
+            return Err(StorageError::OutOfRange("owner key arity"));
+        }
+        sync_refs(conn, owner, &key, &blob_ids)?;
+        Ok((result, created))
     })();
     match outcome {
         Ok(result) => {

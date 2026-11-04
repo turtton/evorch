@@ -98,19 +98,19 @@ fn compact_with_guard(
         let batch = {
             let mut stmt = conn.prepare(
                 "SELECT id,session_id,schema_version,monotonic_ns,wall_clock_ns,kind,payload,
-                 OCTET_LENGTH(payload) FROM events WHERE id>?1 ORDER BY id LIMIT ?2",
+                 body_format,OCTET_LENGTH(payload) FROM events WHERE id>?1 ORDER BY id LIMIT ?2",
             )?;
             let mut rows = stmt.query(params![after, options.batch_rows as i64])?;
             let mut batch = Vec::new();
             let mut batch_bytes = 0;
             while let Some(row) = rows.next()? {
                 let id: i64 = row.get(0)?;
-                let decoded = match crate::repo::event::row_to_event(row) {
+                let decoded = match crate::repo::event::row_to_event(conn, row) {
                     Ok(event) => Some(event),
                     Err(StorageError::Serialization(_)) => None,
                     Err(error) => return Err(error),
                 };
-                let bytes = row.get::<_, u64>(7)?;
+                let bytes = row.get::<_, u64>(8)?;
                 batch_bytes += bytes;
                 batch.push((id, decoded, bytes));
                 if batch_bytes >= 16 * 1024 * 1024 {
@@ -170,7 +170,7 @@ fn compact_with_guard(
                     let subkind = stored.event.kind.subkind_name();
                     stage.deleted("Message", subkind, bytes);
                     if options.apply {
-                        delete_ids.push((id, stored.session_id.clone(), bytes));
+                        delete_ids.push(id);
                     }
                     continue;
                 }
@@ -245,9 +245,8 @@ fn compact_with_guard(
         }
         if !delete_ids.is_empty() {
             let tx = conn.unchecked_transaction()?;
-            for (id, session, bytes) in delete_ids {
+            for id in delete_ids {
                 tx.execute("DELETE FROM events WHERE id=?1", [id])?;
-                super::adjust_session_bytes(&tx, session.as_deref(), bytes, 0)?;
             }
             tx.commit()?;
         }
@@ -297,7 +296,7 @@ fn flush(
     let subkind = pending.first.event.kind.subkind_name();
     if let Some(sample) = preview.as_deref_mut() {
         sample.record(pending.first.id, payload.len(), || {
-            crate::repo::event::encode_payload("Message", subkind, &payload).stored_len()
+            crate::repo::event::would_store_len("Message", subkind, &payload)
         });
     }
     let removed = stage
@@ -309,10 +308,18 @@ fn flush(
     // reports that separately in stage before/after, rather than underflowing.
     removed.payload_bytes += pending.stored_bytes.saturating_sub(payload.len() as u64);
     if options.apply {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE events SET payload=?2 WHERE id=?1",
-            params![pending.first.id, payload],
+        // The merged text may have a string that needs a token, and its blobs must be
+        // written in a write transaction: the row keeps its id, time and charge.
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let written = crate::repo::event::rewrite_payload(
+            &tx,
+            pending.first.id,
+            "Message",
+            subkind,
+            &payload,
+            crate::repo::event::BlobCharge::Keep,
+            crate::repo::event::PayloadEncoding::Plain,
         )?;
         let deleted = tx.execute(
             "DELETE FROM events WHERE id>?1 AND id<=?2 AND kind='Message' AND subkind=?3 AND run_id=?4",
@@ -323,13 +330,9 @@ fn flush(
                 "delta group changed during offline maintenance",
             ));
         }
-        super::adjust_session_bytes(
-            &tx,
-            pending.first.session_id.as_deref(),
-            pending.stored_bytes,
-            payload.len() as u64,
-        )?;
         tx.commit()?;
+        stage.blobs_created += written.created.count;
+        stage.blob_stored_bytes_created += written.created.stored_bytes;
     }
     Ok(())
 }
@@ -351,7 +354,7 @@ fn observe_original(
         // An unchanged BLOB is already encoded; do not count it as new work.
         if let rusqlite::types::Value::Text(payload) = value {
             sample.record(id, payload.len(), || {
-                crate::repo::event::encode_payload("Message", "", &payload).stored_len()
+                crate::repo::event::would_store_len("Message", "", &payload)
             });
         }
     }

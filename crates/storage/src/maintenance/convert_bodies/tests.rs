@@ -14,12 +14,12 @@ use crate::repo::run_messages;
 
 const MIB: usize = 1024 * 1024;
 
-fn lease(path: &Path) {
+pub(super) fn lease(path: &Path) {
     drop(offline::lease_file(path).unwrap());
 }
 
 /// A database exactly as migration `version` leaves it, built by replaying the real migrations.
-fn database_at(dir: &Path, version: usize) -> PathBuf {
+pub(super) fn database_at(dir: &Path, version: usize) -> PathBuf {
     let path = dir.join("events.db");
     let conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "auto_vacuum", 2).unwrap();
@@ -39,11 +39,11 @@ fn latest_schema() -> u32 {
     u32::try_from(MIGRATIONS.len()).unwrap()
 }
 
-fn v39(dir: &Path) -> PathBuf {
+pub(super) fn v39(dir: &Path) -> PathBuf {
     database_at(dir, 39)
 }
 
-struct Run {
+pub(super) struct Run {
     id: &'static str,
     messages: String,
     checkpoints: String,
@@ -53,12 +53,12 @@ struct Run {
     restorable: bool,
 }
 
-fn long(tag: &str, size: usize) -> String {
+pub(super) fn long(tag: &str, size: usize) -> String {
     let unit = format!("{tag} こんにちは \"quoted\" \\ line\n");
     unit.repeat(size / unit.len() + 1)
 }
 
-fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
+pub(super) fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
     Run {
         id,
         messages: serde_json::to_string(messages).unwrap(),
@@ -70,7 +70,7 @@ fn plain_run(id: &'static str, messages: &Value, revision: i64) -> Run {
     }
 }
 
-fn insert(conn: &Connection, run: &Run) {
+pub(super) fn insert(conn: &Connection, run: &Run) {
     let messages = codec::encode(&run.messages);
     let checkpoints = codec::encode(&run.checkpoints);
     conn.execute(
@@ -94,7 +94,7 @@ fn insert(conn: &Connection, run: &Run) {
     .unwrap();
 }
 
-fn conversation(tag: &str) -> Value {
+pub(super) fn conversation(tag: &str) -> Value {
     let shared = long("shared tool output", 5_000);
     json!([
         {"role": "system", "content": [{"type": "text", "text": format!("system {tag}")}]},
@@ -113,11 +113,11 @@ fn conversation(tag: &str) -> Value {
     ])
 }
 
-fn seeded() -> (tempfile::TempDir, PathBuf, Vec<Run>) {
+pub(super) fn seeded() -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     seeded_at(39)
 }
 
-fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
+pub(super) fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     let dir = tempfile::tempdir().unwrap();
     let path = database_at(dir.path(), version);
     let mut big = plain_run("run-big", &conversation("big"), 7);
@@ -147,17 +147,18 @@ fn seeded_at(version: usize) -> (tempfile::TempDir, PathBuf, Vec<Run>) {
     (dir, path, runs)
 }
 
-fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
+pub(super) fn apply(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
     convert_bodies(
         path,
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
     )
 }
 
-fn preview(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
+pub(super) fn preview(path: &Path) -> Result<ConvertBodiesSummary, ConvertBodiesFailure> {
     convert_bodies(path, &ConvertBodiesOptions::default())
 }
 
@@ -171,7 +172,7 @@ fn columns(path: &Path) -> Vec<String> {
         .unwrap()
 }
 
-fn version(path: &Path) -> u32 {
+pub(super) fn version(path: &Path) -> u32 {
     Connection::open(path)
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -182,7 +183,7 @@ fn read(conn: &Connection, id: &str) -> crate::RunContextRecord {
     run_messages::get(conn, id).unwrap().unwrap()
 }
 
-fn files(path: &Path) -> Vec<(String, Vec<u8>)> {
+pub(super) fn files(path: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for entry in fs::read_dir(path.parent().unwrap()).unwrap() {
         let entry = entry.unwrap().path();
@@ -403,6 +404,7 @@ fn a_stopped_conversion_is_recovered_by_restoring_the_backup_and_starting_over()
             &ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
             &mut |at, _| {
                 if std::mem::discriminant(&at) == std::mem::discriminant(&point)
@@ -479,6 +481,7 @@ fn a_migration_failure_always_directs_recovery_to_the_starting_backup() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, _| {
             if point == Point::AfterMigrate {
@@ -515,6 +518,7 @@ fn a_run_that_fails_leaves_nothing_of_itself_and_keeps_the_runs_before_it() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |at, conn| {
             match at {
@@ -566,6 +570,7 @@ fn a_blob_damaged_before_the_read_back_is_found_and_the_run_is_not_committed() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |at, conn| {
             if at == Point::Run(RunPoint::BeforeReadback) {
@@ -592,6 +597,7 @@ fn foreign_keys_stay_enabled_from_the_first_transaction_to_the_last() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |_, conn| {
             assert_eq!(single(conn, "PRAGMA foreign_keys"), 1);
@@ -869,6 +875,7 @@ fn one_run_writes_a_log_in_proportion_to_what_it_stores() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, conn| {
             if let Point::AfterRun { frames } = point {
@@ -947,6 +954,7 @@ fn an_existing_backup_path_is_never_overwritten() {
         &ConvertBodiesOptions {
             apply: true,
             backup: Some(target.clone()),
+            ..Default::default()
         },
     )
     .unwrap_err();
@@ -1391,6 +1399,7 @@ fn the_growth_estimate_is_not_below_what_the_conversion_adds() {
             &ConvertBodiesOptions {
                 apply: true,
                 backup: None,
+                ..Default::default()
             },
             &mut |point, conn| {
                 if point == Point::BeforeVacuum {
@@ -1550,6 +1559,7 @@ fn a_stop_after_the_migrations_is_recovered_from_the_backup_like_any_other() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, _| {
             if point == Point::AfterMigrate {
@@ -1721,7 +1731,7 @@ fn insert_sidecar(
 }
 
 /// The seeded runs with a sidecar each: complete, incomplete (unknown) and empty.
-fn seeded_with_maps() -> (
+pub(super) fn seeded_with_maps() -> (
     tempfile::TempDir,
     PathBuf,
     Vec<(&'static str, ProvenanceStatus, ProvenanceMap)>,
@@ -1893,6 +1903,7 @@ fn a_stop_in_the_middle_of_the_maps_is_refused_and_recovered_from_the_backup() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |at, _| {
             if at == Point::Provenance(ProvenancePoint::BeforeCommit) {
@@ -1956,6 +1967,7 @@ fn a_stop_in_the_middle_of_the_maps_is_refused_and_recovered_from_the_backup() {
 /// Takes a converted database back to `version` (40: before the lane ledger; 41: with it;
 /// 42: with the favorite flag too; the maps are one column again in all of them).
 fn take_back(conn: &Connection, version: u32) {
+    conn.execute_batch(crate::migrations::UNDO_V44).unwrap();
     conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))
         .unwrap();
     if version <= 41 {
@@ -2139,6 +2151,7 @@ fn one_map_writes_a_log_in_proportion_to_the_entries_it_stores() {
         &ConvertBodiesOptions {
             apply: true,
             backup: None,
+            ..Default::default()
         },
         &mut |point, _| {
             if let Point::AfterProvenance { frames } = point {

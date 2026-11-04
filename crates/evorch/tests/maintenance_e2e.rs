@@ -171,7 +171,7 @@ fn backfill_cli_outputs_progress_without_starting_runtime() {
 }
 
 #[test]
-fn convert_bodies_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
+fn convert_bodies_is_a_preview_until_apply_and_takes_only_apply_backup_and_event_batch_rows() {
     let options = parse(&["maintenance", "convert-bodies"])
         .unwrap()
         .convert_bodies
@@ -189,7 +189,16 @@ fn convert_bodies_is_a_preview_until_apply_and_takes_only_apply_and_backup() {
     .unwrap();
     assert!(options.apply);
     assert_eq!(options.backup, Some("saved.db".into()));
+    assert_eq!(options.event_batch_rows, None);
+    let options = parse(&["maintenance", "convert-bodies", "--event-batch-rows", "250"])
+        .unwrap()
+        .convert_bodies
+        .unwrap();
+    assert_eq!(options.event_batch_rows, Some(250));
     for args in [
+        vec!["convert-bodies", "--event-batch-rows", "0"],
+        vec!["convert-bodies", "--event-batch-rows", "100001"],
+        vec!["backfill-events", "--event-batch-rows", "10"],
         vec!["convert-bodies", "--resume"],
         vec!["convert-bodies", "--no-backup"],
         vec!["convert-bodies", "--batch-rows", "1"],
@@ -237,7 +246,10 @@ fn convert_bodies_cli_leaves_a_converted_database_alone_and_refuses_a_non_empty_
         );
         let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(summary["already_converted"], true);
-        assert_eq!(summary["scope"], "run_contexts, run_context_provenance");
+        assert_eq!(
+            summary["scope"],
+            "run_contexts, run_context_provenance, events"
+        );
         assert!(summary["backup"].is_null());
     }
 

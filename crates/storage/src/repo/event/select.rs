@@ -34,12 +34,14 @@ pub(crate) const IDS_BY_SUBKIND_SQL: &str =
 pub(crate) const IDS_UNCONVERTED_BY_KIND_SQL: &str =
     "SELECT id FROM events WHERE kind = ?1 AND subkind IS NULL";
 pub(crate) const IDS_BY_RUN_SQL: &str = "SELECT id FROM events WHERE run_id = ?1";
-// `instr` cannot see inside a compressed payload, so every compressed row stays a
-// candidate and the caller's confirmation decodes it.
+// `instr` cannot see inside a compressed payload, and the text of a tokenized one holds
+// tokens where the long strings were, so every compressed or tokenized row stays a
+// candidate and the caller's confirmation decodes it. A miss of `instr` is never a proof
+// that a row does not mention the text.
 pub(crate) const IDS_UNCONVERTED_MENTIONING_SQL: &str = "SELECT id FROM events WHERE subkind IS NULL \
-     AND (typeof(payload) = 'blob' OR instr(payload, ?1) > 0)";
+     AND (typeof(payload) = 'blob' OR body_format = 1 OR instr(payload, ?1) > 0)";
 pub(crate) const IDS_BLANK_MENTIONING_SQL: &str = "SELECT id FROM events WHERE subkind = '' \
-     AND (typeof(payload) = 'blob' OR instr(payload, ?1) > 0)";
+     AND (typeof(payload) = 'blob' OR body_format = 1 OR instr(payload, ?1) > 0)";
 
 /// Whether any row still lacks `subkind` and `run_id`.
 pub(crate) fn has_unbackfilled(conn: &Connection) -> Result<bool, StorageError> {
@@ -89,8 +91,8 @@ fn visit_candidates(
     mut visit: impl FnMut(StoredEvent) -> ControlFlow<()>,
 ) -> Result<(), StorageError> {
     let mut statement = conn.prepare(
-        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload \
-         FROM events WHERE id = ?1",
+        "SELECT id, session_id, schema_version, monotonic_ns, wall_clock_ns, kind, payload, \
+         body_format FROM events WHERE id = ?1",
     )?;
     let mut skipped = 0_usize;
     let tombstones = crate::thread_retention::TombstoneSet::load(conn)?;
@@ -101,7 +103,7 @@ fn visit_candidates(
         if row.get::<_, i64>(4)? < min_wall_clock_ns {
             continue;
         }
-        match row_to_event(row) {
+        match row_to_event(conn, row) {
             // A deleted family's rows stay on disk until reclaimed; never show them.
             Ok(stored) if tombstones.rejects(&stored.event.kind).is_some() => {}
             Ok(stored) => {
@@ -183,10 +185,10 @@ pub(crate) fn for_each_matching(
 const RUN_MENTIONED: &str = "EXISTS (SELECT 1 FROM json_each(?1) AS mentioned \
      WHERE instr(payload, substr(json_quote(mentioned.value), 2, \
      length(json_quote(mentioned.value)) - 2)) > 0)";
-/// [`RUN_MENTIONED`] for rows of unknown form (not backfilled): a compressed one
-/// cannot be searched, so it stays a candidate. Kinds read through
+/// [`RUN_MENTIONED`] for rows of unknown form (not backfilled): a compressed or
+/// tokenized one cannot be searched, so it stays a candidate. Kinds read through
 /// `RUN_MENTIONED` alone are never compressed.
-const RUN_MENTIONED_OR_COMPRESSED: &str = "(typeof(payload) = 'blob' OR EXISTS (SELECT 1 \
+const RUN_MENTIONED_OR_COMPRESSED: &str = "(typeof(payload) = 'blob' OR body_format = 1 OR EXISTS (SELECT 1 \
      FROM json_each(?1) AS mentioned WHERE instr(payload, substr(json_quote(mentioned.value), 2, \
      length(json_quote(mentioned.value)) - 2)) > 0))";
 

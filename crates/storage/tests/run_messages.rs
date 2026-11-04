@@ -15,6 +15,7 @@ use tempfile::TempDir;
 
 const UNDO_V40: &str = include_str!("support/undo_v40.sql");
 const UNDO_V43: &str = include_str!("support/undo_v43.sql");
+const UNDO_V44: &str = include_str!("support/undo_v44.sql");
 
 fn config(dir: &TempDir) -> StorageConfig {
     StorageConfig {
@@ -886,6 +887,7 @@ fn old_format_database(path: &std::path::Path, version: u32) {
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(path).unwrap();
+    connection.execute_batch(UNDO_V44).unwrap();
     connection.execute_batch(UNDO_V43).unwrap();
     connection.execute_batch(UNDO_V40).unwrap();
     connection
@@ -973,6 +975,7 @@ fn a_version_40_database_whose_maps_are_a_column_is_refused_by_every_entry_untou
     };
     drop(Database::open(&config).unwrap());
     let connection = Connection::open(&path).unwrap();
+    connection.execute_batch(UNDO_V44).unwrap();
     connection.execute_batch(UNDO_V43).unwrap();
     connection.pragma_update(None, "user_version", 40).unwrap();
     connection

@@ -297,32 +297,39 @@ fn events_run(
         return Ok(Work::default());
     };
     let mut ids = Vec::new();
-    let mut per_session: Vec<(Option<String>, u64)> = Vec::new();
     let mut bytes = 0_u64;
+    let mut refs = 0_u64;
     let mut oversized: Option<(i64, u64)> = None;
     {
+        // The stored payload and the reference rows the cascade deletes are the work of a
+        // step. The physical bytes of the blobs are the collector's budget, and the
+        // accounting charge (`blob_bytes`) is neither.
         let mut statement = tx.prepare_cached(
-            "SELECT id, OCTET_LENGTH(payload), session_id FROM events \
+            "SELECT id, OCTET_LENGTH(payload), \
+             (SELECT COUNT(*) FROM (SELECT 1 FROM content_blob_refs_event \
+                                    WHERE event_id = events.id LIMIT ?4)) FROM events \
              WHERE run_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
         )?;
         let limit = i64::try_from(RECLAIM_EVENT_ROWS).unwrap_or(i64::MAX);
-        let mut rows = statement.query(params![run, cursor.after, limit])?;
+        let mut rows =
+            statement.query(params![run, cursor.after, limit, RECLAIM_MESSAGE_REFS + 1])?;
         while let Some(row) = rows.next()? {
             let size = row.get::<_, u64>(1)?;
-            if ids.is_empty() && size > RECLAIM_EVENT_BYTES {
+            let count = row.get::<_, u64>(2)?;
+            let too_big = size > RECLAIM_EVENT_BYTES || count > RECLAIM_MESSAGE_REFS;
+            if ids.is_empty() && too_big {
                 oversized = Some((row.get::<_, i64>(0)?, size));
                 break;
             }
-            if !ids.is_empty() && bytes.saturating_add(size) > RECLAIM_EVENT_BYTES {
+            if too_big
+                || bytes.saturating_add(size) > RECLAIM_EVENT_BYTES
+                || refs.saturating_add(count) > RECLAIM_MESSAGE_REFS
+            {
                 break;
             }
             ids.push(row.get::<_, i64>(0)?);
             bytes = bytes.saturating_add(size);
-            let session: Option<String> = row.get(2)?;
-            match per_session.iter_mut().find(|(known, _)| *known == session) {
-                Some((_, total)) => *total = total.saturating_add(size),
-                None => per_session.push((session, size)),
-            }
+            refs += count;
         }
     }
     if let Some((id, size)) = oversized {
@@ -339,9 +346,6 @@ fn events_run(
         "DELETE FROM events WHERE id IN (SELECT value FROM json_each(?1))",
         [json_ids(&ids)?],
     )?;
-    for (session, size) in per_session {
-        crate::maintenance::adjust_session_bytes(tx, session.as_deref(), size, 0)?;
-    }
     cursor.after = last;
     Ok(Work {
         rows: ids.len() as u64,
@@ -360,11 +364,10 @@ fn events_thread(
     let mut scanned = 0_usize;
     let mut last = cursor.scan_after;
     let mut ids = Vec::new();
-    let mut per_session: Vec<(Option<String>, u64)> = Vec::new();
     let mut bytes = 0_u64;
     {
         let mut statement = tx.prepare_cached(
-            "SELECT id, OCTET_LENGTH(payload), session_id, \
+            "SELECT id, OCTET_LENGTH(payload), \
              EXISTS(SELECT 1 FROM thread_tombstones \
                     WHERE thread_id = json_extract(payload, '$.payload.payload.snapshot.thread_id') \
                       AND family_key = ?3) FROM events \
@@ -378,15 +381,10 @@ fn events_thread(
             last = row.get(0)?;
             // A point lookup per scanned row, so a family with many threads costs
             // no more than a small one.
-            if row.get::<_, bool>(3)? {
+            if row.get::<_, bool>(2)? {
                 let size = row.get::<_, u64>(1)?;
                 ids.push(last);
                 bytes = bytes.saturating_add(size);
-                let session: Option<String> = row.get(2)?;
-                match per_session.iter_mut().find(|(known, _)| *known == session) {
-                    Some((_, total)) => *total = total.saturating_add(size),
-                    None => per_session.push((session, size)),
-                }
             }
         }
     }
@@ -395,9 +393,6 @@ fn events_thread(
             "DELETE FROM events WHERE id IN (SELECT value FROM json_each(?1))",
             [json_ids(&ids)?],
         )?;
-        for (session, size) in per_session {
-            crate::maintenance::adjust_session_bytes(tx, session.as_deref(), size, 0)?;
-        }
     }
     cursor.scan_after = last;
     if scanned < RECLAIM_SCAN_ROWS {
@@ -1282,17 +1277,16 @@ fn delete_oversized(
             let id: i64 = key.parse().map_err(|_| {
                 StorageError::Serialization(format!("bad oversized event id {key}"))
             })?;
-            let row: Option<(Option<String>, u64)> = tx
+            let row: Option<u64> = tx
                 .query_row(
-                    "SELECT session_id, OCTET_LENGTH(payload) FROM events WHERE id = ?1",
+                    "SELECT OCTET_LENGTH(payload) FROM events WHERE id = ?1",
                     [id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| row.get(0),
                 )
                 .optional()?;
             let mut work = Work::default();
-            if let Some((session, size)) = row {
+            if let Some(size) = row {
                 tx.execute("DELETE FROM events WHERE id = ?1", [id])?;
-                crate::maintenance::adjust_session_bytes(&tx, session.as_deref(), size, 0)?;
                 work = Work {
                     rows: 1,
                     bytes: size,

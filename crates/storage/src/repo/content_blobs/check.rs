@@ -15,7 +15,8 @@ use super::{OVERSIZED_FAMILY, OVERSIZED_TABLE, ref_tables, unreferenced_clause};
 use crate::StorageError;
 use crate::body_ref::{collect_tokens, hex};
 use crate::body_store::{
-    OwnerSpec, blob_bytes, decode_blob, decode_skeleton, unresolved, verify_decoded,
+    ContainerEncoding, OwnerSpec, blob_bytes, decode_blob, decode_skeleton, unresolved,
+    verify_decoded,
 };
 use crate::error::BodyUnresolvedReason;
 
@@ -235,7 +236,10 @@ fn check_owner(
     let select: Vec<&str> = key_columns
         .iter()
         .chain(owner.container_columns)
-        .chain(owner.codec_column.iter())
+        .chain(match &owner.encoding {
+            ContainerEncoding::CodecColumn(column) => Some(column),
+            _ => None,
+        })
         .copied()
         .collect();
     let mut sql = format!("SELECT {} FROM {}", select.join(", "), owner.owner_table);
@@ -272,9 +276,22 @@ fn check_owner(
         let mut readable = true;
         for index in 0..owner.container_columns.len() {
             let slot = owner.keys.len() + index;
-            let text: String = match owner.codec_column {
+            let text: String = match owner.encoding {
+                ContainerEncoding::Transparent => match crate::codec::decode(row.get_ref(slot)?) {
+                    Ok(text) => text.into_owned(),
+                    Err(error) => {
+                        report.add(
+                            "container_decode",
+                            Some(&label),
+                            None,
+                            format!("{}: {error}", owner.container_columns[index]),
+                        );
+                        readable = false;
+                        continue;
+                    }
+                },
                 // A codec-tagged BLOB container: decode it with the row's own codec.
-                Some(_) => {
+                ContainerEncoding::CodecColumn(_) => {
                     let codec: i64 = row.get(owner.keys.len() + owner.container_columns.len())?;
                     match row.get_ref(slot)? {
                         rusqlite::types::ValueRef::Blob(data) => {
@@ -304,7 +321,7 @@ fn check_owner(
                         }
                     }
                 }
-                None => {
+                ContainerEncoding::JsonText => {
                     let Some(text) = row
                         .get_ref(slot)?
                         .as_str_or_null()

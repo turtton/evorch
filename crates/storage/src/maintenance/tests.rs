@@ -499,6 +499,7 @@ fn preview_is_read_only_on_old_schema_and_agrees_with_writer_selection() {
     let expected = preview_task_progress_retention(&path).unwrap();
     {
         let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(crate::migrations::UNDO_V44).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V43).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V40).unwrap();
         conn.execute_batch(crate::migrations::UNDO_V35).unwrap();
@@ -670,7 +671,7 @@ fn retention_and_stripping_ignore_compressed_payloads_of_other_kinds() {
                     tool_name: "shell".into(),
                     call_id: "call".into(),
                     is_error: false,
-                    output: Some("large tool output\n".repeat(1000)),
+                    output: Some("large tool output\n".repeat(110)),
                     detail: None,
                     run_id: Some("run".into()),
                     parent_call_id: None,
