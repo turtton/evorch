@@ -430,6 +430,8 @@ impl AgentRuntime {
                 .or(descriptor.name),
             interactive: true,
             keep_alive: true,
+            lane_scope: descriptor.lane_scope,
+            spawn_credits: descriptor.spawn_credits.clone(),
             project_root,
             initial_prompt_id: prompt_id,
             ..authority
@@ -561,6 +563,17 @@ impl AgentRuntime {
             self.deny_deleted_run(&seed.source_run_id)
                 .map_err(deleted)?;
         }
+        if let Some(store) = self.shared.run_store.get() {
+            let lane = store.handle.lane_by_thread(thread_id).map_err(|e| {
+                RuntimeError::ReviewEvidence {
+                    run_id: format!("chat:{thread_id}"),
+                    reason: format!("Cannot establish thread scope: {e}"),
+                }
+            })?;
+            if lane.is_some() {
+                config.lane_scope = Some(event_bus::LaneScope::Lane);
+            }
+        }
         let mentions = std::mem::take(&mut config.skill_mentions);
         if let Some((objective, criteria)) = &config.initial_thread_goal {
             self.validate_new_thread_goal(thread_id, objective, criteria)
@@ -601,7 +614,25 @@ impl AgentRuntime {
                 match record {
                     None => match seed.as_ref() {
                         None => None,
-                        Some(seed) => Some(self.fork_seed_history(store, seed, role, &config)?),
+                        Some(seed) => {
+                            if let Some(source) = store
+                                .restore_record(
+                                    crate::meta::parse_run_id(&seed.source_run_id)
+                                        .map_err(|e| fail(RunRestoreFailure::CorruptContext(e)))?,
+                                )
+                                .map_err(|e| {
+                                    fail(RunRestoreFailure::CorruptContext(e.to_string()))
+                                })?
+                            {
+                                let descriptor: RunRestoreDescriptor =
+                                    serde_json::from_str(&source.config_json).map_err(|e| {
+                                        fail(RunRestoreFailure::CorruptContext(e.to_string()))
+                                    })?;
+                                config.lane_scope = config.lane_scope.or(descriptor.lane_scope);
+                                config.spawn_credits = descriptor.spawn_credits.clone();
+                            }
+                            Some(self.fork_seed_history(store, seed, role, &config)?)
+                        }
                     },
                     Some(record) => {
                         let source = crate::meta::parse_run_id(&record.run_id)
@@ -612,6 +643,8 @@ impl AgentRuntime {
                                 fail(RunRestoreFailure::CorruptContext(error.to_string()))
                             })?;
                         self.validate_history_restore(&record, &descriptor, &config)?;
+                        config.lane_scope = config.lane_scope.or(descriptor.lane_scope);
+                        config.spawn_credits = descriptor.spawn_credits.clone();
                         if Role::from_name(&record.role) != Ok(role)
                             || Role::from_name(&descriptor.role) != Ok(role)
                             || record.parent_run_id.is_some()

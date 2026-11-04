@@ -54,6 +54,16 @@ impl ExecutionPolicy {
         use crate::RunPurpose;
         let tools: &[&str] = match config.purpose {
             RunPurpose::General => {
+                if is_root && self.role_name == Role::Orchestrator.name() {
+                    let lane_tools: &[&str] = if config.lane_scope.is_some() {
+                        &["lane_report"]
+                    } else {
+                        &["lane_open", "lane_list"]
+                    };
+                    self.capabilities
+                        .allowed_tools
+                        .extend(lane_tools.iter().map(|s| (*s).to_owned()));
+                }
                 if is_root {
                     self.capabilities.allowed_tools.extend(
                         ["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned),
@@ -463,10 +473,16 @@ mod tests {
                 .allowed_tools
                 .extend(["create_goal", "get_goal", "submit_goal_check"].map(str::to_owned));
             if role == Role::Orchestrator {
-                expected
-                    .capabilities
-                    .allowed_tools
-                    .extend(["todo_write", "present", "inspect_artifact"].map(str::to_owned));
+                expected.capabilities.allowed_tools.extend(
+                    [
+                        "todo_write",
+                        "present",
+                        "inspect_artifact",
+                        "lane_open",
+                        "lane_list",
+                    ]
+                    .map(str::to_owned),
+                );
             }
             assert_eq!(policy, expected);
             // Orchestrator already allows fetch and WebResearcher already allows both.

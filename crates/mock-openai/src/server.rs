@@ -407,6 +407,15 @@ impl StreamingMockOpenAi {
             .clone()
     }
 
+    /// Queue responses after an observed lifecycle boundary, e.g. a page whose
+    /// opaque continuation cursor only becomes known after the previous response.
+    pub fn enqueue(&self, responses: impl IntoIterator<Item = ScriptedResponse>) {
+        self.scripts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(responses);
+    }
+
     /// Returns the number of scripts not yet consumed.
     pub fn remaining_scripts(&self) -> usize {
         self.scripts.lock().unwrap_or_else(|e| e.into_inner()).len()

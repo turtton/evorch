@@ -24,6 +24,9 @@ pub(crate) fn record_chat_root(
     seed: Option<&ChatForkSeed>,
 ) {
     let mut row = definition(runtime, thread_id.to_owned(), run_id, role, config);
+    if config.lane_scope.is_some() {
+        row.lineage_kind = Some(ThreadLineageKind::Lane);
+    }
     if let Some(seed) = seed {
         row.parent_thread_id = runtime
             .shared

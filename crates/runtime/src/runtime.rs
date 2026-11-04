@@ -138,6 +138,7 @@ pub(crate) struct Shared {
     pub(crate) compaction: OnceLock<CompactionSettings>,
     budget: OnceLock<crate::budget_tracker::BudgetSettings>,
     pub(crate) run_store: OnceLock<crate::RunStore>,
+    pub(crate) lanes: crate::lanes::LaneRuntime,
     /// Contention budget of ownership checkpoints and turn starts; unset is the default.
     pub(crate) ownership_retry: OnceLock<crate::ownership::RetryPolicy>,
     pub(crate) model_resolution: OnceLock<crate::model_resolve::ModelResolution>,
@@ -280,10 +281,10 @@ impl PendingReference {
 }
 
 pub(crate) struct RunEntry {
-    role: Role,
+    pub(crate) role: Role,
     name: String,
     model: String,
-    config: RunConfig,
+    pub(crate) config: RunConfig,
     pub(crate) parent: Option<RunId>,
     escalated_from: Option<RunId>,
     completion_relayed: bool,
@@ -744,6 +745,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
@@ -1062,6 +1064,7 @@ impl AgentRuntime {
                 compaction: OnceLock::new(),
                 budget: OnceLock::new(),
                 run_store: OnceLock::new(),
+                lanes: crate::lanes::LaneRuntime::default(),
                 ownership_retry: OnceLock::new(),
                 model_resolution: OnceLock::new(),
                 comment_checker: OnceLock::new(),
@@ -1286,6 +1289,13 @@ impl AgentRuntime {
                 return run_id;
             }
         }
+        config.lane_scope = parent
+            .and_then(|id| {
+                lock_runs(&self.shared.runs)
+                    .get(&id)
+                    .and_then(|entry| entry.config.lane_scope)
+            })
+            .or(config.lane_scope);
         self.shared.bind_project(parent, &mut config);
         let mut intents = self
             .shared
@@ -1423,6 +1433,9 @@ impl AgentRuntime {
         );
         // A host prompt keeps its submission ID as the request turn's prompt ID.
         // Taken here, so the stored config never passes it to a delegated child.
+        if config.lane_scope.is_some() && start_thread.is_some() && restored.is_none() {
+            turn.origin = Some("agent_brief".into());
+        }
         let initial_prompt_id = config
             .initial_prompt_id
             .take()
@@ -1437,6 +1450,10 @@ impl AgentRuntime {
             && let Some(budget) = self.shared.budget.get()
         {
             config.budget = budget.clone();
+        }
+        if parent.is_none() && config.lane_scope.is_some() {
+            config.conversation = true;
+            config.budget = config.budget.clone().with_unlimited_resources();
         }
         self.shared.bind_project(parent, &mut config);
         if let Some(parent) = parent {
@@ -1656,6 +1673,18 @@ impl AgentRuntime {
             self.release_held_messages(run_id, &mailbox);
             drop(runs);
         }
+        if let Some(parent) = parent {
+            // Admission and registration succeeded. Failed/pending admissions
+            // never earn credit; the parent consumes this before its next budget check.
+            self.shared
+                .lanes
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(parent)
+                .or_default()
+                .push(run_id.to_string());
+        }
         // Registration is the consumption boundary, not provider completion.
         if let Some(reservation) = task
             .restored
@@ -1789,6 +1818,34 @@ impl AgentRuntime {
                 }
             }
         }
+    }
+
+    pub(crate) fn spawn_lane_root(
+        &self,
+        run_id: RunId,
+        thread_id: &str,
+        prompt: String,
+        config: RunConfig,
+    ) -> Result<(), String> {
+        self.bind_thread_root(thread_id, run_id)?;
+        crate::thread_lineage::record_chat_root(
+            self,
+            thread_id,
+            run_id,
+            Role::Orchestrator,
+            &config,
+            None,
+        );
+        self.spawn_run_with_handoff(
+            run_id,
+            None,
+            Role::Orchestrator,
+            prompt,
+            config,
+            RunContinuation::FreshThread(thread_id.into()),
+            None,
+        );
+        Ok(())
     }
 
     pub(crate) fn spawn_escalated_root(
@@ -2713,7 +2770,7 @@ impl AgentRuntime {
         })
     }
 
-    fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
+    pub(crate) fn validate_run_mutation(&self, run_id: RunId) -> Result<(), RuntimeError> {
         let permit = self.entry(run_id)?.config.ownership.clone();
         if let Some(permit) = permit {
             permit

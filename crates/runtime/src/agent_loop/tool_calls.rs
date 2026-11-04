@@ -1181,7 +1181,9 @@ impl LoopState {
                         ToolResult::error(error.to_string())
                     } else if is_meta_op(&name) {
                         let progress_input = reports_progress.then(|| input.clone());
+                        self.meta_call_id = Some(id.clone());
                         let dispatch = meta::dispatch(self, &name, input).await;
+                        self.meta_call_id = None;
                         self.ledger_tool_completed(&name, &id, &dispatch.result);
                         let error_class = self.record_tool_outcome(&name, &dispatch.result, None);
                         if let Some(input) = progress_input

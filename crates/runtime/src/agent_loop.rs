@@ -207,6 +207,7 @@ pub(crate) struct LoopState {
     pub(crate) reported_questions: std::collections::HashSet<String>,
     /// The last tool result, named in the reason when a loop guard stops the run.
     last_tool: Option<stop_context::ToolOutcome>,
+    pub(crate) meta_call_id: Option<String>,
     retracted_delegates: retracted_delegates::RetractedDelegates,
     durable_task: Option<storage::entity::TaskContinuation>,
     pending_terminal: Option<(RunState, LifecycleEvent)>,
@@ -284,6 +285,7 @@ impl LoopState {
             reminded_jobs: std::collections::BTreeSet::new(),
             reported_questions: std::collections::HashSet::new(),
             last_tool: None,
+            meta_call_id: None,
             retracted_delegates: retracted_delegates::RetractedDelegates::default(),
             durable_task: None,
             pending_terminal: None,
@@ -452,6 +454,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
+    state.budget.spawn_credits = state.task.config.spawn_credits.clone();
     state.thread_id = thread_id;
     state.boundary_pending = boundary_pending;
     state.continuity = continuity;
@@ -796,6 +799,17 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             state.finish_error(format!("Cannot persist prepared context: {error}"));
             return;
         }
+        // The durable prepared context precedes the lane's registered generation.
+        // A crash before this point leaves the intent in unstarted_lanes; after it,
+        // the root has an ordinary restorable context, without a duplicate brief.
+        if state.task.parent.is_none()
+            && state.task.config.lane_scope.is_some()
+            && let Some(runtime) = state.runtime()
+            && let Err(error) = runtime.record_lane_start(state.task.run_id)
+        {
+            state.finish_error(format!("Cannot commit lane registration: {error}"));
+            return;
+        }
         if completed_turn_end.is_some() && !state.wait_for_input_boundary(true).await {
             return;
         }
@@ -858,6 +872,7 @@ fn push_initial_system_message(
         shared,
         &base_context::SystemInputs {
             role: task.role,
+            lane_scope: task.config.lane_scope.is_some(),
             category: task.config.category.as_deref(),
             load_skills: &task.config.load_skills,
             prompt_len: task.prompt.len(),

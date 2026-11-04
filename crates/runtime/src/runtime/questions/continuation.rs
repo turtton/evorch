@@ -148,6 +148,8 @@ impl AgentRuntime {
             model_preference: descriptor.model_preference.clone(),
             project_root: descriptor.project_root.clone(),
             interactive: descriptor.interactive,
+            lane_scope: descriptor.lane_scope,
+            spawn_credits: descriptor.spawn_credits.clone(),
             keep_alive: descriptor.keep_alive,
             ownership,
             budget,

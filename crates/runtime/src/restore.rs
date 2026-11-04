@@ -161,6 +161,10 @@ pub struct RunRestoreDescriptor {
     /// Conversation identity only; legacy snapshots did not record it.
     #[serde(default)]
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub lane_scope: Option<event_bus::LaneScope>,
+    #[serde(default)]
+    pub spawn_credits: crate::budget_tracker::SpawnCredits,
     /// Explicit input provenance, never reconstructed by counting canonical history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<providers::RequestTurnContext>,
@@ -522,6 +526,8 @@ fn write_snapshot_with_context(
         responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,
         thread_id: state.thread_id.clone(),
+        lane_scope: config.lane_scope,
+        spawn_credits: state.budget.spawn_credits.clone(),
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),

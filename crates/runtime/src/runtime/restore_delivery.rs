@@ -214,6 +214,8 @@ impl AgentRuntime {
                 .map_err(|error| fail(RunRestoreFailure::CorruptContext(error.to_string())))?;
             let config = RunConfig {
                 name: descriptor.name,
+                lane_scope: descriptor.lane_scope,
+                spawn_credits: descriptor.spawn_credits.clone(),
                 interactive: descriptor.interactive,
                 keep_alive: descriptor.keep_alive,
                 category: descriptor.category,

@@ -35,6 +35,8 @@ pub(crate) fn persist_escalation_seed(
         return Ok(0);
     };
     let descriptor = RunRestoreDescriptor {
+        lane_scope: config.lane_scope,
+        spawn_credits: config.spawn_credits.clone(),
         responses_replay: None,
         admission_reservation_id: None,
         thread_id: Some(event_bus::escalation_thread_id(&run_id.to_string())),
