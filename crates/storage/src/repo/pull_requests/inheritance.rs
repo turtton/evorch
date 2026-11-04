@@ -8,10 +8,10 @@ use super::{
 };
 use crate::StorageError;
 use crate::pull_requests::{
-    InheritancePending, InheritanceReason, InheritanceRecord, InheritanceResolution,
-    InheritanceSkipReason, InheritanceState, LinkOrigin, NewPullRequestInheritance,
-    PULL_REQUEST_ERROR_MAX_CHARS, PULL_REQUEST_LIST_MAX, PullRequestRejection, PullRequestState,
-    sanitize_single_line,
+    InheritanceCursor, InheritancePending, InheritanceReason, InheritanceRecord,
+    InheritanceResolution, InheritanceSkipReason, InheritanceState, LinkOrigin,
+    NewPullRequestInheritance, PULL_REQUEST_ERROR_MAX_CHARS, PULL_REQUEST_LIST_MAX,
+    PullRequestRejection, PullRequestState, sanitize_single_line,
 };
 
 const COLUMNS: &str = "child_thread_id, parent_thread_id, parent_link_id, provider, host, \
@@ -62,6 +62,40 @@ pub(crate) fn get(
         .optional()?)
 }
 
+/// Whether the thread has a pending inheritance row (as a child).
+pub(crate) fn has_pending(conn: &Connection, child_thread_id: &str) -> Result<bool, StorageError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_pull_request_inheritance \
+         WHERE child_thread_id = ?1 AND state = 'pending')",
+        [child_thread_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// The explicit decision the thread already made about pull requests, if any: an explicit
+/// link row (an unlinked one counts as the stronger "unlinked"). An inherited link is not
+/// a decision of the thread.
+fn explicit_decision(
+    conn: &Connection,
+    thread_id: &str,
+) -> Result<Option<InheritanceReason>, StorageError> {
+    let (unlinked, linked): (bool, bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_pull_requests WHERE thread_id = ?1 \
+                       AND origin = 'explicit' AND end_reason = 'unlinked'), \
+                EXISTS(SELECT 1 FROM thread_pull_requests WHERE thread_id = ?1 \
+                       AND origin = 'explicit')",
+        [thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(if unlinked {
+        Some(InheritanceReason::ExplicitUnlink)
+    } else if linked {
+        Some(InheritanceReason::ExplicitLink)
+    } else {
+        None
+    })
+}
+
 fn is_lane(conn: &Connection, thread_id: &str) -> Result<bool, StorageError> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM threads WHERE thread_id = ?1 AND lineage_kind = 'lane')",
@@ -95,10 +129,30 @@ pub(crate) fn schedule(
         return Err(StorageError::PullRequest(PullRequestRejection::LaneThread));
     }
     let (expected, _) = lifecycle(&tx, &new.child_thread_id)?;
+    // A child that already made its own decision (a link or an unlink) before this was
+    // scheduled does not get the parent's link: the row is decided at once, so the
+    // decision is on record and no retry can apply it.
+    let earlier_decision = if expected > 0 {
+        Some(
+            explicit_decision(&tx, &new.child_thread_id)?
+                .unwrap_or(InheritanceReason::ChildChanged),
+        )
+    } else {
+        explicit_decision(&tx, &new.child_thread_id)?
+    };
+    let (state, reason, decided_at) = match earlier_decision {
+        Some(reason) => (
+            InheritanceState::Cancelled,
+            Some(reason.as_str()),
+            Some(new.at_ns),
+        ),
+        None => (InheritanceState::Pending, None, None),
+    };
     tx.execute(
         "INSERT INTO thread_pull_request_inheritance (child_thread_id, parent_thread_id, \
             parent_link_id, provider, host, repository, number, expected_child_revision, state, \
-            created_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+            decision_reason, created_at_ns, decided_at_ns) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             new.child_thread_id,
             parent.thread_id,
@@ -108,7 +162,10 @@ pub(crate) fn schedule(
             parent.key.repository,
             parent.key.number,
             expected,
+            state.as_str(),
+            reason,
             new.at_ns,
+            decided_at,
         ],
     )?;
     let record = get(&tx, &new.child_thread_id)?
@@ -178,6 +235,11 @@ pub(crate) fn resolve(
         return Ok(InheritanceResolution::Skipped(
             InheritanceReason::LaneThread,
         ));
+    }
+    if let Some(reason) = explicit_decision(&tx, child)? {
+        decide(&tx, child, InheritanceState::Cancelled, reason, at_ns)?;
+        tx.commit()?;
+        return Ok(InheritanceResolution::Cancelled(reason));
     }
     let (revision, _) = lifecycle(&tx, child)?;
     if revision != row.expected_child_revision {
@@ -293,16 +355,22 @@ pub(crate) fn skip(
 
 pub(crate) fn pending(
     conn: &Connection,
+    after: Option<InheritanceCursor>,
     limit: usize,
 ) -> Result<Vec<InheritanceRecord>, StorageError> {
     let limit = i64::try_from(limit.clamp(1, PULL_REQUEST_LIST_MAX)).unwrap_or(i64::MAX);
+    let (after_ns, after_child) = match after {
+        Some(cursor) => (Some(cursor.created_at_ns), Some(cursor.child_thread_id)),
+        None => (None, None),
+    };
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM thread_pull_request_inheritance \
          WHERE state = 'pending' \
+           AND (?2 IS NULL OR (created_at_ns, child_thread_id) > (?2, ?3)) \
            AND child_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) \
          ORDER BY created_at_ns, child_thread_id LIMIT ?1"
     ))?;
     Ok(statement
-        .query_map([limit], from_row)?
+        .query_map(params![limit, after_ns, after_child], from_row)?
         .collect::<Result<_, _>>()?)
 }

@@ -24,9 +24,11 @@ fn redact(text: &str) -> String {
     secret_guard::SecretRedactor::from_env().redact(text).text
 }
 
-/// A third-party single-line text, sanitized, redacted and bounded.
+/// A third-party single-line text: the whole original is redacted first, so a credential
+/// that crosses the length limit is masked before anything is cut, and only then is the
+/// text made single-line and bounded.
 fn clean_text(text: &str, max_chars: usize) -> String {
-    sanitize_single_line(&redact(&sanitize_single_line(text, max_chars)), max_chars)
+    sanitize_single_line(&redact(text), max_chars)
 }
 
 fn branch(field: &'static str, value: &str) -> Result<String, StorageError> {
@@ -105,23 +107,45 @@ pub(crate) fn begin_fetch(conn: &Connection, key: &PullRequestKey) -> Result<u64
     )?)
 }
 
-/// `(success_seq, last_attempt_seq)` of a key, once `seq` is known to have been issued.
-fn counters(conn: &Connection, key: &PullRequestKey, seq: u64) -> Result<(u64, u64), StorageError> {
-    let row: Option<(u64, u64, u64)> = conn
+/// The counters of a key a result is checked against, once `seq` is known to have been issued.
+struct Counters {
+    success: u64,
+    attempt: u64,
+    min_valid: u64,
+}
+
+impl Counters {
+    /// A fetch that started before retention cleared the key has no say any more.
+    fn invalidated(&self, seq: u64) -> bool {
+        seq < self.min_valid
+    }
+}
+
+fn counters(conn: &Connection, key: &PullRequestKey, seq: u64) -> Result<Counters, StorageError> {
+    let row: Option<(u64, u64, u64, u64)> = conn
         .query_row(
             &format!(
-                "SELECT success_seq, last_attempt_seq, fetch_seq FROM pull_request_snapshots \
-                 WHERE {KEY_WHERE}"
+                "SELECT success_seq, last_attempt_seq, min_valid_seq, fetch_seq \
+                 FROM pull_request_snapshots WHERE {KEY_WHERE}"
             ),
             params![key.provider.as_str(), key.host, key.repository, key.number],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
     match row {
-        Some((success, attempt, issued)) if seq >= 1 && seq <= issued => Ok((success, attempt)),
+        Some((success, attempt, min_valid, issued)) if seq >= 1 && seq <= issued => Ok(Counters {
+            success,
+            attempt,
+            min_valid,
+        }),
         _ => Err(invalid("seq", "was not handed out by begin_fetch")),
     }
 }
+
+const REFUSED: FetchCommit = FetchCommit {
+    facts_stored: false,
+    attempt_recorded: false,
+};
 
 pub(crate) fn commit_success(
     conn: &Connection,
@@ -135,9 +159,12 @@ pub(crate) fn commit_success(
     let checks_json = serde_json::to_string(&facts.checks)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let tx = immediate(conn)?;
-    let (success_seq, attempt_seq) = counters(&tx, &key, seq)?;
-    let facts_stored = seq > success_seq;
-    let attempt_recorded = seq > attempt_seq;
+    let counters = counters(&tx, &key, seq)?;
+    if counters.invalidated(seq) {
+        return Ok(REFUSED);
+    }
+    let facts_stored = seq > counters.success;
+    let attempt_recorded = seq > counters.attempt;
     if facts_stored {
         tx.execute(
             &format!(
@@ -202,8 +229,11 @@ pub(crate) fn commit_failure(
         message = failure.kind.as_str().to_owned();
     }
     let tx = immediate(conn)?;
-    let (_, attempt_seq) = counters(&tx, &key, seq)?;
-    let attempt_recorded = seq > attempt_seq;
+    let counters = counters(&tx, &key, seq)?;
+    if counters.invalidated(seq) {
+        return Ok(REFUSED);
+    }
+    let attempt_recorded = seq > counters.attempt;
     if attempt_recorded {
         tx.execute(
             &format!(
@@ -310,9 +340,11 @@ pub(crate) fn get(
 }
 
 /// Clears the cached facts and the error of up to `limit` snapshots that only `thread`
-/// references (links, candidates or inheritance rows). The sequence counters stay, so a
-/// fetch that was in flight can never outrank a later one. Returns the rows cleared; it
-/// is idempotent, because a cleared snapshot no longer matches.
+/// references (links, candidates or inheritance rows), and moves their `min_valid_seq`
+/// past every sequence handed out so far: the result of a fetch that was still running
+/// (a success or a failure, with or without earlier facts) is refused afterwards. The
+/// sequence counters stay, so a later fetch always outranks the cleared ones. Returns the
+/// rows cleared; it is idempotent, because a cleared snapshot no longer matches.
 pub(crate) fn clear_unshared(
     conn: &Connection,
     thread: &str,
@@ -323,10 +355,11 @@ pub(crate) fn clear_unshared(
             head_repository = NULL, head_branch = NULL, head_sha = NULL, checks_json = '[]', \
             checks_complete = 0, review_decision = NULL, fetched_at_ns = NULL, \
             last_attempt_at_ns = NULL, last_error_kind = NULL, last_error_message = NULL, \
-            consecutive_failures = 0 \
+            consecutive_failures = 0, min_valid_seq = fetch_seq + 1 \
          WHERE (provider, host, repository, number) IN (\
             SELECT s.provider, s.host, s.repository, s.number FROM pull_request_snapshots AS s \
-            WHERE (s.state IS NOT NULL OR s.last_attempt_at_ns IS NOT NULL) \
+            WHERE (s.state IS NOT NULL OR s.last_attempt_at_ns IS NOT NULL \
+                   OR s.fetch_seq >= s.min_valid_seq) \
               AND (s.provider, s.host, s.repository, s.number) IN (\
                   SELECT provider, host, repository, number FROM thread_pull_requests \
                   WHERE thread_id = ?1 \
@@ -349,3 +382,7 @@ pub(crate) fn clear_unshared(
     )?;
     Ok(cleared as u64)
 }
+
+#[cfg(test)]
+#[path = "snapshots_tests.rs"]
+mod tests;

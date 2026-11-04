@@ -509,8 +509,9 @@ pub struct LinkReceipt {
 /// What [`StorageHandle::unlink_pull_request`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlinkReceipt {
-    /// The link that ended.
-    pub ended: PullRequestLink,
+    /// The link that ended. `None` when the thread had no active link and the unlink only
+    /// declined its pending inheritance.
+    pub ended: Option<PullRequestLink>,
     /// The lifecycle revision after the call.
     pub lifecycle_revision: u64,
     /// Whether the thread's own pending inheritance was cancelled.
@@ -719,6 +720,26 @@ pub struct InheritanceRecord {
     pub created_at_ns: i64,
     /// When it was decided.
     pub decided_at_ns: Option<i64>,
+}
+
+impl InheritanceRecord {
+    /// The position of this row in the pending listing.
+    #[must_use]
+    pub fn cursor(&self) -> InheritanceCursor {
+        InheritanceCursor {
+            created_at_ns: self.created_at_ns,
+            child_thread_id: self.child_thread_id.clone(),
+        }
+    }
+}
+
+/// Where a page of pending inheritance rows ended; pass it back to get the next page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritanceCursor {
+    /// `created_at_ns` of the last row of the previous page.
+    pub created_at_ns: i64,
+    /// `child_thread_id` of the last row of the previous page.
+    pub child_thread_id: String,
 }
 
 /// A request to schedule an inheritance.

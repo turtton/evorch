@@ -87,6 +87,9 @@ BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
 -- that of the newest recorded outcome (success or failure). A result older than what is
 -- stored is refused, and a failure never erases the last success. Rows are never deleted
 -- (retention only clears the facts of an unreferenced key), so a counter never restarts.
+-- `min_valid_seq` is the boundary retention sets when it clears a key: a result of a fetch
+-- started before it (success or failure) is refused, so a fetch that was still running when
+-- the last thread of the key was deleted cannot write its facts back.
 -- `checks_json` is a bounded array of check summaries (sanitized names, no log text);
 -- `review_decision` is GitHub's structured decision only, never a count or a comment.
 CREATE TABLE pull_request_snapshots (
@@ -106,6 +109,7 @@ CREATE TABLE pull_request_snapshots (
     fetched_at_ns INTEGER,
     success_seq INTEGER NOT NULL DEFAULT 0 CHECK (success_seq >= 0),
     fetch_seq INTEGER NOT NULL DEFAULT 0 CHECK (fetch_seq >= 0),
+    min_valid_seq INTEGER NOT NULL DEFAULT 0 CHECK (min_valid_seq >= 0),
     last_attempt_seq INTEGER NOT NULL DEFAULT 0 CHECK (last_attempt_seq >= 0),
     last_attempt_at_ns INTEGER,
     last_error_kind TEXT CHECK (last_error_kind IN
@@ -118,11 +122,12 @@ CREATE TABLE pull_request_snapshots (
         AND head_sha IS NOT NULL AND review_decision IS NOT NULL
         AND fetched_at_ns IS NOT NULL)),
     CHECK (success_seq <= fetch_seq AND last_attempt_seq <= fetch_seq),
+    CHECK (min_valid_seq <= fetch_seq + 1),
     CHECK ((last_error_kind IS NULL) = (last_error_message IS NULL))
 ) WITHOUT ROWID;
 CREATE TRIGGER pull_request_snapshots_monotonic BEFORE UPDATE ON pull_request_snapshots
 WHEN NEW.fetch_seq < OLD.fetch_seq OR NEW.success_seq < OLD.success_seq
-    OR NEW.last_attempt_seq < OLD.last_attempt_seq
+    OR NEW.last_attempt_seq < OLD.last_attempt_seq OR NEW.min_valid_seq < OLD.min_valid_seq
 BEGIN SELECT RAISE(ABORT, 'pull request fetch sequences never go back'); END;
 
 -- 4. Pull requests that a tool output suggested for a thread. A person confirms or

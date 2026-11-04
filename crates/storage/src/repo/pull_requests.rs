@@ -324,19 +324,29 @@ pub(crate) fn unlink(
     if current != expected_revision {
         return Err(stale(expected_revision, current));
     }
-    let Some(active) = active_link(&tx, thread_id)? else {
+    let active = active_link(&tx, thread_id)?;
+    // A thread that only holds a pending inheritance has nothing to end, but the person can
+    // still decline it: that is an explicit decision and is recorded like any other.
+    if active.is_none() && !inheritance::has_pending(&tx, thread_id)? {
         return Err(StorageError::PullRequest(PullRequestRejection::NotLinked));
-    };
+    }
     let revision = bump_revision(&tx, thread_id)?;
-    tx.execute(
-        "UPDATE thread_pull_requests SET superseded_at_ns = ?2, end_reason = 'unlinked', \
-            end_revision = ?3 WHERE link_id = ?1",
-        params![active.link_id, at_ns, revision],
-    )?;
+    let ended = match active {
+        Some(active) => {
+            tx.execute(
+                "UPDATE thread_pull_requests SET superseded_at_ns = ?2, end_reason = 'unlinked', \
+                    end_revision = ?3 WHERE link_id = ?1",
+                params![active.link_id, at_ns, revision],
+            )?;
+            Some(
+                link_by_id(&tx, active.link_id)?
+                    .ok_or(StorageError::OutOfRange("pull request link"))?,
+            )
+        }
+        None => None,
+    };
     let cancelled_inheritance =
         cancel_own_inheritance(&tx, thread_id, InheritanceReason::ExplicitUnlink, at_ns)?;
-    let ended =
-        link_by_id(&tx, active.link_id)?.ok_or(StorageError::OutOfRange("pull request link"))?;
     tx.commit()?;
     Ok(UnlinkReceipt {
         ended,

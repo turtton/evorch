@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use super::{Command, StorageHandle, lanes::LaneJob};
 use crate::StorageError;
 use crate::pull_requests::{
-    CandidatePresented, CandidateState, FetchCommit, FetchFailure, InheritanceRecord,
-    InheritanceResolution, InheritanceSkipReason, LinkPullRequest, LinkReceipt,
+    CandidatePresented, CandidateState, FetchCommit, FetchFailure, InheritanceCursor,
+    InheritanceRecord, InheritanceResolution, InheritanceSkipReason, LinkPullRequest, LinkReceipt,
     NewPullRequestCandidate, NewPullRequestInheritance, NotificationKey, PullRequestCandidate,
     PullRequestFacts, PullRequestKey, PullRequestLink, PullRequestSnapshot, ThreadPullRequestState,
     UnlinkReceipt,
@@ -73,12 +73,14 @@ impl StorageHandle {
 
     /// Ends the thread's active link as `unlinked` from `expected_revision`, the
     /// lifecycle revision the caller read, and cancels the thread's own pending
-    /// inheritance in the same transaction. The parent's and children's rows are not
-    /// touched.
+    /// inheritance in the same transaction. A thread with a pending inheritance but no
+    /// link can be unlinked too: that declines the inheritance (`ended` is `None`). The
+    /// parent's and children's rows are not touched.
     ///
     /// # Errors
     /// `StaleRevision` when the thread moved on (a later link is never erased),
-    /// `PullRequest(NotLinked)`, `Tombstoned`, suspended writes or a closed writer.
+    /// `PullRequest(NotLinked)` when there is neither a link nor a pending inheritance,
+    /// `Tombstoned`, suspended writes or a closed writer.
     pub fn unlink_pull_request(
         &self,
         thread_id: &str,
@@ -377,15 +379,18 @@ impl StorageHandle {
         self.pull_request_read(move |conn| repo::inheritance::get(conn, &child))
     }
 
-    /// Pending inheritance rows, oldest first, at most `limit` (200 at most). The restart
-    /// retry set.
+    /// Pending inheritance rows, oldest first, after `after` (the cursor of the last row
+    /// of the previous page; `None` for the first page), at most `limit` (200 at most).
+    /// The restart retry set: call it again with `InheritanceRecord::cursor` of the last
+    /// row until a page comes back shorter than `limit`.
     ///
     /// # Errors
     /// SQLite failure or a closed writer.
     pub fn pending_pull_request_inheritances(
         &self,
+        after: Option<InheritanceCursor>,
         limit: usize,
     ) -> Result<Vec<InheritanceRecord>, StorageError> {
-        self.pull_request_read(move |conn| repo::inheritance::pending(conn, limit))
+        self.pull_request_read(move |conn| repo::inheritance::pending(conn, after, limit))
     }
 }

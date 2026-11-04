@@ -239,7 +239,10 @@ fn a_stale_unlink_cannot_erase_a_newer_link() {
         .lifecycle_revision;
     let unlinked = h.unlink_pull_request("t1", 1, 200).unwrap();
     assert_eq!(unlinked.lifecycle_revision, 2);
-    assert_eq!(unlinked.ended.end.unwrap().reason, LinkEndReason::Unlinked);
+    assert_eq!(
+        unlinked.ended.unwrap().end.unwrap().reason,
+        LinkEndReason::Unlinked
+    );
     link(&h, "t1", 3, 2);
 
     // When: window A unlinks from its stale revision.
@@ -369,14 +372,13 @@ fn an_explicit_decision_of_the_child_cancels_its_pending_inheritance_for_good() 
 }
 
 #[test]
-fn an_unlink_alone_cancels_the_pending_inheritance_of_a_thread_with_a_link() {
+fn an_unlink_cancels_a_pending_inheritance_even_when_the_child_has_no_link() {
     let f = Fixture::new();
     let h = f.handle();
     let parent = link(&h, "parent", 1, 0);
-    fetch_open(&h, 1, PullRequestState::Open);
+    let seq = fetch_open(&h, 1, PullRequestState::Open);
 
-    // Given: a child that is linked and then gets a pending inheritance scheduled.
-    link(&h, "child", 5, 0);
+    // Given: a derived thread with a pending inheritance and no link of its own.
     let scheduled = h
         .schedule_pull_request_inheritance(NewPullRequestInheritance {
             child_thread_id: "child".into(),
@@ -384,22 +386,120 @@ fn an_unlink_alone_cancels_the_pending_inheritance_of_a_thread_with_a_link() {
             at_ns: 10,
         })
         .unwrap();
-    assert_eq!(scheduled.expected_child_revision, 1);
+    assert_eq!(scheduled.state, InheritanceState::Pending);
+    assert_eq!(scheduled.expected_child_revision, 0);
 
-    // When: the child unlinks.
-    let receipt = h.unlink_pull_request("child", 1, 20).unwrap();
+    // When: the person unlinks it (declines the inheritance) from the revision they read.
+    let receipt = h.unlink_pull_request("child", 0, 20).unwrap();
 
-    // Then: the pending inheritance was cancelled in the same transaction.
+    // Then: the decision is recorded, the inheritance is cancelled in the same
+    // transaction, and a later retry with an open snapshot creates no link.
     assert!(receipt.cancelled_inheritance);
+    assert_eq!(receipt.lifecycle_revision, 1);
     let row = h.pull_request_inheritance("child").unwrap().unwrap();
     assert_eq!(row.state, InheritanceState::Cancelled);
     assert_eq!(row.decision_reason, Some(InheritanceReason::ExplicitUnlink));
+    for _ in 0..2 {
+        assert_eq!(
+            h.resolve_pull_request_inheritance("child", seq, 30)
+                .unwrap(),
+            InheritanceResolution::AlreadyDecided(InheritanceState::Cancelled)
+        );
+    }
+    let state = h.pull_request_thread_state("child").unwrap();
+    assert!(state.active_link.is_none());
+    assert!(h.pull_request_link_history("child", 10).unwrap().is_empty());
+
+    // And: the revision check still applies, and a thread with neither a link nor a
+    // pending inheritance still has nothing to unlink.
     assert!(matches!(
-        h.resolve_pull_request_inheritance("child", 1, 30).unwrap(),
-        InheritanceResolution::AlreadyDecided(InheritanceState::Cancelled)
+        h.unlink_pull_request("child", 0, 40).unwrap_err(),
+        StorageError::StaleRevision {
+            expected: 0,
+            current: 1,
+            ..
+        }
     ));
+    assert_eq!(
+        rejection(&h.unlink_pull_request("child", 1, 41).unwrap_err()),
+        &PullRequestRejection::NotLinked
+    );
+    assert_eq!(
+        rejection(&h.unlink_pull_request("nobody", 0, 42).unwrap_err()),
+        &PullRequestRejection::NotLinked
+    );
+}
+
+#[test]
+fn a_child_that_decided_before_the_inheritance_was_scheduled_does_not_inherit() {
+    let f = Fixture::new();
+    let h = f.handle();
+    let parent = link(&h, "parent", 1, 0);
+    let seq = fetch_open(&h, 1, PullRequestState::Open);
+    let schedule = |child: &str| {
+        h.schedule_pull_request_inheritance(NewPullRequestInheritance {
+            child_thread_id: child.into(),
+            parent_link_id: parent.link.link_id,
+            at_ns: 50,
+        })
+        .unwrap()
+    };
+
+    // Given: one child linked and then unlinked, another still linked, both before
+    // anything was scheduled for them.
+    link(&h, "unlinked-child", 5, 0);
+    h.unlink_pull_request("unlinked-child", 1, 20).unwrap();
+    link(&h, "linked-child", 6, 0);
+
+    // When: the inheritance is scheduled afterwards.
+    let unlinked_row = schedule("unlinked-child");
+    let linked_row = schedule("linked-child");
+
+    // Then: it is decided at once; the explicit decision stands and nothing is inherited.
+    assert_eq!(unlinked_row.state, InheritanceState::Cancelled);
+    assert_eq!(
+        unlinked_row.decision_reason,
+        Some(InheritanceReason::ExplicitUnlink)
+    );
+    assert_eq!(linked_row.state, InheritanceState::Cancelled);
+    assert_eq!(
+        linked_row.decision_reason,
+        Some(InheritanceReason::ExplicitLink)
+    );
+    for child in ["unlinked-child", "linked-child"] {
+        assert_eq!(
+            h.resolve_pull_request_inheritance(child, seq, 60).unwrap(),
+            InheritanceResolution::AlreadyDecided(InheritanceState::Cancelled)
+        );
+    }
     assert!(
-        h.pull_request_thread_state("child")
+        h.pull_request_thread_state("unlinked-child")
+            .unwrap()
+            .active_link
+            .is_none()
+    );
+    let kept = h.pull_request_thread_state("linked-child").unwrap();
+    assert_eq!(kept.active_link.unwrap().key, key(6));
+
+    // And: a pending row whose child has an explicit link row that the cancelling
+    // writes never saw (the revision still matches) is cancelled by the resolution.
+    schedule("sneaky-child");
+    f.sql()
+        .execute(
+            "INSERT INTO thread_pull_requests(thread_id, provider, host, repository, number, \
+             origin, created_at_ns, link_revision, superseded_at_ns, end_reason, end_revision) \
+             VALUES ('sneaky-child', 'github', 'github.com', 'o/r', 8, 'explicit', 1, 1, 2, \
+             'unlinked', 2)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        h.resolve_pull_request_inheritance("sneaky-child", seq, 70)
+            .unwrap(),
+        InheritanceResolution::Cancelled(InheritanceReason::ExplicitUnlink)
+    );
+    assert!(
+        h.pull_request_thread_state("sneaky-child")
             .unwrap()
             .active_link
             .is_none()
@@ -567,6 +667,44 @@ fn a_parent_unlink_changes_neither_the_child_link_nor_its_inheritance_row() {
     assert_eq!(
         rejection(&error),
         &PullRequestRejection::ParentLinkNotActive
+    );
+}
+
+#[test]
+fn pending_inheritances_are_listed_in_pages_without_gaps_or_repeats() {
+    let f = Fixture::new();
+    let h = f.handle();
+    let parent = link(&h, "parent", 1, 0);
+    // Rows share creation times, so the child ID is the tie-break of the cursor.
+    for (child, at_ns) in [("c", 5), ("a", 5), ("e", 7), ("b", 5), ("d", 6)] {
+        h.schedule_pull_request_inheritance(NewPullRequestInheritance {
+            child_thread_id: child.into(),
+            parent_link_id: parent.link.link_id,
+            at_ns,
+        })
+        .unwrap();
+    }
+    h.skip_pull_request_inheritance("d", InheritanceSkipReason::Other, 9)
+        .unwrap();
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = h
+            .pending_pull_request_inheritances(cursor.clone(), 2)
+            .unwrap();
+        seen.extend(page.iter().map(|row| row.child_thread_id.clone()));
+        if page.len() < 2 {
+            break;
+        }
+        cursor = page
+            .last()
+            .map(storage::pull_requests::InheritanceRecord::cursor);
+    }
+    assert_eq!(
+        seen,
+        vec!["a", "b", "c", "e"],
+        "decided rows are not listed"
     );
 }
 
@@ -868,6 +1006,57 @@ fn snapshot_facts_are_structured_sanitized_and_bounded() {
     );
     assert_eq!(sanitize_single_line(" a\n\tb  c ", 10), "a b c");
     assert_eq!(sanitize_single_line("abcdef", 3), "abc");
+}
+
+#[test]
+fn a_credential_that_straddles_the_length_limit_is_never_stored_in_part() {
+    let f = Fixture::new();
+    let h = f.handle();
+    let k = key(1);
+    let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+
+    // Given: third-party texts in which a credential starts just before the cut.
+    let straddling = |limit: usize| format!("{} {token} trailing", "n".repeat(limit - 8));
+    let mut with_secret = facts(PullRequestState::Open);
+    with_secret.checks = vec![check(
+        &straddling(128),
+        &straddling(160),
+        CheckStatus::Queued,
+        None,
+    )];
+    let seq = h.begin_pull_request_fetch(&k).unwrap();
+    h.commit_pull_request_fetch(&k, seq, with_secret, 5)
+        .unwrap();
+    let failure_seq = h.begin_pull_request_fetch(&k).unwrap();
+    h.fail_pull_request_fetch(
+        &k,
+        failure_seq,
+        FetchFailure {
+            kind: FetchErrorKind::Other,
+            message: straddling(256),
+        },
+        6,
+    )
+    .unwrap();
+
+    // Then: no part of the credential reached the database.
+    let snapshot = h.pull_request_snapshot(&k).unwrap().unwrap();
+    let stored_check = &snapshot.facts.unwrap().checks[0];
+    let message = snapshot.last_attempt.unwrap().failure.unwrap().message;
+    for text in [&stored_check.name, &stored_check.provider_id, &message] {
+        assert!(!text.contains("ghp_"), "{text}");
+        assert!(!text.contains("A1b2C3d4E5"), "{text}");
+        assert!(text.contains("[REDACT"), "{text}");
+    }
+    let raw: String = f
+        .sql()
+        .query_row(
+            "SELECT checks_json || COALESCE(last_error_message, '') FROM pull_request_snapshots",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!raw.contains("ghp_"), "{raw}");
 }
 
 #[test]
@@ -1346,7 +1535,7 @@ fn candidates_history_and_pending_inheritance_survive_a_restart() {
         rejection(&h.unlink_pull_request("t1", 2, 9).unwrap_err()),
         &PullRequestRejection::NotLinked
     );
-    let pending = h.pending_pull_request_inheritances(10).unwrap();
+    let pending = h.pending_pull_request_inheritances(None, 10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].child_thread_id, "child");
     assert_eq!(pending[0].parent_link_id, parent_link_id);
@@ -1357,7 +1546,11 @@ fn candidates_history_and_pending_inheritance_survive_a_restart() {
             .unwrap(),
         InheritanceResolution::Applied { .. }
     ));
-    assert!(h.pending_pull_request_inheritances(10).unwrap().is_empty());
+    assert!(
+        h.pending_pull_request_inheritances(None, 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
