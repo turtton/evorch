@@ -409,8 +409,9 @@
                 mainProgram = "cargo";
               };
             };
-        # The dev shell with the fenix toolchain's own cargo (comparison and rollback).
-        upstreamCargoDevShell = pkgs.mkShell {
+        # Dev shell with the fenix toolchain's own cargo; the fork shell is built from it.
+        # `rustcWrapperDefault` is RUSTC_WRAPPER when the caller leaves it unset.
+        mkCargoDevShell = rustcWrapperDefault: pkgs.mkShell {
           nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
           packages = [
             pkgs.bashInteractive
@@ -439,20 +440,25 @@
             # (場所と容量は sccache の既定値: Linux は ~/.cache/sccache、10 GiB)。
             # incremental な workspace crate はキャッシュされず、依存 crate が再利用される。
             # 呼び出し元の RUSTC_WRAPPER を優先し、空文字(RUSTC_WRAPPER=)なら無効のままにする。
-            export RUSTC_WRAPPER="''${RUSTC_WRAPPER-sccache}"
+            # 未設定のときの既定値は rustcWrapperDefault(upstream は sccache、フォークは空)。
+            export RUSTC_WRAPPER="''${RUSTC_WRAPPER-${rustcWrapperDefault}}"
             if [ -e .git ]; then
               lefthook install >/dev/null 2>&1 || echo "evorch: lefthook install failed (non-fatal)" >&2
             fi
           '';
         };
+        upstreamCargoDevShell = mkCargoDevShell "sccache";
         # The fork goes first in PATH, ahead of the fenix toolchain's cargo. Its
         # self-update would try to replace binaries outside the Nix store, so
-        # CARGO_FORK_AUTO_UPDATE=0 turns it off.
+        # CARGO_FORK_AUTO_UPDATE=0 turns it off. It shares dependency builds
+        # across checkouts itself, so sccache is off by default here: an empty
+        # RUSTC_WRAPPER also overrides a `build.rustc-wrapper` in the user's
+        # Cargo config, and a non-empty value set by the caller is still kept.
         devShell =
           if cargoFork == null then
             upstreamCargoDevShell
           else
-            upstreamCargoDevShell.overrideAttrs (old: {
+            (mkCargoDevShell "").overrideAttrs (old: {
               nativeBuildInputs = [ cargoFork ] ++ old.nativeBuildInputs;
               CARGO_FORK_AUTO_UPDATE = "0";
             });
