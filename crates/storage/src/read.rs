@@ -696,6 +696,34 @@ impl Database {
         event::first_pass::for_each_isolated(&self.conn, through_id, visit, on_failure)
     }
 
+    /// Every event with `id <= through_id` in id order, without reading any body: a long
+    /// string of a tokenized event stays a token, and a row that cannot be read is handed
+    /// over in its place in the same sequence. See
+    /// [`crate::for_each_event_ordered_deferred`].
+    ///
+    /// # Errors
+    /// Returns an error if the query itself fails.
+    pub fn for_each_event_ordered_deferred(
+        &self,
+        through_id: i64,
+        visit: impl FnMut(crate::DeferredRow),
+    ) -> Result<(), StorageError> {
+        crate::for_each_event_ordered_deferred(&self.conn, through_id, visit)
+    }
+
+    /// The text of each of `refs` (at most [`crate::MAX_RESOLVE_REFS`] distinct), in the
+    /// order given, in one read snapshot. See [`crate::resolve_bodies`].
+    ///
+    /// # Errors
+    /// Fails, for the whole call, when too many references are given or the snapshot
+    /// cannot be opened.
+    pub fn resolve_bodies(
+        &self,
+        refs: &[crate::BodyRef],
+    ) -> Result<Vec<Result<String, crate::BodyFailure>>, StorageError> {
+        crate::resolve_bodies(&self.conn, refs)
+    }
+
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。
     ///
     /// # Errors

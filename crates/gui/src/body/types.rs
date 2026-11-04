@@ -4,10 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 /// First character of a stored body token (a private-use code point). The
-/// storage layer reserves it: every stored string that starts with it is a
-/// token position, whatever follows.
+/// storage layer reserves it: every string of a tokenized event that starts
+/// with it is a token position, whatever follows.
 pub const TOKEN_ESCAPE: char = '\u{e000}';
-const TOKEN_HEAD: &str = "\u{e000}evorch-body:v1:";
 
 /// The identity of a stored body: the SHA-256 of its UTF-8 bytes and their count.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,62 +15,61 @@ pub struct BodyRef {
     pub byte_len: u64,
 }
 
+impl From<storage::BodyRef> for BodyRef {
+    fn from(reference: storage::BodyRef) -> Self {
+        Self {
+            hash: reference.hash,
+            byte_len: reference.byte_len,
+        }
+    }
+}
+
+impl From<BodyRef> for storage::BodyRef {
+    fn from(reference: BodyRef) -> Self {
+        Self {
+            hash: reference.hash,
+            byte_len: reference.byte_len,
+        }
+    }
+}
+
 impl BodyRef {
     #[must_use]
     pub fn hash_hex(&self) -> String {
-        use fmt::Write as _;
-        self.hash
-            .iter()
-            .fold(String::with_capacity(64), |mut out, b| {
-                let _ = write!(out, "{b:02x}");
-                out
-            })
+        storage::BodyRef::from(*self).hash_hex()
     }
 
-    /// The JSON string value a stored container holds for this body.
-    #[must_use]
-    pub fn to_token(&self) -> String {
-        format!("{TOKEN_HEAD}{}:{}", self.hash_hex(), self.byte_len)
-    }
-
-    /// Reads a whole string value. `None` means the string is not at a token
-    /// position (it does not start with the escape character); `Some(Err)`
-    /// means it is at one but is not a token this build understands.
+    /// Reads a whole string of a tokenized event. `None` means the string is not
+    /// at a token position (it does not start with the escape character);
+    /// `Some(Err)` means it is at one but is not a token this build understands.
+    /// The grammar is storage's.
     #[must_use]
     pub fn parse_token(value: &str) -> Option<Result<Self, BodyError>> {
         if !value.starts_with(TOKEN_ESCAPE) {
             return None;
         }
-        Some(Self::parse_known(value).ok_or_else(|| {
-            BodyError::new(BodyErrorKind::Corrupt, "a stored body token is malformed")
-        }))
+        Some(
+            storage::BodyRef::from_token(value)
+                .map(Self::from)
+                .ok_or_else(|| {
+                    BodyError::new(
+                        BodyErrorKind::Corrupt,
+                        "a stored body token is malformed or of an unknown version",
+                    )
+                }),
+        )
     }
 
-    fn parse_known(value: &str) -> Option<Self> {
-        let rest = value.strip_prefix(TOKEN_HEAD)?;
-        let (hash_text, length_text) = rest.split_once(':')?;
-        if hash_text.len() != 64
-            || !hash_text
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return None;
-        }
-        if length_text.is_empty()
-            || !length_text.bytes().all(|b| b.is_ascii_digit())
-            || (length_text.len() > 1 && length_text.starts_with('0'))
-        {
-            return None;
-        }
-        let byte_len: u64 = length_text.parse().ok()?;
-        if i64::try_from(byte_len).is_err() {
-            return None;
-        }
-        let mut hash = [0u8; 32];
-        for (slot, pair) in hash.iter_mut().zip(hash_text.as_bytes().chunks(2)) {
-            *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-        }
-        Some(Self { hash, byte_len })
+    /// The token a tokenized event holds for this body (tests build events
+    /// with it; storage's own reader is what the app uses).
+    #[cfg(test)]
+    #[must_use]
+    pub fn to_token(&self) -> String {
+        format!(
+            "\u{e000}evorch-body:v1:{}:{}",
+            self.hash_hex(),
+            self.byte_len
+        )
     }
 }
 

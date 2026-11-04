@@ -1,11 +1,7 @@
 //! The worker's connection to the database.
-//!
-//! Until storage names large event text by token, no stored event has a
-//! deferred body, so [`BodyBackend::resolve`] has nothing to read and says the
-//! body is missing; re-reading an event works against today's event log.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::backend::{
     BodyBackend, BodyResult, DeferredEvent, EventFailure, EventReread, FailureKind,
@@ -62,20 +58,33 @@ fn classify(error: storage::StorageError) -> BodyError {
     BodyError::new(kind, text)
 }
 
+/// Storage's account of one body that could not be read.
+pub(super) fn body_error(failure: storage::BodyFailure) -> BodyError {
+    let kind = match failure.class {
+        storage::BodyFailureClass::Missing => BodyErrorKind::Missing,
+        storage::BodyFailureClass::Corrupt => BodyErrorKind::Corrupt,
+        storage::BodyFailureClass::Busy => BodyErrorKind::Busy,
+        storage::BodyFailureClass::Io => BodyErrorKind::Io,
+    };
+    BodyError::new(kind, failure.reason)
+}
+
 impl BodyBackend for StorageBodies {
     fn resolve(&self, refs: &[BodyRef]) -> Result<Vec<BodyResult>, BodyError> {
-        Ok(refs
-            .iter()
-            .map(|_| {
-                Err(BodyError::new(
-                    BodyErrorKind::Missing,
-                    "the event log holds no stored bodies yet",
-                ))
+        let wanted: Vec<storage::BodyRef> = refs.iter().map(|&r| r.into()).collect();
+        let answers = self.with_db(|db| db.resolve_bodies(&wanted))?;
+        Ok(answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(text) => Ok(Arc::from(text)),
+                Err(failure) => Err(body_error(failure)),
             })
             .collect())
     }
 
     fn read_event(&self, id: i64) -> EventReread {
+        // The ordinary reader resolves the event's bodies itself: a read again is
+        // rare and runs here, not on a frame.
         let outcome = self.with_db(|db| db.events_after(id.saturating_sub(1), 1));
         match outcome {
             Ok(page) => match page.events.into_iter().next() {
