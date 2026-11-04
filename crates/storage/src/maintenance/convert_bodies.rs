@@ -38,7 +38,8 @@ use serde::Serialize;
 use crate::StorageError;
 use crate::db::{FileSizes, file_sizes, suffixed_path};
 use crate::migrations::{
-    EVENT_BODIES, MESSAGE_ROWS_VERSION, MIGRATIONS, V40_DROP, V40_PREPARE, V41_DROP, V41_PREPARE,
+    EVENT_BODIES, MESSAGE_ROWS_VERSION, MIGRATIONS, PROVENANCE_ROWS_VERSION, V40_DROP, V40_PREPARE,
+    V42_DROP, V42_PREPARE,
 };
 
 use super::compact::{create_backup, integrity_check, parent};
@@ -733,7 +734,7 @@ fn run(
         if convert_runs {
             conn.execute_batch(V40_PREPARE)?;
         }
-        conn.execute_batch(V41_PREPARE)?;
+        conn.execute_batch(V42_PREPARE)?;
         conn.execute_batch("COMMIT")?;
         checkpoint_passive(&conn)?;
         gauge.sample();
@@ -862,10 +863,23 @@ fn run(
         conn.execute_batch(V40_DROP)?;
     }
     if convert_provenance {
-        conn.execute_batch(V41_DROP)?;
+        conn.execute_batch(V42_DROP)?;
     }
     conn.execute_batch("COMMIT")?;
     hook(Point::AfterDrop, &conn)?;
+    // Migrations after v40 are written for a database that already has the converted
+    // shape, so they run now; `user_version` is set once, at publish.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    // Version 42 is not among them: its two halves ran as `V42_PREPARE` and `V42_DROP`.
+    let end = usize::try_from(PROVENANCE_ROWS_VERSION - 1)
+        .map_err(|_| StorageError::OutOfRange("migration version"))?;
+    let first = usize::try_from(source_schema.max(MESSAGE_ROWS_VERSION))
+        .map_err(|_| StorageError::OutOfRange("migration version"))?
+        .min(end);
+    for migration in &MIGRATIONS[first..end] {
+        conn.execute_batch(migration)?;
+    }
+    conn.execute_batch("COMMIT")?;
     compare_schema(&conn)?;
 
     summary.peak_wal_bytes = gauge.peak.get();

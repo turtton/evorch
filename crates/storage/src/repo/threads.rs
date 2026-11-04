@@ -88,7 +88,16 @@ fn upsert_sql(writer: ThreadWriter) -> String {
     };
     let mut updates: Vec<String> = MERGED
         .iter()
-        .map(|column| merge.replace("{c}", column))
+        .map(|column| {
+            let merged = merge.replace("{c}", column);
+            if *column == "lineage_kind" {
+                // A lane thread keeps its kind: the ledger owns it, not a mirror.
+                let value = merged.trim_start_matches("lineage_kind = ");
+                format!("lineage_kind = CASE WHEN threads.lineage_kind = 'lane' THEN 'lane' ELSE {value} END")
+            } else {
+                merged
+            }
+        })
         .collect();
     match writer {
         ThreadWriter::Host => {
@@ -182,7 +191,10 @@ pub(crate) fn upsert(
                 thread.root_run_id,
                 thread.chat_role,
                 thread.parent_thread_id,
-                thread.lineage_kind.map(ThreadLineageKind::as_str),
+                thread
+                    .lineage_kind
+                    .filter(|kind| *kind != ThreadLineageKind::Lane)
+                    .map(ThreadLineageKind::as_str),
                 thread.fork_point_run_id,
                 fork_point_context_len,
                 thread.escalation_source_run_id,

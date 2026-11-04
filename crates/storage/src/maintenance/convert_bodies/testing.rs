@@ -57,7 +57,7 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     // Tokenized events are written back as plain ones while their blobs still exist.
     resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v42.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
@@ -73,6 +73,13 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
          DROP TABLE run_messages;
          DELETE FROM content_blob_gc_queue;
          DELETE FROM content_blobs;
+         DROP TABLE lane_list_snapshot_rows;
+         DROP TABLE lane_list_snapshots;
+         DROP TABLE lane_delivery_keys;
+         DROP TABLE lane_reports;
+         DROP TABLE lanes;
+         DROP TABLE lane_state;
+         DROP TRIGGER threads_lane_lineage_sticky;
          DROP TABLE run_contexts;",
     )?;
     for definition in &definitions {
@@ -150,36 +157,53 @@ fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Rewrites `path` as a version 40 database: a version 41 one (see [`downgrade_to_v41`])
-/// whose provenance maps are one column again; the runs stay as they are.
+/// Rewrites `path` as a version 40 database: a version 42 one (see [`downgrade_to_v42`])
+/// whose lane ledger is gone and whose provenance maps are one column again; the runs stay
+/// as they are.
 ///
 /// # Errors
 /// Fails when the database cannot be read or rewritten.
 pub fn downgrade_to_v40(path: &Path) -> Result<(), StorageError> {
-    downgrade_to_v41(path)?;
+    downgrade_provenance(path, 40, true)
+}
+
+/// Rewrites `path` as a version 41 database: a version 42 one (see [`downgrade_to_v42`])
+/// whose provenance maps are one column again (the lane ledger stays).
+///
+/// # Errors
+/// Fails when the database cannot be read or rewritten.
+pub fn downgrade_to_v41(path: &Path) -> Result<(), StorageError> {
+    downgrade_provenance(path, 41, false)
+}
+
+fn downgrade_provenance(path: &Path, version: u32, lane_ledger: bool) -> Result<(), StorageError> {
+    downgrade_to_v42(path)?;
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
-    conn.pragma_update(None, "user_version", 40)?;
+    conn.execute_batch(include_str!("../../../tests/support/undo_v42.sql"))?;
+    if lane_ledger {
+        conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+    }
+    conn.pragma_update(None, "user_version", version)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())
 }
 
-/// Rewrites `path` as a version 41 database: what a build before the event body format
+/// Rewrites `path` as a version 42 database: what a build before the event body format
 /// wrote. Tokenized events are written back as plain ones, and the event columns, the
 /// reference table and the accounting triggers of the format are removed; the runs and
 /// the provenance rows stay as they are.
 ///
 /// # Errors
 /// Fails when the database cannot be read or rewritten.
-pub fn downgrade_to_v41(path: &Path) -> Result<(), StorageError> {
+pub fn downgrade_to_v42(path: &Path) -> Result<(), StorageError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     let fresh = Connection::open_in_memory()?;
-    for migration in &MIGRATIONS[..41] {
+    for migration in &MIGRATIONS[..42] {
         fresh.execute_batch(migration)?;
     }
     let accounting: Vec<String> = fresh
@@ -215,7 +239,7 @@ pub fn downgrade_to_v41(path: &Path) -> Result<(), StorageError> {
          UPDATE sessions SET total_event_bytes = COALESCE( \
              (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
     )?;
-    conn.pragma_update(None, "user_version", 41)?;
+    conn.pragma_update(None, "user_version", 42)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     Ok(())

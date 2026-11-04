@@ -1,4 +1,4 @@
-//! The events step of the conversion: what a version 33, 40 or 41 database's events
+//! The events step of the conversion: what a version 33, 40, 41 or 42 database's events
 //! become, and what stops it.
 
 use event_bus::{CompactionEvent, EventKind, MessageEvent, ToolEvent};
@@ -311,11 +311,11 @@ fn a_version_33_database_gets_runs_and_events_converted_by_the_one_command() {
 }
 
 #[test]
-fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
-    // Given: a version 41 database (runs in rows, events plain) with events.
+fn a_version_42_database_converts_only_its_events_and_leaves_every_run_alone() {
+    // Given: a version 42 database (runs in rows, events plain) with events.
     let (_dir, path, _) = seeded();
     apply(&path).unwrap();
-    crate::maintenance::downgrade_to_v41(&path).unwrap();
+    crate::maintenance::downgrade_to_v42(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
     let seeded_events = seed_events(&conn);
     let runs_before: Vec<(i64, String, Vec<u8>, i64)> = conn
@@ -335,7 +335,7 @@ fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
         .collect::<Result<_, _>>()
         .unwrap();
     drop(conn);
-    assert_eq!(version(&path), 41);
+    assert_eq!(version(&path), 42);
 
     // When: it is converted.
     let summary = apply(&path).unwrap();
@@ -343,7 +343,7 @@ fn a_version_41_database_converts_only_its_events_and_leaves_every_run_alone() {
     // Then: events are converted, no run was converted or touched.
     assert_eq!(summary.converted_runs, 0);
     assert_eq!(summary.migrations_applied, 0);
-    assert_eq!((summary.source_schema, summary.target_schema), (41, LATEST));
+    assert_eq!((summary.source_schema, summary.target_schema), (42, LATEST));
     assert!(summary.events.converted_events > 0);
     assert_eq!(summary.events.mismatched_events, 0);
     let conn = Connection::open(&path).unwrap();
@@ -429,10 +429,10 @@ fn a_converted_database_is_a_read_only_no_op_for_events_too() {
 }
 
 #[test]
-fn a_half_prepared_version_41_database_is_refused_unchanged() {
-    // Given: version 41 with the event columns already added (a conversion that stopped).
+fn a_half_prepared_version_42_database_is_refused_unchanged() {
+    // Given: version 42 with the event columns already added (a conversion that stopped).
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("ALTER TABLE events ADD COLUMN body_format INTEGER NOT NULL DEFAULT 0")
         .unwrap();
@@ -449,9 +449,9 @@ fn a_half_prepared_version_41_database_is_refused_unchanged() {
 
 #[test]
 fn events_that_cannot_be_read_stop_apply_before_any_change() {
-    // Given: a version 41 database with an event whose payload is not JSON.
+    // Given: a version 42 database with an event whose payload is not JSON.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     insert_raw(
         &conn,
@@ -484,9 +484,9 @@ fn events_that_cannot_be_read_stop_apply_before_any_change() {
 #[test]
 fn a_payload_of_exactly_the_batch_limit_converts_and_one_byte_more_is_refused() {
     for (extra, converts) in [(0_u64, true), (1, false)] {
-        // Given: a version 41 database with one event of a chosen decoded size.
+        // Given: a version 42 database with one event of a chosen decoded size.
         let dir = tempfile::tempdir().unwrap();
-        let path = database_at(dir.path(), 41);
+        let path = database_at(dir.path(), 42);
         let conn = Connection::open(&path).unwrap();
         let shell = |text: &str| {
             json!({"kind": "Message", "payload": {"kind": "MessageCompleted",
@@ -525,7 +525,7 @@ fn a_payload_of_exactly_the_batch_limit_converts_and_one_byte_more_is_refused() 
 fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
     // Given: five events of about 3 KiB each, and a limit that fits two of them.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     let kinds: Vec<EventKind> = (0..5)
         .map(|n| message(long(&format!("body {n}"), 3_000)))
@@ -549,7 +549,7 @@ fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
 
     // And: with one row per batch every event is its own transaction.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     for (n, kind) in kinds.iter().enumerate() {
         insert_event(&conn, None, kind, n as i64);
@@ -572,7 +572,7 @@ fn a_batch_never_holds_more_payload_than_the_limit_and_rows_limit_the_count() {
 fn a_batch_wal_stays_within_the_stated_bound_whatever_the_event_count() {
     // Given: events with bodies of several sizes, converted one per transaction.
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     for (n, size) in [3_000, 40_000, 400_000].into_iter().enumerate() {
         insert_event(
@@ -726,7 +726,7 @@ fn a_run_and_an_event_share_one_blob_and_the_collector_keeps_it() {
 #[test]
 fn free_space_one_byte_short_refuses_before_the_backup_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let path = database_at(dir.path(), 41);
+    let path = database_at(dir.path(), 42);
     let conn = Connection::open(&path).unwrap();
     insert_event(&conn, None, &message(long("space", 50_000)), 1);
     drop(conn);

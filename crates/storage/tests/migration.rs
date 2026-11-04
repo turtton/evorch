@@ -11,9 +11,15 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38};
 
-const LATEST_SCHEMA: u32 = 42;
+const LATEST_SCHEMA: u32 = 43;
 
-const EXPECTED_TABLES: [&str; 72] = [
+const EXPECTED_TABLES: [&str; 78] = [
+    "lane_state",
+    "lanes",
+    "lane_reports",
+    "lane_delivery_keys",
+    "lane_list_snapshots",
+    "lane_list_snapshot_rows",
     "content_blobs",
     "content_blob_gc_queue",
     "content_blob_refs_event",
@@ -88,8 +94,12 @@ const EXPECTED_TABLES: [&str; 72] = [
     "tasks",
 ];
 
-const EXPECTED_INDICES: [&str; 72] = [
+const EXPECTED_INDICES: [&str; 76] = [
     "idx_content_blob_refs_event_blob",
+    "idx_lanes_lead_activity",
+    "idx_lanes_origin",
+    "idx_lanes_unstarted",
+    "idx_lane_list_snapshots_lead",
     "idx_content_blob_refs_header_blob",
     "idx_content_blob_refs_message_blob",
     "idx_artifact_refs_sha",

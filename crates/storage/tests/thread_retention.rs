@@ -87,6 +87,44 @@ impl Fixture {
             .unwrap();
     }
 
+    /// A lane whose root lives in `thread`, with `reports` reports and one delivery key.
+    fn lane(&self, lane_id: &str, thread: &str, reports: u32) {
+        self.conn
+            .execute(
+                "INSERT INTO lanes(lane_id, thread_id, origin_thread_id, origin_run_id, creation_key, \
+                 request_hash, scope, lead_thread_id, policy, management_revision, brief_json, \
+                 brief_revision, start_seed, created_at_ns, updated_at_ns, last_activity_at_ns) \
+                 VALUES (?1, ?2, 'lead', 'lead-run', ?1, 'h', 'lane', 'lead', 'attached', 1, '{}', 1, \
+                 '', 1, 1, 1)",
+                params![lane_id, thread],
+            )
+            .unwrap();
+        for seq in 1..=reports {
+            self.conn
+                .execute(
+                    "INSERT INTO lane_reports(lane_id, report_seq, status, summary, artifact_refs_json, \
+                     needs_human, question_refs_json, reason_code, producer, management_revision, \
+                     brief_revision, created_at_ns) \
+                     VALUES (?1, ?2, 'working', 'summary', '[]', 0, '[]', NULL, 'harness', 1, 1, 1)",
+                    params![lane_id, seq],
+                )
+                .unwrap();
+            self.conn
+                .execute(
+                    "UPDATE lanes SET latest_report_seq = ?2 WHERE lane_id = ?1",
+                    params![lane_id, seq],
+                )
+                .unwrap();
+        }
+        self.conn
+            .execute(
+                "INSERT INTO lane_delivery_keys(lane_id, management_revision, event_kind, dedupe_key, \
+                 ledger_revision, created_at_ns) VALUES (?1, 1, 'ready', 'k', 0, 1)",
+                [lane_id],
+            )
+            .unwrap();
+    }
+
     /// A saved run with a binding to `thread`, plus a row in every run-keyed table.
     fn run(&self, id: &str, parent: Option<&str>, thread: Option<&str>, name: &str) {
         let c = &self.conn;
@@ -376,6 +414,8 @@ fn build_family(f: &Fixture) {
     f.sql("INSERT INTO task_links(blocker_id, blocked_id) VALUES ('task-1', 'task-2');");
     f.start_state("P", "rp");
     f.start_state("C", "rc");
+    // More reports than one reclaim batch holds, so the lane is worked off in steps.
+    f.lane("lane-c", "C", 1200);
     // An unrelated live thread with the same kinds of rows.
     f.thread("X", None, Some("rx"), None);
     f.sql("UPDATE threads SET archived = 0 WHERE thread_id = 'X'");
@@ -384,6 +424,7 @@ fn build_family(f: &Fixture) {
     f.todo_event("session-1", "X");
     f.task("task-x", "rx");
     f.start_state("X", "rx");
+    f.lane("lane-x", "X", 3);
 }
 
 fn confirm_family(f: &Fixture) -> Database {
@@ -467,6 +508,9 @@ fn family_residue(f: &Fixture) -> Vec<(String, i64)> {
         ("task_queue_ledger", "SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') IN ('task-1','task-2')".to_owned()),
         ("thread_start_states", "SELECT COUNT(*) FROM thread_start_states WHERE thread_id IN ('P','C','E')".to_owned()),
         ("thread_start_untracked", "SELECT COUNT(*) FROM thread_start_untracked WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("lanes", "SELECT COUNT(*) FROM lanes WHERE thread_id IN ('P','C','E')".to_owned()),
+        ("lane_reports", "SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-c'".to_owned()),
+        ("lane_delivery_keys", "SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-c'".to_owned()),
         ("todo events", "SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') IN ('P','C','E')".to_owned()),
     ] {
         checks.push((label.to_owned(), sql));
@@ -493,6 +537,9 @@ fn survivor_rows(f: &Fixture) -> Vec<i64> {
         f.count("SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') = 'task-x'"),
         f.count("SELECT COUNT(*) FROM thread_start_states WHERE thread_id = 'X'"),
         f.count("SELECT COUNT(*) FROM run_ledger WHERE run_id = 'rx'"),
+        f.count("SELECT COUNT(*) FROM lanes WHERE lane_id = 'lane-x'"),
+        f.count("SELECT COUNT(*) FROM lane_reports WHERE lane_id = 'lane-x'"),
+        f.count("SELECT COUNT(*) FROM lane_delivery_keys WHERE lane_id = 'lane-x'"),
     ]
 }
 
@@ -3400,6 +3447,73 @@ fn the_fence_covers_message_rows_and_a_deleted_runs_conversation_stays_hidden() 
 }
 
 #[test]
+fn a_capture_above_the_step_budget_does_not_keep_the_lane_rows_of_its_thread() {
+    // Given: a confirmed family whose thread has a 5 MiB captured file (left to the
+    // exclusive phase) and a lane with reports and a delivery key.
+    let f = Fixture::new();
+    f.thread("A", None, Some("ra"), None);
+    f.run("ra", None, Some("A"), "chat:Worker:A");
+    untracked_capture(&f, "A", "ra", true);
+    f.lane("lane-a", "A", 3);
+    f.sql("INSERT INTO lane_delivery_keys(lane_id, management_revision, event_kind, dedupe_key, ledger_revision, created_at_ns) VALUES ('lane-a', 1, 'question', 'q2', 0, 1)");
+    let database = f.database();
+    let input = sidebar(&["A"], &[]);
+    settle(&database, &input, &policy(), BIG);
+    assert!(matches!(
+        finalize(&database, "A", &input),
+        FinalizeOutcome::Confirmed(_)
+    ));
+    drop(database);
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: only the oversized capture waits; no lane row was left behind.
+    assert_eq!(last.unwrap().oversized_pending, 1);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM thread_start_untracked WHERE LENGTH(content) > 4194304"),
+        1
+    );
+
+    // And: after the exclusive phase nothing of the family remains.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 10);
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM thread_start_untracked"), 0);
+    for table in ["lanes", "lane_reports", "lane_delivery_keys"] {
+        assert_eq!(
+            f.count(&format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table}"
+        );
+    }
+}
+
+#[test]
 fn provenance_entries_are_reclaimed_in_bounded_steps_and_before_their_header() {
     // Given: a confirmed family whose first run has 1,200 provenance entries.
     let f = Fixture::new();
@@ -3453,4 +3567,139 @@ fn provenance_entries_are_reclaimed_in_bounded_steps_and_before_their_header() {
         "1,201 entries need three steps at 500 rows each"
     );
     assert_eq!(family_residue(&f), vec![]);
+}
+
+/// `count` provenance entries of run `rp`, each `half_mib * 2` bytes of text, from `first`.
+fn insert_big_entries(f: &Fixture, first: i64, count: i64, half_mib: i64) {
+    f.sql(&format!(
+        "WITH RECURSIVE n(x) AS (VALUES({first}) UNION ALL SELECT x + 1 FROM n WHERE x < {}) \
+         INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         SELECT 'rp', x, zeroblob(32), {}, hex(zeroblob({half_mib} * 524288)) FROM n;",
+        first + count - 1,
+        half_mib * 1024 * 1024,
+    ));
+}
+
+#[test]
+fn provenance_entries_are_reclaimed_within_the_byte_budget_of_a_step() {
+    // Given: a confirmed family whose first run has ten entries of 1 MiB (the existing
+    // header is entry-free), against a budget of 4 MiB per step.
+    let f = Fixture::new();
+    build_family(&f);
+    insert_big_entries(&f, 1000, 10, 1);
+    let stored = |f: &Fixture| {
+        f.count(
+            "SELECT COALESCE(SUM(entry_len), 0) FROM run_message_provenance WHERE run_id = 'rp'",
+        )
+    };
+    let mut previous = stored(&f);
+    assert_eq!(previous, 10 * 1024 * 1024 + 2);
+    drop(confirm_family(&f));
+
+    // When: the writer reclaims it one transaction at a time.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let handle = storage.handle();
+    let mut steps_with_entries = 0;
+    for _ in 0..10_000 {
+        let progress = handle
+            .reclaim_step(ReclaimBudget {
+                max_transactions: 1,
+            })
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let left = stored(&f);
+        let header = f.count("SELECT COUNT(*) FROM run_context_provenance WHERE run_id = 'rp'");
+
+        // Then: no step deletes more than 4 MiB of entries, and the header outlives them.
+        assert!(
+            previous - left <= 4 * 1024 * 1024,
+            "a step deleted {} bytes of entries",
+            previous - left
+        );
+        assert!(
+            left == 0 || header == 1,
+            "the header went before its entries"
+        );
+        steps_with_entries += i64::from(left != previous);
+        previous = left;
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    storage.close();
+    assert!(
+        steps_with_entries >= 3,
+        "10 MiB of entries need three steps of at most 4 MiB"
+    );
+    assert_eq!(family_residue(&f), vec![]);
+}
+
+#[test]
+fn a_provenance_entry_above_the_step_budget_waits_for_the_exclusive_phase_and_keeps_its_header() {
+    // Given: a confirmed family whose first run has small entries around one of 5 MiB (above the 4 MiB budget).
+    let f = Fixture::new();
+    build_family(&f);
+    f.sql(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 3) \
+         INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         SELECT 'rp', x, zeroblob(32), 2, '{}' FROM n;",
+    );
+    insert_big_entries(&f, 4, 1, 5); // 5 MiB, above the 4 MiB budget alone
+    f.sql(
+        "INSERT INTO run_message_provenance(run_id, map_index, entry_sha256, entry_len, entry_json) \
+         VALUES ('rp', 5, zeroblob(32), 2, '{}')",
+    );
+    drop(confirm_family(&f));
+
+    // When: the bounded steps run to completion.
+    let storage = Storage::open(config(&f.path)).unwrap();
+    let mut last = None;
+    for _ in 0..1_000 {
+        let progress = storage
+            .handle()
+            .reclaim_step(ReclaimBudget::default())
+            .unwrap();
+        assert_eq!(progress.last_error, None);
+        let done = progress.jobs_db_pending == 0;
+        last = Some(progress);
+        if done {
+            break;
+        }
+    }
+    storage.close();
+
+    // Then: only the large entry is left, registered, and its header was not deleted
+    // from under it.
+    let pending = last.unwrap().oversized_pending;
+    assert_eq!(pending, 2, "registrations");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_message_provenance WHERE run_id = 'rp' AND entry_len > 4194304"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM run_context_provenance WHERE run_id = 'rp'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_message_provenance'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM reclaim_oversized WHERE tbl = 'run_context_provenance'"),
+        1
+    );
+
+    // And: the exclusive phase deletes the entry, then the header, and nothing is left.
+    let database = f.database();
+    let mut rounds = 0;
+    while database.reclaim_oversized_step(0).unwrap().remaining > 0 {
+        rounds += 1;
+        assert!(rounds < 20);
+    }
+    assert_eq!(family_residue(&f), vec![]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM reclaim_oversized"), 0);
 }

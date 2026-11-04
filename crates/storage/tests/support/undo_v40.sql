@@ -1,3 +1,13 @@
+-- Also removes the lane ledger migration v41 added on top (its tables; the rebuilt
+-- `threads` table is a superset of the old one and stays), so every test that replays
+-- migrations from an older shape starts without lane tables.
+DROP TABLE IF EXISTS lane_list_snapshot_rows;
+DROP TABLE IF EXISTS lane_list_snapshots;
+DROP TABLE IF EXISTS lane_delivery_keys;
+DROP TABLE IF EXISTS lane_reports;
+DROP TABLE IF EXISTS lanes;
+DROP TABLE IF EXISTS lane_state;
+DROP TRIGGER IF EXISTS threads_lane_lineage_sticky;
 -- Restores the run_contexts shape migration v40 replaced (the whole conversation in
 -- `messages_json`), for tests that rebuild an older schema by hand and replay the
 -- migrations from there. Rows keep their headers and get an empty conversation.

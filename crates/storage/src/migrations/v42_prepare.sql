@@ -1,5 +1,5 @@
--- Message-level provenance storage (PR A2c): everything of migration v41 except the
--- removal of the old column (`v41_drop.sql`).
+-- Message-level provenance storage (PR A2c): everything of migration v42 except the
+-- removal of the old column (`v42_drop.sql`).
 --
 -- `run_context_provenance` keeps the status, the evidence and a small header of the
 -- map; the map's messages move to `run_message_provenance`, one row per
