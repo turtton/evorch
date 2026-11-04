@@ -17,7 +17,7 @@ pub const USAGE: &str = "usage: evorch maintenance <command> [--db <path>]
   convert-bodies [--apply] [--backup <new-path>]
   strip-task-progress-cursor [--apply] [--backup <path> | --no-backup] [--no-vacuum] [--batch-size <1..256>]
   preview-task-progress-retention
-convert-bodies: one-time conversion of a database of version 33 to 39 (conversations in run_contexts.messages_json;
+convert-bodies: one-time conversion of a database of version 33 to 40 (conversations in run_contexts.messages_json;
   migrations 34 to 39 are applied first, after the backup) to the current format (run_messages and content_blobs; each
   provenance map becomes run_message_provenance rows), removing the two old columns. A regular version 40 database
   (messages already rows) has only its provenance maps converted. Stop ALL evorch processes first.
