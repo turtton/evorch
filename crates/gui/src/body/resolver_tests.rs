@@ -578,6 +578,46 @@ fn only_a_failure_that_can_pass_starts_retrying_on_its_own() {
 }
 
 #[test]
+fn a_rehydrate_completed_after_results_were_taken_keeps_the_feed_waiting() {
+    let rig = rig();
+    rig.resolver.request_rows(
+        RowsPurpose::Rehydrate { thread: "t".into() },
+        vec!["run-a".into()],
+        0,
+        9,
+    );
+
+    // The UI takes no results; the worker then finishes before the UI checks
+    // whether the feed can resume. Drive that ordering without a timing race.
+    assert!(rig.resolver.take_rows_results().is_empty());
+    rig.resolver.pump_all();
+    assert!(
+        rig.resolver.rehydrating("t"),
+        "new feed rows must wait for the unapplied history, not just its read"
+    );
+
+    let results = rig.resolver.take_rows_results();
+    assert_eq!(results.len(), 1);
+    assert!(!rig.resolver.rehydrating("t"));
+}
+
+#[test]
+fn forgetting_a_run_discards_its_completed_rehydrate_and_releases_the_feed() {
+    let rig = rig();
+    rig.resolver.request_rows(
+        RowsPurpose::Rehydrate { thread: "t".into() },
+        vec!["run-a".into()],
+        0,
+        9,
+    );
+    rig.resolver.pump_all();
+    rig.resolver.forget_run("run-a");
+
+    assert!(rig.resolver.take_rows_results().is_empty());
+    assert!(!rig.resolver.rehydrating("t"));
+}
+
+#[test]
 fn a_read_of_rows_that_fails_busy_is_retried_and_one_that_fails_for_good_is_reported() {
     let rig = rig();
     rig.backend.script_rows(Err(busy()));
@@ -595,8 +635,9 @@ fn a_read_of_rows_that_fails_busy_is_retried_and_one_that_fails_for_good_is_repo
     rig.clock.advance(Duration::from_millis(250));
     rig.resolver.pump_all();
 
-    assert!(!rig.resolver.rehydrating("t"));
+    assert!(rig.resolver.rehydrating("t"));
     let results = rig.resolver.take_rows_results();
+    assert!(!rig.resolver.rehydrating("t"));
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0].result.as_ref().unwrap_err().kind,
