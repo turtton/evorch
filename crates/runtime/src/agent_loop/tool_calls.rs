@@ -1459,6 +1459,15 @@ impl LoopState {
             NetworkAccessDecision::Ask { mut reason } => {
                 if crate::network::reviews_each_call(name) && per_tool == PolicyDecision::AutoAllow
                 {
+                    // Stored facts only: a web or upload review never waits for gh or git.
+                    let pull_request_service = self
+                        .runtime()
+                        .and_then(|runtime| runtime.shared.pull_requests.get().cloned());
+                    let pull_requests = crate::escalation_review::PullRequestInput::snapshot(
+                        pull_request_service.as_ref(),
+                        &self.task.run_id.to_string(),
+                    )
+                    .await;
                     let context = self
                         .runtime()
                         .and_then(|runtime| {
@@ -1470,9 +1479,10 @@ impl LoopState {
                                 .and_then(|runs| runs.get(&self.task.run_id).cloned())
                         })
                         .and_then(|run| {
-                            crate::escalation_review::review_context(
+                            crate::escalation_review::review_context_with_facts(
                                 run,
                                 self.shared.rules.as_deref(),
+                                pull_requests.facts.clone(),
                             )
                             .ok()
                         });
@@ -1528,8 +1538,16 @@ impl LoopState {
                                     runs.get(&self.task.run_id).map(|run| run.stamp())
                                 })
                             });
-                            if !matches!((stamp, current), (Some(expected), Some(current))
-                                if current.synced && current == expected)
+                            let link_holds = pull_requests
+                                .anchor
+                                .still_holds(
+                                    pull_request_service.as_ref(),
+                                    &self.task.run_id.to_string(),
+                                )
+                                .await;
+                            if !link_holds
+                                || !matches!((stamp, current), (Some(expected), Some(current))
+                                    if current.synced && current == expected)
                             {
                                 return self.reject_network_call(
                                     name,

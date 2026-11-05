@@ -382,6 +382,7 @@ fn review_manifest(run_id: &str) -> ReviewManifest {
             user_request_parts: 1,
             project_rules: None,
             loaded_skills: Vec::new(),
+            harness_facts: None,
         }),
         outcome: Outcome {
             status: OutcomeStatus::Decided,
