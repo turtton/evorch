@@ -1,6 +1,6 @@
 //! Answering a question an agent asked.
 
-use runtime::Role;
+use runtime::{AnswerOutcome, Role};
 
 use super::{ChatInput, CommandService, ComposerRole, HostCommand, HostEvent, RejectKind};
 
@@ -65,17 +65,22 @@ impl CommandService {
             }
         };
         if let Some(previous) = &question.answer {
-            return if previous == &answer {
-                vec![HostEvent::UserAnswerSaved { question_id }]
-            } else {
-                vec![HostEvent::CommandRejected {
-                    kind: RejectKind::AlreadyResolved,
-                    reason: "Question was already answered".into(),
-                }]
-            };
+            return repeated_answer(question_id, previous == &answer);
         }
-        let question = match self.runtime.answer_user_question(&question_id, &answer) {
-            Ok(q) => q,
+        // The storage write decides who answered first, so two answers that arrive
+        // together cannot both believe they saved it.
+        let question = match self
+            .runtime
+            .answer_user_question_if_pending(&question_id, &answer)
+        {
+            Ok(AnswerOutcome::Recorded(question)) => *question,
+            Ok(AnswerOutcome::AlreadyAnswered) => {
+                let same = matches!(
+                    self.runtime.user_question(&question_id),
+                    Ok(Some(stored)) if stored.answer.as_deref() == Some(answer.as_str())
+                );
+                return repeated_answer(question_id, same);
+            }
             Err(reason) => {
                 return vec![HostEvent::CommandRejected {
                     kind: RejectKind::Failed,
@@ -87,6 +92,7 @@ impl CommandService {
         drop(caller_guard);
         let saved = HostEvent::UserAnswerSaved {
             question_id: question_id.clone(),
+            newly_saved: true,
         };
         let active = match self.runtime.has_active_question_recipient(&question_id) {
             Ok(active) => active,
@@ -133,5 +139,21 @@ impl CommandService {
             }
         }
         events
+    }
+}
+
+/// The answer was stored before this command: the same text again is a repeat
+/// that saves nothing, another text is refused.
+fn repeated_answer(question_id: String, same: bool) -> Vec<HostEvent> {
+    if same {
+        vec![HostEvent::UserAnswerSaved {
+            question_id,
+            newly_saved: false,
+        }]
+    } else {
+        vec![HostEvent::CommandRejected {
+            kind: RejectKind::AlreadyResolved,
+            reason: "Question was already answered".into(),
+        }]
     }
 }

@@ -50,7 +50,7 @@ fi
 
 # Edge list. Lines:  W <workspace crate>
 #                    E <from> <to> <kind> <note>     (workspace-crate labels have no version)
-#                    D <from> <crate> <kind> <note>  (declared third-party deps of workbench-* crates)
+#                    D <from> <crate> <kind> <note>  (declared third-party deps of workspace crates)
 # "resolved" edges come from the resolve graph (package ids); "declared" edges
 # come from each manifest and so also cover optional and target-specific
 # dependencies that the resolved graph may leave out.
@@ -73,9 +73,9 @@ cat > "$work/edges.jq" <<'JQ'
     | ($d.kind // "normal") as $kind
     | if ($d.source == null and ($ws | index($d.name))) then
         "E\t\($p.name)\t\($d.name)\t\($kind)\t\(note($d.optional; $d.target))"
-      elif ($p.name | startswith("workbench-")) then
+      else
         "D\t\($p.name)\t\($d.name)\t\($kind)\t\(note($d.optional; $d.target))"
-      else empty end)
+      end)
 JQ
 jq -r -f "$work/edges.jq" "$work/metadata.json" > "$work/edges.tsv"
 
@@ -136,11 +136,9 @@ closure_violations() {
 host_violations() {
   awk -F'\t' -v root="$HOST" -v forbidden=" $HOST_FORBIDDEN_WORKSPACE " -v external_re="$HOST_FORBIDDEN_EXTERNAL" '
     $1 == "W" { ws[$2] = 1 }
-    # Third-party dependencies the manifest declares, including optional and
+    # Third-party dependencies a manifest declares, including optional and
     # target-specific ones that the resolved graph leaves out.
-    $1 == "D" && $2 == root && $3 ~ external_re {
-      print "VIOLATION: " root " declares GUI or client dependency " $3 " [" $4 "; " $5 "]"
-    }
+    $1 == "D" && $3 ~ external_re { d++; dfrom[d] = $2; dto[d] = $3; dkind[d] = $4; dnote[d] = $5 }
     $1 == "E" { n++; from[n] = $2; to[n] = $3; kind[n] = $4; note[n] = $5; out[$2] = out[$2] " " n }
     END {
       queue[1] = root; head = 1; tail = 1; seen[root] = 1
@@ -167,6 +165,23 @@ host_violations() {
           cur = from[i]
         }
         print "VIOLATION: " root " must not depend on GUI or client crate " node ": " root path
+      }
+      # A declaration counts at the root whatever its kind, and at any crate the
+      # root reaches unless it is a dev dependency of that crate.
+      for (j = 1; j <= d; j++) {
+        if (!(dfrom[j] in seen)) continue
+        if (dfrom[j] == root) {
+          print "VIOLATION: " root " declares GUI or client dependency " dto[j] " [" dkind[j] "; " dnote[j] "]"
+          continue
+        }
+        if (dkind[j] == "dev") continue
+        path = ""; cur = dfrom[j]
+        while (cur != root) {
+          i = via[cur]
+          path = " -> " cur " [" kind[i] "; " note[i] "]" path
+          cur = from[i]
+        }
+        print "VIOLATION: " root " must not reach GUI or client dependency " dto[j] " declared by " dfrom[j] " [" dkind[j] "; " dnote[j] "]: " root path
       }
     }' "$work/edges.tsv"
 }

@@ -7,7 +7,12 @@ use event_bus::{AgentRunPhase, EventKind, LifecycleEvent};
 use runtime::{AgentRuntime, Role, RunConfig, RunId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use workbench_host::CommandHost;
 use workbench_host::commands::{ChatInput, CommandService, ContinueInput, HostCommand, HostEvent};
+
+fn submit_as_desktop(host: &mut CommandHost, command: HostCommand) -> Vec<HostEvent> {
+    host.submit_local(command, &workbench_host::provenance::local_desktop())
+}
 
 struct Model(AtomicUsize);
 #[async_trait::async_trait]
@@ -94,17 +99,21 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
             } else {
                 runtime
             };
-            let mut sink = CommandService::new(runtime.clone(), tokio::runtime::Handle::current());
-            sink.bind_goal_context("thread", "project", &run.to_string());
+            let mut sink = CommandHost::new(CommandService::new(
+                runtime.clone(),
+                tokio::runtime::Handle::current(),
+            ));
+            sink.service_mut()
+                .bind_goal_context("thread", "project", &run.to_string());
             let before = model.0.load(Ordering::SeqCst);
             let count = runtime.list_agents().len();
             events.drain_pending_snapshot();
             assert!(
-                matches!(sink.submit(HostCommand::CompactChat { thread_id: "thread".into() }).as_slice(),
+                matches!(submit_as_desktop(&mut sink, HostCommand::CompactChat { thread_id: "thread".into() }).as_slice(),
                 [HostEvent::ChatNotice { text, .. }] if text.starts_with("Compacting saved"))
             );
             assert!(
-                sink.has_background_work(),
+                sink.service().has_background_work(),
                 "the result is only collected by poll"
             );
             for command in [
@@ -123,11 +132,11 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                 }),
             ] {
                 assert!(
-                    matches!(sink.submit(command).as_slice(), [HostEvent::ChatNotice { text, .. }]
+                    matches!(submit_as_desktop(&mut sink, command).as_slice(), [HostEvent::ChatNotice { text, .. }]
                     if text.contains("in progress"))
                 );
             }
-            assert!(matches!(sink.submit(HostCommand::SendChat(
+            assert!(matches!(submit_as_desktop(&mut sink, HostCommand::SendChat(
                 ChatInput {
                     submission_id: "not-accepted".into(),
                     project_root: None,
@@ -140,7 +149,9 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                     skills: Vec::new(),
                 }
             )).as_slice(), [HostEvent::ChatRejected { reason, .. }] if reason.contains("in progress")));
-            (sink.compaction_task("thread").unwrap()).await.unwrap();
+            (sink.service_mut().compaction_task("thread").unwrap())
+                .await
+                .unwrap();
             let progress = events.drain_pending_snapshot();
             let starts: Vec<_> = progress
                 .iter()
@@ -169,15 +180,15 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                 })
                 .collect();
             assert_eq!(starts, terminals);
-            let result = sink.poll();
+            let result = sink.service_mut().poll();
             assert!(
                 matches!(result.as_slice(), [HostEvent::ChatNotice { thread_id, text, .. }]
                 if thread_id == "thread" && if max_bytes == 0 {
                     text.starts_with("Could not compact saved conversation")
                 } else { text.contains("complete. Use /continue") })
             );
-            assert!(sink.poll().is_empty());
-            assert!(!sink.has_background_work());
+            assert!(sink.service_mut().poll().is_empty());
+            assert!(!sink.service().has_background_work());
             assert_eq!(model.0.load(Ordering::SeqCst), before);
             assert_eq!(runtime.list_agents().len(), count);
             if !restored_only {

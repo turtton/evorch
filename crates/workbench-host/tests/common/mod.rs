@@ -105,3 +105,58 @@ pub fn runtime_on_store(dir: &Path, storage: &storage::Storage) -> AgentRuntime 
     };
     runtime().with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap())
 }
+
+/// A question another incarnation asked and nobody is waiting for, on `thread-1`.
+pub fn offline_question(
+    rt: &tokio::runtime::Runtime,
+    dir: &Path,
+    storage: &storage::Storage,
+) -> event_bus::UserQuestion {
+    let requester = runtime_on_store(dir, storage);
+    rt.block_on(async {
+        let run = requester
+            .delegate_chat(
+                "thread-1",
+                Role::Worker,
+                "Prepare the output".into(),
+                runtime::RunConfig::default(),
+            )
+            .unwrap();
+        let question = requester
+            .request_user_question(run, "Which format?".into(), vec!["JSON".into()], true)
+            .unwrap();
+        requester.cancel(run).unwrap();
+        requester.wait(run).await.unwrap();
+        requester
+            .host_input_receipts(&["flush".to_owned()])
+            .unwrap();
+        question
+    })
+}
+
+/// Ownership of `thread` that moved to another host after `permit` was taken, so
+/// `owner` no longer owns it and `permit` is stale.
+pub struct LostOwnership {
+    pub owner: Arc<runtime::ownership::OwnerHost>,
+    pub permit: runtime::ownership::OwnerPermit,
+    _successor: runtime::ownership::OwnerHost,
+    _dir: tempfile::TempDir,
+}
+
+pub fn lost_ownership(thread: &str) -> LostOwnership {
+    let dir = tempfile::tempdir().unwrap();
+    let bus = Arc::new(EventBus::new(64));
+    let owner =
+        runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus.clone()).unwrap();
+    owner.start(thread).unwrap();
+    let permit = owner.owned_permit(thread).unwrap();
+    let successor =
+        runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
+    owner.handoff(&permit, &successor).unwrap();
+    LostOwnership {
+        owner: Arc::new(owner),
+        permit,
+        _successor: successor,
+        _dir: dir,
+    }
+}

@@ -160,6 +160,8 @@ pub enum RejectKind {
     /// The host cannot do this with its current configuration.
     Unsupported,
     Invalid,
+    /// Storage could not be read; the same request may succeed later.
+    Unavailable,
     /// The runtime or storage failed.
     Failed,
 }
@@ -174,9 +176,11 @@ pub enum NoticeOutcome {
 /// What a command produced. Mirrors the events the desktop loop consumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
-    /// Emitted only after durable storage accepted the answer.
+    /// Emitted only after durable storage accepted the answer. `newly_saved` is false
+    /// when the same answer was already stored, so a repeat is told from the first save.
     UserAnswerSaved {
         question_id: String,
+        newly_saved: bool,
     },
     ChatAccepted {
         thread_id: String,

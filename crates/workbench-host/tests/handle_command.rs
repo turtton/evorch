@@ -13,7 +13,9 @@ use workbench_protocol::commands::{
 };
 use workbench_protocol::envelope::{Actor, Provenance, Surface};
 use workbench_protocol::errors::ErrorCode;
-use workbench_protocol::ids::{ApprovalId, AttachmentId, QuestionId, RequestId, RunId, ThreadId};
+use workbench_protocol::ids::{
+    ApprovalId, AttachmentId, QuestionId, RequestId, RunId, SessionId, ThreadId,
+};
 use workbench_protocol::queries::{CommandReceiptState, Query, QueryReply};
 use workbench_protocol::wire::{InstanceEpoch, Revision};
 
@@ -34,7 +36,7 @@ fn a_project_the_host_does_not_know_is_not_found() {
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::NotFound);
-    assert!(host.service.runtime().list_agents().is_empty());
+    assert!(host.service().runtime().list_agents().is_empty());
 }
 
 #[test]
@@ -51,7 +53,7 @@ fn a_new_message_is_accepted_and_remembers_who_sent_it() {
     assert_eq!(reply.submission_id.as_ref().unwrap().as_str(), "sub-1");
     assert!(reply.run_id.is_some());
     assert_eq!(host.submission_provenance("sub-1"), Some(&web()));
-    assert!(host.service.bindings.chat_runs.contains_key("thread-1"));
+    assert!(host.service().bindings.chat_runs.contains_key("thread-1"));
 }
 
 #[test]
@@ -62,7 +64,7 @@ fn resending_the_same_submission_changes_nothing_and_a_different_payload_conflic
     let first = host
         .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
         .unwrap();
-    let agents = host.service.runtime().list_agents().len();
+    let agents = host.service().runtime().list_agents().len();
 
     let again = host
         .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
@@ -78,7 +80,7 @@ fn resending_the_same_submission_changes_nothing_and_a_different_payload_conflic
     assert_eq!(again.run_id, first.run_id);
     assert_eq!(other_sender.disposition, CommandDisposition::AlreadyApplied);
     assert_eq!(conflict.code, ErrorCode::Conflict);
-    assert_eq!(host.service.runtime().list_agents().len(), agents);
+    assert_eq!(host.service().runtime().list_agents().len(), agents);
     assert_eq!(
         host.submission_provenance("sub-1"),
         Some(&web()),
@@ -102,7 +104,7 @@ fn a_second_message_to_a_running_thread_is_a_follow_up_for_every_surface() {
 
     assert_eq!(second.disposition, CommandDisposition::Accepted);
     assert_eq!(second.run_id, first.run_id);
-    assert_eq!(host.service.runtime().list_agents().len(), 1);
+    assert_eq!(host.service().runtime().list_agents().len(), 1);
     assert_eq!(host.submission_provenance("sub-2"), Some(&cli()));
 }
 
@@ -144,8 +146,8 @@ fn losing_thread_ownership_refuses_the_command_before_it_reaches_the_runtime() {
     let successor =
         runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus).unwrap();
     owner.handoff(&permit, &successor).unwrap();
-    host.service.set_ownership(Some(Arc::new(owner)));
-    let run = host.service.bindings.chat_runs["thread-1"];
+    host.service_mut().set_ownership(Some(Arc::new(owner)));
+    let run = host.service().bindings.chat_runs["thread-1"];
 
     for command in [
         Command::SendChat(send("thread-1", "sub-2", "more")),
@@ -244,7 +246,7 @@ fn a_provenance_that_contradicts_itself_is_refused() {
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::InvalidRequest);
-    assert!(host.service.runtime().list_agents().is_empty());
+    assert!(host.service().runtime().list_agents().is_empty());
 }
 
 #[test]
@@ -282,7 +284,7 @@ fn commands_the_host_cannot_honour_yet_say_so() {
 
     assert_eq!(approval.code, ErrorCode::UnsupportedCapability);
     assert_eq!(delegated.code, ErrorCode::UnsupportedCapability);
-    assert!(host.service.runtime().list_agents().is_empty());
+    assert!(host.service().runtime().list_agents().is_empty());
 }
 
 #[test]
@@ -306,7 +308,7 @@ fn a_goal_joins_the_thread_like_the_desktop_one() {
         .unwrap();
 
     assert!(reply.run_id.is_some());
-    assert!(host.service.runtime().thread_goal("thread-1").is_some());
+    assert!(host.service().runtime().thread_goal("thread-1").is_some());
 }
 
 #[test]
@@ -348,10 +350,12 @@ fn an_unknown_question_is_not_found() {
 }
 
 #[test]
-fn every_request_is_looked_up_by_its_receipt() {
+fn every_request_is_looked_up_by_its_receipt_within_its_session() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut host = host_with_project(&rt, runtime(), dir.path());
+    let session = SessionId::new("session-1").unwrap();
+    let other_session = SessionId::new("session-2").unwrap();
     let applied = RequestId::new("req-applied").unwrap();
     let rejected = RequestId::new("req-rejected").unwrap();
     let never_sent = RequestId::new("req-never").unwrap();
@@ -360,35 +364,55 @@ fn every_request_is_looked_up_by_its_receipt() {
 
     let reply = host
         .handle_request(
+            &session,
             &applied,
             Command::SendChat(send("thread-1", "sub-1", "hello")),
             web(),
         )
         .unwrap();
     let error = host
-        .handle_request(&rejected, Command::SendChat(unknown_project), web())
+        .handle_request(
+            &session,
+            &rejected,
+            Command::SendChat(unknown_project),
+            web(),
+        )
         .unwrap_err();
 
-    let receipt = |id: &RequestId| match host
-        .handle_query(&Query::GetCommandReceipt {
-            request_id: id.clone(),
-        })
+    let receipt = |session: &SessionId, id: &RequestId| match host
+        .handle_query(
+            session,
+            &Query::GetCommandReceipt {
+                request_id: id.clone(),
+            },
+        )
         .unwrap()
     {
         QueryReply::CommandReceipt(receipt) => receipt,
         other => panic!("not a receipt: {other:?}"),
     };
     assert_eq!(
-        receipt(&applied).state,
+        receipt(&session, &applied).state,
         CommandReceiptState::Applied { reply }
     );
     assert_eq!(error.correlation_id.as_ref(), Some(&rejected));
     assert_eq!(
-        receipt(&rejected).state,
+        receipt(&session, &rejected).state,
         CommandReceiptState::Rejected { error }
     );
-    assert_eq!(receipt(&never_sent).state, CommandReceiptState::Unknown);
-    assert_eq!(host.receipts().request_provenance(&applied), Some(&web()));
+    assert_eq!(
+        receipt(&session, &never_sent).state,
+        CommandReceiptState::Unknown
+    );
+    assert_eq!(
+        receipt(&other_session, &applied).state,
+        CommandReceiptState::Unknown,
+        "a request id means something only inside its own session"
+    );
+    assert_eq!(
+        host.receipts().request_provenance(&session, &applied),
+        Some(&web())
+    );
 }
 
 #[test]
@@ -396,8 +420,11 @@ fn queries_other_than_receipts_are_not_served_yet() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let host = host_with_project(&rt, runtime(), dir.path());
+    let session = SessionId::new("session-1").unwrap();
 
-    let error = host.handle_query(&Query::GetCoreStatus).unwrap_err();
+    let error = host
+        .handle_query(&session, &Query::GetCoreStatus)
+        .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::UnsupportedCapability);
 }
@@ -442,7 +469,7 @@ fn an_answered_question_accepts_the_same_answer_again_and_refuses_another() {
     assert!(saved.run_id.is_some(), "the conversation resumed");
     assert_eq!(repeated.disposition, CommandDisposition::Accepted);
     assert_eq!(other.code, ErrorCode::AlreadyResolved);
-    let run = host.service.bindings.chat_runs["thread-1"];
+    let run = host.service().bindings.chat_runs["thread-1"];
     runtime.cancel(run).unwrap();
     rt.block_on(async { runtime.wait(run).await.unwrap() });
 }

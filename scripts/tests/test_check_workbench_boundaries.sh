@@ -185,6 +185,22 @@ run_case host_declares_a_rendering_crate_only_for_another_target fail "workbench
 {$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"wgpu","optional":true,"resolved":false}]}
 SPEC
 
+run_case host_reaches_an_optional_rendering_crate_declared_by_a_core_crate fail "workbench-host must not reach GUI or client dependency egui declared by runtime [normal; declared, optional]: workbench-host -> runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"egui","optional":true,"resolved":false}]}
+SPEC
+
+run_case host_reaches_a_target_specific_rendering_crate_two_hops_away fail "declared by test-support [normal; declared, target cfg(unix)]: workbench-host -> test-support" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"test-support"},{"from":"test-support","to":"wgpu","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case a_dev_only_rendering_crate_of_a_host_dependency_is_not_followed ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"egui","kind":"dev","resolved":false}]}
+SPEC
+
+run_case a_rendering_crate_outside_the_host_graph_is_not_a_violation ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"egui"},{"from":"gui","to":"wgpu","optional":true,"resolved":false}]}
+SPEC
+
 run_case host_dev_dependency_on_gui fail "workbench-host -> gui [dev;" <<SPEC
 {$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"gui","kind":"dev"}]}
 SPEC

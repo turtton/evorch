@@ -374,36 +374,33 @@ impl CommandService {
         self.poll_compactions()
     }
 
-    /// Execute a command for the thread's current owner.
+    /// The ownership permit `command` needs.
     ///
     /// With an ownership host configured, a command that targets a thread needs
     /// that host to own the thread right now; a command that does not is refused
-    /// with [`RejectKind::Fenced`] before it reaches the runtime.
-    pub fn submit(&mut self, command: HostCommand) -> Vec<HostEvent> {
-        let permit = if let Some(host) = &self.ownership {
-            match command
-                .thread()
-                .map(|thread| host.owned_permit(thread))
-                .transpose()
-            {
-                Ok(permit) => permit,
-                Err(error) => {
-                    return vec![HostEvent::rejected(RejectKind::Fenced, error.to_string())];
-                }
-            }
-        } else {
-            None
+    /// with [`RejectKind::Fenced`] before it reaches the runtime. This is the
+    /// first step of every ingress, ahead of deduplication.
+    pub(crate) fn authorize(
+        &self,
+        command: &HostCommand,
+    ) -> Result<Option<runtime::ownership::OwnerPermit>, HostEvent> {
+        let Some(host) = &self.ownership else {
+            return Ok(None);
         };
-        self.submit_authorized(command, permit)
+        command
+            .thread()
+            .map(|thread| host.owned_permit(thread))
+            .transpose()
+            .map_err(|error| HostEvent::rejected(RejectKind::Fenced, error.to_string()))
     }
 
-    /// Send a chat under a permit the caller already holds, after checking that
-    /// it still is the thread's current ownership.
-    pub fn submit_chat_with_permit(
-        &mut self,
-        chat: ChatInput,
-        permit: runtime::ownership::OwnerPermit,
-    ) -> Vec<HostEvent> {
+    /// Check that a permit the caller already holds still is the thread's
+    /// current ownership.
+    pub(crate) fn authorize_chat_permit(
+        &self,
+        chat: &ChatInput,
+        permit: &runtime::ownership::OwnerPermit,
+    ) -> Result<(), HostEvent> {
         let validation = (|| {
             if permit.thread_id != chat.thread_id {
                 return Err(runtime::ownership::OwnershipError::Fenced.into());
@@ -419,19 +416,19 @@ impl CommandService {
             }
             permit.validate_generation()
         })();
-        match validation {
-            Ok(()) => self.submit_authorized(HostCommand::SendChat(chat), Some(permit)),
-            Err(error) => vec![HostEvent::chat_rejected(
-                chat.thread_id,
+        validation.map_err(|error: runtime::ownership::RegistryError| {
+            HostEvent::chat_rejected(
+                chat.thread_id.clone(),
                 RejectKind::Fenced,
                 error.to_string(),
-            )],
-        }
+            )
+        })
     }
 
-    /// Run a command under a permit the caller already holds (or none without an
-    /// ownership host), skipping the lookup [`Self::submit`] does.
-    pub fn submit_authorized(
+    /// Run a command under a permit the caller already authorised (or none without
+    /// an ownership host). Reached only through [`crate::CommandHost`], which
+    /// authorises and deduplicates first.
+    pub(crate) fn submit_authorized(
         &mut self,
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,

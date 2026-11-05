@@ -1,11 +1,18 @@
-//! The protocol entry point: [`CommandHost::handle_command`].
+//! The entry points of the host: [`CommandHost`].
 //!
-//! Desktop, web and CLI clients all reach the runtime through here. A
-//! `workbench_protocol::commands::Command` is checked, deduplicated by its
-//! submission id, translated into the host's own [`HostCommand`] and run by the
-//! same [`CommandService`] the in-process desktop adapter calls, so the ownership
-//! check, the follow-up rule for a thread that is still running and every other
-//! validation are the same whichever door the request came through.
+//! Desktop, web and CLI clients all reach the runtime through here, by one of two
+//! doors that share everything after the translation:
+//!
+//! - [`CommandHost::handle_command`] takes a `workbench_protocol::commands::Command`
+//!   and the [`Provenance`] its transport derived;
+//! - [`CommandHost::submit_local`] takes the host's own [`HostCommand`] from an
+//!   in-process client (the desktop adapter).
+//!
+//! Both do the same three steps in the same order: ownership first
+//! ([`CommandService::authorize`]), then the submission ledger (a chat whose
+//! submission id was seen is applied once), then the [`CommandService`]. The
+//! service's execution entry points are crate-private, so this type is the only
+//! way to run a command and none of the steps can be skipped.
 
 use workbench_protocol::commands::{
     AnswerUserQuestion, Command, CommandDisposition, CommandReply, ComposerRole as WireRole,
@@ -15,23 +22,32 @@ use workbench_protocol::commands::{
 use workbench_protocol::envelope::Provenance;
 use workbench_protocol::errors::{ErrorCode, ErrorDetails, RetryAdvice, WorkbenchError};
 use workbench_protocol::handshake::Capability;
-use workbench_protocol::ids::{ProjectId, RequestId, SubmissionId};
+use workbench_protocol::ids::{ProjectId, RequestId, SessionId, SubmissionId};
 use workbench_protocol::queries::{CommandReceipt, Query, QueryReply};
 
 use crate::commands::{
     ChatInput, CommandService, ComposerRole, ContinueInput, GoalInput, HostCommand, HostEvent,
-    PacketReference, ReferenceKind, RejectKind,
+    NoticeOutcome, PacketReference, ReferenceKind, RejectKind,
 };
 use crate::projects::{ProjectDirectory, StaticProjects};
 use crate::receipts::{Receipts, SubmissionRecord};
 
 /// The command service together with what the host remembers about commands.
 pub struct CommandHost {
-    /// The service every ingress shares. Public so the process that composes
-    /// the host can bind threads and configure it, as the desktop adapter does.
-    pub service: CommandService,
+    service: CommandService,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
+}
+
+/// What running a command came to.
+enum Executed {
+    /// A chat whose submission id was accepted before, with the same content. It
+    /// was not applied again.
+    Duplicate {
+        thread_id: String,
+        run_id: Option<String>,
+    },
+    Events(Vec<HostEvent>),
 }
 
 impl CommandHost {
@@ -53,12 +69,30 @@ impl CommandHost {
         self
     }
 
+    /// The service behind the host, for what is not a command: binding threads,
+    /// configuring the runtime, reading state. Commands run only through the host.
+    pub fn service(&self) -> &CommandService {
+        &self.service
+    }
+
+    pub fn service_mut(&mut self) -> &mut CommandService {
+        &mut self.service
+    }
+
     pub fn receipts(&self) -> &Receipts {
         &self.receipts
     }
 
     /// Run one protocol command for `provenance`, which the caller derived from
     /// the authenticated transport and session, never from the request.
+    ///
+    /// A chat is deduplicated by its submission id: the same message again is
+    /// answered [`CommandDisposition::AlreadyApplied`] without a second run, a
+    /// different message under the same id is [`ErrorCode::Conflict`].
+    ///
+    /// `AnswerUserQuestion.question_revision` is **not enforced**: the runtime does
+    /// not version questions yet, so the value is accepted and ignored. A question
+    /// answered meanwhile is still refused as already resolved.
     ///
     /// # Errors
     /// A structured error when the command is invalid, refused, or conflicts
@@ -71,20 +105,22 @@ impl CommandHost {
         provenance.validate()?;
         command.validate()?;
         match command {
-            Command::SendChat(send) => self.send_chat(send, &provenance),
+            Command::SendChat(send) => self.send_chat(&send, &provenance),
             Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
             Command::DecideToolApproval(_) => Err(approvals_unavailable()),
             other => {
                 let host_command = self.translate(other)?;
-                reply_from_events(self.service.submit(host_command), None)
+                let events = self.authorize_and_execute(host_command, &provenance)?;
+                reply_from_events(events, None)
             }
         }
     }
 
-    /// Like [`Self::handle_command`], and remember the outcome under `request`
-    /// so `GetCommandReceipt` can answer for a client that lost the reply.
+    /// Like [`Self::handle_command`], and remember the outcome under `session` and
+    /// `request` so `GetCommandReceipt` can answer for a client that lost the reply.
     pub fn handle_request(
         &mut self,
+        session: &SessionId,
         request: &RequestId,
         command: Command,
         provenance: Provenance,
@@ -92,7 +128,8 @@ impl CommandHost {
         let result = self
             .handle_command(command, provenance.clone())
             .map_err(|error| error.for_request(request.clone()));
-        self.receipts.record_request(request, &provenance, &result);
+        self.receipts
+            .record_request(session, request, &provenance, &result);
         result
     }
 
@@ -101,11 +138,15 @@ impl CommandHost {
     /// # Errors
     /// [`ErrorCode::UnsupportedCapability`] for every other query; the read side
     /// of the protocol is a later step.
-    pub fn handle_query(&self, query: &Query) -> Result<QueryReply, WorkbenchError> {
+    pub fn handle_query(
+        &self,
+        session: &SessionId,
+        query: &Query,
+    ) -> Result<QueryReply, WorkbenchError> {
         match query {
-            Query::GetCommandReceipt { request_id } => {
-                Ok(QueryReply::CommandReceipt(self.command_receipt(request_id)))
-            }
+            Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
+                self.command_receipt(session, request_id),
+            )),
             other => Err(WorkbenchError::new(
                 ErrorCode::UnsupportedCapability,
                 "this host does not serve that query yet",
@@ -117,40 +158,49 @@ impl CommandHost {
         }
     }
 
-    pub fn command_receipt(&self, request: &RequestId) -> CommandReceipt {
-        self.receipts.command_receipt(request)
+    pub fn command_receipt(&self, session: &SessionId, request: &RequestId) -> CommandReceipt {
+        self.receipts.command_receipt(session, request)
     }
 
     /// Run a command from an in-process client (the desktop adapter) as
-    /// `provenance`. It goes through the same service as a protocol command; a
-    /// chat that carries a submission id is remembered with its provenance.
+    /// `provenance`. It passes the same ownership check and submission ledger as a
+    /// protocol command: a chat resent under a used submission id is not applied
+    /// twice, and the first answer saved to a question is remembered with who
+    /// saved it.
     pub fn submit_local(
         &mut self,
         command: HostCommand,
         provenance: &Provenance,
     ) -> Vec<HostEvent> {
-        let submission = match &command {
-            HostCommand::SendChat(chat) if !chat.submission_id.is_empty() => {
-                Some(chat.submission_id.clone())
-            }
-            _ => None,
-        };
-        let events = self.service.submit(command);
-        self.note_local_chat(submission, &events, provenance);
-        events
+        match self.service.authorize(&command) {
+            Ok(permit) => self.execute_local(command, permit, provenance),
+            Err(refusal) => vec![refusal],
+        }
     }
 
-    /// [`CommandService::submit_chat_with_permit`] for an in-process client.
+    /// [`Self::submit_local`] for a chat sent under a permit the caller already
+    /// holds; the permit is checked against the thread's current ownership first.
     pub fn submit_local_chat_with_permit(
         &mut self,
         chat: ChatInput,
         permit: runtime::ownership::OwnerPermit,
         provenance: &Provenance,
     ) -> Vec<HostEvent> {
-        let submission = (!chat.submission_id.is_empty()).then(|| chat.submission_id.clone());
-        let events = self.service.submit_chat_with_permit(chat, permit);
-        self.note_local_chat(submission, &events, provenance);
-        events
+        if let Err(refusal) = self.service.authorize_chat_permit(&chat, &permit) {
+            return vec![refusal];
+        }
+        self.execute_local(HostCommand::SendChat(chat), Some(permit), provenance)
+    }
+
+    /// [`Self::submit_local`] under a permit the caller already authorised (or
+    /// none without an ownership host), skipping the lookup.
+    pub fn submit_local_authorized(
+        &mut self,
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        provenance: &Provenance,
+    ) -> Vec<HostEvent> {
+        self.execute_local(command, permit, provenance)
     }
 
     /// Who sent the accepted chat named `submission`.
@@ -158,122 +208,161 @@ impl CommandHost {
         self.receipts.submission(submission).map(|r| &r.sent_by)
     }
 
-    fn note_local_chat(
+    /// Who saved the answer to `question`, if this host saw it saved. An answer
+    /// stored before this host started has no provenance here; it is never
+    /// credited to whoever repeats it.
+    pub fn answer_provenance(&self, question: &str) -> Option<&Provenance> {
+        self.receipts.answer_provenance(question)
+    }
+
+    fn execute_local(
         &mut self,
-        submission: Option<String>,
-        events: &[HostEvent],
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
         provenance: &Provenance,
-    ) {
-        let Some(submission) = submission else {
-            return;
-        };
-        let Some(run) = events.iter().find_map(|event| match event {
-            HostEvent::ChatAccepted { run_id, .. } => Some(run_id.clone()),
+    ) -> Vec<HostEvent> {
+        match self.execute(command, permit, provenance) {
+            Executed::Duplicate { thread_id, run_id } => vec![HostEvent::ChatAccepted {
+                thread_id,
+                run_id: run_id.unwrap_or_default(),
+            }],
+            Executed::Events(events) => events,
+        }
+    }
+
+    fn authorize_and_execute(
+        &mut self,
+        command: HostCommand,
+        provenance: &Provenance,
+    ) -> Result<Vec<HostEvent>, WorkbenchError> {
+        let permit = self.service.authorize(&command).map_err(refusal_error)?;
+        match self.execute(command, permit, provenance) {
+            Executed::Events(events) => Ok(events),
+            Executed::Duplicate { .. } => unreachable!("only a chat can be a duplicate"),
+        }
+    }
+
+    /// Deduplicate, run and record. The caller has authorised `permit`.
+    fn execute(
+        &mut self,
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+        provenance: &Provenance,
+    ) -> Executed {
+        let submission = match &command {
+            HostCommand::SendChat(chat) if !chat.submission_id.is_empty() => Some(chat.clone()),
             _ => None,
-        }) else {
-            return;
         };
-        self.receipts.record_submission(
-            &submission,
-            SubmissionRecord {
-                payload: None,
-                reply: CommandReply {
-                    disposition: CommandDisposition::Accepted,
-                    submission_id: SubmissionId::new(submission.clone()).ok(),
-                    run_id: workbench_protocol::ids::RunId::new(run).ok(),
-                    thread_revision: None,
-                },
-                sent_by: provenance.clone(),
-            },
-        );
+        if let Some(chat) = &submission {
+            match self.earlier_submission(chat) {
+                Ok(None) => {}
+                Ok(Some(run_id)) => {
+                    return Executed::Duplicate {
+                        thread_id: chat.thread_id.clone(),
+                        run_id,
+                    };
+                }
+                Err(refusal) => {
+                    return Executed::Events(vec![HostEvent::chat_rejected(
+                        chat.thread_id.clone(),
+                        refusal.0,
+                        refusal.1,
+                    )]);
+                }
+            }
+        }
+        let events = self.service.submit_authorized(command, permit);
+        for event in &events {
+            match event {
+                HostEvent::ChatAccepted { run_id, .. } => {
+                    if let Some(chat) = &submission {
+                        self.receipts.record_submission(
+                            &chat.submission_id,
+                            SubmissionRecord {
+                                input: chat.clone(),
+                                run_id: Some(run_id.clone()),
+                                sent_by: provenance.clone(),
+                            },
+                        );
+                    }
+                }
+                HostEvent::UserAnswerSaved {
+                    question_id,
+                    newly_saved: true,
+                } => self.receipts.record_answer(question_id, provenance),
+                _ => {}
+            }
+        }
+        Executed::Events(events)
+    }
+
+    /// The earlier outcome of a chat's submission id: `Ok(Some(run))` for the same
+    /// message again, `Err` for an id that cannot be applied, `Ok(None)` for a new
+    /// submission.
+    ///
+    /// The in-memory ledger compares the whole message (thread, project, composer
+    /// role, text, skills, images, model preference, fork seed). The runtime's
+    /// durable input receipt records only the words, so an id found there alone is
+    /// **never** treated as the same message: it is refused, because applying it
+    /// again could repeat a message and calling it a match could hide a different
+    /// one. Persisting a full fingerprint is a later step.
+    fn earlier_submission(
+        &self,
+        chat: &ChatInput,
+    ) -> Result<Option<Option<String>>, (RejectKind, String)> {
+        let id = chat.submission_id.as_str();
+        if let Some(record) = self.receipts.submission(id) {
+            return if record.input == *chat {
+                Ok(Some(record.run_id.clone()))
+            } else {
+                Err((
+                    RejectKind::Conflict,
+                    format!(
+                        "submission `{}` was already used for a different message",
+                        id.escape_debug()
+                    ),
+                ))
+            };
+        }
+        let receipts = self
+            .service
+            .runtime()
+            .host_input_receipts(&[id.to_owned()])
+            .map_err(|error| {
+                (
+                    RejectKind::Unavailable,
+                    format!("could not read input receipts: {error}"),
+                )
+            })?;
+        if receipts.is_empty() {
+            Ok(None)
+        } else {
+            Err((
+                RejectKind::Conflict,
+                format!(
+                    "submission `{}` was accepted before this host started; it can no longer \
+                     be checked against this message, so it is not applied again",
+                    id.escape_debug()
+                ),
+            ))
+        }
     }
 
     fn send_chat(
         &mut self,
-        send: SendChat,
+        send: &SendChat,
         provenance: &Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
-        if let Some(existing) = self.earlier_submission(&send)? {
-            return Ok(existing);
-        }
-        let input = self.chat_input(&send)?;
-        let reply = reply_from_events(
-            self.service.submit(HostCommand::SendChat(input)),
-            Some(send.submission_id.clone()),
-        )?;
-        let id = send.submission_id.as_str().to_owned();
-        self.receipts.record_submission(
-            &id,
-            SubmissionRecord {
-                payload: Some(send),
-                reply: reply.clone(),
-                sent_by: provenance.clone(),
-            },
-        );
-        Ok(reply)
-    }
-
-    /// The earlier outcome of `send`'s submission id: the recorded reply for an
-    /// identical resend, [`ErrorCode::Conflict`] when the id was used for
-    /// something else, `None` for a new submission. Memory first; after a
-    /// restart the runtime's durable input receipt answers.
-    fn earlier_submission(&self, send: &SendChat) -> Result<Option<CommandReply>, WorkbenchError> {
-        let id = send.submission_id.as_str();
-        if let Some(SubmissionRecord {
-            payload: Some(payload),
-            reply,
-            ..
-        }) = self.receipts.submission(id)
-        {
-            return if payload == send {
-                Ok(Some(already_applied(reply.clone())))
-            } else {
-                Err(submission_conflict(&send.submission_id))
-            };
-        }
-        let ids = [id.to_owned()];
-        let storage_error = |error: storage::StorageError| {
-            WorkbenchError::new(
-                ErrorCode::StorageUnavailable,
-                format!("could not read input receipts: {error}"),
-                RetryAdvice::SameRequest,
-            )
-        };
-        let runtime = self.service.runtime();
-        let Some(receipt) = runtime
-            .host_input_receipts(&ids)
-            .map_err(storage_error)?
-            .into_iter()
-            .next()
-        else {
-            return Ok(None);
-        };
-        let origin = runtime
-            .host_input_origins(&ids)
-            .map_err(storage_error)?
-            .into_iter()
-            .next();
-        let same_text = origin
-            .as_ref()
-            .map_or(receipt.text == send.text, |origin| origin.text == send.text);
-        // Skill names that could not be read cannot disprove a match.
-        let same_skills = origin
-            .as_ref()
-            .is_none_or(|origin| origin.unreadable.is_some() || origin.skills == send.skills);
-        let same_images = receipt.image_count as usize == send.images.len();
-        if receipt.provenance == storage::HostInputProvenance::User
-            && same_text
-            && same_skills
-            && same_images
-        {
-            Ok(Some(CommandReply {
+        let command = HostCommand::SendChat(self.chat_input(send)?);
+        let permit = self.service.authorize(&command).map_err(refusal_error)?;
+        match self.execute(command, permit, provenance) {
+            Executed::Duplicate { run_id, .. } => Ok(CommandReply {
                 disposition: CommandDisposition::AlreadyApplied,
                 submission_id: Some(send.submission_id.clone()),
-                run_id: workbench_protocol::ids::RunId::new(receipt.run_id).ok(),
+                run_id: run_id.and_then(|run| workbench_protocol::ids::RunId::new(run).ok()),
                 thread_revision: None,
-            }))
-        } else {
-            Err(submission_conflict(&send.submission_id))
+            }),
+            Executed::Events(events) => reply_from_events(events, Some(send.submission_id.clone())),
         }
     }
 
@@ -352,8 +441,7 @@ impl CommandHost {
                 thread,
                 question_id,
                 answer,
-                // The runtime does not version questions yet; a question that
-                // was answered meanwhile is refused as already answered.
+                // Not enforced; see `handle_command`.
                 question_revision: _,
             }) => HostCommand::AnswerUserQuestion {
                 thread_id: thread.as_str().to_owned(),
@@ -457,24 +545,16 @@ fn model_preference(preference: &ModelPreference) -> runtime::ModelPreference {
     }
 }
 
-fn already_applied(mut reply: CommandReply) -> CommandReply {
-    reply.disposition = CommandDisposition::AlreadyApplied;
-    reply
-}
-
-fn submission_conflict(id: &SubmissionId) -> WorkbenchError {
-    WorkbenchError::new(
-        ErrorCode::Conflict,
-        format!(
-            "submission `{}` was already used for a different message",
-            id.as_str().escape_debug()
-        ),
-        RetryAdvice::UserActionRequired,
-    )
-}
-
 fn unsupported(message: &str) -> WorkbenchError {
     reject_error(RejectKind::Unsupported, message)
+}
+
+/// The error for an authorisation refusal the service reported as an event.
+fn refusal_error(refusal: HostEvent) -> WorkbenchError {
+    match reply_from_events(vec![refusal], None) {
+        Err(error) => error,
+        Ok(_) => reject_error(RejectKind::Failed, "authorisation refused"),
+    }
 }
 
 /// Approval decisions are validated against the approval registry (ADR 0045
@@ -501,6 +581,7 @@ pub fn reject_error(kind: RejectKind, reason: &str) -> WorkbenchError {
         RejectKind::Busy => (ErrorCode::Busy, RetryAdvice::SameRequest),
         RejectKind::Unsupported => (ErrorCode::UnsupportedCapability, RetryAdvice::Never),
         RejectKind::Invalid => (ErrorCode::InvalidRequest, RetryAdvice::Never),
+        RejectKind::Unavailable => (ErrorCode::StorageUnavailable, RetryAdvice::SameRequest),
         RejectKind::Failed => (ErrorCode::Internal, RetryAdvice::Never),
     };
     WorkbenchError::new(code, reason, retry)
@@ -532,7 +613,7 @@ fn reply_from_events(
             }
             HostEvent::ChatNotice {
                 text,
-                outcome: crate::commands::NoticeOutcome::NotApplied,
+                outcome: NoticeOutcome::NotApplied,
                 ..
             } => {
                 not_applied.get_or_insert(text);

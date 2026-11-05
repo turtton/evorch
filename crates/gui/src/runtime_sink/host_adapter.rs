@@ -112,7 +112,9 @@ pub(super) fn host_command(command: WorkbenchCommand) -> HostCommand {
 /// The desktop loop shows only the reason text; the refusal kind is for the protocol.
 pub(super) fn loop_event(event: HostEvent) -> LoopEvent {
     match event {
-        HostEvent::UserAnswerSaved { question_id } => LoopEvent::UserAnswerSaved { question_id },
+        HostEvent::UserAnswerSaved { question_id, .. } => {
+            LoopEvent::UserAnswerSaved { question_id }
+        }
         HostEvent::ChatAccepted { thread_id, run_id } => {
             LoopEvent::ChatAccepted { thread_id, run_id }
         }

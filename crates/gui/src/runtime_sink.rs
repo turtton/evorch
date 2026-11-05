@@ -70,7 +70,7 @@ type SearchJob = (
 
 impl RuntimeCommandSink {
     pub fn start_background_run(&self, text: String) -> RunId {
-        self.host.service.start_background_run(text)
+        self.host.service().start_background_run(text)
     }
 
     /// runtime と tokio ハンドルから sink を生成する。
@@ -89,7 +89,7 @@ impl RuntimeCommandSink {
     /// questions keep going to the user.
     pub fn with_lane_delivery(self) -> Self {
         {
-            let service = &self.host.service;
+            let service = self.host.service();
             let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
                 service.runtime().downgrade(),
                 service.ownership().cloned(),
@@ -106,27 +106,27 @@ impl RuntimeCommandSink {
     }
 
     pub fn with_web_tools_enabled(mut self, enabled: bool) -> Self {
-        self.host.service.set_web_tools_enabled(enabled);
+        self.host.service_mut().set_web_tools_enabled(enabled);
         self
     }
 
     pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
-        self.host.service.set_event_bus(event_bus);
+        self.host.service_mut().set_event_bus(event_bus);
         self
     }
 
     pub fn with_ownership(mut self, ownership: Arc<runtime::ownership::OwnerHost>) -> Self {
-        self.host.service.set_ownership(Some(ownership));
+        self.host.service_mut().set_ownership(Some(ownership));
         self
     }
 
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
-        self.host.service.set_memory_storage(config);
+        self.host.service_mut().set_memory_storage(config);
         self
     }
 
     pub fn with_team_writer(mut self, writer: storage::StorageHandle) -> Self {
-        self.host.service.set_team_writer(writer);
+        self.host.service_mut().set_team_writer(writer);
         self
     }
 }
@@ -134,7 +134,7 @@ impl RuntimeCommandSink {
 impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
         self.host
-            .service
+            .service_mut()
             .poll()
             .into_iter()
             .map(host_adapter::loop_event)
@@ -142,7 +142,7 @@ impl CommandSink for RuntimeCommandSink {
     }
 
     fn has_background_work(&self) -> bool {
-        self.host.service.has_background_work()
+        self.host.service().has_background_work()
     }
 
     fn has_host_input_receipts(&self) -> bool {
@@ -153,14 +153,14 @@ impl CommandSink for RuntimeCommandSink {
         &self,
         ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
-        Some(self.host.service.runtime().host_input_receipts(ids))
+        Some(self.host.service().runtime().host_input_receipts(ids))
     }
 
     fn host_input_origins(
         &self,
         ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
-        Some(self.host.service.runtime().host_input_origins(ids))
+        Some(self.host.service().runtime().host_input_origins(ids))
     }
 
     fn mark_unreachable_host_inputs(
@@ -170,7 +170,7 @@ impl CommandSink for RuntimeCommandSink {
         if let Ok(run) = run.parse() {
             return self
                 .host
-                .service
+                .service()
                 .runtime()
                 .reconcile_orphaned_host_inputs(run);
         }
@@ -182,45 +182,52 @@ impl CommandSink for RuntimeCommandSink {
         thread: &str,
         prompt_id: &str,
     ) -> Result<(), runtime::RuntimeError> {
-        self.host.service.withdraw_follow_up(thread, prompt_id)
+        self.host
+            .service_mut()
+            .withdraw_follow_up(thread, prompt_id)
     }
 
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
-        self.host.service.follow_up_status(thread)
+        self.host.service().follow_up_status(thread)
     }
 
     fn running_children(&mut self, thread: &str) -> Option<usize> {
-        self.host.service.running_children(thread)
+        self.host.service_mut().running_children(thread)
     }
 
     fn observe_lifecycle(&mut self, event: &Event) {
-        self.host.service.observe_lifecycle(event);
+        self.host.service_mut().observe_lifecycle(event);
     }
 
     fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-        self.host.service.bind_thread_todo(snapshot);
+        self.host.service_mut().bind_thread_todo(snapshot);
     }
 
     fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
-        self.host.service.bind_thread_goal(snapshot, project);
+        self.host.service_mut().bind_thread_goal(snapshot, project);
     }
 
     fn bind_lane_root(&mut self, thread: &str, run: &str) {
-        self.host.service.bind_lane_root(thread, run);
+        self.host.service_mut().bind_lane_root(thread, run);
     }
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
-        self.host.service.bind_goal_context(thread, project, run);
+        self.host
+            .service_mut()
+            .bind_goal_context(thread, project, run);
     }
 
     fn lane_delivery_bound(&self) -> bool {
-        self.host.service.runtime().lane_delivery_binding()
+        self.host.service().runtime().lane_delivery_binding()
             == event_bus::lane::LaneDeliveryBinding::Bound
     }
 
     fn schedule_lane_deliveries(&mut self, thread: &str) {
-        let _guard = self.host.service.handle().enter();
-        self.host.service.runtime().schedule_lane_deliveries(thread);
+        let _guard = self.host.service().handle().enter();
+        self.host
+            .service()
+            .runtime()
+            .schedule_lane_deliveries(thread);
     }
 
     fn restore_diagnostics(
@@ -229,7 +236,7 @@ impl CommandSink for RuntimeCommandSink {
     ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
         let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
         self.host
-            .service
+            .service()
             .runtime()
             .restore_diagnostics(id)
             .map_err(|e| e.to_string())
@@ -242,11 +249,11 @@ impl CommandSink for RuntimeCommandSink {
         // Chat runs capture lessons the same way; a read failure only hides the section.
         request.memory = self
             .host
-            .service
+            .service()
             .capture_memory(request.project_root.as_deref());
         let (sender, receiver) = std::sync::mpsc::channel();
-        let runtime = self.host.service.runtime().clone();
-        self.host.service.handle().spawn(async move {
+        let runtime = self.host.service().runtime().clone();
+        self.host.service().handle().spawn(async move {
             let report = runtime
                 .preview_base_context(request)
                 .await
@@ -264,8 +271,8 @@ impl CommandSink for RuntimeCommandSink {
         cursor: Option<String>,
     ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
         let (sender, receiver) = std::sync::mpsc::channel();
-        let runtime = self.host.service.runtime().clone();
-        let handle = self.host.service.handle().clone();
+        let runtime = self.host.service().runtime().clone();
+        let handle = self.host.service().handle().clone();
         // One storage read at a time, newest request first: a search left over
         // from a closed modal is replaced, and its dropped sender tells the
         // modal it was superseded.
@@ -290,18 +297,18 @@ impl CommandSink for RuntimeCommandSink {
     ) -> Result<Option<runtime::base_context::RunContextView>, String> {
         let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
         self.host
-            .service
+            .service()
             .runtime()
             .run_context_view(id)
             .map_err(|e| e.to_string())
     }
 
     fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
-        self.host.service.set_default_cwd(cwd)
+        self.host.service_mut().set_default_cwd(cwd)
     }
 
     fn set_project_trust(&mut self, root: PathBuf, trusted: bool) {
-        self.host.service.runtime().set_project_trust(
+        self.host.service().runtime().set_project_trust(
             root,
             if trusted {
                 runtime::ProjectTrust::Approved
@@ -313,14 +320,14 @@ impl CommandSink for RuntimeCommandSink {
 
     fn set_project_allowed_directories(&mut self, root: PathBuf, directories: Vec<PathBuf>) {
         self.host
-            .service
+            .service()
             .runtime()
             .set_project_allowed_directories(root, directories);
     }
 
     fn set_thread_read_only_directories(&mut self, thread_id: String, directories: Vec<PathBuf>) {
         self.host
-            .service
+            .service()
             .runtime()
             .set_thread_read_only_directories(&thread_id, directories);
     }
@@ -369,16 +376,16 @@ impl RuntimeCommandSink {
         command: WorkbenchCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<LoopEvent> {
+        let provenance = self.provenance.clone();
         self.host
-            .service
-            .submit_authorized(host_adapter::host_command(command), permit)
+            .submit_local_authorized(host_adapter::host_command(command), permit, &provenance)
             .into_iter()
             .map(host_adapter::loop_event)
             .collect()
     }
 
     fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
-        self.host.service.can_restart_stopped(thread, error)
+        self.host.service().can_restart_stopped(thread, error)
     }
 }
 
@@ -486,35 +493,39 @@ mod tests {
         let worker = "run-1".parse::<runtime::RunId>().unwrap();
         let orchestrator = "run-2".parse::<runtime::RunId>().unwrap();
         sink.host
-            .service
+            .service_mut()
             .bindings
             .chat_runs
             .insert("parent".into(), worker);
         sink.bind_goal_context("parent", "project", "run-1");
         // Repair a duplicate run index without removing the worker's own root.
         sink.host
-            .service
+            .service_mut()
             .bindings
             .chat_runs
             .insert("stale-owner".into(), orchestrator);
         sink.bind_goal_context("stale-owner", "project", "run-2");
         sink.bind_goal_context("escalation-run-2", "project", "run-2");
         assert_eq!(
-            sink.host.service.bindings.chat_runs.get("parent"),
+            sink.host.service_mut().bindings.chat_runs.get("parent"),
             Some(&worker)
         );
         assert_eq!(
-            sink.host.service.bindings.goal_runs.get("parent"),
+            sink.host.service_mut().bindings.goal_runs.get("parent"),
             Some(&worker)
         );
         assert_eq!(
-            sink.host.service.bindings.goal_runs.get("escalation-run-2"),
+            sink.host
+                .service_mut()
+                .bindings
+                .goal_runs
+                .get("escalation-run-2"),
             Some(&orchestrator)
         );
         assert!(
             !sink
                 .host
-                .service
+                .service_mut()
                 .bindings
                 .chat_runs
                 .contains_key("stale-owner")
@@ -522,7 +533,7 @@ mod tests {
         assert!(
             !sink
                 .host
-                .service
+                .service_mut()
                 .bindings
                 .goal_runs
                 .contains_key("stale-owner")
@@ -699,7 +710,7 @@ mod tests {
                 .as_deref(),
             Some("JSON")
         );
-        let run = sink.host.service.bindings.chat_runs["thread-1"];
+        let run = sink.host.service_mut().bindings.chat_runs["thread-1"];
         runtime.cancel(run).unwrap();
         rt.block_on(async {
             runtime.wait(run).await.unwrap();
@@ -718,7 +729,7 @@ mod tests {
         let runtime =
             runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         sink.submit(chat_command("recipient"));
-        let recipient = sink.host.service.bindings.chat_runs["recipient"];
+        let recipient = sink.host.service_mut().bindings.chat_runs["recipient"];
         let question = offline_question_fixture(&rt, &config, storage.handle(), "source", vec![]);
         storage
             .handle()
@@ -854,7 +865,7 @@ mod tests {
         ));
         assert!(runtime.list_agents().is_empty());
         sink.submit(chat_command("no-store"));
-        let run = sink.host.service.bindings.chat_runs["no-store"];
+        let run = sink.host.service_mut().bindings.chat_runs["no-store"];
         sink.submit(WorkbenchCommand::StopChat {
             thread_id: "no-store".into(),
         });
@@ -865,7 +876,7 @@ mod tests {
             sink.submit(continue_command("no-store")).as_slice(),
             [LoopEvent::ChatRejected { .. }]
         ));
-        assert_eq!(sink.host.service.bindings.chat_runs["no-store"], run);
+        assert_eq!(sink.host.service_mut().bindings.chat_runs["no-store"], run);
         assert_eq!(runtime.list_agents().len(), 1);
     }
 
@@ -928,7 +939,7 @@ mod tests {
                 let runtime = runtime
                     .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
                 sink.submit(chat_command("resume"));
-                let run = sink.host.service.bindings.chat_runs["resume"];
+                let run = sink.host.service_mut().bindings.chat_runs["resume"];
                 rt.block_on(async {
                     model.started.notified().await;
                 });
@@ -959,9 +970,16 @@ mod tests {
                     matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == run.to_string()),
                     "{events:?}"
                 );
-                assert_eq!(sink.host.service.bindings.chat_runs["resume"], run);
+                assert_eq!(sink.host.service_mut().bindings.chat_runs["resume"], run);
                 assert_eq!(runtime.list_agents().len(), 1);
-                assert!(!sink.host.service.bindings.stopped_by_us.contains("resume"));
+                assert!(
+                    !sink
+                        .host
+                        .service_mut()
+                        .bindings
+                        .stopped_by_us
+                        .contains("resume")
+                );
                 rt.block_on(async {
                     model.started.notified().await;
                 });
@@ -997,7 +1015,7 @@ mod tests {
             .unwrap();
         let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel::default()));
         sink.submit(chat_command("rapid"));
-        let root = sink.host.service.bindings.chat_runs["rapid"];
+        let root = sink.host.service_mut().bindings.chat_runs["rapid"];
         let child = {
             let _guard = rt.enter();
             runtime
@@ -1015,7 +1033,11 @@ mod tests {
             }]
         ));
         assert!(
-            sink.host.service.bindings.stop_marked.contains("rapid"),
+            sink.host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "first press is SelfOnly"
         );
         assert_eq!(
@@ -1027,7 +1049,12 @@ mod tests {
             [LoopEvent::ChatStopped { .. }]
         ));
         assert!(
-            !sink.host.service.bindings.stop_marked.contains("rapid"),
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "second press is Subtree"
         );
         assert_eq!(
@@ -1047,8 +1074,15 @@ mod tests {
             sink.submit(chat_command("rapid")).as_slice(),
             [LoopEvent::ChatAccepted { .. }]
         ));
-        assert_ne!(sink.host.service.bindings.chat_runs["rapid"], root);
-        assert!(!sink.host.service.bindings.stopped_by_us.contains("rapid"));
+        assert_ne!(sink.host.service_mut().bindings.chat_runs["rapid"], root);
+        assert!(
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .stopped_by_us
+                .contains("rapid")
+        );
         assert!(matches!(
             sink.submit(WorkbenchCommand::StopChat {
                 thread_id: "rapid".into()
@@ -1057,7 +1091,11 @@ mod tests {
             [LoopEvent::ChatStopped { .. }]
         ));
         assert!(
-            sink.host.service.bindings.stop_marked.contains("rapid"),
+            sink.host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "new run restarts at stage one"
         );
     }
@@ -1112,9 +1150,13 @@ mod tests {
                 runtime
             };
             sink.submit(chat_command("no-context"));
-            let root = sink.host.service.bindings.chat_runs["no-context"];
+            let root = sink.host.service_mut().bindings.chat_runs["no-context"];
             if goal {
-                sink.host.service.bindings.chat_runs.remove("no-context");
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .chat_runs
+                    .remove("no-context");
                 sink.bind_goal_context("no-context", "project", &root.to_string());
             }
             assert!(matches!(
@@ -1126,7 +1168,7 @@ mod tests {
             ));
             assert!(
                 sink.host
-                    .service
+                    .service_mut()
                     .bindings
                     .stop_marked
                     .contains("no-context")
@@ -1144,12 +1186,12 @@ mod tests {
                 matches!(events.as_slice(), [LoopEvent::ChatAccepted { .. }]),
                 "{events:?}"
             );
-            let fresh = sink.host.service.bindings.chat_runs["no-context"];
+            let fresh = sink.host.service_mut().bindings.chat_runs["no-context"];
             assert_ne!(fresh, root);
             assert!(
                 !sink
                     .host
-                    .service
+                    .service_mut()
                     .bindings
                     .stop_marked
                     .contains("no-context")
@@ -1157,7 +1199,7 @@ mod tests {
             assert!(
                 !sink
                     .host
-                    .service
+                    .service_mut()
                     .bindings
                     .stopped_by_us
                     .contains("no-context")
@@ -1168,7 +1210,7 @@ mod tests {
             });
             assert!(
                 sink.host
-                    .service
+                    .service_mut()
                     .bindings
                     .stop_marked
                     .contains("no-context")
@@ -1183,13 +1225,13 @@ mod tests {
             let id = runtime::RunId::new(999);
             if goal {
                 sink.host
-                    .service
+                    .service_mut()
                     .bindings
                     .goal_runs
                     .insert("unmarked".into(), id);
             } else {
                 sink.host
-                    .service
+                    .service_mut()
                     .bindings
                     .chat_runs
                     .insert("unmarked".into(), id);
@@ -1200,7 +1242,7 @@ mod tests {
             ));
         }
         sink.host
-            .service
+            .service_mut()
             .bindings
             .stop_marked
             .insert("marked".into());
@@ -1235,7 +1277,7 @@ mod tests {
                 skills: Vec::new(),
             },
         ));
-        let root = sink.host.service.bindings.chat_runs["chat-thread"];
+        let root = sink.host.service_mut().bindings.chat_runs["chat-thread"];
         let (child, grandchild) = rt.block_on(async {
             let child = runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -1266,7 +1308,10 @@ mod tests {
         );
         let phase = rt.block_on(async { runtime.wait(root).await.unwrap() });
         assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
-        assert_eq!(sink.host.service.bindings.chat_runs["chat-thread"], root);
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["chat-thread"],
+            root
+        );
         assert_eq!(runtime.live_descendants(root), vec![child, grandchild]);
         assert!(matches!(
             sink.submit(command.clone()).as_slice(),
@@ -1287,10 +1332,13 @@ mod tests {
             },
         ));
         assert_eq!(
-            sink.host.service.bindings.running_children["chat-thread"],
+            sink.host.service_mut().bindings.running_children["chat-thread"],
             0
         );
-        assert_eq!(sink.host.service.bindings.chat_runs["chat-thread"], root);
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["chat-thread"],
+            root
+        );
         assert!(
             matches!(sink.submit(command).as_slice(), [LoopEvent::ChatNotice { text, .. }] if text == "Already stopped; use /continue or send a message to resume")
         );
@@ -1336,7 +1384,7 @@ mod tests {
             .unwrap();
         let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(FailedRootModel));
         sink.submit(chat_command("failed-root"));
-        let root = sink.host.service.bindings.chat_runs["failed-root"];
+        let root = sink.host.service_mut().bindings.chat_runs["failed-root"];
         let (child, grandchild, sibling) = rt.block_on(async {
             let child = runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -1373,9 +1421,12 @@ mod tests {
             event_bus::AgentRunPhase::Error
         );
         assert_eq!(runtime.live_descendants(root), vec![grandchild, sibling]);
-        assert_eq!(sink.host.service.bindings.chat_runs["failed-root"], root);
-        assert!(sink.host.service.bindings.stop_marked.is_empty());
-        assert!(sink.host.service.bindings.stopped_by_us.is_empty());
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["failed-root"],
+            root
+        );
+        assert!(sink.host.service_mut().bindings.stop_marked.is_empty());
+        assert!(sink.host.service_mut().bindings.stopped_by_us.is_empty());
         runtime.cancel_subtree(root).unwrap();
         rt.block_on(async {
             for run in [grandchild, sibling] {
@@ -1389,8 +1440,8 @@ mod tests {
         let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(chat_command("thread"));
         sink.submit(chat_command("other"));
-        let root = sink.host.service.bindings.chat_runs["thread"];
-        let other_root = sink.host.service.bindings.chat_runs["other"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread"];
+        let other_root = sink.host.service_mut().bindings.chat_runs["other"];
         let child = rt.block_on(async {
             runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -1422,13 +1473,13 @@ mod tests {
         let successor =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
         owner.handoff(&stale, &successor).unwrap();
-        sink.host.service.set_ownership(Some(Arc::new(owner)));
+        sink.host.service_mut().set_ownership(Some(Arc::new(owner)));
         let command = stop_run_command("thread", child);
         for permit in [
             Some(stale),
             Some(
                 sink.host
-                    .service
+                    .service()
                     .ownership()
                     .unwrap()
                     .owned_permit("other")
@@ -1459,7 +1510,9 @@ mod tests {
                 event_bus::AgentRunPhase::Stopped
             );
         });
-        sink.host.service.set_ownership(Some(Arc::new(successor)));
+        sink.host
+            .service_mut()
+            .set_ownership(Some(Arc::new(successor)));
         assert!(matches!(
             sink.submit(command).as_slice(),
             [LoopEvent::ChatNotice { .. }]
@@ -1500,7 +1553,9 @@ mod tests {
         let successor =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
         previous.handoff(&stale, &successor).unwrap();
-        sink.host.service.set_ownership(Some(Arc::new(previous)));
+        sink.host
+            .service_mut()
+            .set_ownership(Some(Arc::new(previous)));
         let control = WorkbenchCommand::SetGoalChecksPaused {
             thread_id: "thread-1".into(),
             goal_id: goal.goal_id,
@@ -1511,7 +1566,7 @@ mod tests {
             Some(stale),
             Some(
                 sink.host
-                    .service
+                    .service()
                     .ownership()
                     .unwrap()
                     .owned_permit("other")
@@ -1529,7 +1584,7 @@ mod tests {
                 .is_empty()
         );
         assert!(runtime.thread_goal("thread-1").unwrap().checks_paused);
-        let root = sink.host.service.bindings.chat_runs["thread-1"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
         runtime.cancel(root).unwrap();
         rt.block_on(runtime.wait(root)).unwrap();
     }
@@ -1583,7 +1638,7 @@ mod tests {
                 runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
             let mut events = bus.subscribe();
             sink.submit(chat_command("thread-1"));
-            let root = sink.host.service.bindings.chat_runs["thread-1"];
+            let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
             rt.block_on(async {
                 while runtime.inspect_agent(root).unwrap().phase
                     != event_bus::AgentRunPhase::Waiting
@@ -1662,7 +1717,7 @@ mod tests {
             vec![],
             vec![],
         )));
-        let root = sink.host.service.bindings.chat_runs["thread-1"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
         rt.block_on(model.started.notified());
         let goal = runtime.thread_goal("thread-1").unwrap();
         assert!(
@@ -1705,7 +1760,7 @@ mod tests {
         assert!(resumed.checks_paused);
         assert!(resumed.review_enabled);
         assert!(!resumed.work_stopped);
-        assert_eq!(sink.host.service.bindings.chat_runs["thread-1"], root);
+        assert_eq!(sink.host.service_mut().bindings.chat_runs["thread-1"], root);
         runtime.cancel(root).unwrap();
         rt.block_on(runtime.wait(root)).unwrap();
     }
@@ -1752,7 +1807,7 @@ mod tests {
             events.as_slice(),
             [LoopEvent::ChatAccepted { .. }]
         ));
-        assert_ne!(sink.host.service.bindings.chat_runs["thread-1"], root);
+        assert_ne!(sink.host.service_mut().bindings.chat_runs["thread-1"], root);
     }
 
     #[test]
@@ -1800,7 +1855,7 @@ mod tests {
         };
 
         sink.submit(chat(Some(thread_project.path().to_path_buf())));
-        let first = sink.host.service.bindings.chat_runs["chat-thread"];
+        let first = sink.host.service_mut().bindings.chat_runs["chat-thread"];
         // A stopped chat without saved context restarts as a fresh run.
         sink.submit(WorkbenchCommand::StopChat {
             thread_id: "chat-thread".into(),
@@ -1809,7 +1864,7 @@ mod tests {
             runtime.wait(first).await.unwrap();
         });
         sink.submit(chat(None));
-        let second = sink.host.service.bindings.chat_runs["chat-thread"];
+        let second = sink.host.service_mut().bindings.chat_runs["chat-thread"];
 
         assert_ne!(first, second);
         assert_eq!(*resolved.lock().unwrap(), [thread_project.path()]);
@@ -2056,7 +2111,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.root_run_id,
-            sink.host.service.bindings.chat_runs["thread-1"].to_string()
+            sink.host.service_mut().bindings.chat_runs["thread-1"].to_string()
         );
         assert!(!snapshot.review_enabled);
         assert!(matches!(
@@ -2108,9 +2163,9 @@ mod tests {
         bridge.abort();
         let _ = rt.block_on(bridge);
         runtime
-            .cancel(sink.host.service.bindings.chat_runs["thread-1"])
+            .cancel(sink.host.service_mut().bindings.chat_runs["thread-1"])
             .unwrap();
-        rt.block_on(runtime.wait(sink.host.service.bindings.chat_runs["thread-1"]))
+        rt.block_on(runtime.wait(sink.host.service_mut().bindings.chat_runs["thread-1"]))
             .unwrap();
         storage.close();
     }
