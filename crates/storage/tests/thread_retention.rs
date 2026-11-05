@@ -496,6 +496,10 @@ fn build_family(f: &Fixture) {
     f.pull_requests("X", 2, 2);
     f.snapshot("o/live", 2);
     f.sql(
+        "INSERT INTO host_chat_submissions(submission_id, fingerprint, run_id, provenance_json, accepted_at_ns) \
+         VALUES ('sub-p', 'fp', 'rp', '{}', 1), ('sub-x', 'fp', 'rx', '{}', 1)",
+    );
+    f.sql(
         "INSERT INTO thread_pull_request_candidates(thread_id, provider, host, repository, number, \
          source_run_id, source_call_id, state, created_at_ns, updated_at_ns) \
          VALUES ('C', 'github', 'github.com', 'o/live', 2, 'run-C', 'call-2', 'presented', 1, 1)",
@@ -556,6 +560,7 @@ const FAMILY_RUN_TABLES: &[(&str, &str)] = &[
     ("run_message_provenance", "run_id"),
     ("run_ledger", "run_id"),
     ("host_input_receipts", "run_id"),
+    ("host_chat_submissions", "run_id"),
     ("review_evidence", "target_run_id"),
     ("review_lineage_edges", "child_run_id"),
     ("assistant_references", "source_run_id"),
@@ -685,6 +690,14 @@ fn a_confirmed_family_is_reclaimed_completely_and_the_rest_is_untouched() {
     // and the derived structures agree with their sources.
     assert_eq!(family_residue(&f), vec![]);
     assert_eq!(survivor_rows(&f), survivors_before);
+    assert_eq!(
+        f.database()
+            .host_chat_submissions(&["sub-p".into(), "sub-x".into()])
+            .unwrap()
+            .len(),
+        1,
+        "the reclaim removed the family's submission and kept the survivor's"
+    );
     assert_eq!(kept_snapshot(&f), kept_before);
     assert_eq!(
         f.count("SELECT COUNT(*) FROM reclaim_jobs WHERE state = 'db_done'"),
@@ -1498,6 +1511,16 @@ fn readers_do_not_see_tombstoned_threads_and_runs() {
             .host_input_receipts_for_run("rp")
             .unwrap()
             .is_empty()
+    );
+    assert_eq!(
+        database
+            .host_chat_submissions(&["sub-p".into(), "sub-x".into()])
+            .unwrap()
+            .into_iter()
+            .map(|state| matches!(state, storage::HostChatSubmissionState::Deleted(_)))
+            .collect::<Vec<_>>(),
+        [true, false],
+        "the deleted family's submission is reported deleted before any reclaim ran"
     );
     assert!(
         database

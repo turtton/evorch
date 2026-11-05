@@ -136,6 +136,9 @@ enum Command {
     ),
     UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
     HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
+    RecordHostChatSubmission(crate::HostChatSubmission, ReplyTx<bool>),
+    HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmissionState>>),
+    TombstonedRuns(Vec<String>, ReplyTx<Vec<String>>),
     HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
@@ -782,6 +785,39 @@ impl StorageHandle {
         prompt_ids: &[String],
     ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
         self.request(|reply| Command::HostInputReceipts(prompt_ids.to_vec(), reply))
+    }
+
+    /// Keep a fingerprint of an accepted chat message. The first record for an id stays;
+    /// returns whether this call stored it.
+    ///
+    /// # Errors
+    /// Rejects an invalid record, a tombstoned run, suspended writes or SQLite failure.
+    pub fn record_host_chat_submission(
+        &self,
+        submission: &crate::HostChatSubmission,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::RecordHostChatSubmission(submission.clone(), reply))
+    }
+
+    /// The recorded chat submissions among `submission_ids`, after all earlier writer requests.
+    /// A submission whose run was deleted is reported as such, without its content.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_chat_submissions(
+        &self,
+        submission_ids: &[String],
+    ) -> Result<Vec<crate::HostChatSubmissionState>, StorageError> {
+        self.request(|reply| Command::HostChatSubmissions(submission_ids.to_vec(), reply))
+    }
+
+    /// The runs among `run_ids` whose thread was deleted, after all earlier writer requests.
+    /// A deleted run stays listed after its rows are reclaimed.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn tombstoned_runs(&self, run_ids: &[String]) -> Result<Vec<String>, StorageError> {
+        self.request(|reply| Command::TombstonedRuns(run_ids.to_vec(), reply))
     }
 
     /// One run's receipts, oldest first, after all earlier writer requests.

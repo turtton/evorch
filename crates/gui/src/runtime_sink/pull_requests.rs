@@ -99,7 +99,7 @@ impl Jobs {
 impl WorkbenchCommand {
     /// The thread a pull request operation acts for; `None` for any other command and for an
     /// inheritance (which names two threads and acts for neither).
-    fn thread(&self) -> Option<&str> {
+    pub(super) fn thread(&self) -> Option<&str> {
         match self {
             Self::LinkPullRequest { thread_id, .. }
             | Self::UnlinkPullRequest { thread_id, .. }
@@ -125,9 +125,26 @@ fn reason(error: &PullRequestError) -> String {
     }
 }
 
+impl WorkbenchCommand {
+    /// Whether this is one of the pull request operations handled here rather than by the host.
+    pub(super) fn is_pull_request(&self) -> bool {
+        matches!(
+            self,
+            Self::LinkPullRequest { .. }
+                | Self::UnlinkPullRequest { .. }
+                | Self::RefreshPullRequest { .. }
+                | Self::ConfirmPullRequestCandidate { .. }
+                | Self::DismissPullRequestCandidate { .. }
+                | Self::InheritPullRequest { .. }
+        )
+    }
+}
+
 impl super::RuntimeCommandSink {
     pub(super) fn pull_requests_on(&self) -> bool {
-        self.runtime
+        self.host
+            .service()
+            .runtime()
             .pull_requests()
             .is_some_and(|service| service.settings().enabled)
     }
@@ -137,7 +154,7 @@ impl super::RuntimeCommandSink {
         command: WorkbenchCommand,
         permit: Option<OwnerPermit>,
     ) -> Vec<LoopEvent> {
-        let Some(service) = self.runtime.pull_requests() else {
+        let Some(service) = self.host.service().runtime().pull_requests() else {
             // Without the service there is nothing to announce to and nothing to operate.
             return match command.thread() {
                 Some(thread) => vec![LoopEvent::PullRequestRejected {
@@ -166,7 +183,7 @@ impl super::RuntimeCommandSink {
             },
         };
         self.pull_request_jobs.enqueue(
-            &self.handle,
+            self.host.service().handle(),
             Work {
                 service,
                 command,
