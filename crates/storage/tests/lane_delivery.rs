@@ -70,6 +70,7 @@ impl Fixture {
                 origin_run_id: "lead-root".into(),
                 creation_key: format!("open-{n}"),
                 brief: LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: "implement".into(),
                     inputs: vec![],
                     deliverables: vec![],

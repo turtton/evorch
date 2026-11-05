@@ -52,6 +52,7 @@ impl Fixture {
 
 fn brief(objective: &str, policy: LanePolicy) -> LaneBrief {
     LaneBrief {
+        verification_requirements: Default::default(),
         objective: objective.into(),
         inputs: vec![],
         deliverables: vec!["a pull request".into()],

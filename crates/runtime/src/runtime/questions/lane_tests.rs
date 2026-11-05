@@ -106,6 +106,7 @@ impl Fixture {
                 lead,
                 key,
                 LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: key.into(),
                     inputs: vec![],
                     deliverables: vec!["artifact".into()],
