@@ -883,4 +883,15 @@ async fn monitor_change_hints_requery_committed_state_without_timer_heartbeats()
             .into_iter()
             .any(|e| matches!(e.kind, EventKind::Diagnostic(d) if d.code == "lane_nudge_accepted"))
     );
+    f.report(&lane, None, LaneStatus::Ready);
+    f.runtime.monitor_lanes().unwrap();
+    assert_eq!(
+        hints(&mut events).len(),
+        1,
+        "resolution also re-queries attention"
+    );
+    assert!(episodes(&f)[0].resolved_at_ns.is_some());
+    assert_eq!(episodes(&f)[0].nudge_state, LaneNudgeState::Accepted);
+    f.runtime.monitor_lanes().unwrap();
+    assert!(hints(&mut events).is_empty());
 }

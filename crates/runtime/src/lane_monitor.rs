@@ -346,6 +346,14 @@ impl AgentRuntime {
                 }
             };
             let Some(classification) = classification else {
+                // Resolving progress can make this lane exempt or terminal. Still
+                // publish the durable revision change so the host removes stale
+                // attention without waiting for focus or an unrelated report.
+                if let Some((id, _)) = &entry.episode
+                    && let Some(episode) = store.handle.lane_stall_episode(id.clone())?
+                {
+                    self.publish_stall_change(&thread, target.root_run_id, entry, episode);
+                }
                 continue;
             };
             let observation = ObserveLaneStall {
@@ -374,27 +382,36 @@ impl AgentRuntime {
             } else {
                 episode
             };
-            let version = (episode.episode_id, episode.revision);
-            if entry.episode.as_ref() != Some(&version) {
-                // A re-query hint, not another source of attention state. Stable
-                // observations do not emit a timer heartbeat or reorder the ledger.
-                self.shared
-                    .bus
-                    .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-                        source: "lane_monitor".into(),
-                        severity: event_bus::DiagnosticSeverity::Info,
-                        code: event_bus::event::diagnostic_codes::LANE_STALL_CHANGED.into(),
-                        detail: format!("episode={} revision={}", version.0, version.1),
-                        run_id: Some(target.root_run_id.to_string()),
-                        thread_id: Some(thread.clone()),
-                        call_id: None,
-                    }));
-                entry.episode = Some(version);
-            }
+            self.publish_stall_change(&thread, target.root_run_id, entry, episode);
         }
         monitor.lanes.retain(|lane, _| observed.contains(lane));
         monitor.execution.retain(|run, _| owned_runs.contains(run));
         Ok(())
+    }
+    fn publish_stall_change(
+        &self,
+        thread: &str,
+        run: RunId,
+        entry: &mut Observation,
+        episode: event_bus::lane::LaneStallEpisode,
+    ) {
+        let version = (episode.episode_id, episode.revision);
+        if entry.episode.as_ref() != Some(&version) {
+            // A re-query hint, not another source of attention state. Stable
+            // observations do not emit a heartbeat or reorder the ledger.
+            self.shared
+                .bus
+                .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                    source: "lane_monitor".into(),
+                    severity: event_bus::DiagnosticSeverity::Info,
+                    code: event_bus::event::diagnostic_codes::LANE_STALL_CHANGED.into(),
+                    detail: format!("episode={} revision={}", version.0, version.1),
+                    run_id: Some(run.to_string()),
+                    thread_id: Some(thread.to_owned()),
+                    call_id: None,
+                }));
+            entry.episode = Some(version);
+        }
     }
     pub(crate) fn fail_lane_nudges(
         &self,
