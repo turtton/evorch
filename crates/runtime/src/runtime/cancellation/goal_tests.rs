@@ -216,6 +216,7 @@ async fn ac15_old_admission_failure_preserves_new_goal_before_and_after_executio
             if before_registration {
                 release_resume.send(()).unwrap();
                 resume.take().unwrap().join().unwrap();
+                worker_entered.recv().unwrap();
             }
         });
         runtime.cancel_subtree(root).unwrap();
