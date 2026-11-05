@@ -6,12 +6,15 @@
 //! [`SandboxBoundary::with_allowed`] and are read again on every use, so a
 //! declaration reaches running sandboxes from their next command.
 
+mod mounts;
+pub(crate) use mounts::{BoundaryMount, MountPlan};
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 pub(crate) const DEFAULT_RO_BINDS: [&str; 6] = ["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix"];
 
-/// Cargo cache entries visible to shells. Credentials and config stay hidden.
+/// Automatic cache sharing excludes credentials/config; explicit allowed directories may expose them.
 const CARGO_CACHES: [&str; 6] = [
     "registry/index",
     "registry/cache",
@@ -137,6 +140,7 @@ pub struct SandboxBoundary {
     pub(crate) cargo_home: Option<PathBuf>,
     pub(crate) rustup_home: Option<PathBuf>,
     pub(crate) scratch: Option<PathBuf>,
+    pub(crate) host_home: Option<PathBuf>,
 }
 
 impl SandboxBoundary {
@@ -152,6 +156,7 @@ impl SandboxBoundary {
             cargo_home: tool_home("CARGO_HOME", ".cargo"),
             rustup_home: tool_home("RUSTUP_HOME", ".rustup"),
             scratch: None,
+            host_home: canonical_home(std::env::var_os("HOME").as_deref().map(Path::new)),
         }
     }
 
@@ -214,8 +219,8 @@ impl SandboxBoundary {
         self
     }
 
-    /// Mount no Cargo / rustup cache at all. For sandboxes that only run a
-    /// prebuilt program and must see nothing of the host's tool homes.
+    /// Disable automatic Cargo / rustup cache sharing, for example when only
+    /// running a prebuilt program. Explicit allowed directories still apply.
     #[must_use]
     pub fn without_tool_caches(mut self) -> Self {
         self.cargo_home = None;
@@ -241,59 +246,18 @@ impl SandboxBoundary {
         mounts
     }
 
-    pub(crate) fn rustup_home(&self) -> Option<&Path> {
-        self.rustup_home.as_deref()
-    }
-
-    /// Host paths in bwrap mount order; a later region covering a path wins.
-    /// Allowed directories come right after the system paths, so a parent
-    /// directory never hides the scratch, output, caches or project root.
+    /// Host regions in the same precedence order as the shell mount plan.
+    /// HOME aliases are shell-only and grant no new host file-tool paths.
     pub fn regions(&self) -> Vec<BoundaryRegion> {
-        let region = |path: &Path, access| BoundaryRegion {
-            path: path.to_path_buf(),
-            access,
-        };
-        let mut regions = Vec::new();
-        regions.extend(
-            self.system
-                .iter()
-                .map(|path| region(path, PathAccess::ReadOnly)),
-        );
-        if let Some(allowed) = &self.allowed {
-            regions.extend(
-                allowed
-                    .paths
-                    .get()
-                    .iter()
-                    .map(|path| region(path, allowed.access)),
-            );
-        }
-        regions.extend(
-            self.scratch
-                .iter()
-                .map(|path| region(path, PathAccess::ReadWrite)),
-        );
-        regions.extend(
-            self.read_only
-                .iter()
-                .map(|path| region(path, PathAccess::ReadOnly)),
-        );
-        regions.extend(
-            self.current_thread_read_directories()
-                .map(|path| region(path, PathAccess::ReadOnly)),
-        );
-        regions.extend(
-            self.cache_mounts()
-                .iter()
-                .map(|mount| region(&mount.host, PathAccess::ReadOnly)),
-        );
-        regions.extend(
-            self.read_write
-                .iter()
-                .map(|path| region(path, PathAccess::ReadWrite)),
-        );
-        regions.push(region(&self.workspace_root, PathAccess::ReadWrite));
-        regions
+        self.mount_plan(self.scratch(), false)
+            .mounts
+            .into_iter()
+            .filter(|mount| mount.host_region)
+            .map(|mount| BoundaryRegion {
+                path: mount.host,
+                access: mount.access,
+            })
+            .collect()
     }
 
     /// The access this boundary grants at the canonical `path`; `None` outside it.
@@ -317,11 +281,22 @@ pub fn region_access(regions: &[BoundaryRegion], path: &Path) -> Option<PathAcce
         .map(|region| region.access)
 }
 
+fn canonical_home(home: Option<&Path>) -> Option<PathBuf> {
+    let home = home
+        .filter(|path| path.is_absolute())?
+        .canonicalize()
+        .ok()?;
+    (home.parent().is_some() && home.is_dir()).then_some(home)
+}
+
 fn tool_home(variable: &str, default: &str) -> Option<PathBuf> {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(default)))
 }
+
+#[cfg(test)]
+mod home_tests;
 
 #[cfg(test)]
 mod tests {

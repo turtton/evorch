@@ -363,10 +363,23 @@ impl Drop for Scratch {
 
 /// Keep HOME and Cargo's lock directory on disk.
 pub(super) fn ensure_layout(dir: &Path) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(dir.join("home/.cargo"))
+        .create(dir)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut fd = open(dir, flags, Mode::empty())?;
+    // Shells can replace HOME entries between commands. Never let layout
+    // preparation create host directories through such a link.
+    for name in ["home", ".cargo"] {
+        match mkdirat(&fd, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        fd = openat(&fd, name, flags, Mode::empty())?;
+    }
+    Ok(())
 }
 
 fn private_dir(path: &Path) -> io::Result<()> {

@@ -737,6 +737,68 @@ async fn allowed_directories_apply_to_the_same_executor_as_they_change() {
     }
 }
 
+#[tokio::test]
+async fn explicit_home_cache_permissions_follow_live_declarations_and_runtime_ro() {
+    // A child process gives this test a fixture HOME without mutating the
+    // process-global environment of parallel tests or exposing the real HOME.
+    if std::env::var_os("EVORCH_FILE_HOME_FIXTURE").is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "explicit_home_cache_permissions_follow_live_declarations_and_runtime_ro",
+            ])
+            .env("HOME", home.path())
+            .env("EVORCH_FILE_HOME_FIXTURE", home.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("EVORCH_FILE_HOME_FIXTURE").unwrap());
+    let layout = layout();
+    let (executor, _) = executor(&layout);
+    let cargo = home.join(".cargo");
+    let deep = cargo.join("registry/src/index/dep");
+    let locked = deep.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    let live = LivePaths::new(vec![cargo.clone()]);
+    let boundary = SandboxBoundary::new(layout.project.clone())
+        .without_tool_caches()
+        .cargo_cache(&cargo)
+        .with_allowed(live.clone(), PathAccess::ReadWrite)
+        .read_only(&locked);
+    executor.set_file_boundary(&boundary);
+    let executor = &executor;
+    let write = |path: PathBuf| async move {
+        executor
+            .execute(
+                &context(),
+                "write",
+                "cache-write",
+                json!({"path":path,"content":"sentinel"}),
+            )
+            .await
+    };
+    write(deep.join("broad.txt")).await.unwrap();
+    denial(write(locked.join("denied.txt")).await);
+    live.set(vec![deep.clone()]);
+    write(deep.join("narrow.txt")).await.unwrap();
+    denial(write(cargo.join("registry/src/sibling.txt")).await);
+    denial(write(locked.join("still-denied.txt")).await);
+    live.set(vec![]);
+    denial(write(deep.join("revoked.txt")).await);
+    assert_eq!(
+        std::fs::read_to_string(deep.join("narrow.txt")).unwrap(),
+        "sentinel"
+    );
+    assert!(!locked.join("denied.txt").exists());
+    assert_eq!(
+        boundary.access(Path::new("/tmp/home/.cargo/registry/src/index/dep/file")),
+        None
+    );
+}
+
 /// A page whose outline names one file input, `e5`, and that records the
 /// files Chromium would be given.
 #[derive(Default)]

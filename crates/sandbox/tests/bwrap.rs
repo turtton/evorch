@@ -1,5 +1,8 @@
 //! bubblewrap の実プロセス隔離を検証します。
 
+#[path = "bwrap/home_mirrors.rs"]
+mod home_mirrors;
+
 use std::{
     fs,
     net::{TcpListener, TcpStream},
