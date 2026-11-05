@@ -1217,6 +1217,7 @@ mod tests {
 
     fn blocked() -> storage::lane_delivery::QuestionCapacityBlocked {
         storage::lane_delivery::QuestionCapacityBlocked {
+            requester_run_id: "run-1".into(),
             capacity: storage::lane_delivery::QuestionCapacity::Requester,
             attempts: 3,
             first_at_ns: 1,

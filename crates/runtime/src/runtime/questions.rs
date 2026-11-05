@@ -238,6 +238,7 @@ impl AgentRuntime {
                     return Ok(
                         storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(
                             storage::lane_delivery::QuestionCapacityBlocked {
+                                requester_run_id: question.run_id.clone(),
                                 capacity,
                                 attempts: 1,
                                 first_at_ns: crate::run_store::review_time_ns(),

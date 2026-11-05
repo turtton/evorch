@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 47;
+const LATEST_SCHEMA: u32 = 48;
 
-const EXPECTED_TABLES: [&str; 86] = [
+const EXPECTED_TABLES: [&str; 90] = [
     "thread_pull_request_state",
     "thread_pull_requests",
     "pull_request_snapshots",
@@ -97,12 +97,19 @@ const EXPECTED_TABLES: [&str; 86] = [
     "messages",
     "sessions",
     "tasks",
+    "lane_closes",
+    "lane_stall_episodes",
+    "lane_verifications",
+    "lane_forward_receipts",
     "lane_question_routes",
     "lane_notifications",
     "lane_delivery_destinations",
 ];
 
-const EXPECTED_INDICES: [&str; 81] = [
+const EXPECTED_INDICES: [&str; 84] = [
+    "lane_verifications_lane",
+    "lane_closes_lane",
+    "lane_forward_receipts_lane",
     "idx_thread_pull_requests_active",
     "idx_thread_pull_requests_key",
     "idx_thread_pull_request_inheritance_pending",
@@ -1170,7 +1177,10 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     // lane-only v45 column before reconstructing v41, so each migration runs exactly once.
     connection
         .execute_batch(concat!(
-            include_str!("../undo/undo_v47.sql"),
+            concat!(
+                include_str!("../undo/undo_v48.sql"),
+                include_str!("../undo/undo_v47.sql")
+            ),
             include_str!("../undo/undo_v46.sql")
         ))
         .unwrap();

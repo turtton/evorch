@@ -67,6 +67,7 @@ pub mod eval_sample;
 pub mod host_input;
 pub mod improvement;
 pub mod inspect;
+pub mod lane_control;
 pub mod lane_delivery;
 pub mod lanes;
 mod learning;

@@ -615,6 +615,7 @@ pub(crate) fn append_report_in_transaction(
             last_activity_at_ns = max(last_activity_at_ns, ?3) WHERE lane_id = ?1",
         params![lane_id, seq_param, at_ns],
     )?;
+    crate::repo::lane_control::report_progress(tx, lane_id, lane.latest_report_seq, input, at_ns)?;
     bump_revision(tx)?;
     let report = tx.query_row(
         &format!(
