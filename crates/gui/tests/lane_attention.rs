@@ -1,6 +1,6 @@
 //! ADR 0044 Phase 2D: the lane attention list against the real runtime, storage and
 //! `RuntimeCommandSink`. Storage derives the list; the GUI only reads and shows it.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use event_bus::lane::QuestionResponder;
@@ -309,18 +309,8 @@ async fn scenario() -> Scenario {
     }
 }
 
-fn listed_rows<'a>(
-    state: &'a WorkbenchState<DemoSource>,
-    questions: &'a BTreeMap<String, event_bus::UserQuestion>,
-) -> Vec<AttentionRow<'a>> {
-    rows(state.lane_attention(), &state.sidebar().threads, questions)
-}
-
-fn pending(state: &WorkbenchState<DemoSource>) -> BTreeMap<String, event_bus::UserQuestion> {
-    state
-        .pending_user_questions()
-        .map(|q| (q.id.clone(), q.clone()))
-        .collect()
+fn listed_rows(state: &WorkbenchState<DemoSource>) -> Vec<AttentionRow<'_>> {
+    rows(state.lane_attention(), &state.sidebar().threads)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -329,8 +319,7 @@ async fn a_question_the_lead_owns_is_listed_without_an_answer_control_and_surviv
     let mut state = s.world.workbench();
     s.world.show(&mut state);
 
-    let questions = pending(&state);
-    let listed = listed_rows(&state, &questions);
+    let listed = listed_rows(&state);
     let [row] = listed.as_slice() else {
         panic!("one item expected: {:?}", state.lane_attention().items());
     };
@@ -386,17 +375,12 @@ async fn routing_to_the_user_enables_the_answer_and_answering_removes_the_item()
     let mut s = scenario().await;
     let mut state = s.world.workbench();
     s.world.show(&mut state);
-    assert!(
-        listed_rows(&state, &pending(&state))[0]
-            .answerable
-            .is_none()
-    );
+    assert!(listed_rows(&state)[0].answerable.is_none());
 
     s.world.lead_routes_to_user(s.lead, &s.question).await;
     s.world.show(&mut state);
 
-    let questions = pending(&state);
-    let listed = listed_rows(&state, &questions);
+    let listed = listed_rows(&state);
     let [row] = listed.as_slice() else {
         panic!("one item expected");
     };
@@ -488,4 +472,16 @@ async fn a_read_after_lost_events_restores_what_they_would_have_shown() {
     state.refresh_lane_attention();
     settle(&mut state);
     assert!(!lead_handles(&state.lane_attention().items()[0].kind));
+
+    // The window's event-built question projection never heard of the switch, yet the stored
+    // question the read returned lets the user answer from the list.
+    assert!(
+        state
+            .pending_user_questions()
+            .all(|q| !matches!(q.responder, Some(QuestionResponder::User))),
+        "the event projection is still behind"
+    );
+    let listed = listed_rows(&state);
+    let answerable = listed[0].answerable.expect("the answer card is restored");
+    assert_eq!(answerable.id, s.question.id);
 }

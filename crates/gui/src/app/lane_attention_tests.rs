@@ -23,11 +23,16 @@ use crate::model::lane_attention::{AttentionAction, AttentionOp, LeadRead};
 struct FakeReader {
     reads: Mutex<Vec<String>>,
     items: Mutex<Vec<LaneAttentionItem>>,
+    failing: Mutex<bool>,
 }
 
 impl FakeReader {
     fn set(&self, items: Vec<LaneAttentionItem>) {
         *self.items.lock().unwrap() = items;
+    }
+
+    fn fail(&self, failing: bool) {
+        *self.failing.lock().unwrap() = failing;
     }
 
     fn reads(&self) -> usize {
@@ -38,10 +43,14 @@ impl FakeReader {
 impl LaneAttentionReader for FakeReader {
     fn read(&self, lead_thread_id: &str) -> Result<LeadRead, String> {
         self.reads.lock().unwrap().push(lead_thread_id.to_owned());
+        if *self.failing.lock().unwrap() {
+            return Err("database busy".into());
+        }
         Ok(LeadRead {
             items: self.items.lock().unwrap().clone(),
             snapshot: LaneAttentionSnapshot::new("snapshot").unwrap(),
             truncated: false,
+            questions: Default::default(),
         })
     }
 }
@@ -172,42 +181,100 @@ fn regaining_focus_and_unreadable_history_read_again_but_a_focused_frame_does_no
     assert_eq!(reader.reads(), 3, "events were missing");
 }
 
+fn continue_lead(revision: u64) -> AttentionAction {
+    AttentionAction {
+        lead: "thread".into(),
+        item: Some(("item".into(), revision)),
+        op: AttentionOp::ContinueThread("thread".into()),
+    }
+}
+
 #[test]
-fn an_action_chosen_on_an_item_the_list_has_since_changed_runs_nothing_and_reads_again() {
+fn an_action_waits_for_a_read_made_after_the_choice_and_runs_only_if_it_still_holds() {
     let (mut workbench, reader, _dir) = workbench();
     reader.set(vec![item(3)]);
     settle(&mut workbench);
-    let stale = AttentionAction {
-        lead: "thread".into(),
-        item: Some(("item".into(), 3)),
-        op: AttentionOp::ContinueLead,
-    };
-
-    // Another window moved the cause on; this window reads it.
-    reader.set(vec![item(4)]);
-    workbench.refresh_lane_attention();
-    settle(&mut workbench);
     let reads = reader.reads();
-    workbench.apply_attention_action(&egui::Context::default(), stale);
+
+    // The item is unchanged in the ledger: nothing runs until a fresh read confirms it.
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(3));
+    assert!(
+        workbench.issued().is_empty(),
+        "not on the window's own projection"
+    );
+    settle(&mut workbench);
+
+    // One read confirmed the choice; the operation then asks for another to show its effect.
+    assert_eq!(reader.reads(), reads + 2);
+    assert!(matches!(
+        workbench.issued(),
+        [crate::model::commands::WorkbenchCommand::ContinueChat(continuation)]
+            if continuation.thread_id == "thread"
+    ));
+}
+
+#[test]
+fn another_windows_change_the_events_did_not_announce_stops_the_old_screens_action() {
+    let (mut workbench, reader, _dir) = workbench();
+    reader.set(vec![item(3)]);
+    settle(&mut workbench);
+
+    // Another window moved the cause on; no event reached this one, so its board still says 3.
+    reader.set(vec![item(4)]);
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(3));
     settle(&mut workbench);
 
     assert!(
         workbench.issued().is_empty(),
         "the old screen's choice was not run"
     );
-    assert_eq!(reader.reads(), reads + 1);
+    assert!(workbench.lane_attention().holds("thread", "item", 4));
 
-    let current = AttentionAction {
-        lead: "thread".into(),
-        item: Some(("item".into(), 4)),
-        op: AttentionOp::ContinueLead,
-    };
-    workbench.apply_attention_action(&egui::Context::default(), current);
-    assert!(matches!(
-        workbench.issued(),
-        [crate::model::commands::WorkbenchCommand::ContinueChat(continuation)]
-            if continuation.thread_id == "thread"
-    ));
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(4));
+    settle(&mut workbench);
+    assert_eq!(workbench.issued().len(), 1);
+}
+
+#[test]
+fn an_action_the_ledger_cannot_confirm_runs_nothing() {
+    let (mut workbench, reader, _dir) = workbench();
+    reader.set(vec![item(3)]);
+    settle(&mut workbench);
+
+    // The held list still says 3, but the read after the choice fails: unconfirmed.
+    reader.fail(true);
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(3));
+    settle(&mut workbench);
+
+    assert!(workbench.issued().is_empty());
+    assert_eq!(workbench.lane_attention().errors().len(), 1);
+
+    // Once the ledger answers again, the same choice is made afresh and confirmed.
+    reader.fail(false);
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(3));
+    settle(&mut workbench);
+    assert_eq!(workbench.issued().len(), 1);
+}
+
+#[test]
+fn opening_a_lane_has_no_side_effect_and_needs_no_confirmation() {
+    let (mut workbench, reader, _dir) = workbench();
+    reader.set(vec![item(3)]);
+    settle(&mut workbench);
+    let reads = reader.reads();
+
+    workbench.apply_attention_action(
+        &egui::Context::default(),
+        AttentionAction {
+            lead: "thread".into(),
+            item: Some(("item".into(), 1)),
+            op: AttentionOp::OpenLane(workspace_ui::ThreadId::new("lane-thread-1")),
+        },
+    );
+    settle(&mut workbench);
+
+    assert_eq!(reader.reads(), reads);
+    assert!(workbench.issued().is_empty());
 }
 
 #[test]

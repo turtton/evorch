@@ -359,11 +359,8 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Notifications => {
                 let focused = ui.input(|input| input.viewport().focused);
-                let rows = crate::model::lane_attention::rows(
-                    self.lane_attention,
-                    &self.sidebar.threads,
-                    self.user_questions,
-                );
+                let rows =
+                    crate::model::lane_attention::rows(self.lane_attention, &self.sidebar.threads);
                 let attention = crate::panes::lane_attention::lane_attention_section(
                     ui,
                     self.lane_attention,

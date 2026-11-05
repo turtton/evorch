@@ -14,17 +14,22 @@ use crate::panes::{
 };
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    pub(super) fn open_notification_thread(
-        &mut self,
-        ctx: &egui::Context,
-        thread_id: workspace_ui::ThreadId,
-    ) {
+    fn open_notification_thread(&mut self, ctx: &egui::Context, thread_id: workspace_ui::ThreadId) {
         let result = self.switch_thread(thread_id);
         if result.is_ok() {
             self.return_to_thread();
             self.focus_panel("agent-main");
         }
         set_sidebar_error(ctx, result.err().map(|error| error.to_string()));
+    }
+
+    /// Shows a lane's thread for the attention list; the original stays private to this module.
+    pub(super) fn open_thread_from_attention(
+        &mut self,
+        ctx: &egui::Context,
+        thread_id: workspace_ui::ThreadId,
+    ) {
+        self.open_notification_thread(ctx, thread_id);
     }
 
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {

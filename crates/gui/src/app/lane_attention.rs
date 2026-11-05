@@ -25,7 +25,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use event_bus::lane::LaneAttentionFilter;
 use event_bus::{Event, EventKind, LedgerEvent, ToolEvent};
 use storage::Database;
-use workbench_protocol::lane_attention::LaneAttentionItem;
+use workbench_protocol::lane_attention::{LaneAttentionItem, LaneAttentionKind};
 
 use super::WorkbenchState;
 use crate::model::lane_attention::{AttentionAction, AttentionBoard, AttentionOp, LeadRead, wire};
@@ -83,6 +83,7 @@ impl LaneAttentionReader for StorageLaneAttentionReader {
                 match page.next_cursor {
                     Some(_) if page_number + 1 == MAX_PAGES => {
                         return Ok(LeadRead {
+                            questions: stored_questions(&db, &items)?,
                             items,
                             snapshot: converted.snapshot,
                             truncated: true,
@@ -91,6 +92,7 @@ impl LaneAttentionReader for StorageLaneAttentionReader {
                     Some(next) => cursor = Some(next),
                     None => {
                         return Ok(LeadRead {
+                            questions: stored_questions(&db, &items)?,
                             items,
                             snapshot: converted.snapshot,
                             truncated: false,
@@ -101,6 +103,32 @@ impl LaneAttentionReader for StorageLaneAttentionReader {
         }
         Err("the attention list kept changing while it was read; refresh to try again".into())
     }
+}
+
+/// The stored form of each question the list asks the user, so the answer card never depends
+/// on an event this window may have missed.
+fn stored_questions(
+    db: &Database,
+    items: &[LaneAttentionItem],
+) -> Result<std::collections::BTreeMap<String, event_bus::UserQuestion>, String> {
+    let mut questions = std::collections::BTreeMap::new();
+    for item in items {
+        if let LaneAttentionKind::QuestionPending { question, .. } = &item.kind
+            && let Some(stored) = db
+                .user_question(question.as_str())
+                .map_err(|error| error.to_string())?
+        {
+            questions.insert(question.to_string(), stored);
+        }
+    }
+    Ok(questions)
+}
+
+/// An operation with a side effect, held until the ledger confirms its item unchanged.
+struct PendingAction {
+    action: AttentionAction,
+    /// The first read number that began after the choice; an earlier read proves nothing.
+    min_seq: u64,
 }
 
 struct Loaded {
@@ -122,6 +150,8 @@ pub(super) struct AttentionState {
     known_leads: BTreeSet<String>,
     seen_gap_epoch: u64,
     focused: bool,
+    /// Operations chosen by the user and waiting for a read made after the choice.
+    pending: Vec<PendingAction>,
     results: Receiver<Loaded>,
     sender: Sender<Loaded>,
 }
@@ -139,6 +169,7 @@ impl Default for AttentionState {
             known_leads: BTreeSet::new(),
             seen_gap_epoch: 0,
             focused: true,
+            pending: Vec::new(),
             results,
             sender,
         }
@@ -224,9 +255,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             if self.attention.dirty.remove(&loaded.lead) {
                 self.attention.queued.insert(loaded.lead.clone());
             }
+            let succeeded = loaded.result.is_ok();
             self.attention
                 .board
                 .apply(&loaded.lead, loaded.seq, loaded.result);
+            self.settle_pending_actions(&loaded.lead, loaded.seq, succeeded);
         }
         for lead in self.sidebar_leads() {
             if self.attention.known_leads.insert(lead.clone()) {
@@ -274,38 +307,82 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// Runs what the user chose on an item. Everything but a refresh needs the item the
-    /// latest read still holds, unchanged: a screen older than that reads again instead.
+    /// Takes what the user chose on an item. Opening a lane has no side effect and runs at once.
+    /// Every other operation waits for a read of the ledger made after the choice, and runs only
+    /// if that read still reports the item at the revision the screen showed: the window's own
+    /// projection can be older than another window's change, so it never decides alone.
     pub(super) fn apply_attention_action(&mut self, ctx: &egui::Context, action: AttentionAction) {
+        match &action.op {
+            AttentionOp::Refresh => {
+                if action.lead.is_empty() {
+                    self.refresh_lane_attention();
+                } else {
+                    self.attention.request(&action.lead);
+                }
+            }
+            AttentionOp::OpenLane(thread) => {
+                self.open_thread_from_attention(ctx, thread.clone());
+            }
+            AttentionOp::ContinueThread(_) | AttentionOp::ResumeDelivery => {
+                let held = action.item.as_ref().is_some_and(|(id, revision)| {
+                    self.attention.board.holds(&action.lead, id, *revision)
+                });
+                if !held {
+                    self.push_notice("That item changed; the list was read again.");
+                    self.attention.request(&action.lead);
+                    return;
+                }
+                if self
+                    .attention
+                    .pending
+                    .iter()
+                    .any(|pending| pending.action == action)
+                {
+                    return;
+                }
+                let lead = action.lead.clone();
+                self.attention.pending.push(PendingAction {
+                    action,
+                    min_seq: self.attention.next_seq + 1,
+                });
+                self.attention.request(&lead);
+            }
+        }
+    }
+
+    /// Runs or drops the held operations of `lead` that read number `seq` can decide.
+    fn settle_pending_actions(&mut self, lead: &str, seq: u64, succeeded: bool) {
         use crate::panes::agent::LaneAction;
-        if action.op == AttentionOp::Refresh {
-            if action.lead.is_empty() {
-                self.refresh_lane_attention();
-            } else {
-                self.attention.request(&action.lead);
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.attention.pending)
+            .into_iter()
+            .partition(|pending| pending.action.lead == lead && seq >= pending.min_seq);
+        self.attention.pending = waiting;
+        for pending in ready {
+            let PendingAction { action, min_seq } = pending;
+            let confirmed = succeeded
+                && action.item.as_ref().is_some_and(|(id, revision)| {
+                    self.attention
+                        .board
+                        .confirms(&action.lead, id, *revision, min_seq)
+                });
+            if !confirmed {
+                self.push_notice(if succeeded {
+                    "That item changed; nothing was done."
+                } else {
+                    "The lane list could not be confirmed; nothing was done."
+                });
+                continue;
             }
-            return;
-        }
-        let current = action
-            .item
-            .as_ref()
-            .is_some_and(|(id, revision)| self.attention.board.holds(&action.lead, id, *revision));
-        if !current {
-            self.push_notice("That item changed; the list was read again.");
-            self.attention.request(&action.lead);
-            return;
-        }
-        let lead = action.lead.clone();
-        match action.op {
-            AttentionOp::OpenLane(thread) => self.open_notification_thread(ctx, thread),
-            AttentionOp::ContinueLead => {
-                self.apply_lane_action(LaneAction::ContinueLead { lead: lead.clone() })
+            match action.op {
+                AttentionOp::ContinueThread(thread) => {
+                    self.apply_lane_action(LaneAction::ContinueLead { lead: thread });
+                }
+                AttentionOp::ResumeDelivery => {
+                    self.apply_lane_action(LaneAction::ResumeDelivery { lead: action.lead });
+                }
+                AttentionOp::OpenLane(_) | AttentionOp::Refresh => {}
             }
-            AttentionOp::ResumeDelivery => {
-                self.apply_lane_action(LaneAction::ResumeDelivery { lead: lead.clone() })
-            }
-            AttentionOp::Refresh => {}
+            self.attention.request(lead);
         }
-        self.attention.request(&lead);
     }
 }

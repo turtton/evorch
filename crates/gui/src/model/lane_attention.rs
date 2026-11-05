@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use event_bus::UserQuestion;
+use event_bus::lane::QuestionResponder;
 use workbench_protocol::lane_attention::{
     LaneAttentionItem, LaneAttentionKind, LaneAttentionSnapshot, LaneQuestionResponder,
 };
@@ -30,12 +31,17 @@ pub struct LeadRead {
     pub snapshot: LaneAttentionSnapshot,
     /// More items exist than the read was willing to fetch.
     pub truncated: bool,
+    /// The stored form of each question a listed item asks the user, read with the list. The
+    /// answer card is drawn from these, never from events a window may have missed.
+    pub questions: BTreeMap<String, UserQuestion>,
 }
 
 #[derive(Debug, Default)]
 struct LeadBoard {
     /// The number of the newest read applied.
     applied: u64,
+    /// The number of the newest read that succeeded.
+    read_seq: u64,
     read: Option<LeadRead>,
     /// Why the newest read failed; the previous list stays shown beside it.
     error: Option<String>,
@@ -57,6 +63,7 @@ impl AttentionBoard {
         board.applied = seq;
         match result {
             Ok(read) => {
+                board.read_seq = seq;
                 let changed = board.read.as_ref() != Some(&read) || board.error.is_some();
                 board.read = Some(read);
                 board.error = None;
@@ -96,6 +103,25 @@ impl AttentionBoard {
         self.items().is_empty()
     }
 
+    /// Whether a read numbered `min_seq` or later succeeded and holds `id` at `revision`: the
+    /// ledger, asked after the choice was made, still reports the item unchanged.
+    #[must_use]
+    pub fn confirms(&self, lead: &str, id: &str, revision: u64, min_seq: u64) -> bool {
+        self.leads
+            .get(lead)
+            .is_some_and(|board| board.read_seq >= min_seq)
+            && self.holds(lead, id, revision)
+    }
+
+    /// The stored question the latest read of any lead returned for `id`.
+    #[must_use]
+    pub fn question(&self, id: &str) -> Option<&UserQuestion> {
+        self.leads
+            .values()
+            .filter_map(|board| board.read.as_ref())
+            .find_map(|read| read.questions.get(id))
+    }
+
     /// Whether the latest answer for `lead` still holds `id` at `revision`.
     #[must_use]
     pub fn holds(&self, lead: &str, id: &str, revision: u64) -> bool {
@@ -127,8 +153,19 @@ impl AttentionBoard {
     }
 }
 
-/// An item with what the pane needs to draw it. Built from the sidebar and the question
-/// projection at draw time; it holds no state.
+/// Where a held-notice item's destination thread stands to its lead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// The lead itself.
+    Lead,
+    /// A lane thread the sidebar shows.
+    Lane(ThreadId),
+    /// Another thread, or none: no operation is offered for it.
+    Unknown,
+}
+
+/// An item with what the pane needs to draw it. Built from the sidebar and the stored
+/// questions of the latest read at draw time; it holds no state.
 #[derive(Debug)]
 pub struct AttentionRow<'a> {
     pub item: &'a LaneAttentionItem,
@@ -138,6 +175,8 @@ pub struct AttentionRow<'a> {
     pub lane_thread: Option<ThreadId>,
     /// The question to answer inline: only for a question the ledger says the user answers.
     pub answerable: Option<&'a UserQuestion>,
+    /// For `StopPending` and `RestoreFailed`: whose delivery is held.
+    pub destination: Destination,
 }
 
 /// Whether the ledger leaves this question to the lead: no answer control may be drawn.
@@ -153,11 +192,7 @@ pub const fn lead_handles(kind: &LaneAttentionKind) -> bool {
 }
 
 #[must_use]
-pub fn rows<'a>(
-    board: &'a AttentionBoard,
-    threads: &[ThreadRecord],
-    questions: &'a BTreeMap<String, UserQuestion>,
-) -> Vec<AttentionRow<'a>> {
+pub fn rows<'a>(board: &'a AttentionBoard, threads: &[ThreadRecord]) -> Vec<AttentionRow<'a>> {
     let title_of = |thread: &str| {
         threads
             .iter()
@@ -179,10 +214,36 @@ pub fn rows<'a>(
                     question,
                     responder: LaneQuestionResponder::User,
                     ..
-                } if lane_record.is_some() => questions
-                    .get(question.as_str())
-                    .filter(|question| question.answer.is_none() && question.is_user_visible()),
+                } if lane_record.is_some() => {
+                    board.question(question.as_str()).filter(|question| {
+                        question.answer.is_none()
+                            && matches!(question.responder, Some(QuestionResponder::User))
+                    })
+                }
                 _ => None,
+            };
+            let destination = match &item.kind {
+                LaneAttentionKind::StopPending {
+                    destination_thread, ..
+                }
+                | LaneAttentionKind::RestoreFailed {
+                    destination_thread, ..
+                } if destination_thread == &item.lead_thread => Destination::Lead,
+                LaneAttentionKind::StopPending {
+                    destination_thread, ..
+                }
+                | LaneAttentionKind::RestoreFailed {
+                    destination_thread, ..
+                } => threads
+                    .iter()
+                    .find(|thread| {
+                        thread.lane.is_some()
+                            && thread.id.to_string() == destination_thread.as_str()
+                    })
+                    .map_or(Destination::Unknown, |thread| {
+                        Destination::Lane(thread.id.clone())
+                    }),
+                _ => Destination::Unknown,
             };
             AttentionRow {
                 item,
@@ -193,6 +254,7 @@ pub fn rows<'a>(
                 lead_title: title_of(item.lead_thread.as_str()),
                 lane_thread: lane_record.map(|thread| thread.id.clone()),
                 answerable,
+                destination,
             }
         })
         .collect()
@@ -203,8 +265,9 @@ pub fn rows<'a>(
 pub enum AttentionOp {
     /// Show the lane's thread.
     OpenLane(ThreadId),
-    /// Continue the lead's conversation (the user's own path; held notices follow).
-    ContinueLead,
+    /// Continue a thread's conversation (the user's own path; its held notices follow): the
+    /// lead, or the lane whose delivery is held.
+    ContinueThread(String),
     /// The user's explicit resume of the lead's held lane notices.
     ResumeDelivery,
     /// Read the lead's list again.
@@ -254,6 +317,7 @@ mod tests {
             items,
             snapshot: LaneAttentionSnapshot::new("snapshot").unwrap(),
             truncated: false,
+            questions: BTreeMap::new(),
         }
     }
 
@@ -341,20 +405,8 @@ mod tests {
         assert!(!lead_handles(&question(LaneQuestionResponder::User)));
         assert!(!lead_handles(&blocked()));
 
-        let mut board = AttentionBoard::default();
-        board.apply(
-            "lead",
-            1,
-            Ok(read(vec![item(
-                "q",
-                1,
-                1,
-                question(LaneQuestionResponder::User),
-            )])),
-        );
-        let mut questions = BTreeMap::new();
-        let mut asked = UserQuestion {
-            responder: Some(event_bus::lane::QuestionResponder::User),
+        let asked = |responder, answer: Option<&str>| UserQuestion {
+            responder: Some(responder),
             routing_revision: 1,
             management_revision: Some(1),
             id: "q".into(),
@@ -365,10 +417,16 @@ mod tests {
             title: "scope".into(),
             options: vec![],
             blocking: false,
-            answer: None,
+            answer: answer.map(str::to_owned),
             answer_origin: None,
         };
-        questions.insert("q".to_owned(), asked.clone());
+        let board_with = |stored: Option<UserQuestion>| {
+            let mut board = AttentionBoard::default();
+            let mut listed = read(vec![item("q", 1, 1, question(LaneQuestionResponder::User))]);
+            listed.questions = stored.into_iter().map(|q| (q.id.clone(), q)).collect();
+            board.apply("lead", 1, Ok(listed));
+            board
+        };
         let mut lane = ThreadRecord::new(
             ThreadId::new("lane-thread"),
             workspace_ui::ProjectId::new("p"),
@@ -381,31 +439,39 @@ mod tests {
             policy: workspace_ui::LanePolicy::Attached,
             management_revision: 1,
         });
+        let user = || asked(QuestionResponder::User, None);
 
-        // The ledger says User, the lane is known and the projection agrees: answerable.
+        // The ledger says User and the stored question agrees: answerable, with no event involved.
+        let board = board_with(Some(user()));
         assert!(
-            rows(&board, std::slice::from_ref(&lane), &questions)[0]
+            rows(&board, std::slice::from_ref(&lane))[0]
                 .answerable
                 .is_some()
         );
         // The lane's thread is unknown: only the lane id is shown and nothing is answerable.
-        assert!(rows(&board, &[], &questions)[0].answerable.is_none());
-        // The projection still says the lead owns it (event not yet seen): not answerable.
-        asked.responder = Some(event_bus::lane::QuestionResponder::Lead {
-            thread_id: "lead".into(),
-        });
-        questions.insert("q".to_owned(), asked.clone());
+        assert!(rows(&board, &[])[0].answerable.is_none());
+        // The stored question still has the lead as responder: not answerable.
+        let board = board_with(Some(asked(
+            QuestionResponder::Lead {
+                thread_id: "lead".into(),
+            },
+            None,
+        )));
         assert!(
-            rows(&board, std::slice::from_ref(&lane), &questions)[0]
+            rows(&board, std::slice::from_ref(&lane))[0]
                 .answerable
                 .is_none()
         );
-        // Already answered: nothing to answer.
-        asked.responder = Some(event_bus::lane::QuestionResponder::User);
-        asked.answer = Some("done".into());
-        questions.insert("q".to_owned(), asked);
+        // Already answered, or not stored at all: nothing to answer.
+        let board = board_with(Some(asked(QuestionResponder::User, Some("done"))));
         assert!(
-            rows(&board, std::slice::from_ref(&lane), &questions)[0]
+            rows(&board, std::slice::from_ref(&lane))[0]
+                .answerable
+                .is_none()
+        );
+        let board = board_with(None);
+        assert!(
+            rows(&board, std::slice::from_ref(&lane))[0]
                 .answerable
                 .is_none()
         );

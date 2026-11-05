@@ -17,7 +17,7 @@ use workbench_protocol::lane_attention::{
 };
 
 use crate::model::lane_attention::{
-    AttentionAction, AttentionBoard, AttentionOp, AttentionRow, LEAD_HANDLING_LABEL,
+    AttentionAction, AttentionBoard, AttentionOp, AttentionRow, Destination, LEAD_HANDLING_LABEL,
 };
 use crate::panes::requests::{ConversationRequests, RequestAction};
 use crate::theme::text::muted;
@@ -96,7 +96,7 @@ pub fn kind_detail(kind: &LaneAttentionKind) -> Option<String> {
             }
         ),
         LaneAttentionKind::RestoreFailed { .. } => {
-            "The lead could not be brought back to receive this lane's notices.".to_owned()
+            "A held notice could not bring its destination back.".to_owned()
         }
         LaneAttentionKind::QuestionPending { .. }
         | LaneAttentionKind::Blocked { .. }
@@ -224,27 +224,41 @@ fn row_card(
                     op = Some(AttentionOp::OpenLane(thread.clone()));
                 }
                 // (button label, hover text, what it does): only operations that exist today.
+                let lead = item.lead_thread.to_string();
+                let held_thread = |label_lead: &'static str| match &row.destination {
+                    Destination::Lead => Some((
+                        label_lead,
+                        "Resume the lead's conversation; held notices are then delivered",
+                        AttentionOp::ContinueThread(lead.clone()),
+                    )),
+                    Destination::Lane(thread) => Some((
+                        "Continue lane",
+                        "Resume this lane's conversation; held notices are then delivered",
+                        AttentionOp::ContinueThread(thread.to_string()),
+                    )),
+                    Destination::Unknown => None,
+                };
                 let offered = match &item.kind {
                     LaneAttentionKind::Blocked { .. }
                     | LaneAttentionKind::Failed { .. }
-                    | LaneAttentionKind::RestoreFailed { .. }
                     | LaneAttentionKind::Stall { .. }
                         if allows(LaneAttentionAction::Continue) =>
                     {
                         Some((
                             "Continue lead",
                             "Resume the lead's conversation",
-                            AttentionOp::ContinueLead,
+                            AttentionOp::ContinueThread(lead.clone()),
                         ))
+                    }
+                    LaneAttentionKind::RestoreFailed { .. }
+                        if allows(LaneAttentionAction::Continue) =>
+                    {
+                        held_thread("Continue lead")
                     }
                     LaneAttentionKind::StopPending { .. }
                         if allows(LaneAttentionAction::Resume) =>
                     {
-                        Some((
-                            "Continue lead",
-                            "Resume the lead's conversation; held notices are then delivered",
-                            AttentionOp::ContinueLead,
-                        ))
+                        held_thread("Continue lead")
                     }
                     LaneAttentionKind::WakeSuppressed { .. }
                         if allows(LaneAttentionAction::Resume) =>
@@ -350,6 +364,7 @@ mod tests {
                 items,
                 snapshot: LaneAttentionSnapshot::new("s").unwrap(),
                 truncated: false,
+                questions: question.into_iter().map(|q| (q.id.clone(), q)).collect(),
             }),
         );
         let mut threads = vec![workspace_ui::ThreadRecord::new(
@@ -364,14 +379,12 @@ mod tests {
             policy: workspace_ui::LanePolicy::Attached,
             management_revision: 1,
         });
-        let questions: BTreeMap<String, event_bus::UserQuestion> =
-            question.into_iter().map(|q| (q.id.clone(), q)).collect();
         let mut drafts = BTreeMap::from([("q".to_owned(), "narrow".to_owned())]);
         let harness = Harness::builder()
             .with_size(egui::vec2(640.0, 600.0))
             .build_ui(move |ui| {
                 crate::theme::install(ui.ctx());
-                let rows = crate::model::lane_attention::rows(&board, &threads, &questions);
+                let rows = crate::model::lane_attention::rows(&board, &threads);
                 let output = lane_attention_section(ui, &board, &rows, &mut drafts);
                 if output.action.is_some() || output.request.is_some() {
                     *sink.borrow_mut() = output;
@@ -461,7 +474,7 @@ mod tests {
         harness.run_steps(2);
         assert_eq!(
             captured.borrow().action.as_ref().unwrap().op,
-            AttentionOp::ContinueLead
+            AttentionOp::ContinueThread("lead".into())
         );
     }
 
@@ -502,7 +515,7 @@ mod tests {
         harness.run_steps(2);
         assert_eq!(
             captured.borrow().action.as_ref().unwrap().op,
-            AttentionOp::ContinueLead
+            AttentionOp::ContinueThread("lead".into())
         );
     }
 
@@ -531,6 +544,70 @@ mod tests {
             assert!(harness.query_by_label(label).is_none(), "{label}");
         }
         assert_eq!(*captured.borrow(), AttentionPaneOutput::default());
+    }
+
+    #[test]
+    fn held_notices_are_continued_on_the_thread_whose_delivery_is_held() {
+        let stop = |destination: &str| {
+            item(
+                "s",
+                LaneAttentionKind::StopPending {
+                    destination_thread: WireThread::new(destination).unwrap(),
+                    pending_count: 1,
+                },
+                &[LaneAttentionAction::Resume],
+            )
+        };
+
+        // The lead was stopped: the lead is continued.
+        let (mut harness, captured) = draw(vec![stop("lead")], None);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Continue lane").is_none());
+        harness.get_by_label("Continue lead").click();
+        harness.run_steps(2);
+        assert_eq!(
+            captured.borrow().action.as_ref().unwrap().op,
+            AttentionOp::ContinueThread("lead".into())
+        );
+
+        // The lane was stopped: the lane is continued, never the lead.
+        let (mut harness, captured) = draw(vec![stop("lane-thread")], None);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Continue lead").is_none());
+        harness.get_by_label("Continue lane").click();
+        harness.run_steps(2);
+        assert_eq!(
+            captured.borrow().action.as_ref().unwrap().op,
+            AttentionOp::ContinueThread("lane-thread".into())
+        );
+
+        // A thread the window does not show as a lane or the lead gets no operation.
+        let (mut harness, captured) = draw(vec![stop("somewhere-else")], None);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Continue lead").is_none());
+        assert!(harness.query_by_label("Continue lane").is_none());
+        assert_eq!(*captured.borrow(), AttentionPaneOutput::default());
+    }
+
+    #[test]
+    fn a_restore_failure_offers_the_continue_of_its_own_destination() {
+        let failed = item(
+            "r",
+            LaneAttentionKind::RestoreFailed {
+                destination_thread: WireThread::new("lane-thread").unwrap(),
+                failure_ref: "lane_delivery:lane-thread".into(),
+            },
+            &[LaneAttentionAction::Inspect, LaneAttentionAction::Continue],
+        );
+        let (mut harness, captured) = draw(vec![failed], None);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("Continue lead").is_none());
+        harness.get_by_label("Continue lane").click();
+        harness.run_steps(2);
+        assert_eq!(
+            captured.borrow().action.as_ref().unwrap().op,
+            AttentionOp::ContinueThread("lane-thread".into())
+        );
     }
 
     #[test]
