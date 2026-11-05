@@ -18,6 +18,7 @@ fn fixture() -> (tempfile::TempDir, Storage, Database, StorageConfig) {
 
 fn receipt(id: &str, run: &str, status: HostInputStatus) -> HostInputReceipt {
     HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: id.into(),
         run_id: run.into(),
         root_run_id: run.into(),

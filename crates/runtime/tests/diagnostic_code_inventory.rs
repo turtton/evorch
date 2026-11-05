@@ -9,7 +9,7 @@ use event_bus::event::diagnostic_codes;
 use regex::Regex;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

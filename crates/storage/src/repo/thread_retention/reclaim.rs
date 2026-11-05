@@ -906,8 +906,9 @@ fn advance_thread(
 }
 
 /// The tables keyed by thread, one table per `table_idx`: 0 the lane ledger rows, 1 the
-/// captured untracked files, 2 the start state. The lane rows come first, so a capture
-/// above the step budget (left to the exclusive phase) never makes a thread skip them.
+/// pull request rows, 2 the captured untracked files, 3 the start state. The lane and pull
+/// request rows come first, so a capture above the step budget (left to the exclusive
+/// phase) never makes a thread skip them.
 fn thread_tables(
     tx: &Transaction<'_>,
     family: &str,
@@ -936,7 +937,22 @@ fn thread_tables(
                 }
             }
         }
-        1 => match take_untracked(tx, &thread, false)? {
+        1 => {
+            // The same holds for the pull request tables (migration 46).
+            let pull_requests: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'thread_pull_requests')",
+                [],
+                |row| row.get(0),
+            )?;
+            if pull_requests {
+                work = take_pull_request_rows(tx, &thread)?;
+            }
+            if work.rows == 0 {
+                cursor.table_idx = 2;
+            }
+        }
+        2 => match take_untracked(tx, &thread, false)? {
             Untracked::Taken(taken) => work = taken,
             // A captured file above the step's budget cannot be deleted by a bounded
             // step. The state row owns the untracked rows (ON DELETE CASCADE), so the
@@ -946,7 +962,7 @@ fn thread_tables(
                 register_oversized(tx, family, "thread_start_states", &thread, size)?;
                 advance_thread(tx, family, cursor, &thread)?;
             }
-            Untracked::None => cursor.table_idx = 2,
+            Untracked::None => cursor.table_idx = 3,
         },
         _ => {
             let stored: Option<u64> = tx
@@ -979,12 +995,79 @@ fn thread_tables(
     Ok(work)
 }
 
+/// Works off the pull request rows of `thread`, at most [`RECLAIM_ROWS`] per call and in
+/// this order: first the cached facts of the snapshots only this thread references are
+/// cleared (the thread's own rows still name them), then its links, candidates,
+/// inheritance row and lifecycle state are deleted. Returns no rows when nothing is left.
+fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
+    let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    let cleared = super::super::pull_requests::snapshots::clear_unshared(tx, thread, limit)?;
+    if cleared > 0 {
+        return Ok(Work {
+            rows: cleared,
+            ..Work::default()
+        });
+    }
+    for sql in [
+        "DELETE FROM thread_pull_requests WHERE link_id IN \
+         (SELECT link_id FROM thread_pull_requests WHERE thread_id = ?1 LIMIT ?2)",
+        "DELETE FROM thread_pull_request_candidates WHERE candidate_id IN \
+         (SELECT candidate_id FROM thread_pull_request_candidates WHERE thread_id = ?1 LIMIT ?2)",
+        "DELETE FROM thread_pull_request_inheritance WHERE child_thread_id = ?1 AND ?2 > 0",
+        "DELETE FROM thread_pull_request_state WHERE thread_id = ?1 AND ?2 > 0",
+    ] {
+        let deleted = tx.execute(sql, params![thread, limit])?;
+        if deleted > 0 {
+            return Ok(Work {
+                rows: deleted as u64,
+                ..Work::default()
+            });
+        }
+    }
+    Ok(Work::default())
+}
+
 /// Deletes up to [`RECLAIM_ROWS`] rows of the lane ledger of `thread`: reports first,
 /// then delivery keys, then the lane row itself once nothing else is left. Returns no
 /// rows when the thread has no lane (any more). None of these tables is fenced against
 /// DELETE, so reclaim always progresses, and each step is bounded.
 fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    // New Phase 1c tables do not exist during older-format offline conversion.
+    let delivery_tables: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_notifications')",
+        [],
+        |r| r.get(0),
+    )?;
+    if delivery_tables {
+        for (table, predicate, bytes_expr) in [
+            (
+                "lane_question_routes",
+                "requester_thread_id=?1 OR responder_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(operation_json),0)",
+            ),
+            (
+                "lane_notifications",
+                "source_thread_id=?1 OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "OCTET_LENGTH(payload)",
+            ),
+            (
+                "lane_delivery_destinations",
+                "thread_id=?1",
+                "COALESCE(OCTET_LENGTH(owner_json),0)",
+            ),
+        ] {
+            let (rows, bytes): (u64,u64)=tx.query_row(&format!("SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT {bytes_expr} AS bytes FROM {table} WHERE {predicate} LIMIT ?2)"),params![thread,limit],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            if rows > 0 {
+                tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"),params![thread,limit])?;
+                return Ok(Work {
+                    rows,
+                    bytes,
+                    ..Work::default()
+                });
+            }
+        }
+    }
     let (rows, bytes): (u64, u64) = tx.query_row(
         "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(summary) + OCTET_LENGTH(artifact_refs_json) \
             + OCTET_LENGTH(question_refs_json)), 0) FROM \
@@ -1649,4 +1732,67 @@ pub(crate) fn jobs_in_state(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod lane_delivery_tests {
+    use super::*;
+    #[test]
+    fn deleting_a_destination_reclaims_cross_thread_delivery_rows_in_bounded_steps() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::migrations::apply_migrations(&conn).unwrap();
+        crate::repo::lanes::create(
+            &conn,
+            &crate::lanes::NewLane {
+                lane_id: "lane".into(),
+                thread_id: "source".into(),
+                origin_thread_id: "destination".into(),
+                origin_run_id: "root".into(),
+                creation_key: "open".into(),
+                brief: crate::lanes::LaneBrief {
+                    objective: "task".into(),
+                    inputs: vec![],
+                    deliverables: vec![],
+                    acceptance_criteria: vec!["test".into()],
+                    constraints: vec![],
+                    workspace: Default::default(),
+                    report_policy: crate::lanes::LanePolicy::Attached,
+                },
+                start_seed: "seed".into(),
+                project_id: None,
+                project_root: None,
+                title: None,
+                at_ns: 1,
+            },
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO user_questions(id,run_id,root_run_id,root_name,payload) VALUES ('q','r','r','root','{}');
+            INSERT INTO lane_question_routes(question_id,lane_id,requester_run_id,requester_root_run_id,requester_thread_id,responder_thread_id,management_revision,routing_revision,payload) VALUES ('q','lane','r','r','source','destination',1,1,'{}');
+            INSERT INTO lane_notifications(notification_id,lane_id,management_revision,event_kind,semantic_key,source_thread_id,destination_thread_id,payload) VALUES ('n','lane',1,'ready','sha','source','destination','{}');
+            INSERT INTO lane_delivery_destinations(thread_id) VALUES ('destination');").unwrap();
+        let mut removed = 0;
+        loop {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let work = take_lane_rows(&tx, "destination").unwrap();
+            assert!(work.rows <= RECLAIM_ROWS as u64);
+            removed += work.rows;
+            tx.commit().unwrap();
+            if work.rows == 0 {
+                break;
+            }
+        }
+        assert_eq!(removed, 3);
+        for table in [
+            "lane_question_routes",
+            "lane_notifications",
+            "lane_delivery_destinations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        assert!(crate::repo::lanes::get(&conn, "lane").unwrap().is_some());
+    }
 }

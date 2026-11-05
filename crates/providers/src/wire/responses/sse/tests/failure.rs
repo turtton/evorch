@@ -279,13 +279,10 @@ fn response_failed_without_message_is_reported_by_code() {
 #[test]
 fn failure_fixtures_classify_per_dialect() {
     let rate_limit =
-        include_str!("../../../../../tests/fixtures/codex/responses_failed_rate_limit_headers.sse");
-    let usage =
-        include_str!("../../../../../tests/fixtures/codex/responses_failed_usage_limit.sse");
-    let context =
-        include_str!("../../../../../tests/fixtures/codex/responses_failed_context_length.sse");
-    let nested =
-        include_str!("../../../../../tests/fixtures/codex/responses_failed_nested_error.sse");
+        include_str!("../../../../../fixtures/codex/responses_failed_rate_limit_headers.sse");
+    let usage = include_str!("../../../../../fixtures/codex/responses_failed_usage_limit.sse");
+    let context = include_str!("../../../../../fixtures/codex/responses_failed_context_length.sse");
+    let nested = include_str!("../../../../../fixtures/codex/responses_failed_nested_error.sse");
     let run = |dialect, fixture| interpret_all_in(dialect, frames(fixture)).unwrap_err();
 
     assert_eq!(

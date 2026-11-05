@@ -1,0 +1,11 @@
+{
+  "thread_summary": {
+    "id": "thr-1",
+    "lead_thread": "thr-lead",
+    "project": "proj-1",
+    "revision": "12",
+    "state": "waiting_for_user",
+    "title": "Fix login",
+    "updated_at": "1793799134000"
+  }
+}

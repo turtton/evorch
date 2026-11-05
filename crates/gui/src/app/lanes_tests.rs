@@ -91,6 +91,8 @@ fn record(n: u32, lead: Option<&str>, policy: LedgerPolicy, revision: u64) -> La
 
 fn report(n: u32, seq: u64, status: LaneStatus) -> LaneReport {
     LaneReport {
+        artifact_revision: None,
+        failure_episode: None,
         lane_id: format!("lane-{n}"),
         report_seq: seq,
         status,

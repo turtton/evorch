@@ -31,7 +31,7 @@ fn canonical_response(contents: &str) -> Result<crate::message::ChatResponse, Pr
 #[test]
 fn interpreter_emits_text_deltas_and_completion() {
     let frames = fixture_frames(include_str!(
-        "../../../../tests/fixtures/codex/responses_success.sse"
+        "../../../../fixtures/codex/responses_success.sse"
     ));
     let mut interpreter = CodexStreamInterpreter::new();
     let mut events = Vec::new();
@@ -73,7 +73,7 @@ fn interpreter_emits_text_deltas_and_completion() {
 #[test]
 fn interpreter_emits_tool_call_events() {
     let frames = fixture_frames(include_str!(
-        "../../../../tests/fixtures/codex/responses_tool_call.sse"
+        "../../../../fixtures/codex/responses_tool_call.sse"
     ));
     let mut interpreter = CodexStreamInterpreter::new();
     let mut accumulator = StreamAccumulator::default();
@@ -105,7 +105,7 @@ fn interpreter_emits_tool_call_events() {
 #[test]
 fn interpreter_recovers_parallel_final_arguments() {
     let frames = fixture_frames(include_str!(
-        "../../../../tests/fixtures/codex/responses_parallel_tool_calls.sse"
+        "../../../../fixtures/codex/responses_parallel_tool_calls.sse"
     ));
     let mut interpreter = CodexStreamInterpreter::new();
     let mut accumulator = StreamAccumulator::default();
@@ -142,8 +142,7 @@ fn interpreter_recovers_parallel_final_arguments() {
 // Then: arguments.done and output_item.done independently recover both calls
 #[test]
 fn either_final_event_recovers_missing_arguments() {
-    let fixture =
-        include_str!("../../../../tests/fixtures/codex/responses_parallel_tool_calls.sse");
+    let fixture = include_str!("../../../../fixtures/codex/responses_parallel_tool_calls.sse");
     for omitted in [
         "response.function_call_arguments.done",
         "response.output_item.done",
@@ -179,7 +178,7 @@ fn either_final_event_recovers_missing_arguments() {
 // Then: the initial snapshot is preserved and final snapshots are not duplicated
 #[test]
 fn added_item_arguments_are_preserved() {
-    let fixture = include_str!("../../../../tests/fixtures/codex/responses_tool_call.sse");
+    let fixture = include_str!("../../../../fixtures/codex/responses_tool_call.sse");
     let contents = fixture
         .split("\n\n")
         .filter(|frame| !frame.starts_with("event: response.function_call_arguments.delta\n"))
@@ -210,7 +209,7 @@ fn added_item_arguments_are_preserved() {
 // Then: fail closed without leaking either argument body in the diagnostic
 #[test]
 fn conflicting_final_arguments_are_rejected() {
-    let fixture = include_str!("../../../../tests/fixtures/codex/responses_tool_call.sse");
+    let fixture = include_str!("../../../../fixtures/codex/responses_tool_call.sse");
     for final_event in [
         "response.function_call_arguments.done",
         "response.output_item.done",
@@ -265,7 +264,7 @@ fn non_function_output_items_are_ignored() {
 #[test]
 fn interpreter_maps_response_failed_to_error() {
     let frames = fixture_frames(include_str!(
-        "../../../../tests/fixtures/codex/responses_failed.sse"
+        "../../../../fixtures/codex/responses_failed.sse"
     ));
     let mut interpreter = CodexStreamInterpreter::new();
 

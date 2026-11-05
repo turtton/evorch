@@ -1,7 +1,7 @@
 //! evorch専用の作成ガイドをrepo skillとして検証し、汎用builtinと分離する。
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use event_bus::EventBus;
 use runtime::skill::{
@@ -11,15 +11,24 @@ use runtime::skill::{
 use runtime::{Role, SkillCatalogSource};
 
 const NAME: &str = "evorch-builtin-skill-authoring";
-const GUIDE: &str = include_str!("../../../.evorch/skills/evorch-builtin-skill-authoring/SKILL.md");
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("../..")
 }
+
+static GUIDE: LazyLock<String> = LazyLock::new(|| {
+    std::fs::read_to_string(
+        repo_root()
+            .join(".evorch/skills")
+            .join(NAME)
+            .join("SKILL.md"),
+    )
+    .expect("repo-scope builtin skill guide")
+});
 
 #[test]
 fn project_guide_has_valid_frontmatter_and_loads_from_repo_scope() {
-    let frontmatter = parse_and_validate(GUIDE, NAME).unwrap();
+    let frontmatter = parse_and_validate(&GUIDE, NAME).unwrap();
     assert_eq!(frontmatter.name, NAME);
     assert!(frontmatter.description.contains("evorch開発専用"));
     let registry = discover_skills(&[(SkillScope::Repo, repo_root().join(".evorch/skills"))]);
@@ -29,7 +38,7 @@ fn project_guide_has_valid_frontmatter_and_loads_from_repo_scope() {
         .expect("project guide must be discovered");
     assert_eq!(entry.scope, SkillScope::Repo);
     assert!(matches!(entry.source, SkillSource::Filesystem { .. }));
-    let (_, body) = split_frontmatter(GUIDE).unwrap();
+    let (_, body) = split_frontmatter(&GUIDE).unwrap();
     assert_eq!(registry.load_body(NAME).unwrap(), body);
     for path in [
         "crates/runtime/src/skill/builtin.rs",
@@ -78,7 +87,7 @@ fn source_publishes_project_metadata_without_loading_guide_body() {
         .unwrap();
     assert!(prompt.contains("- evorch-builtin-skill-authoring:"));
     assert!(!prompt.contains("# evorch: 組み込みskillの作成"));
-    let (_, body) = split_frontmatter(GUIDE).unwrap();
+    let (_, body) = split_frontmatter(&GUIDE).unwrap();
     assert_eq!(snapshot.registry.load_body(NAME).unwrap(), body);
 }
 

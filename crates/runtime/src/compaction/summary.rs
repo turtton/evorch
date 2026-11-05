@@ -627,7 +627,7 @@ mod tests {
 
     fn fixture() -> Vec<Message> {
         serde_json::from_str(include_str!(
-            "../../tests/fixtures/compaction_long_session.json"
+            "../../shared-test-support/compaction_long_session.json"
         ))
         .expect("long-session fixture must parse")
     }

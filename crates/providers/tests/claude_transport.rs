@@ -19,23 +19,23 @@ async fn claude_decodes_every_advertised_compression_for_send_and_sse() {
     let formats: [(&str, &[u8], &[u8]); 4] = [
         (
             "gzip",
-            include_bytes!("fixtures/claude-compression/send.gzip"),
-            include_bytes!("fixtures/claude-compression/stream.gzip"),
+            include_bytes!("../fixtures/claude-compression/send.gzip"),
+            include_bytes!("../fixtures/claude-compression/stream.gzip"),
         ),
         (
             "deflate",
-            include_bytes!("fixtures/claude-compression/send.deflate"),
-            include_bytes!("fixtures/claude-compression/stream.deflate"),
+            include_bytes!("../fixtures/claude-compression/send.deflate"),
+            include_bytes!("../fixtures/claude-compression/stream.deflate"),
         ),
         (
             "br",
-            include_bytes!("fixtures/claude-compression/send.br"),
-            include_bytes!("fixtures/claude-compression/stream.br"),
+            include_bytes!("../fixtures/claude-compression/send.br"),
+            include_bytes!("../fixtures/claude-compression/stream.br"),
         ),
         (
             "zstd",
-            include_bytes!("fixtures/claude-compression/send.zstd"),
-            include_bytes!("fixtures/claude-compression/stream.zstd"),
+            include_bytes!("../fixtures/claude-compression/send.zstd"),
+            include_bytes!("../fixtures/claude-compression/stream.zstd"),
         ),
     ];
     for (encoding, send, stream) in formats {

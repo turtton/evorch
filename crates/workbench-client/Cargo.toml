@@ -1,0 +1,18 @@
+[package]
+name = "workbench-client"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Client side of the evorch workbench protocol (ADR 0045)."
+
+# The only workspace dependency allowed here is workbench-protocol;
+# scripts/check-workbench-boundaries.sh enforces that in CI.
+[dependencies]
+workbench-protocol = { path = "../workbench-protocol" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "io-util", "net", "macros"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

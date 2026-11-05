@@ -190,7 +190,7 @@ fn wire(request: &ChatRequest, dialect: ResponsesDialect, key: Option<&str>) -> 
 // prefix contract for the Codex wire
 #[test]
 fn codex_dialect_wire_bytes_match_the_0166_fixture() {
-    let golden = include_str!("../../../tests/fixtures/codex/wire_request_0166.json");
+    let golden = include_str!("../../../fixtures/codex/wire_request_0166.json");
     let codex = options(ResponsesDialect::Codex, None);
 
     let rich = serde_json::to_string(&to_wire_request(&rich_request(), &codex)).unwrap();
@@ -211,11 +211,11 @@ fn codex_dialect_wire_bytes_match_the_0166_fixture() {
 #[test]
 fn codex_0166_differs_from_the_previous_golden_only_by_the_developer_move() {
     let old: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/codex/wire_request_pre_0166.json"
+        "../../../fixtures/codex/wire_request_pre_0166.json"
     ))
     .unwrap();
     let new: Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/codex/wire_request_0166.json"
+        "../../../fixtures/codex/wire_request_0166.json"
     ))
     .unwrap();
     let mut old = old.as_object().unwrap().clone();
@@ -398,11 +398,11 @@ fn openai_dialect_differs_from_the_previous_wire_only_in_root_field_order() {
     rich.reasoning_effort = Some("high".into());
     let cases = [
         (
-            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_rich.json"),
+            include_str!("../../../fixtures/openai/responses_request_pre_0166_rich.json"),
             to_wire_request(&rich, &options(ResponsesDialect::OpenAi, Some("run-1"))),
         ),
         (
-            include_str!("../../../tests/fixtures/openai/responses_request_pre_0166_minimal.json"),
+            include_str!("../../../fixtures/openai/responses_request_pre_0166_minimal.json"),
             to_wire_request(&minimal_request(), &options(ResponsesDialect::OpenAi, None)),
         ),
     ];

@@ -1,0 +1,27 @@
+{
+  "body": {
+    "content": {
+      "payload": {
+        "body_id": "body-1",
+        "total_bytes": "1099511627776"
+      },
+      "type": "body"
+    },
+    "index": "17",
+    "role": "assistant",
+    "run": "run-1",
+    "thread": "thr-1"
+  },
+  "inline": {
+    "content": {
+      "payload": {
+        "text": "hi"
+      },
+      "type": "inline"
+    },
+    "index": "17",
+    "role": "assistant",
+    "run": "run-1",
+    "thread": "thr-1"
+  }
+}

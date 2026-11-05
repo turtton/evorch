@@ -135,7 +135,9 @@ async fn shell_runs_listing_when_command_contains_arguments() {
 #[tokio::test]
 #[ignore = "bwrap 実行環境が必要"]
 async fn output_artifact_and_scratch_survive_between_calls() {
-    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let workspace =
+        tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .unwrap();
     let executor = ToolExecutor::with_production_sandbox(
         Arc::new(EventBus::new(32)),
         BwrapConfig::new(workspace.path().to_path_buf()),

@@ -67,12 +67,14 @@ pub mod eval_sample;
 pub mod host_input;
 pub mod improvement;
 pub mod inspect;
+pub mod lane_delivery;
 pub mod lanes;
 mod learning;
 pub mod maintenance;
 pub mod memory;
 mod migrations;
 mod projection;
+pub mod pull_requests;
 mod read;
 mod repo;
 mod review;
@@ -93,7 +95,8 @@ pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, Diagnost
 pub use entity::CatalogUpdateRecord;
 pub use error::{FailureClass, StorageError};
 pub use host_input::{
-    HostInputOrigin, HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
+    HostInputOrigin, HostInputProvenance, HostInputReceipt, HostInputStatus, HostInputTransition,
+    HostInputWrite,
 };
 pub use maintenance::offline::{
     ExclusiveLeases, SharedLeases, reclaim_lease, shared_with_wait, try_exclusive,

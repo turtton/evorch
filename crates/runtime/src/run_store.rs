@@ -693,6 +693,7 @@ mod review_tests {
         for (index, body) in ["first", "second", "first"].into_iter().enumerate() {
             let row = row(body);
             let receipt = storage::HostInputReceipt {
+                provenance: storage::HostInputProvenance::User,
                 prompt_id: format!("prompt-{index}"),
                 run_id: target.clone(),
                 root_run_id: target.clone(),

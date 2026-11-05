@@ -4,7 +4,7 @@ use crate::StorageError;
 use crate::host_input::{HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite};
 
 const COLUMNS: &str = "prompt_id, run_id, root_run_id, text, image_count, status, reason, \
-                       accepted_at_ns, status_at_ns, evidence_id";
+                       accepted_at_ns, status_at_ns, evidence_id, provenance_json";
 
 /// Canonical JSON array of distinct, non-empty prompt IDs in first-seen order.
 pub(crate) fn normalized_ids(json: &str) -> Result<String, StorageError> {
@@ -28,7 +28,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
     conn.execute(
         &format!(
             "INSERT INTO host_input_receipts ({COLUMNS}, acceptance_seq) VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
               (SELECT COALESCE(MAX(acceptance_seq), 0) + 1 FROM host_input_receipts))"
         ),
         params![
@@ -42,8 +42,13 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
             receipt.accepted_at_ns,
             receipt.status_at_ns,
             receipt.evidence_id,
+            serde_json::to_string(&receipt.provenance)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?,
         ],
     )?;
+    // The writer transaction also owns evidence/reference consumption and, on
+    // restore, the snapshot. An outbox failure rolls all of them back.
+    crate::repo::lane_delivery::notify_user_input(conn, receipt)?;
     Ok(())
 }
 
@@ -91,7 +96,7 @@ fn reconcile(
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let mut statement = conn.prepare(
         "UPDATE host_input_receipts SET status = 'unknown', reason = ?3, status_at_ns = ?4 \
-         WHERE run_id = ?1 AND (status = 'accepted' OR (status = 'delivered' AND prompt_id NOT IN \
+         WHERE run_id = ?1 AND json_extract(provenance_json,'$.kind')='user' AND (status = 'accepted' OR (status = 'delivered' AND prompt_id NOT IN \
          (SELECT value FROM json_each(?2)))) RETURNING prompt_id",
     )?;
     let rows = statement.query_map(params![run_id, held, reason, now_ns], |row| row.get(0))?;
@@ -176,7 +181,7 @@ pub(crate) fn for_run(
     run_id: &str,
 ) -> Result<Vec<HostInputReceipt>, StorageError> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM host_input_receipts WHERE run_id = ?1 \
+        "SELECT {COLUMNS} FROM host_input_receipts WHERE run_id = ?1 AND json_extract(provenance_json,'$.kind')='user' \
          AND run_id NOT IN (SELECT run_id FROM run_tombstones) \
          AND root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY accepted_at_ns, prompt_id"
@@ -189,6 +194,9 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostInputReceipt> {
     let status: String = row.get(5)?;
     let image_count: i64 = row.get(4)?;
     Ok(HostInputReceipt {
+        provenance: serde_json::from_str(&row.get::<_, String>(10)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         prompt_id: row.get(0)?,
         run_id: row.get(1)?,
         root_run_id: row.get(2)?,
@@ -237,7 +245,8 @@ pub(crate) fn origins(
          LEFT JOIN review_evidence AS evidence ON evidence.id = receipt.evidence_id \
              AND evidence.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
              AND evidence.target_run_id NOT IN (SELECT run_id FROM run_tombstones) \
-         WHERE receipt.run_id NOT IN (SELECT run_id FROM run_tombstones) \
+         WHERE json_extract(receipt.provenance_json,'$.kind')='user' \
+           AND receipt.run_id NOT IN (SELECT run_id FROM run_tombstones) \
            AND receipt.root_run_id NOT IN (SELECT run_id FROM run_tombstones) \
          ORDER BY requested.key",
     )?;

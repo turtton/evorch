@@ -52,6 +52,7 @@ fn outer_app_logic_only_saves_debounced_draft_and_repairs_missing_receipts() {
     }]);
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
     let receipts = Arc::new(Mutex::new(vec![storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "pending".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),

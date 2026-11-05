@@ -47,7 +47,8 @@ fn copy_dir(src: &Path, dest: &Path) {
 
 #[test]
 fn upstream_scenarios_001_through_024() {
-    let scenarios = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenarios");
+    let scenarios = Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/scenarios");
     let mut count = 0;
     for scenario in fs::read_dir(scenarios).unwrap() {
         let scenario = scenario.unwrap().path();

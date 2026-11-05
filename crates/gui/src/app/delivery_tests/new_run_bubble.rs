@@ -84,6 +84,7 @@ fn receipt_for(
     status: storage::HostInputStatus,
 ) -> storage::HostInputReceipt {
     storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: state.history[0].id.clone(),
         text: "hello".into(),
         image_count: 0,
@@ -183,6 +184,7 @@ fn editing_and_deleting_follow_ups_keeps_the_pending_new_run_bubble() {
                 .iter()
                 .skip(1)
                 .map(|message| storage::HostInputReceipt {
+                    provenance: storage::HostInputProvenance::User,
                     prompt_id: message.id.clone(),
                     text: message.text.clone(),
                     ..super::review::receipt(storage::HostInputStatus::Accepted)

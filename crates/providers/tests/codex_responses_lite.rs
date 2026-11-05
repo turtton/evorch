@@ -22,8 +22,8 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use contract_support::seeded_store;
 
-const CATALOG: &str = include_str!("fixtures/codex/models_catalog_0166.json");
-const SUCCESS_SSE: &str = include_str!("fixtures/codex/responses_success.sse");
+const CATALOG: &str = include_str!("../fixtures/codex/models_catalog_0166.json");
+const SUCCESS_SSE: &str = include_str!("../fixtures/codex/responses_success.sse");
 const LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 fn chat(model: &str, user: &str) -> ChatRequest {

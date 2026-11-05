@@ -62,7 +62,11 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     // Tokenized events are written back as plain ones while their blobs still exist.
     resolve_tokenized_events(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
+    conn.execute_batch(concat!(
+        include_str!("../../../undo/undo_v47.sql"),
+        include_str!("../../../undo/undo_v46.sql")
+    ))?;
+    conn.execute_batch(include_str!("../../../undo/undo_v43.sql"))?;
     conn.execute_batch(
         "BEGIN IMMEDIATE;
          DROP TRIGGER IF EXISTS content_blob_refs_event_queue_gc;
@@ -173,6 +177,10 @@ fn resolve_tokenized_events(conn: &Connection) -> Result<(), StorageError> {
 pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch(concat!(
+        include_str!("../../../undo/undo_v47.sql"),
+        include_str!("../../../undo/undo_v46.sql")
+    ))?;
     let fresh = Connection::open_in_memory()?;
     for migration in &MIGRATIONS[..43] {
         fresh.execute_batch(migration)?;
@@ -210,7 +218,7 @@ pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
          UPDATE sessions SET total_event_bytes = COALESCE( \
              (SELECT payload_bytes FROM event_session_bytes WHERE session_id = sessions.id), 0);",
     )?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v45.sql"))?;
+    conn.execute_batch(include_str!("../../../undo/undo_v45.sql"))?;
     conn.pragma_update(None, "user_version", 43)?;
     conn.execute_batch("COMMIT")?;
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
@@ -252,12 +260,12 @@ fn downgrade_provenance(path: &Path, version: u32) -> Result<(), StorageError> {
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))?;
+    conn.execute_batch(include_str!("../../../undo/undo_v43.sql"))?;
     if version <= 41 {
         take_lessons_back_to_v41(&conn)?;
     }
     if version <= 40 {
-        conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))?;
+        conn.execute_batch(include_str!("../../../undo/undo_v41.sql"))?;
     }
     conn.pragma_update(None, "user_version", version)?;
     conn.execute_batch("COMMIT")?;

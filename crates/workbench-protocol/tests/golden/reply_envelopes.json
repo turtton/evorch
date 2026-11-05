@@ -1,0 +1,132 @@
+{
+  "error": {
+    "payload": {
+      "code": "stale_revision",
+      "correlation_id": "req-1",
+      "details": {
+        "payload": {
+          "actual": "2",
+          "expected": "1"
+        },
+        "type": "revision"
+      },
+      "message": "the entity changed since it was read",
+      "retry": "after_resync"
+    },
+    "request_id": "req-1",
+    "status": "error"
+  },
+  "success_ack": {
+    "payload": {
+      "type": "ack"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  },
+  "success_command": {
+    "payload": {
+      "payload": {
+        "disposition": "accepted",
+        "run_id": "run-1",
+        "submission_id": "sub-a",
+        "thread_revision": "13"
+      },
+      "type": "command"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  },
+  "success_pong": {
+    "payload": {
+      "payload": {
+        "nonce": "1"
+      },
+      "type": "pong"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  },
+  "success_query": {
+    "payload": {
+      "payload": {
+        "payload": {
+          "retention_reasons": [
+            "active_turn",
+            "connected_clients"
+          ],
+          "running": {
+            "clients": 3,
+            "shell_jobs": 1,
+            "tool_calls": 2,
+            "turns": 1,
+            "waiting_lanes": 0
+          },
+          "state": "ready"
+        },
+        "type": "core_status"
+      },
+      "type": "query"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  },
+  "success_subscription_started": {
+    "payload": {
+      "payload": {
+        "high_water": {
+          "core_epoch": "7",
+          "sequence": "40"
+        },
+        "initial_page": {
+          "items": [
+            {
+              "payload": {
+                "retention_reasons": [
+                  "active_turn",
+                  "connected_clients"
+                ],
+                "running": {
+                  "clients": 3,
+                  "shell_jobs": 1,
+                  "tool_calls": 2,
+                  "turns": 1,
+                  "waiting_lanes": 0
+                },
+                "state": "ready"
+              },
+              "type": "core_status"
+            },
+            {
+              "payload": {
+                "id": "thr-1",
+                "lead_thread": "thr-lead",
+                "project": "proj-1",
+                "revision": "12",
+                "state": "waiting_for_user",
+                "title": "Fix login",
+                "updated_at": "1793799134000"
+              },
+              "type": "thread"
+            }
+          ],
+          "snapshot_revision": "99"
+        },
+        "snapshot_id": "snap-1",
+        "subscription_id": "sub-1"
+      },
+      "type": "subscription_started"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  },
+  "success_unsubscribed": {
+    "payload": {
+      "payload": {
+        "subscription_id": "sub-1"
+      },
+      "type": "unsubscribed"
+    },
+    "request_id": "req-1",
+    "status": "success"
+  }
+}

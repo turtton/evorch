@@ -895,8 +895,9 @@ fn a_row_s_own_attention_takes_precedence_over_its_hidden_children() {
 #[test]
 #[ignore = "writes thread tree PNG evidence using an offscreen adapter"]
 fn capture_thread_tree_png_evidence() {
-    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/thread-tree");
+    let output =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/thread-tree");
     std::fs::create_dir_all(&output).expect("evidence directory");
     let mut harness = branch_fixture_with(320.0, flagged_children());
     harness.run_steps(2);

@@ -510,8 +510,8 @@ fn capture_triage_button_and_badge() {
     let (workbench, _store) = triage_workbench(&fixture, &sink);
     let mut harness = gui::headless::HeadlessWorkbench::new(workbench, [1400.0, 900.0]);
     harness.run();
-    let directory =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence/thread-read-dirs");
+    let directory = Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("../../target/gui-evidence/thread-read-dirs");
     std::fs::create_dir_all(&directory).expect("evidence directory");
     if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
         frame

@@ -86,10 +86,8 @@ impl Repo {
     fn capture(&self, project_root: &Path) -> ThreadStartCapture {
         capture_with(
             project_root,
-            &Git {
-                deadline: Instant::now() + CAPTURE_DEADLINE,
-                global_config: Some(&self.global_config),
-            },
+            &GitReader::new(Instant::now() + CAPTURE_DEADLINE)
+                .with_global_config(self.global_config.clone()),
         )
     }
 
@@ -336,10 +334,7 @@ fn expired_deadline_is_not_replayable() {
     // When: its start state is captured.
     let capture = capture_with(
         &repo.root(),
-        &Git {
-            deadline: Instant::now(),
-            global_config: Some(&repo.global_config),
-        },
+        &GitReader::new(Instant::now()).with_global_config(repo.global_config.clone()),
     );
 
     // Then: it is recorded as timed out.

@@ -31,6 +31,9 @@ fn started() -> Event {
 }
 fn question() -> UserQuestion {
     UserQuestion {
+        responder: None,
+        routing_revision: 0,
+        management_revision: None,
         id: "q-one".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),

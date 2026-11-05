@@ -271,7 +271,8 @@ fn macro_bodies_and_spaced_paths_remain_guarded() {
 
 #[test]
 fn standalone_save_entry_points_are_confined_to_explicit_config_api_adapters() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let crates = Path::new(&manifest_dir).parent().unwrap();
     // Only the config API itself may implement the explicit standalone contract.
     // Runtime/GUI/evaluator code edits layered user settings, not isolated files.
     let adapters = [

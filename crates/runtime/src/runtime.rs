@@ -17,7 +17,7 @@ pub(crate) use host_prompt::HostPrompt;
 mod nested_orchestrator;
 mod output;
 mod project;
-mod questions;
+pub(crate) mod questions;
 mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 pub use questions::{AnswerOutcome, RunWait};
@@ -316,7 +316,7 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
-    fn review_error(run_id: RunId, reason: impl ToString) -> RuntimeError {
+    pub(crate) fn review_error(run_id: RunId, reason: impl ToString) -> RuntimeError {
         RuntimeError::ReviewEvidence {
             run_id: run_id.to_string(),
             reason: reason.to_string(),
@@ -617,6 +617,7 @@ impl AgentRuntime {
                 &[],
                 reference.map(|pending| pending.reference_id.as_str()),
                 &storage::HostInputReceipt {
+                    provenance: storage::HostInputProvenance::User,
                     prompt_id: prompt_id.into(),
                     run_id: run_id.to_string(),
                     root_run_id: review.root_run_id.clone(),
@@ -631,6 +632,15 @@ impl AgentRuntime {
             )
             .map_err(|error| Self::review_error(run_id, error))?;
         shared.add_request(crate::run_store::request_from_evidence(row));
+        drop(shared);
+        drop(runs);
+        if let Err(error) = self.record_lane_user_intervention(run_id, prompt_id) {
+            self.lane_delivery_diagnostic(
+                Some(run_id),
+                "lane_user_input_schedule_failed",
+                &error.to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -2494,6 +2504,30 @@ impl AgentRuntime {
                 )?;
             }
         }
+        for target in &targets {
+            // Pending admission is the current incarnation, not an old terminal entry.
+            let admission = admissions
+                .get(target)
+                .map(|a| a.snapshot())
+                .filter(|a| a.result.is_none());
+            let persisted = if let Some(admission) = admission {
+                self.persist_lane_delivery_stop(*target, admission.ownership.as_ref())
+            } else if let Some(entry) = runs.get(target) {
+                self.persist_lane_delivery_stop(*target, entry.config.ownership.as_ref())
+            } else {
+                Ok(())
+            };
+            // Storage failure must never prevent the operator from stopping live work.
+            // This process retains operator_stops; a restarted driver also refuses
+            // to wake a nonterminal checkpoint with unknown Stop state.
+            if let Err(error) = persisted {
+                self.lane_delivery_diagnostic(
+                    Some(*target),
+                    "lane_stop_persistence_failed",
+                    &error.to_string(),
+                );
+            }
+        }
         let mut operator_stops = self
             .shared
             .operator_stops
@@ -2516,7 +2550,7 @@ impl AgentRuntime {
         Ok(())
     }
 
-    fn stop_restore_gate(&self, run: RunId) -> Arc<Mutex<()>> {
+    pub(crate) fn stop_restore_gate(&self, run: RunId) -> Arc<Mutex<()>> {
         let mut gates = self
             .shared
             .stop_restore_gates
@@ -2827,6 +2861,10 @@ impl AgentRuntime {
                 }),
             );
         }
+    }
+
+    pub(crate) fn lane_delivery_phase(&self, run: RunId) -> Option<watch::Receiver<AgentRunPhase>> {
+        self.entry(run).ok().map(|r| r.phase_rx.clone())
     }
 
     fn entry(&self, run_id: RunId) -> Result<RunEntryView<'_>, RuntimeError> {

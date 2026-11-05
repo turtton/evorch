@@ -335,7 +335,8 @@ fn capture_context_tab_png_evidence() {
             .with_command_sink(Box::new(LiveSink::new(user_dir.path(), project.path())));
     let mut harness = gui::headless::HeadlessWorkbench::new(state, [1400.0, 1000.0]);
     let output =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-evidence/context");
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/context");
     std::fs::create_dir_all(&output).expect("evidence directory");
     let save = |harness: &mut gui::headless::HeadlessWorkbench<DemoSource>, name: &str| {
         harness.pointer_move(egui::pos2(1390.0, 990.0));

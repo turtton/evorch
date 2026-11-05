@@ -690,10 +690,12 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("fixture checker");
-        let fixture = env!("CARGO_BIN_EXE_comment-checker-test-fixture").replace('\'', "'\\''");
+        let fixture = std::env::var("CARGO_BIN_EXE_comment-checker-test-fixture")
+            .expect("CARGO_BIN_EXE_comment-checker-test-fixture")
+            .replace('\'', "'\\''");
         std::fs::write(
             &binary,
-            include_str!("support/comment_checker.sh")
+            include_str!("fixtures/comment_checker.sh")
                 .replace("__COMMENT_CHECKER_TEST_FIXTURE__", &fixture),
         )
         .unwrap();

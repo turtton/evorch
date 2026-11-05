@@ -12,6 +12,8 @@ pub use fencing::{
 };
 pub mod event;
 pub mod lane;
+#[cfg(test)]
+mod lane_contract_tests;
 pub use lane::{
     LANE_ARTIFACT_REFS_MAX, LANE_BRIEF_ITEM_MAX_BYTES, LANE_BRIEF_ITEMS_MAX, LANE_BRIEF_MAX_BYTES,
     LANE_LIST_PAGE_MAX, LANE_LIST_PAGE_MAX_BYTES, LANE_OBJECTIVE_MAX_BYTES, LANE_QUESTION_REFS_MAX,
@@ -39,9 +41,10 @@ pub use event::{
     CacheBaselineMissing, CacheComparison, CompactionEvent, CompactionMode, CompactionReason,
     ContextComposition, DeliveryDisposition, DiagnosticEvent, DiagnosticSeverity,
     EscalationMemoSummary, EscalationTrigger, Event, EventKind, EventMeta, FallbackAxis,
-    FaultEvent, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent, ProviderFailureKind,
-    REQUEST_FAILED_DETAIL_MAX_BYTES, RequestPurpose, RoutingSource, RunActivity, SCHEMA_VERSION,
-    ServiceTier, SkillDiagnosticKind, ToolEvent, UsageEvent, UserQuestion, WindowSource,
+    FaultEvent, HumanChannel, LedgerEvent, LifecycleEvent, MessageEvent, ProviderEvent,
+    ProviderFailureKind, REQUEST_FAILED_DETAIL_MAX_BYTES, RequestPurpose, RoutingSource,
+    RunActivity, SCHEMA_VERSION, ServiceTier, SkillDiagnosticKind, ToolEvent, UsageEvent,
+    UserQuestion, WindowSource,
 };
 pub use orchestrator::OrchestratorEvent;
 pub use otel::{

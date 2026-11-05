@@ -9,7 +9,8 @@ fn fixture(mode: &str) -> (tempfile::TempDir, LspDiagnostics, Arc<EventBus>) {
     std::fs::write(dir.path().join("sample file.rs"), "secret document").unwrap();
     let bus = Arc::new(EventBus::new(16));
     let command = CommandSpec {
-        program: env!("CARGO_BIN_EXE_lsp-test-server").into(),
+        program: std::env::var("CARGO_BIN_EXE_lsp-test-server")
+            .expect("CARGO_BIN_EXE_lsp-test-server"),
         args: vec![mode.into(), dir.path().join("pid").display().to_string()],
         cwd: None,
         extra_env: vec![],

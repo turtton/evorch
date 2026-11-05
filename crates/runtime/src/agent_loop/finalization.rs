@@ -139,6 +139,22 @@ impl LoopState {
                 self.snapshot_diagnostic(&error);
             }
         }
+        if authority
+            && self.run_state.phase() == event_bus::AgentRunPhase::Error
+            && let Some(runtime) = self.runtime()
+            && let Err(error) = runtime.record_lane_harness_failure(
+                self.task.run_id,
+                &self.lane_failure_episode,
+                "runtime_failed",
+                self.task.config.ownership.as_ref(),
+            )
+        {
+            runtime.lane_delivery_diagnostic(
+                Some(self.task.run_id),
+                "lane_failure_report_failed",
+                &error.to_string(),
+            );
+        }
         // Without unknown shell effects, snapshot failure remains a non-fatal
         // diagnostic and does not suppress ordinary completion or workspace cleanup.
         let released = if drained && authority && (saved || !uncertain) {

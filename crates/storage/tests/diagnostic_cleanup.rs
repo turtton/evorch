@@ -205,12 +205,23 @@ fn suspended_writer_cleanup_reclaims_space_and_resumes_context_writes() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path().join("suspended.db"));
     let storage = Storage::open(config.clone()).unwrap();
+    // Keep the payload allowance independent of the evolving empty schema size.
+    let empty_schema_bytes = {
+        let conn = Connection::open(&config.db_path).unwrap();
+        let pages: u64 = conn
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .unwrap();
+        let page: u64 = conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .unwrap();
+        pages * page
+    };
     let event = diagnostic(1, "lsp", "large", &"x".repeat(32_768));
     for _ in 0..32 {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 960_000;
+    config.hard_limits.max_db_bytes = empty_schema_bytes + 512 * 1024;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(handle.upsert_run_context(&context()).is_err());
@@ -239,12 +250,23 @@ fn maintenance_cleans_expired_diagnostics_and_recovers_suspended_writer() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(dir.path().join("automatic.db"));
     let storage = Storage::open(config.clone()).unwrap();
+    // Keep the payload allowance independent of the evolving empty schema size.
+    let empty_schema_bytes = {
+        let conn = Connection::open(&config.db_path).unwrap();
+        let pages: u64 = conn
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .unwrap();
+        let page: u64 = conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .unwrap();
+        pages * page
+    };
     let expired = diagnostic(1, "lsp", "large", &"x".repeat(32_768));
     for _ in 0..32 {
         storage.handle().append_event(None, &expired).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 960_000;
+    config.hard_limits.max_db_bytes = empty_schema_bytes + 512 * 1024;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(handle.upsert_run_context(&context()).is_err());
@@ -276,7 +298,7 @@ fn legacy_database_reports_deletion_without_claiming_file_recovery() {
         storage.handle().append_event(None, &event).unwrap();
     }
     storage.close();
-    config.hard_limits.max_db_bytes = 960_000;
+    config.hard_limits.max_db_bytes = 1_000_000;
     let storage = Storage::open(config.clone()).unwrap();
     let handle = storage.handle();
     assert!(

@@ -1,0 +1,60 @@
+{
+  "accepted": {
+    "payload": {
+      "capabilities": [
+        "commands.v1",
+        "queries.v1",
+        "snapshot_events.v1",
+        "input_receipts.v1",
+        "approvals.v1",
+        "questions.v1",
+        "committed_bodies.v1",
+        "safe_restart.v1"
+      ],
+      "core": "core-abc",
+      "instance_epoch": "7",
+      "limits": {
+        "max_body_chunk_bytes": 65536,
+        "max_frame_bytes": 1048576,
+        "max_in_flight_requests": 64,
+        "subscription_queue_bytes": 4194304,
+        "subscription_queue_events": 1024
+      },
+      "protocol_version": 1,
+      "server_build": {
+        "name": "evorch",
+        "revision": "abc1234",
+        "version": "0.1.0"
+      },
+      "status": {
+        "retention_reasons": [
+          "active_turn",
+          "connected_clients"
+        ],
+        "running": {
+          "clients": 3,
+          "shell_jobs": 1,
+          "tool_calls": 2,
+          "turns": 1,
+          "waiting_lanes": 0
+        },
+        "state": "ready"
+      }
+    },
+    "type": "accepted"
+  },
+  "rejected": {
+    "payload": {
+      "message": "missing",
+      "missing_capabilities": [
+        "approvals.v2"
+      ],
+      "reason": "missing_capabilities",
+      "recommended_action": "upgrade_core",
+      "supported_versions": [
+        1
+      ]
+    },
+    "type": "rejected"
+  }
+}

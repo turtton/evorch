@@ -76,7 +76,7 @@ impl RunJsHost for TestHost {
 }
 
 fn worker_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_evorch"))
+    PathBuf::from(std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"))
 }
 
 struct Fixture {

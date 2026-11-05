@@ -6,7 +6,6 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Weak;
 use std::time::{Duration, Instant};
 
@@ -16,11 +15,10 @@ use storage::thread_start::{
 };
 
 use crate::RunId;
+use crate::git_read::{GitOutput, GitReadError, GitReader, STDERR_LIMIT};
 use crate::runtime::Shared;
 
 pub(crate) const CAPTURE_DEADLINE: Duration = Duration::from_secs(10);
-
-const STDERR_LIMIT: usize = 64 * 1024;
 
 /// Capture and persist the start state before the thread's first run touches the tree.
 /// Never fails the run: storage errors are logged and the wait is bounded by the deadline.
@@ -69,16 +67,10 @@ pub(crate) async fn record(
 }
 
 pub(crate) fn capture(project_root: &Path, deadline: Instant) -> ThreadStartCapture {
-    capture_with(
-        project_root,
-        &Git {
-            deadline,
-            global_config: None,
-        },
-    )
+    capture_with(project_root, &GitReader::new(deadline))
 }
 
-fn capture_with(project_root: &Path, git: &Git<'_>) -> ThreadStartCapture {
+fn capture_with(project_root: &Path, git: &GitReader) -> ThreadStartCapture {
     match snapshot(project_root, git) {
         Ok(snapshot) => ThreadStartCapture::Replayable(snapshot),
         Err(reason) => ThreadStartCapture::NotReplayable(reason),
@@ -87,9 +79,10 @@ fn capture_with(project_root: &Path, git: &Git<'_>) -> ThreadStartCapture {
 
 fn snapshot(
     project_root: &Path,
-    git: &Git<'_>,
+    git: &GitReader,
 ) -> Result<ThreadStartSnapshot, NotReplayableReason> {
-    let located = git.run(
+    let located = run(
+        git,
         project_root,
         &["rev-parse", "--show-toplevel", "--show-prefix"],
         STDERR_LIMIT,
@@ -113,7 +106,8 @@ fn snapshot(
     let repo_prefix = lines.next().unwrap_or_default().to_owned();
     let toplevel = Path::new(toplevel);
 
-    let head = git.run(
+    let head = run(
+        git,
         toplevel,
         &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
         STDERR_LIMIT,
@@ -128,7 +122,8 @@ fn snapshot(
     let head_ref = head_ref(toplevel, git)?;
 
     // Fixed flags keep the diff applicable whatever the user's diff config says.
-    let diff = succeeded(git.run(
+    let diff = succeeded(run(
+        git,
         toplevel,
         &[
             "diff",
@@ -145,7 +140,8 @@ fn snapshot(
         ],
         MAX_THREAD_START_BYTES,
     )?)?;
-    let listed = succeeded(git.run(
+    let listed = succeeded(run(
+        git,
         toplevel,
         &[
             "ls-files",
@@ -164,7 +160,7 @@ fn snapshot(
         if path.is_empty() || path.ends_with(b"/") {
             continue;
         }
-        if Instant::now() >= git.deadline {
+        if Instant::now() >= git.deadline() {
             return Err(NotReplayableReason::TimedOut);
         }
         let path =
@@ -185,8 +181,8 @@ fn snapshot(
 }
 
 /// `git symbolic-ref` exits with 1 when `HEAD` is detached.
-fn head_ref(toplevel: &Path, git: &Git<'_>) -> Result<Option<String>, NotReplayableReason> {
-    let output = git.run(toplevel, &["symbolic-ref", "-q", "HEAD"], STDERR_LIMIT)?;
+fn head_ref(toplevel: &Path, git: &GitReader) -> Result<Option<String>, NotReplayableReason> {
+    let output = run(git, toplevel, &["symbolic-ref", "-q", "HEAD"], STDERR_LIMIT)?;
     if output.status.code() == Some(1) {
         return Ok(None);
     }
@@ -257,12 +253,6 @@ fn is_executable(_: &std::fs::Metadata) -> bool {
     false
 }
 
-struct GitOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
 fn succeeded(output: GitOutput) -> Result<Vec<u8>, NotReplayableReason> {
     if output.status.success() {
         Ok(output.stdout)
@@ -271,125 +261,18 @@ fn succeeded(output: GitOutput) -> Result<Vec<u8>, NotReplayableReason> {
     }
 }
 
-struct Git<'a> {
-    deadline: Instant,
-    /// Replaces the user's global config; tests only.
-    global_config: Option<&'a Path>,
-}
-
-impl Git<'_> {
-    /// Run a read-only git command, killing it at the deadline or once stdout exceeds `limit`.
-    fn run(
-        &self,
-        dir: &Path,
-        arguments: &[&str],
-        limit: usize,
-    ) -> Result<GitOutput, NotReplayableReason> {
-        let deadline = self.deadline;
-        let mut command = Command::new("git");
-        // Inherited GIT_DIR/GIT_INDEX_FILE must not point the read at another repository.
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("GIT_") {
-                command.env_remove(name);
-            }
-        }
-        // The user's global config stays readable so its core.excludesFile still
-        // hides ignored files; everything that could write, prompt, fetch or run
-        // user programs is turned off.
-        command
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("LC_ALL", "C")
-            // `git diff` rewrites a stat-dirty index even without optional locks.
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "diff.autoRefreshIndex=false",
-            ])
-            .args(arguments)
-            .current_dir(dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(path) = self.global_config {
-            command.env("GIT_CONFIG_GLOBAL", path);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|_| NotReplayableReason::CaptureFailed)?;
-        let (sender, streams) = std::sync::mpsc::channel();
-        for (index, stream, limit) in [
-            (
-                0,
-                Box::new(child.stdout.take().expect("piped stdout")) as Box<dyn Read + Send>,
-                limit,
-            ),
-            (
-                1,
-                Box::new(child.stderr.take().expect("piped stderr")),
-                STDERR_LIMIT,
-            ),
-        ] {
-            let sender = sender.clone();
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let read = stream
-                    .take(limit as u64 + 1)
-                    .read_to_end(&mut bytes)
-                    .map(|_| bytes);
-                let _ = sender.send((index, read));
-            });
-        }
-        drop(sender);
-        let mut output = [None, None];
-        let failure = loop {
-            if output.iter().all(Option::is_some) {
-                break None;
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match streams.recv_timeout(remaining) {
-                Ok((index, Ok(bytes))) if bytes.len() > limit && index == 0 => {
-                    break Some(NotReplayableReason::TooLarge);
-                }
-                Ok((index, Ok(bytes))) => output[index] = Some(bytes),
-                Ok((_, Err(_))) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    break Some(NotReplayableReason::CaptureFailed);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    break Some(NotReplayableReason::TimedOut);
-                }
-            }
-        };
-        if let Some(reason) = failure {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(reason);
-        }
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(5))
-                }
-                Ok(None) | Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(NotReplayableReason::TimedOut);
-                }
-            }
-        };
-        let [stdout, stderr] = output.map(Option::unwrap_or_default);
-        Ok(GitOutput {
-            status,
-            stdout,
-            stderr,
-        })
-    }
+/// One bounded git read, its failures spelled as the reasons a start state records.
+fn run(
+    git: &GitReader,
+    dir: &Path,
+    arguments: &[&str],
+    limit: usize,
+) -> Result<GitOutput, NotReplayableReason> {
+    git.run(dir, arguments, limit).map_err(|error| match error {
+        GitReadError::TimedOut => NotReplayableReason::TimedOut,
+        GitReadError::TooLarge => NotReplayableReason::TooLarge,
+        GitReadError::Failed => NotReplayableReason::CaptureFailed,
+    })
 }
 
 #[cfg(test)]

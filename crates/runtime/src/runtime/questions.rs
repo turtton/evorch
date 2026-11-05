@@ -8,6 +8,10 @@ use storage::{AnswerMode, StorageError};
 mod tests;
 
 mod continuation;
+#[cfg(test)]
+#[path = "questions/lane_tests.rs"]
+mod lane_tests;
+pub(crate) mod routing;
 
 /// How [`AgentRuntime::wait_or_blocked_on_user`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +92,44 @@ impl AgentRuntime {
         options: Vec<String>,
         blocking: bool,
     ) -> Result<UserQuestion, String> {
+        match self.request_user_question_outcome(run, title, options, blocking)? {
+            storage::lane_delivery::LaneQuestionCreated::Created(question) => Ok(*question),
+            storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(diagnostic) => {
+                Err(format!(
+                    "question_capacity_blocked: {:?} limit {}",
+                    diagnostic.capacity,
+                    diagnostic.capacity.limit()
+                ))
+            }
+        }
+    }
+
+    /// Typed capacity result for model-facing requests. Capacity does not create a
+    /// question and must not trigger an automatic retry.
+    pub(crate) fn request_user_question_outcome(
+        &self,
+        run: RunId,
+        title: String,
+        options: Vec<String>,
+        blocking: bool,
+    ) -> Result<storage::lane_delivery::LaneQuestionCreated, String> {
+        self.request_question_with_binding(
+            run,
+            title,
+            options,
+            blocking,
+            routing::LaneQuestionBindingSource::lane_question_binding(self),
+        )
+    }
+
+    fn request_question_with_binding(
+        &self,
+        run: RunId,
+        title: String,
+        options: Vec<String>,
+        blocking: bool,
+        binding: event_bus::lane::LaneDeliveryBinding,
+    ) -> Result<storage::lane_delivery::LaneQuestionCreated, String> {
         self.validate_run_mutation(run).map_err(|e| e.to_string())?;
         let store = self
             .shared
@@ -114,6 +156,9 @@ impl AgentRuntime {
                 .collect::<String>()
         );
         let question = UserQuestion {
+            responder: None,
+            routing_revision: 0,
+            management_revision: None,
             id,
             run_id: run.to_string(),
             root_run_id: root.to_string(),
@@ -136,10 +181,68 @@ impl AgentRuntime {
             .map(|permit| permit.mutation_guard())
             .transpose()
             .map_err(|e| e.to_string())?;
-        store
-            .handle
-            .create_user_question(&question)
-            .map_err(|e| e.to_string())?;
+        let lane = {
+            let entry = self.entry(run).map_err(|e| e.to_string())?;
+            let is_lane_root = entry.parent.is_none() && entry.config.lane_scope.is_some();
+            drop(entry);
+            if is_lane_root {
+                let thread = self
+                    .goal_thread(run)
+                    .ok_or("lane requester has no thread")?;
+                let lane = store
+                    .handle
+                    .lane_by_thread(&thread)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("lane record is missing")?;
+                if lane.root_run_id.as_deref() != Some(&run.to_string()) {
+                    return Err("not the current lane root".into());
+                }
+                Some(lane)
+            } else {
+                None
+            }
+        };
+        let question = if let Some(lane) = lane {
+            let requester = event_bus::lane::QuestionRequester {
+                run_id: question.run_id.clone(),
+                root_run_id: question.root_run_id.clone(),
+                thread_id: lane.thread_id,
+            };
+            match store
+                .handle
+                .create_lane_question(
+                    lane.lane_id,
+                    question,
+                    requester,
+                    binding,
+                    crate::run_store::review_time_ns(),
+                )
+                .map_err(|e| e.to_string())?
+            {
+                storage::lane_delivery::LaneQuestionCreated::Created(question) => *question,
+                blocked @ storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(_) => {
+                    return Ok(blocked);
+                }
+            }
+        } else {
+            match store.handle.create_user_question(&question) {
+                Ok(()) => {}
+                Err(StorageError::QuestionCapacity(capacity)) => {
+                    return Ok(
+                        storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(
+                            storage::lane_delivery::QuestionCapacityBlocked {
+                                capacity,
+                                attempts: 1,
+                                first_at_ns: crate::run_store::review_time_ns(),
+                                last_at_ns: crate::run_store::review_time_ns(),
+                            },
+                        ),
+                    );
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+            question
+        };
         drop(guard);
         self.shared
             .bus
@@ -149,7 +252,12 @@ impl AgentRuntime {
         self.shared
             .question_version
             .send_modify(|version| *version = version.wrapping_add(1));
-        Ok(question)
+        if let Some(event_bus::lane::QuestionResponder::Lead { thread_id }) = &question.responder {
+            routing::LaneQuestionBindingSource::schedule_lane_question_delivery(self, thread_id);
+        }
+        Ok(storage::lane_delivery::LaneQuestionCreated::Created(
+            Box::new(question),
+        ))
     }
 
     /// Read clarification requests owned by one direct child. The parent can
@@ -246,7 +354,13 @@ impl AgentRuntime {
     /// Host-facing answer API. A live run must still have current mutation authority.
     /// Offline answers are persisted for explicit conversation resumption, never replaying tools.
     pub fn answer_user_question(&self, id: &str, answer: &str) -> Result<UserQuestion, String> {
-        self.answer_question(id, answer, AnswerOrigin::Host)
+        self.answer_question(
+            id,
+            answer,
+            AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
     }
 
     /// Host-facing answer API for a caller that must not answer a question twice. Unlike
@@ -264,7 +378,14 @@ impl AgentRuntime {
         id: &str,
         answer: &str,
     ) -> Result<AnswerOutcome, String> {
-        self.answer_question_with_mode(id, answer, AnswerOrigin::Host, AnswerMode::FirstOnly)
+        self.answer_question_with_mode(
+            id,
+            answer,
+            AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+            AnswerMode::FirstOnly,
+        )
     }
 
     fn answer_question(
@@ -288,8 +409,19 @@ impl AgentRuntime {
     ) -> Result<AnswerOutcome, String> {
         // Only a host answer is the user's word and becomes review evidence; a
         // parent agent's answer never does, whatever it relays.
-        let trusted_user = origin == AnswerOrigin::Host;
+        let trusted_user = origin
+            == AnswerOrigin::Host {
+                channel: Default::default(),
+            };
         let question = self.user_question(id)?.ok_or("unknown question")?;
+        if trusted_user
+            && matches!(
+                question.responder,
+                Some(event_bus::lane::QuestionResponder::Lead { .. })
+            )
+        {
+            return Err("question is addressed to its lane lead; route_to_user first".into());
+        }
         self.deny_deleted_run(&question.run_id)
             .map_err(|deleted| deleted.to_string())?;
         let store = self

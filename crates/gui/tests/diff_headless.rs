@@ -385,8 +385,10 @@ fn review_diff_virtualizes_large_documents_and_keeps_toolbar_inside_narrow_pane(
 #[test]
 #[ignore = "requires a working wgpu adapter; CI requires real diff render evidence"]
 fn capture_review_diff_unified_and_split() {
-    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/diff-review");
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    )
+    .join("../../target/gui-evidence/diff-review");
     std::fs::create_dir_all(&directory).unwrap();
     for size in [[1280.0, 720.0], [800.0, 600.0]] {
         let temp = tempfile::tempdir().unwrap();

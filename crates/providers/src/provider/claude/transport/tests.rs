@@ -25,12 +25,11 @@ fn post(transport: &ClaudeTransport, url: &str) -> wreq::RequestBuilder {
 }
 
 fn assert_native_request_shape(hello: Vec<u8>, requests: &[Vec<u8>]) {
-    let expected = include_bytes!(
-        "../../../../tests/fixtures/claude-transport/native-2.1.295-client-hello.bin"
-    );
+    let expected =
+        include_bytes!("../../../../fixtures/claude-transport/native-2.1.295-client-hello.bin");
     assert_eq!(normalize_hello(hello), expected);
     let expected_headers: Vec<String> = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/claude-transport/native-2.1.295-shared-headers.json"
+        "../../../../fixtures/claude-transport/native-2.1.295-shared-headers.json"
     ))
     .unwrap();
     for raw in requests {
@@ -102,11 +101,10 @@ async fn native_client_hello_and_http_header_order_match_and_connection_is_reuse
     }
     let (hello, requests) = task.await.unwrap();
     assert_native_request_shape(hello, &requests[..1]);
-    let child_headers: std::collections::HashMap<String, Vec<String>> =
-        serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/claude-transport/native-2.1.295-child-headers.json"
-        ))
-        .unwrap();
+    let child_headers: std::collections::HashMap<String, Vec<String>> = serde_json::from_str(
+        include_str!("../../../../fixtures/claude-transport/native-2.1.295-child-headers.json"),
+    )
+    .unwrap();
     assert_eq!(header_names(&requests[1]), child_headers["first_level"]);
     assert_eq!(header_names(&requests[2]), child_headers["nested"]);
 }

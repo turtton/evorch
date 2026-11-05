@@ -30,7 +30,9 @@ fn child(name: &str) -> bool {
 }
 
 async fn scenario(approved: bool) {
-    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+    let workspace =
+        tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .expect("workspace");
     let sandbox = match BwrapSandbox::detect(BwrapConfig::new(workspace.path().into())) {
         Ok(sandbox) => sandbox,
         Err(error) => {

@@ -28,6 +28,7 @@ impl AgentModel for AdmissionGate {
 
 pub(super) fn receipt(status: storage::HostInputStatus) -> storage::HostInputReceipt {
     storage::HostInputReceipt {
+        provenance: storage::HostInputProvenance::User,
         prompt_id: "old".into(),
         run_id: "run-1".into(),
         root_run_id: "run-1".into(),

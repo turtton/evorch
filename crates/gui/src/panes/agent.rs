@@ -1023,6 +1023,8 @@ mod tests {
         let detail = crate::model::lanes::LaneDetail {
             record,
             latest_report: Some(LaneReport {
+                artifact_revision: None,
+                failure_episode: None,
                 lane_id: "lane-1".into(),
                 report_seq: 1,
                 status: LaneStatus::Ready,
