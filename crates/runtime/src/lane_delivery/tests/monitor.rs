@@ -1,6 +1,6 @@
 use super::*;
-use event_bus::Event;
 use event_bus::lane::{LaneNudgeState, LaneStallClassification as Class, LaneStallEpisode};
+use event_bus::{Event, ToolEvent};
 const MINUTE: i64 = 60_000_000_000;
 struct OwnedHost {
     thread: String,
@@ -670,14 +670,21 @@ async fn accepted_but_unpresented_nudge_error_is_attention_not_automatic_restore
     host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
     f.model.fail_next.store(true, Ordering::SeqCst);
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let drive = AFTER_RECEIPT_BARRIER.scope(
+        gate.clone(),
+        f.runtime.drive_lane_deliveries(&lane.thread_id),
+    );
+    let fail = async {
+        gate.wait().await;
+        f.runtime.wait(lane.root_run_id).await.unwrap();
+        gate.wait().await;
+    };
+    let (outcome, ()) = tokio::join!(drive, fail);
     assert_eq!(
-        f.runtime
-            .drive_lane_deliveries(&lane.thread_id)
-            .await
-            .unwrap(),
+        outcome.unwrap(),
         LaneDeliveryOutcome::Delivered { notifications: 1 }
     );
-    f.runtime.wait(lane.root_run_id).await.unwrap();
     assert_eq!(
         f.runtime.inspect_agent(lane.root_run_id).unwrap().phase,
         AgentRunPhase::Error
@@ -894,4 +901,106 @@ async fn monitor_change_hints_requery_committed_state_without_timer_heartbeats()
     assert_eq!(episodes(&f)[0].nudge_state, LaneNudgeState::Accepted);
     f.runtime.monitor_lanes().unwrap();
     assert!(hints(&mut events).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn ready_and_done_after_the_last_nudge_fence_do_not_append_failed() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "late-ready").await;
+    let (_owner, host) = owned(&f, &lane);
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let drive = BEFORE_QUEUE.scope(
+        gate.clone(),
+        f.runtime.drive_lane_deliveries(&lane.thread_id),
+    );
+    let finish = async {
+        gate.wait().await; // the whole driver has passed its last nudge fence
+        f.report(&lane, None, LaneStatus::Ready);
+        f.finish(lane.root_run_id).await;
+        gate.wait().await;
+    };
+    let (outcome, ()) = tokio::join!(drive, finish);
+    assert_eq!(
+        outcome.unwrap(),
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::Stopped)
+    );
+    let reports = f
+        .storage
+        .handle()
+        .lane_reports(&lane.lane_id, 0, 20)
+        .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].status, LaneStatus::Ready);
+    assert_eq!(f.receipts(), 0);
+    assert!(episodes(&f)[0].resolved_at_ns.is_some());
+    f.runtime.cancel(lead).unwrap();
+    f.runtime.wait(lead).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn lag_and_a_parallel_tool_completion_remain_unobservable_until_a_full_boundary() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "lag-parallel").await;
+    let (_owner, host) = owned(&f, &lane);
+    f.runtime.monitor_lanes().unwrap();
+    f.model.block_next.store(true, Ordering::SeqCst);
+    f.runtime
+        .send_message(lane.root_run_id, "parallel work".into())
+        .unwrap();
+    f.model.blocked.notified().await;
+    // Overflow the real receiver, losing both parallel starts while the
+    // provider stays live until explicit cancel. Completion-only suffixes
+    // cannot re-establish a complete execution observation.
+    let bus = &f.runtime.shared.bus;
+    for call_id in ["still-running", "completed"] {
+        bus.emit(Event::new(ToolEvent::ToolStarted {
+            tool_name: "shell".into(),
+            call_id: call_id.into(),
+            input: None,
+            run_id: Some(lane.root_run_id.to_string()),
+            parent_call_id: None,
+        }));
+    }
+    for _ in 0..16_384 {
+        let call_id = "completed";
+        bus.emit(Event::new(ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: call_id.into(),
+            is_error: false,
+            output: None,
+            detail: None,
+            run_id: Some(lane.root_run_id.to_string()),
+            parent_call_id: None,
+        }));
+    }
+    host.now.fetch_add(120 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(120 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert!(
+        episodes(&f).is_empty(),
+        "one completion cannot account for the lost parallel start"
+    );
+    bus.emit(Event::new(LifecycleEvent::RunProgress {
+        run_id: lane.root_run_id.to_string(),
+        activity: event_bus::RunActivity::Idle,
+        compaction_operation_id: None,
+        context: None,
+    }));
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(5 * MINUTE - 1, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert!(episodes(&f).is_empty());
+    host.now.fetch_add(1, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert_eq!(episodes(&f)[0].classification, Class::WorkStalled);
+    for run in [lane.root_run_id, lead] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
 }

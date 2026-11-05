@@ -242,6 +242,10 @@ impl AgentRuntime {
     }
     /// Also used after an ownership acquisition or an outbox source commit.
     pub fn schedule_lane_deliveries(&self, thread: &str) {
+        #[cfg(test)]
+        if tests::integration::MANUAL_SOURCES.try_with(|()| ()).is_ok() {
+            return;
+        }
         if self.lane_delivery_binding() == LaneDeliveryBinding::Unbound {
             return;
         }
@@ -480,7 +484,7 @@ impl AgentRuntime {
             }
         }
         self.resume_forwarded_lane_answers(target.root_run_id, thread)
-            .await;
+            .await?;
         let claim = {
             let _guard = target
                 .authority
@@ -538,10 +542,48 @@ impl AgentRuntime {
         if claim.completed_root_wake {
             self.announce_paused_wakes(&claim);
         }
+        // A receipt alone is not a continuation. Keep the outbox retryable when
+        // reconnecting an answered child encounters a transient storage failure.
+        #[cfg(test)]
+        if execute.is_ok() {
+            let _ = tests::AFTER_RECEIPT.try_with(|action| {
+                if let Some(action) = action.borrow_mut().take() {
+                    action();
+                }
+            });
+        }
+        #[cfg(test)]
+        if execute.is_ok()
+            && let Ok(gate) = tests::AFTER_RECEIPT_BARRIER.try_with(Arc::clone)
+        {
+            gate.wait().await;
+            gate.wait().await;
+        }
+        let execute = match execute {
+            Ok(count) => self
+                .resume_forwarded_lane_answers(target.root_run_id, thread)
+                .await
+                .map(|()| count)
+                .map_err(|error| {
+                    self.lane_delivery_diagnostic(
+                        Some(target.root_run_id),
+                        "lane_answer_continuation_retry",
+                        &error.to_string(),
+                    );
+                    LaneDeliveryNack::StorageFailed
+                }),
+            Err(LaneDeliveryNack::RestoreFailed) => {
+                // The receiver may have finished with Ready after our last input
+                // fence. Obsolete nudges must never overwrite that report.
+                match self.check_nudge_target(&target, &claim, false) {
+                    Ok(()) => Err(LaneDeliveryNack::RestoreFailed),
+                    Err(reason) => Err(reason),
+                }
+            }
+            other => other,
+        };
         match execute {
             Ok(notifications) => {
-                self.resume_forwarded_lane_answers(target.root_run_id, thread)
-                    .await;
                 if let Err(error) = store.handle.ack_lane_delivery(claim.clone(), host.now_ns()) {
                     if let Err(nack) = store.handle.nack_lane_delivery(
                         claim.clone(),
@@ -647,6 +689,11 @@ impl AgentRuntime {
             if !matches!(record.terminal_phase.as_str(), "Done" | "Error") {
                 return Err(LaneDeliveryNack::Stopped);
             }
+        }
+        #[cfg(test)]
+        if let Ok(gate) = tests::BEFORE_QUEUE.try_with(Arc::clone) {
+            gate.wait().await;
+            gate.wait().await;
         }
         let (tx, rx) = oneshot::channel();
         delivery

@@ -849,3 +849,103 @@ async fn a_destination_the_window_does_not_know_is_nacked_and_its_notification_s
         "nothing was guessed from a name and the notification is kept"
     );
 }
+
+#[tokio::test]
+async fn attention_query_and_display_leave_a_static_provider_input_and_saved_prefix_unchanged() {
+    let mut world = World::new();
+    let lead = world
+        .runtime
+        .delegate_chat(
+            LEAD,
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "static-attention");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    world
+        .storage
+        .handle()
+        .append_lane_report_with_delivery(
+            lane.lane_id.clone(),
+            event_bus::LaneReportInput {
+                status: event_bus::LaneStatus::Ready,
+                summary: "unverified artifact".into(),
+                artifact_refs: vec![],
+                artifact_revision: None,
+                failure_episode: None,
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::LaneReportProducer::LaneAgent,
+            },
+            100,
+        )
+        .unwrap();
+    // No host is bound and both roots are waiting: this is a static fixture,
+    // not an assertion about how quickly a scheduled delivery would happen.
+    let texts = world.model.texts.lock().unwrap().clone();
+    let calls = world.model.requests.lock().unwrap().clone();
+    let db_path = world.config.db_path.clone();
+    let saved = || {
+        [lead, lane.root_run_id].map(|run| {
+            let record = storage::Database::open_read_only(&db_path)
+                .unwrap()
+                .run_context(&run.to_string())
+                .unwrap()
+                .unwrap();
+            (record.messages_json, record.config_json)
+        })
+    };
+    let prefix = saved();
+    let reader = Arc::new(gui::app::lane_attention::StorageLaneAttentionReader::new(
+        world.config.db_path.clone(),
+    ));
+    let mut state = world.workbench().with_lane_attention(reader);
+    world.show(&mut state);
+    assert_eq!(state.lane_attention().items().len(), 1);
+    let ctx = egui::Context::default();
+    let mut drafts = Default::default();
+    for _ in 0..3 {
+        state.refresh_lane_attention();
+        world.show(&mut state);
+        let board = state.lane_attention();
+        let rows = gui::model::lane_attention::rows(board, &[]);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            gui::theme::install(ui.ctx());
+            egui::CentralPanel::default().show(ui, |ui| {
+                let output = gui::panes::lane_attention::lane_attention_section(
+                    ui,
+                    board,
+                    &rows,
+                    &mut drafts,
+                );
+                assert!(output.action.is_none() && output.request.is_none());
+            });
+        });
+        output.textures_delta.clear();
+    }
+    assert_eq!(*world.model.texts.lock().unwrap(), texts);
+    assert_eq!(*world.model.requests.lock().unwrap(), calls);
+    assert_eq!(
+        saved(),
+        prefix,
+        "query and redraw do not replace saved model input/tool settings"
+    );
+    assert_eq!(
+        state.lane_attention().items().len(),
+        1,
+        "reading did not resolve the item"
+    );
+    for run in [lead, lane.root_run_id] {
+        world.runtime.cancel(run).unwrap();
+        world.runtime.wait(run).await.unwrap();
+    }
+}

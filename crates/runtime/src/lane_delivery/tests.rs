@@ -3,6 +3,12 @@ use crate::{AgentInvocationContext, AgentModel, Role, RuntimeError};
 use event_bus::{EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+tokio::task_local! {
+    pub(super) static BEFORE_QUEUE: Arc<tokio::sync::Barrier>;
+    pub(super) static AFTER_RECEIPT_BARRIER: Arc<tokio::sync::Barrier>;
+    pub(super) static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+}
+pub(super) mod integration;
 mod lease;
 mod monitor;
 mod questions;

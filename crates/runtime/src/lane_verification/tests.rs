@@ -1166,3 +1166,41 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
     service.shutdown();
     f.cleanup().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn verify_returns_evidence_unavailable_when_owned_pr_refresh_times_out() {
+    let f = Fixture::new(Mode::Approve).await;
+    require_pr(&f);
+    let owner = Arc::new(
+        crate::ownership::OwnerHost::open(
+            &f.dir.path().join("owners"),
+            Default::default(),
+            f.runtime.shared.bus.clone(),
+        )
+        .unwrap(),
+    );
+    owner.start(&f.lane.thread_id).unwrap();
+    let (service, _, source, key) = install_pr_with(&f, owner);
+    let gate = source.push_gate(&key);
+    let ready_seq = f
+        .storage
+        .handle()
+        .lane(&f.lane.lane_id)
+        .unwrap()
+        .unwrap()
+        .latest_report_seq;
+    let verify = f.runtime.verify_lane(f.lead, &f.lane.lane_id, ready_seq);
+    let expire = async {
+        gate.arrived().await;
+        tokio::time::advance(std::time::Duration::from_secs(
+            config::PullRequestsConfig::default().review_refresh_timeout_seconds,
+        ))
+        .await;
+    };
+    let (result, ()) = tokio::join!(verify, expire);
+    assert_eq!(result.unwrap_err().code, "evidence_unavailable");
+    assert_eq!(source.calls().len(), 1);
+    service.shutdown();
+    drop(gate);
+    f.cleanup().await;
+}

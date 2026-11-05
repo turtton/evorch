@@ -88,17 +88,19 @@ impl AgentRuntime {
     /// receipt but before this hook must not lose the continuation behind ACK repair.
     /// Caller authority, direct ownership, Stop and snapshot-consumed fences are
     /// rechecked by resume_answered_child; inheritance alone never renews authority.
-    pub(crate) async fn resume_forwarded_lane_answers(&self, caller: RunId, thread: &str) {
+    pub(crate) async fn resume_forwarded_lane_answers(
+        &self,
+        caller: RunId,
+        thread: &str,
+    ) -> Result<(), LaneError> {
         let Some(store) = self.shared.run_store.get() else {
-            return;
+            return Ok(());
         };
         let mut after = String::new();
         loop {
-            let Ok(notices) = store.handle.lane_inbox(thread.to_owned(), after.clone()) else {
-                return;
-            };
+            let notices = store.handle.lane_inbox(thread.to_owned(), after.clone())?;
             if notices.is_empty() {
-                return;
+                return Ok(());
             }
             after = notices
                 .last()
@@ -109,9 +111,7 @@ impl AgentRuntime {
                 .iter()
                 .map(|n| format!("lane-notification:{}", n.notification_id))
                 .collect::<Vec<_>>();
-            let Ok(receipts) = store.handle.host_input_receipts(&ids) else {
-                return;
-            };
+            let receipts = store.handle.host_input_receipts(&ids)?;
             for notice in notices {
                 let LaneNotificationKind::Answer { question_id, .. } = &notice.kind else {
                     continue;
@@ -126,22 +126,22 @@ impl AgentRuntime {
                 }) {
                     continue;
                 }
-                let Ok(Some(question)) = self.user_question(question_id) else {
+                let Some(question) = self
+                    .user_question(question_id)
+                    .map_err(|error| LaneError::new("storage_failed", error))?
+                else {
                     continue;
                 };
                 if question.answer.is_none() {
                     continue;
                 }
-                let Ok(Some(route)) = store.handle.lane_question_routing(question_id.clone())
-                else {
+                let Some(route) = store.handle.lane_question_routing(question_id.clone())? else {
                     continue;
                 };
                 if route.requester.thread_id != thread {
                     continue;
                 }
-                let Ok(recipients) = store.user_question_recipients(question_id) else {
-                    continue;
-                };
+                let recipients = store.user_question_recipients(question_id)?;
                 for recipient in std::iter::once(question.run_id.clone()).chain(recipients) {
                     let Ok(child) = crate::meta::parse_run_id(&recipient) else {
                         continue;
