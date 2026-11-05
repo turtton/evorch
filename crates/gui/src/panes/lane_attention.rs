@@ -71,7 +71,7 @@ pub fn kind_detail(kind: &LaneAttentionKind) -> Option<String> {
                 .to_owned()
         }
         LaneAttentionKind::StopPending { pending_count, .. } => format!(
-            "The lead was stopped: {pending_count} notice(s) are held, not lost, and it is not woken."
+            "The delivery target was stopped: {pending_count} notice(s) are held, not lost, and it is not woken until continued."
         ),
         LaneAttentionKind::Stall {
             classification,

@@ -252,14 +252,21 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         while let Ok(loaded) = self.attention.results.try_recv() {
             self.attention.in_flight.remove(&loaded.lead);
-            if self.attention.dirty.remove(&loaded.lead) {
+            // Asked for again while this read ran: it may have taken its snapshot before the
+            // change that prompted the request, so it can be shown but cannot confirm anything.
+            let overtaken = self.attention.dirty.remove(&loaded.lead);
+            if overtaken {
                 self.attention.queued.insert(loaded.lead.clone());
             }
             let succeeded = loaded.result.is_ok();
             self.attention
                 .board
                 .apply(&loaded.lead, loaded.seq, loaded.result);
-            self.settle_pending_actions(&loaded.lead, loaded.seq, succeeded);
+            if overtaken {
+                self.defer_pending_actions(&loaded.lead);
+            } else {
+                self.settle_pending_actions(&loaded.lead, loaded.seq, succeeded);
+            }
         }
         for lead in self.sidebar_leads() {
             if self.attention.known_leads.insert(lead.clone()) {
@@ -346,6 +353,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     min_seq: self.attention.next_seq + 1,
                 });
                 self.attention.request(&lead);
+            }
+        }
+    }
+
+    /// Keeps the held operations of `lead` for the read that is about to start: none of the reads
+    /// begun so far can be trusted to include the change that overtook them.
+    fn defer_pending_actions(&mut self, lead: &str) {
+        let next = self.attention.next_seq + 1;
+        for pending in &mut self.attention.pending {
+            if pending.action.lead == lead {
+                pending.min_seq = pending.min_seq.max(next);
             }
         }
     }

@@ -295,3 +295,96 @@ fn a_refresh_needs_no_item_and_reads_every_lead() {
     assert_eq!(reader.reads(), 2);
     assert!(workbench.issued().is_empty());
 }
+
+type HeldJobs = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
+/// A workbench whose reads start only when the test runs them, so an event can arrive after a
+/// read took its snapshot and before its answer is taken in.
+fn gated_workbench() -> (
+    WorkbenchState<DemoSource>,
+    Arc<FakeReader>,
+    HeldJobs,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs: HeldJobs = Arc::default();
+    let held = Arc::clone(&jobs);
+    let spawner: Spawner = Arc::new(move |job| held.lock().unwrap().push(job));
+    let reader = Arc::new(FakeReader::default());
+    let mut workbench = state(&dir.path().join("sidebar.json"))
+        .with_lane_attention(reader.clone())
+        .with_lane_spawner(spawner);
+    workbench.apply_conversation_event(&lane_created());
+    (workbench, reader, jobs, dir)
+}
+
+/// Runs the reads started so far: each takes its snapshot now and posts its answer.
+fn run_reads(jobs: &HeldJobs) {
+    let started = std::mem::take(&mut *jobs.lock().unwrap());
+    for job in started {
+        job();
+    }
+}
+
+/// Holds a choice on revision 3 whose confirming read has taken its snapshot but whose answer
+/// is not yet taken in.
+fn choice_awaiting_its_answer(
+    workbench: &mut WorkbenchState<DemoSource>,
+    reader: &FakeReader,
+    jobs: &HeldJobs,
+) {
+    reader.set(vec![item(3)]);
+    workbench.pump_attention();
+    run_reads(jobs);
+    workbench.pump_attention();
+    assert!(workbench.lane_attention().holds("thread", "item", 3));
+
+    workbench.apply_attention_action(&egui::Context::default(), continue_lead(3));
+    workbench.pump_attention();
+    run_reads(jobs);
+}
+
+#[test]
+fn a_read_overtaken_by_an_update_event_cannot_confirm_an_action_the_update_invalidated() {
+    let (mut workbench, reader, jobs, _dir) = gated_workbench();
+    choice_awaiting_its_answer(&mut workbench, &reader, &jobs);
+
+    // The cause moved on after the read took its snapshot; the event arrives before its answer.
+    reader.set(vec![item(4)]);
+    workbench.note_attention_event(&lane_created());
+    workbench.pump_attention();
+    assert!(
+        workbench.issued().is_empty(),
+        "the old answer must not decide the choice"
+    );
+
+    run_reads(&jobs);
+    workbench.pump_attention();
+    assert!(
+        workbench.issued().is_empty(),
+        "the item changed: nothing runs"
+    );
+    assert!(workbench.lane_attention().holds("thread", "item", 4));
+}
+
+#[test]
+fn a_choice_waits_for_the_read_after_an_overtaking_event_and_runs_if_it_still_holds() {
+    let (mut workbench, reader, jobs, _dir) = gated_workbench();
+    choice_awaiting_its_answer(&mut workbench, &reader, &jobs);
+
+    // The event changed nothing that matters to the item, but the answer in hand predates it.
+    workbench.note_attention_event(&lane_created());
+    workbench.pump_attention();
+    assert!(
+        workbench.issued().is_empty(),
+        "still waiting for a later read"
+    );
+
+    run_reads(&jobs);
+    workbench.pump_attention();
+    assert!(matches!(
+        workbench.issued(),
+        [crate::model::commands::WorkbenchCommand::ContinueChat(continuation)]
+            if continuation.thread_id == "thread"
+    ));
+}
