@@ -1,6 +1,7 @@
 use super::tests::{pause, terminal};
 use super::*;
 use crate::{AgentInvocationContext, AgentModel};
+use std::sync::mpsc;
 
 fn memo(source: RunId) -> crate::EscalationMemo {
     crate::EscalationMemo {
@@ -17,6 +18,13 @@ fn memo(source: RunId) -> crate::EscalationMemo {
 
 struct Model {
     reject: AtomicBool,
+    paused_worker: Mutex<Option<WorkerCompletion>>,
+    reviewer_entered: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+struct WorkerCompletion {
+    entered: mpsc::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -68,7 +76,15 @@ impl AgentModel for Model {
         _: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, RuntimeError> {
         if role == Role::Reviewer {
+            if let Some(entered) = self.reviewer_entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+            }
             std::future::pending::<()>().await;
+        }
+        let paused = self.paused_worker.lock().unwrap().take();
+        if let Some(WorkerCompletion { entered, release }) = paused {
+            entered.send(()).unwrap();
+            let _ = release.await;
         }
         Ok(providers::ChatResponse {
             usage_reported: true,
@@ -102,6 +118,8 @@ fn fixture() -> (
     let bus = Arc::new(EventBus::new(128));
     let model = Arc::new(Model {
         reject: AtomicBool::new(false),
+        paused_worker: Mutex::new(None),
+        reviewer_entered: Mutex::new(None),
     });
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_run_store(crate::RunStore::open(&config, storage.handle()).unwrap());
@@ -118,6 +136,14 @@ async fn ac15_old_admission_failure_preserves_new_goal_before_and_after_executio
             .create_thread_goal("goal", root, "original".into(), vec!["criterion".into()])
             .unwrap();
         let a = runtime.execution_snapshot(root).unwrap();
+        let (worker_entered_tx, worker_entered) = mpsc::channel();
+        let (release_worker, worker_release) = tokio::sync::oneshot::channel();
+        *model.paused_worker.lock().unwrap() = Some(WorkerCompletion {
+            entered: worker_entered_tx,
+            release: worker_release,
+        });
+        let (reviewer_entered_tx, reviewer_entered) = mpsc::channel();
+        *model.reviewer_entered.lock().unwrap() = Some(reviewer_entered_tx);
         let (failed, release_failure) = pause(&runtime, HookPoint::AdmissionFailed, &a);
         let (validated, release_validation) = pause(&runtime, HookPoint::RootRestoreValidated, &a);
         let (completed_tx, completed) = std::sync::mpsc::channel();
@@ -163,12 +189,21 @@ async fn ac15_old_admission_failure_preserves_new_goal_before_and_after_executio
             if !before_registration {
                 release_resume.send(()).unwrap();
                 resume.take().unwrap().join().unwrap();
+                worker_entered.recv().unwrap();
             }
             let reviewer = runtime.reserve_run_id();
             runtime.spawn_goal_reviewer(root, reviewer, "review".into(), RunConfig::default());
             runtime.set_test_goal_reviewer(root, reviewer);
             let reviewer_execution = runtime.execution_snapshot(reviewer).unwrap();
+            reviewer_entered.recv().unwrap();
+            // Requests record goal usage before complete. Observe both entries
+            // and park the worker response so only the stale admission failure
+            // can change the goal between the snapshots below.
             let before = runtime.goal_for_root(root).unwrap();
+            assert_eq!(
+                before.usage.model_requests,
+                if before_registration { 1 } else { 2 }
+            );
             assert!(!before.work_stopped);
             release_failure.send(()).unwrap();
             // The provider completion has finished its goal side effects before
@@ -177,9 +212,11 @@ async fn ac15_old_admission_failure_preserves_new_goal_before_and_after_executio
             assert_eq!(runtime.goal_for_root(root).unwrap(), before);
             assert_eq!(runtime.test_goal_reviewer(root), Some(reviewer));
             assert_eq!(*reviewer_execution.cancel_tx.borrow(), RunInterrupt::None);
+            release_worker.send(()).unwrap();
             if before_registration {
                 release_resume.send(()).unwrap();
                 resume.take().unwrap().join().unwrap();
+                worker_entered.recv().unwrap();
             }
         });
         runtime.cancel_subtree(root).unwrap();
