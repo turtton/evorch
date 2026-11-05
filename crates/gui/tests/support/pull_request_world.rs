@@ -418,12 +418,19 @@ impl Process {
     }
 
     /// Everything the service has published, once a marker published after it has come back.
+    /// The marker is matched by its source, its code and a token unique to this call, so a
+    /// diagnostic of the service's own can neither end the wait nor be taken for the marker.
     pub async fn quiet_events(&mut self) -> Vec<Event> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let token = format!(
+            "marker-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         self.bus.emit(Event::new(event_bus::DiagnosticEvent {
             source: "pull-request-e2e".into(),
             severity: event_bus::DiagnosticSeverity::Info,
             code: "marker".into(),
-            detail: String::new(),
+            detail: token.clone(),
             run_id: None,
             thread_id: None,
             call_id: None,
@@ -431,7 +438,11 @@ impl Process {
         let mut events = Vec::new();
         loop {
             let event = self.events.recv().await.unwrap();
-            if matches!(event.kind, EventKind::Diagnostic(_)) {
+            if let EventKind::Diagnostic(diagnostic) = &event.kind
+                && diagnostic.source == "pull-request-e2e"
+                && diagnostic.code == "marker"
+                && diagnostic.detail == token
+            {
                 return events;
             }
             events.push(event);

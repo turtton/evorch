@@ -77,6 +77,30 @@ fn fetch_statuses(events: &[Event]) -> Vec<PullRequestFetchStatus> {
         .collect()
 }
 
+/// The diagnostics the pull request service could be raising a failure through: any whose source
+/// or code names pull requests, or that belongs to `thread`. The marker the tests publish is not
+/// one of them.
+///
+/// ADR 0043 reports a failing source through `FetchStatusChanged` (PR3's decision), which the
+/// scenario below counts, and the service publishes no `Diagnostic` event of its own; the
+/// count of these stays at zero, at the first failure and after it has repeated.
+fn pull_request_diagnostics(events: &[Event], thread: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| match &event.kind {
+            EventKind::Diagnostic(diagnostic) => {
+                let marker = diagnostic.source == "pull-request-e2e" && diagnostic.code == "marker";
+                !marker
+                    && (diagnostic.source.contains("pull_request")
+                        || diagnostic.source.contains("pull-request")
+                        || diagnostic.code.contains("pull_request")
+                        || diagnostic.thread_id.as_deref() == Some(thread))
+            }
+            _ => false,
+        })
+        .count()
+}
+
 fn pull_request_events_of(events: &[Event], thread: &str) -> usize {
     events
         .iter()
@@ -603,6 +627,7 @@ async fn an_auth_failure_backs_off_quietly_and_refresh_recovers_and_reopens() {
     process
         .until(|event| matches!(event, PullRequestEvent::FetchStatusChanged { .. }))
         .await;
+    let first_report: Vec<Event> = process.seen.clone();
     assert_eq!(process.fetches_of(12), 1);
     process.scheduler_round().await;
     assert_eq!(process.fetches_of(12), 1, "no retry before time passes");
@@ -615,6 +640,17 @@ async fn an_auth_failure_backs_off_quietly_and_refresh_recovers_and_reopens() {
     let rest = process.quiet_events().await;
     let all: Vec<Event> = heard.into_iter().chain(rest).collect();
     assert_eq!(fetch_statuses(&all).len(), 1, "{:?}", fetch_statuses(&all));
+    assert_eq!(
+        fetch_statuses(&first_report),
+        fetch_statuses(&all),
+        "the failure repeated three times and was reported no more than at the first"
+    );
+    assert_eq!(pull_request_diagnostics(&first_report, THREAD), 0);
+    assert_eq!(
+        pull_request_diagnostics(&all, THREAD),
+        pull_request_diagnostics(&first_report, THREAD),
+        "repeating the failure raised no diagnostic"
+    );
     process.show(&mut window);
     assert!(kinds(&window).is_empty());
 

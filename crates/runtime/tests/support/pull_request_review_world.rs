@@ -72,6 +72,13 @@ pub fn answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
     }
 }
 
+/// [`answer`] with the one check failed: CI failed on `head`.
+pub fn failing_answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
+    let mut failed = answer(head, fetched_at_ns);
+    failed.facts.checks[0].conclusion = Some(CheckConclusion::Failure);
+    failed
+}
+
 /// A runtime with the pull request service on, and its fake source.
 pub struct World {
     pub bus: Arc<EventBus>,

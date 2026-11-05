@@ -21,11 +21,13 @@ use std::sync::Arc;
 
 use agents::Role;
 use config::PullRequestsConfig;
-use event_bus::{AgentRunPhase, EventBus, EventKind, PullRequestEvent};
+use event_bus::{
+    AgentRunPhase, Event, EventBus, EventKind, EventReceiver, LifecycleEvent, PullRequestEvent,
+};
 use providers::FinishReason;
 use review_world::{
-    DELEGATION, DENY, REQUEST, THREAD, answer, merge_call, now_ns, provider_run_with, reviews,
-    world, world_with,
+    DELEGATION, DENY, REQUEST, THREAD, answer, failing_answer, merge_call, now_ns,
+    provider_run_with, reviews, world, world_with,
 };
 use runtime::RunConfig;
 use runtime::pull_requests::{PullRequestError, ReviewLookup};
@@ -36,6 +38,38 @@ use tools::ToolExecutor;
 
 const APPROVE: &str = r#"{"approve":true,"reason":"requested","risk_level":"medium","authorization_level":"high","procedure_step":"none"}"#;
 const SHELL_REVIEW: &str = "Review a shell sandbox permission request.";
+
+/// Everything published before a marker that is published now has been received once the marker
+/// comes back, so what the receiver returns is the whole history up to this point. The marker is
+/// matched by its source, its code and a token that is unique to this call.
+async fn events_up_to_a_marker(bus: &EventBus, receiver: &mut EventReceiver) -> Vec<Event> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let token = format!(
+        "marker-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    bus.emit(Event::new(event_bus::DiagnosticEvent {
+        source: "pull-request-e2e".into(),
+        severity: event_bus::DiagnosticSeverity::Info,
+        code: "marker".into(),
+        detail: token.clone(),
+        run_id: None,
+        thread_id: None,
+        call_id: None,
+    }));
+    let mut events = Vec::new();
+    loop {
+        let event = receiver.recv().await.unwrap();
+        if let EventKind::Diagnostic(diagnostic) = &event.kind
+            && diagnostic.source == "pull-request-e2e"
+            && diagnostic.code == "marker"
+            && diagnostic.detail == token
+        {
+            return events;
+        }
+        events.push(event);
+    }
+}
 
 fn executor(bus: &Arc<EventBus>) -> ToolExecutor {
     ToolExecutor::with_standard_tools(Arc::clone(bus), Arc::new(DirectSandbox::new_unchecked()))
@@ -302,28 +336,13 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
         .await
         .unwrap();
 
-    // Everything published so far is in the receiver once a marker published after it is.
-    world
-        .bus
-        .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
-            source: "pull-request-e2e".into(),
-            severity: event_bus::DiagnosticSeverity::Info,
-            code: "marker".into(),
-            detail: String::new(),
-            run_id: None,
-            thread_id: None,
-            call_id: None,
-        }));
     {
         let mut events = world.events.lock().await;
-        loop {
-            let event = events.recv().await.unwrap();
-            match event.kind {
-                EventKind::Diagnostic(_) => break,
-                EventKind::PullRequest(_) => pull_request_events += 1,
-                _ => {}
-            }
-        }
+        pull_request_events += events_up_to_a_marker(&world.bus, &mut events)
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::PullRequest(_)))
+            .count();
     }
 
     let review_payloads = reviews(&model, SHELL_REVIEW).await;
@@ -344,6 +363,97 @@ async fn flow(settings: PullRequestsConfig) -> Flow {
         notice: format!("{:?}", model.observed().await).contains("harness-notice"),
         linking,
     }
+}
+
+// Scenario 8c. Given: a tracked, linked thread whose agent has finished, so a notice would have
+// a finished recipient to be held for and to wake / When: CI fails and the service has handled it
+// (the transition is stored and its notification claimed) / Then: nothing is delivered to any
+// run, nothing is held, no run is woken or started, no automatic wake is spent, and the agent's
+// model input never carried a harness notice. Notices and wakes are Phase 2.
+#[tokio::test]
+async fn a_ci_failure_on_a_linked_thread_sends_no_notice_holds_nothing_and_wakes_nothing() {
+    let model = Arc::new(ScriptedModel::new([]));
+    model
+        .add_keyed(REQUEST, [Ok(text_response("ready", FinishReason::Stop))])
+        .await;
+    let bus = Arc::new(EventBus::new(4096));
+    let world = world(model.clone(), executor(&bus), bus);
+    world.link(answer('a', now_ns())).await;
+    let root = world
+        .runtime
+        .delegate_chat(
+            THREAD,
+            Role::Orchestrator,
+            REQUEST.into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(world.runtime.wait(root).await, Ok(AgentRunPhase::Done));
+    let mut audit = world.bus.subscribe();
+    let (held, wakes) = (
+        world.runtime.held_message_count(),
+        world.runtime.auto_wake_total(),
+    );
+
+    // When: the check fails, and the change is published with its notification claimed.
+    world
+        .source
+        .push_ok(&review_world::key(), failing_answer('b', now_ns()));
+    world
+        .service
+        .refresh(THREAD, &world.permit())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let event = audit.recv().await.unwrap();
+        let handled = matches!(
+            &event.kind,
+            EventKind::PullRequest(PullRequestEvent::Changed { notifications, .. })
+                if notifications.iter().any(|kind| kind == "checks_failed")
+        );
+        seen.push(event);
+        if handled {
+            break;
+        }
+    }
+    seen.extend(events_up_to_a_marker(&world.bus, &mut audit).await);
+
+    // Then: the failure was handled once, and nothing reached an agent.
+    let failures = seen
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                EventKind::PullRequest(PullRequestEvent::Changed { notifications, .. })
+                    if notifications.iter().any(|kind| kind == "checks_failed")
+            )
+        })
+        .count();
+    assert_eq!(failures, 1);
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::AgentMessage(_))),
+        "no message was delivered to any run, held or not"
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Lifecycle(
+                LifecycleEvent::AgentRunStarted { .. }
+                    | LifecycleEvent::AgentRunStateChanged { .. }
+            )
+        )),
+        "no run was started or woken"
+    );
+    assert_eq!(world.runtime.held_message_count(), held);
+    assert_eq!(held, 0);
+    assert_eq!(world.runtime.auto_wake_total(), wakes);
+    assert_eq!(wakes, 0);
+    let sent = model.observed().await;
+    assert_eq!(sent.len(), 1, "no request was made after the failure");
+    assert!(!format!("{sent:?}").contains("harness-notice"));
 }
 
 // Scenario 8a. Given: `[pull_requests] enabled = false` / When: an agent prints a pull request
