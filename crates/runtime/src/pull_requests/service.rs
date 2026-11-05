@@ -882,6 +882,32 @@ impl PullRequestService {
         self.inner.review_of_thread(&thread, config).await
     }
 
+    /// The thread's lifecycle revision (it moves on every Link and Unlink, whether or not the
+    /// thread has an active link), for the thread of `run_id`. `None` when the review would see
+    /// no pull request item at all: tracking or review input is off, or the run is in no thread.
+    ///
+    /// A review reads this *before* its facts and checks it again after its verdict, so a link
+    /// that came and went in between is noticed. Reads the database only.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub async fn review_lifecycle_revision(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<u64>, PullRequestError> {
+        let config = self.inner.config();
+        if !config.enabled || !config.include_in_review {
+            return Ok(None);
+        }
+        let (env, run) = (Arc::clone(&self.inner.env), run_id.to_owned());
+        let Some(thread) = self.inner.blocking(move || env.thread_of_run(&run)).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.inner.thread_state(&thread).await?.lifecycle_revision,
+        ))
+    }
+
     /// [`Self::snapshot_for_review`], first fetching when the stored facts are older than
     /// `review_max_age_seconds` (or failed or missing) and this process owns the thread. The
     /// wait is bounded by `review_refresh_timeout_seconds`; a fetch that runs longer goes on

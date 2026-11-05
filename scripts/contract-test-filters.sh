@@ -43,7 +43,8 @@ CACHE_CONTRACT_FILTER='
       | binary(=builtin_git_skill)
       | binary(=skill_hot_reload_cache)
       | binary(=thread_tools_cache)
-      | binary(=pull_request_observer_cache)))
+      | binary(=pull_request_observer_cache)
+      | binary(=pull_request_review_cache)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & binary(=artifact_pages_cache))
 '
