@@ -144,6 +144,8 @@ pub(super) struct ThreadIndicators<'a> {
     pub active_runs: &'a HashSet<&'a workspace_ui::ThreadId>,
     /// When each archived thread is deleted, or why it is kept.
     pub retention: &'a BTreeMap<workspace_ui::ThreadId, RetentionStatus>,
+    /// The pull request badges, and whether "Link PR…" is offered.
+    pub pull_requests: super::PullRequestsView<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -265,6 +267,9 @@ struct RowMarks {
     attention: Attention,
     hidden: Hidden,
     title_color: Option<egui::Color32>,
+    pull_request: Option<crate::model::pull_requests::PullRequestBadge>,
+    /// Offer "Link PR…" in the title's menu.
+    link_pr: bool,
 }
 
 /// What a collapsed row hides, so collapsing a family never hides work that
@@ -435,6 +440,12 @@ fn render_tree(
                             attention: own,
                             hidden,
                             title_color: row_colors.map(|(fg, _)| fg),
+                            pull_request: indicators
+                                .pull_requests
+                                .badges
+                                .and_then(|badges| badges.get(&thread.id))
+                                .copied(),
+                            link_pr: indicators.pull_requests.enabled,
                         },
                         family_running,
                         action,
@@ -649,6 +660,8 @@ fn active_row(
         attention,
         hidden,
         title_color,
+        pull_request,
+        link_pr,
     } = marks;
     let note = attention_note(attention, hidden.attention);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -729,7 +742,16 @@ fn active_row(
         }
         ui.add_space(SP_1);
         hidden_count_badge(ui, hidden.count);
-        thread_title(ui, thread, !display_root, note, title_color, action);
+        if let Some(badge) = pull_request {
+            pull_request_badge(ui, badge);
+        }
+        thread_title(
+            ui,
+            thread,
+            !display_root,
+            (note, title_color, link_pr),
+            action,
+        );
     });
 }
 
@@ -748,8 +770,32 @@ fn archived_row(
         }
         hidden_count_badge(ui, hidden_count);
         let note = retention.and_then(retention_hover_text);
-        thread_title(ui, thread, !display_root, note.as_deref(), None, action);
+        thread_title(
+            ui,
+            thread,
+            !display_root,
+            (note.as_deref(), None, false),
+            action,
+        );
     });
+}
+
+/// `#12 ✓`: the pull request's number and its glyph. The glyph class also has a word, in the
+/// accessible name and the hover; merged reads `merged` outright.
+fn pull_request_badge(ui: &mut Ui, badge: crate::model::pull_requests::PullRequestBadge) {
+    use crate::model::pull_requests::PrGlyph;
+    let (icon, color) = crate::panes::agent::pull_request_glyph_style(badge.glyph);
+    let text = match badge.glyph {
+        PrGlyph::Merged => format!("#{} merged", badge.number),
+        _ => format!("#{} {icon}", badge.number),
+    };
+    let label = format!("Pull request #{}: {}", badge.number, badge.glyph.word());
+    let response = ui.add(
+        egui::Label::new(egui::RichText::new(text).size(FONT_SMALL).color(color))
+            .sense(Sense::hover()),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    response.on_hover_text(label);
 }
 
 /// A pill counting a collapsed row's descendants; nothing when none are hidden.
@@ -852,8 +898,7 @@ fn thread_title(
     ui: &mut Ui,
     thread: &ThreadRecord,
     child: bool,
-    note: Option<&str>,
-    color: Option<egui::Color32>,
+    (note, color, link_pr): (Option<&str>, Option<egui::Color32>, bool),
     action: &mut Option<SidebarAction>,
 ) {
     // Indentation and the caret already show nesting; "↳" stays in the
@@ -882,6 +927,10 @@ fn thread_title(
         }
         if ui.button("Copy thread title").clicked() {
             ui.ctx().copy_text(thread.title.to_string());
+            ui.close();
+        }
+        if link_pr && ui.button("Link PR…").clicked() {
+            *action = Some(SidebarAction::LinkPullRequest(thread.id.clone()));
             ui.close();
         }
     });
@@ -1103,6 +1152,7 @@ mod tests {
             externally_working: &BTreeSet::new(),
             active_runs: &HashSet::new(),
             retention: &BTreeMap::new(),
+            pull_requests: Default::default(),
         };
         // a hides a1, a1x and a2, but neither itself nor b's subtree.
         assert_eq!(
@@ -1593,6 +1643,7 @@ mod tests {
                         externally_working: &none,
                         active_runs: &active,
                         retention: &BTreeMap::new(),
+                        pull_requests: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1649,6 +1700,7 @@ mod tests {
                         externally_working: &none,
                         active_runs: &active,
                         retention: &BTreeMap::new(),
+                        pull_requests: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -1779,6 +1831,7 @@ mod tests {
                         externally_working: &none,
                         active_runs: &active,
                         retention: &retention,
+                        pull_requests: Default::default(),
                     };
                     for (archived, id) in [(true, "old"), (false, "live")] {
                         let section: Vec<&ThreadRecord> = sidebar
@@ -2000,6 +2053,7 @@ mod tests {
             externally_working: &external,
             active_runs: &active,
             retention: &BTreeMap::new(),
+            pull_requests: Default::default(),
         };
 
         // Then: the collapsed root carries it, the child itself is not hidden
@@ -2061,6 +2115,7 @@ mod tests {
                         externally_working: &external,
                         active_runs: &active,
                         retention: &BTreeMap::new(),
+                        pull_requests: Default::default(),
                     };
                     super::render_tree(ui, &sidebar, &lineage, &rows, &indicators, false, action);
                 },
@@ -2207,6 +2262,7 @@ mod tests {
                     externally_working: &none,
                     active_runs: &active,
                     retention: &BTreeMap::new(),
+                    pull_requests: Default::default(),
                 };
                 let mut action = None;
                 super::render_tree(

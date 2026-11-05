@@ -55,6 +55,16 @@ pub enum SidebarAction {
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
     ToggleArchive(ThreadId),
+    /// Open the "Link PR…" dialog for a thread.
+    LinkPullRequest(ThreadId),
+}
+
+/// What the thread rows show about pull requests: their badges, and whether the feature is
+/// on (the right-click "Link PR…" is offered only then).
+#[derive(Clone, Copy, Default)]
+pub struct PullRequestsView<'a> {
+    pub enabled: bool,
+    pub badges: Option<&'a BTreeMap<ThreadId, crate::model::pull_requests::PullRequestBadge>>,
 }
 
 pub fn sidebar_pane(
@@ -92,6 +102,34 @@ pub fn sidebar_pane_with_retention(
     retention: &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
     view: &SidebarView,
 ) -> Option<SidebarAction> {
+    sidebar_pane_with_pull_requests(
+        ui,
+        sidebar,
+        (phases, question_threads, approval_threads, unread_threads),
+        (externally_working_threads, retention),
+        view,
+        PullRequestsView::default(),
+    )
+}
+
+/// [`sidebar_pane_with_retention`] that also shows each linked thread's pull request badge.
+#[allow(clippy::too_many_arguments)]
+pub fn sidebar_pane_with_pull_requests(
+    ui: &mut egui::Ui,
+    sidebar: &SidebarState,
+    (phases, question_threads, approval_threads, unread_threads): (
+        &BTreeMap<String, ThreadRunPhase>,
+        &BTreeSet<ThreadId>,
+        &BTreeSet<ThreadId>,
+        &BTreeSet<ThreadId>,
+    ),
+    (externally_working_threads, retention): (
+        &BTreeSet<ThreadId>,
+        &BTreeMap<ThreadId, storage::thread_retention::RetentionStatus>,
+    ),
+    view: &SidebarView,
+    pull_requests: PullRequestsView<'_>,
+) -> Option<SidebarAction> {
     let active_runs = threads::threads_with_active_runs(&sidebar.threads, phases);
     let indicators = threads::ThreadIndicators {
         phases,
@@ -101,6 +139,7 @@ pub fn sidebar_pane_with_retention(
         externally_working: externally_working_threads,
         active_runs: &active_runs,
         retention,
+        pull_requests,
     };
     let pane_state = ui
         .ctx()

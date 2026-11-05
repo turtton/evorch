@@ -28,6 +28,7 @@ pub mod project_bridge;
 pub mod project_dialog;
 pub mod project_path;
 pub mod provider_settings;
+pub mod pull_requests;
 pub mod role_profiles;
 pub mod role_settings;
 pub mod routing_settings;
