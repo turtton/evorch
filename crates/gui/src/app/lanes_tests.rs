@@ -1071,6 +1071,7 @@ fn a_lane_delivery_diagnostic_refreshes_what_is_shown() {
     let mut blocked = snapshot(lane, None);
     blocked.detail.delivery.capacity_blocked =
         Some(storage::lane_delivery::QuestionCapacityBlocked {
+            requester_run_id: "run-1".into(),
             capacity: storage::lane_delivery::QuestionCapacity::Requester,
             attempts: 1,
             first_at_ns: 1,

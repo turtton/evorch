@@ -16,8 +16,11 @@ use tempfile::TempDir;
 const UNDO_V40: &str = include_str!("../undo/undo_v40.sql");
 const UNDO_V43: &str = include_str!("../undo/undo_v43.sql");
 const UNDO_V46: &str = concat!(
-    include_str!("../undo/undo_v48.sql"),
-    include_str!("../undo/undo_v47.sql"),
+    concat!(
+        include_str!("../undo/undo_v49.sql"),
+        include_str!("../undo/undo_v48.sql"),
+        include_str!("../undo/undo_v47.sql")
+    ),
     include_str!("../undo/undo_v46.sql")
 );
 const UNDO_V45: &str = include_str!("../undo/undo_v45.sql");

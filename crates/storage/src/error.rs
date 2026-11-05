@@ -105,6 +105,7 @@ pub enum LaneCursorError {
 pub enum StorageError {
     QuestionCapacity(crate::lane_delivery::QuestionCapacity),
     LaneDeliveryConflict(&'static str),
+    LaneOperation(event_bus::lane::LaneOperationError),
     StaleMutation,
     /// SQLite 操作が失敗しました。
     Sqlite(rusqlite::Error),
@@ -228,6 +229,7 @@ impl fmt::Display for StorageError {
                 "question capacity {capacity:?} reached ({})",
                 capacity.limit()
             ),
+            Self::LaneOperation(reason) => write!(formatter, "{}", reason.as_str()),
             Self::LaneDeliveryConflict(reason) => {
                 write!(formatter, "lane delivery conflict: {reason}")
             }
@@ -396,6 +398,7 @@ impl std::error::Error for StorageError {
             Self::Sqlite(error) => Some(error),
             Self::Io(_) => Some(&IO_SOURCE),
             Self::QuestionCapacity(_)
+            | Self::LaneOperation(_)
             | Self::LaneDeliveryConflict(_)
             | Self::Migration { .. }
             | Self::StaleMutation

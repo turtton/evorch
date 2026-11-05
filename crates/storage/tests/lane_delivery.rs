@@ -8,6 +8,8 @@ use storage::{
 };
 #[path = "lane_delivery/atomic_guard.rs"]
 mod atomic_guard;
+#[path = "lane_delivery/control.rs"]
+mod control;
 #[path = "lane_delivery/recovery.rs"]
 mod recovery;
 #[path = "lane_delivery/rollback.rs"]
@@ -644,6 +646,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v49.sql"),
         include_str!("../undo/undo_v48.sql"),
         include_str!("../undo/undo_v47.sql")
     ))
