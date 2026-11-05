@@ -12,8 +12,8 @@ use storage::pull_requests::{CheckConclusion, CheckStatus, PullRequestState, Rev
 
 use crate::format;
 use crate::model::pull_requests::{
-    Freshness, PrGlyph, PullRequestAction, ThreadPullRequest, check_is_failed, ci_summary,
-    freshness, glyph, mismatches, state_word,
+    PrGlyph, PullRequestAction, Status, ThreadPullRequest, check_is_failed, ci_summary, glyph,
+    mismatches, state_word, statuses,
 };
 use crate::theme::icons;
 use crate::theme::text::{medium, muted};
@@ -111,24 +111,47 @@ pub(super) fn show(
     }
 }
 
-fn status_text(view: &ThreadPullRequest, now_ns: i64) -> Option<(String, egui::Color32)> {
-    let fetched = view.fetched_at_ns.map_or_else(
-        || "never fetched".to_owned(),
-        |at| format!("last fetched {}", age(now_ns, at)),
-    );
-    match freshness(view, now_ns) {
-        Freshness::NotTracked => Some((
-            format!("Not tracked in this window · {fetched}"),
-            palette().TEXT_MUTED,
-        )),
-        Freshness::Stale => Some((format!("Stale · {fetched}"), palette().WARNING_FG)),
-        Freshness::Current => view.failure.as_ref().map(|failure| {
-            (
-                format!("Fetch failed ({}) · {fetched}", failure.kind.as_str()),
-                palette().WARNING_FG,
-            )
-        }),
+/// One line of status: its words, colour and, when there is more to read, the hover.
+struct StatusLine {
+    text: String,
+    color: egui::Color32,
+    hover: Option<String>,
+}
+
+/// Every status that holds, each on its own (never one hiding another), then when the facts
+/// were last fetched.
+fn status_lines(view: &ThreadPullRequest, now_ns: i64) -> Vec<StatusLine> {
+    let mut lines: Vec<StatusLine> = statuses(view, now_ns)
+        .into_iter()
+        .map(|status| match status {
+            Status::NotTracked => StatusLine {
+                text: "Not tracked in this window".to_owned(),
+                color: palette().TEXT_MUTED,
+                hover: Some("Another window polls this pull request, or none does".into()),
+            },
+            Status::Stale => StatusLine {
+                text: "Stale".to_owned(),
+                color: palette().WARNING_FG,
+                hover: Some("The facts are older than the polling interval allows".into()),
+            },
+            Status::FetchFailed { kind, message } => StatusLine {
+                text: format!("Fetch failed ({kind})"),
+                color: palette().WARNING_FG,
+                hover: Some(message),
+            },
+        })
+        .collect();
+    if !lines.is_empty() {
+        lines.push(StatusLine {
+            text: view.fetched_at_ns.map_or_else(
+                || "never fetched".to_owned(),
+                |at| format!("last fetched {}", age(now_ns, at)),
+            ),
+            color: palette().TEXT_MUTED,
+            hover: None,
+        });
     }
+    lines
 }
 
 fn summary_row(
@@ -209,8 +232,11 @@ fn summary_row(
             if !ci.is_empty() {
                 ui.label(RichText::new(ci).color(color));
             }
-            if let Some((text, color)) = status_text(view, bar.now_ns) {
-                ui.label(RichText::new(text).size(FONT_SMALL).color(color));
+            for line in status_lines(view, bar.now_ns) {
+                let label = ui.label(RichText::new(line.text).size(FONT_SMALL).color(line.color));
+                if let Some(hover) = line.hover {
+                    label.on_hover_text(hover);
+                }
             }
             if let Some(facts) = &view.facts {
                 ui.add(egui::Label::new(muted(facts.head_branch.as_str())).truncate());
@@ -232,7 +258,7 @@ fn details(ui: &mut egui::Ui, bar: &PullRequestBarContext<'_>) {
     if let Some(label) = view.label() {
         ui.label(medium(label));
     }
-    checks(ui, facts);
+    checks(ui, facts, view.failure.is_none());
     ui.add_space(SP_1);
     egui::Grid::new("pull-request-facts")
         .num_columns(2)
@@ -275,8 +301,8 @@ fn details(ui: &mut egui::Ui, bar: &PullRequestBarContext<'_>) {
                 ui.end_row();
             }
         });
-    if let Some((text, color)) = status_text(view, bar.now_ns) {
-        ui.label(RichText::new(text).color(color));
+    for line in status_lines(view, bar.now_ns) {
+        ui.label(RichText::new(line.text).color(line.color));
     }
     for mismatch in mismatches(view) {
         ui.label(
@@ -312,7 +338,7 @@ fn conclusion_word(conclusion: Option<CheckConclusion>) -> &'static str {
 
 /// Failures one by one, the checks still running one by one, and everything that passed on one
 /// line.
-fn checks(ui: &mut egui::Ui, facts: &storage::pull_requests::PullRequestFacts) {
+fn checks(ui: &mut egui::Ui, facts: &storage::pull_requests::PullRequestFacts, fetch_worked: bool) {
     if facts.state != PullRequestState::Open && facts.checks.is_empty() {
         return;
     }
@@ -350,10 +376,14 @@ fn checks(ui: &mut egui::Ui, facts: &storage::pull_requests::PullRequestFacts) {
         }
     }
     if passed > 0 {
-        ui.label(
-            RichText::new(icons::with_icon(icons::CHECK, format!("{passed} passed")))
-                .color(palette().SUCCESS),
-        );
+        // A pass is only drawn as success while the list is the whole list and the newest fetch
+        // worked; otherwise it is a count, in neutral.
+        let (icon, color) = if fetch_worked && facts.checks_complete {
+            (icons::CHECK, palette().SUCCESS)
+        } else {
+            (icons::MINUS, palette().TEXT_MUTED)
+        };
+        ui.label(RichText::new(icons::with_icon(icon, format!("{passed} passed"))).color(color));
     }
     if !facts.checks_complete {
         ui.label(muted("The list of checks is incomplete"));

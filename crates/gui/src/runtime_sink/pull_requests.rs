@@ -1,10 +1,16 @@
 //! Pull request operations of the runtime command sink (ADR 0043 Phase 1).
 //!
-//! Link, Unlink, Refresh and Confirm act for a thread, so they need the permit of the process
-//! that holds the thread's lease; the application obtains write mode first, as chat does.
-//! They run on the Tokio runtime (storage and `gh` are never touched on the UI thread) and
-//! report a refusal through [`CommandSink::poll`]. A success is not reported here: the
-//! service publishes an event after it committed, and the display reads the database again.
+//! Link, Unlink, Refresh, Confirm and Dismiss act for a thread, so each needs the permit of the
+//! process that holds the thread's lease (the application obtains write mode first, as chat
+//! does, and this sink checks it again). An inheritance announces a derived thread and needs
+//! none.
+//!
+//! Nothing here touches storage or `gh` on the UI thread. Every operation goes to one queue
+//! that a single Tokio task works off in the order it was issued, so what a person did first
+//! happens first: a fork's inheritance pins the parent's link before the Unlink the person
+//! presses right after it, and an Unlink is never overtaken by a later Link. A refusal is
+//! reported through [`CommandSink::poll`]; a success is not reported here, since the service
+//! publishes an event after it committed and the display reads the database again.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,16 +18,27 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use runtime::ownership::OwnerPermit;
 use runtime::pull_requests::{DerivedThreadKind, PullRequestError, PullRequestService};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::model::commands::{LoopEvent, PullRequestDerivation, WorkbenchCommand};
 
-/// Refusals waiting for the next poll, and how many operations are still running.
+/// One queued operation.
+struct Work {
+    service: PullRequestService,
+    command: WorkbenchCommand,
+    permit: Option<OwnerPermit>,
+}
+
+/// The queue, the refusals waiting for the next poll, and how much is still outstanding.
 pub(super) struct Jobs {
     sender: Sender<LoopEvent>,
     results: Receiver<LoopEvent>,
+    /// Operations queued or running.
     running: Arc<AtomicUsize>,
     /// Refusals sent and not yet polled.
     unpolled: Arc<AtomicUsize>,
+    /// The queue of the worker task, started with the first operation.
+    queue: Option<UnboundedSender<Work>>,
 }
 
 impl Default for Jobs {
@@ -32,6 +49,7 @@ impl Default for Jobs {
             results,
             running: Arc::new(AtomicUsize::new(0)),
             unpolled: Arc::new(AtomicUsize::new(0)),
+            queue: None,
         }
     }
 }
@@ -46,13 +64,50 @@ impl Jobs {
     pub(super) fn busy(&self) -> bool {
         self.running.load(Ordering::SeqCst) > 0 || self.unpolled.load(Ordering::SeqCst) > 0
     }
+
+    /// Queues `work`, starting the worker on `handle` the first time.
+    fn enqueue(&mut self, handle: &tokio::runtime::Handle, work: Work) {
+        let queue = self.queue.get_or_insert_with(|| {
+            let (queue, mut inbox) = unbounded_channel::<Work>();
+            let sender = self.sender.clone();
+            let running = Arc::clone(&self.running);
+            let unpolled = Arc::clone(&self.unpolled);
+            handle.spawn(async move {
+                while let Some(work) = inbox.recv().await {
+                    let thread = work.command.thread().map(str::to_owned);
+                    if let Err(error) = run(work).await
+                        && let Some(thread_id) = thread
+                    {
+                        unpolled.fetch_add(1, Ordering::SeqCst);
+                        let _ = sender.send(LoopEvent::PullRequestRejected {
+                            thread_id,
+                            reason: reason(&error),
+                        });
+                    }
+                    running.fetch_sub(1, Ordering::SeqCst);
+                }
+            });
+            queue
+        });
+        self.running.fetch_add(1, Ordering::SeqCst);
+        if queue.send(work).is_err() {
+            self.running.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
-struct Running(Arc<AtomicUsize>);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+impl WorkbenchCommand {
+    /// The thread a pull request operation acts for; `None` for any other command and for an
+    /// inheritance (which names two threads and acts for neither).
+    fn thread(&self) -> Option<&str> {
+        match self {
+            Self::LinkPullRequest { thread_id, .. }
+            | Self::UnlinkPullRequest { thread_id, .. }
+            | Self::RefreshPullRequest { thread_id }
+            | Self::ConfirmPullRequestCandidate { thread_id, .. }
+            | Self::DismissPullRequestCandidate { thread_id, .. } => Some(thread_id),
+            _ => None,
+        }
     }
 }
 
@@ -82,89 +137,75 @@ impl super::RuntimeCommandSink {
         command: WorkbenchCommand,
         permit: Option<OwnerPermit>,
     ) -> Vec<LoopEvent> {
-        if let WorkbenchCommand::InheritPullRequest {
-            parent_thread_id,
-            child_thread_id,
-            kind,
-        } = command
-        {
-            self.inherit_pull_request(&parent_thread_id, &child_thread_id, kind);
-            return Vec::new();
-        }
-        let thread_id = match &command {
-            WorkbenchCommand::LinkPullRequest { thread_id, .. }
-            | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
-            | WorkbenchCommand::RefreshPullRequest { thread_id }
-            | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. }
-            | WorkbenchCommand::DismissPullRequestCandidate { thread_id, .. } => thread_id.clone(),
-            _ => return Vec::new(),
-        };
-        let refuse = |text: &str| {
-            vec![LoopEvent::PullRequestRejected {
-                thread_id: thread_id.clone(),
-                reason: text.to_owned(),
-            }]
-        };
         let Some(service) = self.runtime.pull_requests() else {
-            return refuse("Pull request tracking is not running");
+            // Without the service there is nothing to announce to and nothing to operate.
+            return match command.thread() {
+                Some(thread) => vec![LoopEvent::PullRequestRejected {
+                    thread_id: thread.to_owned(),
+                    reason: "Pull request tracking is not running".into(),
+                }],
+                None => Vec::new(),
+            };
         };
-        let needs_permit = !matches!(
-            command,
-            WorkbenchCommand::DismissPullRequestCandidate { .. }
-        );
-        let permit = match permit {
-            Some(permit) if permit.thread_id == thread_id => Some(permit),
-            Some(_) => return refuse("The write-mode permit belongs to another thread"),
-            None if needs_permit => {
-                return refuse("Another window holds this thread in write mode");
-            }
+        let permit = match command.thread() {
             None => None,
+            Some(thread) => match permit {
+                Some(permit) if permit.thread_id == thread => Some(permit),
+                Some(_) => {
+                    return vec![LoopEvent::PullRequestRejected {
+                        thread_id: thread.to_owned(),
+                        reason: "The write-mode permit belongs to another thread".into(),
+                    }];
+                }
+                None => {
+                    return vec![LoopEvent::PullRequestRejected {
+                        thread_id: thread.to_owned(),
+                        reason: "Another window holds this thread in write mode".into(),
+                    }];
+                }
+            },
         };
-        self.jobs_running().fetch_add(1, Ordering::SeqCst);
-        let guard = Running(Arc::clone(self.jobs_running()));
-        let sender = self.pull_request_jobs.sender.clone();
-        let unpolled = Arc::clone(&self.pull_request_jobs.unpolled);
-        self.handle.spawn(async move {
-            let _running = guard;
-            if let Err(error) = run(&service, command, permit).await {
-                unpolled.fetch_add(1, Ordering::SeqCst);
-                let _ = sender.send(LoopEvent::PullRequestRejected {
-                    thread_id,
-                    reason: reason(&error),
-                });
-            }
-        });
+        self.pull_request_jobs.enqueue(
+            &self.handle,
+            Work {
+                service,
+                command,
+                permit,
+            },
+        );
         Vec::new()
-    }
-
-    fn jobs_running(&self) -> &Arc<AtomicUsize> {
-        &self.pull_request_jobs.running
-    }
-
-    /// Pins the parent's link for a derived thread in the path that creates it, so what the
-    /// parent does next (an Unlink) cannot take it away. A derived thread keeps no link of
-    /// its own until the pull request is confirmed open.
-    fn inherit_pull_request(&self, parent: &str, child: &str, kind: PullRequestDerivation) {
-        let Some(service) = self.runtime.pull_requests() else {
-            return;
-        };
-        let kind = match kind {
-            PullRequestDerivation::Fork => DerivedThreadKind::Fork,
-            PullRequestDerivation::Rewind => DerivedThreadKind::Rewind,
-        };
-        let _guard = self.handle.enter();
-        if let Err(error) = service.inherit_now(parent, child, kind) {
-            tracing::warn!(%error, parent, child, "pull request inheritance was not pinned");
-        }
     }
 }
 
-async fn run(
-    service: &PullRequestService,
-    command: WorkbenchCommand,
-    permit: Option<OwnerPermit>,
-) -> Result<(), PullRequestError> {
+/// Runs one queued operation. The service checks the permit of the operations that take one;
+/// dismissing a candidate takes none there, so its permit is checked here first.
+async fn run(work: Work) -> Result<(), PullRequestError> {
+    let Work {
+        service,
+        command,
+        permit,
+    } = work;
     match (command, permit) {
+        (
+            WorkbenchCommand::InheritPullRequest {
+                parent_thread_id,
+                child_thread_id,
+                kind,
+            },
+            _,
+        ) => {
+            let kind = match kind {
+                PullRequestDerivation::Fork => DerivedThreadKind::Fork,
+                PullRequestDerivation::Rewind => DerivedThreadKind::Rewind,
+            };
+            if let Err(error) = service
+                .inherit(&parent_thread_id, &child_thread_id, kind)
+                .await
+            {
+                tracing::warn!(%error, parent = %parent_thread_id, child = %child_thread_id, "pull request inheritance was not pinned");
+            }
+            Ok(())
+        }
         (
             WorkbenchCommand::LinkPullRequest {
                 thread_id,
@@ -205,11 +246,19 @@ async fn run(
                 thread_id,
                 candidate_id,
             },
-            _,
-        ) => service
-            .dismiss_candidate(&thread_id, candidate_id)
-            .await
-            .map(drop),
+            Some(permit),
+        ) => {
+            let held = tokio::task::spawn_blocking(move || permit.validate_generation().is_ok())
+                .await
+                .unwrap_or(false);
+            if !held {
+                return Err(PullRequestError::NotOwner);
+            }
+            service
+                .dismiss_candidate(&thread_id, candidate_id)
+                .await
+                .map(drop)
+        }
         _ => Err(PullRequestError::NotOwner),
     }
 }

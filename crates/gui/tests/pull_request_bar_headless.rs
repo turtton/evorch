@@ -366,12 +366,15 @@ fn a_window_that_does_not_track_the_thread_says_so() {
         subagent: false,
     });
     h.run_steps(4);
+    let all = labels(&h);
     assert!(
-        labels(&h)
-            .iter()
-            .any(|label| label.starts_with("Not tracked in this window · last fetched")),
-        "{:?}",
-        labels(&h)
+        all.iter()
+            .any(|label| label == "Not tracked in this window"),
+        "{all:?}"
+    );
+    assert!(
+        all.iter().any(|label| label.starts_with("last fetched")),
+        "{all:?}"
     );
 }
 
@@ -389,12 +392,11 @@ fn a_failed_fetch_is_a_visible_status() {
         subagent: false,
     });
     h.run_steps(4);
+    let all = labels(&h);
     assert!(
-        labels(&h)
-            .iter()
-            .any(|label| label.starts_with("Fetch failed (unauthenticated)")),
-        "{:?}",
-        labels(&h)
+        all.iter()
+            .any(|label| label == "Fetch failed (unauthenticated)"),
+        "{all:?}"
     );
 }
 
@@ -584,4 +586,86 @@ fn representative_states_render_for_evidence() {
             .save(directory.join(format!("pull-request-bar-{name}.png")))
             .unwrap();
     }
+}
+
+// Given: a window that does not track the thread, with facts that are old, whose newest fetch
+// failed / Then: all three statuses are drawn, none hiding another
+#[test]
+fn tracking_staleness_and_a_failed_fetch_are_all_shown_together() {
+    let mut shown = view(Some(failing()));
+    shown.tracked_here = false;
+    shown.fetched_at_ns = Some(gui::model::pull_requests::now_ns() - 3_600 * 1_000_000_000);
+    shown.failure = Some(FetchFailure {
+        kind: FetchErrorKind::Network,
+        message: "offline".into(),
+    });
+    for expanded in [false, true] {
+        let (mut h, _) = harness(Bar {
+            view: shown.clone(),
+            expanded,
+            subagent: false,
+        });
+        h.run_steps(4);
+        let all = labels(&h);
+        for wanted in [
+            "Not tracked in this window",
+            "Stale",
+            "Fetch failed (network)",
+        ] {
+            assert!(
+                all.iter().any(|label| label == wanted),
+                "{wanted} in {all:?} (expanded {expanded})"
+            );
+        }
+    }
+}
+
+// Given: an expanded bar of facts that cannot vouch for success (a partial list, a failed
+// fetch) / Then: the passed checks are a neutral count, never the success line
+#[test]
+fn passed_checks_are_not_drawn_as_success_when_the_facts_cannot_vouch_for_it() {
+    let passed = || {
+        check(
+            "build",
+            CheckStatus::Completed,
+            Some(CheckConclusion::Success),
+        )
+    };
+    let mut partial = view(Some(facts(PullRequestState::Open, vec![passed()], false)));
+    partial.failure = None;
+    let mut failed_fetch = view(Some(facts(PullRequestState::Open, vec![passed()], true)));
+    failed_fetch.failure = Some(FetchFailure {
+        kind: FetchErrorKind::Network,
+        message: "offline".into(),
+    });
+    for shown in [partial, failed_fetch] {
+        let (mut h, _) = harness(Bar {
+            view: shown,
+            expanded: true,
+            subagent: false,
+        });
+        h.run_steps(4);
+        let all = labels(&h);
+        assert!(
+            all.iter().any(|label| label.ends_with("1 passed")),
+            "the count is still shown: {all:?}"
+        );
+        assert!(
+            !all.iter()
+                .any(|label| label == &format!("{} 1 passed", gui::theme::icons::CHECK)),
+            "{all:?}"
+        );
+    }
+    // And: a complete list with a working fetch keeps the success line.
+    let (mut h, _) = harness(Bar {
+        view: view(Some(facts(PullRequestState::Open, vec![passed()], true))),
+        expanded: true,
+        subagent: false,
+    });
+    h.run_steps(4);
+    assert!(
+        labels(&h)
+            .iter()
+            .any(|label| label == &format!("{} 1 passed", gui::theme::icons::CHECK))
+    );
 }

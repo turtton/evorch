@@ -121,7 +121,8 @@ pub type OwnerProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type Waker = Arc<dyn Fn() + Send + Sync>;
 
 enum Loaded {
-    Thread(String, Result<Box<ThreadPullRequest>, String>),
+    /// A thread's read, with the event epoch it started at.
+    Thread(String, u64, Result<Box<ThreadPullRequest>, String>),
     Linked(Result<Vec<String>, String>),
     Slug(String, Option<String>),
 }
@@ -161,6 +162,12 @@ pub(super) struct PullRequestState {
     shown: Option<String>,
     /// Link revisions that ended in this window; a late event for one never notifies.
     ended: BTreeSet<(String, u64)>,
+    /// Counts the events of this process's runtime; a read that started at or after an event
+    /// has seen the database as that event left it.
+    epoch: u64,
+    /// Notifications the runtime claimed, held until a read made after their event confirms that
+    /// the thread is still linked to the same link and this process still owns it.
+    pending_notices: Vec<PendingNotice>,
     notified: std::collections::VecDeque<(String, u64, u64, String)>,
     pub(super) dialog: Option<LinkDialog>,
 }
@@ -183,11 +190,27 @@ impl Default for PullRequestState {
             sender,
             shown: None,
             ended: BTreeSet::new(),
+            epoch: 0,
+            pending_notices: Vec::new(),
             notified: std::collections::VecDeque::new(),
             dialog: None,
         }
     }
 }
+
+/// A notification waiting for the database to confirm it is still wanted.
+struct PendingNotice {
+    thread_id: String,
+    link_revision: u64,
+    transition_seq: u64,
+    kind: String,
+    reference: PullRequestRef,
+    /// The epoch of the event that brought it.
+    arrived: u64,
+}
+
+/// Notifications held at most; the oldest go first if reads never come.
+const PENDING_NOTICES_KEPT: usize = 64;
 
 impl PullRequestState {
     fn request(&mut self, thread: &str) {
@@ -333,12 +356,13 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             let waker = Arc::clone(&self.pull_requests.waker);
             let reader = Arc::clone(&reader);
             let probe = self.pull_requests.probe.clone();
+            let epoch = self.pull_requests.epoch;
             (self.pull_requests.spawner)(Box::new(move || {
                 let result = reader.load(&thread).map(|mut view| {
                     view.tracked_here = probe.as_ref().is_none_or(|probe| probe(&thread));
                     Box::new(view)
                 });
-                let _ = sender.send(Loaded::Thread(thread, result));
+                let _ = sender.send(Loaded::Thread(thread, epoch, result));
                 waker();
             }));
         }
@@ -346,13 +370,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
 
     fn apply_loaded_pull_request(&mut self, loaded: Loaded) {
         match loaded {
-            Loaded::Thread(thread, result) => {
+            Loaded::Thread(thread, epoch, result) => {
                 self.pull_requests.in_flight.remove(&thread);
                 if self.pull_requests.dirty.remove(&thread) {
                     self.pull_requests.request(&thread);
                 }
                 match result {
                     Ok(view) if self.pull_requests.model.enabled => {
+                        self.settle_pending_notices(&view, epoch);
                         self.pull_requests.model.set(*view);
                     }
                     Ok(_) => {}
@@ -384,12 +409,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
     }
 
-    /// Folds a pull request event this process's own runtime published: reads again, and raises
-    /// the notifications the runtime claimed for it.
+    /// Folds a pull request event this process's own runtime published: reads again, and holds
+    /// the notifications the runtime claimed for it until that read confirms them (see
+    /// [`Self::settle_pending_notices`]).
     pub(super) fn apply_local_pull_request_event(&mut self, event: &Event) {
         let EventKind::PullRequest(change) = &event.kind else {
             return;
         };
+        self.pull_requests.epoch += 1;
         if let PullRequestEvent::Unlinked {
             thread_id,
             link_revision,
@@ -419,15 +446,57 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 return;
             }
             for kind in notifications {
-                let key = (
-                    thread_id.clone(),
-                    *link_revision,
-                    *transition_seq,
-                    kind.clone(),
+                self.pull_requests.pending_notices.push(PendingNotice {
+                    thread_id: thread_id.clone(),
+                    link_revision: *link_revision,
+                    transition_seq: *transition_seq,
+                    kind: kind.clone(),
+                    reference: pull_request.clone(),
+                    arrived: self.pull_requests.epoch,
+                });
+            }
+            let excess = self
+                .pull_requests
+                .pending_notices
+                .len()
+                .saturating_sub(PENDING_NOTICES_KEPT);
+            self.pull_requests.pending_notices.drain(..excess);
+        }
+    }
+
+    /// Decides the notifications that waited for `view`, a read that started at `started`.
+    /// A notification is raised only when a read made after its event shows the thread still
+    /// linked to the link it was about and this process still holding the thread: an Unlink in
+    /// any window, a relink, or a lost lease while it waited drops it. One transition notifies
+    /// once.
+    fn settle_pending_notices(&mut self, view: &ThreadPullRequest, started: u64) {
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pull_requests.pending_notices)
+                .into_iter()
+                .partition(|notice| {
+                    notice.thread_id == view.thread_id && notice.arrived <= started
+                });
+        self.pull_requests.pending_notices = waiting;
+        let linked = view.link.as_ref().map(|link| link.link_revision);
+        for notice in due {
+            let still_wanted = view.tracked_here
+                && linked == Some(notice.link_revision)
+                && !self
+                    .pull_requests
+                    .ended
+                    .contains(&(notice.thread_id.clone(), notice.link_revision));
+            let key = (
+                notice.thread_id.clone(),
+                notice.link_revision,
+                notice.transition_seq,
+                notice.kind.clone(),
+            );
+            if still_wanted && self.pull_requests.remember_notified(key) {
+                self.raise_pull_request_notification(
+                    &notice.thread_id,
+                    &notice.reference,
+                    &notice.kind,
                 );
-                if self.pull_requests.remember_notified(key) {
-                    self.raise_pull_request_notification(thread_id, pull_request, kind);
-                }
             }
         }
     }
@@ -435,6 +504,17 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// Folds a pull request event another process published: only the display is read again.
     pub(super) fn apply_shared_pull_request_event(&mut self, event: &Event) {
         if let EventKind::PullRequest(change) = &event.kind {
+            // A link another window ended is ended here too: nothing waiting for it notifies.
+            if let PullRequestEvent::Unlinked {
+                thread_id,
+                link_revision,
+                ..
+            } = change
+            {
+                self.pull_requests
+                    .ended
+                    .insert((thread_id.clone(), *link_revision));
+            }
             self.pull_requests.invalidate(change);
         }
     }
@@ -568,10 +648,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             PullRequestAction::Dismiss {
                 thread_id,
                 candidate_id,
-            } => self.submit_pull_request_command(WorkbenchCommand::DismissPullRequestCandidate {
-                thread_id,
-                candidate_id,
-            }),
+            } => {
+                // Dismissing writes the thread's candidate state, so it takes the same write
+                // mode (and the same refusals) as every other operation.
+                if self.pull_request_permit(&thread_id) {
+                    self.submit_pull_request_command(
+                        WorkbenchCommand::DismissPullRequestCandidate {
+                            thread_id,
+                            candidate_id,
+                        },
+                    );
+                }
+            }
             PullRequestAction::Link { thread_id, locator } => {
                 let Some(view) = self.pull_requests.model.view(&thread_id) else {
                     // The revision to name is not read yet; it is now.

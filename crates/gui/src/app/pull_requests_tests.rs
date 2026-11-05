@@ -78,3 +78,45 @@ fn an_imported_branch_announces_nothing() {
 
     assert_eq!(inherits(&state).len(), before);
 }
+
+// Given: a thread this window attached read-only / When: any pull request operation is asked for,
+// Ignore included / Then: none reaches the sink, and the person is told why
+#[test]
+fn a_thread_attached_read_only_refuses_every_operation() {
+    use crate::model::pull_requests::PullRequestAction;
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = state(directory.path());
+    state.readonly_threads.insert("parent".to_owned());
+
+    for action in [
+        PullRequestAction::Refresh {
+            thread_id: "parent".into(),
+        },
+        PullRequestAction::Confirm {
+            thread_id: "parent".into(),
+            candidate_id: 1,
+        },
+        PullRequestAction::Dismiss {
+            thread_id: "parent".into(),
+            candidate_id: 1,
+        },
+    ] {
+        state.apply_pull_request_action(action);
+    }
+
+    assert!(
+        state.issued().is_empty(),
+        "an operation got past the read-only attach: {:?}",
+        state.issued()
+    );
+    let refused = state
+        .transcript()
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(entry, crate::model::transcript::TranscriptEntry::Notice { text }
+                if text == "Read-only attach: explicitly Start or Claim before mutating.")
+        })
+        .count();
+    assert_eq!(refused, 3);
+}

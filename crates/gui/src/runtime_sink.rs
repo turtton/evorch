@@ -515,12 +515,12 @@ impl CommandSink for RuntimeCommandSink {
                 | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
                 | WorkbenchCommand::RefreshPullRequest { thread_id }
                 | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. }
+                | WorkbenchCommand::DismissPullRequestCandidate { thread_id, .. }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
                 WorkbenchCommand::DecideToolApproval { .. }
                 | WorkbenchCommand::SetWebToolsEnabled { .. }
-                | WorkbenchCommand::DismissPullRequestCandidate { .. }
                 | WorkbenchCommand::InheritPullRequest { .. } => None,
             };
             match thread.map(|thread| host.owned_permit(thread)).transpose() {

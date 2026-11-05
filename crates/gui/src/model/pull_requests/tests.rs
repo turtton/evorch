@@ -210,14 +210,58 @@ fn a_failure_seen_first_is_a_baseline_not_a_transition() {
     assert!(!bar.expanded);
 }
 
+// Given: a view that is untracked, old and failed at once / Then: each status holds on its own
 #[test]
-fn freshness_names_untracked_and_stale_threads() {
+fn tracking_staleness_and_a_failed_fetch_are_independent_statuses() {
     let mut shown = view(Some(passing()));
-    assert_eq!(freshness(&shown, 1), Freshness::Current);
+    assert_eq!(statuses(&shown, 1), []);
     let later = (STALE_AFTER_SECONDS + 1) * NANOS_PER_SECOND;
-    assert_eq!(freshness(&shown, later), Freshness::Stale);
+    assert_eq!(statuses(&shown, later), [Status::Stale]);
     shown.tracked_here = false;
-    assert_eq!(freshness(&shown, 1), Freshness::NotTracked);
+    assert_eq!(statuses(&shown, 1), [Status::NotTracked]);
+    shown.failure = Some(FetchFailure {
+        kind: storage::pull_requests::FetchErrorKind::Network,
+        message: "offline".into(),
+    });
+    assert_eq!(
+        statuses(&shown, later),
+        [
+            Status::NotTracked,
+            Status::Stale,
+            Status::FetchFailed {
+                kind: "network".into(),
+                message: "offline".into()
+            }
+        ]
+    );
+}
+
+// Given: a failing pull request whose bar the person closed / When: a fetch fails and the same
+// failure returns / Then: the bar stays closed; only a pass in between makes a new transition
+#[test]
+fn a_failed_fetch_in_between_is_not_a_transition() {
+    let mut bar = BarState::default();
+    bar.observe(&view(Some(passing())));
+    bar.observe(&view(Some(failing())));
+    assert!(bar.expanded);
+    bar.expanded = false;
+
+    let mut unreachable = view(Some(failing()));
+    unreachable.failure = Some(FetchFailure {
+        kind: storage::pull_requests::FetchErrorKind::Network,
+        message: "offline".into(),
+    });
+    bar.observe(&unreachable);
+    bar.observe(&view(None));
+    bar.observe(&view(Some(failing())));
+    assert!(
+        !bar.expanded,
+        "recovering into the same failure must not expand"
+    );
+
+    bar.observe(&view(Some(passing())));
+    bar.observe(&view(Some(failing())));
+    assert!(bar.expanded, "a failure after a pass is a new transition");
 }
 
 #[test]

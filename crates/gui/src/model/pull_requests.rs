@@ -253,31 +253,48 @@ pub fn mismatches(view: &ThreadPullRequest) -> Vec<Mismatch> {
     }
 }
 
-/// How current the shown facts are, for the status line of the bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
-    /// Tracked here and recent.
-    Current,
-    /// Tracked here, but nothing newer than [`STALE_AFTER_SECONDS`] arrived.
-    Stale,
+/// One thing a person should know about how far the shown facts can be trusted. The three
+/// kinds are independent: each is shown whenever it holds, whatever the others say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
     /// This window does not poll the thread: another window owns it, or nobody does (after a
     /// restart). What is shown is the last stored snapshot.
     NotTracked,
+    /// Nothing newer than [`STALE_AFTER_SECONDS`] arrived.
+    Stale,
+    /// The newest fetch failed; the facts shown are the last ones that arrived.
+    FetchFailed {
+        /// The class of the failure (`unauthenticated`, `network`, …).
+        kind: String,
+        /// The stored, sanitized message.
+        message: String,
+    },
 }
 
+/// Whether the last successful fetch is older than [`STALE_AFTER_SECONDS`], tracked here or not.
 #[must_use]
-pub fn freshness(view: &ThreadPullRequest, now_ns: i64) -> Freshness {
+pub fn is_stale(view: &ThreadPullRequest, now_ns: i64) -> bool {
+    view.fetched_at_ns
+        .is_some_and(|at| now_ns.saturating_sub(at) > STALE_AFTER_SECONDS * NANOS_PER_SECOND)
+}
+
+/// Every status that holds for the view, in the order they are shown.
+#[must_use]
+pub fn statuses(view: &ThreadPullRequest, now_ns: i64) -> Vec<Status> {
+    let mut found = Vec::new();
     if !view.tracked_here {
-        return Freshness::NotTracked;
+        found.push(Status::NotTracked);
     }
-    let stale = view
-        .fetched_at_ns
-        .is_some_and(|at| now_ns.saturating_sub(at) > STALE_AFTER_SECONDS * NANOS_PER_SECOND);
-    if stale {
-        Freshness::Stale
-    } else {
-        Freshness::Current
+    if is_stale(view, now_ns) {
+        found.push(Status::Stale);
     }
+    if let Some(failure) = &view.failure {
+        found.push(Status::FetchFailed {
+            kind: failure.kind.as_str().to_owned(),
+            message: failure.message.clone(),
+        });
+    }
+    found
 }
 
 /// A candidate chip as the transcript shows it.
@@ -372,9 +389,9 @@ pub struct BarState {
 
 impl BarState {
     /// Takes in a newly loaded view. A move into failure expands the bar once; a failure that
-    /// stays (polls that find the same failure) never expands it again, so a bar the person
-    /// closed stays closed. The first view after a link or an application start is a baseline,
-    /// not a transition.
+    /// stays (polls that find the same failure, or one that returns after a failed fetch) never
+    /// expands it again, so a bar the person closed stays closed. The first view after a link or
+    /// an application start is a baseline, not a transition.
     pub fn observe(&mut self, view: &ThreadPullRequest) {
         let Some(link) = &view.link else {
             *self = Self::default();
@@ -383,6 +400,11 @@ impl BarState {
         if self.link_revision != Some(link.link_revision) {
             self.link_revision = Some(link.link_revision);
             self.was_failing = None;
+        }
+        // A view that cannot say how the checks stand (a failed fetch, no facts yet, no checks)
+        // keeps what was last established: recovering into the same failure is no transition.
+        if glyph(view) == Some(PrGlyph::Unknown) {
+            return;
         }
         let failing = is_failing(view);
         if failing && self.was_failing == Some(false) {

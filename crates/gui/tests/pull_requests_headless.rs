@@ -339,18 +339,44 @@ async fn link_refresh_unlink_and_the_fork_keeps_its_link() {
         Some(PrGlyph::Passing)
     );
 
-    // And: a fork is made, its owner starts, and the service gives it the link.
+    // And: a fork is made. The UI thread writes nothing (this runtime runs one thread, so the
+    // queued pin cannot have run yet), and the person's Unlink right after it still finds the
+    // parent's link to pin: the operations run in the order they were issued.
+    let before = world
+        .database()
+        .pull_request_thread_state(THREAD)
+        .unwrap()
+        .active_link
+        .unwrap();
     let child = window.fork_thread(ThreadId::new(THREAD)).unwrap();
-    assert_eq!(
+    assert!(
         world
             .storage
             .handle()
             .pull_request_inheritance(&child.to_string())
             .unwrap()
-            .map(|row| row.state),
-        Some(storage::pull_requests::InheritanceState::Pending),
-        "the link is pinned where the fork is created, before any run"
+            .is_none(),
+        "forking wrote to the database on the calling thread"
     );
+    window.apply_pull_request_action(PullRequestAction::Unlink {
+        thread_id: THREAD.into(),
+    });
+    world
+        .until(|event| matches!(event, PullRequestEvent::Unlinked { thread_id, .. } if thread_id == THREAD))
+        .await;
+    let pinned = world
+        .storage
+        .handle()
+        .pull_request_inheritance(&child.to_string())
+        .unwrap()
+        .expect("the fork's inheritance was pinned before the Unlink ran");
+    assert_eq!(
+        pinned.state,
+        storage::pull_requests::InheritanceState::Pending
+    );
+    assert_eq!(pinned.parent_link_id, before.link_id);
+
+    // When: the fork's owner starts, the service gives it the link the parent had.
     world.host.start(&child.to_string()).unwrap();
     world.service.notify_changed();
     let child_id = child.to_string();
@@ -358,21 +384,6 @@ async fn link_refresh_unlink_and_the_fork_keeps_its_link() {
         .until(
             move |event| matches!(event, PullRequestEvent::Linked { thread_id, .. } if *thread_id == child_id),
         )
-        .await;
-    world.show(&mut window);
-    assert!(
-        window
-            .pull_request_model()
-            .linked(&child.to_string())
-            .is_some()
-    );
-
-    // When: the parent is unlinked.
-    window.apply_pull_request_action(PullRequestAction::Unlink {
-        thread_id: THREAD.into(),
-    });
-    world
-        .until(|event| matches!(event, PullRequestEvent::Unlinked { thread_id, .. } if thread_id == THREAD))
         .await;
     world.show(&mut window);
 
@@ -570,18 +581,57 @@ fn kinds(state: &WorkbenchState<DemoSource>) -> Vec<NotificationKind> {
         .collect()
 }
 
-// Given: events the runtime claimed notifications for / Then: one notification per thread and
-// transition, none for a link that ended
+/// A thread this process holds, linked to #12 in the database; returns its link revision.
+fn linked_and_owned(world: &World) -> u64 {
+    world.host.start(THREAD).unwrap();
+    world
+        .storage
+        .handle()
+        .link_pull_request(storage::pull_requests::LinkPullRequest {
+            thread_id: THREAD.into(),
+            key: key(12),
+            expected_revision: 0,
+            at_ns: 1,
+        })
+        .unwrap()
+        .link
+        .link_revision
+}
+
+fn unlinked_event(revision: u64) -> Event {
+    Event::new(PullRequestEvent::Unlinked {
+        thread_id: THREAD.into(),
+        link_revision: revision,
+        transition_seq: 3,
+        pull_request: event_bus::PullRequestRef {
+            provider: "github".into(),
+            host: "github.com".into(),
+            repository: REPOSITORY.into(),
+            number: 12,
+        },
+        reason: event_bus::PullRequestLinkEnd::Unlinked,
+    })
+}
+
+// Given: events the runtime claimed notifications for / Then: once the database confirms the link
+// and the owner, one notification per thread and transition
 #[tokio::test]
-async fn a_transition_notifies_once_and_a_late_event_after_unlink_does_not() {
+async fn a_transition_notifies_once_after_the_database_confirms_it() {
     let world = World::new();
+    let revision = linked_and_owned(&world);
     let mut window = world.window_with(&world.host, Box::new(RecordingSink::default()));
     let thread = ThreadId::new(THREAD);
 
     // When: the same transition arrives twice, then another kind.
-    window.apply_events([change(THREAD, 3, 1, &["checks_failed"])]);
-    window.apply_events([change(THREAD, 3, 1, &["checks_failed"])]);
-    window.apply_events([change(THREAD, 3, 2, &["merged"])]);
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    window.apply_events([change(THREAD, revision, 2, &["merged"])]);
+    assert_eq!(
+        window.notifications().items().count(),
+        0,
+        "nothing is raised before the database has been read again"
+    );
+    settle(&mut window);
 
     // Then: each is shown once, in the existing rows.
     assert_eq!(
@@ -604,26 +654,150 @@ async fn a_transition_notifies_once_and_a_late_event_after_unlink_does_not() {
             .summary
             .starts_with("CI failed on turtton/evorch#12")
     );
+}
 
-    // When: the link ends and a delayed event for it still arrives.
-    window.apply_events([Event::new(PullRequestEvent::Unlinked {
+// Given: an event whose link another window unlinked before this window read the database /
+// Then: nothing is raised, whether the event was folded before or after the Unlink; a later
+// link's event is
+#[tokio::test]
+async fn a_late_event_for_a_link_another_window_ended_never_notifies() {
+    let world = World::new();
+    let revision = linked_and_owned(&world);
+    let mut window = world.window_with(&world.host, Box::new(RecordingSink::default()));
+    settle(&mut window);
+
+    // When: the event is folded, then the link is ended elsewhere before the read.
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    let ended = world
+        .storage
+        .handle()
+        .unlink_pull_request(THREAD, revision, 2)
+        .unwrap();
+    // And: an event of the same ended link arrives later still.
+    window.apply_events([change(THREAD, revision, 4, &["merged"])]);
+    settle(&mut window);
+
+    // Then: nothing is raised.
+    assert_eq!(window.notifications().items().count(), 0);
+
+    // And: a later link of the thread notifies for its own events.
+    let relinked = world
+        .storage
+        .handle()
+        .link_pull_request(storage::pull_requests::LinkPullRequest {
+            thread_id: THREAD.into(),
+            key: key(12),
+            expected_revision: ended.lifecycle_revision,
+            at_ns: 3,
+        })
+        .unwrap();
+    window.apply_events([change(
+        THREAD,
+        relinked.link.link_revision,
+        1,
+        &["checks_failed"],
+    )]);
+    settle(&mut window);
+    assert_eq!(window.notifications().items().count(), 1);
+}
+
+// Given: a Changed event waiting to be confirmed / When: the shared feed delivers the Unlinked
+// of that link from another window / Then: it is recorded as ended and nothing is raised, even
+// though the database read still shows the link
+#[tokio::test]
+async fn a_shared_unlink_ends_the_link_for_the_notifications_waiting_on_it() {
+    let world = World::new();
+    let revision = linked_and_owned(&world);
+    let mut window = world
+        .window_with(&world.host, Box::new(RecordingSink::default()))
+        .with_manual_shared_feed(world.config.db_path.clone(), "viewer".into())
+        .unwrap();
+    settle(&mut window);
+
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    world
+        .storage
+        .handle()
+        .append_stream_event("elsewhere", &unlinked_event(revision), None)
+        .unwrap();
+    window.poll_shared_feed();
+    settle(&mut window);
+
+    assert_eq!(window.notifications().items().count(), 0);
+}
+
+// Given: a thread this process does not own / When: an event with claimed notifications reaches
+// it / Then: the owner check refuses it
+#[tokio::test]
+async fn a_notification_needs_this_process_to_hold_the_thread() {
+    let world = World::new();
+    let revision = linked_and_owned(&world);
+    let second = Arc::new(
+        OwnerHost::open(world.owners.path(), Default::default(), world.bus.clone()).unwrap(),
+    );
+    let mut window = world.window_with(&second, Box::new(RecordingSink::default()));
+
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    settle(&mut window);
+
+    assert_eq!(window.notifications().items().count(), 0);
+}
+
+// Given: a candidate / When: Ignore is pressed in a window that does not hold the thread, then in
+// the one that does / Then: the first is refused as chat is and changes nothing; the second
+// dismisses it
+#[tokio::test]
+async fn ignoring_a_candidate_needs_the_threads_write_mode() {
+    let mut world = World::new();
+    world.host.start(THREAD).unwrap();
+    let presented = world
+        .storage
+        .handle()
+        .present_pull_request_candidate(NewPullRequestCandidate {
+            thread_id: THREAD.into(),
+            key: key(21),
+            source_run_id: "run-1".into(),
+            source_call_id: "call-1".into(),
+            at_ns: 1,
+        })
+        .unwrap();
+    let id = presented.candidate.candidate_id;
+    let dismiss = || PullRequestAction::Dismiss {
         thread_id: THREAD.into(),
-        link_revision: 3,
-        transition_seq: 3,
-        pull_request: event_bus::PullRequestRef {
-            provider: "github".into(),
-            host: "github.com".into(),
-            repository: REPOSITORY.into(),
-            number: 12,
-        },
-        reason: event_bus::PullRequestLinkEnd::Unlinked,
-    })]);
-    window.apply_events([change(THREAD, 3, 4, &["checks_failed"])]);
+        candidate_id: id,
+    };
+    let second = Arc::new(
+        OwnerHost::open(world.owners.path(), Default::default(), world.bus.clone()).unwrap(),
+    );
+    let mut other = world.window_with(&second, world.sink(&second));
+    settle(&mut other);
 
-    // Then: nothing more is raised; a later link's event is.
-    assert_eq!(window.notifications().items().count(), 2);
-    window.apply_events([change(THREAD, 5, 1, &["checks_failed"])]);
-    assert_eq!(window.notifications().items().count(), 3);
+    other.apply_pull_request_action(dismiss());
+    other.poll_command_sink();
+
+    assert!(
+        notices(&other)
+            .iter()
+            .any(|text| text == "Another window holds this thread in write mode"),
+        "{:?}",
+        notices(&other)
+    );
+    let state = |world: &World| {
+        world
+            .database()
+            .pull_request_candidates(THREAD, None)
+            .unwrap()[0]
+            .state
+    };
+    assert_eq!(state(&world), CandidateState::Presented);
+
+    let mut owner = world.window();
+    settle(&mut owner);
+    owner.apply_pull_request_action(dismiss());
+    world
+        .until(|event| matches!(event, PullRequestEvent::CandidateChanged { .. }))
+        .await;
+    assert_eq!(state(&world), CandidateState::Dismissed);
 }
 
 // Given: a thread another window owns / When: its events arrive through the shared feed / Then:
