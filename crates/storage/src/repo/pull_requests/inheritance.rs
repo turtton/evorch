@@ -110,11 +110,59 @@ pub(crate) fn schedule(
 ) -> Result<InheritanceRecord, StorageError> {
     check_id("child_thread_id", &new.child_thread_id)?;
     let tx = immediate(conn)?;
-    tombstone_check(&tx, &new.child_thread_id)?;
-    if let Some(existing) = get(&tx, &new.child_thread_id)? {
+    let record = schedule_in(&tx, new)?;
+    tx.commit()?;
+    Ok(record)
+}
+
+/// Pins whatever link `parent_thread_id` has *in this transaction*, so a parent that relinks
+/// at the same time is pinned to the old link or the new one, never to neither. `None` when the
+/// parent has no active link. An existing row of the child is returned as it is.
+pub(crate) fn schedule_from_parent(
+    conn: &Connection,
+    child_thread_id: &str,
+    parent_thread_id: &str,
+    at_ns: i64,
+) -> Result<Option<InheritanceRecord>, StorageError> {
+    check_id("child_thread_id", child_thread_id)?;
+    check_id("parent_thread_id", parent_thread_id)?;
+    let tx = immediate(conn)?;
+    tombstone_check(&tx, child_thread_id)?;
+    if let Some(existing) = get(&tx, child_thread_id)? {
+        return Ok(Some(existing));
+    }
+    let active: Option<u64> = tx
+        .query_row(
+            "SELECT link_id FROM thread_pull_requests \
+             WHERE thread_id = ?1 AND superseded_at_ns IS NULL",
+            [parent_thread_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(parent_link_id) = active else {
+        return Ok(None);
+    };
+    let record = schedule_in(
+        &tx,
+        &NewPullRequestInheritance {
+            child_thread_id: child_thread_id.to_owned(),
+            parent_link_id,
+            at_ns,
+        },
+    )?;
+    tx.commit()?;
+    Ok(Some(record))
+}
+
+fn schedule_in(
+    tx: &Transaction<'_>,
+    new: &NewPullRequestInheritance,
+) -> Result<InheritanceRecord, StorageError> {
+    tombstone_check(tx, &new.child_thread_id)?;
+    if let Some(existing) = get(tx, &new.child_thread_id)? {
         return Ok(existing);
     }
-    let parent = link_by_id(&tx, new.parent_link_id)?.ok_or(StorageError::PullRequest(
+    let parent = link_by_id(tx, new.parent_link_id)?.ok_or(StorageError::PullRequest(
         PullRequestRejection::ParentLinkNotFound,
     ))?;
     if parent.end.is_some() {
@@ -125,20 +173,19 @@ pub(crate) fn schedule(
     if parent.thread_id == new.child_thread_id {
         return Err(StorageError::PullRequest(PullRequestRejection::SameThread));
     }
-    if is_lane(&tx, &new.child_thread_id)? {
+    if is_lane(tx, &new.child_thread_id)? {
         return Err(StorageError::PullRequest(PullRequestRejection::LaneThread));
     }
-    let (expected, _) = lifecycle(&tx, &new.child_thread_id)?;
+    let (expected, _) = lifecycle(tx, &new.child_thread_id)?;
     // A child that already made its own decision (a link or an unlink) before this was
     // scheduled does not get the parent's link: the row is decided at once, so the
     // decision is on record and no retry can apply it.
     let earlier_decision = if expected > 0 {
         Some(
-            explicit_decision(&tx, &new.child_thread_id)?
-                .unwrap_or(InheritanceReason::ChildChanged),
+            explicit_decision(tx, &new.child_thread_id)?.unwrap_or(InheritanceReason::ChildChanged),
         )
     } else {
-        explicit_decision(&tx, &new.child_thread_id)?
+        explicit_decision(tx, &new.child_thread_id)?
     };
     let (state, reason, decided_at) = match earlier_decision {
         Some(reason) => (
@@ -168,10 +215,7 @@ pub(crate) fn schedule(
             decided_at,
         ],
     )?;
-    let record = get(&tx, &new.child_thread_id)?
-        .ok_or(StorageError::OutOfRange("pull request inheritance"))?;
-    tx.commit()?;
-    Ok(record)
+    get(tx, &new.child_thread_id)?.ok_or(StorageError::OutOfRange("pull request inheritance"))
 }
 
 fn decide(

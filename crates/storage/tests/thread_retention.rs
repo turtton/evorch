@@ -302,6 +302,31 @@ impl Fixture {
             .unwrap();
     }
 
+    fn pull_request_event(&self, session: &str, thread: &str) {
+        let event = event_bus::PullRequestEvent::Changed {
+            thread_id: thread.into(),
+            link_revision: 1,
+            transition_seq: 1,
+            pull_request: event_bus::PullRequestRef {
+                provider: "github".into(),
+                host: "github.com".into(),
+                repository: "o/live".into(),
+                number: 1,
+            },
+            fields: vec![event_bus::PullRequestChangedField::State],
+            notifications: vec![],
+        };
+        let kind = EventKind::PullRequest(event);
+        let payload = serde_json::to_string(&kind).unwrap();
+        self.conn
+            .execute(
+                "INSERT INTO events(session_id, schema_version, monotonic_ns, wall_clock_ns, kind, \
+                 payload, subkind, run_id) VALUES (?1, 1, 1, ?2, 'PullRequest', ?3, 'Changed', NULL)",
+                params![session, NOW_NS, payload],
+            )
+            .unwrap();
+    }
+
     fn task(&self, id: &str, run: &str) {
         self.conn
             .execute(
@@ -445,6 +470,8 @@ fn build_family(f: &Fixture) {
     }
     f.todo_event("session-1", "P");
     f.todo_event("session-1", "C");
+    f.pull_request_event("session-1", "P");
+    f.pull_request_event("session-1", "C");
     f.task("task-1", "rp");
     f.task("task-2", "rp2");
     f.sql("INSERT INTO task_links(blocker_id, blocked_id) VALUES ('task-1', 'task-2');");
@@ -462,6 +489,7 @@ fn build_family(f: &Fixture) {
     f.run("rx", None, Some("X"), "chat:Worker:X");
     f.run_payload("rx", "session-1");
     f.todo_event("session-1", "X");
+    f.pull_request_event("session-1", "X");
     f.task("task-x", "rx");
     f.start_state("X", "rx");
     f.lane("lane-x", "X", 3);
@@ -569,6 +597,7 @@ fn family_residue(f: &Fixture) -> Vec<(String, i64)> {
         ("thread_pull_request_state", "SELECT COUNT(*) FROM thread_pull_request_state WHERE thread_id IN ('P','C','E')".to_owned()),
         ("pull_request_snapshot facts of a deleted thread", "SELECT COUNT(*) FROM pull_request_snapshots WHERE repository = 'o/live' AND number = 1 AND state IS NOT NULL".to_owned()),
         ("todo events", "SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') IN ('P','C','E')".to_owned()),
+        ("pull request events", "SELECT COUNT(*) FROM events WHERE kind = 'PullRequest' AND json_extract(payload, '$.payload.payload.thread_id') IN ('P','C','E')".to_owned()),
     ] {
         checks.push((label.to_owned(), sql));
     }
@@ -589,6 +618,7 @@ fn survivor_rows(f: &Fixture) -> Vec<i64> {
         f.count("SELECT COUNT(*) FROM run_contexts WHERE run_id = 'rx'"),
         f.count("SELECT COUNT(*) FROM events WHERE run_id = 'rx'"),
         f.count("SELECT COUNT(*) FROM events WHERE subkind = 'ThreadTodoUpdated' AND json_extract(payload, '$.payload.payload.snapshot.thread_id') = 'X'"),
+        f.count("SELECT COUNT(*) FROM events WHERE kind = 'PullRequest' AND json_extract(payload, '$.payload.payload.thread_id') = 'X'"),
         f.count("SELECT COUNT(*) FROM conversation_blocks WHERE run_id = 'rx'"),
         f.count("SELECT COUNT(*) FROM tasks WHERE id = 'task-x'"),
         f.count("SELECT COUNT(*) FROM task_queue_ledger WHERE json_extract(payload, '$.id') = 'task-x'"),
@@ -1391,7 +1421,23 @@ fn appends_for_deleted_runs_are_refused_without_side_effects() {
         handle.append_event(None, &todo),
         Err(StorageError::Tombstoned { thread_id: Some(thread), .. }) if thread == "P"
     ));
-    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 2);
+    let pull_request = Event::new(event_bus::PullRequestEvent::Unlinked {
+        thread_id: "P".into(),
+        link_revision: 2,
+        transition_seq: 2,
+        pull_request: event_bus::PullRequestRef {
+            provider: "github".into(),
+            host: "github.com".into(),
+            repository: "o/live".into(),
+            number: 1,
+        },
+        reason: event_bus::PullRequestLinkEnd::Unlinked,
+    });
+    assert!(matches!(
+        handle.append_event(None, &pull_request),
+        Err(StorageError::Tombstoned { thread_id: Some(thread), .. }) if thread == "P"
+    ));
+    assert_eq!(handle.statistics().unwrap().events_rejected_tombstoned, 3);
     assert_eq!(handle.statistics().unwrap().event_write_failures, 0);
 
     // And: a host mirror of a deleted thread is skipped while the rest is stored.

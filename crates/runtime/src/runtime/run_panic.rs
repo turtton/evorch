@@ -69,6 +69,13 @@ impl AgentRuntime {
                 AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
             )
         {
+            // The run's loop state is gone: authority comes from its configuration,
+            // read outside the runs lock (which the completion relay holds while
+            // taking others) and validated against the registry before any write.
+            let ownership = lock_runs(&self.shared.runs)
+                .get(&run_id)
+                .and_then(|entry| entry.config.ownership.clone());
+            self.reconcile_todo_or_report(run_id, ownership.as_ref());
             let first_line = panic.message.lines().next().unwrap_or_default();
             self.publish_terminal(
                 run_id,

@@ -139,6 +139,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
         | EventKind::Ownership(_)
+        | EventKind::PullRequest(_)
         | EventKind::Orchestrator(_) => None,
     }
 }
@@ -178,6 +179,9 @@ fn wording(code: &str) -> Option<Wording> {
         code::ESCALATION_HANDOFF_FAILED => Fixed("Escalation could not be prepared"),
         code::ESCALATION_ADMISSION_FAILED => Fixed("The escalated Orchestrator did not start"),
         code::CRASH_RECOVERED => Fixed("Recovered from a crash in a previous session"),
+        code::THREAD_TODO_RECONCILE_FAILED => {
+            Fixed("Could not mark unfinished procedure items as interrupted")
+        }
         code::AGENT_RUN_PANICKED => Fixed("The run crashed and was stopped"),
         code::STORAGE_WRITER_HALTED => Fixed("History is no longer being saved"),
         code::SCOPE_DENIED => Lead("Tool call denied"),

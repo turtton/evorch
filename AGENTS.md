@@ -74,10 +74,23 @@ mismatch. Revisit this policy before cutting a v1 release.
   artifacts go to `${CARGO_HOME:-~/.cargo}/targets/<workspace>-<hash>/`, with
   dependencies in `shared-deps/`, shared by every checkout; only final and
   test binaries land in each checkout's `target/`. A new checkout of the same
-  commit reuses dependencies, but still rebuilds units that depend on
-  `CARGO_MANIFEST_DIR` or `CARGO_BIN_EXE_*` (mostly integration tests), and a
-  data file read with `include_str!` from `tests/` or `docs/` has a newer
-  mtime in a fresh worktree and invalidates its crate and every dependent.
+  commit reuses the workspace crates as well, keyed by file content, with two
+  exceptions that are rebuilt in every new worktree:
+  - A unit whose rustc dep-info names `CARGO_MANIFEST_DIR` or
+    `CARGO_BIN_EXE_*`. In tests, read them at run time with
+    `std::env::var("CARGO_MANIFEST_DIR")` (`cargo test` and `cargo nextest`
+    set both) instead of `env!`.
+  - A file the unit reads that is not content-keyed, which falls back to an
+    mtime check that a fresh worktree always fails. The fork keys a target by
+    the files of its package in directories that hold no other target's root.
+    The root files of other targets (`tests/*.rs`), the directories they sit
+    in (`tests/`, `examples/`, `src/` for an integration test) and anything
+    outside the package (`docs/`, other crates) are mtime-checked. Put data
+    that a lib and its tests both `include_str!` in a directory other than
+    `src/` and `tests/` (for example `fixtures/`, `undo/`,
+    `shared-test-support/`), and read files outside the package at run time
+    rather than with `include_str!`; otherwise a lib reading from `tests/`
+    invalidates its crate and every dependent.
 - Those directories live outside the repository and are not removed with a
   worktree; delete them by hand (`rm -rf ~/.cargo/targets/<dir>`) when they
   grow large.

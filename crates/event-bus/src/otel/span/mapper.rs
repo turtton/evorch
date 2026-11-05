@@ -18,7 +18,8 @@ impl SpanMapper {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
-            | EventKind::Ownership(_) => Vec::new(),
+            | EventKind::Ownership(_)
+            | EventKind::PullRequest(_) => Vec::new(),
         }
     }
 

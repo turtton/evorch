@@ -348,8 +348,9 @@ fn columns_sql(read_payloads: bool) -> String {
                 OR (kind = 'Lifecycle' AND subkind IN ({TASK_SUBKINDS}, {SESSION_SUBKINDS})) \
                 OR (kind = 'Message' AND subkind = 'MessagePart') \
                 OR (subkind = '' AND kind NOT IN ('Diagnostic', 'Ownership')) \
-                OR (?1 AND kind = 'Orchestrator' \
+                OR (?1 AND ((kind = 'Orchestrator' \
                     AND subkind IN ('ThreadGoalUpdated', 'ThreadTodoUpdated')) \
+                    OR kind = 'PullRequest')) \
              THEN payload END"
         )
     };
@@ -471,7 +472,9 @@ fn classify(kind: &str, subkind: Option<&str>, probe_threads: bool) -> Reading {
         }
         ("Lifecycle", "Started" | "Completed" | "Failed") => Reading::SessionMarker,
         ("Message", "MessagePart") => Reading::Part,
-        ("Orchestrator", "ThreadGoalUpdated" | "ThreadTodoUpdated") if probe_threads => {
+        ("Orchestrator", "ThreadGoalUpdated" | "ThreadTodoUpdated") | ("PullRequest", _)
+            if probe_threads =>
+        {
             Reading::Decode(Decoding::ThreadProbe)
         }
         // These categories have no inner tag, so a blank `subkind` is normal.

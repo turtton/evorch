@@ -31,6 +31,48 @@ enum Step<T> {
     Answer(T),
     /// Never answers; the caller's deadline ends it.
     Hang,
+    /// Waits for a test to release it (see [`FetchGate`]).
+    Gate(Arc<GateShared>),
+}
+
+type GateAnswer = Result<FetchedPullRequest, FetchError>;
+
+/// What a scripted gate shares between the fetch that waits and the test that opens it.
+#[derive(Debug)]
+struct GateShared {
+    arrived: tokio::sync::Notify,
+    answer: Mutex<Option<tokio::sync::oneshot::Receiver<GateAnswer>>>,
+}
+
+/// Controls one scripted fetch: a test learns that the request arrived, and decides when and
+/// how it is answered. The fetch still honours its deadline.
+#[derive(Debug)]
+pub struct FetchGate {
+    shared: Arc<GateShared>,
+    answer: Option<tokio::sync::oneshot::Sender<GateAnswer>>,
+}
+
+impl FetchGate {
+    /// Resolves once the fetch has been asked for (also if it already was).
+    pub async fn arrived(&self) {
+        self.shared.arrived.notified().await;
+    }
+
+    /// Answers the waiting fetch with a success.
+    pub fn release_ok(mut self, fetched: FetchedPullRequest) {
+        self.release(Ok(fetched));
+    }
+
+    /// Answers the waiting fetch with a failure.
+    pub fn release_err(mut self, error: FetchError) {
+        self.release(Err(error));
+    }
+
+    fn release(&mut self, answer: GateAnswer) {
+        if let Some(sender) = self.answer.take() {
+            let _ = sender.send(answer);
+        }
+    }
 }
 
 /// A [`PullRequestSource`] that answers from a script.
@@ -70,6 +112,20 @@ impl FakePullRequestSource {
     /// Queues a fetch of `key` that never finishes on its own.
     pub fn push_hang(&self, key: &PullRequestKey) {
         self.push(key, Step::Hang);
+    }
+
+    /// Queues a fetch of `key` that waits until the returned gate answers it.
+    pub fn push_gate(&self, key: &PullRequestKey) -> FetchGate {
+        let (answer, receiver) = tokio::sync::oneshot::channel();
+        let shared = Arc::new(GateShared {
+            arrived: tokio::sync::Notify::new(),
+            answer: Mutex::new(Some(receiver)),
+        });
+        self.push(key, Step::Gate(Arc::clone(&shared)));
+        FetchGate {
+            shared,
+            answer: Some(answer),
+        }
     }
 
     /// Keeps answering with the last scripted answer once the queue is down to it.
@@ -123,6 +179,18 @@ impl PullRequestSource for FakePullRequestSource {
             Some(Step::Hang) => {
                 let _ = tokio::time::timeout(deadline, std::future::pending::<()>()).await;
                 Err(FetchError::Timeout(deadline))
+            }
+            Some(Step::Gate(gate)) => {
+                let receiver = lock(&gate.answer).take();
+                gate.arrived.notify_one();
+                let Some(receiver) = receiver else {
+                    return Err(FetchError::other("the gate was used twice"));
+                };
+                match tokio::time::timeout(deadline, receiver).await {
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(_)) => Err(FetchError::other("the gate was dropped unanswered")),
+                    Err(_) => Err(FetchError::Timeout(deadline)),
+                }
             }
         }
     }
@@ -190,7 +258,7 @@ impl ProcessRunner for FakeProcessRunner {
         };
         match step {
             Some(Step::Answer(answer)) => answer,
-            Some(Step::Hang) => std::future::pending().await,
+            Some(Step::Hang | Step::Gate(_)) => std::future::pending().await,
             None => Err(ProcessError::Spawn("nothing scripted".into())),
         }
     }

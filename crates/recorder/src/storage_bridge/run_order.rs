@@ -109,7 +109,7 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
         EventKind::Fault(event) => match event {
             FaultEvent::SubscriberLagged { .. } | FaultEvent::SkillDiagnostic { .. } => {}
         },
-        EventKind::Ownership(_) => {}
+        EventKind::Ownership(_) | EventKind::PullRequest(_) => {}
     }
     runs
 }

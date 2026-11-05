@@ -166,6 +166,7 @@ impl EventKind {
                 LedgerEvent::LaneManagementChanged { .. } => "LaneManagementChanged",
                 LedgerEvent::LaneBriefRevised { .. } => "LaneBriefRevised",
             },
+            Self::PullRequest(event) => event.subkind_name(),
             Self::Diagnostic(_) | Self::Ownership(_) => "",
         }
     }
@@ -252,7 +253,7 @@ impl EventKind {
                 OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
                 OrchestratorEvent::ThreadTodoUpdated { .. } => None,
             },
-            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) => None,
+            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) | Self::PullRequest(_) => None,
         }
     }
 }
@@ -284,6 +285,8 @@ pub enum EventKind {
     Ownership(crate::OwnershipEvent),
     /// run 台帳への追記イベント。
     Ledger(LedgerEvent),
+    /// A change to the pull request a thread tracks (ADR 0043). Thread-scoped: it has no run.
+    PullRequest(crate::PullRequestEvent),
 }
 
 /// run 台帳に関するイベント。
@@ -489,6 +492,10 @@ pub mod diagnostic_codes {
     /// The original snapshot is kept untouched as evidence.
     pub const NESTED_ORCHESTRATOR_REJECTED: &str = "NestedOrchestratorRejected";
 
+    /// The runtime could not mark a stopped work period's in-progress procedure
+    /// items as interrupted. The list stays as it was; nothing continues.
+    pub const THREAD_TODO_RECONCILE_FAILED: &str = "ThreadTodoReconcileFailed";
+
     /// Every code above.
     pub const ALL: &[&str] = &[
         BUDGET_WARNING,
@@ -529,6 +536,7 @@ pub mod diagnostic_codes {
         BROWSER_SCREENSHOT,
         EVALUATION_FINISHED,
         NESTED_ORCHESTRATOR_REJECTED,
+        THREAD_TODO_RECONCILE_FAILED,
     ];
 }
 

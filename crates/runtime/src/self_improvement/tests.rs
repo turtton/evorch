@@ -110,6 +110,7 @@ fn all_real_diagnostic_codes_and_unknown_are_pinned() {
         ("ContextCheckpointSaved", Ignored),
         ("EvaluationFinished", Ignored),
         ("NestedOrchestratorRejected", Ignored),
+        ("ThreadTodoReconcileFailed", Ignored),
         ("escalation_review", Ignored),
         ("escalation_review_manifest", Ignored),
         ("tool_call_access", Ignored),
