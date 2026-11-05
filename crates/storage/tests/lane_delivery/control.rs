@@ -1,6 +1,8 @@
 //! Phase 2 storage contracts: deterministic integer clocks, explicit writer
 //! completion and barriers. The shared fixture exercises the production writer.
 use super::*;
+#[path = "forward_return.rs"]
+mod forward_return;
 use storage::lane_control::*;
 fn rejected<T: std::fmt::Debug>(r: Result<T, StorageError>, reason: LaneOperationError) {
     assert!(

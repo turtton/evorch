@@ -59,6 +59,7 @@ define_meta_ops! {
     LaneList => "lane_list" => lanes::list_spec => |state, runtime, input| { lanes::list(state, runtime, input) },
     LaneQuestions => "lane_questions" => lanes::questions_spec => |state, runtime, input| { lanes::questions(state, runtime, input) },
     LaneAnswer => "lane_answer" => lanes::answer_spec => |state, runtime, input| { lanes::answer(state, runtime, input) },
+    LaneForwardQuestion => "lane_forward_question" => questions::forward_spec => |state, runtime, input| { questions::forward(state, runtime, input) },
     LaneReport => "lane_report" => lanes::report_spec => |state, runtime, input| { lanes::report(state, runtime, input) },
     TodoWrite => "todo_write" => crate::thread_todos::spec => |state, runtime, input| {
         crate::thread_todos::dispatch(state, runtime, input)
