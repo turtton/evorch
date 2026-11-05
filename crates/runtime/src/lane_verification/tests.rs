@@ -563,6 +563,17 @@ fn install_pr(
     crate::pull_requests::FakePullRequestSource,
     storage::pull_requests::PullRequestKey,
 ) {
+    install_pr_with(f, Arc::new(NoOwner))
+}
+fn install_pr_with(
+    f: &Fixture,
+    ownership: Arc<dyn crate::pull_requests::OwnershipView>,
+) -> (
+    crate::pull_requests::PullRequestService,
+    Arc<Clock>,
+    crate::pull_requests::FakePullRequestSource,
+    storage::pull_requests::PullRequestKey,
+) {
     let key = storage::pull_requests::PullRequestKey::github("owner/repo", 2).unwrap();
     f.storage
         .handle()
@@ -579,7 +590,7 @@ fn install_pr(
         crate::pull_requests::PullRequestService::start(crate::pull_requests::ServiceParts {
             storage: f.storage.handle(),
             source: Arc::new(source.clone()),
-            ownership: Arc::new(NoOwner),
+            ownership,
             environment: Arc::new(Environment {
                 run: f.lane.root_run_id.to_string(),
                 thread: f.lane.thread_id.clone(),
@@ -966,9 +977,9 @@ fn git(dir: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(out.stdout).unwrap().trim().into()
 }
-#[tokio::test]
-async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved_head() {
-    let f = Fixture::new(Mode::Approve).await;
+/// Commits `artifact.txt` on `feature` in the fixture directory and reports that commit as
+/// the lane's Ready artifact. Returns `(head, tree)`.
+fn commit_fixture(f: &Fixture) -> (String, String) {
     let dir = f.dir.path();
     git(dir, &["init", "-q"]);
     git(dir, &["symbolic-ref", "HEAD", "refs/heads/feature"]);
@@ -994,19 +1005,12 @@ async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved
         .handle()
         .revise_lane_brief(&lane.lane_id, lane.brief_revision, brief, 3)
         .unwrap();
-    let mut report = f
-        .storage
-        .handle()
-        .lane_reports(&lane.lane_id, 0, 1)
-        .unwrap()
-        .remove(0);
-    report.artifact_revision = Some(ArtifactRevision::CommitSha(head.clone()));
     f.storage
         .handle()
         .append_lane_report_with_delivery(
             lane.lane_id,
             event_bus::LaneReportInput {
-                artifact_revision: report.artifact_revision,
+                artifact_revision: Some(ArtifactRevision::CommitSha(head.clone())),
                 failure_episode: None,
                 status: event_bus::LaneStatus::Ready,
                 summary: "committed".into(),
@@ -1019,6 +1023,13 @@ async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved
             crate::run_store::review_time_ns(),
         )
         .unwrap();
+    (head, tree)
+}
+#[tokio::test]
+async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved_head() {
+    let f = Fixture::new(Mode::Approve).await;
+    let (head, tree) = commit_fixture(&f);
+    let dir = f.dir.path();
     let v = f.verify().await;
     f.runtime
         .wait(v.reviewer_run_id.parse().unwrap())
@@ -1033,5 +1044,125 @@ async fn commit_evidence_uses_resolved_clean_checkout_and_rejects_dirty_or_moved
     );
     git(dir, &["update-ref", "refs/heads/feature", &new_head]);
     assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+    f.cleanup().await;
+}
+#[tokio::test]
+async fn index_flags_that_hide_edits_from_status_reject_commit_evidence() {
+    for flag in ["assume-unchanged", "skip-worktree"] {
+        let f = Fixture::new(Mode::Approve).await;
+        commit_fixture(&f);
+        let dir = f.dir.path();
+        let v = f.verify().await;
+        f.runtime
+            .wait(v.reviewer_run_id.parse().unwrap())
+            .await
+            .unwrap();
+        git(dir, &["update-index", &format!("--{flag}"), "artifact.txt"]);
+        std::fs::write(dir.join("artifact.txt"), b"hidden edit").unwrap();
+        assert!(
+            git(dir, &["status", "--porcelain=v1"]).is_empty(),
+            "{flag} must hide the edit from status, which is the bypass under test"
+        );
+        assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+        // A flagged file is refused even when its contents match the commit again.
+        std::fs::write(dir.join("artifact.txt"), b"verified contents").unwrap();
+        assert_eq!(f.close(&v).await.unwrap_err().code, "artifact_changed");
+        git(
+            dir,
+            &["update-index", &format!("--no-{flag}"), "artifact.txt"],
+        );
+        f.close(&v).await.unwrap();
+        f.cleanup().await;
+    }
+}
+#[tokio::test]
+async fn a_brief_and_ready_update_between_the_lane_and_target_reads_is_rejected() {
+    let f = Fixture::new(Mode::Approve).await;
+    let handle = f.storage.handle();
+    let lane = handle.lane(&f.lane.lane_id).unwrap().unwrap();
+    let guessed_next_seq = lane.latest_report_seq + 1;
+    let (lane_id, revision) = (lane.lane_id.clone(), lane.brief_revision);
+    let mut revised = lane.brief.clone();
+    revised.objective = "a different deliverable".into();
+    let updater = handle.clone();
+    let digest = format!("{:x}", Sha256::digest(b"verified contents"));
+    AFTER_LANE_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            updater
+                .revise_lane_brief(&lane_id, revision, revised, 5)
+                .unwrap();
+            updater
+                .append_lane_report_with_delivery(
+                    lane_id,
+                    event_bus::LaneReportInput {
+                        artifact_revision: Some(ArtifactRevision::Sha256(digest)),
+                        failure_episode: None,
+                        status: event_bus::LaneStatus::Ready,
+                        summary: "ready for the revised brief".into(),
+                        artifact_refs: vec!["artifact.txt".into()],
+                        needs_human: false,
+                        question_refs: vec![],
+                        reason_code: None,
+                        producer: event_bus::lane::LaneReportProducer::LaneAgent,
+                    },
+                    crate::run_store::review_time_ns(),
+                )
+                .unwrap();
+        }));
+    });
+    let error = f
+        .runtime
+        .verify_lane(f.lead, &f.lane.lane_id, guessed_next_seq)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "stale_ready");
+    // Without the revision check this call would have matched the new Ready and
+    // started a Reviewer on the old brief.
+    let target = handle
+        .lane_verification_target(f.lane.lane_id.clone())
+        .unwrap();
+    assert_eq!(target.ready_seq, guessed_next_seq);
+    assert!(target.brief_revision > revision);
+    f.cleanup().await;
+}
+#[tokio::test]
+async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
+    let f = Fixture::new(Mode::Approve).await;
+    require_pr(&f);
+    let host = Arc::new(
+        crate::ownership::OwnerHost::open(
+            &f.dir.path().join("owners"),
+            config::OwnershipConfig::default(),
+            f.runtime.shared.bus.clone(),
+        )
+        .unwrap(),
+    );
+    host.start(&f.lane.thread_id).unwrap();
+    let (service, clock, source, key) = install_pr_with(&f, host);
+    source.push_ok(
+        &key,
+        crate::pull_requests::FetchedPullRequest {
+            requested: key.clone(),
+            canonical: key.clone(),
+            url: "https://github.com/owner/repo/pull/2".into(),
+            facts: facts(),
+            fetched_at_ns: crate::pull_requests::WallClock::now_ns(&*clock),
+        },
+    );
+    let v = f.verify().await;
+    assert!(v.pr_evidence.is_some());
+    let fetches_by_verify = source.calls().len();
+    assert!(fetches_by_verify >= 1, "verify refreshed through the owner");
+    f.runtime
+        .wait(v.reviewer_run_id.parse().unwrap())
+        .await
+        .unwrap();
+    f.close(&v).await.unwrap();
+    assert_eq!(
+        source.calls().len(),
+        fetches_by_verify,
+        "close reads the accessor's snapshot and never fetches"
+    );
+    service.shutdown();
     f.cleanup().await;
 }

@@ -16,6 +16,34 @@ use storage::lanes::LaneRecord;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only barrier run right after the lane record is read and before the
+    /// verification target is read, to model a concurrent brief + ready update.
+    static AFTER_LANE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn after_lane_read() {
+    #[cfg(test)]
+    if let Some(hook) = AFTER_LANE_READ.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+/// The lane record and the verification target are separate storage reads. The brief
+/// that is shown to the Reviewer and that decides requirements must be the revision the
+/// target (and so the Ready report) was computed for.
+fn same_brief_revision(
+    lane: &LaneRecord,
+    target: &LaneVerificationTarget,
+    error: LaneOperationError,
+) -> Result<(), LaneError> {
+    if lane.brief_revision == target.brief_revision {
+        Ok(())
+    } else {
+        Err(operation(error))
+    }
+}
+
 pub(crate) fn operation(error: LaneOperationError) -> LaneError {
     LaneError::new(error.as_str(), error.as_str())
 }
@@ -81,6 +109,7 @@ impl AgentRuntime {
     ) -> Result<LaneVerification, LaneError> {
         let (lead, config, lane) = self.verification_lead(caller, lane_id)?;
         let store = self.verification_store()?;
+        after_lane_read();
         let target = store
             .handle
             .lane_verification_target(lane_id.into())
@@ -88,6 +117,7 @@ impl AgentRuntime {
         if target.ready_seq != ready_seq {
             return Err(operation(LaneOperationError::StaleReady));
         }
+        same_brief_revision(&lane, &target, LaneOperationError::StaleReady)?;
         let (pr, review) = self.verification_pr(&lane, true).await?;
         self.observe_lane_artifact(&lane, &target, review.as_deref())
             .await?;
@@ -181,6 +211,7 @@ impl AgentRuntime {
         if target != v.target {
             return Err(operation(LaneOperationError::StaleVerification));
         }
+        same_brief_revision(&lane, &target, LaneOperationError::StaleVerification)?;
         self.reconcile_lane_reviewer(&v)?;
         let (pr, review) = self.verification_pr(&lane, false).await?;
         self.observe_lane_artifact(&lane, &target, review.as_deref())
@@ -416,6 +447,10 @@ impl AgentRuntime {
                     {
                         return Err(operation(LaneOperationError::ArtifactChanged));
                     }
+                    // `assume-unchanged` / `skip-worktree` hide edits from `status`.
+                    if has_hidden_index_flags(&reader, &checkout.path)? {
+                        return Err(operation(LaneOperationError::ArtifactChanged));
+                    }
                     if !git_text(
                         &reader,
                         &checkout.path,
@@ -537,6 +572,24 @@ fn same_file_state(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
             && a.modified().ok() == b.modified().ok()
             && a.created().ok() == b.created().ok()
     }
+}
+/// True when any tracked file is marked `assume-unchanged` (lowercase tag) or
+/// `skip-worktree` (`S`/`s`), which makes `git status` unable to prove the tree is clean.
+fn has_hidden_index_flags(
+    reader: &crate::git_read::GitReader,
+    path: &Path,
+) -> Result<bool, LaneError> {
+    let output = reader
+        .run(path, &["ls-files", "-v", "-z"], 32 * 1024 * 1024)
+        .map_err(|_| operation(LaneOperationError::EvidenceUnavailable))?;
+    if !output.status.success() {
+        return Err(operation(LaneOperationError::EvidenceUnavailable));
+    }
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry[0].is_ascii_lowercase() || entry[0] == b'S'))
 }
 fn git_text(
     reader: &crate::git_read::GitReader,
