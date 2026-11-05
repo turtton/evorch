@@ -29,9 +29,8 @@ use workbench_protocol::queries::{CommandReceipt, CommandReceiptState};
 
 pub mod fingerprint;
 
-/// Entries kept per table. The oldest are dropped first; a dropped submission
-/// falls back to the durable runtime receipt (refused as unverifiable), a dropped
-/// request reads as unknown.
+/// Entries kept per table. The oldest are dropped first; a dropped submission is
+/// still recognised from its stored fingerprint, a dropped request reads as unknown.
 pub const RECEIPT_CAPACITY: usize = 4096;
 
 /// A map that forgets its oldest entry when full.
@@ -91,6 +90,16 @@ pub struct SubmissionRecord {
 struct RequestRecord {
     state: CommandReceiptState,
     provenance: Provenance,
+    /// What an applied request acted on, so a receipt can be withheld once that was
+    /// deleted.
+    subject: Subject,
+}
+
+/// The submission and run a request's reply names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subject {
+    pub submission: Option<String>,
+    pub run: Option<String>,
 }
 
 pub struct Receipts {
@@ -128,6 +137,16 @@ impl Receipts {
         provenance: &Provenance,
         result: &Result<CommandReply, WorkbenchError>,
     ) {
+        let subject = match result {
+            Ok(reply) => Subject {
+                submission: reply
+                    .submission_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned()),
+                run: reply.run_id.as_ref().map(|id| id.as_str().to_owned()),
+            },
+            Err(_) => Subject::default(),
+        };
         let state = match result {
             Ok(reply) => CommandReceiptState::Applied {
                 reply: reply.clone(),
@@ -141,6 +160,7 @@ impl Receipts {
             RequestRecord {
                 state,
                 provenance: provenance.clone(),
+                subject,
             },
         );
     }
@@ -157,7 +177,14 @@ impl Receipts {
         }
     }
 
-    /// Who sent `request`.
+    /// The submission and run an applied request acted on.
+    pub fn request_subject(&self, session: &SessionId, request: &RequestId) -> Option<&Subject> {
+        self.requests
+            .get(&request_key(session, request))
+            .map(|record| &record.subject)
+    }
+
+    /// Who sent `request`, as remembered; see [`Self::command_receipt`].
     pub fn request_provenance(
         &self,
         session: &SessionId,

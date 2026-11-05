@@ -4,7 +4,8 @@
 //! root run a thread is bound to, which stops this host issued, the ownership
 //! permits it checked) and executes [`HostCommand`]s against the runtime. It is
 //! the one implementation behind every ingress: the desktop GUI adapter and
-//! the protocol handler ([`crate::ingress`]) both call [`CommandService::submit`].
+//! the protocol handler both reach it through [`crate::CommandHost`], which authorises
+//! and deduplicates before [`CommandService`] runs anything.
 //!
 //! Nothing here reaches a GUI or client crate, and nothing here puts client
 //! provenance into a model prompt (the prompt cache contract): provenance is

@@ -138,6 +138,7 @@ enum Command {
     HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
     RecordHostChatSubmission(crate::HostChatSubmission, ReplyTx<bool>),
     HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmissionState>>),
+    TombstonedRuns(Vec<String>, ReplyTx<Vec<String>>),
     HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
@@ -808,6 +809,15 @@ impl StorageHandle {
         submission_ids: &[String],
     ) -> Result<Vec<crate::HostChatSubmissionState>, StorageError> {
         self.request(|reply| Command::HostChatSubmissions(submission_ids.to_vec(), reply))
+    }
+
+    /// The runs among `run_ids` whose thread was deleted, after all earlier writer requests.
+    /// A deleted run stays listed after its rows are reclaimed.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn tombstoned_runs(&self, run_ids: &[String]) -> Result<Vec<String>, StorageError> {
+        self.request(|reply| Command::TombstonedRuns(run_ids.to_vec(), reply))
     }
 
     /// One run's receipts, oldest first, after all earlier writer requests.

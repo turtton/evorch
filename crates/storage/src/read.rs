@@ -283,6 +283,15 @@ impl Database {
         crate::repo::host_chat_submission::for_ids(&self.conn, submission_ids)
     }
 
+    /// The runs among `run_ids` whose thread was deleted; a deleted run stays listed after
+    /// its rows are reclaimed.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access fails.
+    pub fn tombstoned_runs(&self, run_ids: &[String]) -> Result<Vec<String>, StorageError> {
+        crate::repo::host_chat_submission::tombstoned_runs(&self.conn, run_ids)
+    }
+
     /// What each submission recorded (the host's words and the skill names
     /// attached to them), in request order; IDs without a receipt are skipped.
     ///

@@ -509,6 +509,12 @@ pub(super) fn run_writer_with_index(
                     &ids,
                 ));
             }
+            Ok(Command::TombstonedRuns(ids, reply)) => {
+                let _ = reply.send(crate::repo::host_chat_submission::tombstoned_runs(
+                    &state.conn,
+                    &ids,
+                ));
+            }
             Ok(Command::HostInputReceiptsForRun(run_id, reply)) => {
                 let _ = reply.send(crate::repo::host_input_receipt::for_run(
                     &state.conn,

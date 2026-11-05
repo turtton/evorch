@@ -58,3 +58,20 @@ pub(crate) fn for_ids(
     }
     Ok(found)
 }
+
+/// The runs among `ids` that were deleted: their tombstone stays after the rows are
+/// reclaimed, so this still answers once nothing else is left.
+pub(crate) fn tombstoned_runs(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<Vec<String>, StorageError> {
+    let mut statement =
+        conn.prepare("SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)")?;
+    let mut deleted = Vec::new();
+    for id in ids {
+        if statement.query_row(params![id], |row| row.get::<_, bool>(0))? {
+            deleted.push(id.clone());
+        }
+    }
+    Ok(deleted)
+}

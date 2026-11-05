@@ -409,10 +409,7 @@ fn every_request_is_looked_up_by_its_receipt_within_its_session() {
         CommandReceiptState::Unknown,
         "a request id means something only inside its own session"
     );
-    assert_eq!(
-        host.receipts().request_provenance(&session, &applied),
-        Some(&web())
-    );
+    assert_eq!(host.request_provenance(&session, &applied), Some(web()));
 }
 
 #[test]

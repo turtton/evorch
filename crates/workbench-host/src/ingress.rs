@@ -160,7 +160,7 @@ impl CommandHost {
     ) -> Result<QueryReply, WorkbenchError> {
         match query {
             Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
-                self.command_receipt(session, request_id),
+                self.command_receipt(session, request_id)?,
             )),
             other => Err(WorkbenchError::new(
                 ErrorCode::UnsupportedCapability,
@@ -173,8 +173,70 @@ impl CommandHost {
         }
     }
 
-    pub fn command_receipt(&self, session: &SessionId, request: &RequestId) -> CommandReceipt {
-        self.receipts.command_receipt(session, request)
+    /// What became of `request` in `session`. An applied request whose submission or
+    /// run was deleted since reads as unknown: deletion removes what the host knew, and
+    /// the reply names the deleted run.
+    ///
+    /// # Errors
+    /// [`ErrorCode::StorageUnavailable`] when deletion cannot be checked.
+    pub fn command_receipt(
+        &self,
+        session: &SessionId,
+        request: &RequestId,
+    ) -> Result<CommandReceipt, WorkbenchError> {
+        let receipt = self.receipts.command_receipt(session, request);
+        let deleted = self
+            .request_subject_deleted(session, request)
+            .map_err(|error| {
+                reject_error(
+                    RejectKind::Unavailable,
+                    &format!("could not check the request's conversation: {error}"),
+                )
+            })?;
+        Ok(if deleted {
+            CommandReceipt {
+                request_id: receipt.request_id,
+                state: workbench_protocol::queries::CommandReceiptState::Unknown,
+            }
+        } else {
+            receipt
+        })
+    }
+
+    /// Who sent `request`; `None` for an unknown request and for one whose submission or
+    /// run was deleted.
+    pub fn request_provenance(
+        &self,
+        session: &SessionId,
+        request: &RequestId,
+    ) -> Option<Provenance> {
+        if self.request_subject_deleted(session, request).ok()? {
+            return None;
+        }
+        self.receipts.request_provenance(session, request).cloned()
+    }
+
+    fn request_subject_deleted(
+        &self,
+        session: &SessionId,
+        request: &RequestId,
+    ) -> Result<bool, storage::StorageError> {
+        let Some(subject) = self.receipts.request_subject(session, request) else {
+            return Ok(false);
+        };
+        if let Some(run) = &subject.run
+            && !self
+                .service
+                .runtime()
+                .deleted_runs(std::slice::from_ref(run))?
+                .is_empty()
+        {
+            return Ok(true);
+        }
+        if let Some(submission) = &subject.submission {
+            return Ok(matches!(self.submission_status(submission)?, Seen::Deleted));
+        }
+        Ok(false)
     }
 
     /// Run a command from an in-process client (the desktop adapter) as

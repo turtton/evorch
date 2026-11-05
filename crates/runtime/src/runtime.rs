@@ -2296,6 +2296,18 @@ impl AgentRuntime {
         }
     }
 
+    /// The runs among `run_ids` that were deleted with their thread. A deleted run stays
+    /// listed after its rows are reclaimed. Without storage nothing is deleted.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn deleted_runs(&self, run_ids: &[String]) -> Result<Vec<String>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => store.handle.tombstoned_runs(run_ids),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Whether this runtime persists runs. Without a run store nothing a host records
     /// outlives the process, and nothing is ever deleted by retention.
     pub fn has_run_store(&self) -> bool {

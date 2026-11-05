@@ -98,8 +98,12 @@ fn a_deleted_conversations_message_is_not_answered_from_memory_or_storage() {
     assert_eq!(error.code, ErrorCode::Conflict);
 }
 
+// Once the rows are reclaimed the host keeps nothing about the conversation, by design:
+// retention wins over remembering. Hence an id that nobody remembers (a host created after
+// the reclaim) is a NEW submission and is applied normally; it is never answered with the
+// deleted run. A host that still remembers the id in memory refuses it instead.
 #[test]
-fn after_the_rows_are_reclaimed_nothing_about_the_message_comes_back() {
+fn after_the_reclaim_nothing_is_kept_so_a_recreated_hosts_id_is_deliberately_new() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (runtime, storage) = runtime_with_store(dir.path());
@@ -118,8 +122,8 @@ fn after_the_rows_are_reclaimed_nothing_about_the_message_comes_back() {
         .unwrap_err();
     assert_eq!(same_host.code, ErrorCode::Conflict);
 
-    // A host created afterwards has nothing to remember, so the id is new: it is never
-    // answered with the deleted run.
+    // Intended: a host created afterwards has nothing to remember, so the id is new. It is
+    // never answered with the deleted run.
     let mut recreated = host_with_project(&rt, runtime_on_store(dir.path(), &storage), dir.path());
     assert_eq!(recreated.submission_provenance("sub-1"), None);
     match recreated.handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web()) {
@@ -160,4 +164,113 @@ fn a_deleted_questions_answer_provenance_is_gone() {
         .unwrap();
 
     assert_eq!(host.answer_provenance(&question.id), None);
+}
+
+use workbench_protocol::commands::ThreadTarget;
+use workbench_protocol::ids::{RequestId, SessionId};
+use workbench_protocol::queries::{CommandReceiptState, Query, QueryReply};
+
+fn receipt_state(
+    host: &workbench_host::CommandHost,
+    session: &SessionId,
+    request: &RequestId,
+) -> CommandReceiptState {
+    match host
+        .handle_query(
+            session,
+            &Query::GetCommandReceipt {
+                request_id: request.clone(),
+            },
+        )
+        .unwrap()
+    {
+        QueryReply::CommandReceipt(receipt) => receipt.state,
+        other => panic!("not a receipt: {other:?}"),
+    }
+}
+
+#[test]
+fn a_command_receipt_of_a_deleted_conversation_reads_as_unknown_before_and_after_the_reclaim() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_with_project(&rt, runtime, dir.path());
+    let session = SessionId::new("session-1").unwrap();
+    let chat = RequestId::new("req-chat").unwrap();
+    let stop = RequestId::new("req-stop").unwrap();
+    let accepted = host
+        .handle_request(
+            &session,
+            &chat,
+            Command::SendChat(send("thread-1", "sub-1", "hello")),
+            web(),
+        )
+        .unwrap();
+    host.handle_request(
+        &session,
+        &stop,
+        Command::StopChat(ThreadTarget {
+            thread: ThreadId::new("thread-1").unwrap(),
+        }),
+        web(),
+    )
+    .unwrap();
+    assert!(matches!(
+        receipt_state(&host, &session, &chat),
+        CommandReceiptState::Applied { .. }
+    ));
+    assert!(matches!(
+        receipt_state(&host, &session, &stop),
+        CommandReceiptState::Applied { .. }
+    ));
+    assert_eq!(host.request_provenance(&session, &chat), Some(web()));
+
+    // Deleted just now: the reply names the deleted run, so it is withheld.
+    tombstone(dir.path(), &run_of(&accepted));
+    assert_eq!(
+        receipt_state(&host, &session, &chat),
+        CommandReceiptState::Unknown
+    );
+    assert_eq!(
+        receipt_state(&host, &session, &stop),
+        CommandReceiptState::Unknown,
+        "a reply that only names the run is withheld too"
+    );
+    assert_eq!(host.request_provenance(&session, &chat), None);
+
+    // After the rows are reclaimed the tombstone is all that is left, and still decides.
+    reclaim(dir.path(), &run_of(&accepted));
+    assert_eq!(
+        receipt_state(&host, &session, &chat),
+        CommandReceiptState::Unknown
+    );
+    assert_eq!(
+        receipt_state(&host, &session, &stop),
+        CommandReceiptState::Unknown
+    );
+    assert_eq!(host.request_provenance(&session, &stop), None);
+}
+
+#[test]
+fn a_command_receipt_of_a_live_conversation_is_unaffected_by_another_ones_deletion() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, _storage) = runtime_with_store(dir.path());
+    let mut host = host_with_project(&rt, runtime, dir.path());
+    let session = SessionId::new("session-1").unwrap();
+    let chat = RequestId::new("req-chat").unwrap();
+    host.handle_request(
+        &session,
+        &chat,
+        Command::SendChat(send("thread-1", "sub-1", "hello")),
+        web(),
+    )
+    .unwrap();
+
+    tombstone(dir.path(), "some-other-run");
+
+    assert!(matches!(
+        receipt_state(&host, &session, &chat),
+        CommandReceiptState::Applied { .. }
+    ));
 }

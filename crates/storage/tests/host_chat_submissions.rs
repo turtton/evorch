@@ -182,3 +182,22 @@ fn a_deleted_run_accepts_no_new_submission() {
 
     assert!(error.to_string().contains("tombstoned"), "{error}");
 }
+
+#[test]
+fn tombstoned_runs_are_listed_even_when_nothing_else_is_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("submissions.sqlite3");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    tombstone(&path, "run-1");
+
+    let listed = handle
+        .tombstoned_runs(&["run-0".into(), "run-1".into(), "run-2".into()])
+        .unwrap();
+
+    assert_eq!(listed, vec!["run-1".to_owned()]);
+}
