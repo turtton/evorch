@@ -117,6 +117,11 @@ pub enum HostCommand {
     SetWebToolsEnabled {
         enabled: bool,
     },
+    /// Make the runtime redeliver the lane notifications held for a thread. Desktop
+    /// only; the protocol has no such command yet.
+    ResumeLaneDeliveries {
+        thread_id: String,
+    },
 }
 
 impl HostCommand {
@@ -132,6 +137,7 @@ impl HostCommand {
             | Self::StopChat { thread_id }
             | Self::StopRun { thread_id, .. }
             | Self::DeliverFollowUpsNextTurn { thread_id }
+            | Self::ResumeLaneDeliveries { thread_id }
             | Self::AnswerUserQuestion { thread_id, .. } => Some(thread_id),
             Self::DecideToolApproval { .. } | Self::SetWebToolsEnabled { .. } => None,
         }

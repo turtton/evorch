@@ -79,6 +79,7 @@ fn conversation_header_uses_h3_when_agent_is_selected() {
                     parent_thread: None,
                     child_threads: Vec::new(),
                     lane: None,
+                    lead: None,
                     thread_metrics: None,
                     phase: None,
                     sandbox_picker: Default::default(),

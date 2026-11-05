@@ -17,6 +17,10 @@ use runtime::{
 };
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
+#[path = "support/short_private_directory.rs"]
+mod short_private_directory;
+use short_private_directory::ShortPrivateDirectory;
+
 /// The lead answers and waits; a lane root (it sees the agent brief) never gets a reply.
 #[derive(Default)]
 struct LaneModel {
@@ -209,13 +213,10 @@ fn a_child_named_like_the_lane_thread_never_becomes_the_target_of_the_lanes_stop
         .unwrap();
     let bus = Arc::new(EventBus::new(1024));
     let mut events = bus.subscribe();
+    let owners = ShortPrivateDirectory::new();
     let owner = Arc::new(
-        runtime::ownership::OwnerHost::open(
-            &dir.path().join("owners"),
-            Default::default(),
-            bus.clone(),
-        )
-        .unwrap(),
+        runtime::ownership::OwnerHost::open(owners.path(), Default::default(), bus.clone())
+            .unwrap(),
     );
     let model = Arc::new(LaneModel::default());
     let runtime = {

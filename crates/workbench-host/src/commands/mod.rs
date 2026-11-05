@@ -13,6 +13,7 @@
 mod chat;
 mod compaction;
 mod goal;
+mod lanes;
 mod question;
 mod stop;
 mod types;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 
 use event_bus::{Event, EventBus};
 use runtime::{AgentRuntime, Role, RunConfig, RunId};
+
+use crate::lane::{BindingTable, ThreadBinding, memory_boundary};
 
 pub use goal::render_entry_prompt;
 pub use types::{
@@ -48,6 +51,8 @@ pub struct ThreadBindings {
     pub chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
     /// Project each thread last submitted from, for host follow-ups that carry none.
     pub thread_roots: BTreeMap<String, PathBuf>,
+    /// Model each thread last submitted with, so a runtime-requested wake keeps it.
+    pub model_preferences: BTreeMap<String, runtime::ModelPreference>,
 }
 
 impl ThreadBindings {
@@ -80,6 +85,8 @@ pub struct CommandService {
     automatic_resume: bool,
     ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     compaction_jobs: BTreeMap<String, compaction::CompactionJob>,
+    /// What the lane delivery host reads; republished after every change of the bindings.
+    lane_bindings: BindingTable,
 }
 
 impl CommandService {
@@ -96,6 +103,7 @@ impl CommandService {
             automatic_resume: false,
             ownership: None,
             compaction_jobs: BTreeMap::new(),
+            lane_bindings: BindingTable::default(),
         }
     }
 
@@ -148,6 +156,52 @@ impl CommandService {
         &self.handle
     }
 
+    /// The bindings snapshot the lane delivery host reads.
+    pub fn lane_bindings(&self) -> BindingTable {
+        self.lane_bindings.clone()
+    }
+
+    pub fn memory_config(&self) -> Option<&storage::StorageConfig> {
+        self.memory_config.as_ref()
+    }
+
+    pub fn team_writer(&self) -> Option<&storage::StorageHandle> {
+        self.team_writer.as_ref()
+    }
+
+    /// Republish the bindings the lane delivery host reads. Every change of the
+    /// bindings, the project roots or the working directory ends with this.
+    pub fn publish_lane_bindings(&self) {
+        let threads: BTreeSet<&String> = self
+            .bindings
+            .chat_runs
+            .keys()
+            .chain(self.bindings.goal_runs.keys())
+            .collect();
+        self.lane_bindings.replace(
+            threads
+                .into_iter()
+                .filter_map(|thread| {
+                    let root = self.bindings.root_of(thread)?;
+                    Some((
+                        thread.clone(),
+                        ThreadBinding {
+                            root,
+                            project_root: self
+                                .bindings
+                                .thread_roots
+                                .get(thread)
+                                .cloned()
+                                .or_else(|| self.shell_cwd.clone()),
+                            goal_project: self.bindings.goal_projects.get(thread).cloned(),
+                            model_preference: self.bindings.model_preferences.get(thread).cloned(),
+                        },
+                    ))
+                })
+                .collect(),
+        );
+    }
+
     pub fn ownership(&self) -> Option<&Arc<runtime::ownership::OwnerHost>> {
         self.ownership.as_ref()
     }
@@ -186,15 +240,11 @@ impl CommandService {
 
     /// Lessons are keyed by the slug post-run learning stores them under, not the sidebar id.
     pub fn capture_memory(&self, root: Option<&Path>) -> Option<runtime::memory::MemoryBoundary> {
-        let config = self.memory_config.as_ref()?;
-        let root = root.or(self.shell_cwd.as_deref())?;
-        let project = self
-            .runtime
-            .project_slug(root)
-            .unwrap_or_else(|| runtime::repository::derive_repo_slug(root));
-        runtime::memory::MemoryBoundary::capture(config, &project)
-            .inspect_err(|error| tracing::warn!(%error, %project, "memory read failed"))
-            .ok()
+        memory_boundary(
+            &self.runtime,
+            self.memory_config.as_ref(),
+            root.or(self.shell_cwd.as_deref()),
+        )
     }
 
     /// Whether a stop this host issued left a chat whose saved context is gone, so the
@@ -273,6 +323,7 @@ impl CommandService {
                 .chat_runs
                 .insert(snapshot.thread_id.clone(), id);
         }
+        self.publish_lane_bindings();
     }
 
     /// Point a lane thread at the root run the runtime itself started, without spawning
@@ -285,6 +336,7 @@ impl CommandService {
         {
             self.bindings.rebind_conversation_root(thread, id);
             self.bindings.chat_runs.insert(thread.into(), id);
+            self.publish_lane_bindings();
         }
     }
 
@@ -296,6 +348,7 @@ impl CommandService {
             self.bindings
                 .goal_projects
                 .insert(thread.into(), project.into());
+            self.publish_lane_bindings();
         }
     }
 
@@ -312,6 +365,7 @@ impl CommandService {
             .set_project_root(root.clone())
             .map_err(|error| error.to_string())?;
         self.shell_cwd = Some(root);
+        self.publish_lane_bindings();
         Ok(())
     }
 
@@ -382,6 +436,16 @@ impl CommandService {
         command: HostCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
     ) -> Vec<HostEvent> {
+        let events = self.dispatch_authorized(command, permit);
+        self.publish_lane_bindings();
+        events
+    }
+
+    fn dispatch_authorized(
+        &mut self,
+        command: HostCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+    ) -> Vec<HostEvent> {
         if let Some(thread) = Self::compaction_excluded_thread(&command)
             && self.compaction_jobs.contains_key(thread)
         {
@@ -411,6 +475,9 @@ impl CommandService {
                 Vec::new()
             }
             HostCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
+            HostCommand::ResumeLaneDeliveries { thread_id } => {
+                self.resume_lane_deliveries(thread_id, permit)
+            }
             HostCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 self.deliver_follow_ups_next_turn(thread_id)
             }

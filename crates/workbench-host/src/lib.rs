@@ -13,6 +13,7 @@
 
 pub mod commands;
 pub mod ingress;
+pub mod lane;
 pub mod projects;
 pub mod provenance;
 pub mod receipts;

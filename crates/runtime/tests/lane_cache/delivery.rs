@@ -468,3 +468,105 @@ async fn receipt_ack_retry_stop_resume_and_compaction_restore_never_duplicate_no
     f.h.runtime.cancel(f.lead).unwrap();
     f.h.runtime.wait(f.lead).await.unwrap();
 }
+/// (5) A direct user input to a lane the lead manages: the input reaches the lane only and
+/// the lead gets a reference-only notice, for an attached and for a summary lane alike.
+async fn direct_lane_input_case(summary: bool) {
+    let mut f = Fixture::new().await;
+    let (lane_id, lane_root) = if summary {
+        f.h.mock.enqueue(vec![text_response("summary lane idle")]);
+        let opened =
+            f.h.runtime
+                .open_lane(
+                    f.lead,
+                    "summary-direct-input",
+                    event_bus::LaneBrief {
+                        objective: "summary lane".into(),
+                        inputs: vec![],
+                        deliverables: vec!["artifact".into()],
+                        acceptance_criteria: vec!["review".into()],
+                        constraints: vec![],
+                        workspace: Default::default(),
+                        report_policy: event_bus::LanePolicy::Summary,
+                    },
+                )
+                .unwrap();
+        f.events.extend(
+            through_phase(
+                &mut f.h.receiver,
+                opened.root_run_id,
+                AgentRunPhase::Waiting,
+            )
+            .await,
+        );
+        (opened.lane_id, opened.root_run_id)
+    } else {
+        let lane_id = f.lanes[0].clone();
+        let root: RunId = f
+            .store
+            .handle()
+            .lane(&lane_id)
+            .unwrap()
+            .unwrap()
+            .root_run_id
+            .unwrap()
+            .parse()
+            .unwrap();
+        (lane_id, root)
+    };
+    // (5) The user talks to the lane directly: the input reaches the lane only, and the
+    // runtime saves a reference-only intervention notice for its lead. Deny only the
+    // automatic source trigger so that the explicit driver is the completion barrier.
+    f.host.denied.store(true, Ordering::SeqCst);
+    f.h.mock
+        .enqueue(vec![text_response("lane saw the direct input")]);
+    f.h.runtime
+        .send_message(lane_root, "private direct input for the lane".into())
+        .unwrap();
+    f.events
+        .extend(through_phase(&mut f.h.receiver, lane_root, AgentRunPhase::Waiting).await);
+    f.host.checked.notified().await;
+    f.host.denied.store(false, Ordering::SeqCst);
+
+    f.h.mock
+        .enqueue(vec![text_response("intervention received")]);
+    assert_eq!(
+        f.h.runtime
+            .drive_lane_deliveries("cache-delivery-lead")
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    f.delivered_request().await;
+    assert_eq!(
+        f.host.restores.load(Ordering::SeqCst),
+        0,
+        "a live lead is not restored"
+    );
+    f.followup("ordinary turn after the intervention notice")
+        .await;
+
+    let requests = f.requests();
+    for pair in requests.windows(2) {
+        assert_append_only(CacheProtocol::OpenAi, &pair[0], &pair[1]).unwrap();
+    }
+    for request in &requests {
+        assert!(
+            !request.to_string().contains("private direct input"),
+            "the input body is never copied to the lead"
+        );
+    }
+    assert!(requests.last().unwrap().to_string().contains(&lane_id));
+    f.verify(0);
+    f.h.runtime.cancel(f.lead).unwrap();
+    f.h.runtime.wait(f.lead).await.unwrap();
+}
+#[tokio::test]
+async fn direct_input_to_an_attached_lane_notifies_the_live_lead_by_reference_and_preserves_wire_prefix()
+ {
+    direct_lane_input_case(false).await;
+}
+#[tokio::test]
+async fn direct_input_to_a_summary_lane_notifies_the_live_lead_by_reference_and_preserves_wire_prefix()
+ {
+    direct_lane_input_case(true).await;
+}

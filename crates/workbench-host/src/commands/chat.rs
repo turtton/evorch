@@ -3,6 +3,8 @@
 use config::agent_categories::CategoryId;
 use runtime::{Role, RunConfig, RunId};
 
+use crate::lane::TeamSource;
+
 use super::{ChatInput, CommandService, ComposerRole, HostEvent, NoticeOutcome, RejectKind};
 
 impl CommandService {
@@ -27,37 +29,13 @@ impl CommandService {
         prompt: Option<&str>,
         authority: &mut RunConfig,
     ) -> Result<(), String> {
-        if !self
-            .runtime
-            .restore_diagnostics(run)
-            .ok()
-            .flatten()
-            .is_some_and(|diagnostics| diagnostics.renewable_team.is_some())
-        {
-            return Ok(());
+        TeamSource {
+            runtime: &self.runtime,
+            memory_config: self.memory_config.as_ref(),
+            team_writer: self.team_writer.as_ref(),
+            goal_project: self.bindings.goal_projects.get(thread).map(String::as_str),
         }
-        let project = self
-            .bindings
-            .goal_projects
-            .get(thread)
-            .ok_or("Current project binding is required to continue this team")?;
-        let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer) else {
-            return Err("Current team storage is unavailable".into());
-        };
-        authority.team_store = Some(runtime::team_context::TeamStore {
-            config: config.clone(),
-            writer: writer.clone(),
-            id: format!("{project}:{thread}"),
-        });
-        authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-        // This renews the current team capability; it is not a model message.
-        authority.delegation_value = Some(
-            prompt
-                .unwrap_or("Resume the existing team coordination")
-                .into(),
-        );
-        authority.finding_store = Some(config.db_path.clone());
-        Ok(())
+        .renew(thread, run, prompt, authority)
     }
 
     pub(super) fn submit_chat(
@@ -92,6 +70,16 @@ impl CommandService {
             initial.skill_mentions.clone_from(&submission.skills);
         }
         let thread_id = submission.thread_id;
+        match &submission.model_preference {
+            Some(preference) => {
+                self.bindings
+                    .model_preferences
+                    .insert(thread_id.clone(), preference.clone());
+            }
+            None => {
+                self.bindings.model_preferences.remove(&thread_id);
+            }
+        }
         // New runs of a thread work in its project, even after the active project moved.
         if let Some(root) = submission.project_root {
             self.bindings.thread_roots.insert(thread_id.clone(), root);

@@ -103,6 +103,9 @@ pub(super) fn host_command(command: WorkbenchCommand) -> HostCommand {
         WorkbenchCommand::SetWebToolsEnabled { enabled } => {
             HostCommand::SetWebToolsEnabled { enabled }
         }
+        WorkbenchCommand::ResumeLaneDeliveries { thread_id } => {
+            HostCommand::ResumeLaneDeliveries { thread_id }
+        }
     }
 }
 

@@ -20,6 +20,8 @@ use workbench_protocol::envelope::Provenance;
 use crate::model::commands::{CommandSink, GoalSubmission, LoopEvent, WorkbenchCommand};
 
 mod host_adapter;
+mod lane_host;
+pub use lane_host::GuiLaneDeliveryHost;
 
 /// Prefix of the stream ids GUI processes persist their events under.
 pub const STORAGE_SESSION_ID: &str = "evorch-gui";
@@ -78,6 +80,29 @@ impl RuntimeCommandSink {
             provenance: workbench_host::provenance::local_desktop(),
             search_jobs: crate::model::latest_job::LatestJob::default(),
         }
+    }
+
+    /// Installs the runtime's durable lane delivery (ADR 0044 Phase 1c) with this sink's
+    /// bindings and ownership as the host. Call it after `with_ownership`,
+    /// `with_memory_storage` and `with_team_writer`: the host copies them. Inside the Tokio
+    /// handle the runtime's recovery worker starts; without one delivery stays unbound and
+    /// questions keep going to the user.
+    pub fn with_lane_delivery(self) -> Self {
+        {
+            let service = &self.host.service;
+            let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
+                service.runtime().downgrade(),
+                service.ownership().cloned(),
+                service.lane_bindings(),
+                service.memory_config().cloned(),
+                service.team_writer().cloned(),
+            ));
+            service.publish_lane_bindings();
+            let _guard = service.handle().enter();
+            // The worker keeps running without its handle and holds the runtime weakly.
+            drop(service.runtime().bind_lane_delivery_host(host));
+        }
+        self
     }
 
     pub fn with_web_tools_enabled(mut self, enabled: bool) -> Self {
@@ -186,6 +211,16 @@ impl CommandSink for RuntimeCommandSink {
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
         self.host.service.bind_goal_context(thread, project, run);
+    }
+
+    fn lane_delivery_bound(&self) -> bool {
+        self.host.service.runtime().lane_delivery_binding()
+            == event_bus::lane::LaneDeliveryBinding::Bound
+    }
+
+    fn schedule_lane_deliveries(&mut self, thread: &str) {
+        let _guard = self.host.service.handle().enter();
+        self.host.service.runtime().schedule_lane_deliveries(thread);
     }
 
     fn restore_diagnostics(
