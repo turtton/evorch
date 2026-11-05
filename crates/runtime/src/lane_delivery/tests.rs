@@ -242,6 +242,7 @@ impl Fixture {
                 lead,
                 key,
                 event_bus::LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: key.into(),
                     inputs: vec![],
                     deliverables: vec!["artifact".into()],

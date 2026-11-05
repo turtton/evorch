@@ -11,9 +11,9 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 48;
+const LATEST_SCHEMA: u32 = 49;
 
-const EXPECTED_TABLES: [&str; 90] = [
+const EXPECTED_TABLES: [&str; 91] = [
     "thread_pull_request_state",
     "thread_pull_requests",
     "pull_request_snapshots",
@@ -104,9 +104,10 @@ const EXPECTED_TABLES: [&str; 90] = [
     "lane_question_routes",
     "lane_notifications",
     "lane_delivery_destinations",
+    "host_chat_submissions",
 ];
 
-const EXPECTED_INDICES: [&str; 84] = [
+const EXPECTED_INDICES: [&str; 85] = [
     "lane_verifications_lane",
     "lane_closes_lane",
     "lane_forward_receipts_lane",
@@ -151,6 +152,7 @@ const EXPECTED_INDICES: [&str; 84] = [
     "idx_events_task_lifecycle",
     "host_input_receipts_run",
     "host_input_receipts_seq",
+    "host_chat_submissions_run",
     "idx_threads_project_updated",
     "idx_threads_parent",
     "idx_thread_runs_thread",
@@ -1178,6 +1180,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../undo/undo_v49.sql"),
                 include_str!("../undo/undo_v48.sql"),
                 include_str!("../undo/undo_v47.sql")
             ),

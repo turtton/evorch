@@ -1,5 +1,6 @@
 //! Runtime-owned meta operations, ordered as they appear in provider tool specs.
 
+use super::lane_verification;
 use providers::ToolSpec;
 use serde_json::Value;
 
@@ -55,10 +56,14 @@ macro_rules! define_meta_ops {
 }
 
 define_meta_ops! {
+    LaneVerify => "lane_verify" => lane_verification::spec => |state, runtime, input| { lane_verification::verify(state, runtime, input).await },
+    LaneClose => "lane_close" => lane_verification::spec => |state, runtime, input| { lane_verification::close(state, runtime, input).await },
+    SubmitLaneVerification => "submit_lane_verification" => lane_verification::spec => |state, runtime, input| { lane_verification::submit(state, runtime, input) },
     LaneOpen => "lane_open" => lanes::open_spec => |state, runtime, input| { lanes::open(state, runtime, input) },
     LaneList => "lane_list" => lanes::list_spec => |state, runtime, input| { lanes::list(state, runtime, input) },
     LaneQuestions => "lane_questions" => lanes::questions_spec => |state, runtime, input| { lanes::questions(state, runtime, input) },
     LaneAnswer => "lane_answer" => lanes::answer_spec => |state, runtime, input| { lanes::answer(state, runtime, input) },
+    LaneForwardQuestion => "lane_forward_question" => questions::forward_spec => |state, runtime, input| { questions::forward(state, runtime, input) },
     LaneReport => "lane_report" => lanes::report_spec => |state, runtime, input| { lanes::report(state, runtime, input) },
     TodoWrite => "todo_write" => crate::thread_todos::spec => |state, runtime, input| {
         crate::thread_todos::dispatch(state, runtime, input)

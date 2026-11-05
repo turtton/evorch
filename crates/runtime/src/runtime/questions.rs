@@ -8,6 +8,7 @@ use storage::{AnswerMode, StorageError};
 mod tests;
 
 mod continuation;
+mod forwarding;
 #[cfg(test)]
 #[path = "questions/lane_tests.rs"]
 mod lane_tests;
@@ -422,14 +423,6 @@ impl AgentRuntime {
                 channel: Default::default(),
             };
         let question = self.user_question(id)?.ok_or("unknown question")?;
-        if trusted_user
-            && matches!(
-                question.responder,
-                Some(event_bus::lane::QuestionResponder::Lead { .. })
-            )
-        {
-            return Err("question is addressed to its lane lead; route_to_user first".into());
-        }
         self.deny_deleted_run(&question.run_id)
             .map_err(|deleted| deleted.to_string())?;
         let store = self
@@ -505,6 +498,23 @@ impl AgentRuntime {
             .user_question(id)
             .map_err(|error| error.to_string())?
             .ok_or("question disappeared")?;
+        // Even an identical retry must not bypass the canonical responder check
+        // after a different responder answered. No evidence is written here.
+        if question.answer.is_some()
+            && store
+                .handle
+                .lane_question_routing(id.into())
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            let checked = store
+                .handle
+                .answer_user_question_with_mode(id, answer, &origin, mode);
+            if matches!(checked, Err(StorageError::QuestionAlreadyAnswered)) {
+                return Ok(AnswerOutcome::AlreadyAnswered);
+            }
+            checked.map_err(|e| e.to_string())?;
+        }
         if mode == AnswerMode::FirstOnly && question.answer.is_some() {
             return Ok(AnswerOutcome::AlreadyAnswered);
         }
@@ -589,9 +599,21 @@ impl AgentRuntime {
         if let Some(error) = reflection_error {
             return Err(error);
         }
-        let mut question = question;
-        question.answer = Some(answer.into());
-        question.answer_origin = Some(origin);
+        let question = store
+            .user_question(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("answered question disappeared")?;
+        if trusted_user
+            && let Some(route) = store
+                .handle
+                .lane_question_routing(id.into())
+                .map_err(|e| e.to_string())?
+        {
+            routing::LaneQuestionBindingSource::schedule_lane_question_delivery(
+                self,
+                &route.requester.thread_id,
+            );
+        }
         self.shared
             .bus
             .emit(Event::new(ToolEvent::UserQuestionUpdated {

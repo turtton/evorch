@@ -54,8 +54,20 @@ impl ExecutionPolicy {
         use crate::RunPurpose;
         let tools: &[&str] = match config.purpose {
             RunPurpose::General => {
+                if is_root
+                    && config.lane_scope.is_none()
+                    && self.role_name == Role::Orchestrator.name()
+                {
+                    self.capabilities
+                        .allowed_tools
+                        .extend(["lane_verify", "lane_close"].map(str::to_owned));
+                }
                 if is_root && self.role_name == Role::Orchestrator.name() {
                     let lane_tools: &[&str] = if config.lane_scope.is_some() {
+                        // Run-local tool schemas are built once, never hot-swapped.
+                        self.capabilities
+                            .allowed_tools
+                            .insert("lane_forward_question".into());
                         &["lane_report"]
                     } else {
                         &["lane_open", "lane_list", "lane_questions", "lane_answer"]
@@ -106,6 +118,14 @@ impl ExecutionPolicy {
                 "web_search",
                 "web_fetch",
                 "submit_goal_review",
+            ],
+            RunPurpose::LaneVerification { .. } if self.role_name == Role::Reviewer.name() => &[
+                "read",
+                "grep",
+                "git_diff",
+                "web_search",
+                "web_fetch",
+                "submit_lane_verification",
             ],
             RunPurpose::LessonExtract { .. }
                 if config.learning_internal && self.role_name == Role::Worker.name() =>
@@ -482,6 +502,8 @@ mod tests {
                         "lane_list",
                         "lane_questions",
                         "lane_answer",
+                        "lane_verify",
+                        "lane_close",
                     ]
                     .map(str::to_owned),
                 );

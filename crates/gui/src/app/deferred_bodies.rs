@@ -75,8 +75,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
-        // A conversation the resolver no longer holds a read for (its runs
-        // were forgotten) must not keep the feed waiting.
+        // Forgotten runs must not keep the feed waiting. A read that finished
+        // after we took the results still holds the feed until its next drain;
+        // otherwise its history would replace newer events folded meanwhile.
         self.shared_feed
             .rehydrating
             .retain(|thread| resolver.rehydrating(thread));

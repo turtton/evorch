@@ -473,6 +473,7 @@ fn purpose(caller: RunId, config: &RunConfig) -> Result<(RunId, RunId, bool), St
         return Err("internal learning authority is required".into());
     }
     match config.purpose {
+        RunPurpose::LaneVerification { .. } => Err("this run has no learning authority".into()),
         RunPurpose::LessonExtract { source_run_id } => Ok((source_run_id, caller, false)),
         RunPurpose::LessonReview {
             source_run_id,

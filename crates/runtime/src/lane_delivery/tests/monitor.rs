@@ -457,6 +457,7 @@ async fn waiting_question_pause_summary_and_reported_terminal_do_not_gain_nudges
                     lead,
                     kind,
                     event_bus::LaneBrief {
+                        verification_requirements: Default::default(),
                         objective: kind.into(),
                         inputs: vec![],
                         deliverables: vec!["artifact".into()],

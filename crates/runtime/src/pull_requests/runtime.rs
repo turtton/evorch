@@ -69,6 +69,12 @@ impl ThreadEnvironment for RuntimeEnvironment {
 }
 
 impl AgentRuntime {
+    pub(crate) fn lane_checkout_directories(&self, thread: &str) -> Vec<PathBuf> {
+        RuntimeEnvironment {
+            runtime: self.downgrade(),
+        }
+        .checkout_directories(thread)
+    }
     /// Starts pull request tracking for this runtime (ADR 0043): the scheduler, the output
     /// observer and the inheritance of derived threads. Call once, inside a Tokio runtime,
     /// after the run store is connected. A repeated call keeps the first service.

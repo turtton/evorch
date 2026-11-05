@@ -65,11 +65,14 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 workspace-ui = { path = "../workspace-ui" }
+workbench-host = { path = "../workbench-host" }
+workbench-protocol = { path = "../workbench-protocol" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notify-rust = "4"
 
 [dev-dependencies]
+workbench-host = { path = "../workbench-host", features = ["test-support"] }
 # The history restore test converts a database the build wrote, after taking it back to version 39.
 storage = { path = "../storage", features = ["unchecked-open"] }
 # Leaves a descriptor without O_CLOEXEC open to check child launches.

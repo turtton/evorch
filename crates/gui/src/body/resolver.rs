@@ -599,8 +599,8 @@ impl BodyResolver {
         }
     }
 
-    /// Whether a rows read for a conversation of `thread` has not finished
-    /// (queued, running, or waiting for a retry).
+    /// Whether a conversation of `thread` still awaits its history: queued,
+    /// running, waiting for a retry, or finished but not taken by the app yet.
     #[must_use]
     pub fn rehydrating(&self, thread: &str) -> bool {
         let state = self.lock();
@@ -608,6 +608,7 @@ impl BodyResolver {
         state.rows_queue.iter().any(|r| is(&r.purpose))
             || state.rows_reading.as_ref().is_some_and(|r| is(&r.purpose))
             || state.rows_waiting.iter().any(|w| is(&w.request.purpose))
+            || state.rows_results.iter().any(|o| is(&o.request.purpose))
     }
 
     /// Whether a rows read is queued or running. One that waits for its next

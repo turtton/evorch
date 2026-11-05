@@ -121,6 +121,7 @@ struct Work {
 const RUN_TABLES: &[(&str, &str)] = &[
     ("run_ledger", "run_id = ?1"),
     ("host_input_receipts", "run_id = ?1"),
+    ("host_chat_submissions", "run_id = ?1"),
     ("review_evidence", "root_run_id = ?1 OR target_run_id = ?1"),
     (
         "review_lineage_edges",
@@ -442,6 +443,19 @@ fn run_tables(
     };
     if table == "run_message_provenance" {
         return provenance_entries(tx, family, cursor, &run);
+    }
+    if table == "host_chat_submissions" {
+        // A database converted from an older layout reaches this before it has the table.
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+             AND name = 'host_chat_submissions')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !present {
+            cursor.table_idx += 1;
+            return Ok(Work::default());
+        }
     }
     if table == "run_context_provenance" {
         // The header goes after its entries (RESTRICT): an entry left for the exclusive
@@ -1803,6 +1817,7 @@ mod lane_delivery_tests {
                 origin_run_id: "root".into(),
                 creation_key: "open".into(),
                 brief: crate::lanes::LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: "task".into(),
                     inputs: vec![],
                     deliverables: vec![],

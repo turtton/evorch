@@ -1062,6 +1062,7 @@ mod tests {
             policy: LanePolicy::Attached,
             management_revision: 1,
             brief: LaneBrief {
+                verification_requirements: Default::default(),
                 objective: "Ship it".into(),
                 inputs: vec![],
                 deliverables: vec![],

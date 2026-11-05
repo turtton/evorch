@@ -70,6 +70,7 @@ impl Fixture {
                 origin_run_id: "lead-root".into(),
                 creation_key: format!("open-{n}"),
                 brief: LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: "implement".into(),
                     inputs: vec![],
                     deliverables: vec![],
@@ -646,6 +647,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v49.sql"),
         include_str!("../undo/undo_v48.sql"),
         include_str!("../undo/undo_v47.sql")
     ))

@@ -150,6 +150,7 @@ async fn pending_lane(
             lead,
             "pending-root",
             event_bus::LaneBrief {
+                verification_requirements: Default::default(),
                 objective: "survive process loss, not cancellation".into(),
                 inputs: vec![],
                 deliverables: vec!["artifact".into()],

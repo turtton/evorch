@@ -497,6 +497,24 @@ pub(super) fn run_writer_with_index(
             Ok(Command::HostInputReceipts(ids, reply)) => {
                 let _ = reply.send(crate::repo::host_input_receipt::for_ids(&state.conn, &ids));
             }
+            Ok(Command::RecordHostChatSubmission(submission, reply)) => {
+                let result = review_transaction(&state, |conn| {
+                    crate::repo::host_chat_submission::insert(conn, &submission)
+                });
+                let _ = reply.send(result);
+            }
+            Ok(Command::HostChatSubmissions(ids, reply)) => {
+                let _ = reply.send(crate::repo::host_chat_submission::for_ids(
+                    &state.conn,
+                    &ids,
+                ));
+            }
+            Ok(Command::TombstonedRuns(ids, reply)) => {
+                let _ = reply.send(crate::repo::host_chat_submission::tombstoned_runs(
+                    &state.conn,
+                    &ids,
+                ));
+            }
             Ok(Command::HostInputReceiptsForRun(run_id, reply)) => {
                 let _ = reply.send(crate::repo::host_input_receipt::for_run(
                     &state.conn,
