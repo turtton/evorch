@@ -204,3 +204,36 @@ pub(crate) fn accept_nudge(
     }
     Ok(())
 }
+
+/// Change only the observation, never the one-shot slot or episode identity.
+pub(crate) fn reclassify_stall(
+    conn: &Connection,
+    r: ObserveLaneStall,
+    episode_id: &str,
+    revision: u64,
+) -> Result<LaneStallEpisode, StorageError> {
+    let tx = tx(conn)?;
+    let l = check_observation(&tx, &r)?;
+    let mut e = episode(&tx, episode_id)?.ok_or_else(|| err(LaneOperationError::StaleEpisode))?;
+    if e.lane_id != l.lane_id
+        || e.progress_anchor != r.progress_anchor
+        || e.management_revision != r.management_revision
+        || e.resolved_at_ns.is_some()
+        || e.revision != revision
+    {
+        return Err(err(LaneOperationError::StaleEpisode));
+    }
+    if e.classification != r.classification {
+        e.classification = r.classification;
+        e.revision += 1;
+        if r.classification == LaneStallClassification::RestoreUnavailable
+            && e.nudge_state == LaneNudgeState::Pending
+        {
+            e.nudge_state = LaneNudgeState::Failed;
+            tx.execute("UPDATE lane_notifications SET state='obsolete' WHERE notification_id=?1 AND state='pending' AND receipt_prompt_id IS NULL", [&e.notification_id])?;
+        }
+        save(&tx, &e, revision)?;
+    }
+    tx.commit()?;
+    Ok(e)
+}

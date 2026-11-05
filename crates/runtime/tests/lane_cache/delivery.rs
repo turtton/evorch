@@ -8,7 +8,9 @@ fn chat_authority() -> RunConfig {
         ..Default::default()
     }
 }
+mod nudge;
 struct Host {
+    thread: String,
     target: LaneDeliveryTarget,
     denied: AtomicBool,
     checked: Notify,
@@ -23,7 +25,7 @@ impl LaneDeliveryHost for Host {
         if self.denied.load(Ordering::SeqCst) {
             return Err(storage::lane_delivery::LaneDeliveryNack::Readonly);
         }
-        if thread != "cache-delivery-lead" {
+        if thread != self.thread {
             return Err(storage::lane_delivery::LaneDeliveryNack::UnknownThread);
         }
         Ok(self.target.clone())
@@ -51,6 +53,8 @@ struct Fixture {
     lanes: Vec<String>,
     host: Arc<Host>,
     events: Vec<Event>,
+    request_tool: &'static str,
+    request_marker: Option<String>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -103,6 +107,7 @@ impl Fixture {
             .unwrap()
             .to_owned();
         let host = Arc::new(Host {
+            thread: "cache-delivery-lead".into(),
             target: LaneDeliveryTarget {
                 root_run_id: lead,
                 generation: 1,
@@ -125,6 +130,8 @@ impl Fixture {
             lanes: vec![first, second],
             host,
             events,
+            request_tool: "lane_open",
+            request_marker: None,
         }
     }
     fn report(&self, index: usize, status: event_bus::LaneStatus, revision: u32) {
@@ -195,11 +202,15 @@ impl Fixture {
             .iter()
             .filter(|r| {
                 r.path == Wire::ChatCompletions.path()
+                    && self
+                        .request_marker
+                        .as_ref()
+                        .is_none_or(|marker| r.body["messages"].to_string().contains(marker))
                     && r.body["tools"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|t| t["function"]["name"] == "lane_open")
+                        .any(|t| t["function"]["name"] == self.request_tool)
             })
             .map(|r| r.body.clone())
             .collect()
@@ -259,7 +270,11 @@ impl Fixture {
             let (input, cached) = completed[id];
             assert!(input > 0 && cached <= input);
             if index == 0 {
-                assert_eq!(cached, 0);
+                // Lane requests start after the lead and may already reuse the
+                // common instruction prefix. Only the first lead starts cold.
+                if self.request_marker.is_none() {
+                    assert_eq!(cached, 0);
+                }
                 continue;
             }
             let previous = completed[&starts[index - 1].0].0;

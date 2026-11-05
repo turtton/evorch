@@ -119,6 +119,63 @@ fn filter() -> LaneAttentionFilter {
 }
 
 #[test]
+fn stall_classification_cas_preserves_identity_and_slot_and_retires_unrecoverable_pending() {
+    let f = Fixture::new();
+    let owner = started(&f);
+    let mut r = observation(&f, &owner);
+    r.classification = LaneStallClassification::NoReport;
+    let first = f.h().observe_lane_stall(r.clone()).unwrap();
+    let pending = f
+        .h()
+        .request_lane_nudge(r.clone(), first.episode_id.clone(), first.revision)
+        .unwrap();
+    r.classification = LaneStallClassification::SilentDone;
+    let done = f
+        .h()
+        .reclassify_lane_stall(r.clone(), first.episode_id.clone(), pending.revision)
+        .unwrap();
+    assert_eq!(done.episode_id, pending.episode_id);
+    assert_eq!(done.notification_id, pending.notification_id);
+    assert_eq!(done.nudge_state, LaneNudgeState::Pending);
+    assert_eq!(done.revision, pending.revision + 1);
+    rejected(
+        f.h()
+            .reclassify_lane_stall(r.clone(), first.episode_id.clone(), pending.revision),
+        LaneOperationError::StaleEpisode,
+    );
+    assert_eq!(
+        f.h()
+            .request_lane_nudge(r.clone(), first.episode_id.clone(), done.revision)
+            .unwrap()
+            .notification_id,
+        pending.notification_id
+    );
+    r.classification = LaneStallClassification::RestoreUnavailable;
+    let failed = f
+        .h()
+        .reclassify_lane_stall(r.clone(), first.episode_id.clone(), done.revision)
+        .unwrap();
+    assert_eq!(failed.nudge_state, LaneNudgeState::Failed);
+    let state: String = f
+        .sql()
+        .query_row(
+            "SELECT state FROM lane_notifications WHERE notification_id=?1",
+            [&pending.notification_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "obsolete");
+    assert_eq!(
+        f.h()
+            .request_lane_nudge(r, first.episode_id, failed.revision)
+            .unwrap()
+            .nudge_state,
+        LaneNudgeState::Failed
+    );
+    assert_eq!(f.count("lane_stall_episodes"), 1);
+    assert_eq!(f.count("lane_notifications"), 1);
+}
+#[test]
 fn differently_worded_working_reports_and_generations_never_renew_nudge_slot() {
     let f = Fixture::new();
     let owner = started(&f);

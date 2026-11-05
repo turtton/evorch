@@ -4,6 +4,7 @@ use event_bus::{EventBus, EventKind, LifecycleEvent};
 use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 mod lease;
+mod monitor;
 mod questions;
 mod todo;
 
