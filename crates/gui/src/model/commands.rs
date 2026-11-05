@@ -91,6 +91,11 @@ pub enum WorkbenchCommand {
     DeliverFollowUpsNextTurn {
         thread_id: String,
     },
+    /// The user's explicit resume of held lane notices for a lead thread: the runtime
+    /// clears its durable Stop and the wake guards of the lanes it leads.
+    ResumeLaneDeliveries {
+        thread_id: String,
+    },
     SubmitGoal(GoalSubmission),
     SetGoalReview {
         thread_id: String,
@@ -206,6 +211,14 @@ pub trait CommandSink: Send {
     /// work. Stop and follow-ups then reach it like any other conversation root; every
     /// ownership check still applies to the command that uses the binding.
     fn bind_lane_root(&mut self, _thread: &str, _run: &str) {}
+    /// Whether the runtime's durable lane delivery is installed behind this sink. The lane
+    /// card words question routing by it; fixtures and demos have none.
+    fn lane_delivery_bound(&self) -> bool {
+        false
+    }
+    /// Ask the runtime to drive the lane deliveries of `thread` (ownership was just
+    /// acquired). The runtime owns the outbox, lease and retries; this is only a trigger.
+    fn schedule_lane_deliveries(&mut self, _thread: &str) {}
     fn restore_diagnostics(
         &self,
         _run: &str,
@@ -331,6 +344,7 @@ impl CommandSink for FixtureLoopAdapter {
                 reason: "No resumable conversation in demo mode".into(),
             }],
             WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            | WorkbenchCommand::ResumeLaneDeliveries { .. }
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::StopChat { .. } => Vec::new(),
             WorkbenchCommand::DecideToolApproval { .. }

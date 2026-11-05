@@ -34,6 +34,8 @@ use context::context_actuals;
 pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) pending_approvals: &'a PendingApprovalsModel,
     pub(super) request_action: &'a mut Option<RequestAction>,
+    pub(super) lane_action: &'a mut Option<crate::panes::agent::LaneAction>,
+    pub(super) lane_delivery_bound: bool,
     pub(super) diagnostics_request: &'a mut bool,
     pub(super) context_request: &'a mut bool,
     pub(super) user_questions: &'a BTreeMap<String, event_bus::UserQuestion>,

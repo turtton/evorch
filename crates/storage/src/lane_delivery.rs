@@ -177,3 +177,37 @@ pub enum LaneQuestionAction {
         origin: event_bus::AnswerOrigin,
     },
 }
+
+/// Read-only observations for a host that shows delivery state. Writes, claims and
+/// resumes stay with the runtime; these never change a lane's place or its guard.
+impl crate::Database {
+    /// The lane's durable wake guard (`suppressed` once the no-progress limit is hit).
+    ///
+    /// # Errors
+    /// Returns an error if the lane is unknown or SQLite access or decoding fails.
+    pub fn lane_wake_guard(&self, lane_id: &str) -> Result<LaneWakeGuard, crate::StorageError> {
+        crate::repo::lane_delivery::guard(&self.conn, lane_id)
+    }
+
+    /// The lane's single bounded `question_capacity_blocked` diagnostic, if any.
+    ///
+    /// # Errors
+    /// Returns an error if the lane is unknown or SQLite access or decoding fails.
+    pub fn lane_question_capacity_diagnostic(
+        &self,
+        lane_id: &str,
+    ) -> Result<Option<QuestionCapacityBlocked>, crate::StorageError> {
+        crate::repo::lane_delivery::capacity_diagnostic(&self.conn, lane_id)
+    }
+
+    /// The durable destination binding of `thread_id` (a lead), including Stop.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or decoding fails.
+    pub fn lane_delivery_destination(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LaneDeliveryDestination>, crate::StorageError> {
+        crate::repo::lane_delivery::destination(&self.conn, thread_id)
+    }
+}

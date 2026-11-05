@@ -164,6 +164,19 @@ impl AgentRuntime {
             }
         }))
     }
+    /// The current root and generation of the lane whose thread is `thread`, from the lane
+    /// ledger (the delivery authority for a lane destination); `None` for a thread that is not
+    /// a started lane.
+    ///
+    /// # Errors
+    /// The ledger cannot be read.
+    pub fn lane_thread_binding(&self, thread: &str) -> Result<Option<(RunId, u64)>, LaneError> {
+        let store = self.delivery_store()?;
+        Ok(store
+            .handle
+            .lane_by_thread(thread)?
+            .and_then(|lane| Some((lane.root_run_id?.parse().ok()?, lane.generation))))
+    }
     /// Also used after an ownership acquisition or an outbox source commit.
     pub fn schedule_lane_deliveries(&self, thread: &str) {
         if self.lane_delivery_binding() == LaneDeliveryBinding::Unbound {
@@ -179,6 +192,33 @@ impl AgentRuntime {
                 runtime.lane_delivery_diagnostic(None, "lane_delivery_failed", &error.to_string());
             }
         });
+    }
+    /// A completed-root wake counted toward each source lane's no-progress guard when it was
+    /// accepted: tell the host about the lanes it just paused. Best effort; the guard itself is
+    /// durable and read again whenever the lane is shown.
+    fn announce_paused_wakes(&self, claim: &LaneDeliveryClaim) {
+        let Ok(store) = self.delivery_store() else {
+            return;
+        };
+        let lanes: HashSet<&str> = claim
+            .notifications
+            .iter()
+            .map(|notice| notice.lane_id.as_str())
+            .collect();
+        for lane in lanes {
+            let paused = store
+                .handle
+                .lane_wake_guard(lane.to_owned())
+                .is_ok_and(|guard| guard.suppressed);
+            if paused && let Ok(Some(record)) = store.handle.lane(lane) {
+                self.lane_state_changed(
+                    &record.thread_id,
+                    event_bus::DiagnosticSeverity::Warning,
+                    "lane_wake_suppressed",
+                    lane,
+                );
+            }
+        }
     }
     /// A bounded page per destination per trigger. Further pending work is picked
     /// up at another boundary/expiry, not an unbounded immediate retry loop.
@@ -424,6 +464,9 @@ impl AgentRuntime {
                 Err(LaneDeliveryNack::OwnershipLost)
             }
         };
+        if claim.completed_root_wake {
+            self.announce_paused_wakes(&claim);
+        }
         match execute {
             Ok(notifications) => {
                 if let Err(error) = store.handle.ack_lane_delivery(claim.clone(), host.now_ns()) {
@@ -584,6 +627,46 @@ impl AgentRuntime {
             "wake guard changed during four CAS attempts",
         ))
     }
+    /// A delivery-visible state (capacity block, paused wake, Stop, resume) of `thread`
+    /// changed: the one signal a host needs to re-read what it shows. It carries no state.
+    pub(crate) fn lane_state_changed(
+        &self,
+        thread: &str,
+        severity: event_bus::DiagnosticSeverity,
+        code: &str,
+        detail: &str,
+    ) {
+        // A thread with no lane on either side has no lane view to refresh.
+        let involved = self.shared.run_store.get().is_some_and(|store| {
+            store
+                .handle
+                .lane_by_thread(thread)
+                .is_ok_and(|lane| lane.is_some())
+                || store
+                    .handle
+                    .lane_list(storage::lanes::LaneListRequest {
+                        lead_thread_id: thread.into(),
+                        policy: None,
+                        cursor: None,
+                        limit: 1,
+                    })
+                    .is_ok_and(|page| !page.items.is_empty())
+        });
+        if !involved {
+            return;
+        }
+        self.shared
+            .bus
+            .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                source: "lane_delivery".into(),
+                severity,
+                code: code.into(),
+                detail: detail.into(),
+                run_id: None,
+                thread_id: Some(thread.to_owned()),
+                call_id: None,
+            }));
+    }
     pub(crate) fn lane_delivery_diagnostic(&self, run: Option<RunId>, code: &str, detail: &str) {
         self.shared
             .bus
@@ -694,19 +777,102 @@ impl AgentRuntime {
                 LaneDestinationAction::Stop,
             )
             .map_err(|e| Self::review_error(run, e))?;
+        self.lane_state_changed(
+            &thread,
+            event_bus::DiagnosticSeverity::Info,
+            "lane_delivery_stopped",
+            "operator stop",
+        );
         Ok(())
     }
-    pub(crate) fn explicitly_resume_lane_delivery(
+    /// The thread a root run belongs to: the live goal binding, else the saved chat identity
+    /// of a root that was not restored yet (after a restart, before the user continues it).
+    pub(crate) fn saved_root_thread(&self, run: RunId) -> Option<String> {
+        if let Some(thread) = self.goal_thread(run) {
+            return Some(thread);
+        }
+        let record = self.shared.run_store.get()?.restore_record(run).ok()??;
+        if record.parent_run_id.is_some() {
+            return None;
+        }
+        let descriptor: crate::restore::RunRestoreDescriptor =
+            serde_json::from_str(&record.config_json).ok()?;
+        descriptor.thread_id.or_else(|| {
+            let name = descriptor.name?;
+            let (_, thread) = name.strip_prefix("chat:")?.split_once(':')?;
+            Some(thread.to_owned())
+        })
+    }
+    /// The user's explicit resume of lane notices for the lead thread whose root is `run`:
+    /// clears a durable Stop on its destination, resets the wake guards of the lanes it leads
+    /// and schedules a delivery. Call it only for a user action (a button, `/continue`), never
+    /// for an agent- or timer-driven path; progress alone never resumes a stopped destination.
+    /// A lead whose root the operator stopped still needs its chat resumed ([`Self::resume_chat`]).
+    /// A run that belongs to no thread has nothing to resume and is not an error here.
+    pub fn explicitly_resume_lane_delivery(
         &self,
+        run: RunId,
+        ownership: Option<&crate::ownership::OwnerPermit>,
+    ) -> Result<(), crate::RuntimeError> {
+        match self.saved_root_thread(run) {
+            Some(thread) => self.resume_thread_lane_delivery(&thread, run, ownership),
+            None => Ok(()),
+        }
+    }
+    /// [`Self::explicitly_resume_lane_delivery`] for a host button: the host names the thread
+    /// and its current root, and a root that is not that thread's (or a permit for another
+    /// thread) is refused instead of silently doing nothing.
+    pub fn resume_lane_deliveries(
+        &self,
+        thread: &str,
+        run: RunId,
+        ownership: Option<&crate::ownership::OwnerPermit>,
+    ) -> Result<(), crate::RuntimeError> {
+        let deleted = |reason| crate::RuntimeError::RunRestoreFailed {
+            run_id: run.to_string(),
+            reason: crate::RunRestoreFailure::ThreadDeleted(reason),
+        };
+        self.deny_deleted_thread(thread).map_err(deleted)?;
+        self.deny_deleted_run(&run.to_string()).map_err(deleted)?;
+        if self.operator_stopped(run)
+            || self.shared.run_store.get().is_some_and(|store| {
+                store
+                    .handle
+                    .lane_delivery_destination(thread.to_owned())
+                    .is_ok_and(|destination| destination.is_some_and(|d| d.stopped))
+            })
+        {
+            return Err(Self::review_error(
+                run,
+                LaneError::new(
+                    "lead_stopped",
+                    "the lead was stopped: continue it to resume its lane notifications",
+                ),
+            ));
+        }
+        if self.saved_root_thread(run).as_deref() != Some(thread)
+            || ownership.is_some_and(|permit| permit.thread_id != thread)
+        {
+            return Err(Self::review_error(
+                run,
+                LaneError::new(
+                    "not_the_threads_root",
+                    format!("{run} is not the current root of thread {thread}"),
+                ),
+            ));
+        }
+        self.resume_thread_lane_delivery(thread, run, ownership)
+    }
+    fn resume_thread_lane_delivery(
+        &self,
+        thread: &str,
         run: RunId,
         ownership: Option<&crate::ownership::OwnerPermit>,
     ) -> Result<(), crate::RuntimeError> {
         let Some(store) = self.shared.run_store.get() else {
             return Ok(());
         };
-        let Some(thread) = self.goal_thread(run) else {
-            return Ok(());
-        };
+        let thread = thread.to_owned();
         let _guard = ownership
             .map(|p| p.mutation_guard())
             .transpose()
@@ -731,7 +897,14 @@ impl AgentRuntime {
         }
         drop(_guard);
         self.lane_user_progress(&thread, LaneGuardSignal::ExplicitUserResume)
-            .map_err(|e| Self::review_error(run, e))
+            .map_err(|e| Self::review_error(run, e))?;
+        self.lane_state_changed(
+            &thread,
+            event_bus::DiagnosticSeverity::Info,
+            "lane_delivery_resumed",
+            "explicit user resume",
+        );
+        Ok(())
     }
     /// Harness failures use one stable episode per execution/recovery attempt,
     /// independent from the number or wording of model-authored reports.

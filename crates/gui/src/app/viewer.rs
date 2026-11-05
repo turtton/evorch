@@ -111,6 +111,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut tasks_action = None;
         let mut notifications_action = None;
         let mut request_action = None;
+        let mut lane_action = None;
+        let lane_delivery_bound = self.sink.lane_delivery_bound();
         let mut self_improvement_action = None;
         let mut diagnostics_request = false;
         let mut context_request = false;
@@ -145,6 +147,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 sandbox_picker,
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
+                lane_action: &mut lane_action,
+                lane_delivery_bound,
                 diagnostics_request: &mut diagnostics_request,
                 context_request: &mut context_request,
                 user_questions: &self.user_questions,
@@ -283,6 +287,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 NotificationsAction::OpenEvaluations => self.open_evaluations_tab(),
             }
+        }
+        if let Some(action) = lane_action {
+            self.apply_lane_action(action);
         }
         if let Some(action) = request_action {
             match action {
