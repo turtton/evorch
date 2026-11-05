@@ -1,20 +1,28 @@
 //! Conversation commands and generic thread goals.
+//!
+//! The command logic lives in the `workbench-host` crate, shared with the
+//! protocol ingress (ADR 0045). This module is the desktop adapter: it turns
+//! the GUI's `WorkbenchCommand`s into host commands, tags them with desktop
+//! provenance, and turns the host's events back into `LoopEvent`s.
 
-// allow: SIZE_OK - RuntimeCommandSink 本体に、pinned された 9 件の振る舞いテスト
-// (stub モデル込み) が inline テスト慣習どおり同居するため分割不可能。
+// allow: SIZE_OK - RuntimeCommandSink の振る舞いテスト (stub モデル込み) が
+// inline テスト慣習どおり同居するため分割不可能。
 // テストを別ファイルへ分離すると impl+test ペアリング規約に反する。
 
-use config::agent_categories::CategoryId;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use event_bus::{Event, EventBus};
-use runtime::{AgentRuntime, Role, RunConfig, RunId};
+use runtime::{AgentRuntime, RunId};
+use workbench_host::{CommandHost, commands::CommandService};
+use workbench_protocol::envelope::Provenance;
 
-use crate::model::commands::{
-    CommandSink, GoalSubmission, LoopEvent, ReferenceKind, WorkbenchCommand,
-};
+use crate::model::commands::{CommandSink, GoalSubmission, LoopEvent, WorkbenchCommand};
+
+mod host_adapter;
+mod lane_host;
+mod pull_requests;
+pub use lane_host::GuiLaneDeliveryHost;
 
 /// Prefix of the stream ids GUI processes persist their events under.
 pub const STORAGE_SESSION_ID: &str = "evorch-gui";
@@ -46,32 +54,10 @@ pub fn finish_chat_start(
 ///
 /// SubmitGoal joins the normal persistent conversation and creates a generic objective.
 pub struct RuntimeCommandSink {
-    event_bus: Option<Arc<EventBus>>,
-    team_writer: Option<storage::StorageHandle>,
-    memory_config: Option<storage::StorageConfig>,
-    runtime: AgentRuntime,
-    shell_cwd: Option<PathBuf>,
-    handle: tokio::runtime::Handle,
-    chat_runs: BTreeMap<String, RunId>,
-    goal_runs: BTreeMap<String, RunId>,
-    running_children: BTreeMap<String, usize>,
-    // A second press must escalate before the async root phase changes.
-    stop_marked: BTreeSet<String>,
-    // Retain resume eligibility even after stage two clears stop_marked.
-    stopped_by_us: BTreeSet<String>,
-    /// Set while serving a runtime-requested resume, which is not user input.
-    automatic_resume: bool,
-    goal_projects: BTreeMap<String, String>,
-    chat_permits: BTreeMap<String, runtime::ownership::OwnerPermit>,
-    /// Project each thread last submitted from, for host follow-ups that carry none.
-    thread_roots: BTreeMap<String, PathBuf>,
-    ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
+    host: CommandHost,
+    /// Attached to every command this window issues.
+    provenance: Provenance,
     search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
-    compaction_jobs: BTreeMap<String, saved_compaction::CompactionJob>,
-    /// Model each thread last submitted with, so a runtime-requested wake keeps it.
-    model_preferences: BTreeMap<String, runtime::ModelPreference>,
-    /// What the lane delivery host reads; republished after every change of the maps above.
-    lane_bindings: lane_host::BindingTable,
     /// Pull request operations that run on the Tokio runtime and their refusals.
     pull_request_jobs: pull_requests::Jobs,
 }
@@ -86,49 +72,16 @@ type SearchJob = (
 );
 
 impl RuntimeCommandSink {
-    fn rebind_conversation_root(&mut self, thread: &str, run: RunId) {
-        self.chat_runs
-            .retain(|owner, root| owner == thread || *root != run);
-        self.goal_runs
-            .retain(|owner, root| owner == thread || *root != run);
-    }
-
     pub fn start_background_run(&self, text: String) -> RunId {
-        let _guard = self.handle.enter();
-        self.runtime.delegate_background(
-            Role::Worker,
-            text,
-            RunConfig {
-                interactive: false,
-                keep_alive: false,
-                ..RunConfig::default()
-            },
-        )
+        self.host.service().start_background_run(text)
     }
 
     /// runtime と tokio ハンドルから sink を生成する。
     pub fn new(runtime: AgentRuntime, handle: tokio::runtime::Handle) -> Self {
         Self {
-            event_bus: None,
-            team_writer: None,
-            memory_config: None,
-            runtime,
-            shell_cwd: None,
-            handle,
-            chat_runs: BTreeMap::new(),
-            goal_runs: BTreeMap::new(),
-            running_children: BTreeMap::new(),
-            stop_marked: BTreeSet::new(),
-            stopped_by_us: BTreeSet::new(),
-            automatic_resume: false,
-            goal_projects: BTreeMap::new(),
-            chat_permits: BTreeMap::new(),
-            thread_roots: BTreeMap::new(),
-            ownership: None,
+            host: CommandHost::new(CommandService::new(runtime, handle)),
+            provenance: workbench_host::provenance::local_desktop(),
             search_jobs: crate::model::latest_job::LatestJob::default(),
-            compaction_jobs: BTreeMap::new(),
-            model_preferences: BTreeMap::new(),
-            lane_bindings: lane_host::BindingTable::default(),
             pull_request_jobs: pull_requests::Jobs::default(),
         }
     }
@@ -139,114 +92,70 @@ impl RuntimeCommandSink {
     /// handle the runtime's recovery worker starts; without one delivery stays unbound and
     /// questions keep going to the user.
     pub fn with_lane_delivery(self) -> Self {
-        let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
-            self.runtime.downgrade(),
-            self.ownership.clone(),
-            self.lane_bindings.clone(),
-            self.memory_config.clone(),
-            self.team_writer.clone(),
-        ));
-        self.publish_lane_bindings();
-        let _guard = self.handle.enter();
-        // The worker keeps running without its handle and holds the runtime weakly.
-        drop(self.runtime.bind_lane_delivery_host(host));
+        {
+            let service = self.host.service();
+            let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
+                service.runtime().downgrade(),
+                service.ownership().cloned(),
+                service.lane_bindings(),
+                service.memory_config().cloned(),
+                service.team_writer().cloned(),
+            ));
+            service.publish_lane_bindings();
+            let _guard = service.handle().enter();
+            // The worker keeps running without its handle and holds the runtime weakly.
+            drop(service.runtime().bind_lane_delivery_host(host));
+        }
         self
     }
 
-    fn publish_lane_bindings(&self) {
-        let threads: BTreeSet<&String> =
-            self.chat_runs.keys().chain(self.goal_runs.keys()).collect();
-        self.lane_bindings.replace(
-            threads
-                .into_iter()
-                .filter_map(|thread| {
-                    let root = *self
-                        .chat_runs
-                        .get(thread)
-                        .or_else(|| self.goal_runs.get(thread))?;
-                    Some((
-                        thread.clone(),
-                        lane_host::ThreadBinding {
-                            root,
-                            project_root: self
-                                .thread_roots
-                                .get(thread)
-                                .cloned()
-                                .or_else(|| self.shell_cwd.clone()),
-                            goal_project: self.goal_projects.get(thread).cloned(),
-                            model_preference: self.model_preferences.get(thread).cloned(),
-                        },
-                    ))
-                })
-                .collect(),
-        );
-    }
-
-    pub fn with_web_tools_enabled(self, enabled: bool) -> Self {
-        self.runtime.set_web_tools_enabled(enabled);
+    pub fn with_web_tools_enabled(mut self, enabled: bool) -> Self {
+        self.host.service_mut().set_web_tools_enabled(enabled);
         self
     }
 
     pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
-        self.event_bus = Some(event_bus);
+        self.host.service_mut().set_event_bus(event_bus);
         self
     }
 
-    pub fn with_ownership(
-        mut self,
-        ownership: std::sync::Arc<runtime::ownership::OwnerHost>,
-    ) -> Self {
-        self.ownership = Some(ownership);
+    pub fn with_ownership(mut self, ownership: Arc<runtime::ownership::OwnerHost>) -> Self {
+        self.host.service_mut().set_ownership(Some(ownership));
         self
     }
 
     pub fn with_memory_storage(mut self, config: storage::StorageConfig) -> Self {
-        self.memory_config = Some(config);
+        self.host.service_mut().set_memory_storage(config);
         self
     }
 
     pub fn with_team_writer(mut self, writer: storage::StorageHandle) -> Self {
-        self.team_writer = Some(writer);
+        self.host.service_mut().set_team_writer(writer);
         self
-    }
-
-    /// Lessons are keyed by the slug post-run learning stores them under, not the sidebar id.
-    fn capture_memory(&self, root: Option<&Path>) -> Option<runtime::memory::MemoryBoundary> {
-        let config = self.memory_config.as_ref()?;
-        let root = root.or(self.shell_cwd.as_deref())?;
-        lane_host::memory_boundary(&self.runtime, Some(config), Some(root))
-    }
-
-    fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
-        (self.stop_marked.contains(thread) || self.stopped_by_us.contains(thread))
-            && matches!(
-                error,
-                runtime::RuntimeError::RunRestoreFailed {
-                    reason: runtime::RunRestoreFailure::MissingContext
-                        | runtime::RunRestoreFailure::StorageNotConfigured,
-                    ..
-                }
-            )
     }
 }
 
-mod lane_host;
-mod pull_requests;
-mod saved_compaction;
-pub use lane_host::GuiLaneDeliveryHost;
-
 impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
-        let mut events = self.poll_compactions();
+        let mut events: Vec<LoopEvent> = self
+            .host
+            .service_mut()
+            .poll()
+            .into_iter()
+            .map(host_adapter::loop_event)
+            .collect();
         events.extend(self.pull_request_jobs.poll());
         events
     }
+
     fn has_background_work(&self) -> bool {
-        !self.compaction_jobs.is_empty() || self.pull_request_jobs.busy()
+        self.host.service().has_background_work() || self.pull_request_jobs.busy()
     }
+
     fn pull_requests_enabled(&self) -> bool {
         self.pull_requests_on()
     }
+
     fn has_host_input_receipts(&self) -> bool {
         true
     }
@@ -255,20 +164,26 @@ impl CommandSink for RuntimeCommandSink {
         &self,
         ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputReceipt>, storage::StorageError>> {
-        Some(self.runtime.host_input_receipts(ids))
+        Some(self.host.service().runtime().host_input_receipts(ids))
     }
+
     fn host_input_origins(
         &self,
         ids: &[String],
     ) -> Option<Result<Vec<storage::HostInputOrigin>, storage::StorageError>> {
-        Some(self.runtime.host_input_origins(ids))
+        Some(self.host.service().runtime().host_input_origins(ids))
     }
+
     fn mark_unreachable_host_inputs(
         &self,
         run: &str,
     ) -> Result<Vec<String>, storage::StorageError> {
         if let Ok(run) = run.parse() {
-            return self.runtime.reconcile_orphaned_host_inputs(run);
+            return self
+                .host
+                .service()
+                .runtime()
+                .reconcile_orphaned_host_inputs(run);
         }
         Ok(Vec::new())
     }
@@ -278,97 +193,62 @@ impl CommandSink for RuntimeCommandSink {
         thread: &str,
         prompt_id: &str,
     ) -> Result<(), runtime::RuntimeError> {
-        let run = self
-            .chat_runs
-            .get(thread)
-            .or_else(|| self.goal_runs.get(thread))
-            .ok_or(runtime::FollowUpWithdrawalError::Unknown)?;
-        self.runtime.withdraw_follow_up(*run, prompt_id)
+        self.host
+            .service_mut()
+            .withdraw_follow_up(thread, prompt_id)
     }
 
     fn follow_up_status(&self, thread: &str) -> Option<runtime::FollowUpStatus> {
-        let run = self
-            .chat_runs
-            .get(thread)
-            .or_else(|| self.goal_runs.get(thread))?;
-        self.runtime.follow_up_status(*run).ok()
+        self.host.service().follow_up_status(thread)
     }
+
     fn running_children(&mut self, thread: &str) -> Option<usize> {
-        let run = *self
-            .chat_runs
-            .get(thread)
-            .or_else(|| self.goal_runs.get(thread))?;
-        let count = self.runtime.live_descendants(run).len();
-        self.running_children.insert(thread.into(), count);
-        Some(count)
+        self.host.service_mut().running_children(thread)
     }
 
     fn observe_lifecycle(&mut self, event: &Event) {
-        if matches!(event.kind, event_bus::EventKind::Lifecycle(_)) {
-            // Refresh all bound roots: a stopped/completed child is no longer in
-            // live_descendants, so filtering by the live set would miss it.
-            let threads: std::collections::BTreeSet<_> = self
-                .chat_runs
-                .keys()
-                .chain(self.goal_runs.keys())
-                .cloned()
-                .collect();
-            for thread in threads {
-                self.running_children(&thread);
-            }
-        }
+        self.host.service_mut().observe_lifecycle(event);
     }
 
     fn bind_thread_todo(&mut self, snapshot: &event_bus::ThreadTodoSnapshot) {
-        if let Err(error) = self.runtime.restore_thread_todo(snapshot.clone()) {
-            tracing::warn!(%error, "failed to restore thread procedures");
-        }
+        self.host.service_mut().bind_thread_todo(snapshot);
     }
 
     fn bind_thread_goal(&mut self, snapshot: &event_bus::ThreadGoalSnapshot, project: &str) {
-        self.goal_projects
-            .insert(snapshot.thread_id.clone(), project.into());
-        if let Ok(id) = snapshot.root_run_id.parse::<RunId>() {
-            self.rebind_conversation_root(&snapshot.thread_id, id);
-            self.chat_runs.insert(snapshot.thread_id.clone(), id);
-        }
-        self.publish_lane_bindings();
+        self.host.service_mut().bind_thread_goal(snapshot, project);
     }
 
     fn bind_lane_root(&mut self, thread: &str, run: &str) {
-        // The runtime decides what a lane root is; a name or a child never qualifies.
-        if let Ok(id) = run.parse::<RunId>()
-            && self.runtime.is_lane_root(thread, id)
-        {
-            self.rebind_conversation_root(thread, id);
-            self.chat_runs.insert(thread.into(), id);
-            self.publish_lane_bindings();
-        }
-    }
-
-    fn lane_delivery_bound(&self) -> bool {
-        self.runtime.lane_delivery_binding() == event_bus::lane::LaneDeliveryBinding::Bound
-    }
-
-    fn schedule_lane_deliveries(&mut self, thread: &str) {
-        let _guard = self.handle.enter();
-        self.runtime.schedule_lane_deliveries(thread);
+        self.host.service_mut().bind_lane_root(thread, run);
     }
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
-        if let Ok(id) = run.parse::<RunId>() {
-            self.rebind_conversation_root(thread, id);
-            self.goal_runs.insert(thread.into(), id);
-            self.goal_projects.insert(thread.into(), project.into());
-            self.publish_lane_bindings();
-        }
+        self.host
+            .service_mut()
+            .bind_goal_context(thread, project, run);
     }
+
+    fn lane_delivery_bound(&self) -> bool {
+        self.host.service().runtime().lane_delivery_binding()
+            == event_bus::lane::LaneDeliveryBinding::Bound
+    }
+
+    fn schedule_lane_deliveries(&mut self, thread: &str) {
+        let _guard = self.host.service().handle().enter();
+        self.host
+            .service()
+            .runtime()
+            .schedule_lane_deliveries(thread);
+    }
+
     fn restore_diagnostics(
         &self,
         run: &str,
     ) -> Result<Option<runtime::restore::RunRestoreDiagnostics>, String> {
         let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
-        self.runtime
+        self.host
+            .service()
+            .runtime()
             .restore_diagnostics(id)
             .map_err(|e| e.to_string())
     }
@@ -378,10 +258,13 @@ impl CommandSink for RuntimeCommandSink {
         mut request: runtime::base_context::BaseContextRequest,
     ) -> Option<crate::model::commands::ContextPreviewReceiver> {
         // Chat runs capture lessons the same way; a read failure only hides the section.
-        request.memory = self.capture_memory(request.project_root.as_deref());
+        request.memory = self
+            .host
+            .service()
+            .capture_memory(request.project_root.as_deref());
         let (sender, receiver) = std::sync::mpsc::channel();
-        let runtime = self.runtime.clone();
-        self.handle.spawn(async move {
+        let runtime = self.host.service().runtime().clone();
+        self.host.service().handle().spawn(async move {
             let report = runtime
                 .preview_base_context(request)
                 .await
@@ -399,8 +282,8 @@ impl CommandSink for RuntimeCommandSink {
         cursor: Option<String>,
     ) -> Option<crate::model::thread_search::ThreadSearchReceiver> {
         let (sender, receiver) = std::sync::mpsc::channel();
-        let runtime = self.runtime.clone();
-        let handle = self.handle.clone();
+        let runtime = self.host.service().runtime().clone();
+        let handle = self.host.service().handle().clone();
         // One storage read at a time, newest request first: a search left over
         // from a closed modal is replaced, and its dropped sender tells the
         // modal it was superseded.
@@ -424,28 +307,19 @@ impl CommandSink for RuntimeCommandSink {
         run: &str,
     ) -> Result<Option<runtime::base_context::RunContextView>, String> {
         let id = run.parse::<RunId>().map_err(|e| e.to_string())?;
-        self.runtime.run_context_view(id).map_err(|e| e.to_string())
+        self.host
+            .service()
+            .runtime()
+            .run_context_view(id)
+            .map_err(|e| e.to_string())
     }
 
     fn set_default_cwd(&mut self, cwd: Option<PathBuf>) -> Result<(), String> {
-        // cwd 未指定時は起動済み executor を維持し、不要な sandbox 構築を避ける。
-        let Some(root) = cwd else {
-            self.shell_cwd = None;
-            return Ok(());
-        };
-        if self.shell_cwd.as_ref() == Some(&root) {
-            return Ok(());
-        }
-        self.runtime
-            .set_project_root(root.clone())
-            .map_err(|error| error.to_string())?;
-        self.shell_cwd = Some(root);
-        self.publish_lane_bindings();
-        Ok(())
+        self.host.service_mut().set_default_cwd(cwd)
     }
 
     fn set_project_trust(&mut self, root: PathBuf, trusted: bool) {
-        self.runtime.set_project_trust(
+        self.host.service().runtime().set_project_trust(
             root,
             if trusted {
                 runtime::ProjectTrust::Approved
@@ -456,12 +330,16 @@ impl CommandSink for RuntimeCommandSink {
     }
 
     fn set_project_allowed_directories(&mut self, root: PathBuf, directories: Vec<PathBuf>) {
-        self.runtime
+        self.host
+            .service()
+            .runtime()
             .set_project_allowed_directories(root, directories);
     }
 
     fn set_thread_read_only_directories(&mut self, thread_id: String, directories: Vec<PathBuf>) {
-        self.runtime
+        self.host
+            .service()
+            .runtime()
             .set_thread_read_only_directories(&thread_id, directories);
     }
 
@@ -474,849 +352,32 @@ impl CommandSink for RuntimeCommandSink {
         chat: crate::model::commands::ChatSubmission,
         permit: runtime::ownership::OwnerPermit,
     ) -> Vec<LoopEvent> {
-        let validation = (|| {
-            if permit.thread_id != chat.thread_id {
-                return Err(runtime::ownership::OwnershipError::Fenced.into());
-            }
-            if let Some(host) = &self.ownership {
-                let current = host.owned_permit(&chat.thread_id)?;
-                if current.registry_path != permit.registry_path
-                    || current.lease.owner_id != permit.lease.owner_id
-                    || current.lease.generation != permit.lease.generation
-                {
-                    return Err(runtime::ownership::OwnershipError::Fenced.into());
-                }
-            }
-            permit.validate_generation()
-        })();
-        match validation {
-            Ok(()) => self.submit_authorized(WorkbenchCommand::SendChat(chat), Some(permit)),
-            Err(error) => vec![LoopEvent::ChatRejected {
-                thread_id: chat.thread_id,
-                reason: error.to_string(),
-            }],
-        }
+        self.host
+            .submit_local_chat_with_permit(host_adapter::chat_input(chat), permit, &self.provenance)
+            .into_iter()
+            .map(host_adapter::loop_event)
+            .collect()
     }
 
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
-        let permit = if let Some(host) = &self.ownership {
-            let thread = match &command {
-                WorkbenchCommand::SendChat(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::ContinueChat(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::SubmitGoal(value) => Some(value.thread_id.as_str()),
-                WorkbenchCommand::SetGoalReview { thread_id, .. }
-                | WorkbenchCommand::SetGoalChecksPaused { thread_id, .. }
-                | WorkbenchCommand::CompactChat { thread_id }
-                | WorkbenchCommand::StopChat { thread_id }
-                | WorkbenchCommand::StopRun { thread_id, .. }
-                | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
-                | WorkbenchCommand::ResumeLaneDeliveries { thread_id }
-                | WorkbenchCommand::LinkPullRequest { thread_id, .. }
-                | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
-                | WorkbenchCommand::RefreshPullRequest { thread_id }
-                | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. }
-                | WorkbenchCommand::DismissPullRequestCandidate { thread_id, .. }
-                | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
-                    Some(thread_id.as_str())
-                }
-                WorkbenchCommand::DecideToolApproval { .. }
-                | WorkbenchCommand::SetWebToolsEnabled { .. }
-                | WorkbenchCommand::InheritPullRequest { .. } => None,
-            };
-            match thread.map(|thread| host.owned_permit(thread)).transpose() {
+        if command.is_pull_request() {
+            // Pull request operations are not host commands: they act through the runtime's
+            // pull request service, but still under the thread's ownership permit.
+            let permit = match self.host.service().permit_for_thread(command.thread()) {
                 Ok(permit) => permit,
                 Err(error) => {
                     return vec![LoopEvent::CommandRejected {
                         reason: error.to_string(),
                     }];
                 }
-            }
-        } else {
-            None
-        };
-        self.submit_authorized(command, permit)
-    }
-}
-
-impl RuntimeCommandSink {
-    fn submit_authorized(
-        &mut self,
-        command: WorkbenchCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
-    ) -> Vec<LoopEvent> {
-        let events = self.dispatch_authorized(command, permit);
-        self.publish_lane_bindings();
-        events
-    }
-
-    fn dispatch_authorized(
-        &mut self,
-        command: WorkbenchCommand,
-        permit: Option<runtime::ownership::OwnerPermit>,
-    ) -> Vec<LoopEvent> {
-        let thread = match &command {
-            WorkbenchCommand::CompactChat { thread_id }
-            | WorkbenchCommand::StopChat { thread_id }
-            | WorkbenchCommand::StopRun { thread_id, .. } => Some(thread_id),
-            WorkbenchCommand::ContinueChat(chat) => Some(&chat.thread_id),
-            WorkbenchCommand::SendChat(chat) => Some(&chat.thread_id),
-            _ => None,
-        };
-        if let Some(thread) = thread
-            && self.compaction_jobs.contains_key(thread)
-        {
-            let reason = "Context compaction is in progress; try again after it completes".into();
-            if matches!(command, WorkbenchCommand::SendChat(_)) {
-                return vec![LoopEvent::ChatRejected {
-                    thread_id: thread.clone(),
-                    reason,
-                }];
-            }
-            return vec![LoopEvent::ChatNotice {
-                thread_id: thread.clone(),
-                text: reason,
-            }];
-        }
-        match command {
-            WorkbenchCommand::AnswerUserQuestion {
-                thread_id,
-                question_id,
-                answer,
-            } => {
-                let question = match self.runtime.user_question(&question_id) {
-                    Ok(Some(q)) => q,
-                    Ok(None) => {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: "Unknown question".into(),
-                        }];
-                    }
-                    Err(reason) => return vec![LoopEvent::CommandRejected { reason }],
-                };
-                let chat_role = [Role::Worker, Role::Orchestrator]
-                    .into_iter()
-                    .find(|role| question.root_name == format!("chat:{}:{thread_id}", role.name()));
-                let bound_runs = self
-                    .goal_runs
-                    .get(&thread_id)
-                    .into_iter()
-                    .chain(self.chat_runs.get(&thread_id))
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                // Consumer routing is not execution ownership. The shared helper
-                // matches UI projection; the caller and live recipients are fenced
-                // separately before any durable answer is written.
-                if !question.belongs_to_thread(&thread_id, &bound_runs) {
-                    return vec![LoopEvent::CommandRejected { reason:"Question belongs to a different or inactive conversation; resume its goal first".into() }];
-                }
-                if permit
-                    .as_ref()
-                    .is_some_and(|permit| permit.thread_id != thread_id)
-                {
-                    return vec![LoopEvent::CommandRejected {
-                        reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-                    }];
-                }
-                // Offline requesters have no live permit for the runtime to guard.
-                // Keep the submitting host's generation stable through durable storage.
-                let caller_guard = match permit.as_ref().map(|p| p.mutation_guard()).transpose() {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: error.to_string(),
-                        }];
-                    }
-                };
-                if let Some(previous) = &question.answer {
-                    return if previous == &answer {
-                        vec![LoopEvent::UserAnswerSaved { question_id }]
-                    } else {
-                        vec![LoopEvent::CommandRejected {
-                            reason: "Question was already answered".into(),
-                        }]
-                    };
-                }
-                let question = match self.runtime.answer_user_question(&question_id, &answer) {
-                    Ok(q) => q,
-                    Err(reason) => return vec![LoopEvent::CommandRejected { reason }],
-                };
-                // Resumption writes the ownership registry, so release its read guard first.
-                drop(caller_guard);
-                let saved = LoopEvent::UserAnswerSaved {
-                    question_id: question_id.clone(),
-                };
-                let active = match self.runtime.has_active_question_recipient(&question_id) {
-                    Ok(active) => active,
-                    Err(reason) => {
-                        return vec![
-                            saved,
-                            LoopEvent::CommandRejected {
-                                reason: format!(
-                                    "Answer saved, but its recipient could not be confirmed: {reason}"
-                                ),
-                            },
-                        ];
-                    }
-                };
-                if active {
-                    return vec![saved];
-                }
-                let text = question.answer_message();
-                let mut events = self.submit_authorized(
-                    WorkbenchCommand::SendChat(crate::model::commands::ChatSubmission {
-                        submission_id: String::new(),
-                        fork_seed: None,
-                        project_root: None,
-                        thread_id,
-                        text,
-                        images: Vec::new(),
-                        model_preference: None,
-                        composer_role: if chat_role == Some(Role::Worker) {
-                            crate::model::composer::ComposerRole::Worker
-                        } else {
-                            crate::model::composer::ComposerRole::Orchestrator
-                        },
-                        skills: Vec::new(),
-                    }),
-                    permit,
-                );
-                events.insert(0, saved);
-                for event in &mut events {
-                    if let LoopEvent::ChatRejected { reason, .. } = event {
-                        *reason = format!(
-                            "Answer saved, but the conversation could not resume: {reason}. Fix the cause and resume it."
-                        );
-                    }
-                }
-                events
-            }
-            WorkbenchCommand::SetWebToolsEnabled { enabled } => {
-                self.runtime.set_web_tools_enabled(enabled);
-                Vec::new()
-            }
-            command @ (WorkbenchCommand::LinkPullRequest { .. }
-            | WorkbenchCommand::UnlinkPullRequest { .. }
-            | WorkbenchCommand::RefreshPullRequest { .. }
-            | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
-            | WorkbenchCommand::DismissPullRequestCandidate { .. }
-            | WorkbenchCommand::InheritPullRequest { .. }) => {
-                self.pull_request_command(command, permit)
-            }
-            WorkbenchCommand::DecideToolApproval { call_id, approved } => {
-                if let Some(bus) = &self.event_bus {
-                    bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
-                }
-                Vec::new()
-            }
-            WorkbenchCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
-            WorkbenchCommand::ResumeLaneDeliveries { thread_id } => {
-                if permit
-                    .as_ref()
-                    .is_some_and(|permit| permit.thread_id != thread_id)
-                    || (self.ownership.is_some() && permit.is_none())
-                {
-                    return vec![LoopEvent::CommandRejected {
-                        reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-                    }];
-                }
-                let run = self
-                    .chat_runs
-                    .get(&thread_id)
-                    .or_else(|| self.goal_runs.get(&thread_id))
-                    .copied()
-                    .map_or_else(
-                        || self.runtime.latest_chat_run(&thread_id),
-                        |run| Ok(Some(run)),
-                    );
-                let _guard = self.handle.enter();
-                let result = match run {
-                    Ok(Some(run)) => {
-                        self.runtime
-                            .resume_lane_deliveries(&thread_id, run, permit.as_ref())
-                    }
-                    Ok(None) => {
-                        return vec![LoopEvent::ChatNotice {
-                            thread_id,
-                            text: "No conversation to resume lane notifications for".into(),
-                        }];
-                    }
-                    Err(error) => Err(error),
-                };
-                match result {
-                    Ok(()) => Vec::new(),
-                    Err(error) => vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: format!("Could not resume lane notifications: {error}"),
-                    }],
-                }
-            }
-            WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
-                let result = self
-                    .chat_runs
-                    .get(&thread_id)
-                    .or_else(|| self.goal_runs.get(&thread_id))
-                    .ok_or_else(|| "No conversation to deliver follow-ups to".to_owned())
-                    .and_then(|run| {
-                        self.runtime
-                            .deliver_follow_ups_next_turn(*run)
-                            .map_err(|error| error.to_string())
-                    });
-                match result {
-                    Ok(()) => Vec::new(),
-                    Err(reason) => vec![LoopEvent::ChatRejected { thread_id, reason }],
-                }
-            }
-            WorkbenchCommand::StopRun { thread_id, run_id } => {
-                if permit
-                    .as_ref()
-                    .is_some_and(|permit| permit.thread_id != thread_id)
-                    || (self.ownership.is_some() && permit.is_none())
-                {
-                    return vec![LoopEvent::CommandRejected {
-                        reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-                    }];
-                }
-                // Keep the submitting owner's generation stable through the stop.
-                let _caller_guard = match permit.as_ref().map(|p| p.mutation_guard()).transpose() {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: error.to_string(),
-                        }];
-                    }
-                };
-                let target = run_id.parse::<RunId>().ok();
-                let root = self
-                    .chat_runs
-                    .get(&thread_id)
-                    .or_else(|| self.goal_runs.get(&thread_id));
-                let Some(target) = target.filter(|target| {
-                    root.is_some_and(|root| self.runtime.live_descendants(*root).contains(target))
-                }) else {
-                    return vec![LoopEvent::ChatNotice {
-                        thread_id,
-                        text: "The agent is no longer active in this conversation".into(),
-                    }];
-                };
-                match self.runtime.stop(target, runtime::StopScope::SelfOnly) {
-                    Ok(()) => Vec::new(),
-                    Err(error) => vec![LoopEvent::ChatNotice {
-                        thread_id,
-                        text: format!("Could not stop the agent: {error}"),
-                    }],
-                }
-            }
-            WorkbenchCommand::StopChat { thread_id } => {
-                let Some(&run_id) = self
-                    .chat_runs
-                    .get(&thread_id)
-                    .or_else(|| self.goal_runs.get(&thread_id))
-                else {
-                    return vec![LoopEvent::ChatNotice {
-                        thread_id,
-                        text: "No chat run to stop".into(),
-                    }];
-                };
-                let scope = if self.stop_marked.contains(&thread_id) {
-                    runtime::StopScope::Subtree
-                } else {
-                    match self.runtime.inspect_agent(run_id) {
-                        Ok(run) => {
-                            match run.phase {
-                                event_bus::AgentRunPhase::Pending
-                                | event_bus::AgentRunPhase::Running
-                                | event_bus::AgentRunPhase::Waiting => runtime::StopScope::SelfOnly,
-                                event_bus::AgentRunPhase::Stopped
-                                    if !self.runtime.live_descendants(run_id).is_empty() =>
-                                {
-                                    runtime::StopScope::Subtree
-                                }
-                                _ => {
-                                    return vec![LoopEvent::ChatNotice {
-                                    thread_id,
-                                    text: "Already stopped; use /continue or send a message to resume".into(),
-                                }];
-                                }
-                            }
-                        }
-                        // Admission-pending runs have no inspection yet. stop validates
-                        // the ID against admissions before accepting this first press.
-                        Err(runtime::RuntimeError::UnknownRun { .. }) => {
-                            runtime::StopScope::SelfOnly
-                        }
-                        Err(error) => {
-                            return vec![LoopEvent::ChatRejected {
-                                thread_id,
-                                reason: error.to_string(),
-                            }];
-                        }
-                    }
-                };
-                if let Err(error) = self.runtime.stop(run_id, scope) {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: error.to_string(),
-                    }];
-                }
-                match scope {
-                    runtime::StopScope::SelfOnly => {
-                        self.stop_marked.insert(thread_id.clone());
-                    }
-                    runtime::StopScope::Subtree => {
-                        self.stop_marked.remove(&thread_id);
-                    }
-                }
-                self.stopped_by_us.insert(thread_id.clone());
-                let running_children = self.running_children(&thread_id).unwrap_or(0);
-                vec![LoopEvent::ChatStopped {
-                    thread_id,
-                    run_id: run_id.to_string(),
-                    running_children,
-                }]
-            }
-            WorkbenchCommand::SubmitGoal(submission) => {
-                let thread_id = submission.thread_id.clone();
-                let objective = submission.goal.clone();
-                let criteria = vec![objective.clone()];
-                let prompt = render_entry_prompt(&submission);
-                self.goal_projects
-                    .insert(thread_id.clone(), submission.project_id.clone());
-                let mut initial = RunConfig::default();
-                if let Some(value) = submission.delegation_value {
-                    if value.trim().is_empty() {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: "team mode requires explicit delegation value".into(),
-                        }];
-                    }
-                    let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer)
-                    else {
-                        return vec![LoopEvent::CommandRejected {
-                            reason: "team storage is unavailable".into(),
-                        }];
-                    };
-                    initial.team_store = Some(runtime::team_context::TeamStore {
-                        config: config.clone(),
-                        writer: writer.clone(),
-                        id: format!("{}:{}", submission.project_id, thread_id),
-                    });
-                    initial.topology =
-                        runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-                    initial.delegation_value = Some(value);
-                    initial.finding_store = Some(config.db_path.clone());
-                }
-                initial.initial_thread_goal = Some((objective, criteria));
-                let mut events = self.submit_chat_config(
-                    crate::model::commands::ChatSubmission {
-                        submission_id: String::new(),
-                        project_root: submission.project_root.clone(),
-                        thread_id: thread_id.clone(),
-                        text: prompt,
-                        composer_role: crate::model::composer::ComposerRole::Orchestrator,
-                        images: Vec::new(),
-                        model_preference: None,
-                        fork_seed: None,
-                        skills: Vec::new(),
-                    },
-                    permit,
-                    false,
-                    initial,
-                );
-                if events
-                    .iter()
-                    .any(|event| matches!(event, LoopEvent::ChatAccepted { .. }))
-                    && let Some(goal) = self.runtime.thread_goal(&thread_id)
-                {
-                    events.push(LoopEvent::GoalAccepted {
-                        thread_id,
-                        goal_id: goal.goal_id,
-                    });
-                }
-                events
-            }
-            WorkbenchCommand::SetGoalReview {
-                thread_id,
-                goal_id,
-                enabled,
-            } => self.goal_control(&thread_id, permit, |runtime| {
-                runtime.set_goal_review(&thread_id, &goal_id, enabled)
-            }),
-            WorkbenchCommand::SetGoalChecksPaused {
-                thread_id,
-                goal_id,
-                paused,
-            } => self.goal_control(&thread_id, permit, |runtime| {
-                runtime.set_goal_checks_paused(&thread_id, &goal_id, paused)
-            }),
-            WorkbenchCommand::SendChat(submission) => self.submit_chat(submission, permit, false),
-            WorkbenchCommand::ContinueChat(continuation) => {
-                self.automatic_resume = continuation.automatic;
-                let events = self.submit_chat(
-                    crate::model::commands::ChatSubmission {
-                        submission_id: String::new(),
-                        fork_seed: None,
-                        project_root: continuation.project_root,
-                        thread_id: continuation.thread_id,
-                        composer_role: continuation.composer_role,
-                        model_preference: continuation.model_preference,
-                        images: Vec::new(),
-                        // The resume_only path never submits this placeholder as input.
-                        text: String::new(),
-                        skills: Vec::new(),
-                    },
-                    permit,
-                    true,
-                );
-                self.automatic_resume = false;
-                events
-            }
-        }
-    }
-
-    /// A user `/continue` renews the automatic-wake budget; a runtime-requested
-    /// resume only delivers the reports held for the root.
-    fn resume_chat(
-        &self,
-        run_id: RunId,
-        authority: RunConfig,
-    ) -> Result<RunId, runtime::RuntimeError> {
-        if self.automatic_resume {
-            self.runtime.wake_chat(run_id, authority)
-        } else {
-            self.runtime.resume_chat(run_id, authority)
-        }
-    }
-
-    fn renew_team_authority(
-        &self,
-        thread: &str,
-        run: RunId,
-        prompt: Option<&str>,
-        authority: &mut RunConfig,
-    ) -> Result<(), String> {
-        lane_host::TeamSource {
-            runtime: &self.runtime,
-            memory_config: self.memory_config.as_ref(),
-            team_writer: self.team_writer.as_ref(),
-            goal_project: self.goal_projects.get(thread).map(String::as_str),
-        }
-        .renew(thread, run, prompt, authority)
-    }
-
-    fn goal_control(
-        &self,
-        thread_id: &str,
-        permit: Option<runtime::ownership::OwnerPermit>,
-        control: impl FnOnce(&AgentRuntime) -> Result<(), String>,
-    ) -> Vec<LoopEvent> {
-        if permit
-            .as_ref()
-            .is_some_and(|permit| permit.thread_id != thread_id)
-            || (self.ownership.is_some() && permit.is_none())
-        {
-            return vec![LoopEvent::CommandRejected {
-                reason: runtime::ownership::OwnershipError::Fenced.to_string(),
-            }];
-        }
-        let _guard = match permit
-            .as_ref()
-            .map(|permit| permit.mutation_guard())
-            .transpose()
-        {
-            Ok(guard) => guard,
-            Err(error) => {
-                return vec![LoopEvent::CommandRejected {
-                    reason: error.to_string(),
-                }];
-            }
-        };
-        let _runtime = self.handle.enter();
-        match control(&self.runtime) {
-            Ok(()) => Vec::new(),
-            Err(reason) => vec![LoopEvent::CommandRejected { reason }],
-        }
-    }
-
-    fn submit_chat(
-        &mut self,
-        submission: crate::model::commands::ChatSubmission,
-        permit: Option<runtime::ownership::OwnerPermit>,
-        resume_only: bool,
-    ) -> Vec<LoopEvent> {
-        self.submit_chat_config(submission, permit, resume_only, RunConfig::default())
-    }
-
-    fn submit_chat_config(
-        &mut self,
-        submission: crate::model::commands::ChatSubmission,
-        permit: Option<runtime::ownership::OwnerPermit>,
-        resume_only: bool,
-        mut initial: RunConfig,
-    ) -> Vec<LoopEvent> {
-        if !resume_only {
-            // Host-generated goal/answer chats have no GUI submission row; give
-            // them their own ID rather than storing the empty string.
-            initial.initial_prompt_id = Some(if submission.submission_id.is_empty() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                submission.submission_id.clone()
-            });
-        }
-
-        // The runtime reads the mentioned skills with the new prompt; a resume
-        // sends no prompt and attaches nothing.
-        if !resume_only {
-            initial.skill_mentions.clone_from(&submission.skills);
-        }
-        let thread_id = submission.thread_id;
-        match &submission.model_preference {
-            Some(preference) => {
-                self.model_preferences
-                    .insert(thread_id.clone(), preference.clone());
-            }
-            None => {
-                self.model_preferences.remove(&thread_id);
-            }
-        }
-        // New runs of a thread work in its project, even after the active project moved.
-        if let Some(root) = submission.project_root {
-            self.thread_roots.insert(thread_id.clone(), root);
-        }
-        if initial.project_root.is_none() {
-            initial.project_root = self.thread_roots.get(&thread_id).cloned();
-        }
-        initial.memory = self.capture_memory(initial.project_root.as_deref());
-        if resume_only {
-            if !self.chat_runs.contains_key(&thread_id) && !self.goal_runs.contains_key(&thread_id)
-            {
-                match self.runtime.latest_chat_run(&thread_id) {
-                    Ok(Some(run)) => {
-                        self.chat_runs.insert(thread_id.clone(), run);
-                    }
-                    Ok(None) => {
-                        return vec![LoopEvent::ChatNotice {
-                            thread_id,
-                            text: "No conversation to continue; send a message first".into(),
-                        }];
-                    }
-                    Err(error) => {
-                        return vec![LoopEvent::ChatRejected {
-                            thread_id,
-                            reason: error.to_string(),
-                        }];
-                    }
-                }
-            }
-            let run = self
-                .chat_runs
-                .get(&thread_id)
-                .or_else(|| self.goal_runs.get(&thread_id))
-                .copied()
-                .expect("resolved conversation root");
-            let phase = self.runtime.inspect_agent(run).ok().map(|run| run.phase);
-            if phase == Some(event_bus::AgentRunPhase::Waiting) {
-                return vec![LoopEvent::ChatNotice {
-                    thread_id,
-                    text: "Run is already waiting for input".into(),
-                }];
-            }
-            if phase.is_some_and(|phase| {
-                matches!(
-                    phase,
-                    event_bus::AgentRunPhase::Pending | event_bus::AgentRunPhase::Running
-                )
-            }) {
-                return vec![LoopEvent::ChatNotice {
-                    thread_id,
-                    text: "Run is still running or stopping; try /continue once it settles".into(),
-                }];
-            }
-        }
-
-        if let Some(&run_id) = self.goal_runs.get(&thread_id) {
-            // A missing-context fallback may have replaced the original goal root.
-            let run_id = self.chat_runs.get(&thread_id).copied().unwrap_or(run_id);
-            let mut authority = RunConfig {
-                ownership: permit.clone(),
-                images: submission.images.clone(),
-                model_preference: submission.model_preference.clone(),
-                ..initial.clone()
             };
-            if self
-                .runtime
-                .restore_diagnostics(run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|d| d.renewable_team.is_some())
-            {
-                let Some(project) = self.goal_projects.get(&thread_id) else {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: "Current project binding is required to continue this team".into(),
-                    }];
-                };
-                let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer) else {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: "Current team storage is unavailable".into(),
-                    }];
-                };
-                authority.team_store = Some(runtime::team_context::TeamStore {
-                    config: config.clone(),
-                    writer: writer.clone(),
-                    id: format!("{project}:{thread_id}"),
-                });
-                authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-                authority.delegation_value = Some(if resume_only {
-                    "Resume the existing team coordination".into()
-                } else {
-                    submission.text.clone()
-                });
-                authority.finding_store = Some(config.db_path.clone());
-            }
-            let _guard = self.handle.enter();
-            let continuation = if resume_only {
-                self.resume_chat(run_id, authority)
-            } else {
-                self.runtime
-                    .continue_goal(run_id, submission.text.clone(), authority)
-            };
-            match continuation {
-                Ok(run_id) => {
-                    self.chat_runs.insert(thread_id.clone(), run_id);
-                    self.stop_marked.remove(&thread_id);
-                    self.stopped_by_us.remove(&thread_id);
-                    return vec![LoopEvent::ChatAccepted {
-                        thread_id,
-                        run_id: run_id.to_string(),
-                    }];
-                }
-                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
-                    self.stop_marked.remove(&thread_id);
-                    self.stopped_by_us.remove(&thread_id);
-                    self.chat_runs.remove(&thread_id);
-                }
-                Err(error) => {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: error.to_string(),
-                    }];
-                }
-            }
+            return self.pull_request_command(command, permit);
         }
-        if let Some(permit) = &permit {
-            if !resume_only
-                && self.chat_permits.get(&thread_id).is_some_and(|previous| {
-                    previous.registry_path != permit.registry_path
-                        || previous.lease.owner_id != permit.lease.owner_id
-                        || previous.lease.generation != permit.lease.generation
-                })
-            {
-                self.chat_runs.remove(&thread_id);
-            }
-            self.chat_permits.insert(thread_id.clone(), permit.clone());
-        }
-        if let Some(&run_id) = self.chat_runs.get(&thread_id) {
-            // continue_goal preserves the saved role, regardless of the current composer.
-            let saved_role = self
-                .runtime
-                .restore_diagnostics(run_id)
-                .ok()
-                .flatten()
-                .map(|saved| saved.role_name);
-            let conversation = saved_role.as_deref().is_some_and(|role| {
-                role == Role::Worker.name() || role == Role::Orchestrator.name()
-            });
-            let worker = saved_role.as_deref() == Some(Role::Worker.name());
-            let mut authority = RunConfig {
-                conversation,
-                category: worker.then(|| CategoryId::Conversation.to_string()),
-                ownership: permit.clone(),
-                images: submission.images.clone(),
-                model_preference: submission.model_preference.clone(),
-                ..initial.clone()
-            };
-            if let Err(reason) = self.renew_team_authority(
-                &thread_id,
-                run_id,
-                (!resume_only).then_some(submission.text.as_str()),
-                &mut authority,
-            ) {
-                return vec![LoopEvent::ChatRejected { thread_id, reason }];
-            }
-            let _guard = self.handle.enter();
-            let continuation = if resume_only {
-                self.resume_chat(run_id, authority)
-            } else {
-                self.runtime
-                    .continue_goal(run_id, submission.text.clone(), authority)
-            };
-            match continuation {
-                Ok(run_id) => {
-                    self.stop_marked.remove(&thread_id);
-                    self.stopped_by_us.remove(&thread_id);
-                    return vec![LoopEvent::ChatAccepted {
-                        thread_id,
-                        run_id: run_id.to_string(),
-                    }];
-                }
-                Err(error) if !resume_only && self.can_restart_stopped(&thread_id, &error) => {
-                    self.stop_marked.remove(&thread_id);
-                    self.stopped_by_us.remove(&thread_id);
-                    self.chat_runs.remove(&thread_id);
-                }
-                Err(error) => {
-                    return vec![LoopEvent::ChatRejected {
-                        thread_id,
-                        reason: error.to_string(),
-                    }];
-                }
-            }
-        }
-        if resume_only {
-            return vec![LoopEvent::ChatNotice {
-                thread_id,
-                text: "No conversation to continue; send a message first".into(),
-            }];
-        }
-        let worker = submission.composer_role == crate::model::composer::ComposerRole::Worker;
-        let _guard = self.handle.enter();
-        let run_id = self.runtime.delegate_chat_seeded(
-            &thread_id,
-            match submission.composer_role {
-                crate::model::composer::ComposerRole::Worker => Role::Worker,
-                crate::model::composer::ComposerRole::Orchestrator => Role::Orchestrator,
-            },
-            submission.text,
-            RunConfig {
-                conversation: true,
-                category: worker.then(|| CategoryId::Conversation.to_string()),
-                images: submission.images,
-                ownership: permit,
-                interactive: true,
-                keep_alive: true,
-                model_preference: submission.model_preference,
-                ..initial
-            },
-            submission.fork_seed,
-        );
-        let run_id = match run_id {
-            Ok(run_id) => run_id,
-            Err(error) => {
-                return vec![LoopEvent::ChatRejected {
-                    thread_id,
-                    reason: error.to_string(),
-                }];
-            }
-        };
-        self.chat_runs.insert(thread_id.clone(), run_id);
-        self.stop_marked.remove(&thread_id);
-        self.stopped_by_us.remove(&thread_id);
-        vec![LoopEvent::ChatAccepted {
-            thread_id,
-            run_id: run_id.to_string(),
-        }]
+        self.host
+            .submit_local(host_adapter::host_command(command), &self.provenance)
+            .into_iter()
+            .map(host_adapter::loop_event)
+            .collect()
     }
 }
 
@@ -1326,41 +387,31 @@ impl RuntimeCommandSink {
 /// `References:` / `Constraints:` セクションとして 1 行 1 項目で続ける。
 /// 参照と制約は通常会話へ渡す文脈であり、PR や固定フローの起動条件ではない。
 pub fn render_entry_prompt(submission: &GoalSubmission) -> String {
-    let mut prompt = submission.goal.clone();
-    if !submission.references.is_empty() {
-        prompt.push_str("\n\nReferences:\n");
-        let lines: Vec<String> = submission
-            .references
-            .iter()
-            .map(|reference| {
-                let kind_label = reference_kind_label(&reference.kind);
-                format!("- {kind_label}: {}", reference.value)
-            })
-            .collect();
-        prompt.push_str(&lines.join("\n"));
-    }
-    if !submission.constraints.is_empty() {
-        prompt.push_str("\n\nConstraints:\n");
-        let lines: Vec<String> = submission
-            .constraints
-            .iter()
-            .map(|constraint| format!("- {constraint}"))
-            .collect();
-        prompt.push_str(&lines.join("\n"));
-    }
-    prompt
-}
-
-/// 参照元種別のラベル。
-fn reference_kind_label(kind: &ReferenceKind) -> &'static str {
-    match kind {
-        ReferenceKind::Packet => "packet",
-        ReferenceKind::Issue => "issue",
-    }
+    workbench_host::commands::render_entry_prompt(&host_adapter::goal_input(submission.clone()))
 }
 
 /// The `owner/name` label of a project (see [`runtime::repository::derive_repo_slug`]).
 pub use runtime::repository::derive_repo_slug;
+
+#[cfg(test)]
+impl RuntimeCommandSink {
+    fn submit_authorized(
+        &mut self,
+        command: WorkbenchCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+    ) -> Vec<LoopEvent> {
+        let provenance = self.provenance.clone();
+        self.host
+            .submit_local_authorized(host_adapter::host_command(command), permit, &provenance)
+            .into_iter()
+            .map(host_adapter::loop_event)
+            .collect()
+    }
+
+    fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
+        self.host.service().can_restart_stopped(thread, error)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1465,17 +516,52 @@ mod tests {
         let (_rt, mut sink, _, _) = build_sink();
         let worker = "run-1".parse::<runtime::RunId>().unwrap();
         let orchestrator = "run-2".parse::<runtime::RunId>().unwrap();
-        sink.chat_runs.insert("parent".into(), worker);
+        sink.host
+            .service_mut()
+            .bindings
+            .chat_runs
+            .insert("parent".into(), worker);
         sink.bind_goal_context("parent", "project", "run-1");
         // Repair a duplicate run index without removing the worker's own root.
-        sink.chat_runs.insert("stale-owner".into(), orchestrator);
+        sink.host
+            .service_mut()
+            .bindings
+            .chat_runs
+            .insert("stale-owner".into(), orchestrator);
         sink.bind_goal_context("stale-owner", "project", "run-2");
         sink.bind_goal_context("escalation-run-2", "project", "run-2");
-        assert_eq!(sink.chat_runs.get("parent"), Some(&worker));
-        assert_eq!(sink.goal_runs.get("parent"), Some(&worker));
-        assert_eq!(sink.goal_runs.get("escalation-run-2"), Some(&orchestrator));
-        assert!(!sink.chat_runs.contains_key("stale-owner"));
-        assert!(!sink.goal_runs.contains_key("stale-owner"));
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs.get("parent"),
+            Some(&worker)
+        );
+        assert_eq!(
+            sink.host.service_mut().bindings.goal_runs.get("parent"),
+            Some(&worker)
+        );
+        assert_eq!(
+            sink.host
+                .service_mut()
+                .bindings
+                .goal_runs
+                .get("escalation-run-2"),
+            Some(&orchestrator)
+        );
+        assert!(
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .chat_runs
+                .contains_key("stale-owner")
+        );
+        assert!(
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .goal_runs
+                .contains_key("stale-owner")
+        );
     }
 
     #[test]
@@ -1648,7 +734,7 @@ mod tests {
                 .as_deref(),
             Some("JSON")
         );
-        let run = sink.chat_runs["thread-1"];
+        let run = sink.host.service_mut().bindings.chat_runs["thread-1"];
         runtime.cancel(run).unwrap();
         rt.block_on(async {
             runtime.wait(run).await.unwrap();
@@ -1667,7 +753,7 @@ mod tests {
         let runtime =
             runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
         sink.submit(chat_command("recipient"));
-        let recipient = sink.chat_runs["recipient"];
+        let recipient = sink.host.service_mut().bindings.chat_runs["recipient"];
         let question = offline_question_fixture(&rt, &config, storage.handle(), "source", vec![]);
         storage
             .handle()
@@ -1803,7 +889,7 @@ mod tests {
         ));
         assert!(runtime.list_agents().is_empty());
         sink.submit(chat_command("no-store"));
-        let run = sink.chat_runs["no-store"];
+        let run = sink.host.service_mut().bindings.chat_runs["no-store"];
         sink.submit(WorkbenchCommand::StopChat {
             thread_id: "no-store".into(),
         });
@@ -1814,7 +900,7 @@ mod tests {
             sink.submit(continue_command("no-store")).as_slice(),
             [LoopEvent::ChatRejected { .. }]
         ));
-        assert_eq!(sink.chat_runs["no-store"], run);
+        assert_eq!(sink.host.service_mut().bindings.chat_runs["no-store"], run);
         assert_eq!(runtime.list_agents().len(), 1);
     }
 
@@ -1877,7 +963,7 @@ mod tests {
                 let runtime = runtime
                     .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
                 sink.submit(chat_command("resume"));
-                let run = sink.chat_runs["resume"];
+                let run = sink.host.service_mut().bindings.chat_runs["resume"];
                 rt.block_on(async {
                     model.started.notified().await;
                 });
@@ -1908,9 +994,16 @@ mod tests {
                     matches!(events.as_slice(), [LoopEvent::ChatAccepted { run_id, .. }] if *run_id == run.to_string()),
                     "{events:?}"
                 );
-                assert_eq!(sink.chat_runs["resume"], run);
+                assert_eq!(sink.host.service_mut().bindings.chat_runs["resume"], run);
                 assert_eq!(runtime.list_agents().len(), 1);
-                assert!(!sink.stopped_by_us.contains("resume"));
+                assert!(
+                    !sink
+                        .host
+                        .service_mut()
+                        .bindings
+                        .stopped_by_us
+                        .contains("resume")
+                );
                 rt.block_on(async {
                     model.started.notified().await;
                 });
@@ -1946,7 +1039,7 @@ mod tests {
             .unwrap();
         let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(HeldModel::default()));
         sink.submit(chat_command("rapid"));
-        let root = sink.chat_runs["rapid"];
+        let root = sink.host.service_mut().bindings.chat_runs["rapid"];
         let child = {
             let _guard = rt.enter();
             runtime
@@ -1964,7 +1057,11 @@ mod tests {
             }]
         ));
         assert!(
-            sink.stop_marked.contains("rapid"),
+            sink.host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "first press is SelfOnly"
         );
         assert_eq!(
@@ -1976,7 +1073,12 @@ mod tests {
             [LoopEvent::ChatStopped { .. }]
         ));
         assert!(
-            !sink.stop_marked.contains("rapid"),
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "second press is Subtree"
         );
         assert_eq!(
@@ -1996,8 +1098,15 @@ mod tests {
             sink.submit(chat_command("rapid")).as_slice(),
             [LoopEvent::ChatAccepted { .. }]
         ));
-        assert_ne!(sink.chat_runs["rapid"], root);
-        assert!(!sink.stopped_by_us.contains("rapid"));
+        assert_ne!(sink.host.service_mut().bindings.chat_runs["rapid"], root);
+        assert!(
+            !sink
+                .host
+                .service_mut()
+                .bindings
+                .stopped_by_us
+                .contains("rapid")
+        );
         assert!(matches!(
             sink.submit(WorkbenchCommand::StopChat {
                 thread_id: "rapid".into()
@@ -2006,7 +1115,11 @@ mod tests {
             [LoopEvent::ChatStopped { .. }]
         ));
         assert!(
-            sink.stop_marked.contains("rapid"),
+            sink.host
+                .service_mut()
+                .bindings
+                .stop_marked
+                .contains("rapid"),
             "new run restarts at stage one"
         );
     }
@@ -2061,9 +1174,13 @@ mod tests {
                 runtime
             };
             sink.submit(chat_command("no-context"));
-            let root = sink.chat_runs["no-context"];
+            let root = sink.host.service_mut().bindings.chat_runs["no-context"];
             if goal {
-                sink.chat_runs.remove("no-context");
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .chat_runs
+                    .remove("no-context");
                 sink.bind_goal_context("no-context", "project", &root.to_string());
             }
             assert!(matches!(
@@ -2073,7 +1190,13 @@ mod tests {
                 .as_slice(),
                 [LoopEvent::ChatStopped { .. }]
             ));
-            assert!(sink.stop_marked.contains("no-context"));
+            assert!(
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .stop_marked
+                    .contains("no-context")
+            );
             let error = runtime
                 .continue_goal(root, "probe".into(), RunConfig::default())
                 .unwrap_err();
@@ -2087,15 +1210,35 @@ mod tests {
                 matches!(events.as_slice(), [LoopEvent::ChatAccepted { .. }]),
                 "{events:?}"
             );
-            let fresh = sink.chat_runs["no-context"];
+            let fresh = sink.host.service_mut().bindings.chat_runs["no-context"];
             assert_ne!(fresh, root);
-            assert!(!sink.stop_marked.contains("no-context"));
-            assert!(!sink.stopped_by_us.contains("no-context"));
+            assert!(
+                !sink
+                    .host
+                    .service_mut()
+                    .bindings
+                    .stop_marked
+                    .contains("no-context")
+            );
+            assert!(
+                !sink
+                    .host
+                    .service_mut()
+                    .bindings
+                    .stopped_by_us
+                    .contains("no-context")
+            );
             // Both goal and plain-chat paths use the new binding on subsequent stops.
             sink.submit(WorkbenchCommand::StopChat {
                 thread_id: "no-context".into(),
             });
-            assert!(sink.stop_marked.contains("no-context"));
+            assert!(
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .stop_marked
+                    .contains("no-context")
+            );
         }
     }
 
@@ -2105,16 +1248,28 @@ mod tests {
         for goal in [false, true] {
             let id = runtime::RunId::new(999);
             if goal {
-                sink.goal_runs.insert("unmarked".into(), id);
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .goal_runs
+                    .insert("unmarked".into(), id);
             } else {
-                sink.chat_runs.insert("unmarked".into(), id);
+                sink.host
+                    .service_mut()
+                    .bindings
+                    .chat_runs
+                    .insert("unmarked".into(), id);
             }
             assert!(matches!(
                 sink.submit(chat_command("unmarked")).as_slice(),
                 [LoopEvent::ChatRejected { .. }]
             ));
         }
-        sink.stop_marked.insert("marked".into());
+        sink.host
+            .service_mut()
+            .bindings
+            .stop_marked
+            .insert("marked".into());
         for reason in [
             runtime::RunRestoreFailure::CorruptContext("bad".into()),
             runtime::RunRestoreFailure::UnsupportedConfig("bad".into()),
@@ -2146,7 +1301,7 @@ mod tests {
                 skills: Vec::new(),
             },
         ));
-        let root = sink.chat_runs["chat-thread"];
+        let root = sink.host.service_mut().bindings.chat_runs["chat-thread"];
         let (child, grandchild) = rt.block_on(async {
             let child = runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -2177,7 +1332,10 @@ mod tests {
         );
         let phase = rt.block_on(async { runtime.wait(root).await.unwrap() });
         assert_eq!(phase, event_bus::AgentRunPhase::Stopped);
-        assert_eq!(sink.chat_runs["chat-thread"], root);
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["chat-thread"],
+            root
+        );
         assert_eq!(runtime.live_descendants(root), vec![child, grandchild]);
         assert!(matches!(
             sink.submit(command.clone()).as_slice(),
@@ -2197,8 +1355,14 @@ mod tests {
                 reason: None,
             },
         ));
-        assert_eq!(sink.running_children["chat-thread"], 0);
-        assert_eq!(sink.chat_runs["chat-thread"], root);
+        assert_eq!(
+            sink.host.service_mut().bindings.running_children["chat-thread"],
+            0
+        );
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["chat-thread"],
+            root
+        );
         assert!(
             matches!(sink.submit(command).as_slice(), [LoopEvent::ChatNotice { text, .. }] if text == "Already stopped; use /continue or send a message to resume")
         );
@@ -2244,7 +1408,7 @@ mod tests {
             .unwrap();
         let (rt, mut sink, runtime, _) = build_sink_on(rt, Arc::new(FailedRootModel));
         sink.submit(chat_command("failed-root"));
-        let root = sink.chat_runs["failed-root"];
+        let root = sink.host.service_mut().bindings.chat_runs["failed-root"];
         let (child, grandchild, sibling) = rt.block_on(async {
             let child = runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -2281,9 +1445,12 @@ mod tests {
             event_bus::AgentRunPhase::Error
         );
         assert_eq!(runtime.live_descendants(root), vec![grandchild, sibling]);
-        assert_eq!(sink.chat_runs["failed-root"], root);
-        assert!(sink.stop_marked.is_empty());
-        assert!(sink.stopped_by_us.is_empty());
+        assert_eq!(
+            sink.host.service_mut().bindings.chat_runs["failed-root"],
+            root
+        );
+        assert!(sink.host.service_mut().bindings.stop_marked.is_empty());
+        assert!(sink.host.service_mut().bindings.stopped_by_us.is_empty());
         runtime.cancel_subtree(root).unwrap();
         rt.block_on(async {
             for run in [grandchild, sibling] {
@@ -2297,8 +1464,8 @@ mod tests {
         let (rt, mut sink, runtime, _) = build_sink();
         sink.submit(chat_command("thread"));
         sink.submit(chat_command("other"));
-        let root = sink.chat_runs["thread"];
-        let other_root = sink.chat_runs["other"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread"];
+        let other_root = sink.host.service_mut().bindings.chat_runs["other"];
         let child = rt.block_on(async {
             runtime
                 .delegate_background_as_child(root, Role::Worker, "child", RunConfig::default())
@@ -2330,13 +1497,14 @@ mod tests {
         let successor =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
         owner.handoff(&stale, &successor).unwrap();
-        sink.ownership = Some(Arc::new(owner));
+        sink.host.service_mut().set_ownership(Some(Arc::new(owner)));
         let command = stop_run_command("thread", child);
         for permit in [
             Some(stale),
             Some(
-                sink.ownership
-                    .as_ref()
+                sink.host
+                    .service()
+                    .ownership()
                     .unwrap()
                     .owned_permit("other")
                     .unwrap(),
@@ -2366,7 +1534,9 @@ mod tests {
                 event_bus::AgentRunPhase::Stopped
             );
         });
-        sink.ownership = Some(Arc::new(successor));
+        sink.host
+            .service_mut()
+            .set_ownership(Some(Arc::new(successor)));
         assert!(matches!(
             sink.submit(command).as_slice(),
             [LoopEvent::ChatNotice { .. }]
@@ -2407,7 +1577,9 @@ mod tests {
         let successor =
             runtime::ownership::OwnerHost::open(dir.path(), Default::default(), bus).unwrap();
         previous.handoff(&stale, &successor).unwrap();
-        sink.ownership = Some(Arc::new(previous));
+        sink.host
+            .service_mut()
+            .set_ownership(Some(Arc::new(previous)));
         let control = WorkbenchCommand::SetGoalChecksPaused {
             thread_id: "thread-1".into(),
             goal_id: goal.goal_id,
@@ -2417,8 +1589,9 @@ mod tests {
             None,
             Some(stale),
             Some(
-                sink.ownership
-                    .as_ref()
+                sink.host
+                    .service()
+                    .ownership()
                     .unwrap()
                     .owned_permit("other")
                     .unwrap(),
@@ -2435,7 +1608,7 @@ mod tests {
                 .is_empty()
         );
         assert!(runtime.thread_goal("thread-1").unwrap().checks_paused);
-        let root = sink.chat_runs["thread-1"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
         runtime.cancel(root).unwrap();
         rt.block_on(runtime.wait(root)).unwrap();
     }
@@ -2489,7 +1662,7 @@ mod tests {
                 runtime.with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap());
             let mut events = bus.subscribe();
             sink.submit(chat_command("thread-1"));
-            let root = sink.chat_runs["thread-1"];
+            let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
             rt.block_on(async {
                 while runtime.inspect_agent(root).unwrap().phase
                     != event_bus::AgentRunPhase::Waiting
@@ -2568,7 +1741,7 @@ mod tests {
             vec![],
             vec![],
         )));
-        let root = sink.chat_runs["thread-1"];
+        let root = sink.host.service_mut().bindings.chat_runs["thread-1"];
         rt.block_on(model.started.notified());
         let goal = runtime.thread_goal("thread-1").unwrap();
         assert!(
@@ -2611,7 +1784,7 @@ mod tests {
         assert!(resumed.checks_paused);
         assert!(resumed.review_enabled);
         assert!(!resumed.work_stopped);
-        assert_eq!(sink.chat_runs["thread-1"], root);
+        assert_eq!(sink.host.service_mut().bindings.chat_runs["thread-1"], root);
         runtime.cancel(root).unwrap();
         rt.block_on(runtime.wait(root)).unwrap();
     }
@@ -2658,7 +1831,7 @@ mod tests {
             events.as_slice(),
             [LoopEvent::ChatAccepted { .. }]
         ));
-        assert_ne!(sink.chat_runs["thread-1"], root);
+        assert_ne!(sink.host.service_mut().bindings.chat_runs["thread-1"], root);
     }
 
     #[test]
@@ -2706,7 +1879,7 @@ mod tests {
         };
 
         sink.submit(chat(Some(thread_project.path().to_path_buf())));
-        let first = sink.chat_runs["chat-thread"];
+        let first = sink.host.service_mut().bindings.chat_runs["chat-thread"];
         // A stopped chat without saved context restarts as a fresh run.
         sink.submit(WorkbenchCommand::StopChat {
             thread_id: "chat-thread".into(),
@@ -2715,7 +1888,7 @@ mod tests {
             runtime.wait(first).await.unwrap();
         });
         sink.submit(chat(None));
-        let second = sink.chat_runs["chat-thread"];
+        let second = sink.host.service_mut().bindings.chat_runs["chat-thread"];
 
         assert_ne!(first, second);
         assert_eq!(*resolved.lock().unwrap(), [thread_project.path()]);
@@ -2960,7 +2133,10 @@ mod tests {
         assert!(
             matches!(first.as_slice(), [LoopEvent::ChatAccepted { .. }, LoopEvent::GoalAccepted { goal_id, .. }] if goal_id == &snapshot.goal_id)
         );
-        assert_eq!(snapshot.root_run_id, sink.chat_runs["thread-1"].to_string());
+        assert_eq!(
+            snapshot.root_run_id,
+            sink.host.service_mut().bindings.chat_runs["thread-1"].to_string()
+        );
         assert!(!snapshot.review_enabled);
         assert!(matches!(
             sink.submit(WorkbenchCommand::SubmitGoal(submission(
@@ -3010,8 +2186,10 @@ mod tests {
         assert!(stored.iter().any(|stored| matches!(&stored.event.kind, EventKind::Orchestrator(OrchestratorEvent::ThreadGoalUpdated { snapshot }) if snapshot.goal_id == goal_id)));
         bridge.abort();
         let _ = rt.block_on(bridge);
-        runtime.cancel(sink.chat_runs["thread-1"]).unwrap();
-        rt.block_on(runtime.wait(sink.chat_runs["thread-1"]))
+        runtime
+            .cancel(sink.host.service_mut().bindings.chat_runs["thread-1"])
+            .unwrap();
+        rt.block_on(runtime.wait(sink.host.service_mut().bindings.chat_runs["thread-1"]))
             .unwrap();
         storage.close();
     }

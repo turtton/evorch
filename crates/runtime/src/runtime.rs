@@ -2296,6 +2296,56 @@ impl AgentRuntime {
         }
     }
 
+    /// The runs among `run_ids` that were deleted with their thread. A deleted run stays
+    /// listed after its rows are reclaimed. Without storage nothing is deleted.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn deleted_runs(&self, run_ids: &[String]) -> Result<Vec<String>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => store.handle.tombstoned_runs(run_ids),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Whether this runtime persists runs. Without a run store nothing a host records
+    /// outlives the process, and nothing is ever deleted by retention.
+    pub fn has_run_store(&self) -> bool {
+        self.shared.run_store.get().is_some()
+    }
+
+    /// Keep a fingerprint of an accepted chat message so a resend under the same
+    /// submission id can be recognised after a restart. The first record for an id stays;
+    /// returns whether this call stored it. Without storage nothing is kept.
+    ///
+    /// # Errors
+    /// Storage that is closed, failing or has the run tombstoned.
+    pub fn record_host_chat_submission(
+        &self,
+        submission: &storage::HostChatSubmission,
+    ) -> Result<bool, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => store.handle.record_host_chat_submission(submission),
+            None => Ok(false),
+        }
+    }
+
+    /// The recorded chat submissions among `submission_ids`, after every earlier write;
+    /// one whose run was deleted is reported as such, without its content. Without
+    /// storage there are none.
+    ///
+    /// # Errors
+    /// Storage that is closed or failing.
+    pub fn host_chat_submissions(
+        &self,
+        submission_ids: &[String],
+    ) -> Result<Vec<storage::HostChatSubmissionState>, storage::StorageError> {
+        match self.shared.run_store.get() {
+            Some(store) => store.handle.host_chat_submissions(submission_ids),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// What the runtime recorded for each given submission: the host's own
     /// words and the names of the skills it attached, as fixed when it accepted
     /// the message. Hosts show this rather than their own copy. Submissions

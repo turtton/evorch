@@ -73,7 +73,8 @@ const C_GC: u64 = 24;
 /// triggers on an empty `events` table; 106 and 146 frames with v44 added), and v46 (the five
 /// pull request tables, their indexes and fences; 126 and 181 frames with v46 added), whatever
 /// v47 (delivery schema), and v48 (four Phase 2 tables, their indexes, three empty
-/// lane header columns and fences: 255 frames with 100,000 rows). The row-independent
+/// lane header columns and fences: 255 frames with 100,000 rows), and v49 (the host chat submission
+/// table with its index and fence: 270 frames with 100,000 rows). The row-independent
 /// ceiling includes these schema pages; the VM-step comparison below still forbids scans.
 const MIGRATION_FRAMES: u64 = 280;
 
@@ -291,7 +292,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v48) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest (v49) to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -312,6 +313,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v49.sql"),
                     include_str!("../undo/undo_v48.sql"),
                     include_str!("../undo/undo_v47.sql")
                 ),
@@ -333,7 +335,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v48 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v49 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

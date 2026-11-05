@@ -96,8 +96,8 @@ pub use diagnostic::{DIAGNOSTIC_RETENTION_DAYS, DiagnosticCleanupScope, Diagnost
 pub use entity::CatalogUpdateRecord;
 pub use error::{FailureClass, StorageError};
 pub use host_input::{
-    HostInputOrigin, HostInputProvenance, HostInputReceipt, HostInputStatus, HostInputTransition,
-    HostInputWrite,
+    HostChatSubmission, HostChatSubmissionState, HostInputOrigin, HostInputProvenance,
+    HostInputReceipt, HostInputStatus, HostInputTransition, HostInputWrite,
 };
 pub use maintenance::offline::{
     ExclusiveLeases, SharedLeases, reclaim_lease, shared_with_wait, try_exclusive,
