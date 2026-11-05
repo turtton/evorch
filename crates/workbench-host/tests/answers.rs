@@ -56,7 +56,7 @@ fn the_first_answer_keeps_its_provenance_and_a_repeat_does_not_take_it() {
 
     assert_eq!(repeat.disposition, CommandDisposition::Accepted);
     assert_eq!(other.code, ErrorCode::AlreadyResolved);
-    assert_eq!(host.answer_provenance(&question.id), Some(&web()));
+    assert_eq!(host.answer_provenance(&question.id), Some(web()));
     cancel(&host, &rt);
 }
 
@@ -87,7 +87,7 @@ fn a_desktop_answer_is_remembered_and_a_later_web_repeat_does_not_replace_it() {
             ..
         }
     )));
-    assert_eq!(host.answer_provenance(&question.id), Some(&desktop));
+    assert_eq!(host.answer_provenance(&question.id), Some(desktop.clone()));
     cancel(&host, &rt);
 }
 

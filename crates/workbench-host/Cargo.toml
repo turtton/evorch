@@ -28,6 +28,7 @@ test-support = []
 
 [dev-dependencies]
 async-trait = { workspace = true }
+rusqlite = { workspace = true }
 providers = { path = "../providers" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

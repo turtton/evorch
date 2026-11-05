@@ -2296,6 +2296,12 @@ impl AgentRuntime {
         }
     }
 
+    /// Whether this runtime persists runs. Without a run store nothing a host records
+    /// outlives the process, and nothing is ever deleted by retention.
+    pub fn has_run_store(&self) -> bool {
+        self.shared.run_store.get().is_some()
+    }
+
     /// Keep a fingerprint of an accepted chat message so a resend under the same
     /// submission id can be recognised after a restart. The first record for an id stays;
     /// returns whether this call stored it. Without storage nothing is kept.
@@ -2312,15 +2318,16 @@ impl AgentRuntime {
         }
     }
 
-    /// The recorded chat submissions among `submission_ids`, after every earlier write.
-    /// Without storage there are none.
+    /// The recorded chat submissions among `submission_ids`, after every earlier write;
+    /// one whose run was deleted is reported as such, without its content. Without
+    /// storage there are none.
     ///
     /// # Errors
     /// Storage that is closed or failing.
     pub fn host_chat_submissions(
         &self,
         submission_ids: &[String],
-    ) -> Result<Vec<storage::HostChatSubmission>, storage::StorageError> {
+    ) -> Result<Vec<storage::HostChatSubmissionState>, storage::StorageError> {
         match self.shared.run_store.get() {
             Some(store) => store.handle.host_chat_submissions(submission_ids),
             None => Ok(Vec::new()),

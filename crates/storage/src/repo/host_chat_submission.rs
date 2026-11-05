@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 
 use crate::StorageError;
-use crate::host_input::HostChatSubmission;
+use crate::host_input::{HostChatSubmission, HostChatSubmissionState};
 
 /// Record a submission unless its id already has a row: the first record stays.
 /// Returns whether this call stored it.
@@ -25,24 +25,31 @@ pub(crate) fn insert(
     Ok(changed == 1)
 }
 
-/// The recorded submissions among `ids`, in the order asked.
+/// The submissions among `ids`, in the order asked. One whose run is tombstoned is
+/// reported as deleted, without its content.
 pub(crate) fn for_ids(
     conn: &Connection,
     ids: &[String],
-) -> Result<Vec<HostChatSubmission>, StorageError> {
+) -> Result<Vec<HostChatSubmissionState>, StorageError> {
     let mut statement = conn.prepare(
-        "SELECT submission_id, fingerprint, run_id, provenance_json, accepted_at_ns \
+        "SELECT submission_id, fingerprint, run_id, provenance_json, accepted_at_ns, \
+                run_id IN (SELECT run_id FROM run_tombstones) \
          FROM host_chat_submissions WHERE submission_id = ?1",
     )?;
     let mut found = Vec::new();
     for id in ids {
         let mut rows = statement.query_map(params![id], |row| {
-            Ok(HostChatSubmission {
-                submission_id: row.get(0)?,
-                fingerprint: row.get(1)?,
-                run_id: row.get(2)?,
-                provenance_json: row.get(3)?,
-                accepted_at_ns: row.get(4)?,
+            let deleted: bool = row.get(5)?;
+            Ok(if deleted {
+                HostChatSubmissionState::Deleted(row.get(0)?)
+            } else {
+                HostChatSubmissionState::Live(HostChatSubmission {
+                    submission_id: row.get(0)?,
+                    fingerprint: row.get(1)?,
+                    run_id: row.get(2)?,
+                    provenance_json: row.get(3)?,
+                    accepted_at_ns: row.get(4)?,
+                })
             })
         })?;
         if let Some(row) = rows.next() {

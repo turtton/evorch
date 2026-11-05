@@ -1,6 +1,7 @@
 //! Fingerprints of accepted chat messages through the single-writer boundary.
 
-use storage::{HostChatSubmission, Storage, StorageConfig};
+use rusqlite::Connection;
+use storage::{HostChatSubmission, HostChatSubmissionState, Storage, StorageConfig};
 
 fn storage() -> (tempfile::TempDir, Storage) {
     let dir = tempfile::tempdir().unwrap();
@@ -35,7 +36,12 @@ fn a_recorded_submission_is_read_back_whole() {
         .unwrap();
 
     assert!(stored);
-    assert_eq!(found, vec![submission("sub-1", "digest-a", "run-1")]);
+    assert_eq!(
+        found,
+        vec![HostChatSubmissionState::Live(submission(
+            "sub-1", "digest-a", "run-1"
+        ))]
+    );
 }
 
 #[test]
@@ -53,7 +59,9 @@ fn the_first_record_for_an_id_stays() {
     assert!(!again);
     assert_eq!(
         handle.host_chat_submissions(&["sub-1".into()]).unwrap(),
-        vec![submission("sub-1", "digest-a", "run-1")]
+        vec![HostChatSubmissionState::Live(submission(
+            "sub-1", "digest-a", "run-1"
+        ))]
     );
 }
 
@@ -79,7 +87,9 @@ fn a_record_survives_reopening_the_database() {
             .handle()
             .host_chat_submissions(&["sub-1".into()])
             .unwrap(),
-        vec![submission("sub-1", "digest-a", "run-1")]
+        vec![HostChatSubmissionState::Live(submission(
+            "sub-1", "digest-a", "run-1"
+        ))]
     );
 }
 
@@ -102,4 +112,73 @@ fn an_incomplete_record_is_refused() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn tombstone(path: &std::path::Path, run: &str) {
+    Connection::open(path)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_tombstones(run_id, thread_id, family_key) VALUES (?1, 't', 'f')",
+            [run],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_submission_of_a_deleted_run_is_reported_deleted_without_its_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("submissions.sqlite3");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    let handle = storage.handle();
+    handle
+        .record_host_chat_submission(&submission("sub-1", "digest-a", "run-1"))
+        .unwrap();
+    handle
+        .record_host_chat_submission(&submission("sub-2", "digest-b", "run-2"))
+        .unwrap();
+
+    tombstone(&path, "run-1");
+    let found = handle
+        .host_chat_submissions(&["sub-1".into(), "sub-2".into()])
+        .unwrap();
+
+    assert_eq!(
+        found,
+        vec![
+            HostChatSubmissionState::Deleted("sub-1".into()),
+            HostChatSubmissionState::Live(submission("sub-2", "digest-b", "run-2")),
+        ]
+    );
+    let reader = storage::Database::open(&StorageConfig {
+        db_path: path,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        reader.host_chat_submissions(&["sub-1".into()]).unwrap(),
+        found[..1]
+    );
+}
+
+#[test]
+fn a_deleted_run_accepts_no_new_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("submissions.sqlite3");
+    let storage = Storage::open(StorageConfig {
+        db_path: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    tombstone(&path, "run-1");
+
+    let error = storage
+        .handle()
+        .record_host_chat_submission(&submission("sub-1", "digest-a", "run-1"))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("tombstoned"), "{error}");
 }

@@ -214,3 +214,12 @@ impl HostChatSubmission {
         Ok(())
     }
 }
+
+/// What storage knows about one submission id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostChatSubmissionState {
+    Live(HostChatSubmission),
+    /// The run it went to was deleted (its thread is tombstoned). Nothing about the
+    /// message is returned; a physical reclaim removes the row altogether.
+    Deleted(String),
+}

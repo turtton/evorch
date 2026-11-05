@@ -174,3 +174,46 @@ fn an_input_receipt_without_a_stored_fingerprint_cannot_be_compared_and_is_refus
     assert!(restarted_runtime.list_agents().is_empty());
     assert!(host.submission_provenance("sub-1").is_none());
 }
+
+#[test]
+fn a_fingerprint_that_could_not_be_stored_still_blocks_a_reapply_after_a_restart() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, storage) = runtime_with_store(dir.path());
+    // Storing a fingerprint fails; the acceptance of the message itself does not.
+    rusqlite::Connection::open(dir.path().join("host.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER injected_failure BEFORE INSERT ON host_chat_submissions \
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+    let mut host = host_with_project(&rt, runtime.clone(), dir.path());
+    let accepted = host
+        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .unwrap();
+    let same_host = host
+        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .unwrap();
+    assert_eq!(same_host.run_id, accepted.run_id);
+    assert_eq!(same_host.disposition, CommandDisposition::AlreadyApplied);
+    assert!(
+        runtime
+            .host_chat_submissions(&["sub-1".to_owned()])
+            .unwrap()
+            .is_empty(),
+        "the failure left no stored fingerprint"
+    );
+
+    let restarted_runtime = runtime_on_store(dir.path(), &storage);
+    let mut restarted = host_with_project(&rt, restarted_runtime.clone(), dir.path());
+    let error = restarted
+        .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(
+        restarted_runtime.list_agents().is_empty(),
+        "nothing was applied a second time"
+    );
+}

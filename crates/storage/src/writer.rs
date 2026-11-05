@@ -136,7 +136,7 @@ enum Command {
     UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
     HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
     RecordHostChatSubmission(crate::HostChatSubmission, ReplyTx<bool>),
-    HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmission>>),
+    HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmissionState>>),
     HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
@@ -798,13 +798,14 @@ impl StorageHandle {
     }
 
     /// The recorded chat submissions among `submission_ids`, after all earlier writer requests.
+    /// A submission whose run was deleted is reported as such, without its content.
     ///
     /// # Errors
     /// Returns an error for SQLite failure or a closed writer.
     pub fn host_chat_submissions(
         &self,
         submission_ids: &[String],
-    ) -> Result<Vec<crate::HostChatSubmission>, StorageError> {
+    ) -> Result<Vec<crate::HostChatSubmissionState>, StorageError> {
         self.request(|reply| Command::HostChatSubmissions(submission_ids.to_vec(), reply))
     }
 

@@ -54,6 +54,12 @@ impl<V> Bounded<V> {
         self.entries.get(key)
     }
 
+    fn remove(&mut self, key: &str) {
+        if self.entries.remove(key).is_some() {
+            self.order.retain(|queued| queued != key);
+        }
+    }
+
     /// Insert unless `key` is present; the first value wins.
     fn insert_new(&mut self, key: String, value: V) {
         if self.entries.contains_key(&key) {
@@ -169,6 +175,11 @@ impl Receipts {
 
     pub fn submission(&self, submission: &str) -> Option<&SubmissionRecord> {
         self.submissions.get(submission)
+    }
+
+    /// Drop what is remembered about a submission whose conversation was deleted.
+    pub fn forget_submission(&mut self, submission: &str) {
+        self.submissions.remove(submission);
     }
 
     /// Remember who saved the answer to `question`. The first save stays: a

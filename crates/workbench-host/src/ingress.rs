@@ -40,6 +40,20 @@ pub struct CommandHost {
     projects: Box<dyn ProjectDirectory>,
 }
 
+/// What the host knows about a submission id.
+enum Seen {
+    New,
+    /// Only the runtime's input receipt exists: the words, not the identity.
+    Unverifiable,
+    /// The conversation it went to was deleted.
+    Deleted,
+    Known {
+        fingerprint: String,
+        run_id: Option<String>,
+        sent_by: Option<Provenance>,
+    },
+}
+
 /// What running a command came to.
 enum Executed {
     /// A chat whose submission id was accepted before, with the same content. It
@@ -208,25 +222,24 @@ impl CommandHost {
     }
 
     /// Who sent the accepted chat named `submission`, from memory or from storage.
+    /// `None` for an unknown id and for one whose run was deleted: deletion removes
+    /// what the host knew about the message.
     pub fn submission_provenance(&self, submission: &str) -> Option<Provenance> {
-        if let Some(record) = self.receipts.submission(submission) {
-            return Some(record.sent_by.clone());
+        match self.submission_status(submission).ok()? {
+            Seen::Known { sent_by, .. } => sent_by,
+            Seen::New | Seen::Unverifiable | Seen::Deleted => None,
         }
-        let stored = self
-            .service
-            .runtime()
-            .host_chat_submissions(&[submission.to_owned()])
-            .ok()?
-            .into_iter()
-            .next()?;
-        serde_json::from_str(&stored.provenance_json).ok()
     }
 
     /// Who saved the answer to `question`, if this host saw it saved. An answer
     /// stored before this host started has no provenance here; it is never
-    /// credited to whoever repeats it.
-    pub fn answer_provenance(&self, question: &str) -> Option<&Provenance> {
-        self.receipts.answer_provenance(question)
+    /// credited to whoever repeats it. `None` once the question was deleted.
+    pub fn answer_provenance(&self, question: &str) -> Option<Provenance> {
+        let runtime = self.service.runtime();
+        if runtime.has_run_store() && !matches!(runtime.user_question(question), Ok(Some(_))) {
+            return None;
+        }
+        self.receipts.answer_provenance(question).cloned()
     }
 
     fn execute_local(
@@ -332,74 +345,98 @@ impl CommandHost {
         );
     }
 
+    /// What this host knows about a submission id, from storage and memory.
+    ///
+    /// Storage is authoritative: a row whose run was deleted is `Deleted` and a live
+    /// row is compared by fingerprint. Memory covers what storage does not have: no run
+    /// store at all, or a fingerprint that could not be stored. A memory entry whose
+    /// input receipt is gone from a store that has receipts was reclaimed with its
+    /// run, so it counts as deleted. The runtime's input receipt alone records only
+    /// the words, which cannot prove two messages are the same.
+    fn submission_status(&self, id: &str) -> Result<Seen, storage::StorageError> {
+        let runtime = self.service.runtime();
+        let ids = [id.to_owned()];
+        match runtime.host_chat_submissions(&ids)?.into_iter().next() {
+            Some(storage::HostChatSubmissionState::Deleted(_)) => return Ok(Seen::Deleted),
+            Some(storage::HostChatSubmissionState::Live(stored)) => {
+                return Ok(Seen::Known {
+                    fingerprint: stored.fingerprint,
+                    run_id: Some(stored.run_id),
+                    sent_by: serde_json::from_str(&stored.provenance_json).ok(),
+                });
+            }
+            None => {}
+        }
+        let has_receipt = !runtime.host_input_receipts(&ids)?.is_empty();
+        Ok(match self.receipts.submission(id) {
+            Some(record) if !runtime.has_run_store() || has_receipt => Seen::Known {
+                fingerprint: record.fingerprint.clone(),
+                run_id: record.run_id.clone(),
+                sent_by: Some(record.sent_by.clone()),
+            },
+            Some(_) => Seen::Deleted,
+            None if has_receipt => Seen::Unverifiable,
+            None => Seen::New,
+        })
+    }
+
     /// The earlier outcome of a chat's submission id: `Ok(Some(run))` for the same
     /// message again, `Err` for an id that cannot be applied, `Ok(None)` for a new
     /// submission.
     ///
     /// "The same message" is the digest of every field of the message
     /// ([`chat_fingerprint`]): thread, project, composer role, text, skills, images,
-    /// model preference and fork seed. It is looked up in memory, then in storage, so
-    /// the answer survives a restart and the bounded in-memory table. The runtime's
-    /// host input receipt records only the words; an id found only there (accepted
-    /// before fingerprints were stored, or while storing one failed) cannot be
-    /// compared and is **never** treated as the same message: it is refused.
+    /// model preference and fork seed. An id whose run was deleted, or that has only
+    /// the runtime's input receipt (accepted before fingerprints were stored, or while
+    /// storing one failed), cannot be answered and is refused.
     fn earlier_submission(
-        &self,
+        &mut self,
         chat: &ChatInput,
     ) -> Result<Option<Option<String>>, (RejectKind, String)> {
         let id = chat.submission_id.as_str();
-        let fingerprint = chat_fingerprint(chat);
-        let different = || {
-            (
-                RejectKind::Conflict,
-                format!(
-                    "submission `{}` was already used for a different message",
-                    id.escape_debug()
-                ),
-            )
-        };
-        if let Some(record) = self.receipts.submission(id) {
-            return if record.fingerprint == fingerprint {
-                Ok(Some(record.run_id.clone()))
-            } else {
-                Err(different())
-            };
-        }
-        let unavailable = |error: storage::StorageError| {
+        let status = self.submission_status(id).map_err(|error| {
             (
                 RejectKind::Unavailable,
                 format!("could not read earlier submissions: {error}"),
             )
-        };
-        let ids = [id.to_owned()];
-        let runtime = self.service.runtime();
-        if let Some(stored) = runtime
-            .host_chat_submissions(&ids)
-            .map_err(unavailable)?
-            .into_iter()
-            .next()
-        {
-            return if stored.fingerprint == fingerprint {
-                Ok(Some(Some(stored.run_id)))
-            } else {
-                Err(different())
-            };
-        }
-        if runtime
-            .host_input_receipts(&ids)
-            .map_err(unavailable)?
-            .is_empty()
-        {
-            Ok(None)
-        } else {
-            Err((
+        })?;
+        match status {
+            Seen::New => Ok(None),
+            Seen::Known {
+                fingerprint,
+                run_id,
+                ..
+            } => {
+                if fingerprint == chat_fingerprint(chat) {
+                    Ok(Some(run_id))
+                } else {
+                    Err((
+                        RejectKind::Conflict,
+                        format!(
+                            "submission `{}` was already used for a different message",
+                            id.escape_debug()
+                        ),
+                    ))
+                }
+            }
+            Seen::Deleted => {
+                self.receipts.forget_submission(id);
+                Err((
+                    RejectKind::Conflict,
+                    format!(
+                        "submission `{}` belonged to a conversation that was deleted",
+                        id.escape_debug()
+                    ),
+                ))
+            }
+            Seen::Unverifiable => Err((
                 RejectKind::Conflict,
                 format!(
                     "submission `{}` was accepted without a stored fingerprint; it cannot be \
                      checked against this message, so it is not applied again",
                     id.escape_debug()
                 ),
-            ))
+            )),
         }
     }
 
