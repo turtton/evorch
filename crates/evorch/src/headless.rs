@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
+use event_bus::{AgentRunPhase, EventBus, EventKind, ToolEvent};
 use recorder::pricing::UsagePricing;
 use recorder::storage_bridge::{OwnedStorageBridge, StorageBridge};
 use routing::EnvLookup;
@@ -417,9 +417,12 @@ async fn serve_approvals(mut receiver: event_bus::EventReceiver, bus: Arc<EventB
         })
         .await
         .unwrap_or(false);
-        bus.emit(Event::new(ToolEvent::ApprovalResolved {
-            call_id,
+        if let Err(error) = sandbox::approval::ApprovalRegistry::for_bus(&bus).resolve_presented(
+            &call_id,
             approved,
-        }));
+            sandbox::approval::ApprovalProvenance::CLI,
+        ) {
+            eprintln!("Approval no longer available: {error}");
+        }
     }
 }

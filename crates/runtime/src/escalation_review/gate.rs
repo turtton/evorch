@@ -82,17 +82,13 @@ impl SandboxEscalationGate {
             ShellAccess::Host => "shell_escalation",
             ShellAccess::Network => "shell_network",
         };
-        let call_id = format!(
-            "{}:{}",
-            ctx.run_id,
-            ctx.call_id.as_deref().unwrap_or_default()
-        );
-        match ApprovalGate::new(self.bus.clone(), self.human_timeout).request_with_input(
-            "shell", &call_id,
-            Some(serde_json::json!({"command":command, "justification":justification, "kind":kind})),
-        ).await {
+        let call_id = ctx.call_id.as_deref().unwrap_or_default();
+        match ApprovalGate::new(self.bus.clone(), self.human_timeout).request_for(sandbox::approval::ApprovalRequest {
+            run_id: &ctx.run_id, thread_id: ctx.thread_id.as_deref(), tool_name: "shell", call_id,
+            input: Some(serde_json::json!({"command":command, "justification":justification, "kind":kind})),
+        }).await {
             ApprovalOutcome::Approved => EscalationDecision::Approve,
-            ApprovalOutcome::Denied => EscalationDecision::Deny { reason: "shell escalation denied by user".into() },
+            ApprovalOutcome::Denied | ApprovalOutcome::Cancelled => EscalationDecision::Deny { reason: "shell escalation denied by user".into() },
             ApprovalOutcome::TimedOut => EscalationDecision::Deny { reason: "shell escalation approval timed out".into() },
         }
     }
@@ -102,11 +98,7 @@ impl SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         request: &FileAccessRequest,
     ) -> EscalationDecision {
-        let call_id = format!(
-            "{}:{}",
-            ctx.run_id,
-            ctx.call_id.as_deref().unwrap_or_default()
-        );
+        let call_id = ctx.call_id.as_deref().unwrap_or_default();
         let path = request
             .paths
             .iter()
@@ -124,11 +116,17 @@ impl SandboxEscalationGate {
             input["change"] = change.clone().into();
         }
         match ApprovalGate::new(self.bus.clone(), self.human_timeout)
-            .request_with_input(&request.tool, &call_id, Some(input))
+            .request_for(sandbox::approval::ApprovalRequest {
+                run_id: &ctx.run_id,
+                thread_id: ctx.thread_id.as_deref(),
+                tool_name: &request.tool,
+                call_id,
+                input: Some(input),
+            })
             .await
         {
             ApprovalOutcome::Approved => EscalationDecision::Approve,
-            ApprovalOutcome::Denied => EscalationDecision::Deny {
+            ApprovalOutcome::Denied | ApprovalOutcome::Cancelled => EscalationDecision::Deny {
                 reason: "file access escalation denied by user".into(),
             },
             ApprovalOutcome::TimedOut => EscalationDecision::Deny {

@@ -1,166 +1,56 @@
-//! イベントバスを介した利用者承認を扱います。
-
+//! Registry-backed approval gate. Bus messages are notifications only.
+use event_bus::EventBus;
 use std::{sync::Arc, time::Duration};
+mod registry;
+pub use registry::*;
+#[cfg(test)]
+mod tests;
 
-use event_bus::{Event, EventBus, EventKind, RecvError, ToolEvent};
-
-/// 承認要求の結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
     Denied,
     TimedOut,
+    Cancelled,
 }
 
-/// 承認要求と応答待機をまとめるゲート。
+/// Keeps the existing construction API; every gate on a core bus shares authority.
 pub struct ApprovalGate {
     event_bus: Arc<EventBus>,
     timeout: Duration,
 }
-
 impl ApprovalGate {
     pub const fn new(event_bus: Arc<EventBus>, timeout: Duration) -> Self {
         Self { event_bus, timeout }
     }
-
+    pub fn registry(&self) -> Arc<ApprovalRegistry> {
+        ApprovalRegistry::for_bus(&self.event_bus)
+    }
     pub async fn request(&self, tool_name: &str, call_id: &str) -> ApprovalOutcome {
         self.request_with_input(tool_name, call_id, None).await
     }
-
-    /// ツール引数を承認要求へ添えて、同じ call ID の応答を待ちます。
+    /// Convenience API for unbound callers. Runtime/tool paths use request_for.
     pub async fn request_with_input(
         &self,
         tool_name: &str,
         call_id: &str,
         input: Option<serde_json::Value>,
     ) -> ApprovalOutcome {
-        let mut receiver = self.event_bus.subscribe();
-        self.event_bus
-            .emit(Event::new(ToolEvent::ApprovalRequested {
-                tool_name: tool_name.to_owned(),
-                call_id: call_id.to_owned(),
-                input,
-            }));
-
-        let response = async {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => match event.kind {
-                        EventKind::Tool(ToolEvent::ApprovalResolved {
-                            call_id: resolved_id,
-                            approved,
-                        }) if resolved_id == call_id => {
-                            return if approved {
-                                ApprovalOutcome::Approved
-                            } else {
-                                ApprovalOutcome::Denied
-                            };
-                        }
-                        EventKind::Lifecycle(_)
-                        | EventKind::Ledger(_)
-                        | EventKind::Message(_)
-                        | EventKind::Tool(_)
-                        | EventKind::Usage(_)
-                        | EventKind::Provider(_)
-                        | EventKind::Fault(_)
-                        | EventKind::AgentMessage(_)
-                        | EventKind::Compaction(_)
-                        | EventKind::Orchestrator(_)
-                        | EventKind::Diagnostic(_)
-                        | EventKind::Ownership(_) => {}
-                    },
-                    Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return ApprovalOutcome::TimedOut,
-                }
-            }
-        };
-
-        tokio::time::timeout(self.timeout, response)
-            .await
-            .unwrap_or(ApprovalOutcome::TimedOut)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use event_bus::{EventKind, EventReceiver};
-
-    async fn respond(event_bus: Arc<EventBus>, mut receiver: EventReceiver, approved: bool) {
-        let event = receiver.recv().await.expect("承認要求を受信できるはずです");
-        let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind else {
-            panic!("承認要求イベントであるはずです");
-        };
-        event_bus.emit(Event::new(ToolEvent::ApprovalResolved {
+        self.request_for(ApprovalRequest {
+            run_id: "unbound",
+            thread_id: None,
+            tool_name,
             call_id,
-            approved,
-        }));
+            input,
+        })
+        .await
     }
-
-    // Given: 承認する応答者 / When: 承認を要求 / Then: 承認済みになる
-    #[tokio::test]
-    async fn request_returns_approved() {
-        let event_bus = Arc::new(EventBus::new(16));
-        let receiver = event_bus.subscribe();
-        let responder = tokio::spawn(respond(Arc::clone(&event_bus), receiver, true));
-        let gate = ApprovalGate::new(event_bus, Duration::from_secs(1));
-
-        assert_eq!(
-            gate.request("shell", "call-1").await,
-            ApprovalOutcome::Approved
-        );
-        responder.await.expect("応答タスクが完了するはずです");
-    }
-
-    // Given: 拒否する応答者 / When: 承認を要求 / Then: 拒否になる
-    #[tokio::test]
-    async fn request_returns_denied() {
-        let event_bus = Arc::new(EventBus::new(16));
-        let receiver = event_bus.subscribe();
-        let responder = tokio::spawn(respond(Arc::clone(&event_bus), receiver, false));
-        let gate = ApprovalGate::new(event_bus, Duration::from_secs(1));
-
-        assert_eq!(
-            gate.request("shell", "call-2").await,
-            ApprovalOutcome::Denied
-        );
-        responder.await.expect("応答タスクが完了するはずです");
-    }
-
-    // Given: 応答者なし / When: 短い期限で承認を要求 / Then: 時間切れになる
-    #[tokio::test]
-    async fn request_times_out_without_responder() {
-        let gate = ApprovalGate::new(Arc::new(EventBus::new(16)), Duration::from_millis(50));
-
-        assert_eq!(
-            gate.request("shell", "call-3").await,
-            ApprovalOutcome::TimedOut
-        );
-    }
-
-    // Given: 異なる ID の応答後に正しい応答を返す応答者 / When: 承認を要求 / Then: 正しい応答だけ採用される
-    #[tokio::test]
-    async fn request_ignores_foreign_call_id() {
-        let event_bus = Arc::new(EventBus::new(16));
-        let responder_bus = Arc::clone(&event_bus);
-        let mut receiver = event_bus.subscribe();
-        let responder = tokio::spawn(async move {
-            let _request = receiver.recv().await.expect("承認要求を受信できるはずです");
-            responder_bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                call_id: "foreign".to_owned(),
-                approved: false,
-            }));
-            responder_bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                call_id: "call-4".to_owned(),
-                approved: true,
-            }));
-        });
-        let gate = ApprovalGate::new(event_bus, Duration::from_secs(1));
-
-        assert_eq!(
-            gate.request("shell", "call-4").await,
-            ApprovalOutcome::Approved
-        );
-        responder.await.expect("応答タスクが完了するはずです");
+    pub async fn request_for(&self, request: ApprovalRequest<'_>) -> ApprovalOutcome {
+        match self.registry().register(request, self.timeout).wait().await {
+            ApprovalState::Approved => ApprovalOutcome::Approved,
+            ApprovalState::Denied => ApprovalOutcome::Denied,
+            ApprovalState::Expired => ApprovalOutcome::TimedOut,
+            ApprovalState::Cancelled | ApprovalState::Pending => ApprovalOutcome::Cancelled,
+        }
     }
 }

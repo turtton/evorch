@@ -1612,6 +1612,7 @@ impl AgentRuntime {
                 None
             }
         };
+        self.bind_approval_owner(run_id, &config, &execution);
         let task = RunTask {
             publication: execution.publication(),
             ancestry,
@@ -2540,6 +2541,7 @@ impl AgentRuntime {
                 admission.cancelled = true;
             } else if let Some(entry) = runs.get(&target) {
                 entry.execution.cancel_tx.send_replace(RunInterrupt::Stop);
+                entry.execution.approvals.close();
             } else {
                 continue;
             }
@@ -2840,6 +2842,23 @@ impl AgentRuntime {
                 })?;
         }
         Ok(())
+    }
+
+    fn bind_approval_owner(
+        &self,
+        run: RunId,
+        config: &RunConfig,
+        execution: &Arc<ExecutionControl>,
+    ) {
+        let thread = config.ownership.as_ref().map(|p| p.thread_id.clone());
+        sandbox::approval::ApprovalRegistry::for_bus(&self.shared.bus).bind_run(
+            &run.to_string(),
+            thread,
+            &execution.approvals,
+        );
+        if let Some(permit) = &config.ownership {
+            crate::ownership::authority::watch_approvals(permit, &execution.approvals);
+        }
     }
 
     /// Fence the run's events by the in-process authority record, never by a

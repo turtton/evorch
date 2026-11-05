@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use agents::Role;
 use config::EscalationApproval;
-use event_bus::{AgentRunPhase, Event, EventBus, EventKind, ToolEvent};
+use event_bus::{AgentRunPhase, EventBus, EventKind, ToolEvent};
 use providers::{ContentBlock, FinishReason, Message, ToolResultContent};
 use runtime::scratch::ThreadScratch;
 use runtime::{AgentRuntime, ExecutionPolicy, RunConfig, SandboxFactory, WorkspaceMounts};
@@ -236,10 +236,13 @@ fn respond_to_file_access(
                     && input["kind"] == "file_access"
                 {
                     seen.push(input);
-                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
+                    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                        .resolve_presented(
+                            &(call_id),
+                            approved,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     break;
                 }
             }

@@ -124,11 +124,14 @@ async fn scenario_with_policy(
                 if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) =
                     approvals.recv().await.expect("approval").kind
                 {
-                    assert!(call_id.ends_with(":mcp-call"));
-                    approval_bus.emit(event_bus::Event::new(ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
+                    assert!(call_id.contains(":mcp-call:"));
+                    sandbox::approval::ApprovalRegistry::for_bus(&approval_bus)
+                        .resolve_presented(
+                            &(call_id),
+                            approved,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     break;
                 }
             }

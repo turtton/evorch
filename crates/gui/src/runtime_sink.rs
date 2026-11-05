@@ -604,11 +604,17 @@ impl RuntimeCommandSink {
                 Vec::new()
             }
             WorkbenchCommand::DecideToolApproval { call_id, approved } => {
-                if let Some(bus) = &self.event_bus {
-                    bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
+                if let Some(bus) = &self.event_bus
+                    && let Err(error) = sandbox::approval::ApprovalRegistry::for_bus(bus)
+                        .resolve_presented(
+                            &call_id,
+                            approved,
+                            sandbox::approval::ApprovalProvenance::DESKTOP,
+                        )
+                {
+                    return vec![LoopEvent::CommandRejected {
+                        reason: error.to_string(),
+                    }];
                 }
                 Vec::new()
             }
@@ -1369,31 +1375,76 @@ mod tests {
 
     #[test]
     fn tool_approval_preserves_correlation_when_bus_is_configured() {
-        // Given: 承認結果を購読する bus を注入した sink。
+        use sandbox::approval::{
+            ApprovalGate, ApprovalOutcome, ApprovalProvenance, ApprovalRegistry, ApprovalRequest,
+        };
         let (rt, sink, _, _) = build_sink();
         let bus = Arc::new(EventBus::new(64));
+        let registry = ApprovalRegistry::for_bus(&bus);
         let mut subscriber = bus.subscribe();
-        let mut sink = sink.with_event_bus(Arc::clone(&bus));
-
+        let mut sink = sink.with_event_bus(bus.clone());
         for approved in [true, false] {
-            // When: 相関 ID を含む承認・拒否を提出する。
-            let events = sink.submit(WorkbenchCommand::DecideToolApproval {
-                call_id: "run-2:call-1:17".into(),
-                approved,
+            let gate = ApprovalGate::new(bus.clone(), std::time::Duration::from_secs(300));
+            let task = rt.spawn(async move {
+                gate.request_for(ApprovalRequest {
+                    run_id: "run-2",
+                    thread_id: Some("thread-2"),
+                    tool_name: "shell",
+                    call_id: "call-1",
+                    input: None,
+                })
+                .await
             });
-
-            // Then: 即応イベントはなく、相関 ID と判断をそのまま配送する。
-            assert!(events.is_empty());
-            let event =
-                rt.block_on(async { subscriber.recv().await.expect("approval resolved event") });
+            let token = rt.block_on(async {
+                loop {
+                    if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested {
+                        call_id,
+                        ..
+                    }) = subscriber.recv().await.unwrap().kind
+                    {
+                        break call_id;
+                    }
+                }
+            });
+            let snapshot = registry.list_pending(None, 1).pop().unwrap();
+            assert_eq!(snapshot.id.value, token);
+            assert!(
+                sink.submit(WorkbenchCommand::DecideToolApproval {
+                    call_id: token.clone(),
+                    approved
+                })
+                .is_empty()
+            );
+            assert_eq!(
+                rt.block_on(task).unwrap(),
+                if approved {
+                    ApprovalOutcome::Approved
+                } else {
+                    ApprovalOutcome::Denied
+                }
+            );
+            assert_eq!(
+                registry.get(&snapshot.id).unwrap().decided_by,
+                Some(ApprovalProvenance::DESKTOP)
+            );
             assert!(matches!(
-                event.kind,
-                EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: actual,
-                }) if call_id.as_bytes() == b"run-2:call-1:17" && actual == approved
+                sink.submit(WorkbenchCommand::DecideToolApproval {
+                    call_id: token,
+                    approved
+                })
+                .as_slice(),
+                [LoopEvent::CommandRejected { .. }]
             ));
         }
+        // Historical/provider IDs are not live authorization tokens.
+        assert!(matches!(
+            sink.submit(WorkbenchCommand::DecideToolApproval {
+                call_id: "run-2:call-1:17".into(),
+                approved: true
+            })
+            .as_slice(),
+            [LoopEvent::CommandRejected { .. }]
+        ));
     }
 
     #[test]

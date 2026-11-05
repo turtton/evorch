@@ -4,6 +4,7 @@ use super::*;
 pub(crate) struct ExecutionControl {
     publication: PublicationToken,
     pub(super) cancel_tx: watch::Sender<RunInterrupt>,
+    pub(crate) approvals: Arc<sandbox::approval::ApprovalOwner>,
 }
 
 #[derive(Clone)]
@@ -16,7 +17,12 @@ struct PublicationFence {
 
 impl ExecutionControl {
     pub(crate) fn new(cancelled: bool) -> Arc<Self> {
+        let approvals = Arc::new(sandbox::approval::ApprovalOwner::default());
+        if cancelled {
+            approvals.close();
+        }
         Arc::new(Self {
+            approvals,
             publication: PublicationToken(Arc::new(PublicationFence {
                 gate: Mutex::new(()),
                 cancelled: AtomicBool::new(cancelled),
@@ -40,6 +46,7 @@ impl ExecutionControl {
     fn forbid_publication(&self) {
         self.publication.0.cancelled.store(true, Ordering::Release);
         self.cancel_tx.send_replace(RunInterrupt::Cancel);
+        self.approvals.close();
     }
 }
 

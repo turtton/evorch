@@ -180,13 +180,9 @@ async fn handoff_admitted_before_threshold(critical: bool) {
                 events.recv().await.unwrap().kind
             {
                 assert_eq!(fixture.denials(&fixture.ctx), CONSECUTIVE_DENIAL_LIMIT);
-                fixture
-                    .gate
-                    .bus
-                    .emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved: true,
-                    }));
+                sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }

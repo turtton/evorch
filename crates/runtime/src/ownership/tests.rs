@@ -1,5 +1,61 @@
 use super::*;
 
+#[tokio::test]
+async fn observed_owner_loss_closes_pending_approvals_even_before_wait_is_polled() {
+    use sandbox::approval::{ApprovalOwner, ApprovalRegistry, ApprovalRequest, ApprovalState};
+    let directory = tempfile::tempdir().unwrap();
+    let bus = std::sync::Arc::new(event_bus::EventBus::new(32));
+    let registry = ApprovalRegistry::for_bus(&bus);
+    let permit = OwnerPermit {
+        registry_path: directory.path().join("owners.db"),
+        thread_id: "thread-approval".into(),
+        lease: Lease {
+            owner_id: "old-owner".into(),
+            generation: 1,
+            expires_at: u64::MAX,
+        },
+        run_id: Some("run-approval".into()),
+    };
+    let owner = std::sync::Arc::new(ApprovalOwner::default());
+    registry.bind_run("run-approval", Some(permit.thread_id.clone()), &owner);
+    authority::watch_approvals(&permit, &owner);
+    let token = permit.clone();
+    bus.register_mutation_fence(
+        "run-approval".into(),
+        std::sync::Arc::new(move || {
+            !authority::is_fenced(&token.registry_path, &token.thread_id, &token.lease)
+        }),
+    );
+    let pending = registry.register(
+        ApprovalRequest {
+            run_id: "run-approval",
+            thread_id: None,
+            tool_name: "shell",
+            call_id: "call",
+            input: None,
+        },
+        std::time::Duration::from_secs(300),
+    );
+    authority::record_fenced(&permit.registry_path, &permit.thread_id, &permit.lease);
+    assert!(registry.list_pending(None, 1).is_empty());
+    assert_eq!(pending.wait().await, ApprovalState::Cancelled);
+    // A fence observed before subscription closes a newly registered owner too.
+    let late = std::sync::Arc::new(ApprovalOwner::default());
+    authority::watch_approvals(&permit, &late);
+    registry.bind_run("run-late", None, &late);
+    let pending = registry.register(
+        ApprovalRequest {
+            run_id: "run-late",
+            thread_id: None,
+            tool_name: "shell",
+            call_id: "call",
+            input: None,
+        },
+        std::time::Duration::from_secs(300),
+    );
+    assert_eq!(pending.wait().await, ApprovalState::Cancelled);
+}
+
 #[cfg(unix)]
 #[test]
 fn host_release_allows_explicit_claim_and_fences_old_permit() {

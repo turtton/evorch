@@ -284,7 +284,7 @@ async fn web_fetch_critical_approval_is_handed_to_the_user() {
         assert!(events.iter().any(|event| matches!(
             &event.kind,
             EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
-                if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-critical")
+                if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_id}:fetch-critical:"))
         )));
         assert_eq!(
             events.iter().any(|event| matches!(
@@ -346,7 +346,7 @@ async fn web_fetch_user_review_executes_only_after_approval() {
             matches!(
                 &event.kind,
             EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
-                    if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-1")
+                    if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_id}:fetch-1:"))
             )
         })
         .expect("ApprovalRequested が発行される");
@@ -397,7 +397,7 @@ async fn web_fetch_denied_user_review_never_starts() {
     assert!(events.iter().any(|event| matches!(
         &event.kind,
             EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, input: Some(input) })
-            if tool_name == "web_fetch" && call_id == &format!("{run_id}:fetch-1")
+            if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_id}:fetch-1:"))
                 && input == &json!({"url": "https://example.invalid/"})
     )));
     assert!(!events.iter().any(|event| matches!(
@@ -473,12 +473,12 @@ async fn parallel_runs_do_not_cross_accept_approval_resolutions() {
     assert!(events.iter().any(|event| matches!(
         &event.kind,
             EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
-            if tool_name == "web_fetch" && call_id == &format!("{run_a}:fetch-1")
+            if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_a}:fetch-1:"))
     )));
     assert!(events.iter().any(|event| matches!(
         &event.kind,
             EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, .. })
-            if tool_name == "web_fetch" && call_id == &format!("{run_b}:fetch-1")
+            if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_b}:fetch-1:"))
     )));
     // ToolStarted / ToolCompleted の call_id は生 call_id のまま (相関キー化は
     // 承認イベントのみで、ツールライフサイクルイベントは変更しない)。
