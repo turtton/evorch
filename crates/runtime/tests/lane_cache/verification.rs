@@ -2,7 +2,9 @@
 //! Gates order independent runs by explicit tool arrivals, never scheduler timing.
 use super::*;
 use sha2::{Digest, Sha256};
-struct ReadGate(tokio::sync::mpsc::UnboundedSender<(String, tokio::sync::oneshot::Sender<()>)>);
+pub(super) struct ReadGate(
+    pub(super) tokio::sync::mpsc::UnboundedSender<(String, tokio::sync::oneshot::Sender<()>)>,
+);
 #[async_trait::async_trait]
 impl Tool for ReadGate {
     fn name(&self) -> &'static str {

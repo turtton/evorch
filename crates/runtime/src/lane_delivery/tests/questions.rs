@@ -230,3 +230,132 @@ async fn active_turn_delivery_is_not_a_completed_root_wake_or_finish_gate() {
     // Neither an unanswered lane question nor unverified ready blocks this lead.
     f.finish(lead).await;
 }
+
+#[tokio::test]
+async fn answer_read_failure_after_receipt_keeps_ack_pending_and_retries_child_continuation() {
+    let mut f = Fixture::new();
+    let (lead, old) = f.lead().await;
+    let lane = f.lane(lead, "retry-child").await;
+    let child = f
+        .runtime
+        .spawn_reserved_child(
+            lane.root_run_id,
+            f.runtime.reserve_run_id(),
+            Role::Worker,
+            "original child",
+            RunConfig::default(),
+        )
+        .unwrap();
+    f.runtime.wait(child).await.unwrap();
+    f.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let q = f
+        .runtime
+        .request_user_question(child, "scope?".into(), vec![], false)
+        .unwrap();
+    f.runtime
+        .forward_lane_question(lane.root_run_id, &q.id, "forward")
+        .unwrap();
+    let q = f.runtime.user_question(&q.id).unwrap().unwrap();
+    let answered = f
+        .runtime
+        .resolve_lane_question(
+            lead,
+            crate::runtime::questions::routing::LaneAnswerRequest {
+                question_id: q.id.clone(),
+                management_revision: q.management_revision.unwrap(),
+                routing_revision: q.routing_revision,
+                operation_id: "answer".into(),
+                answer: Some("task decision".into()),
+            },
+        )
+        .unwrap();
+    let hosts = Arc::new(Hosts {
+        targets: HashMap::from([(
+            lane.thread_id.clone(),
+            LaneDeliveryTarget {
+                root_run_id: lane.root_run_id,
+                ..old.target.clone()
+            },
+        )]),
+        hold_lead: AtomicBool::new(true),
+        restores: Mutex::new(HashMap::new()),
+    });
+    *f.runtime.shared.lanes.delivery.host.lock().unwrap() = Some(hosts);
+    let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload FROM lane_question_routes WHERE question_id=?1",
+            [&q.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let path = f.config.db_path.clone();
+    let id = q.id.clone();
+    let inject: Box<dyn FnOnce()> = Box::new(move || {
+        // A real decoding failure in the routing read, strictly after durable
+        // input acceptance. Nothing in the saved provider history is altered.
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "UPDATE lane_question_routes SET payload='unreadable' WHERE question_id=?1",
+                [id],
+            )
+            .unwrap();
+    });
+    let outcome = AFTER_RECEIPT
+        .scope(
+            std::cell::RefCell::new(Some(inject)),
+            f.runtime.drive_lane_deliveries(&lane.thread_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::StorageFailed)
+    );
+    assert_eq!(f.receipts(), 1);
+    assert!(
+        f.storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .contains(&lane.thread_id)
+    );
+    conn.execute(
+        "UPDATE lane_question_routes SET payload=?2 WHERE question_id=?1",
+        rusqlite::params![q.id, payload],
+    )
+    .unwrap();
+    f.runtime
+        .drive_lane_deliveries(&lane.thread_id)
+        .await
+        .unwrap();
+    f.runtime.wait(child).await.unwrap();
+    let record = f
+        .runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_record(child)
+        .unwrap()
+        .unwrap();
+    let messages: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    assert!(AgentRuntime::answer_is_in_history(&messages, &answered));
+    assert_eq!(
+        f.receipts(),
+        1,
+        "ACK repair must not append the answer twice"
+    );
+    assert!(
+        !f.storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .contains(&lane.thread_id)
+    );
+    for run in [lane.root_run_id, lead] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
+}

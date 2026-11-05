@@ -203,7 +203,11 @@ fn check_claim(
         return Err(conflict("invalid_claim_members"));
     }
     for notice in &claim.notifications {
-        crate::repo::lane_control::check_nudge(conn, notice)?;
+        // Eligibility gates new input, not ACK repair of an already saved
+        // prefix. Progress/Error after receipt must not strand its ACK.
+        if !received(conn, notice)? {
+            crate::repo::lane_control::check_nudge(conn, notice)?;
+        }
         live_thread(conn, &notice.source_thread_id)?;
         let current = lane(conn, &notice.lane_id)?;
         if matches!(notice.kind, LaneNotificationKind::Nudge { .. })

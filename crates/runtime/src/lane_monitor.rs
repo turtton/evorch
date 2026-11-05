@@ -108,6 +108,16 @@ impl LaneMonitor {
                     activity, ..
                 }) => {
                     state.activity = Some(activity);
+                    if matches!(
+                        activity,
+                        event_bus::RunActivity::Idle
+                            | event_bus::RunActivity::User
+                            | event_bus::RunActivity::Children
+                    ) {
+                        // The loop reached a safe boundary after joining its work.
+                        state.tools.clear();
+                        state.requests.clear();
+                    }
                 }
                 EventKind::Tool(ToolEvent::ToolStarted { call_id, .. }) => {
                     state.tools.insert(call_id);
@@ -245,7 +255,11 @@ impl AgentRuntime {
             owned_runs.extend(children.iter().copied());
             let healthy_child_wait =
                 self.lane_healthy_child_wait(target.root_run_id, phase, &monitor);
-            let unknown_running = phase == Some(AgentRunPhase::Running) && execution.is_none();
+            // A completion from a partial event suffix does not prove that all
+            // parallel work finished. Only a whole-run activity boundary can
+            // re-establish observability after bind/lag.
+            let unknown_running = phase == Some(AgentRunPhase::Running)
+                && execution.is_none_or(|e| e.activity.is_none());
             let busy = execution.is_some_and(Execution::busy);
             let exited = execution.and_then(|e| e.exited_at);
             let exempt = busy
