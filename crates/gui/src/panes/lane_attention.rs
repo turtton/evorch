@@ -223,46 +223,44 @@ fn row_card(
                 {
                     op = Some(AttentionOp::OpenLane(thread.clone()));
                 }
-                match &item.kind {
+                // (button label, hover text, what it does): only operations that exist today.
+                let offered = match &item.kind {
                     LaneAttentionKind::Blocked { .. }
                     | LaneAttentionKind::Failed { .. }
                     | LaneAttentionKind::RestoreFailed { .. }
                     | LaneAttentionKind::Stall { .. }
                         if allows(LaneAttentionAction::Continue) =>
                     {
-                        if ui
-                            .small_button("Continue lead")
-                            .on_hover_text("Resume the lead's conversation")
-                            .clicked()
-                        {
-                            op = Some(AttentionOp::ContinueLead);
-                        }
+                        Some((
+                            "Continue lead",
+                            "Resume the lead's conversation",
+                            AttentionOp::ContinueLead,
+                        ))
                     }
                     LaneAttentionKind::StopPending { .. }
                         if allows(LaneAttentionAction::Resume) =>
                     {
-                        if ui
-                            .small_button("Continue lead")
-                            .on_hover_text(
-                                "Resume the lead's conversation; held notices are then delivered",
-                            )
-                            .clicked()
-                        {
-                            op = Some(AttentionOp::ContinueLead);
-                        }
+                        Some((
+                            "Continue lead",
+                            "Resume the lead's conversation; held notices are then delivered",
+                            AttentionOp::ContinueLead,
+                        ))
                     }
                     LaneAttentionKind::WakeSuppressed { .. }
                         if allows(LaneAttentionAction::Resume) =>
                     {
-                        if ui
-                            .small_button("Resume notifications")
-                            .on_hover_text("Deliver this lane's held notices to its lead again")
-                            .clicked()
-                        {
-                            op = Some(AttentionOp::ResumeDelivery);
-                        }
+                        Some((
+                            "Resume notifications",
+                            "Deliver this lane's held notices to its lead again",
+                            AttentionOp::ResumeDelivery,
+                        ))
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some((label, hover, offered)) = offered
+                    && ui.small_button(label).on_hover_text(hover).clicked()
+                {
+                    op = Some(offered);
                 }
             });
             if let Some(op) = op {
