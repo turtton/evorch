@@ -7,6 +7,7 @@ fn event_input_wins_when_fallback_has_different_arguments() {
     // Given: 引数の異なるイベントと旧 ToolStarted の補完候補。
     let mut model = PendingApprovalsModel::default();
     let event = Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "shell".into(),
         call_id: "run-2:call-1:17".into(),
         input: Some(json!({"command": "pwd"})),

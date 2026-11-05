@@ -60,6 +60,8 @@ pub struct NotificationsModel {
     items: VecDeque<Notification>,
     acks: BTreeMap<u64, AttentionAck>,
     next_id: u64,
+    /// Counts unreadable-history notices; the lane attention list reads again when it moves.
+    gap_epoch: u64,
 }
 
 impl NotificationsModel {
@@ -214,6 +216,7 @@ impl NotificationsModel {
                 String::new()
             }
         );
+        self.gap_epoch += 1;
         self.push(
             NotificationKind::HistoryGap,
             None,
@@ -267,6 +270,11 @@ impl NotificationsModel {
         }
     }
 
+    #[must_use]
+    pub const fn gap_epoch(&self) -> u64 {
+        self.gap_epoch
+    }
+
     pub fn items(&self) -> impl Iterator<Item = &Notification> {
         self.items.iter()
     }
@@ -307,6 +315,7 @@ mod tests {
     }
     fn approval() -> Event {
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             tool_name: "shell".into(),
             call_id: "call-1".into(),

@@ -261,6 +261,7 @@ fn kinds_that_sql_reads_inside_stay_inline_whatever_their_size() {
     let database = database();
     let mut accounting = EventAccounting::default();
     let approval: EventKind = ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "write".into(),
         call_id: "run-a:call".into(),
         input: Some(json!({"content": noise(9, 6_000)})),

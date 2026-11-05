@@ -1075,6 +1075,14 @@ impl UserQuestion {
     }
 }
 
+/// Full original tool-call identity, separate from the opaque approval token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalCorrelation {
+    pub run_id: String,
+    pub call_id: String,
+    pub attempt: u64,
+}
+
 /// ツール実行に関するイベント。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
@@ -1162,12 +1170,21 @@ pub enum ToolEvent {
     /// ツール実行の承認が要求された。
     ApprovalRequested {
         tool_name: String,
+        /// Opaque approval token issued by the registry, not the provider call ID.
         call_id: String,
+        /// Display/transcript correlation only; never an authorization token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correlation: Option<ApprovalCorrelation>,
         #[serde(default)]
         input: Option<serde_json::Value>,
     },
-    /// 承認要求への応答（承認 UI / CLI 側が emit する）。
-    ApprovalResolved { call_id: String, approved: bool },
+    /// Registry の終端通知。emit 自体は実行許可ではない。
+    ApprovalResolved {
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correlation: Option<ApprovalCorrelation>,
+        approved: bool,
+    },
     /// ポリシーまたは承認結果によりツール実行が拒否された。
     ExecutionDenied {
         tool_name: String,
@@ -2304,6 +2321,7 @@ mod tests {
     #[test]
     fn approval_requested_uses_nested_adjacent_tags() {
         let event = Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "shell".into(),
             call_id: "c1".into(),
             input: None,
@@ -2328,6 +2346,7 @@ mod tests {
     #[test]
     fn approval_resolved_round_trips_with_nested_adjacent_tags() {
         let event = Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: "c1".into(),
             approved: true,
         });

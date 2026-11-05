@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use event_bus::{Event, EventBus, EventKind, ToolEvent};
+use event_bus::{EventBus, EventKind, ToolEvent};
 use sandbox::{
     ApprovalGate, ApprovalMode, ApprovalPolicy, BwrapConfig, BwrapSandbox, CommandSpec,
     DirectSandbox, Sandbox, SandboxError, WrappedCommand,
@@ -34,10 +34,9 @@ fn set_approval(executor: &mut ToolExecutor, bus: Arc<EventBus>) -> tokio::task:
         loop {
             let event = receiver.recv().await.expect("承認要求を受信できるはずです");
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: true,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 return;
             }
         }

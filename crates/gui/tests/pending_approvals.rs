@@ -9,6 +9,7 @@ use workspace_ui::UiSettings;
 
 fn requested(call_id: &str) -> Event {
     Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         input: None,
         tool_name: "shell".into(),
         call_id: call_id.into(),
@@ -17,6 +18,7 @@ fn requested(call_id: &str) -> Event {
 
 fn resolved(call_id: &str) -> Event {
     Event::new(ToolEvent::ApprovalResolved {
+        correlation: None,
         call_id: call_id.into(),
         approved: true,
     })
@@ -36,6 +38,7 @@ fn pending_approval_shows_escalation_command_and_justification_when_requested() 
         "kind": "shell_escalation",
     });
     let event = Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "shell".into(),
         call_id: "run-2:call-review:1".into(),
         input: Some(input.clone()),

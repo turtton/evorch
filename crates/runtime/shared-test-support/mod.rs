@@ -323,10 +323,13 @@ pub fn spawn_approval_responder(
         loop {
             let event = receiver.recv().await.expect("承認要求を受信できるはずです");
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(
+                        &(call_id),
+                        approved,
+                        sandbox::approval::ApprovalProvenance::CLI,
+                    )
+                    .expect("resolve live approval");
                 return;
             }
         }
@@ -352,17 +355,23 @@ pub fn spawn_run_scoped_approval_responder(
             let event = receiver.recv().await.expect("承認要求を受信できるはずです");
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
                 if call_id.starts_with(&prefix) {
-                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved: true,
-                    }));
+                    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                        .resolve_presented(
+                            &(call_id),
+                            true,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     return;
                 }
                 if let Some(stored) = unmatched {
-                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                        call_id: stored,
-                        approved: true,
-                    }));
+                    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                        .resolve_presented(
+                            &(stored),
+                            true,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     return;
                 }
                 unmatched = Some(call_id);

@@ -17,6 +17,7 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
     [
         (
             ToolEvent::ApprovalRequested {
+                correlation: None,
                 tool_name: "write".into(),
                 call_id: call_id.clone(),
                 input: None,
@@ -26,6 +27,7 @@ fn approvals(run: &str) -> [(Event, TranscriptEntry); 3] {
         ),
         (
             ToolEvent::ApprovalResolved {
+                correlation: None,
                 call_id: call_id.clone(),
                 approved: false,
             },
@@ -119,11 +121,13 @@ fn scoped_child_approval_after_plain_tool_start_updates_that_card() {
 fn approval_before_start_and_approval_while_running_keep_one_card() {
     let approval_id = format!("{ROOT}:call-x");
     let request = Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "write".into(),
         call_id: approval_id.clone(),
         input: Some(serde_json::json!({"path": "a.rs"})),
     });
     let approve = Event::new(ToolEvent::ApprovalResolved {
+        correlation: None,
         call_id: approval_id,
         approved: true,
     });
@@ -197,4 +201,69 @@ fn scoped_root_approval_reaches_thread_and_run() {
             vec![TranscriptKey::Thread, TranscriptKey::Run(ROOT.into())]
         );
     }
+}
+
+#[tokio::test]
+async fn real_registry_keeps_long_original_call_on_one_card_through_completion() {
+    use sandbox::approval::{
+        ApprovalDecision, ApprovalProvenance, ApprovalRegistry, ApprovalRequest, ApprovalState,
+    };
+    use std::{sync::Arc, time::Duration};
+    let bus = Arc::new(event_bus::EventBus::new(16));
+    let approvals = ApprovalRegistry::for_bus(&bus);
+    let mut events = bus.subscribe();
+    let mut transcripts = registry();
+    let original = "provider:long_unicode_呼び出し_id_".repeat(8);
+    let input = serde_json::json!({"command": "echo hello"});
+    transcripts.apply(&Event::new(ToolEvent::ToolStarted {
+        tool_name: "shell".into(),
+        call_id: original.clone(),
+        run_id: Some(CHILD.into()),
+        input: Some(input.clone()),
+        parent_call_id: None,
+    }));
+    let pending = approvals.register(
+        ApprovalRequest {
+            run_id: CHILD,
+            thread_id: Some("thread"),
+            tool_name: "shell",
+            call_id: &original,
+            input: Some(input),
+        },
+        Duration::from_secs(60),
+    );
+    let id = approvals.list_pending(None, 1).pop().unwrap().id;
+    let requested = events.recv().await.unwrap();
+    transcripts.apply(&requested);
+    assert_eq!(transcripts.run(CHILD).unwrap().entries().len(), 1);
+    assert!(
+        matches!(&transcripts.run(CHILD).unwrap().entries()[0], TranscriptEntry::Tool { call_id, status: ToolStatus::AwaitingApproval, .. } if call_id == &original)
+    );
+    approvals
+        .resolve(
+            &id,
+            1,
+            ApprovalDecision::Approve,
+            ApprovalProvenance::DESKTOP,
+        )
+        .unwrap();
+    transcripts.apply(&events.recv().await.unwrap());
+    assert_eq!(pending.wait().await, ApprovalState::Approved);
+    assert_eq!(transcripts.run(CHILD).unwrap().entries().len(), 1);
+    assert!(
+        matches!(&transcripts.run(CHILD).unwrap().entries()[0], TranscriptEntry::Tool { call_id, status: ToolStatus::Running, .. } if call_id == &original)
+    );
+    transcripts.apply(&Event::new(ToolEvent::ToolCompleted {
+        tool_name: "shell".into(),
+        call_id: original.clone(),
+        run_id: Some(CHILD.into()),
+        is_error: false,
+        output: Some("done".into()),
+        detail: None,
+        parent_call_id: None,
+    }));
+    assert_eq!(transcripts.run(CHILD).unwrap().entries().len(), 1);
+    assert!(
+        matches!(&transcripts.run(CHILD).unwrap().entries()[0], TranscriptEntry::Tool { call_id, output: Some(output), status: ToolStatus::Succeeded, .. } if call_id == &original && output == "done")
+    );
 }

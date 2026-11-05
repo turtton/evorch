@@ -108,8 +108,8 @@ pub enum HostCommand {
         goal_id: String,
         paused: bool,
     },
-    /// Approval through the call id the tool executor announced. The protocol's
-    /// approval registry (ADR 0045 P4) does not feed this yet.
+    /// Desktop legacy approval through the opaque token the tool executor announced.
+    /// The protocol's epoch/revision approval command is not connected yet.
     DecideToolApproval {
         call_id: String,
         approved: bool,

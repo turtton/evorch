@@ -2,6 +2,8 @@
 //! Mock tokens are synthetic bytes, not a prediction of production billing.
 #[path = "apply_patch_cache/mod.rs"]
 mod apply_patch_cache;
+#[path = "approval_cache/mod.rs"]
+mod approval_cache;
 mod codex_run_identity_cache;
 #[path = "encrypted_reasoning_cache/mod.rs"]
 mod encrypted_reasoning_cache;
@@ -284,6 +286,35 @@ fn harness_with_catalog(
     threshold: f64,
     configure: impl FnOnce(&mut Config),
 ) -> Harness {
+    harness_with_catalog_and_executor(
+        wire,
+        model,
+        catalog_capabilities,
+        script,
+        window,
+        read,
+        extra_tools,
+        checker,
+        threshold,
+        configure,
+        |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harness_with_catalog_and_executor(
+    wire: Wire,
+    model: &str,
+    catalog_capabilities: Option<Value>,
+    script: Vec<ScriptedResponse>,
+    window: u64,
+    read: Arc<dyn Tool>,
+    extra_tools: Vec<Arc<dyn Tool>>,
+    checker: Option<Arc<dyn tools::post_edit::PostEditHook>>,
+    threshold: f64,
+    configure: impl FnOnce(&mut Config),
+    configure_executor: impl FnOnce(&mut ToolExecutor, &Arc<EventBus>),
+) -> Harness {
     let directory = tempfile::tempdir().unwrap();
     let mock = StreamingMockOpenAi::spawn_with_prompt_cache_models(script, vec![model.into()]);
     let mock = match catalog_capabilities {
@@ -351,6 +382,7 @@ summarizer = "structural"
     if checker.is_some() {
         executor = executor.with_post_edit_hook(checker);
     }
+    configure_executor(&mut executor, &bus);
     let credential_store: Arc<FileCredentialStore> =
         Arc::new(FileCredentialStore::open(directory.path().join("credentials")).unwrap());
     let env = Arc::new(MapEnv::from_iter([(KEY_ENV, "offline-test-key")]));

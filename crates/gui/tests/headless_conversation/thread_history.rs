@@ -147,6 +147,7 @@ fn stopped_and_failed_streams_do_not_restore_unaccepted_answer_drafts() {
             reply("run", "one", "")[0].clone(),
             thought("before approval"),
             Event::new(ToolEvent::ApprovalRequested {
+                correlation: None,
                 tool_name: "shell".into(),
                 call_id: "unknown".into(),
                 input: None,

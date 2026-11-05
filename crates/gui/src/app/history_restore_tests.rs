@@ -404,6 +404,7 @@ fn assert_restore_matches_legacy_inner(
             parent_call_id: None,
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "write".into(),
             call_id: "pending".into(),
             input: Some(serde_json::json!({"path":"x"})),

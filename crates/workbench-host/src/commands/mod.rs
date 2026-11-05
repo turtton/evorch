@@ -471,11 +471,15 @@ impl CommandService {
                 Vec::new()
             }
             HostCommand::DecideToolApproval { call_id, approved } => {
-                if let Some(bus) = &self.event_bus {
-                    bus.emit(Event::new(event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
+                if let Some(bus) = &self.event_bus
+                    && let Err(error) = sandbox::approval::ApprovalRegistry::for_bus(bus)
+                        .resolve_presented(
+                            &call_id,
+                            approved,
+                            sandbox::approval::ApprovalProvenance::DESKTOP,
+                        )
+                {
+                    return vec![HostEvent::rejected(RejectKind::Invalid, error.to_string())];
                 }
                 Vec::new()
             }

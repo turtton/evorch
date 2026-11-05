@@ -94,20 +94,24 @@ async fn respond(gate: &SandboxEscalationGate, approved: bool) -> tokio::task::J
                 tool_name,
                 call_id,
                 input,
+                ..
             }) = rx.recv().await.expect("event").kind
             {
                 assert_eq!(tool_name, "shell");
-                assert_eq!(call_id, "run-review:call-review");
+                assert!(call_id.starts_with("run-review:call-review:"));
                 assert_eq!(
                     input,
                     Some(
                         serde_json::json!({"command":"pwd", "justification":"inspect", "kind":"shell_escalation"})
                     )
                 );
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(
+                        &(call_id),
+                        approved,
+                        sandbox::approval::ApprovalProvenance::CLI,
+                    )
+                    .expect("resolve live approval");
                 break;
             }
         }
@@ -145,10 +149,7 @@ async fn fallback_approval_records_info_then_final_approval() {
     responder.await.expect("responder");
     let mut diagnostics = Vec::new();
     while diagnostics.len() < 2 {
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("diagnostic deadline")
-            .expect("diagnostic event");
+        let event = events.recv().await.expect("diagnostic event");
         if let EventKind::Diagnostic(diagnostic) = event.kind {
             diagnostics.push(diagnostic);
         }
@@ -239,10 +240,9 @@ async fn network_only_human_approval_identifies_its_scope() {
                 rx.recv().await.expect("approval event").kind
             {
                 assert_eq!(input.expect("input")["kind"], "shell_network");
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: true,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }
@@ -331,10 +331,11 @@ async fn respond_file_access(
                 tool_name,
                 call_id,
                 input,
+                ..
             }) = rx.recv().await.expect("event").kind
             {
                 assert_eq!(tool_name, "write");
-                assert_eq!(call_id, "run-review:call-review");
+                assert!(call_id.starts_with("run-review:call-review:"));
                 assert_eq!(
                     input,
                     Some(serde_json::json!({
@@ -343,10 +344,13 @@ async fn respond_file_access(
                         "change":"- [ ] ship",
                     }))
                 );
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(
+                        &(call_id),
+                        approved,
+                        sandbox::approval::ApprovalProvenance::CLI,
+                    )
+                    .expect("resolve live approval");
                 break;
             }
         }

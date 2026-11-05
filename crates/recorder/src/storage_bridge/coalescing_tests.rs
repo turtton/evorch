@@ -194,6 +194,7 @@ async fn orchestrator_boundaries_flush_only_their_runs_reasoning_first() {
 async fn unattributed_approval_and_fault_keep_their_position_between_reasoning() {
     let boundaries = [
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "shell".into(),
             call_id: "unattributed".into(),
             input: None,

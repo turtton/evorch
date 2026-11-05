@@ -1396,6 +1396,11 @@ fn build_workbench(
         .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
             storage_config.db_path.clone(),
         )))
+        .with_lane_attention(Arc::new(
+            gui::app::lane_attention::StorageLaneAttentionReader::new(
+                storage_config.db_path.clone(),
+            ),
+        ))
         .with_pull_requests(
             Arc::new(gui::app::pull_requests::StoragePullRequestReader::new(
                 storage_config.db_path.clone(),

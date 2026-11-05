@@ -402,6 +402,7 @@ mod tests {
         let mut model = TranscriptModel::new();
         model.apply(&event_bus::Event::new(
             event_bus::ToolEvent::ApprovalRequested {
+                correlation: None,
                 tool_name: "web_fetch".into(),
                 call_id: "run-1:call-1".into(),
                 input: Some(serde_json::json!({"url": "https://example.com"})),
@@ -410,6 +411,7 @@ mod tests {
         // When: the user approves and the call runs.
         model.apply(&event_bus::Event::new(
             event_bus::ToolEvent::ApprovalResolved {
+                correlation: None,
                 call_id: "run-1:call-1".into(),
                 approved: true,
             },

@@ -29,6 +29,9 @@ mod history;
 #[cfg(test)]
 mod history_restore_tests;
 mod input;
+pub mod lane_attention;
+#[cfg(test)]
+mod lane_attention_tests;
 pub mod lanes;
 #[cfg(test)]
 mod lanes_tests;

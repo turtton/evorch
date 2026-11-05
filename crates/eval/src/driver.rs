@@ -169,11 +169,18 @@ impl Observed {
                 tool_name,
                 call_id,
                 input,
+                ..
             }) => {
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id: call_id.clone(),
-                    approved: false,
-                }));
+                if let Some(registry) = sandbox::approval::ApprovalRegistry::existing(bus) {
+                    let _ = registry.resolve_presented(
+                        &(call_id.clone()),
+                        false,
+                        sandbox::approval::ApprovalProvenance {
+                            actor: sandbox::approval::ApprovalActor::Agent,
+                            surface: sandbox::approval::ApprovalSurface::None,
+                        },
+                    );
+                }
                 self.denied.push(DeniedRequest {
                     tool: tool_name.clone(),
                     input: summary(input.as_ref()),

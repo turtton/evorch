@@ -318,13 +318,11 @@ async fn shell_host_input_handoff_is_once_only_and_preserves_the_wire_prefix() {
                 chat_config("initial", true),
             )
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !started.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        // This external shell only signals readiness with a marker file, not a
+        // Rust notification. Poll that explicit signal; nextest owns hang detection.
+        while !started.exists() {
+            tokio::task::yield_now().await;
+        }
         harness
             .runtime
             .send_message_with_images(
@@ -337,9 +335,7 @@ async fn shell_host_input_handoff_is_once_only_and_preserves_the_wire_prefix() {
         // Pause the second tool after the handoff request. Finish and observe
         // the real job before allowing Stop, which correctly refuses unobserved
         // jobs even if a model has emitted final text.
-        tokio::time::timeout(std::time::Duration::from_secs(5), gated.started.notified())
-            .await
-            .unwrap();
+        gated.started.notified().await;
         std::fs::write(&release, "").unwrap();
         let request = harness
             .mock
@@ -358,6 +354,7 @@ async fn shell_host_input_handoff_is_once_only_and_preserves_the_wire_prefix() {
             .unwrap();
         let ctx = tools::ToolExecutionContext {
             run_id: run.to_string(),
+            thread_id: Some("shell-handoff".into()),
             ..Default::default()
         };
         shell

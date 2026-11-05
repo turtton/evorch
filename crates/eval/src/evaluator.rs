@@ -168,14 +168,20 @@ async fn ask(
     tool: &str,
     summary: String,
 ) -> Result<(), String> {
-    let call_id = format!("{}:{}", ctx.run_id, ctx.call_id.as_deref().unwrap_or(tool));
+    let call_id = ctx.call_id.as_deref().unwrap_or(tool);
     let input = json!({"kind": tool, "summary": summary});
     match ApprovalGate::new(Arc::clone(&shared.context.bus), APPROVAL_TIMEOUT)
-        .request_with_input(tool, &call_id, Some(input))
+        .request_for(sandbox::approval::ApprovalRequest {
+            run_id: &ctx.run_id,
+            thread_id: ctx.thread_id.as_deref(),
+            tool_name: tool,
+            call_id,
+            input: Some(input),
+        })
         .await
     {
         ApprovalOutcome::Approved => Ok(()),
-        ApprovalOutcome::Denied => Err("the user declined".into()),
+        ApprovalOutcome::Denied | ApprovalOutcome::Cancelled => Err("the user declined".into()),
         ApprovalOutcome::TimedOut => Err(format!(
             "the user did not answer within {} minutes",
             APPROVAL_TIMEOUT.as_secs() / 60

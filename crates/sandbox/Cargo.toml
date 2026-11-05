@@ -18,8 +18,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net", "process", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "time"] }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # close_range(2), which rustix 1 does not wrap, for the child launch policy.
@@ -28,4 +29,4 @@ libc = "0.2"
 [dev-dependencies]
 # The launch policy tests run themselves on a pseudo-terminal.
 portable-pty = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time", "test-util"] }

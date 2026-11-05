@@ -108,6 +108,7 @@ impl AgentRuntime {
             history_only,
             restored.turn.as_ref(),
         );
+        self.bind_approval_owner(run_id, &config, &execution);
         let task = restored.attach_to(RunTask {
             publication: execution.publication(),
             ancestry,

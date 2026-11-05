@@ -3,7 +3,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use event_bus::{Event, EventBus, EventKind, ToolEvent};
+use event_bus::{EventBus, EventKind, ToolEvent};
 use providers::{ContentBlock, FinishReason};
 use runtime::{AgentRuntime, Role, RunConfig};
 use sandbox::{ApprovalGate, ApprovalMode, ApprovalPolicy, PolicyDecision};
@@ -251,22 +251,24 @@ async fn all_permission_checks_happen_before_any_execution() {
     );
     // When: observe and resolve the real approval gate.
     let run = runtime.delegate_background(Role::Worker, "batch".into(), RunConfig::default());
-    let before = tokio::time::timeout(Duration::from_secs(3), async {
+    let before = async {
         loop {
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) =
                 events.recv().await.expect("event").kind
             {
                 let before = trace.lock().expect("trace").clone();
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: false,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(
+                        &(call_id),
+                        false,
+                        sandbox::approval::ApprovalProvenance::CLI,
+                    )
+                    .expect("resolve live approval");
                 break before;
             }
         }
-    })
-    .await
-    .expect("approval");
+    }
+    .await;
     runtime.wait(run).await.expect("wait");
     // Then: no tool ran before the last approval, and denial remains per-call.
     assert!(
