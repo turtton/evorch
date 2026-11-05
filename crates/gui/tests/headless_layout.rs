@@ -17,6 +17,8 @@ mod demo_fixture_headless;
 mod headless_options;
 #[path = "headless_layout/pane_typography.rs"]
 mod pane_typography;
+#[path = "headless_layout/procedure_interrupted.rs"]
+mod procedure_interrupted;
 #[path = "headless_layout/right_panes_headless.rs"]
 mod right_panes_headless;
 #[path = "headless_layout/status_line_headless.rs"]
