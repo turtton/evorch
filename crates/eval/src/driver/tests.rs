@@ -429,7 +429,7 @@ async fn approval_requests_are_denied_and_escalation_denials_recorded() {
     let resolved = events.drain_pending_snapshot();
     assert!(resolved.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalResolved { call_id, approved: false }) if call_id == &token
+        EventKind::Tool(ToolEvent::ApprovalResolved { call_id, approved: false, .. }) if call_id == &token
     )));
     assert_eq!(observed.tool_calls, 1);
     assert_eq!(

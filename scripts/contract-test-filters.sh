@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Keep the offline gates and the workspace remainder disjoint. nextest isolates
 # each test process, including providers' process-global cache tests.
+# cache_preservation_e2e includes approval_cache::approved_tool_preserves_next_provider_prefix
+# (Chat Completions, Responses and Codex; approval is not a cache boundary).
 # shellcheck disable=SC2034 # Consumed by scripts that source this file.
 CACHE_CONTRACT_FILTER='
   package(=mock-openai)

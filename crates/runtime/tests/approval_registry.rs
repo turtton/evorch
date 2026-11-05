@@ -68,6 +68,7 @@ async fn forged_notifications_never_execute_and_terminal_paths_close_pending() {
         assert_eq!(pending.call_id, "reused-provider-id");
         // Merely broadcasting a forged answer cannot run the counter.
         bus.emit(Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: pending.id.value.clone(),
             approved: true,
         }));
@@ -118,4 +119,55 @@ async fn forged_notifications_never_execute_and_terminal_paths_close_pending() {
         );
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn unconfirmable_arguments_never_reach_the_executor() {
+    let bus = Arc::new(EventBus::new(128));
+    let mut events = bus.subscribe();
+    let registry = ApprovalRegistry::for_bus(&bus);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut executor = ToolExecutor::new(bus.clone());
+    executor.register(Arc::new(Counter(count.clone()))).unwrap();
+    executor.set_policy(
+        ApprovalPolicy::standard(ApprovalMode::OnRequest)
+            .with_override("read", PolicyDecision::Ask),
+    );
+    executor.set_approval_gate(ApprovalGate::new(bus.clone(), Duration::from_secs(300)));
+    let model = Arc::new(ScriptedModel::new([Ok(tool_response(
+        "too-large",
+        "read",
+        json!({"command": "x".repeat(sandbox::approval::FULL_INPUT_MAX_BYTES)}),
+    ))]));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(executor), model);
+    let run = runtime.delegate_background(
+        Role::Worker,
+        "confirm the complete operation".into(),
+        RunConfig::default(),
+    );
+    // Unconfirmable input cancels the approval; runtime aborts rather than
+    // continuing an execution whose consent payload could not be presented.
+    assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Error);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(registry.list_pending(None, 100).is_empty());
+    let events = events.drain_pending_snapshot();
+    assert!(!events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Tool(ToolEvent::ApprovalRequested { .. })
+    )));
+    let token = events
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::Tool(ToolEvent::ApprovalResolved {
+                call_id,
+                approved: false,
+                ..
+            }) => Some(call_id),
+            _ => None,
+        })
+        .expect("oversize request closed synchronously");
+    assert!(matches!(
+        registry.resolve_presented(token, true, ApprovalProvenance::DESKTOP),
+        Err(ApprovalError::InputTooLarge { .. })
+    ));
 }

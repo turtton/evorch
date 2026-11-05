@@ -2,7 +2,7 @@
 //!
 //! Subscribe before listing. On lag, resnapshot pending rows. Terminal tombstones
 //! are bounded; after eviction old decisions return Unknown, never become Pending.
-use event_bus::{Event, EventBus, ToolEvent};
+use event_bus::{ApprovalCorrelation, Event, EventBus, ToolEvent};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
@@ -18,6 +18,9 @@ use tokio::{
 use uuid::Uuid;
 
 pub const SUMMARY_MAX_BYTES: usize = 8192;
+/// Full confirmation payloads are capped separately from list summaries. Larger
+/// requests are cancelled before publication, never approved from a projection.
+pub const FULL_INPUT_MAX_BYTES: usize = 1024 * 1024;
 pub const TOOL_NAME_MAX_BYTES: usize = 256;
 pub const PAGE_MAX: usize = 100;
 const TOMBSTONES_MAX: usize = 1024;
@@ -83,6 +86,8 @@ pub struct ApprovalSnapshot {
     pub execution_attempt: Option<Uuid>,
     pub tool_name: String,
     pub summary: String,
+    /// Serialized complete argument size (zero for no arguments).
+    pub input_bytes: usize,
     pub deadline: Instant,
     pub state: ApprovalState,
     pub decided_by: Option<ApprovalProvenance>,
@@ -99,10 +104,13 @@ pub enum ApprovalError {
     Expired,
     #[error("approval cancelled")]
     Cancelled,
+    #[error("complete approval input exceeds {FULL_INPUT_MAX_BYTES} bytes ({bytes} bytes)")]
+    InputTooLarge { bytes: usize },
     #[error("approval revision mismatch (current: {current})")]
     RevisionMismatch { current: u64 },
 }
-/// Execution arguments are not retained, only a bounded display projection.
+/// Arguments are retained only while pending, for complete confirmation. List
+/// snapshots contain a bounded summary; use `full_input` for the complete value.
 pub struct ApprovalRequest<'a> {
     pub run_id: &'a str,
     pub thread_id: Option<&'a str>,
@@ -150,6 +158,7 @@ impl Drop for ApprovalOwner {
 }
 struct Entry {
     snapshot: ApprovalSnapshot,
+    input: Option<Arc<serde_json::Value>>,
     owner: Option<Binding>,
     waiter: Option<oneshot::Sender<ApprovalState>>,
 }
@@ -258,21 +267,18 @@ impl ApprovalRegistry {
                 .insert(id.value.clone(), (Arc::downgrade(self), id.clone()));
         }
         let (waiter, receiver) = oneshot::channel();
-        let summary = bounded(
-            &request
-                .input
-                .as_ref()
-                .map_or_else(String::new, serde_json::Value::to_string),
-            SUMMARY_MAX_BYTES,
-        );
+        let serialized = request
+            .input
+            .as_ref()
+            .map_or_else(String::new, serde_json::Value::to_string);
+        let input_bytes = serialized.len();
+        let summary = bounded(&serialized, SUMMARY_MAX_BYTES);
         let tool_name = bounded(request.tool_name, TOOL_NAME_MAX_BYTES);
-        let input = request.input.map(|v| {
-            if v.to_string().len() <= SUMMARY_MAX_BYTES {
-                v
-            } else {
-                serde_json::json!({"summary": bounded(&summary, SUMMARY_MAX_BYTES / 2 - 16)})
-            }
-        });
+        let input = if input_bytes <= FULL_INPUT_MAX_BYTES {
+            request.input.map(Arc::new)
+        } else {
+            None
+        };
         let snapshot = ApprovalSnapshot {
             id: id.clone(),
             revision: 1,
@@ -286,6 +292,7 @@ impl ApprovalRegistry {
             execution_attempt: binding.as_ref().map(|b| b.attempt),
             tool_name: tool_name.clone(),
             summary,
+            input_bytes,
             deadline: Instant::now() + timeout,
             state: ApprovalState::Pending,
             decided_by: None,
@@ -294,6 +301,7 @@ impl ApprovalRegistry {
             id.value.clone(),
             Entry {
                 snapshot: snapshot.clone(),
+                input: input.clone(),
                 owner: binding,
                 waiter: Some(waiter),
             },
@@ -305,15 +313,18 @@ impl ApprovalRegistry {
             receiver: Some(receiver),
         };
         // The receiver and drop guard already exist before Pending is published.
-        if Self::owner_gone(&state.entries[&id.value]) {
+        if input_bytes > FULL_INPUT_MAX_BYTES || Self::owner_gone(&state.entries[&id.value]) {
             self.finish(&mut state, &id.value, ApprovalState::Cancelled, None);
         } else {
+            let correlation = Self::correlation(&snapshot);
             let _ = self.changes.send(snapshot);
             if let Some(bus) = self.bus.upgrade() {
                 bus.emit(Event::new(ToolEvent::ApprovalRequested {
                     tool_name,
                     call_id: id.value.clone(),
-                    input,
+                    correlation: Some(correlation),
+                    // The existing desktop renderer receives the COMPLETE input.
+                    input: input.as_deref().cloned(),
                 }));
             }
         }
@@ -328,19 +339,56 @@ impl ApprovalRegistry {
         decision: ApprovalDecision,
         provenance: ApprovalProvenance,
     ) -> Result<ApprovalSnapshot, ApprovalError> {
-        if id.core_epoch != self.core_epoch {
-            return Err(ApprovalError::WrongEpoch);
-        }
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.refresh(&mut state, &id.value);
+        self.pending_entry(&mut state, id, expected_revision)?;
+        let next = match decision {
+            ApprovalDecision::Approve => ApprovalState::Approved,
+            ApprovalDecision::Deny => ApprovalState::Denied,
+        };
+        self.finish(&mut state, &id.value, next, Some(provenance));
+        Ok(state.entries[&id.value].snapshot.clone())
+    }
+    /// Fetch the immutable COMPLETE arguments for confirmation, never the list
+    /// summary. Hosts must authorize the caller before fetching, and show this
+    /// value before offering Approve. None means the request has no arguments.
+    /// Epoch/revision, deadline and owner are checked like the decision ingress.
+    pub fn full_input(
+        &self,
+        id: &ApprovalId,
+        expected_revision: u64,
+    ) -> Result<Option<Arc<serde_json::Value>>, ApprovalError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(self
+            .pending_entry(&mut state, id, expected_revision)?
+            .input
+            .clone())
+    }
+    fn pending_entry<'s>(
+        &self,
+        state: &'s mut State,
+        id: &ApprovalId,
+        expected_revision: u64,
+    ) -> Result<&'s Entry, ApprovalError> {
+        if id.core_epoch != self.core_epoch {
+            return Err(ApprovalError::WrongEpoch);
+        }
+        self.refresh(state, &id.value);
         let snapshot = &state
             .entries
             .get(&id.value)
             .ok_or(ApprovalError::Unknown)?
             .snapshot;
+        if snapshot.input_bytes > FULL_INPUT_MAX_BYTES {
+            return Err(ApprovalError::InputTooLarge {
+                bytes: snapshot.input_bytes,
+            });
+        }
         match snapshot.state {
             ApprovalState::Pending => {}
             ApprovalState::Expired => return Err(ApprovalError::Expired),
@@ -352,12 +400,14 @@ impl ApprovalRegistry {
                 current: snapshot.revision,
             });
         }
-        let next = match decision {
-            ApprovalDecision::Approve => ApprovalState::Approved,
-            ApprovalDecision::Deny => ApprovalState::Denied,
-        };
-        self.finish(&mut state, &id.value, next, Some(provenance));
-        Ok(state.entries[&id.value].snapshot.clone())
+        Ok(&state.entries[&id.value])
+    }
+    fn correlation(snapshot: &ApprovalSnapshot) -> ApprovalCorrelation {
+        ApprovalCorrelation {
+            run_id: snapshot.run_id.clone(),
+            call_id: snapshot.call_id.clone(),
+            attempt: snapshot.attempt,
+        }
     }
     /// Legacy desktop/CLI bridge: call_id now carries the opaque registry token.
     /// It never looks up a provider call ID. New hosts must quote epoch/revision.
@@ -461,6 +511,8 @@ impl ApprovalRegistry {
         if entry.snapshot.state != ApprovalState::Pending {
             return;
         }
+        // Terminal tombstones retain metadata, not potentially large arguments.
+        entry.input = None;
         entry.snapshot.state = next;
         entry.snapshot.revision += 1;
         entry.snapshot.decided_by = provenance;
@@ -478,6 +530,7 @@ impl ApprovalRegistry {
         if let Some(bus) = self.bus.upgrade() {
             bus.emit(Event::new(ToolEvent::ApprovalResolved {
                 call_id: id.into(),
+                correlation: Some(Self::correlation(&entry.snapshot)),
                 approved: next == ApprovalState::Approved,
             }));
         }

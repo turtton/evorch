@@ -182,6 +182,7 @@ impl Fixture {
                 parent_call_id: None,
             }),
             Event::new(ToolEvent::ApprovalRequested {
+                correlation: None,
                 tool_name: "shell".into(),
                 call_id: format!("{child}:call-2"),
                 input: Some(json!({"command": "curl example.com"})),

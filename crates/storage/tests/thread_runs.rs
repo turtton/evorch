@@ -146,6 +146,7 @@ fn events_for_runs_match_run_fields_and_approval_call_ids_only() {
             role: "worker".into(),
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "shell".into(),
             call_id: "run-1:call-1".into(),
             input: None,

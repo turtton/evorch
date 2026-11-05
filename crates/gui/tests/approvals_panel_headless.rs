@@ -23,6 +23,7 @@ impl CommandSink for SharedSink {
 
 fn requested(call_id: &str, tool_name: &str) -> Event {
     Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         input: None,
         call_id: call_id.into(),
         tool_name: tool_name.into(),
@@ -111,6 +112,7 @@ fn displays_file_access_path_tool_and_justification() {
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
     state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "write".into(),
         call_id: "run-2:call-9".into(),
         input: Some(json!({
@@ -152,6 +154,7 @@ fn displays_an_evaluator_summary_as_the_request_itself() {
     let mut state =
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default()).expect("state");
     state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "eval_start".into(),
         call_id: "run-2:call-3".into(),
         input: Some(json!({"kind": "eval_start", "summary": summary})),
@@ -225,6 +228,7 @@ fn displays_fallbacks_and_empty_state_when_information_is_missing() {
     harness
         .state_mut()
         .apply_events([Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: "".into(),
             approved: false,
         })]);
@@ -326,6 +330,7 @@ fn removes_only_resolved_row_when_resolution_arrives() {
         harness
             .state_mut()
             .apply_events([Event::new(ToolEvent::ApprovalResolved {
+                correlation: None,
                 call_id: B.into(),
                 approved,
             })]);
@@ -362,6 +367,7 @@ fn nested_subagent_approval_belongs_to_parent_conversation_not_selected_thread()
     );
     state.apply_events([
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             call_id: "run-12:call:0007:opaque".into(),
             tool_name: "shell".into(),
             input: Some(
@@ -431,4 +437,67 @@ fn approval_notification_navigates_to_owning_conversation() {
         Some(ThreadId::new("one"))
     );
     assert_eq!(h.query_all_by_label("Approve").count(), 2);
+}
+
+#[tokio::test]
+async fn complete_confirmation_shows_dangerous_tail_beyond_list_summary() {
+    use sandbox::approval::{ApprovalProvenance, ApprovalRegistry, ApprovalRequest};
+    use std::time::Duration;
+    let bus = Arc::new(event_bus::EventBus::new(16));
+    let approvals = ApprovalRegistry::for_bus(&bus);
+    let mut events = bus.subscribe();
+    let command = format!(
+        "{}; rm -rf /DANGEROUS_TAIL_TEST_ONLY",
+        "echo harmless; ".repeat(800)
+    );
+    assert!(command.find("rm -rf").unwrap() > sandbox::approval::SUMMARY_MAX_BYTES);
+    let input = json!({"command": command});
+    let pending = approvals.register(
+        ApprovalRequest {
+            run_id: "run-2",
+            thread_id: Some("one"),
+            tool_name: "shell",
+            call_id: "provider-long-call-id-not-an-approval-token",
+            input: Some(input.clone()),
+        },
+        Duration::from_secs(60),
+    );
+    let snapshot = approvals.list_pending(None, 1).pop().unwrap();
+    assert!(!snapshot.summary.contains("rm -rf"));
+    assert_eq!(
+        approvals.full_input(&snapshot.id, 1).unwrap().as_deref(),
+        Some(&input)
+    );
+    let mut state = state();
+    state.apply_events([events.recv().await.unwrap()]);
+    assert_eq!(
+        state
+            .pending_approvals()
+            .get(&snapshot.id.value)
+            .unwrap()
+            .input
+            .as_ref(),
+        Some(&input)
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 900.0))
+        .build_ui_state(
+            |ui, state| {
+                for item in state.pending_approvals().items() {
+                    gui::panes::approvals::approval_card(ui, item);
+                }
+            },
+            state,
+        );
+    h.run_steps(3);
+    // The accessible rendered code block contains the entire command, not a summary.
+    assert!(h.query_by_label(&command).is_some());
+    assert!(h.query_by_label("Approve").is_some());
+    approvals
+        .resolve_presented(&snapshot.id.value, true, ApprovalProvenance::DESKTOP)
+        .unwrap();
+    assert_eq!(
+        pending.wait().await,
+        sandbox::approval::ApprovalState::Approved
+    );
 }

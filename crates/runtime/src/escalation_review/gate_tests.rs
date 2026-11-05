@@ -94,6 +94,7 @@ async fn respond(gate: &SandboxEscalationGate, approved: bool) -> tokio::task::J
                 tool_name,
                 call_id,
                 input,
+                ..
             }) = rx.recv().await.expect("event").kind
             {
                 assert_eq!(tool_name, "shell");
@@ -330,6 +331,7 @@ async fn respond_file_access(
                 tool_name,
                 call_id,
                 input,
+                ..
             }) = rx.recv().await.expect("event").kind
             {
                 assert_eq!(tool_name, "write");

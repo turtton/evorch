@@ -133,11 +133,13 @@ fn answer_input_keeps_focus_and_cursor_across_conversation_updates() {
             run_id: Some("run-1".into()),
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             call_id: "run-1:call:1".into(),
             tool_name: "shell".into(),
             input: Some(serde_json::json!({"command": "pwd"})),
         }),
         Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: "run-1:call:1".into(),
             approved: true,
         }),
@@ -278,6 +280,7 @@ fn approvals_and_questions_share_conversation_without_a_floating_window() {
     state.apply_events([
         started(),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             call_id: "run-1:call:1".into(),
             tool_name: "shell".into(),
             input: Some(serde_json::json!({"command": "pwd"})),
@@ -545,6 +548,7 @@ fn subagent_tool_approval_marks_its_parent_thread_until_resolved() {
     harness
         .state_mut()
         .apply_events([Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             call_id: "run-7:call-1".into(),
             tool_name: "shell".into(),
             input: Some(serde_json::json!({"command": "pwd"})),
@@ -568,6 +572,7 @@ fn subagent_tool_approval_marks_its_parent_thread_until_resolved() {
     harness
         .state_mut()
         .apply_events([Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: "run-7:call-1".into(),
             approved: true,
         })]);

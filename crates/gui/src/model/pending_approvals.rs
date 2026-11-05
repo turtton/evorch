@@ -35,8 +35,13 @@ impl PendingApprovalsModel {
                 tool_name,
                 call_id,
                 input,
+                correlation,
             }) => {
-                let (run_id, original_call_id, attempt) = match parse_scoped_call_id(call_id) {
+                let identity = correlation
+                    .as_ref()
+                    .map(|c| (c.run_id.clone(), c.call_id.clone(), Some(c.attempt)))
+                    .or_else(|| parse_scoped_call_id(call_id));
+                let (run_id, original_call_id, attempt) = match identity {
                     Some((run, original, attempt)) => (Some(run), original, attempt),
                     None => (resolve_run(call_id), call_id.clone(), None),
                 };

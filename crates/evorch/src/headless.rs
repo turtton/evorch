@@ -399,6 +399,7 @@ async fn serve_approvals(mut receiver: event_bus::EventReceiver, bus: Arc<EventB
             tool_name,
             call_id,
             input,
+            ..
         }) = event.kind
         else {
             continue;

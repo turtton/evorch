@@ -30,6 +30,7 @@ fn runtime_approval_formats_open_parent_conversation_without_started_event() {
             .unwrap()
             .with_sidebar(sidebar);
         state.apply_events([Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             tool_name: "shell".into(),
             call_id: call_id.into(),

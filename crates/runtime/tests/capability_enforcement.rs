@@ -396,7 +396,7 @@ async fn web_fetch_denied_user_review_never_starts() {
     // 拒否されたため executor に到達しない (AC6)。
     assert!(events.iter().any(|event| matches!(
         &event.kind,
-            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, input: Some(input) })
+            EventKind::Tool(ToolEvent::ApprovalRequested { tool_name, call_id, input: Some(input), .. })
             if tool_name == "web_fetch" && call_id.starts_with(&format!("{run_id}:fetch-1:"))
                 && input == &json!({"url": "https://example.invalid/"})
     )));

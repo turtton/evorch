@@ -169,6 +169,7 @@ impl Observed {
                 tool_name,
                 call_id,
                 input,
+                ..
             }) => {
                 if let Some(registry) = sandbox::approval::ApprovalRegistry::existing(bus) {
                     let _ = registry.resolve_presented(

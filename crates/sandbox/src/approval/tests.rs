@@ -201,6 +201,7 @@ async fn forged_resolution_and_replayed_request_cannot_authorize_or_resurrect() 
         matches!(&event.kind, EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) if call_id == &pending.id.value)
     );
     bus.emit(Event::new(ToolEvent::ApprovalResolved {
+        correlation: None,
         call_id: pending.id.value.clone(),
         approved: true,
     }));
@@ -337,4 +338,70 @@ async fn page_cap_id_bounds_and_evicted_tombstones_remain_fail_closed() {
     assert!(!pending.id.value.chars().any(char::is_control));
     assert_eq!(registry.get(&pending.id).unwrap().call_id, call);
     drop(handles);
+}
+
+#[tokio::test]
+async fn complete_input_is_available_and_oversize_confirmation_fails_closed() {
+    let bus = Arc::new(EventBus::new(32));
+    let registry = ApprovalRegistry::for_bus(&bus);
+    let mut events = bus.subscribe();
+    // JSON quotes count toward the inclusive serialized byte limit.
+    for bytes in [
+        SUMMARY_MAX_BYTES + 100,
+        FULL_INPUT_MAX_BYTES,
+        FULL_INPUT_MAX_BYTES + 1,
+    ] {
+        let input = serde_json::Value::String("x".repeat(bytes - 2));
+        let pending = registry.register(
+            ApprovalRequest {
+                input: Some(input.clone()),
+                ..request("run-1", "call")
+            },
+            Duration::from_secs(60),
+        );
+        let snapshot = registry.get(&pending.id).unwrap();
+        assert_eq!(snapshot.input_bytes, bytes);
+        assert!(snapshot.summary.len() <= SUMMARY_MAX_BYTES);
+        if bytes > FULL_INPUT_MAX_BYTES {
+            assert_eq!(snapshot.state, ApprovalState::Cancelled);
+            assert!(
+                matches!(registry.full_input(&pending.id, 1), Err(ApprovalError::InputTooLarge { bytes: actual }) if actual == bytes)
+            );
+            assert!(
+                matches!(decide(&registry, &pending.id, ApprovalDecision::Approve), Err(ApprovalError::InputTooLarge { bytes: actual }) if actual == bytes)
+            );
+            assert_eq!(pending.wait().await, ApprovalState::Cancelled);
+            assert!(registry.list_pending(None, 100).is_empty());
+            let notification = events.recv().await.unwrap();
+            assert!(matches!(
+                notification.kind,
+                EventKind::Tool(ToolEvent::ApprovalResolved {
+                    approved: false,
+                    ..
+                })
+            ));
+        } else {
+            let complete = registry.full_input(&pending.id, 1).unwrap().unwrap();
+            assert_eq!(complete.as_ref(), &input);
+            let retained = Arc::downgrade(&complete);
+            drop(complete);
+            assert!(matches!(
+                registry.full_input(&pending.id, 2),
+                Err(ApprovalError::RevisionMismatch { current: 1 })
+            ));
+            let notification = events.recv().await.unwrap();
+            assert!(
+                matches!(notification.kind, EventKind::Tool(ToolEvent::ApprovalRequested { input: Some(actual), .. }) if actual == input)
+            );
+            decide(&registry, &pending.id, ApprovalDecision::Deny).unwrap();
+            assert!(matches!(
+                registry.full_input(&pending.id, 1),
+                Err(ApprovalError::AlreadyDecided(ApprovalState::Denied))
+            ));
+            assert_eq!(pending.wait().await, ApprovalState::Denied);
+            let _terminal = events.recv().await.unwrap();
+            // Terminal tombstones do not keep the large argument allocation.
+            assert!(retained.upgrade().is_none());
+        }
+    }
 }
