@@ -530,9 +530,10 @@ async fn an_older_plan_does_not_undo_a_newer_open_success() {
             &key(1),
             &flight,
             crate::pull_requests::service::FlightOutcome::Committed {
-                seq: 99,
+                seq,
                 pending: true,
                 terminal: false,
+                stored: true,
             },
         );
     });
@@ -546,6 +547,92 @@ async fn an_older_plan_does_not_undo_a_newer_open_success() {
         2,
         "the newer open success keeps the polling going"
     );
+}
+
+/// Ends a flight of pull request 1 the way a finished fetch of this process would.
+fn finish_committed(process: &Process, seq: u64, stored: bool) {
+    let flight = Arc::new(crate::pull_requests::service::Flight::new(Vec::new()));
+    process.service.inner().finish(
+        &key(1),
+        &flight,
+        crate::pull_requests::service::FlightOutcome::Committed {
+            seq,
+            pending: true,
+            terminal: false,
+            stored,
+        },
+    );
+}
+
+// Given: a fetch of this process that found the pull request open and was stored, whose delivery
+// is slow, while another owner stored a merge that the scheduler already adopted / When: the
+// slow fetch finishes / Then: the older "open" does not undo the merge: nothing is fetched
+// again
+#[tokio::test(start_paused = true)]
+async fn a_stored_fetch_finishing_after_a_newer_merge_was_adopted_does_not_undo_it() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    another_process_stores_a_merge(&process);
+    process.service.notify_changed();
+    settle().await;
+
+    // The fetch that was stored first (seq 1) ends only now.
+    finish_committed(&process, 1, true);
+    {
+        // Looked at before the scheduler can run again: the finish itself keeps the newer view.
+        let state = process.service.inner().lock();
+        let entry = state.keys.get(&key(1)).unwrap();
+        assert!(entry.terminal, "the entry is still done");
+        assert_eq!(entry.adopted_seq, 2, "it still stands on the merge");
+        assert_eq!(entry.next_due, None, "and nothing is due");
+    }
+    pass(1_000_000).await;
+
+    assert_eq!(
+        process.source.calls().len(),
+        1,
+        "the merge of the newer sequence stays adopted"
+    );
+}
+
+// Given: a fetch that storage refused because a newer success was already stored / When: it
+// finishes / Then: its read of the pull request is not taken as a fact: the entry keeps what it
+// had adopted, and the next plan reads the stored merge
+#[tokio::test(start_paused = true)]
+async fn a_fetch_refused_by_storage_is_not_taken_as_the_state() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    another_process_stores_a_merge(&process);
+
+    // A fetch of seq 1 found it open, but storage already holds the merge of seq 2.
+    finish_committed(&process, 5, false);
+    {
+        let state = process.service.inner().lock();
+        let entry = state.keys.get(&key(1)).unwrap();
+        assert_eq!(entry.adopted_seq, 1, "a refused result adopts nothing");
+        assert!(!entry.terminal);
+    }
+    process.service.notify_changed();
+    settle().await;
+    pass(1_000_000).await;
+
+    assert_eq!(
+        process.source.calls().len(),
+        1,
+        "the plan adopted the stored merge: the polling stopped"
+    );
+    let state = process.service.inner().lock();
+    assert!(state.keys.get(&key(1)).unwrap().terminal);
 }
 
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,

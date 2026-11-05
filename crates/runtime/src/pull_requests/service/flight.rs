@@ -62,6 +62,9 @@ pub(crate) enum FlightOutcome {
         pending: bool,
         /// The stored facts are merged or closed.
         terminal: bool,
+        /// Storage took the facts of this fetch as the newest. Otherwise an even newer success
+        /// was stored first, and this result says nothing about the pull request's state.
+        stored: bool,
     },
     /// The fetch failed; the failure was recorded.
     Failed { seq: u64, error: FetchError },
@@ -232,15 +235,14 @@ impl Inner {
             Err(PullRequestError::NotOwner) => return FlightOutcome::Discarded,
             Err(error) => return FlightOutcome::StorageFailed(error.to_string()),
         };
-        let stored = if commit.facts_stored {
-            Some(&facts)
-        } else {
-            previous_facts.as_ref()
-        };
+        // Only facts that storage accepted as the newest describe the pull request. A refused
+        // result must not be read back as "open" or "merged": the state it would claim is older.
+        let stored = commit.facts_stored.then_some(&facts);
         let outcome = FlightOutcome::Committed {
             seq,
             pending: diff::is_pending(stored),
             terminal: diff::is_terminal(stored),
+            stored: commit.facts_stored,
         };
         if !commit.facts_stored && !commit.attempt_recorded {
             return outcome;
@@ -531,38 +533,36 @@ impl Inner {
             {
                 state.flights.remove(key);
             }
-            // Only a fetch that settled a fact (a stored success) outdates a plan that read the
-            // shared snapshot earlier. A failure learned nothing, so it must not make a plan
-            // that read a merge look stale.
-            if matches!(outcome, FlightOutcome::Committed { .. }) {
-                state.finish_counter += 1;
-            }
-            let finished_at = state.finish_counter;
-            let settled = matches!(outcome, FlightOutcome::Committed { .. });
             let entry = state
                 .keys
                 .entry(key.clone())
-                .or_insert_with(|| KeyState::new(now, false));
-            if settled {
-                entry.finished_at = finished_at;
-            }
+                .or_insert_with(|| KeyState::new(now, false, 0));
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let stable = Duration::from_secs(config.stable_poll_seconds);
             let backoff_max = Duration::from_secs(config.backoff_max_seconds);
             match &outcome {
                 FlightOutcome::Committed {
+                    seq,
                     pending: is_pending,
                     terminal,
-                    ..
+                    stored,
                 } => {
                     entry.failures = 0;
                     entry.backoff_until = None;
-                    entry.terminal = *terminal;
-                    entry.next_due = if *terminal {
-                        None
+                    if *stored && *seq > entry.adopted_seq {
+                        entry.adopted_seq = *seq;
+                        entry.terminal = *terminal;
+                        entry.next_due = if *terminal {
+                            None
+                        } else {
+                            Some(now + if *is_pending { pending } else { stable })
+                        };
                     } else {
-                        Some(now + if *is_pending { pending } else { stable })
-                    };
+                        // Storage kept an even newer success, or a newer view was adopted while
+                        // this fetch ran: this result is not the state. The entry keeps what it
+                        // has, and the next plan reads the newest facts.
+                        entry.next_due = (!entry.terminal).then_some(now + pending);
+                    }
                 }
                 FlightOutcome::Failed { error, .. } => {
                     entry.failures = entry.failures.saturating_add(1);

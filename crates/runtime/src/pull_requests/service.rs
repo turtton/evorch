@@ -184,19 +184,21 @@ pub(crate) struct KeyState {
     /// Until when a failed fetch is not tried again by whoever waits for the pull request (a
     /// pending inheritance, the tracking threads). Independent of `terminal`.
     pub(crate) backoff_until: Option<Instant>,
-    /// The value of [`State::finish_counter`] when this process last finished a fetch of it. A plan
-    /// that began before that is older than what this process saw, and must not undo it.
-    pub(crate) finished_at: u64,
+    /// The `success_seq` of the newest facts this entry has adopted (0: none yet). Whether the
+    /// stored facts are merged or open is taken from them only when they are newer than this, so
+    /// neither the order a plan and a finished fetch happen to run in nor a fetch that storage
+    /// refused as older can turn the entry back to an older view.
+    pub(crate) adopted_seq: u64,
 }
 
 impl KeyState {
-    pub(crate) fn new(now: Instant, terminal: bool) -> Self {
+    pub(crate) fn new(now: Instant, terminal: bool, adopted_seq: u64) -> Self {
         Self {
             next_due: if terminal { None } else { Some(now) },
             terminal,
             failures: 0,
             backoff_until: None,
-            finished_at: 0,
+            adopted_seq,
         }
     }
 }
@@ -211,8 +213,6 @@ pub(crate) struct State {
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
     pub(crate) inheritance_due: HashMap<String, Instant>,
-    /// Counts the fetches this process finished.
-    pub(crate) finish_counter: u64,
 }
 
 /// A wait on the blocking pool right before a process is started. A test may interrupt it, which

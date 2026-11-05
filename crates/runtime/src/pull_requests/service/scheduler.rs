@@ -27,8 +27,8 @@ const MAX_CHILDREN_PER_ROUND: usize = 1_000;
 
 struct Plan {
     targets: Vec<Target>,
-    /// Keys whose stored facts say merged or closed.
-    terminal: HashSet<PullRequestKey>,
+    /// For each key with stored facts: their `success_seq`, and whether they say merged or closed.
+    stored: HashMap<PullRequestKey, (u64, bool)>,
     /// Pending inheritances of children this process owns: the child, the pull request it waits
     /// for, and its permit.
     children: Vec<(String, PullRequestKey, OwnerPermit)>,
@@ -116,18 +116,18 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
             break;
         }
     }
-    let mut terminal = HashSet::new();
-    let mut seen = HashSet::new();
+    let mut stored = HashMap::new();
     for target in &targets {
-        if !seen.insert(target.key.clone()) {
+        if stored.contains_key(&target.key) {
             continue;
         }
-        let facts = inner
-            .storage
-            .pull_request_snapshot(&target.key)?
-            .and_then(|snapshot| snapshot.facts);
-        if facts.is_some_and(|facts| facts.state != PullRequestState::Open) {
-            terminal.insert(target.key.clone());
+        if let Some(snapshot) = inner.storage.pull_request_snapshot(&target.key)?
+            && let Some(facts) = snapshot.facts
+        {
+            stored.insert(
+                target.key.clone(),
+                (snapshot.success_seq, facts.state != PullRequestState::Open),
+            );
         }
     }
     let mut children = Vec::new();
@@ -151,7 +151,7 @@ fn plan_blocking(inner: &Inner) -> Result<Plan, StorageError> {
     }
     Ok(Plan {
         targets,
-        terminal,
+        stored,
         children,
     })
 }
@@ -172,8 +172,6 @@ impl Inner {
     /// One planning round: starts what is due and returns when the next thing is.
     async fn round(self: &Arc<Self>) -> Option<Instant> {
         let config = self.config();
-        // What this process finishes from here on is newer than the plan about to be read.
-        let plan_epoch = self.lock().finish_counter;
         let planner = Arc::clone(self);
         let plan = match self.blocking(move || plan_blocking(&planner)).await {
             Ok(Ok(plan)) => plan,
@@ -212,17 +210,20 @@ impl Inner {
                 let forced = targets
                     .iter()
                     .any(|target| state.forced.contains(&target.thread_id));
-                let terminal = plan.terminal.contains(&key);
+                let (stored_seq, terminal) = plan.stored.get(&key).copied().unwrap_or((0, false));
                 let entry = state
                     .keys
                     .entry(key.clone())
-                    .or_insert_with(|| KeyState::new(now, terminal));
+                    .or_insert_with(|| KeyState::new(now, terminal, stored_seq));
                 // The shared snapshot is the other processes' word too: a merge or a reopening they
-                // stored is honoured, unless this process finished a fetch of it since the plan
-                // began (then the plan is the older view and must not undo the newer one).
-                if entry.finished_at <= plan_epoch && entry.terminal != terminal {
-                    entry.terminal = terminal;
-                    entry.next_due = if terminal { None } else { Some(now) };
+                // stored is honoured when it is newer than what this entry has adopted. An older
+                // read (the plan is older than a fetch this process finished meanwhile) is not.
+                if stored_seq > entry.adopted_seq {
+                    entry.adopted_seq = stored_seq;
+                    if entry.terminal != terminal {
+                        entry.terminal = terminal;
+                        entry.next_due = if terminal { None } else { Some(now) };
+                    }
                 }
                 if forced {
                     entry.next_due = Some(now);
