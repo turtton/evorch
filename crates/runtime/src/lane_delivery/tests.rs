@@ -5,6 +5,7 @@ use providers::{ContentBlock, Message, ToolSpec};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 mod lease;
 mod questions;
+mod todo;
 
 #[tokio::test]
 async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {

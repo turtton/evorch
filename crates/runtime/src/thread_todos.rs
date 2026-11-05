@@ -13,7 +13,7 @@ const MAX_ECHO: usize = 80;
 
 /// What one `todo_write` call asks for. Exactly one is accepted.
 #[derive(Debug)]
-enum Operation {
+pub(crate) enum Operation {
     Replace(Vec<ThreadTodoItem>),
     Advance {
         expected_revision: u64,
@@ -34,7 +34,7 @@ struct UpdateArgs {
 
 /// The committed list and whether this call changed it.
 #[derive(Debug)]
-struct Applied {
+pub(crate) struct Applied {
     snapshot: ThreadTodoSnapshot,
     changed: bool,
 }
@@ -67,7 +67,11 @@ impl AgentRuntime {
 
     /// Apply one operation to `root`'s list and publish a change, all under the
     /// goal lock. The caller holds the ownership guard (ownership, then goal).
-    fn write_thread_todo(&self, root: RunId, operation: Operation) -> Result<Applied, String> {
+    pub(crate) fn write_thread_todo(
+        &self,
+        root: RunId,
+        operation: Operation,
+    ) -> Result<Applied, String> {
         let mut state = self.goal_lock();
         let thread = state
             .roots
