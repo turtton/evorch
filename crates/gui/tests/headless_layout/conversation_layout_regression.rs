@@ -33,6 +33,7 @@ fn narrow_conversation_keeps_message_input_and_send_inside_its_width() {
                             parent_thread: None,
                             child_threads: Vec::new(),
                             lane: None,
+                            lead: None,
                             thread_metrics: None,
                             phase: None,
                             model_picker: gui::panes::model_picker::ModelPickerContext {
@@ -321,6 +322,7 @@ fn multiline_composer_grows_upward_and_shrinks_without_covering_the_transcript()
                         parent_thread: None,
                         child_threads: Vec::new(),
                         lane: None,
+                        lead: None,
                         thread_metrics: None,
                         phase: None,
                         model_picker: gui::panes::model_picker::ModelPickerContext {

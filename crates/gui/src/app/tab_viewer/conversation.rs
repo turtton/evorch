@@ -133,8 +133,38 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                         .iter()
                         .find(|t| t.id == lane.origin_thread_id)
                 });
-                Some(crate::panes::agent::LaneContext { detail, origin })
+                Some(crate::panes::agent::LaneContext {
+                    detail,
+                    origin,
+                    delivery_bound: self.lane_delivery_bound,
+                })
             }),
+            lead: active_thread
+                .zip(thread_id.as_deref())
+                .and_then(|(thread, id)| {
+                    let lanes: Vec<_> = self
+                        .sidebar
+                        .threads
+                        .iter()
+                        .filter(|lane| {
+                            lane.lane.as_ref().is_some_and(|link| {
+                                link.lead_thread_id.as_ref() == Some(&thread.id)
+                            })
+                        })
+                        .filter_map(|lane| self.lane_details.get(&lane.id.to_string()))
+                        .collect();
+                    let waiting_questions = super::super::questions::lead_routed_count(
+                        self.user_questions.values(),
+                        id,
+                    );
+                    (!lanes.is_empty() || waiting_questions > 0).then_some(
+                        crate::panes::agent::LeadContext {
+                            thread_id: id,
+                            lanes,
+                            waiting_questions,
+                        },
+                    )
+                }),
             branch: match (self.focus, active_thread) {
                 (ConversationFocus::Thread, Some(thread)) => {
                     lineage
@@ -180,6 +210,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             match action {
                 AgentPaneAction::Goal(a) => *self.goal_action = Some(a),
                 AgentPaneAction::Request(a) => *self.request_action = Some(a),
+                AgentPaneAction::Lane(a) => *self.lane_action = Some(a),
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),

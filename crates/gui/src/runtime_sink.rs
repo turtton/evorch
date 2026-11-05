@@ -68,6 +68,10 @@ pub struct RuntimeCommandSink {
     ownership: Option<std::sync::Arc<runtime::ownership::OwnerHost>>,
     search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
     compaction_jobs: BTreeMap<String, saved_compaction::CompactionJob>,
+    /// Model each thread last submitted with, so a runtime-requested wake keeps it.
+    model_preferences: BTreeMap<String, runtime::ModelPreference>,
+    /// What the lane delivery host reads; republished after every change of the maps above.
+    lane_bindings: lane_host::BindingTable,
 }
 
 /// Reply channel, project, query, result limit and continuation cursor of a thread search.
@@ -121,7 +125,58 @@ impl RuntimeCommandSink {
             ownership: None,
             search_jobs: crate::model::latest_job::LatestJob::default(),
             compaction_jobs: BTreeMap::new(),
+            model_preferences: BTreeMap::new(),
+            lane_bindings: lane_host::BindingTable::default(),
         }
+    }
+
+    /// Installs the runtime's durable lane delivery (ADR 0044 Phase 1c) with this sink's
+    /// bindings and ownership as the host. Call it after `with_ownership`,
+    /// `with_memory_storage` and `with_team_writer`: the host copies them. Inside the Tokio
+    /// handle the runtime's recovery worker starts; without one delivery stays unbound and
+    /// questions keep going to the user.
+    pub fn with_lane_delivery(self) -> Self {
+        let host = Arc::new(lane_host::GuiLaneDeliveryHost::new(
+            self.runtime.downgrade(),
+            self.ownership.clone(),
+            self.lane_bindings.clone(),
+            self.memory_config.clone(),
+            self.team_writer.clone(),
+        ));
+        self.publish_lane_bindings();
+        let _guard = self.handle.enter();
+        // The worker keeps running without its handle and holds the runtime weakly.
+        drop(self.runtime.bind_lane_delivery_host(host));
+        self
+    }
+
+    fn publish_lane_bindings(&self) {
+        let threads: BTreeSet<&String> =
+            self.chat_runs.keys().chain(self.goal_runs.keys()).collect();
+        self.lane_bindings.replace(
+            threads
+                .into_iter()
+                .filter_map(|thread| {
+                    let root = *self
+                        .chat_runs
+                        .get(thread)
+                        .or_else(|| self.goal_runs.get(thread))?;
+                    Some((
+                        thread.clone(),
+                        lane_host::ThreadBinding {
+                            root,
+                            project_root: self
+                                .thread_roots
+                                .get(thread)
+                                .cloned()
+                                .or_else(|| self.shell_cwd.clone()),
+                            goal_project: self.goal_projects.get(thread).cloned(),
+                            model_preference: self.model_preferences.get(thread).cloned(),
+                        },
+                    ))
+                })
+                .collect(),
+        );
     }
 
     pub fn with_web_tools_enabled(self, enabled: bool) -> Self {
@@ -156,13 +211,7 @@ impl RuntimeCommandSink {
     fn capture_memory(&self, root: Option<&Path>) -> Option<runtime::memory::MemoryBoundary> {
         let config = self.memory_config.as_ref()?;
         let root = root.or(self.shell_cwd.as_deref())?;
-        let project = self
-            .runtime
-            .project_slug(root)
-            .unwrap_or_else(|| derive_repo_slug(root));
-        runtime::memory::MemoryBoundary::capture(config, &project)
-            .inspect_err(|error| tracing::warn!(%error, %project, "memory read failed"))
-            .ok()
+        lane_host::memory_boundary(&self.runtime, Some(config), Some(root))
     }
 
     fn can_restart_stopped(&self, thread: &str, error: &runtime::RuntimeError) -> bool {
@@ -178,7 +227,9 @@ impl RuntimeCommandSink {
     }
 }
 
+mod lane_host;
 mod saved_compaction;
+pub use lane_host::GuiLaneDeliveryHost;
 
 impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
@@ -272,6 +323,7 @@ impl CommandSink for RuntimeCommandSink {
             self.rebind_conversation_root(&snapshot.thread_id, id);
             self.chat_runs.insert(snapshot.thread_id.clone(), id);
         }
+        self.publish_lane_bindings();
     }
 
     fn bind_lane_root(&mut self, thread: &str, run: &str) {
@@ -281,7 +333,17 @@ impl CommandSink for RuntimeCommandSink {
         {
             self.rebind_conversation_root(thread, id);
             self.chat_runs.insert(thread.into(), id);
+            self.publish_lane_bindings();
         }
+    }
+
+    fn lane_delivery_bound(&self) -> bool {
+        self.runtime.lane_delivery_binding() == event_bus::lane::LaneDeliveryBinding::Bound
+    }
+
+    fn schedule_lane_deliveries(&mut self, thread: &str) {
+        let _guard = self.handle.enter();
+        self.runtime.schedule_lane_deliveries(thread);
     }
 
     fn bind_goal_context(&mut self, thread: &str, project: &str, run: &str) {
@@ -289,6 +351,7 @@ impl CommandSink for RuntimeCommandSink {
             self.rebind_conversation_root(thread, id);
             self.goal_runs.insert(thread.into(), id);
             self.goal_projects.insert(thread.into(), project.into());
+            self.publish_lane_bindings();
         }
     }
     fn restore_diagnostics(
@@ -368,6 +431,7 @@ impl CommandSink for RuntimeCommandSink {
             .set_project_root(root.clone())
             .map_err(|error| error.to_string())?;
         self.shell_cwd = Some(root);
+        self.publish_lane_bindings();
         Ok(())
     }
 
@@ -437,6 +501,7 @@ impl CommandSink for RuntimeCommandSink {
                 | WorkbenchCommand::StopChat { thread_id }
                 | WorkbenchCommand::StopRun { thread_id, .. }
                 | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
+                | WorkbenchCommand::ResumeLaneDeliveries { thread_id }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
@@ -460,6 +525,16 @@ impl CommandSink for RuntimeCommandSink {
 
 impl RuntimeCommandSink {
     fn submit_authorized(
+        &mut self,
+        command: WorkbenchCommand,
+        permit: Option<runtime::ownership::OwnerPermit>,
+    ) -> Vec<LoopEvent> {
+        let events = self.dispatch_authorized(command, permit);
+        self.publish_lane_bindings();
+        events
+    }
+
+    fn dispatch_authorized(
         &mut self,
         command: WorkbenchCommand,
         permit: Option<runtime::ownership::OwnerPermit>,
@@ -613,6 +688,47 @@ impl RuntimeCommandSink {
                 Vec::new()
             }
             WorkbenchCommand::CompactChat { thread_id } => self.compact_chat(thread_id, permit),
+            WorkbenchCommand::ResumeLaneDeliveries { thread_id } => {
+                if permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.thread_id != thread_id)
+                    || (self.ownership.is_some() && permit.is_none())
+                {
+                    return vec![LoopEvent::CommandRejected {
+                        reason: runtime::ownership::OwnershipError::Fenced.to_string(),
+                    }];
+                }
+                let run = self
+                    .chat_runs
+                    .get(&thread_id)
+                    .or_else(|| self.goal_runs.get(&thread_id))
+                    .copied()
+                    .map_or_else(
+                        || self.runtime.latest_chat_run(&thread_id),
+                        |run| Ok(Some(run)),
+                    );
+                let _guard = self.handle.enter();
+                let result = match run {
+                    Ok(Some(run)) => {
+                        self.runtime
+                            .resume_lane_deliveries(&thread_id, run, permit.as_ref())
+                    }
+                    Ok(None) => {
+                        return vec![LoopEvent::ChatNotice {
+                            thread_id,
+                            text: "No conversation to resume lane notifications for".into(),
+                        }];
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(()) => Vec::new(),
+                    Err(error) => vec![LoopEvent::ChatRejected {
+                        thread_id,
+                        reason: format!("Could not resume lane notifications: {error}"),
+                    }],
+                }
+            }
             WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id } => {
                 let result = self
                     .chat_runs
@@ -856,36 +972,13 @@ impl RuntimeCommandSink {
         prompt: Option<&str>,
         authority: &mut RunConfig,
     ) -> Result<(), String> {
-        if !self
-            .runtime
-            .restore_diagnostics(run)
-            .ok()
-            .flatten()
-            .is_some_and(|diagnostics| diagnostics.renewable_team.is_some())
-        {
-            return Ok(());
+        lane_host::TeamSource {
+            runtime: &self.runtime,
+            memory_config: self.memory_config.as_ref(),
+            team_writer: self.team_writer.as_ref(),
+            goal_project: self.goal_projects.get(thread).map(String::as_str),
         }
-        let project = self
-            .goal_projects
-            .get(thread)
-            .ok_or("Current project binding is required to continue this team")?;
-        let (Some(config), Some(writer)) = (&self.memory_config, &self.team_writer) else {
-            return Err("Current team storage is unavailable".into());
-        };
-        authority.team_store = Some(runtime::team_context::TeamStore {
-            config: config.clone(),
-            writer: writer.clone(),
-            id: format!("{project}:{thread}"),
-        });
-        authority.topology = runtime::CoordinationTopology::DynamicTeam { max_workers: 3 };
-        // This renews the current team capability; it is not a model message.
-        authority.delegation_value = Some(
-            prompt
-                .unwrap_or("Resume the existing team coordination")
-                .into(),
-        );
-        authority.finding_store = Some(config.db_path.clone());
-        Ok(())
+        .renew(thread, run, prompt, authority)
     }
 
     fn goal_control(
@@ -954,6 +1047,15 @@ impl RuntimeCommandSink {
             initial.skill_mentions.clone_from(&submission.skills);
         }
         let thread_id = submission.thread_id;
+        match &submission.model_preference {
+            Some(preference) => {
+                self.model_preferences
+                    .insert(thread_id.clone(), preference.clone());
+            }
+            None => {
+                self.model_preferences.remove(&thread_id);
+            }
+        }
         // New runs of a thread work in its project, even after the active project moved.
         if let Some(root) = submission.project_root {
             self.thread_roots.insert(thread_id.clone(), root);

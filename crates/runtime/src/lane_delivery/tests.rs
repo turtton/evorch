@@ -940,3 +940,81 @@ fn binding_without_an_executor_remains_unbound() {
         LaneDeliveryBinding::Unbound
     );
 }
+#[tokio::test]
+async fn host_entries_resolve_the_lane_ledger_binding_and_refuse_a_foreign_thread_resume() {
+    let mut f = Fixture::new();
+    let (lead, _host) = f.lead().await;
+    let lane = f.lane(lead, "host-entries").await;
+
+    let (root, generation) = f
+        .runtime
+        .lane_thread_binding(&lane.thread_id)
+        .unwrap()
+        .expect("a started lane has a ledger binding");
+    assert_eq!(root, lane.root_run_id);
+    assert!(generation > 0);
+    assert_eq!(
+        f.runtime.lane_thread_binding("delivery-lead").unwrap(),
+        None,
+        "a lead is not a lane"
+    );
+
+    assert!(
+        f.runtime
+            .resume_lane_deliveries("another-thread", lead, None)
+            .is_err(),
+        "a root that is not the named thread's is refused, not ignored"
+    );
+    f.runtime
+        .resume_lane_deliveries("delivery-lead", lead, None)
+        .unwrap();
+}
+#[tokio::test]
+async fn a_host_resume_never_clears_a_stop_and_says_to_continue_the_lead() {
+    let mut f = Fixture::new();
+    let (lead, _host) = f.lead().await;
+    let _lane = f.lane(lead, "stopped-resume").await;
+    f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(lead).await.unwrap();
+
+    let refused = f
+        .runtime
+        .resume_lane_deliveries("delivery-lead", lead, None)
+        .unwrap_err();
+
+    assert!(refused.to_string().contains("continue it"), "{refused}");
+    assert!(
+        f.storage
+            .handle()
+            .lane_delivery_destination("delivery-lead".into())
+            .unwrap()
+            .unwrap()
+            .stopped,
+        "the durable Stop is kept until the user continues the lead"
+    );
+}
+#[tokio::test]
+async fn a_thread_without_lanes_announces_no_delivery_state_change() {
+    let mut f = Fixture::new();
+    let (lead, _host) = f.lead().await;
+
+    f.runtime
+        .resume_lane_deliveries("delivery-lead", lead, None)
+        .unwrap();
+    f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
+    // The lead's Stopped phase ends the stop: every announcement of it came before.
+    loop {
+        let event = f.events.recv().await.unwrap();
+        assert!(
+            !matches!(&event.kind, event_bus::EventKind::Diagnostic(d)
+                if d.source == "lane_delivery" && d.thread_id.is_some()),
+            "{event:?}"
+        );
+        if matches!(&event.kind, event_bus::EventKind::Lifecycle(
+            event_bus::LifecycleEvent::AgentRunStateChanged { run_id, to, .. }
+        ) if *run_id == lead.to_string() && *to == AgentRunPhase::Stopped)
+        {
+            break;
+        }
+    }
+}
