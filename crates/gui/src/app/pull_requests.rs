@@ -372,12 +372,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         match loaded {
             Loaded::Thread(thread, epoch, result) => {
                 self.pull_requests.in_flight.remove(&thread);
-                if self.pull_requests.dirty.remove(&thread) {
+                // Something about the thread (an event, an ownership change) arrived while this
+                // read ran: what it found may already be out of date, and the read that follows
+                // will say. It is shown meanwhile, but decides no notification.
+                let overtaken = self.pull_requests.dirty.remove(&thread);
+                if overtaken {
                     self.pull_requests.request(&thread);
                 }
                 match result {
                     Ok(view) if self.pull_requests.model.enabled => {
-                        self.settle_pending_notices(&view, epoch);
+                        if !overtaken {
+                            self.settle_pending_notices(&view, epoch);
+                        }
                         self.pull_requests.model.set(*view);
                     }
                     Ok(_) => {}
@@ -522,7 +528,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// An ownership change decides who polls a thread, and so what its bar says about
     /// tracking.
     pub(super) fn invalidate_pull_request_tracking(&mut self, thread: &str) {
-        if self.pull_requests.model.linked(thread).is_some() {
+        let notices_wait = self
+            .pull_requests
+            .pending_notices
+            .iter()
+            .any(|notice| notice.thread_id == thread);
+        if notices_wait || self.pull_requests.model.linked(thread).is_some() {
             self.pull_requests.request(thread);
         }
     }
@@ -613,13 +624,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     return;
                 };
                 let expected_revision = view.lifecycle_revision;
-                let ended = view.link.as_ref().map(|link| link.link_revision);
+                // Nothing is assumed ended here: a refused Unlink leaves the link, and a granted
+                // one shows in the next read and in the Unlinked event.
                 if self.pull_request_permit(&thread_id) {
-                    if let Some(revision) = ended {
-                        self.pull_requests
-                            .ended
-                            .insert((thread_id.clone(), revision));
-                    }
                     self.submit_pull_request_command(WorkbenchCommand::UnlinkPullRequest {
                         thread_id,
                         expected_revision,

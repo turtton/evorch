@@ -212,6 +212,24 @@ impl World {
         host: &Arc<OwnerHost>,
         sink: Box<dyn CommandSink>,
     ) -> WorkbenchState<DemoSource> {
+        let probe_host = host.clone();
+        let inline: gui::app::lanes::Spawner = Arc::new(|job| job());
+        self.window_built(
+            host,
+            sink,
+            Arc::new(move |thread: &str| probe_host.owned_permit(thread).is_ok()),
+            inline,
+        )
+    }
+
+    /// [`Self::window_with`] with its own owner probe and the way reads are run.
+    fn window_built(
+        &self,
+        host: &Arc<OwnerHost>,
+        sink: Box<dyn CommandSink>,
+        probe: gui::app::pull_requests::OwnerProbe,
+        spawner: gui::app::lanes::Spawner,
+    ) -> WorkbenchState<DemoSource> {
         let mut sidebar = SidebarState::default();
         let project = ProjectId::new("project");
         sidebar
@@ -222,8 +240,6 @@ impl World {
             .create_thread(ThreadId::new(THREAD), project, "Thread")
             .unwrap();
         sidebar.switch_thread(&ThreadId::new(THREAD)).unwrap();
-        let probe_host = host.clone();
-        let inline: gui::app::lanes::Spawner = Arc::new(|job| job());
         WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
             .unwrap()
             .with_sidebar(sidebar)
@@ -232,11 +248,9 @@ impl World {
             .with_command_sink(sink)
             .with_pull_requests(
                 Arc::new(StoragePullRequestReader::new(self.config.db_path.clone())),
-                Some(Arc::new(move |thread: &str| {
-                    probe_host.owned_permit(thread).is_ok()
-                })),
+                Some(probe),
             )
-            .with_pull_request_spawner(inline)
+            .with_pull_request_spawner(spawner)
     }
 
     fn window(&self) -> WorkbenchState<DemoSource> {
@@ -1006,4 +1020,98 @@ async fn a_merge_the_runtime_found_notifies_once() {
     );
     window.apply_events(events);
     assert_eq!(window.notifications().items().count(), 1);
+}
+
+type Held = Arc<std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
+/// Runs the reads that were held back, in the order they were started.
+fn run_held(held: &Held) {
+    let jobs: Vec<_> = held.lock().unwrap().drain(..).collect();
+    for job in jobs {
+        job();
+    }
+}
+
+// Given: a notification waiting for the database, a read of the thread that has completed but
+// whose result is not applied yet / When: this process loses the thread before the result is
+// applied / Then: that result decides nothing; the read that follows sees the lost lease and the
+// notification is dropped
+#[tokio::test]
+async fn a_read_overtaken_by_an_ownership_change_confirms_no_notification() {
+    let world = World::new();
+    let revision = linked_and_owned(&world);
+    let owned = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let held: Held = Arc::default();
+    let probe_owned = Arc::clone(&owned);
+    let spawner_held = Arc::clone(&held);
+    let mut window = world.window_built(
+        &world.host,
+        Box::new(RecordingSink::default()),
+        Arc::new(move |_: &str| probe_owned.load(std::sync::atomic::Ordering::SeqCst)),
+        Arc::new(move |job| spawner_held.lock().unwrap().push(job)),
+    );
+    for _ in 0..3 {
+        window.pump_pull_requests();
+        run_held(&held);
+    }
+    window.pump_pull_requests();
+
+    // When: an event brings a notification, its read runs to completion, and only then does the
+    // ownership change (its event arrives) before the result is applied.
+    window.apply_events([change(THREAD, revision, 1, &["checks_failed"])]);
+    window.pump_pull_requests();
+    run_held(&held);
+    owned.store(false, std::sync::atomic::Ordering::SeqCst);
+    window.apply_events([Event::new(event_bus::OwnershipEvent {
+        thread_id: THREAD.into(),
+        owner_id: "another-window".into(),
+        generation: 9,
+        action: event_bus::OwnershipAction::Handoff,
+    })]);
+    window.pump_pull_requests();
+    assert_eq!(
+        window.notifications().items().count(),
+        0,
+        "a result overtaken by an ownership change must not confirm a notification"
+    );
+
+    // Then: the follow-up read finds the lease gone, and the notification is dropped for good.
+    for _ in 0..3 {
+        run_held(&held);
+        window.pump_pull_requests();
+    }
+    assert_eq!(window.notifications().items().count(), 0);
+}
+
+// Given: a link this window unlinked itself / When: an event of that link arrives afterwards /
+// Then: the database shows no such link and nothing is raised
+#[tokio::test]
+async fn an_event_arriving_after_this_windows_own_unlink_never_notifies() {
+    let mut world = World::new();
+    let mut window = world.window();
+    world.source.push_ok(&key(12), running(12));
+    world.source.repeat_last();
+    settle(&mut window);
+    window.apply_pull_request_action(link_action("turtton/evorch#12"));
+    world.until(changed(THREAD)).await;
+    world.show(&mut window);
+    let revision = window
+        .pull_request_model()
+        .linked(THREAD)
+        .unwrap()
+        .link
+        .as_ref()
+        .unwrap()
+        .link_revision;
+
+    window.apply_pull_request_action(PullRequestAction::Unlink {
+        thread_id: THREAD.into(),
+    });
+    world
+        .until(|event| matches!(event, PullRequestEvent::Unlinked { thread_id, .. } if thread_id == THREAD))
+        .await;
+    window.apply_events([change(THREAD, revision, 9, &["merged"])]);
+    world.show(&mut window);
+
+    assert_eq!(window.notifications().items().count(), 0);
 }

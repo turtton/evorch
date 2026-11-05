@@ -177,8 +177,8 @@ impl super::RuntimeCommandSink {
     }
 }
 
-/// Runs one queued operation. The service checks the permit of the operations that take one;
-/// dismissing a candidate takes none there, so its permit is checked here first.
+/// Runs one queued operation. The service checks the permit, and holds the thread's generation
+/// while it writes and publishes.
 async fn run(work: Work) -> Result<(), PullRequestError> {
     let Work {
         service,
@@ -247,18 +247,10 @@ async fn run(work: Work) -> Result<(), PullRequestError> {
                 candidate_id,
             },
             Some(permit),
-        ) => {
-            let held = tokio::task::spawn_blocking(move || permit.validate_generation().is_ok())
-                .await
-                .unwrap_or(false);
-            if !held {
-                return Err(PullRequestError::NotOwner);
-            }
-            service
-                .dismiss_candidate(&thread_id, candidate_id)
-                .await
-                .map(drop)
-        }
+        ) => service
+            .dismiss_candidate(&thread_id, candidate_id, &permit)
+            .await
+            .map(drop),
         _ => Err(PullRequestError::NotOwner),
     }
 }

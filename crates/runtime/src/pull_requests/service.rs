@@ -225,6 +225,8 @@ pub(crate) enum Stage {
     Checkout,
     /// The scheduler has read its plan and has not yet applied it.
     Planned,
+    /// A write for a thread is about to take the registry guard (after its permit was checked).
+    Guarded,
 }
 
 pub(crate) struct Inner {
@@ -414,7 +416,7 @@ impl Inner {
         permits: Vec<OwnerPermit>,
         write: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, PullRequestError> {
-        self.blocking(move || {
+        self.blocking_at(Stage::Guarded, move || {
             let mut refusal = PullRequestError::NotOwner;
             for permit in &permits {
                 match permit.mutation_guard() {
@@ -438,6 +440,7 @@ impl Inner {
         key: PullRequestKey,
         expected_revision: u64,
         permit: &OwnerPermit,
+        confirmed: Option<PullRequestCandidate>,
     ) -> Result<LinkReceipt, PullRequestError> {
         self.enabled()?;
         self.check_permit(thread_id, permit).await?;
@@ -475,6 +478,17 @@ impl Inner {
                         origin: event_bus::PullRequestLinkOrigin::Explicit,
                     }));
                 }
+                // Announced inside the same guarded write: a process that lost the thread
+                // meanwhile publishes nothing.
+                if let Some(candidate) = &confirmed {
+                    Self::announce_candidate(
+                        &storage,
+                        &bus,
+                        &receipt.link.thread_id,
+                        candidate,
+                        event_bus::PullRequestCandidateState::Confirmed,
+                    )?;
+                }
                 Ok(receipt)
             })
             .await??;
@@ -502,21 +516,24 @@ impl Inner {
             .await??)
     }
 
-    async fn candidate_event(
-        &self,
+    /// Publishes a candidate decision with the thread's current revision and sequence. Called
+    /// inside a guarded write, after the decision is stored.
+    fn announce_candidate(
+        storage: &StorageHandle,
+        bus: &EventBus,
         thread_id: &str,
         candidate: &PullRequestCandidate,
         state: event_bus::PullRequestCandidateState,
-    ) -> Result<(), PullRequestError> {
-        let current = self.thread_state(thread_id).await?;
-        self.emit(PullRequestEvent::CandidateChanged {
+    ) -> Result<(), StorageError> {
+        let current = storage.pull_request_thread_state(thread_id)?;
+        bus.emit(Event::new(PullRequestEvent::CandidateChanged {
             thread_id: thread_id.to_owned(),
             link_revision: current.lifecycle_revision,
             transition_seq: current.transition_seq,
             pull_request: Self::reference(&candidate.key),
             candidate_id: candidate.candidate_id,
             state,
-        });
+        }));
         Ok(())
     }
 
@@ -658,7 +675,7 @@ impl PullRequestService {
     ) -> Result<LinkReceipt, PullRequestError> {
         let key = parse_locator(locator)?;
         self.inner
-            .link_key(thread_id, key, expected_revision, permit)
+            .link_key(thread_id, key, expected_revision, permit, None)
             .await
     }
 
@@ -726,40 +743,54 @@ impl PullRequestService {
     }
 
     /// Ignores a candidate chip. A decided candidate is not shown again, not even after an
-    /// Unlink.
+    /// Unlink. Dismissing changes the thread's stored state, so it needs the thread's permit like
+    /// the other decisions, and the write and its event are done under the registry guard.
     ///
     /// # Errors
-    /// [`PullRequestError::Disabled`], [`PullRequestError::CandidateNotFound`], storage errors.
+    /// [`PullRequestError::Disabled`], [`PullRequestError::NotOwner`],
+    /// [`PullRequestError::CandidateNotFound`], storage errors.
     pub async fn dismiss_candidate(
         &self,
         thread_id: &str,
         candidate_id: u64,
+        permit: &OwnerPermit,
     ) -> Result<PullRequestCandidate, PullRequestError> {
         let inner = &self.inner;
         inner.enabled()?;
+        inner.check_permit(thread_id, permit).await?;
         let before = inner
             .candidates(thread_id)
             .await?
             .into_iter()
             .find(|candidate| candidate.candidate_id == candidate_id)
             .ok_or(PullRequestError::CandidateNotFound)?;
-        let (storage, thread, at_ns) = (
+        let (storage, bus, thread, at_ns) = (
             inner.storage.clone(),
+            Arc::clone(&inner.bus),
             thread_id.to_owned(),
             inner.clock.now_ns(),
         );
         let after = inner
-            .blocking(move || storage.dismiss_pull_request_candidate(&thread, candidate_id, at_ns))
+            .guarded(
+                permit,
+                move || -> Result<PullRequestCandidate, StorageError> {
+                    let after =
+                        storage.dismiss_pull_request_candidate(&thread, candidate_id, at_ns)?;
+                    if before.state == CandidateState::Presented
+                        && after.state == CandidateState::Dismissed
+                    {
+                        Inner::announce_candidate(
+                            &storage,
+                            &bus,
+                            &thread,
+                            &after,
+                            event_bus::PullRequestCandidateState::Dismissed,
+                        )?;
+                    }
+                    Ok(after)
+                },
+            )
             .await??;
-        if before.state == CandidateState::Presented && after.state == CandidateState::Dismissed {
-            inner
-                .candidate_event(
-                    thread_id,
-                    &after,
-                    event_bus::PullRequestCandidateState::Dismissed,
-                )
-                .await?;
-        }
         Ok(after)
     }
 
@@ -786,17 +817,15 @@ impl PullRequestService {
                     && candidate.state == CandidateState::Presented
             })
             .ok_or(PullRequestError::CandidateNotFound)?;
-        let receipt = inner
-            .link_key(thread_id, candidate.key.clone(), expected_revision, permit)
-            .await?;
         inner
-            .candidate_event(
+            .link_key(
                 thread_id,
-                &candidate,
-                event_bus::PullRequestCandidateState::Confirmed,
+                candidate.key.clone(),
+                expected_revision,
+                permit,
+                Some(candidate),
             )
-            .await?;
-        Ok(receipt)
+            .await
     }
 
     /// Records that `child_thread_id`, derived from `parent_thread_id`, may take the parent's
