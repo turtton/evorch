@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use event_bus::lane::{LaneDeliveryBinding, QuestionResponder};
 use event_bus::{AgentRunPhase, EventBus, EventKind, EventReceiver, LifecycleEvent};
 use gui::{
-    model::commands::{ChatSubmission, CommandSink, LoopEvent, WorkbenchCommand},
+    app::WorkbenchState,
+    fixture::DemoSource,
+    model::commands::{ChatContinuation, ChatSubmission, CommandSink, LoopEvent, WorkbenchCommand},
     model::composer::ComposerRole,
     runtime_sink::RuntimeCommandSink,
 };
@@ -18,6 +20,7 @@ use runtime::{
     RuntimeError,
 };
 use storage::lane_delivery::LaneDeliveryNack;
+use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[path = "support/short_private_directory.rs"]
 mod short_private_directory;
@@ -33,6 +36,8 @@ struct Model {
     finishing: Mutex<HashSet<String>>,
     scripted: Mutex<HashMap<String, ContentBlock>>,
     requests: Mutex<HashMap<String, usize>>,
+    /// Every message each root was sent, serialized, in request order.
+    texts: Mutex<HashMap<String, Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -50,6 +55,12 @@ impl AgentModel for Model {
             .unwrap()
             .entry(invocation.run_id.clone())
             .or_default() += 1;
+        self.texts
+            .lock()
+            .unwrap()
+            .entry(invocation.run_id.clone())
+            .or_default()
+            .push(serde_json::to_string(messages).unwrap());
         let scripted = self.scripted.lock().unwrap().remove(&invocation.run_id);
         let finish = self.finishing.lock().unwrap().contains(&invocation.run_id);
         let tool = scripted.or_else(|| {
@@ -101,6 +112,9 @@ struct World {
     bus: Arc<EventBus>,
     /// Questions the workbench would have been told about, as the bus announced them.
     announced: Vec<event_bus::UserQuestion>,
+    /// Every event received and not yet handed to a workbench.
+    seen: Vec<event_bus::Event>,
+    config: storage::StorageConfig,
     _dir: tempfile::TempDir,
 }
 
@@ -128,6 +142,8 @@ impl World {
             events,
             bus,
             announced: Vec::new(),
+            seen: Vec::new(),
+            config,
             _dir: dir,
         }
     }
@@ -150,18 +166,76 @@ impl World {
 
     async fn phase(&mut self, run: RunId, wanted: AgentRunPhase) {
         loop {
-            let event = self.events.recv().await.unwrap();
-            if let EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) =
-                &event.kind
-            {
-                self.announced.push(question.clone());
-            }
+            let event = self.next_event().await;
             if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. })
                 if *run_id == run.to_string() && *to == wanted)
             {
                 return;
             }
         }
+    }
+
+    async fn next_event(&mut self) -> event_bus::Event {
+        let event = self.events.recv().await.unwrap();
+        if let EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) = &event.kind
+        {
+            self.announced.push(question.clone());
+        }
+        self.seen.push(event.clone());
+        event
+    }
+
+    /// Receives events until the runtime announces a change of a lane delivery state.
+    async fn until_state_changed(&mut self, code: &str, thread: &str) {
+        loop {
+            let event = self.next_event().await;
+            if matches!(&event.kind, EventKind::Diagnostic(d)
+                if d.source == "lane_delivery" && d.code == code && d.thread_id.as_deref() == Some(thread))
+            {
+                return;
+            }
+        }
+    }
+
+    /// A workbench that shows this world's lanes from the real ledger, with the lead's thread.
+    fn workbench(&self) -> WorkbenchState<DemoSource> {
+        let mut sidebar = SidebarState::default();
+        let project = ProjectId::new("project");
+        sidebar
+            .add_project(project.clone(), "project", self._dir.path())
+            .unwrap();
+        sidebar.select_project(&project).unwrap();
+        sidebar
+            .create_thread(ThreadId::new(LEAD), project, "Lead")
+            .unwrap();
+        sidebar.switch_thread(&ThreadId::new(LEAD)).unwrap();
+        let inline: gui::app::lanes::Spawner = Arc::new(|job| job());
+        WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
+            .unwrap()
+            .with_sidebar(sidebar)
+            .with_provider_status(gui::model::composer::ProviderStatus::Configured)
+            .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
+                self.config.db_path.clone(),
+            )))
+            .with_lane_spawner(inline)
+    }
+
+    /// Hands the events received so far to `state` and lets its ledger reads finish.
+    fn show(&mut self, state: &mut WorkbenchState<DemoSource>) {
+        state.apply_events(std::mem::take(&mut self.seen));
+        for _ in 0..3 {
+            state.pump_lanes();
+        }
+    }
+
+    /// A runtime started over the same storage, as after a restart: it knows no goal binding.
+    fn restarted_runtime(&self) -> AgentRuntime {
+        AgentRuntime::new(
+            self.bus.clone(),
+            Arc::new(tools::ToolExecutor::new(self.bus.clone())),
+            Arc::new(Model::default()),
+        )
+        .with_run_store(RunStore::open(&self.config, self.storage.handle()).unwrap())
     }
 
     /// Ends `run` through its own `finish` tool call.
@@ -406,4 +480,340 @@ async fn without_a_bound_host_an_attached_lane_question_comes_to_the_user() {
         question.responder,
         Some(QuestionResponder::Lead { .. })
     ));
+}
+
+fn start_lead(sink: &mut RuntimeCommandSink) -> RunId {
+    let accepted = sink.submit(WorkbenchCommand::SendChat(ChatSubmission {
+        submission_id: String::new(),
+        project_root: None,
+        composer_role: ComposerRole::Orchestrator,
+        images: Vec::new(),
+        thread_id: LEAD.into(),
+        text: "coordinate".into(),
+        skills: Vec::new(),
+        model_preference: None,
+        fork_seed: None,
+    }));
+    let Some(LoopEvent::ChatAccepted { run_id, .. }) = accepted.first() else {
+        panic!("the lead was not accepted: {accepted:?}");
+    };
+    run_id.parse().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_lane_reads_it() {
+    let mut world = World::new();
+    let owners = ShortPrivateDirectory::new();
+    let owner = world.owner(owners.path());
+    let mut sink = world.sink(Some(&owner), true);
+    owner.start(LEAD).unwrap();
+    let lead = start_lead(&mut sink);
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "answer-lane");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    world.finish(lead).await;
+
+    // The lane asks and then ends: both it and its lead are finished when the answer comes.
+    world
+        .model
+        .finishing
+        .lock()
+        .unwrap()
+        .insert(lane.root_run_id.to_string());
+    world.model.scripted.lock().unwrap().insert(
+        lane.root_run_id.to_string(),
+        ContentBlock::ToolUse {
+            id: "ask".into(),
+            name: "ask_user".into(),
+            input: serde_json::json!({"title": TITLE, "blocking": false}),
+        },
+    );
+    world
+        .runtime
+        .send_message(lane.root_run_id, "ask the managing lead".into())
+        .unwrap();
+    world.runtime.wait(lane.root_run_id).await.unwrap();
+    world
+        .model
+        .finishing
+        .lock()
+        .unwrap()
+        .remove(&lane.root_run_id.to_string());
+    assert_eq!(
+        world.runtime.inspect_agent(lane.root_run_id).unwrap().phase,
+        AgentRunPhase::Done
+    );
+    world.phase(lead, AgentRunPhase::Waiting).await;
+
+    let question = world.question(LEAD);
+    world.model.scripted.lock().unwrap().insert(
+        lead.to_string(),
+        ContentBlock::ToolUse {
+            id: "answer".into(),
+            name: "lane_answer".into(),
+            input: serde_json::json!({
+                "question_id": question.id,
+                "management_revision": question.management_revision.unwrap(),
+                "routing_revision": question.routing_revision,
+                "operation_id": "gui-host-answer",
+                "action": {"kind": "answer", "text": "agent task-scope decision"}
+            }),
+        },
+    );
+    world.model.scripted.lock().unwrap().insert(
+        lane.root_run_id.to_string(),
+        ContentBlock::ToolUse {
+            id: "read-answer".into(),
+            name: "user_answers".into(),
+            input: serde_json::json!({}),
+        },
+    );
+    world
+        .runtime
+        .send_message(lead, "answer the pending lane question".into())
+        .unwrap();
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+
+    let stored = world.runtime.user_question(&question.id).unwrap().unwrap();
+    assert!(matches!(
+        stored.answer_origin,
+        Some(event_bus::AnswerOrigin::LaneLead { .. })
+    ));
+    assert!(
+        world.model.texts.lock().unwrap()[&lane.root_run_id.to_string()]
+            .iter()
+            .any(|request| request.contains("agent task-scope decision")),
+        "the restored lane could read the stored answer"
+    );
+    assert!(
+        world
+            .storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .is_empty(),
+        "both notifications were acknowledged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_question_capacity_block_reaches_the_lane_card_the_moment_it_happens() {
+    let mut world = World::new();
+    let _sink = world.sink(None, false);
+    let lead = world
+        .runtime
+        .delegate_chat(
+            LEAD,
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "capacity-lane");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let mut state = world.workbench();
+    world.show(&mut state);
+    let thread = ThreadId::new(lane.thread_id.clone());
+    assert!(
+        state
+            .lane_detail(&thread)
+            .expect("the lane is shown")
+            .delivery
+            .capacity_blocked
+            .is_none()
+    );
+
+    for _ in 0..32 {
+        world
+            .runtime
+            .request_user_question(lane.root_run_id, TITLE.into(), Vec::new(), false)
+            .unwrap();
+    }
+    let refused = world
+        .runtime
+        .request_user_question(lane.root_run_id, TITLE.into(), Vec::new(), false)
+        .unwrap_err();
+    assert!(refused.contains("question_capacity_blocked"), "{refused}");
+    world
+        .until_state_changed("question_capacity_blocked", &lane.thread_id)
+        .await;
+    world.show(&mut state);
+
+    let line = state
+        .lane_detail(&thread)
+        .unwrap()
+        .delivery
+        .capacity_line()
+        .expect("the diagnostic is shown without leaving the lane");
+    assert!(line.contains("32 unanswered"), "{line}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_users_stop_and_resume_reach_the_lane_views_when_they_are_confirmed() {
+    let mut world = World::new();
+    let mut sink = world.sink(None, false);
+    let lead = start_lead(&mut sink);
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "stop-lane");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    let mut state = world.workbench();
+    world.show(&mut state);
+    let thread = ThreadId::new(lane.thread_id.clone());
+    assert!(!state.lane_detail(&thread).unwrap().delivery.lead_stopped);
+
+    sink.submit(WorkbenchCommand::StopChat {
+        thread_id: LEAD.into(),
+    });
+    world
+        .until_state_changed("lane_delivery_stopped", LEAD)
+        .await;
+    world.show(&mut state);
+    assert!(
+        state.lane_detail(&thread).unwrap().delivery.lead_stopped,
+        "the held-notification notice appears at the Stop"
+    );
+
+    sink.submit(WorkbenchCommand::ContinueChat(ChatContinuation {
+        project_root: None,
+        thread_id: LEAD.into(),
+        composer_role: ComposerRole::Orchestrator,
+        model_preference: None,
+        automatic: false,
+    }));
+    world
+        .until_state_changed("lane_delivery_resumed", LEAD)
+        .await;
+    world.show(&mut state);
+    assert!(
+        !state.lane_detail(&thread).unwrap().delivery.lead_stopped,
+        "and goes away when the user resumes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resuming_after_a_restart_works_for_a_chat_without_a_goal_and_never_fails_silently() {
+    use storage::lane_delivery::{LANE_NO_PROGRESS_LIMIT, LaneGuardSignal};
+
+    let mut world = World::new();
+    let lead = world
+        .runtime
+        .delegate_chat(
+            LEAD,
+            Role::Orchestrator,
+            "coordinate".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                conversation: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    world.phase(lead, AgentRunPhase::Waiting).await;
+    let lane = open(&world, lead, "restart-lane");
+    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    world.finish(lead).await;
+    let handle = world.storage.handle();
+    for batch in 0..LANE_NO_PROGRESS_LIMIT {
+        let guard = handle.lane_wake_guard(lane.lane_id.clone()).unwrap();
+        handle
+            .update_lane_wake_guard(
+                lane.lane_id.clone(),
+                guard.revision,
+                LaneGuardSignal::WakeBatch {
+                    batch_id: format!("batch-{batch}"),
+                },
+            )
+            .unwrap();
+    }
+    assert!(
+        handle
+            .lane_wake_guard(lane.lane_id.clone())
+            .unwrap()
+            .suppressed
+    );
+
+    // A new process: no goal binding, the lead's root is only saved history.
+    let mut sink =
+        RuntimeCommandSink::new(world.restarted_runtime(), tokio::runtime::Handle::current());
+    let events = sink.submit(WorkbenchCommand::ResumeLaneDeliveries {
+        thread_id: LEAD.into(),
+    });
+
+    assert!(events.is_empty(), "{events:?}");
+    assert!(
+        !handle.lane_wake_guard(lane.lane_id).unwrap().suppressed,
+        "the explicit resume reset the guard of the lane the lead manages"
+    );
+    let unknown = sink.submit(WorkbenchCommand::ResumeLaneDeliveries {
+        thread_id: "ghost".into(),
+    });
+    assert!(
+        matches!(unknown.as_slice(), [LoopEvent::ChatNotice { .. }]),
+        "a resume that cannot be done says so: {unknown:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destination_the_window_does_not_know_is_nacked_and_its_notification_stays() {
+    use storage::lanes::NewLane;
+
+    let world = World::new();
+    let _sink = world.sink(None, true);
+    let handle = world.storage.handle();
+    let created = handle
+        .create_lane(NewLane {
+            lane_id: "ghost-lane".into(),
+            thread_id: "ghost-lane-thread".into(),
+            origin_thread_id: "ghost-lead".into(),
+            origin_run_id: "ghost-run".into(),
+            creation_key: "ghost-key".into(),
+            brief: brief(),
+            start_seed: "seed".into(),
+            project_id: None,
+            project_root: None,
+            title: None,
+            at_ns: 1,
+        })
+        .unwrap();
+    assert!(created.created);
+    handle
+        .append_lane_report_with_delivery(
+            "ghost-lane".into(),
+            event_bus::LaneReportInput {
+                status: event_bus::LaneStatus::Ready,
+                summary: "done".into(),
+                artifact_refs: vec!["artifact:1".into()],
+                artifact_revision: Some(event_bus::lane::ArtifactRevision::CommitSha(format!(
+                    "{:040x}",
+                    1
+                ))),
+                failure_episode: None,
+                needs_human: false,
+                question_refs: vec![],
+                reason_code: None,
+                producer: event_bus::LaneReportProducer::LaneAgent,
+            },
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(
+        world.drive("ghost-lead").await,
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::UnknownThread)
+    );
+    assert_eq!(
+        handle
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap(),
+        ["ghost-lead"],
+        "nothing was guessed from a name and the notification is kept"
+    );
 }

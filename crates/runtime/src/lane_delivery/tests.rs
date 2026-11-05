@@ -939,3 +939,32 @@ fn binding_without_an_executor_remains_unbound() {
         LaneDeliveryBinding::Unbound
     );
 }
+#[tokio::test]
+async fn host_entries_resolve_the_lane_ledger_binding_and_refuse_a_foreign_thread_resume() {
+    let mut f = Fixture::new();
+    let (lead, _host) = f.lead().await;
+    let lane = f.lane(lead, "host-entries").await;
+
+    let (root, generation) = f
+        .runtime
+        .lane_thread_binding(&lane.thread_id)
+        .unwrap()
+        .expect("a started lane has a ledger binding");
+    assert_eq!(root, lane.root_run_id);
+    assert!(generation > 0);
+    assert_eq!(
+        f.runtime.lane_thread_binding("delivery-lead").unwrap(),
+        None,
+        "a lead is not a lane"
+    );
+
+    assert!(
+        f.runtime
+            .resume_lane_deliveries("another-thread", lead, None)
+            .is_err(),
+        "a root that is not the named thread's is refused, not ignored"
+    );
+    f.runtime
+        .resume_lane_deliveries("delivery-lead", lead, None)
+        .unwrap();
+}

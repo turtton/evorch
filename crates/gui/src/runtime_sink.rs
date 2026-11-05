@@ -709,9 +709,10 @@ impl RuntimeCommandSink {
                     );
                 let _guard = self.handle.enter();
                 let result = match run {
-                    Ok(Some(run)) => self
-                        .runtime
-                        .explicitly_resume_lane_delivery(run, permit.as_ref()),
+                    Ok(Some(run)) => {
+                        self.runtime
+                            .resume_lane_deliveries(&thread_id, run, permit.as_ref())
+                    }
                     Ok(None) => {
                         return vec![LoopEvent::ChatNotice {
                             thread_id,

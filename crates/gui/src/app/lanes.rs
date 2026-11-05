@@ -357,8 +357,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         self.pump_lanes()
     }
 
-    /// [`Self::poll_lanes`] without an egui context.
-    pub(super) fn pump_lanes(&mut self) -> bool {
+    /// [`Self::poll_lanes`] without an egui context: what a headless host calls once per tick.
+    pub fn pump_lanes(&mut self) -> bool {
         if self.lanes.reader.is_none() {
             return false;
         }
@@ -559,9 +559,16 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     fn fold_lane_event(&mut self, event: &Event) -> bool {
         if let EventKind::Diagnostic(diagnostic) = &event.kind
             && diagnostic.source == "lane_delivery"
-            && let Some(active) = self.sidebar.active_thread.as_ref().map(ToString::to_string)
         {
-            self.request_delivery_reads(&active);
+            // The runtime names the thread whose delivery state changed (a lane or a lead);
+            // a delivery problem that names none refreshes what is shown.
+            let thread = diagnostic
+                .thread_id
+                .clone()
+                .or_else(|| self.sidebar.active_thread.as_ref().map(ToString::to_string));
+            if let Some(thread) = thread {
+                self.request_delivery_reads(&thread);
+            }
             return false;
         }
         let EventKind::Ledger(ledger) = &event.kind else {

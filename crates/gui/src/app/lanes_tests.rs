@@ -1100,6 +1100,53 @@ fn a_lane_delivery_diagnostic_refreshes_what_is_shown() {
 }
 
 #[test]
+fn a_delivery_change_names_the_thread_to_refresh_even_when_another_thread_is_shown() {
+    let ledger = Arc::new(FakeLedger::default());
+    let lane = record(1, Some("thread"), LedgerPolicy::Attached, 1);
+    ledger.put(snapshot(lane.clone(), None));
+    let (mut workbench, _dir) = workbench(Some(ledger.clone()));
+    workbench.apply_conversation_event(&created(&lane));
+    workbench
+        .sidebar
+        .create_thread(
+            ThreadId::new("unrelated"),
+            workspace_ui::ProjectId::new("test"),
+            "unrelated",
+        )
+        .unwrap();
+    workbench.switch_thread(ThreadId::new("unrelated")).unwrap();
+    settle(&mut workbench);
+    let lane_thread = ThreadId::new("lane-thread-1");
+
+    let mut paused = snapshot(lane, None);
+    paused.detail.delivery.guard.suppressed = true;
+    ledger.put(paused);
+    let named = |thread: Option<&str>| {
+        Event::new(event_bus::DiagnosticEvent {
+            source: "lane_delivery".into(),
+            severity: event_bus::DiagnosticSeverity::Warning,
+            code: "lane_wake_suppressed".into(),
+            detail: String::new(),
+            run_id: None,
+            thread_id: thread.map(str::to_owned),
+            call_id: None,
+        })
+    };
+    workbench.apply_conversation_event(&named(Some("lane-thread-1")));
+    settle(&mut workbench);
+
+    assert!(
+        workbench
+            .lane_detail(&lane_thread)
+            .unwrap()
+            .delivery
+            .guard
+            .suppressed,
+        "the named lane is read although the user is looking at another thread"
+    );
+}
+
+#[test]
 fn acquiring_ownership_of_a_thread_asks_the_runtime_to_redrive_its_deliveries() {
     use event_bus::{OwnershipAction, OwnershipEvent};
 

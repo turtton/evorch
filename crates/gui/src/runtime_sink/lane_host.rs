@@ -171,14 +171,23 @@ impl LaneDeliveryHost for GuiLaneDeliveryHost {
             .upgrade()
             .ok_or(LaneDeliveryNack::UnknownThread)?;
         let binding = self.bindings.get(thread);
-        let root = match &binding {
-            Some(binding) => binding.root,
+        // A lane thread's root and generation are the lane ledger's: it is the only record that
+        // moves with every start or restart, and a delivery to a stale pair is refused.
+        let lane = runtime
+            .lane_thread_binding(thread)
+            .map_err(|_| LaneDeliveryNack::StorageFailed)?;
+        let (root, generation) = match (&lane, &binding) {
+            (Some((root, generation)), _) => (*root, *generation),
+            (None, Some(binding)) => (binding.root, 0),
             // After a restart the sink binds a root only once the user touches the thread; the
             // runtime's saved conversation root is the same answer the Continue path uses.
-            None => runtime
-                .latest_chat_run(thread)
-                .map_err(|_| LaneDeliveryNack::StorageFailed)?
-                .ok_or(LaneDeliveryNack::UnknownThread)?,
+            (None, None) => (
+                runtime
+                    .latest_chat_run(thread)
+                    .map_err(|_| LaneDeliveryNack::StorageFailed)?
+                    .ok_or(LaneDeliveryNack::UnknownThread)?,
+                0,
+            ),
         };
         let permit = self
             .ownership
@@ -221,7 +230,7 @@ impl LaneDeliveryHost for GuiLaneDeliveryHost {
         .map_err(|_| LaneDeliveryNack::RestoreFailed)?;
         Ok(LaneDeliveryTarget {
             root_run_id: root,
-            generation: 0,
+            generation,
             authority,
         })
     }

@@ -58,6 +58,10 @@ fn table() -> BTreeMap<&'static str, Guard> {
                 via: &["create_goal_inner"],
             },
         ),
+        (
+            "lane_delivery.rs::resume_lane_deliveries",
+            Guarded { via: &[] },
+        ),
         ("thread_goals.rs::restore_thread_goal", Guarded { via: &[] }),
         ("thread_todos.rs::restore_thread_todo", Guarded { via: &[] }),
         (
