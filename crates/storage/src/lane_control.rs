@@ -37,3 +37,20 @@ pub struct ObserveLaneStall {
     pub classification: LaneStallClassification,
     pub at_ns: i64,
 }
+
+impl crate::Database {
+    /// The lane attention list of one lead, derived from the ledger. Read only: it
+    /// marks nothing as seen and appends no input.
+    ///
+    /// # Errors
+    /// `StaleCursor` when `cursor` was cut from another filter or state, and SQLite
+    /// or decoding failures.
+    pub fn lane_attention(
+        &self,
+        filter: LaneAttentionFilter,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<LaneAttentionPage, crate::StorageError> {
+        crate::repo::lane_control::attention(&self.conn, filter, cursor, limit)
+    }
+}

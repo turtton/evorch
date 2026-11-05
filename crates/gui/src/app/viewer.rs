@@ -23,6 +23,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         set_sidebar_error(ctx, result.err().map(|error| error.to_string()));
     }
 
+    /// Shows a lane's thread for the attention list; the original stays private to this module.
+    pub(super) fn open_thread_from_attention(
+        &mut self,
+        ctx: &egui::Context,
+        thread_id: workspace_ui::ThreadId,
+    ) {
+        self.open_notification_thread(ctx, thread_id);
+    }
+
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         // The composer re-asserts focus when it renders; a hidden one must not keep claiming Tab.
         self.composer.focused = false;
@@ -110,6 +119,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut agents_action = None;
         let mut tasks_action = None;
         let mut notifications_action = None;
+        let mut lane_attention_action = None;
         let mut request_action = None;
         let mut lane_action = None;
         let mut pull_request_action = None;
@@ -160,6 +170,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 question_drafts: &mut self.question_drafts,
                 notifications: &mut self.notifications,
                 notifications_action: &mut notifications_action,
+                lane_attention: &self.attention.board,
+                lane_attention_action: &mut lane_attention_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
@@ -292,6 +304,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 NotificationsAction::OpenEvaluations => self.open_evaluations_tab(),
             }
+        }
+        if let Some(action) = lane_attention_action {
+            self.apply_attention_action(&ctx, action);
         }
         if let Some(action) = lane_action {
             self.apply_lane_action(action);

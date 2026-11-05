@@ -171,6 +171,7 @@ pub struct WorkbenchState<S> {
     pub(super) usage_ledger: Option<super::usage_ledger::UsageLedgerLink>,
     pub(super) thread_mirror: Option<super::thread_mirror::ThreadMirrorLink>,
     pub(super) lanes: super::lanes::LaneState,
+    pub(super) attention: super::lane_attention::AttentionState,
     pub(super) pull_requests: super::pull_requests::PullRequestState,
     /// Threads a confirmed deletion removed; the sidebar never holds them again.
     pub(super) tombstones: storage::thread_retention::TombstoneSet,
@@ -309,6 +310,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             usage_ledger: None,
             thread_mirror: None,
             lanes: Default::default(),
+            attention: Default::default(),
             pull_requests: Default::default(),
             tombstones: Default::default(),
             retention: Default::default(),

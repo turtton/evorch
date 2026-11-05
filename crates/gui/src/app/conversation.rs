@@ -104,6 +104,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             _ => {}
         }
         let lane_changed = self.apply_lane_event(event);
+        self.note_attention_event(event);
         let touched = self.touch_thread_activity(event);
         self.transcripts.apply_with_body(event, body);
         changed || role_changed || touched || lane_changed
