@@ -113,9 +113,9 @@ fn answer_checked(
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(canonical) = canonical {
+    if let Some(canonical) = &canonical {
         let route: event_bus::lane::QuestionRouting =
-            serde_json::from_str(&canonical).map_err(|e| invalid(&e.to_string()))?;
+            serde_json::from_str(canonical).map_err(|e| invalid(&e.to_string()))?;
         use event_bus::lane::{LaneOperationError, QuestionResponder};
         let permitted = match (&route.responder, origin) {
             (QuestionResponder::User, AnswerOrigin::Host { .. }) => true,
@@ -156,6 +156,41 @@ fn answer_checked(
         } else {
             Err(invalid("question already answered"))
         };
+    }
+    // User-rerouted lane questions retain the same return path. This shares the
+    // answer/evidence transaction, so neither a rejected answer nor a crash can
+    // leave a committed answer without its durable lane notification.
+    if matches!(origin, AnswerOrigin::Host { .. })
+        && let Some(canonical) = canonical
+    {
+        let mut route: event_bus::lane::QuestionRouting =
+            serde_json::from_str(&canonical).map_err(|e| invalid(&e.to_string()))?;
+        route.routing_revision = route
+            .routing_revision
+            .checked_add(1)
+            .ok_or(StorageError::OutOfRange("routing revision"))?;
+        let payload = serde_json::to_string(&route).map_err(|e| invalid(&e.to_string()))?;
+        conn.execute(
+            "UPDATE lane_question_routes SET routing_revision=?2,payload=?3 WHERE question_id=?1",
+            params![id, route.routing_revision, payload],
+        )?;
+        question.routing_revision = route.routing_revision;
+        crate::repo::lane_delivery::enqueue(
+            conn,
+            event_bus::lane::LaneNotification {
+                notification_id: String::new(),
+                lane_id: route.lane_id,
+                management_revision: route.management_revision,
+                source_thread_id: route.requester.thread_id.clone(),
+                destination_thread_id: route.requester.thread_id,
+                kind: event_bus::lane::LaneNotificationKind::Answer {
+                    question_id: id.into(),
+                    routing_revision: route.routing_revision,
+                },
+                report_seq: None,
+                created_at_ns: crate::system_time_to_ns(std::time::SystemTime::now())?,
+            },
+        )?;
     }
     question.answer = Some(answer.into());
     question.answer_origin = Some(origin.clone());
