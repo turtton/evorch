@@ -498,6 +498,8 @@ mod tests {
                         "lane_list",
                         "lane_questions",
                         "lane_answer",
+                        "lane_verify",
+                        "lane_close",
                     ]
                     .map(str::to_owned),
                 );
