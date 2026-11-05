@@ -51,6 +51,38 @@ fn start_owned_runtime(
     runtime.recover_lanes_on_startup(ownership)
 }
 
+/// Starts pull request tracking (ADR 0043). The service is always started: while
+/// `[pull_requests] enabled` is false it fetches and observes nothing, and a later reload that
+/// enables it takes effect at once.
+fn start_pull_requests(
+    runtime: &AgentRuntime,
+    ownership: &Arc<runtime::ownership::OwnerHost>,
+    settings: config::PullRequestsConfig,
+) {
+    let view: Arc<dyn runtime::pull_requests::OwnershipView> = ownership.clone();
+    let source = Arc::new(runtime::pull_requests::GhSource::new());
+    if let Err(error) = runtime.start_pull_requests(view, source, settings) {
+        tracing::warn!(%error, "pull request tracking did not start");
+    }
+}
+
+/// Applies `[pull_requests]` from the configuration to the running service.
+fn reload_pull_request_settings(
+    runtime: &runtime::WeakAgentRuntime,
+    options: &config::LoadOptions,
+) -> Result<(), String> {
+    let config = config::Config::load(options).map_err(|error| error.to_string())?;
+    let Some(service) = runtime
+        .upgrade()
+        .and_then(|runtime| runtime.pull_requests())
+    else {
+        return Ok(());
+    };
+    service
+        .update_settings(config.pull_requests)
+        .map_err(|error| error.to_string())
+}
+
 /// Keeps the Rust heap out of glibc malloc. CEF runs its browser process inside this
 /// one, and its memory dumps read glibc's `mallinfo()`, whose `int` fields overflow
 /// once the glibc heap passes 2 GiB; Chromium then fails a CHECK and kills the GUI.
@@ -1213,6 +1245,7 @@ fn build_workbench(
         let projects = project_models.clone();
         let handle = storage.handle();
         let retention_policy = Arc::clone(&retention_policy);
+        let weak_runtime = runtime.downgrade();
         let options = if demo_directory.is_some() {
             settings_load_options.clone()
         } else {
@@ -1221,6 +1254,7 @@ fn build_workbench(
         Box::new(move || {
             gui::model::production::reload_models(production.as_ref(), projects.as_ref())?;
             reload_retention_policy(&retention_policy, &options);
+            reload_pull_request_settings(&weak_runtime, &options)?;
             reload_index_settings(&handle, &options)
         })
     });
@@ -1256,6 +1290,14 @@ fn build_workbench(
     // Keep the retained storage/host guard alive before starting any root.
     start_owned_runtime(&runtime, &ownership)
         .map_err(|error| GuiError::Startup(format!("lane recovery: {error}")))?;
+    {
+        let _enter = handle.enter();
+        start_pull_requests(&runtime, &ownership, composition_config.pull_requests);
+    }
+    let owner_probe: gui::app::pull_requests::OwnerProbe = {
+        let host = Arc::clone(&ownership);
+        Arc::new(move |thread: &str| host.owned_permit(thread).is_ok())
+    };
     let portal_opener: Arc<dyn gui::model::artifact_opener::ArtifactOpener> =
         Arc::new(gui::model::artifact_opener::PortalArtifactOpener);
     #[cfg(feature = "cef")]
@@ -1354,6 +1396,12 @@ fn build_workbench(
         .with_lane_ledger(Arc::new(gui::app::lanes::StorageLaneReader::new(
             storage_config.db_path.clone(),
         )))
+        .with_pull_requests(
+            Arc::new(gui::app::pull_requests::StoragePullRequestReader::new(
+                storage_config.db_path.clone(),
+            )),
+            Some(owner_probe),
+        )
         .with_tombstones(prelude.tombstones.clone());
     if pruned > 0 {
         state.save_sidebar();

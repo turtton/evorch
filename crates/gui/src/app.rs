@@ -37,6 +37,9 @@ mod ownership;
 mod ownership_status;
 mod project_dialog;
 mod provider_settings;
+pub mod pull_requests;
+#[cfg(test)]
+mod pull_requests_tests;
 mod questions;
 mod repaint_policy;
 mod restoration;

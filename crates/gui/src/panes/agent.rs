@@ -21,6 +21,10 @@ mod branch;
 pub use branch::BranchContext;
 mod composer_panel;
 mod header;
+mod pull_request_bar;
+pub use pull_request_bar::{
+    PullRequestBarContext, glyph_style as pull_request_glyph_style, max_bar_height,
+};
 mod lane;
 use header::header_strip;
 pub(crate) mod async_layout;
@@ -88,6 +92,11 @@ pub struct ConversationContext<'a> {
     pub sandbox_picker: crate::panes::composer::SandboxPickerContext,
     /// Present only while showing a thread conversation.
     pub branch: Option<BranchContext<'a>>,
+    /// The thread's linked pull request, shown above the composer (also in a subagent's
+    /// transcript: the pull request belongs to the thread).
+    pub pull_request: Option<PullRequestBarContext<'a>>,
+    /// Candidate chips by the tool call that produced them, drawn under its card.
+    pub pull_request_chips: Option<(&'a str, &'a crate::panes::pull_request_chip::ChipsByCall)>,
 }
 
 /// Agent 会話ペインから発生するアクションです。
@@ -102,6 +111,7 @@ pub enum AgentPaneAction {
     ModelPreference(Option<workspace_ui::ModelPreference>),
     Request(super::requests::RequestAction),
     Lane(LaneAction),
+    PullRequest(crate::model::pull_requests::PullRequestAction),
 }
 
 /// トランスクリプトモデルを egui 上に描画します。
@@ -129,6 +139,7 @@ pub fn agent_pane_with_repo_root(
     pane_root(ui, "Conversation", |ui| {
         let mut action = None;
         header_strip(ui, &identity, &ctx, &mut action);
+        let conversation_height = ui.available_height();
         composer_panel::composer_panel(
             ui,
             &ctx,
@@ -137,6 +148,9 @@ pub fn agent_pane_with_repo_root(
             identity.is_some(),
             &mut action,
         );
+        if let Some(bar) = &ctx.pull_request {
+            pull_request_bar::show(ui, bar, conversation_height, &mut action);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -150,6 +164,14 @@ pub fn agent_pane_with_repo_root(
                     empty_state_body(ui, &ctx, &mut action);
                 } else {
                     let mut branch_action = None;
+                    let mut chip_action = None;
+                    let mut chips = ctx.pull_request_chips.map(|(thread_id, by_call)| {
+                        crate::panes::pull_request_chip::PullRequestChips {
+                            thread_id,
+                            by_call,
+                            action: &mut chip_action,
+                        }
+                    });
                     if let Some(request) = run_detail_body(
                         ui,
                         model,
@@ -157,8 +179,12 @@ pub fn agent_pane_with_repo_root(
                         repo_root,
                         ctx.requests.as_mut(),
                         (ctx.branch.as_ref(), &mut branch_action),
+                        chips.as_mut(),
                     ) {
                         action = Some(AgentPaneAction::Request(request));
+                    }
+                    if let Some(chip_action) = chip_action {
+                        action = Some(AgentPaneAction::PullRequest(chip_action));
                     }
                     if let Some(branch_action) = branch_action {
                         action = Some(AgentPaneAction::Sidebar(branch_action));
@@ -280,6 +306,7 @@ pub fn transcript_body_with_agents(
         repo_root,
         None,
         (None, &mut None),
+        None,
     );
 }
 
@@ -290,6 +317,7 @@ fn run_detail_body(
     repo_root: Option<&std::path::Path>,
     requests: Option<&mut super::requests::ConversationRequests<'_>>,
     (branch, branch_action): (Option<&BranchContext<'_>>, &mut Option<SidebarAction>),
+    mut chips: Option<&mut crate::panes::pull_request_chip::PullRequestChips<'_>>,
 ) -> Option<super::requests::RequestAction> {
     let (identity, task_rows) = context;
     let pane_id = ui.id();
@@ -365,6 +393,10 @@ fn run_detail_body(
             }
             branch
                 .map(|branch| branch.rewind_block)
+                .hash(&mut layout_revision);
+            chips
+                .as_ref()
+                .map(|chips| crate::panes::pull_request_chip::revision(chips.by_call))
                 .hash(&mut layout_revision);
             let layout_revision = layout_revision.finish();
             let latest_job_entry = latest_shell_job_entries(entries, model.shell_jobs());
@@ -468,6 +500,9 @@ fn run_detail_body(
                                 agents: task_rows,
                             },
                         );
+                        if let Some(chips) = chips.as_deref_mut() {
+                            crate::panes::pull_request_chip::show(ui, chips, group);
+                        }
                         return;
                     }
                     ui.add_space(SP_1);
@@ -907,6 +942,7 @@ mod tests {
                     None,
                     None,
                     (None, &mut None),
+                    None,
                 );
             });
         harness.run_steps(2);
@@ -956,6 +992,7 @@ mod tests {
                 None,
                 None,
                 (None, &mut None),
+                None,
             );
         });
         // Then: no ledger header is exposed.
@@ -997,6 +1034,8 @@ mod tests {
                             enabled: false,
                         },
                         branch: None,
+                        pull_request: None,
+                        pull_request_chips: None,
                     };
                     header_strip(ui, &None, &ctx, &mut None);
                 });
@@ -1099,6 +1138,8 @@ mod tests {
                         enabled: false,
                     },
                     branch: None,
+                    pull_request: None,
+                    pull_request_chips: None,
                 };
                 header_strip(ui, &None, &ctx, &mut None);
             });
@@ -1162,6 +1203,8 @@ mod tests {
                         enabled: false,
                     },
                     branch: None,
+                    pull_request: None,
+                    pull_request_chips: None,
                 };
                 let mut action = None;
                 header_strip(ui, &None, &ctx, &mut action);

@@ -38,6 +38,8 @@ pub struct Palette {
     /// Thread row foreground / surface for work another process executes.
     pub EXTERNAL_WORKING_FG: Color32,
     pub EXTERNAL_WORKING_SURFACE: Color32,
+    /// Foreground of a merged pull request (ADR 0043); always paired with the word and glyph.
+    pub MERGED_FG: Color32,
 }
 
 impl Palette {
@@ -76,6 +78,7 @@ impl Palette {
             UNREAD_SURFACE: Color32::from_rgb(0x25, 0x2e, 0x48),
             EXTERNAL_WORKING_FG: Color32::from_rgb(0xbb, 0x9a, 0xf7),
             EXTERNAL_WORKING_SURFACE: Color32::from_rgb(0x30, 0x2c, 0x4b),
+            MERGED_FG: Color32::from_rgb(0xbb, 0x9a, 0xf7),
         }
     }
 
@@ -111,6 +114,7 @@ impl Palette {
             UNREAD_SURFACE: Color32::from_rgb(0x12, 0x1f, 0x35),
             EXTERNAL_WORKING_FG: Color32::from_rgb(0xa7, 0x8b, 0xfa),
             EXTERNAL_WORKING_SURFACE: Color32::from_rgb(0x1f, 0x16, 0x35),
+            MERGED_FG: Color32::from_rgb(0xa3, 0x71, 0xf7),
         }
     }
 }
@@ -317,6 +321,7 @@ mod tests {
             (p.UNREAD_SURFACE, [0x25, 0x2e, 0x48]),
             (p.EXTERNAL_WORKING_FG, [0xbb, 0x9a, 0xf7]),
             (p.EXTERNAL_WORKING_SURFACE, [0x30, 0x2c, 0x4b]),
+            (p.MERGED_FG, [0xbb, 0x9a, 0xf7]),
         ] {
             assert_eq!(
                 actual,
@@ -363,6 +368,7 @@ mod tests {
             p.EXTERNAL_WORKING_SURFACE,
             Color32::from_rgb(0x1f, 0x16, 0x35)
         );
+        assert_eq!(p.MERGED_FG, Color32::from_rgb(0xa3, 0x71, 0xf7));
     }
 
     #[test]

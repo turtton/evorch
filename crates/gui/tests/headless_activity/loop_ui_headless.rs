@@ -84,7 +84,13 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. }
+            | WorkbenchCommand::LinkPullRequest { .. }
+            | WorkbenchCommand::UnlinkPullRequest { .. }
+            | WorkbenchCommand::RefreshPullRequest { .. }
+            | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
+            | WorkbenchCommand::DismissPullRequestCandidate { .. }
+            | WorkbenchCommand::InheritPullRequest { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");

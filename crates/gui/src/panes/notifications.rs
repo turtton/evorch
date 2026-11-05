@@ -57,6 +57,10 @@ pub fn notifications_pane(
                 NotificationKind::EvaluationFinished {
                     all_reported: false,
                 } => ("Evaluation", attention_color()),
+                NotificationKind::PullRequestChecksFailed { .. } => {
+                    ("CI failed", palette().ERROR_FG)
+                }
+                NotificationKind::PullRequestMerged { .. } => ("Merged", palette().MERGED_FG),
             };
             let row = ui
                 .push_id(notification.id, |ui| {
@@ -82,6 +86,13 @@ pub fn notifications_pane(
                         } else {
                             "Read"
                         }));
+                        let pull_request_thread = match &notification.kind {
+                            NotificationKind::PullRequestChecksFailed { thread_id }
+                            | NotificationKind::PullRequestMerged { thread_id } => {
+                                Some(thread_id.clone())
+                            }
+                            _ => None,
+                        };
                         let summary = RichText::new(&notification.summary);
                         let summary = if unread {
                             summary.strong().color(palette().TEXT)
@@ -89,6 +100,16 @@ pub fn notifications_pane(
                             summary.color(palette().TEXT_MUTED)
                         };
                         match &notification.run_id {
+                            _ if pull_request_thread.is_some() => {
+                                if ui
+                                    .add(egui::Button::new(summary).frame(false).wrap())
+                                    .clicked()
+                                {
+                                    action = pull_request_thread
+                                        .clone()
+                                        .map(NotificationsAction::OpenThread);
+                                }
+                            }
                             _ if matches!(
                                 notification.kind,
                                 NotificationKind::EvaluationFinished { .. }

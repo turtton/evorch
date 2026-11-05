@@ -24,6 +24,8 @@ pub mod phase_indicator;
 pub mod project_dialog;
 pub mod provider_models;
 pub mod provider_settings;
+pub mod pull_request_chip;
+pub mod pull_request_dialog;
 pub mod quota_footer;
 pub mod requests;
 pub mod role_profiles;

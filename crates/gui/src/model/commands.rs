@@ -114,6 +114,50 @@ pub enum WorkbenchCommand {
     SetWebToolsEnabled {
         enabled: bool,
     },
+    /// Link a thread to a pull request named by a URL or `owner/repo#N` (ADR 0043). The host
+    /// acquires the thread's write mode first; `expected_revision` is the lifecycle revision
+    /// the display read, so a decision made meanwhile is never overwritten.
+    LinkPullRequest {
+        thread_id: String,
+        locator: String,
+        expected_revision: u64,
+    },
+    /// End the thread's link. Derived threads that already took it keep theirs.
+    UnlinkPullRequest {
+        thread_id: String,
+        expected_revision: u64,
+    },
+    /// Fetch the thread's pull request now. Also makes the process that holds the thread
+    /// poll it again.
+    RefreshPullRequest {
+        thread_id: String,
+    },
+    /// Link the thread to a pull request a tool output suggested.
+    ConfirmPullRequestCandidate {
+        thread_id: String,
+        candidate_id: u64,
+        expected_revision: u64,
+    },
+    /// Ignore a suggested pull request.
+    DismissPullRequestCandidate {
+        thread_id: String,
+        candidate_id: u64,
+    },
+    /// A thread was derived from another: it may take the parent's open pull request.
+    /// Idempotent, and sent when the thread is created, before any run exists.
+    InheritPullRequest {
+        parent_thread_id: String,
+        child_thread_id: String,
+        kind: PullRequestDerivation,
+    },
+}
+
+/// How a thread was derived, for [`WorkbenchCommand::InheritPullRequest`]. A lane never
+/// inherits, so it has no variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PullRequestDerivation {
+    Fork,
+    Rewind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +190,11 @@ pub enum LoopEvent {
         goal_id: String,
     },
     CommandRejected {
+        reason: String,
+    },
+    /// A pull request operation did not happen; `reason` is shown beside the bar.
+    PullRequestRejected {
+        thread_id: String,
         reason: String,
     },
 }
@@ -285,6 +334,13 @@ pub trait CommandSink: Send {
         None
     }
 
+    /// Whether pull request tracking is switched on behind this sink (`[pull_requests]
+    /// enabled`). While it is not, no pull request surface is shown. Sinks without a
+    /// runtime answer `true`: a host that installed a reader meant to show it.
+    fn pull_requests_enabled(&self) -> bool {
+        true
+    }
+
     fn submit(&mut self, cmd: WorkbenchCommand) -> Vec<LoopEvent>;
     fn submit_chat_with_permit(
         &mut self,
@@ -350,6 +406,17 @@ impl CommandSink for FixtureLoopAdapter {
             WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::SetWebToolsEnabled { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. } => Vec::new(),
+            WorkbenchCommand::LinkPullRequest { thread_id, .. }
+            | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
+            | WorkbenchCommand::RefreshPullRequest { thread_id }
+            | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. } => {
+                vec![LoopEvent::PullRequestRejected {
+                    thread_id,
+                    reason: "Pull requests are unavailable in demo mode".into(),
+                }]
+            }
+            WorkbenchCommand::DismissPullRequestCandidate { .. }
+            | WorkbenchCommand::InheritPullRequest { .. } => Vec::new(),
             WorkbenchCommand::SendChat(submission) => {
                 self.accepted_chats = self.accepted_chats.saturating_add(1);
                 vec![LoopEvent::ChatAccepted {

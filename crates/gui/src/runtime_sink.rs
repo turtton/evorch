@@ -72,6 +72,8 @@ pub struct RuntimeCommandSink {
     model_preferences: BTreeMap<String, runtime::ModelPreference>,
     /// What the lane delivery host reads; republished after every change of the maps above.
     lane_bindings: lane_host::BindingTable,
+    /// Pull request operations that run on the Tokio runtime and their refusals.
+    pull_request_jobs: pull_requests::Jobs,
 }
 
 /// Reply channel, project, query, result limit and continuation cursor of a thread search.
@@ -127,6 +129,7 @@ impl RuntimeCommandSink {
             compaction_jobs: BTreeMap::new(),
             model_preferences: BTreeMap::new(),
             lane_bindings: lane_host::BindingTable::default(),
+            pull_request_jobs: pull_requests::Jobs::default(),
         }
     }
 
@@ -228,15 +231,21 @@ impl RuntimeCommandSink {
 }
 
 mod lane_host;
+mod pull_requests;
 mod saved_compaction;
 pub use lane_host::GuiLaneDeliveryHost;
 
 impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
-        self.poll_compactions()
+        let mut events = self.poll_compactions();
+        events.extend(self.pull_request_jobs.poll());
+        events
     }
     fn has_background_work(&self) -> bool {
-        !self.compaction_jobs.is_empty()
+        !self.compaction_jobs.is_empty() || self.pull_request_jobs.busy()
+    }
+    fn pull_requests_enabled(&self) -> bool {
+        self.pull_requests_on()
     }
     fn has_host_input_receipts(&self) -> bool {
         true
@@ -502,11 +511,17 @@ impl CommandSink for RuntimeCommandSink {
                 | WorkbenchCommand::StopRun { thread_id, .. }
                 | WorkbenchCommand::DeliverFollowUpsNextTurn { thread_id }
                 | WorkbenchCommand::ResumeLaneDeliveries { thread_id }
+                | WorkbenchCommand::LinkPullRequest { thread_id, .. }
+                | WorkbenchCommand::UnlinkPullRequest { thread_id, .. }
+                | WorkbenchCommand::RefreshPullRequest { thread_id }
+                | WorkbenchCommand::ConfirmPullRequestCandidate { thread_id, .. }
+                | WorkbenchCommand::DismissPullRequestCandidate { thread_id, .. }
                 | WorkbenchCommand::AnswerUserQuestion { thread_id, .. } => {
                     Some(thread_id.as_str())
                 }
                 WorkbenchCommand::DecideToolApproval { .. }
-                | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
+                | WorkbenchCommand::SetWebToolsEnabled { .. }
+                | WorkbenchCommand::InheritPullRequest { .. } => None,
             };
             match thread.map(|thread| host.owned_permit(thread)).transpose() {
                 Ok(permit) => permit,
@@ -677,6 +692,14 @@ impl RuntimeCommandSink {
             WorkbenchCommand::SetWebToolsEnabled { enabled } => {
                 self.runtime.set_web_tools_enabled(enabled);
                 Vec::new()
+            }
+            command @ (WorkbenchCommand::LinkPullRequest { .. }
+            | WorkbenchCommand::UnlinkPullRequest { .. }
+            | WorkbenchCommand::RefreshPullRequest { .. }
+            | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
+            | WorkbenchCommand::DismissPullRequestCandidate { .. }
+            | WorkbenchCommand::InheritPullRequest { .. }) => {
+                self.pull_request_command(command, permit)
             }
             WorkbenchCommand::DecideToolApproval { call_id, approved } => {
                 if let Some(bus) = &self.event_bus {

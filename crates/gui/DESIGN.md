@@ -31,7 +31,24 @@ Its native small Button reserves Small text height + SP_2 on each axis;
 pinned threads use egui's disabled painting and cannot activate Archive;
 while a family has a running or pending run, Archive is hidden and a running
 row's spinner takes its slot, so Pin stays in place.
-Thread titles open a right-click menu with Copy thread ID / Copy thread title.
+Thread titles open a right-click menu with Copy thread ID / Copy thread title. With `[pull_requests] enabled` it also offers
+"Link PR…", a small dialog taking a URL or `owner/repo#N` that warns (never blocks) when the
+pull request's repository is not the project's origin.
+A thread linked to a pull request (ADR 0043) shows a PR bar directly above the composer, also
+in a subagent's transcript, and a badge on its row: `#12` and a glyph (check, cross, filled
+circle for running) or the word `merged`; colour is never the only signal and merged is the
+purple `MERGED_FG` (Graphite `#a371f7`, Tokyo Night `#bb9af7`). The bar's collapsed line holds
+the number, state icon and word, the CI summary (`CI failing 2/5`), a status when this window
+does not poll the thread (`Not tracked in this window · last fetched 5m 12s ago`), stale or
+failed, and the head branch. Expanded it grows upward to at most 40% of the conversation area
+and scrolls inside: failed checks one by one, passes on one line, branches, head and local
+HEAD, review decision, fetch time and any local-checkout mismatch; the Refresh and Unlink row
+stays fixed. Unlink is the only way out and there is no Link… on the bar. A move into CI
+failure expands the bar once; a bar the person closed stays closed. Success is never drawn
+for no checks, a partial list, an unknown state or a failed fetch. No trust-boundary note is
+shown; mismatch, fetch failure and not-signed-in are. A `gh pr create` output gets a chip
+under its card (`owner/repo#N`, Link PR / Ignore) that becomes one linked line. CI failed and
+Merged notifications use the existing rows and open the thread.
 The thread list draws 1pt tree rails in TEXT_MUTED at 45% from each expanded
 parent's caret down to its last child, with an elbow into every child row.
 Child rows name why they are nested with a TEXT_MUTED marker: ARROW_FAT_LINE_UP
