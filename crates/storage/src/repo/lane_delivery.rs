@@ -90,6 +90,14 @@ fn semantic(kind: &LaneNotificationKind) -> Result<(&'static str, String), Stora
                 ))?,
             )
         }
+        LaneNotificationKind::Closed { close_id } => {
+            id(close_id)?;
+            ("closed", close_id.clone())
+        }
+        LaneNotificationKind::Nudge { episode_id } => {
+            id(episode_id)?;
+            ("nudge", episode_id.clone())
+        }
         LaneNotificationKind::Milestone => ("milestone", "pending".into()),
         LaneNotificationKind::Intervention { input_id } => {
             id(input_id)?;
@@ -101,7 +109,10 @@ fn semantic(kind: &LaneNotificationKind) -> Result<(&'static str, String), Stora
 
 /// The semantic key and outbox row are one write. Returns the original stable ID
 /// on a retry, even when that notification has already been ACKed.
-fn enqueue(conn: &Connection, mut notice: LaneNotification) -> Result<String, StorageError> {
+pub(super) fn enqueue(
+    conn: &Connection,
+    mut notice: LaneNotification,
+) -> Result<String, StorageError> {
     live_thread(conn, &notice.source_thread_id)?;
     live_thread(conn, &notice.destination_thread_id)?;
     let current = lane(conn, &notice.lane_id)?;
@@ -560,6 +571,13 @@ pub(crate) fn notify_user_input(
         .query_map([&receipt.root_run_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for id in affected {
+        crate::repo::lane_control::input_progress(
+            conn,
+            &id,
+            lane_id.as_ref() == Some(&id),
+            true,
+            receipt.accepted_at_ns,
+        )?;
         let state = guards::guard(conn, &id)?;
         guards::update_guard_in_transaction(
             conn,

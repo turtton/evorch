@@ -142,8 +142,8 @@ pub(crate) fn claim(
              AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
          )
          SELECT payload FROM eligible
-         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer'))
-         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer') THEN 0 ELSE 1 END,
+         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer','nudge'))
+         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer','nudge') THEN 0 ELSE 1 END,
                   notification_id LIMIT 20"
     ))?;
     let values = statement
@@ -203,11 +203,18 @@ fn check_claim(
         return Err(conflict("invalid_claim_members"));
     }
     for notice in &claim.notifications {
+        crate::repo::lane_control::check_nudge(conn, notice)?;
         live_thread(conn, &notice.source_thread_id)?;
-        management(
-            lane(conn, &notice.lane_id)?.management_revision,
-            notice.management_revision,
-        )?;
+        let current = lane(conn, &notice.lane_id)?;
+        if matches!(notice.kind, LaneNotificationKind::Nudge { .. })
+            && (current.root_run_id.as_deref() != Some(&claim.owner.root_run_id)
+                || current.generation != claim.owner.generation)
+        {
+            return Err(crate::StorageError::LaneOperation(
+                event_bus::lane::LaneOperationError::OwnershipLost,
+            ));
+        }
+        management(current.management_revision, notice.management_revision)?;
         let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM lane_notifications WHERE notification_id=?1 AND claim_epoch=?2 AND destination_thread_id=?3 AND payload=?4 AND state='pending')",params![notice.notification_id,claim.claim_epoch,claim.destination_thread_id,json(notice)?],|r|r.get(0))?;
         if !valid {
             return Err(conflict("stale_notification"));
@@ -288,6 +295,20 @@ pub(crate) fn accept_delivery(
             },
         };
         crate::repo::host_input_receipt::insert(&tx, &receipt)?;
+        crate::repo::lane_control::accept_nudge(&tx, notice)?;
+        let source = lane(&tx, &notice.lane_id)?;
+        if source.thread_id == notice.destination_thread_id {
+            crate::repo::lane_control::input_progress(
+                &tx,
+                &notice.lane_id,
+                true,
+                matches!(
+                    notice.kind,
+                    LaneNotificationKind::Intervention { .. } | LaneNotificationKind::Answer { .. }
+                ),
+                now_ns,
+            )?;
+        }
         tx.execute(
             "UPDATE lane_notifications SET receipt_prompt_id=?2 WHERE notification_id=?1",
             params![notice.notification_id, receipt.prompt_id],
@@ -295,7 +316,10 @@ pub(crate) fn accept_delivery(
         // No post-commit callback: receipt-only crash recovery must retain the
         // same causal wake count even when the sender never reaches ACK.
         if claim.completed_root_wake
-            && !matches!(notice.kind, LaneNotificationKind::Answer { .. })
+            && !matches!(
+                notice.kind,
+                LaneNotificationKind::Answer { .. } | LaneNotificationKind::Nudge { .. }
+            )
             && wake_sources.insert(&notice.lane_id)
         {
             let expected = guard(&tx, &notice.lane_id)?.revision;

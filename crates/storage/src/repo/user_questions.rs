@@ -81,6 +81,54 @@ pub fn answer(
     origin: &AnswerOrigin,
     mode: AnswerMode,
 ) -> Result<(), StorageError> {
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        answer_checked(&tx, id, answer, origin, mode)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    answer_checked(conn, id, answer, origin, mode)
+}
+fn answer_checked(
+    conn: &Connection,
+    id: &str,
+    answer: &str,
+    origin: &AnswerOrigin,
+    mode: AnswerMode,
+) -> Result<(), StorageError> {
+    // Canonical routing, not a cached projection or inherited recipient link.
+    let canonical: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM lane_question_routes WHERE question_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(canonical) = canonical {
+        let route: event_bus::lane::QuestionRouting =
+            serde_json::from_str(&canonical).map_err(|e| invalid(&e.to_string()))?;
+        use event_bus::lane::{LaneOperationError, QuestionResponder};
+        let permitted = match (&route.responder, origin) {
+            (QuestionResponder::User, AnswerOrigin::Host { .. }) => true,
+            (
+                QuestionResponder::Lead { thread_id },
+                AnswerOrigin::LaneLead { thread_id: by, .. },
+            ) if thread_id == by => {
+                crate::repo::lanes::get(conn, &route.lane_id)?.is_some_and(|l| {
+                    l.policy == event_bus::LanePolicy::Attached
+                        && l.lead_thread_id.as_deref() == Some(by)
+                        && l.management_revision == route.management_revision
+                })
+            }
+            _ => false,
+        };
+        if !permitted {
+            return Err(StorageError::LaneOperation(
+                LaneOperationError::NotResponder,
+            ));
+        }
+    }
     if answer.trim().is_empty() || answer.len() > 4096 {
         return Err(invalid("answer must be 1..4096 bytes"));
     }

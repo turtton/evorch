@@ -7,6 +7,10 @@
 //!
 //! Oversized or empty input is reported as a [`LaneValidationError`]; nothing is
 //! truncated silently.
+#[path = "lane_phase2.rs"]
+mod phase2;
+pub use phase2::*;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -860,6 +864,12 @@ pub enum LaneNotificationKind {
     Failed {
         episode: String,
         revision: Option<ArtifactRevision>,
+    },
+    Closed {
+        close_id: String,
+    },
+    Nudge {
+        episode_id: String,
     },
     Milestone,
     Intervention {
