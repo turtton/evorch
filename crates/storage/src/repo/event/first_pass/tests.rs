@@ -240,6 +240,7 @@ fn mixed_history(conn: &Connection) {
         phase("child-6", AgentRunPhase::Waiting),
         phase("child-6", AgentRunPhase::Done),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "write".into(),
             call_id: "pending".into(),
             input: None,

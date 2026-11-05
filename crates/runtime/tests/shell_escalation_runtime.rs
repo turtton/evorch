@@ -25,7 +25,6 @@ struct Fixture {
     run: runtime::RunId,
     executor: Arc<ToolExecutor>,
     model: Arc<ScriptedModel>,
-    bus: Arc<EventBus>,
     sandbox: Arc<ProbeSandbox>,
     host: Arc<ProbeSandbox>,
 }
@@ -64,7 +63,6 @@ impl Fixture {
             run,
             executor,
             model,
-            bus,
             sandbox,
             host,
         }
@@ -153,22 +151,51 @@ async fn consecutive_reviewer_denials_suspend_automatic_review_for_the_run() {
     fixture.assert_wraps(0);
 }
 
-// Given: user mode and scoped responder / When: shell executes / Then: approval uses run correlation.
+// A real live execution, not the cancelled provenance-only review fixture, owns
+// human approval. The opaque request token remains scoped to that run.
 #[tokio::test]
 async fn escalated_shell_user_mode_uses_scoped_approval_responder() {
-    let fixture = Fixture::new(EscalationApproval::User, "unused");
-    let responder = support::spawn_run_scoped_approval_responder(
-        fixture.bus.clone(),
-        fixture.bus.subscribe(),
-        format!("{}:", fixture.run),
+    let bus = Arc::new(EventBus::new(128));
+    let mut events = bus.subscribe();
+    let sandbox = Arc::new(ProbeSandbox::default());
+    let host = Arc::new(ProbeSandbox::default());
+    let executor = Arc::new(ToolExecutor::with_standard_tools(
+        bus.clone(),
+        sandbox.clone(),
+    ));
+    let model = Arc::new(ScriptedModel::new([
+        Ok(support::tool_response(
+            "call-shell",
+            "shell",
+            json!({"command":"printf approved", "sandbox_access":"unsandboxed", "justification":"host inspection"}),
+        )),
+        Ok(text_response("done", providers::FinishReason::Stop)),
+    ]));
+    let runtime = AgentRuntime::new(bus.clone(), executor.clone(), model.clone());
+    runtime.set_sandbox_escalation(EscalationApproval::User, false);
+    executor.set_shell_escalation(runtime.shell_escalation_gate(), host.clone());
+    let response_events = bus.subscribe();
+    let run = runtime.delegate_background(
+        agents::Role::Worker,
+        "inspect host".into(),
+        runtime::RunConfig::default(),
     );
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), fixture.execute())
-        .await
-        .expect("scoped response");
-    assert!(!result.is_error);
+    let responder = support::spawn_run_scoped_approval_responder(
+        bus.clone(),
+        response_events,
+        format!("{run}:"),
+    );
+    assert_eq!(
+        runtime.wait(run).await.unwrap(),
+        event_bus::AgentRunPhase::Done
+    );
     responder.await.expect("responder");
-    assert!(fixture.model.observed().await.is_empty());
-    fixture.assert_wraps(1);
+    assert!(events.drain_pending_snapshot().iter().any(|event| matches!(&event.kind,
+        event_bus::EventKind::Tool(event_bus::ToolEvent::ToolCompleted { call_id, is_error: false, output: Some(output), .. }) if call_id == "call-shell" && output.contains("approved")
+    )));
+    assert_eq!(model.observed().await.len(), 2);
+    assert!(sandbox.0.lock().unwrap().is_empty());
+    assert_eq!(host.0.lock().unwrap().len(), 1);
 }
 
 // Given: an already wired executor / When: settings switch Off / Then: no reviewer or host execution.

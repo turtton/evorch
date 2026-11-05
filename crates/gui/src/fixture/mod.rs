@@ -33,11 +33,13 @@ pub fn demo_pending_approval_events() -> [event_bus::Event; 3] {
             parent_call_id: None,
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             call_id: "run-2:call-1:17".into(),
             tool_name: "shell".into(),
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             call_id: "run-3:call-2:18".into(),
             tool_name: "write".into(),

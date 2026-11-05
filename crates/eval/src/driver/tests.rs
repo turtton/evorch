@@ -386,13 +386,25 @@ async fn approval_requests_are_denied_and_escalation_denials_recorded() {
         ..Observed::default()
     };
 
-    // When: an approval request, a tool call and its denied escalation are observed.
+    let registry = sandbox::approval::ApprovalRegistry::for_bus(&bus);
+    let pending = registry.register(
+        sandbox::approval::ApprovalRequest {
+            run_id: "root",
+            thread_id: Some("thread"),
+            tool_name: "web_fetch",
+            call_id: "approval-1",
+            input: Some(serde_json::json!({"url":"https://example.com"})),
+        },
+        std::time::Duration::from_secs(300),
+    );
+    let token = pending.id().value.clone();
+    observed.observe(&events.recv().await.unwrap(), &bus);
+    assert_eq!(
+        pending.wait().await,
+        sandbox::approval::ApprovalState::Denied
+    );
+    // When: a real approval request and a denied escalation are observed.
     for kind in [
-        EventKind::Tool(ToolEvent::ApprovalRequested {
-            tool_name: "web_fetch".into(),
-            call_id: "approval-1".into(),
-            input: Some(serde_json::json!({"url": "https://example.com"})),
-        }),
         EventKind::Tool(ToolEvent::ToolStarted {
             tool_name: "shell".into(),
             call_id: "call-1".into(),
@@ -417,7 +429,7 @@ async fn approval_requests_are_denied_and_escalation_denials_recorded() {
     let resolved = events.drain_pending_snapshot();
     assert!(resolved.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Tool(ToolEvent::ApprovalResolved { call_id, approved: false }) if call_id == "approval-1"
+        EventKind::Tool(ToolEvent::ApprovalResolved { call_id, approved: false, .. }) if call_id == &token
     )));
     assert_eq!(observed.tool_calls, 1);
     assert_eq!(

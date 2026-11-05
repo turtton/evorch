@@ -127,6 +127,7 @@ fn tool_approval_requested_updates_status() {
     }
     // When: approval is requested.
     model.apply(&Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         input: None,
         tool_name: "read_file".into(),
         call_id: "c1".into(),

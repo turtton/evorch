@@ -730,8 +730,7 @@ impl LoopState {
         }
         let ctx = ToolExecutionContext {
             run_id: self.task.run_id.to_string(),
-            // THREAD_ID_SEAM: RunTask currently carries run identity only.
-            thread_id: None,
+            thread_id: self.thread_id.clone(),
             call_id: None,
             shell_wait_policy: tools::executor::ShellWaitPolicy::AutoYield,
             shell_input: Some(Arc::new(crate::runtime::user_inbox::RunShellInput {
@@ -1596,8 +1595,7 @@ impl LoopState {
                     }
                 }
                 let gate = ApprovalGate::new(Arc::clone(&self.shared.bus), WEB_APPROVAL_TIMEOUT);
-                // Model call IDs are run-local. Scope approval IDs to the run.
-                let correlation_id = format!("{}:{}", self.task.run_id, call_id);
+                let approval_run = self.task.run_id.to_string();
                 let outcome = tokio::select! {
                     biased;
                     changed = self.channels.cancel_rx.changed() => {
@@ -1607,7 +1605,7 @@ impl LoopState {
                         }
                         return self.reject_network_call(name, call_id, input, "user_review", "approval wait was interrupted");
                     }
-                    outcome = gate.request_with_input(name, &correlation_id, Some(input.clone())) => outcome,
+                    outcome = gate.request_for(sandbox::approval::ApprovalRequest { run_id: &approval_run, thread_id: self.thread_id.as_deref(), tool_name: name, call_id, input: Some(input.clone()) }) => outcome,
                 };
                 match outcome {
                     ApprovalOutcome::Approved => {
@@ -1621,7 +1619,9 @@ impl LoopState {
                         );
                         NetworkGate::Proceed
                     }
-                    ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => {
+                    ApprovalOutcome::Denied
+                    | ApprovalOutcome::TimedOut
+                    | ApprovalOutcome::Cancelled => {
                         let error = if matches!(outcome, ApprovalOutcome::TimedOut) {
                             format!("approval timed out: {reason}")
                         } else {

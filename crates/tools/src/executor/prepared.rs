@@ -143,18 +143,22 @@ impl ValidatedToolCall {
             Action::AskFirst => match &self.executor.gate {
                 None => Some("承認ゲートが未設定のため拒否されました"),
                 Some(gate) => match gate
-                    .request_with_input(
-                        &self.name,
-                        &approval_id(&self.ctx, &self.id),
-                        Some(self.args.clone()),
-                    )
+                    .request_for(sandbox::approval::ApprovalRequest {
+                        run_id: &self.ctx.run_id,
+                        thread_id: self.ctx.thread_id.as_deref(),
+                        tool_name: &self.name,
+                        call_id: &self.id,
+                        input: Some(self.args.clone()),
+                    })
                     .await
                 {
                     ApprovalOutcome::Approved => {
                         self.action = Action::Proceed;
                         None
                     }
-                    ApprovalOutcome::Denied => Some("承認要求が拒否されました"),
+                    ApprovalOutcome::Denied | ApprovalOutcome::Cancelled => {
+                        Some("承認要求が拒否されました")
+                    }
                     ApprovalOutcome::TimedOut => Some("承認応答がタイムアウトしました"),
                 },
             },
@@ -227,7 +231,7 @@ mod rework_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn denial_preflight_is_silent_for_deny_and_timeout() {
         // Given: either unconditional denial or an unanswered AskFirst gate.
         for decision in [PolicyDecision::Deny, PolicyDecision::Ask] {
@@ -258,15 +262,13 @@ mod rework_tests {
                 .authorize()
                 .await;
             assert!(result.is_err());
-            // Then: only approval requests, never execution lifecycle events, are observable.
-            while let Ok(Ok(event)) =
-                tokio::time::timeout(Duration::from_millis(10), events.recv()).await
-            {
-                assert!(matches!(
-                    event.kind,
-                    EventKind::Tool(ToolEvent::ApprovalRequested { .. })
-                ));
-            }
+            // Terminal notifications are allowed, but preflight has no tool side effects.
+            assert!(events.drain_pending_snapshot().iter().all(|event| matches!(
+                event.kind,
+                EventKind::Tool(
+                    ToolEvent::ApprovalRequested { .. } | ToolEvent::ApprovalResolved { .. }
+                )
+            )));
         }
     }
 
@@ -316,10 +318,13 @@ mod rework_tests {
             }
         }
         for (index, call_id) in ids.iter().enumerate() {
-            bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                call_id: call_id.clone(),
-                approved: index == 0,
-            }));
+            sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                .resolve_presented(
+                    &(call_id.clone()),
+                    index == 0,
+                    sandbox::approval::ApprovalProvenance::CLI,
+                )
+                .expect("resolve live approval");
         }
         while let Some(result) = tasks.join_next().await {
             result.expect("join").expect("tool");

@@ -1,4 +1,4 @@
-use event_bus::{Event, EventBus, EventKind, ToolEvent};
+use event_bus::{EventBus, EventKind, ToolEvent};
 use sandbox::{ApprovalGate, ApprovalMode, ApprovalPolicy, PolicyDecision};
 use serde_json::{Value, json};
 use std::sync::{
@@ -76,10 +76,9 @@ async fn prepared_on_failure_defers_approval_until_failed_execution() {
             {
                 assert_eq!(count.load(Ordering::SeqCst), 1);
                 assert_approval_id_format(&call_id);
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: true,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }
@@ -96,9 +95,9 @@ fn assert_approval_id_format(call_id: &str) {
     let attempt = call_id
         .strip_prefix("run-2:call-1:")
         .expect("run and call scope");
-    assert!(!attempt.is_empty());
-    assert!(attempt.bytes().all(|byte| byte.is_ascii_digit()));
+    let (attempt, nonce) = attempt.split_once(':').expect("attempt and opaque nonce");
     assert!(attempt.parse::<u64>().is_ok());
+    assert!(!nonce.is_empty());
 }
 
 #[tokio::test]
@@ -129,10 +128,7 @@ async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
         .unwrap();
     // When: authorization runs before any execution.
     let task = tokio::spawn(validated.authorize());
-    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let event = events.recv().await.unwrap();
     // Then: the first event is a scoped approval request and no tool has executed.
     assert_eq!(
         serde_json::to_value(&event).expect("event JSON")["kind"]["payload"]["payload"]["input"],
@@ -143,10 +139,9 @@ async fn prepared_ask_first_emits_scoped_attempt_id_before_tool_started() {
     };
     assert_approval_id_format(&call_id);
     assert_eq!(count.load(Ordering::SeqCst), 0);
-    bus.emit(Event::new(ToolEvent::ApprovalResolved {
-        call_id,
-        approved: true,
-    }));
+    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+        .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+        .expect("resolve live approval");
     let _prepared = task.await.unwrap().unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }

@@ -887,7 +887,13 @@ impl ToolExecutor {
                     );
                 };
                 match gate
-                    .request_with_input(tool_name, call_id, Some(args.clone()))
+                    .request_for(sandbox::approval::ApprovalRequest {
+                        run_id: &ctx.run_id,
+                        thread_id: ctx.thread_id.as_deref(),
+                        tool_name,
+                        call_id,
+                        input: Some(args.clone()),
+                    })
                     .await
                 {
                     ApprovalOutcome::Approved => {
@@ -896,7 +902,7 @@ impl ToolExecutor {
                             .execute_with_search_provider(ctx, args, search_provider)
                             .await
                     }
-                    ApprovalOutcome::Denied => {
+                    ApprovalOutcome::Denied | ApprovalOutcome::Cancelled => {
                         return self.deny(ctx, tool_name, call_id, "承認要求が拒否されました");
                     }
                     ApprovalOutcome::TimedOut => {
@@ -918,11 +924,13 @@ impl ToolExecutor {
                     first
                 } else if let Some(gate) = &self.gate {
                     match gate
-                        .request_with_input(
+                        .request_for(sandbox::approval::ApprovalRequest {
+                            run_id: &ctx.run_id,
+                            thread_id: ctx.thread_id.as_deref(),
                             tool_name,
-                            &approval_id(ctx, call_id),
-                            Some(args.clone()),
-                        )
+                            call_id,
+                            input: Some(args.clone()),
+                        })
                         .await
                     {
                         ApprovalOutcome::Approved => {
@@ -931,7 +939,9 @@ impl ToolExecutor {
                                 .execute_with_search_provider(ctx, args, search_provider)
                                 .await
                         }
-                        ApprovalOutcome::Denied | ApprovalOutcome::TimedOut => first,
+                        ApprovalOutcome::Denied
+                        | ApprovalOutcome::TimedOut
+                        | ApprovalOutcome::Cancelled => first,
                     }
                 } else {
                     first
@@ -1106,12 +1116,6 @@ fn canonicalize_edit_names(args: &mut serde_json::Value) {
             }
         }
     }
-}
-
-fn approval_id(ctx: &ToolExecutionContext, call_id: &str) -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let attempt = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}:{call_id}:{attempt}", ctx.run_id)
 }
 
 fn is_failure(outcome: &Result<ToolResult, ToolError>) -> bool {

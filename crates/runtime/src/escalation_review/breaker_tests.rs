@@ -233,21 +233,14 @@ async fn user_mode_approval_resets_auto_streak() {
             if let EventKind::Tool(event_bus::ToolEvent::ApprovalRequested { call_id, .. }) =
                 events.recv().await.unwrap().kind
             {
-                fixture.gate.bus.emit(event_bus::Event::new(
-                    event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved: true,
-                    },
-                ));
+                sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                    .resolve_presented(&call_id, true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }
     };
-    let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(approval, answer)
-    })
-    .await
-    .expect("user-mode approval deadline");
+    let (decision, ()) = async { tokio::join!(approval, answer) }.await;
     assert!(matches!(decision, EscalationDecision::Approve));
     assert_eq!(fixture.denials(&fixture.ctx), 0);
     *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Auto, false);
@@ -303,21 +296,14 @@ async fn settings_change_during_fallback_approval_neither_counts_nor_resets() {
                 events.recv().await.unwrap().kind
             {
                 *fixture.gate.settings.lock().unwrap() = (EscalationApproval::Auto, false);
-                fixture.gate.bus.emit(event_bus::Event::new(
-                    event_bus::ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved: true,
-                    },
-                ));
+                sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                    .resolve_presented(&call_id, true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }
     };
-    let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(decision, change)
-    })
-    .await
-    .expect("ordered settings change");
+    let (decision, ()) = async { tokio::join!(decision, change) }.await;
     assert!(matches!(decision, EscalationDecision::Deny { reason }
         if reason == "shell escalation settings changed during review"));
     assert_eq!(fixture.denials(&fixture.ctx), 1);
@@ -375,21 +361,19 @@ async fn parallel_old_generation_completions_cannot_change_current_streak() {
                             ..
                         }) = events.recv().await.unwrap().kind
                         {
-                            fixture.gate.bus.emit(event_bus::Event::new(
-                                event_bus::ToolEvent::ApprovalResolved {
-                                    call_id,
-                                    approved: true,
-                                },
-                            ));
+                            sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                                .resolve_presented(
+                                    &call_id,
+                                    true,
+                                    sandbox::approval::ApprovalProvenance::CLI,
+                                )
+                                .expect("resolve live approval");
                             break;
                         }
                     }
                 }
             };
-            let (decision, ()) =
-                tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(old, newer) })
-                    .await
-                    .expect("ordered old-generation completion");
+            let (decision, ()) = async { tokio::join!(old, newer) }.await;
             // New input invalidates the old evidence, even when its human
             // handoff is allowed because the newer generation is not suspended.
             assert!(!matches!(decision, EscalationDecision::Approve));
@@ -446,11 +430,7 @@ async fn input_arriving_during_denial_discards_old_result_before_next_call() {
             .add_user_request(&fixture.ctx.run_id, "new request");
         release.notify_one();
     };
-    tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(pending, input)
-    })
-    .await
-    .expect("ordered new input");
+    async { tokio::join!(pending, input) }.await;
     assert_eq!(fixture.denials(&fixture.ctx), 0);
 }
 

@@ -256,9 +256,25 @@ impl TranscriptRegistry {
                     |run_id| self.route_run(run_id),
                 )
             }
-            EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. })
-            | EventKind::Tool(ToolEvent::ApprovalResolved { call_id, .. })
-            | EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => self
+            EventKind::Tool(ToolEvent::ApprovalRequested {
+                call_id,
+                correlation,
+                ..
+            })
+            | EventKind::Tool(ToolEvent::ApprovalResolved {
+                call_id,
+                correlation,
+                ..
+            }) => correlation
+                .as_ref()
+                .map(|c| c.run_id.as_str())
+                .or_else(|| self.run_for_call(call_id))
+                .or_else(|| self.call_index.get(call_id).map(String::as_str))
+                .map_or_else(
+                    || vec![TranscriptKey::Thread],
+                    |run_id| self.route_run(run_id),
+                ),
+            EventKind::Tool(ToolEvent::ExecutionDenied { call_id, .. }) => self
                 .run_for_call(call_id)
                 .or_else(|| self.call_index.get(call_id).map(String::as_str))
                 .map_or_else(
@@ -1009,11 +1025,13 @@ mod tests {
             parent_call_id: None,
         }));
         let known = Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             tool_name: "write".into(),
             call_id: "known".into(),
         });
         let unknown = Event::new(ToolEvent::ApprovalResolved {
+            correlation: None,
             call_id: "unknown".into(),
             approved: false,
         });

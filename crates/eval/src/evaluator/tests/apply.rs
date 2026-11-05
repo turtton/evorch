@@ -215,10 +215,9 @@ async fn apply_revalidates_dropin_kind_after_waiting_for_approval() {
             let event = events.recv().await.unwrap();
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
                 std::fs::write(edit_path, IMAGE_PROVIDER).unwrap();
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: true,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 break;
             }
         }
@@ -252,10 +251,9 @@ async fn apply_commits_exact_preview_bytes_after_valid_dropin_change() {
                 events.recv().await.unwrap().kind
             {
                 std::fs::write(edit_path, latest_for_approval).unwrap();
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved: true,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(&(call_id), true, sandbox::approval::ApprovalProvenance::CLI)
+                    .expect("resolve live approval");
                 return input.unwrap();
             }
         }

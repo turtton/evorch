@@ -871,6 +871,7 @@ fn what_other_windows_do_is_shown_without_acting_on_it() {
         AgentRunPhase::Running,
     ));
     a.emit(Event::new(ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "shell".into(),
         call_id: "run-a:c1".into(),
         input: None,
@@ -945,6 +946,7 @@ fn what_other_windows_do_is_shown_without_acting_on_it() {
             parent_call_id: None,
         }),
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             tool_name: "shell".into(),
             call_id: "run-b:c2".into(),
             input: None,

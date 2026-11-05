@@ -110,10 +110,13 @@ impl Fixture {
                 if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, input, .. }) =
                     event.kind
                 {
-                    bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved,
-                    }));
+                    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                        .resolve_presented(
+                            &(call_id),
+                            approved,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     return input.unwrap();
                 }
             }
@@ -179,6 +182,7 @@ impl Fixture {
                 parent_call_id: None,
             }),
             Event::new(ToolEvent::ApprovalRequested {
+                correlation: None,
                 tool_name: "shell".into(),
                 call_id: format!("{child}:call-2"),
                 input: Some(json!({"command": "curl example.com"})),

@@ -654,12 +654,15 @@ impl TranscriptModel {
                 tool_name,
                 call_id,
                 input,
-            }) => self.update_tool(call_id, tool_name, input.as_ref(), ToolStatus::AwaitingApproval),
+                correlation,
+            }) => self.update_tool(call_id, correlation.as_ref(), tool_name, input.as_ref(), ToolStatus::AwaitingApproval),
             event_bus::EventKind::Tool(event_bus::ToolEvent::ApprovalResolved {
                 call_id,
                 approved,
+                correlation,
             }) => self.update_tool(
                 call_id,
+                correlation.as_ref(),
                 "",
                 None,
                 if *approved {
@@ -676,6 +679,7 @@ impl TranscriptModel {
                 reason,
             }) => self.update_tool(
                 call_id,
+                None,
                 tool_name,
                 None,
                 ToolStatus::Denied {
@@ -893,16 +897,20 @@ impl TranscriptModel {
         });
     }
 
-    /// Applies an approval status. A run-scoped approval ID (`run:call[:attempt]`)
-    /// resolves to that run's original call, so one call keeps one card.
+    /// Authorization tokens are opaque. Full correlation is carried separately
+    /// so long or colon-containing provider IDs still address one tool card.
     fn update_tool(
         &mut self,
         approval_id: &str,
+        correlation: Option<&event_bus::ApprovalCorrelation>,
         tool_name: &str,
         input: Option<&serde_json::Value>,
         status: ToolStatus,
     ) {
-        let (run_id, call_id) = match parse_scoped_call_id(approval_id) {
+        let identity = correlation
+            .map(|c| (c.run_id.clone(), c.call_id.clone(), Some(c.attempt)))
+            .or_else(|| parse_scoped_call_id(approval_id));
+        let (run_id, call_id) = match identity {
             Some((run, call, _)) => (Some(run), call),
             None => (None, approval_id.to_owned()),
         };

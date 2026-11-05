@@ -74,10 +74,13 @@ fn spawn_responder(
         loop {
             let event = receiver.recv().await.expect("承認要求を受信できるはずです");
             if let EventKind::Tool(ToolEvent::ApprovalRequested { call_id, .. }) = event.kind {
-                bus.emit(Event::new(ToolEvent::ApprovalResolved {
-                    call_id,
-                    approved,
-                }));
+                sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                    .resolve_presented(
+                        &(call_id),
+                        approved,
+                        sandbox::approval::ApprovalProvenance::CLI,
+                    )
+                    .expect("resolve live approval");
                 return;
             }
         }
@@ -128,11 +131,7 @@ async fn auto_allow_executes_without_approval_events() {
             ..
         }
     ));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), receiver.recv())
-            .await
-            .is_err()
-    );
+    assert!(receiver.drain_pending_snapshot().is_empty());
 }
 
 // Given: 実行前承認が必要なプロセスツールと拒否応答 / When: 実行 / Then: ツールを呼ばず拒否イベント後にエラー完了する
@@ -285,11 +284,7 @@ async fn ask_without_available_approval_path_fails_closed() {
             next(&mut observer).await,
             ToolEvent::ToolCompleted { is_error: true, .. }
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), observer.recv())
-                .await
-                .is_err()
-        );
+        assert!(observer.drain_pending_snapshot().is_empty());
     }
 }
 

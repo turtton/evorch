@@ -103,6 +103,7 @@ fn seed_events(conn: &Connection) -> Seeded {
     }
     .into();
     let approval: EventKind = ToolEvent::ApprovalRequested {
+        correlation: None,
         tool_name: "write".into(),
         call_id: "run-big:approve".into(),
         input: Some(json!({"content": long("approval", 6_000)})),

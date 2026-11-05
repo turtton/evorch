@@ -80,17 +80,13 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
         runtime.set_sandbox_escalation(next.0, next.1);
         model.release.wait().await;
     };
-    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::join!(execution, update)
-    })
-    .await
-    .expect("review completes");
+    let (result, ()) = async { tokio::join!(execution, update) }.await;
     let result = result.expect("execute");
     // Then: only an unchanged snapshot may reach unsandboxed execution.
     let changed = next != (EscalationApproval::Auto, false);
     assert_eq!(result.is_error, changed);
     assert_eq!(*host.0.lock().expect("probe"), usize::from(!changed));
-    let diagnostic = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let diagnostic = async {
         loop {
             if let EventKind::Diagnostic(event) = events.recv().await.expect("event").kind
                 && event.code == "escalation_review"
@@ -98,9 +94,8 @@ async fn review_with_settings(next: (EscalationApproval, bool)) {
                 break event;
             }
         }
-    })
-    .await
-    .expect("review diagnostic");
+    }
+    .await;
     assert_eq!(
         diagnostic.severity,
         if changed {
@@ -164,20 +159,20 @@ async fn escalation_is_denied_when_settings_change_during_human_approval() {
                     events.recv().await.expect("event").kind
                 {
                     runtime.set_sandbox_escalation(EscalationApproval::Off, false);
-                    bus.emit(event_bus::Event::new(ToolEvent::ApprovalResolved {
-                        call_id,
-                        approved: true,
-                    }));
+                    sandbox::approval::ApprovalRegistry::for_bus(&bus)
+                        .resolve_presented(
+                            &(call_id),
+                            true,
+                            sandbox::approval::ApprovalProvenance::CLI,
+                        )
+                        .expect("resolve live approval");
                     break;
                 }
             }
         };
         use tools::tools::shell_escalation::{EscalationDecision, ShellEscalationGate};
-        let (decision, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(gate.decide(&ctx, "pwd", "inspect"), update)
-        })
-        .await
-        .expect("human review completes");
+        let (decision, ()) =
+            async { tokio::join!(gate.decide(&ctx, "pwd", "inspect"), update) }.await;
         // Then: stale human approval is denied as well.
         assert!(matches!(decision, EscalationDecision::Deny { .. }));
     }

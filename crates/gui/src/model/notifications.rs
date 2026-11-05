@@ -307,6 +307,7 @@ mod tests {
     }
     fn approval() -> Event {
         Event::new(ToolEvent::ApprovalRequested {
+            correlation: None,
             input: None,
             tool_name: "shell".into(),
             call_id: "call-1".into(),

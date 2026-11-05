@@ -20,6 +20,12 @@ pub struct EventBus {
     tx: broadcast::Sender<Event>,
     next_subscriber_id: AtomicU64,
     fences: std::sync::Arc<crate::fencing::MutationFences>,
+    shared: std::sync::Mutex<
+        std::collections::HashMap<
+            std::any::TypeId,
+            std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        >,
+    >,
 }
 
 impl EventBus {
@@ -36,7 +42,36 @@ impl EventBus {
             tx,
             next_subscriber_id: AtomicU64::new(0),
             fences: std::sync::Arc::default(),
+            shared: std::sync::Mutex::default(),
         }
+    }
+
+    /// Look up an installed service without creating authority from an event.
+    pub fn get_shared_state<T: Send + Sync + 'static>(&self) -> Option<std::sync::Arc<T>> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&std::any::TypeId::of::<T>())
+            .cloned()
+            .and_then(|s| s.downcast().ok())
+    }
+
+    /// Core-local shared services, retained for this bus lifetime, not rebuilt
+    /// from replayed events. Initializers must not reenter this method.
+    pub fn shared_state<T: Send + Sync + 'static>(
+        &self,
+        init: impl FnOnce() -> T,
+    ) -> std::sync::Arc<T> {
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| std::sync::Arc::new(init()))
+            .clone()
+            .downcast()
+            .expect("entry type matches its TypeId")
     }
 
     /// イベントを全受信者へブロードキャストし、受信者数を返す。

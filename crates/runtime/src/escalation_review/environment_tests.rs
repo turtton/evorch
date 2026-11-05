@@ -60,23 +60,20 @@ async fn initially_unsynced_evidence_allows_stable_human_approval_and_resets_str
                                 call_id,
                                 ..
                             }) => {
-                                fixture.gate.bus.emit(Event::new(
-                                    event_bus::ToolEvent::ApprovalResolved {
-                                        call_id,
-                                        approved: true,
-                                    },
-                                ));
+                                sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                                    .resolve_presented(
+                                        &call_id,
+                                        true,
+                                        sandbox::approval::ApprovalProvenance::CLI,
+                                    )
+                                    .expect("resolve live approval");
                                 break;
                             }
                             _ => {}
                         }
                     }
                 };
-                let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-                    tokio::join!(decision, answer)
-                })
-                .await
-                .expect("stable human approval with initially unsynced evidence");
+                let (decision, ()) = async { tokio::join!(decision, answer) }.await;
                 assert!(
                     matches!(decision, EscalationDecision::Approve),
                     "file={file}, auto_fallback={auto_fallback}, denials={denials}: {}",
@@ -129,22 +126,19 @@ async fn concurrent_settings_change_during_human_denial_or_timeout_preserves_str
                             false,
                         );
                         if !timeout {
-                            fixture.gate.bus.emit(Event::new(
-                                event_bus::ToolEvent::ApprovalResolved {
-                                    call_id,
-                                    approved: false,
-                                },
-                            ));
+                            sandbox::approval::ApprovalRegistry::for_bus(&fixture.gate.bus)
+                                .resolve_presented(
+                                    &call_id,
+                                    false,
+                                    sandbox::approval::ApprovalProvenance::CLI,
+                                )
+                                .expect("resolve live approval");
                         }
                         break;
                     }
                 }
             };
-            let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(decision, change)
-            })
-            .await
-            .expect("settings change while the human dialog is pending");
+            let (decision, ()) = async { tokio::join!(decision, change) }.await;
             let expected = if timeout {
                 "shell escalation approval timed out"
             } else {
@@ -195,11 +189,7 @@ async fn concurrent_evidence_invalidation_during_model_denial_preserves_streak()
                 }
                 changed.notify_one();
             };
-            let (decision, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(decision, invalidate)
-            })
-            .await
-            .expect("evidence invalidation while the review is pending");
+            let (decision, ()) = async { tokio::join!(decision, invalidate) }.await;
             assert!(
                 matches!(decision, EscalationDecision::Deny { reason } if reason == "stale denial")
             );

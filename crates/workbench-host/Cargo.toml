@@ -15,6 +15,7 @@ workbench-protocol = { path = "../workbench-protocol" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 runtime = { path = "../runtime" }
+sandbox = { path = "../sandbox" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 storage = { path = "../storage" }
