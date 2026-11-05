@@ -1208,6 +1208,17 @@ impl crate::agent_loop::LoopState {
             return Err(LaneDeliveryNack::StorageFailed);
         }
         self.context = candidate;
+        if missing
+            .iter()
+            .any(|n| matches!(n.kind, LaneNotificationKind::Nudge { .. }))
+        {
+            runtime.lane_state_changed(
+                thread,
+                event_bus::DiagnosticSeverity::Info,
+                event_bus::event::diagnostic_codes::LANE_NUDGE_ACCEPTED,
+                "Nudge input receipt committed",
+            );
+        }
         // The storage transaction also committed completed-root wake guards.
         // Credits remain pending until the post-compaction provider request succeeds.
         self.publish_message_count();

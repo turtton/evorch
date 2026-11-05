@@ -180,6 +180,8 @@ fn known_class(code: &str) -> Option<CandidateClass> {
         | BROWSER_SCREENSHOT => Ignored,
         // eval: a requested evaluation ended; its failures are the replays', not the harness's.
         EVALUATION_FINISHED => Ignored,
+        // Lane ledger re-query hints are routine state notifications, not faults.
+        LANE_STALL_CHANGED | LANE_NUDGE_ACCEPTED => Ignored,
         // Includes tool-result codes (unknown_run/run_output_denied), not bus diagnostics.
         _ => return None,
     })

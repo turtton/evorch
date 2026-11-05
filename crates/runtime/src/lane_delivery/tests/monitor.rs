@@ -129,6 +129,27 @@ async fn no_report_and_work_stalled_boundaries_and_live_nudge_share_one_slot() {
     );
     assert_eq!(f.receipts(), 1);
     assert_eq!(episodes(&f)[0].episode_id, initial.episode_id);
+    // No new human input: that would legitimately create a new anchor/slot.
+    f.model.finish.store(true, Ordering::SeqCst);
+    f.runtime
+        .send_internal_message(lane.root_run_id, "Finish this existing turn".into())
+        .unwrap();
+    f.runtime.wait(lane.root_run_id).await.unwrap();
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(5 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert_eq!(episodes(&f)[0].classification, Class::SilentDone);
+    assert_eq!(episodes(&f)[0].nudge_state, LaneNudgeState::Accepted);
+    assert_eq!(episodes(&f)[0].episode_id, initial.episode_id);
+    assert_eq!(
+        f.runtime
+            .drive_lane_deliveries(&lane.thread_id)
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Empty
+    );
+    assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+    assert_eq!(f.receipts(), 1);
     assert_eq!(
         f.storage
             .handle()
@@ -208,27 +229,46 @@ async fn silent_done_wakes_once_despite_three_different_working_reports_and_rest
         LaneDeliveryOutcome::Delivered { notifications: 1 }
     );
     f.runtime.wait(lane.root_run_id).await.unwrap();
+    let anchor = f
+        .storage
+        .handle()
+        .lane_progress_anchor(lane.lane_id.clone())
+        .unwrap();
     for n in 0..3 {
-        // Replay a freshly worded Working report while the same execution is
-        // Done. None of these observations may create another automatic wake.
-        f.storage
-            .handle()
-            .append_lane_report(
-                &lane.lane_id,
-                event_bus::LaneReportInput {
-                    status: LaneStatus::Working,
-                    summary: format!("different prose {n}"),
-                    artifact_refs: vec![],
-                    artifact_revision: None,
-                    failure_episode: None,
-                    needs_human: false,
-                    question_refs: vec![],
-                    reason_code: None,
-                    producer: event_bus::LaneReportProducer::LaneAgent,
-                },
-                host.now_ns(),
-            )
+        // Explicit test replays, not automatic nudges or real user input. Exercise
+        // actual restore, lane_report and finish, rather than editing the ledger.
+        f.model.next_tools.lock().unwrap().insert(lane.root_run_id.to_string(), ContentBlock::ToolUse {
+            id: format!("working-{n}"), name: "lane_report".into(),
+            input: serde_json::json!({"status":"working","summary":format!("different prose {n}"),"artifact_refs":[]}),
+        });
+        f.runtime
+            .wake_chat(lane.root_run_id, host.target.authority.clone())
             .unwrap();
+        f.runtime
+            .send_internal_message(lane.root_run_id, "Replay a working-only turn".into())
+            .unwrap();
+        f.runtime.wait(lane.root_run_id).await.unwrap();
+        assert_eq!(
+            f.runtime.inspect_agent(lane.root_run_id).unwrap().phase,
+            AgentRunPhase::Done
+        );
+        assert_eq!(
+            f.storage
+                .handle()
+                .lane_progress_anchor(lane.lane_id.clone())
+                .unwrap(),
+            anchor
+        );
+        assert_eq!(
+            f.storage
+                .handle()
+                .lane_reports(&lane.lane_id, 0, 20)
+                .unwrap()
+                .last()
+                .unwrap()
+                .summary,
+            format!("different prose {n}")
+        );
         *f.runtime.shared.lanes.delivery.monitor.lock().unwrap() = Default::default();
         f.runtime.start_lane_monitor();
         f.runtime.monitor_lanes().unwrap();
@@ -759,4 +799,88 @@ async fn provider_exit_before_startup_scan_still_grants_exact_five_minute_grace(
     host.now.store(base + 125 * MINUTE, Ordering::SeqCst);
     f.runtime.monitor_lanes().unwrap();
     assert_eq!(episodes(&f)[0].classification, Class::NoReport);
+}
+
+#[tokio::test(start_paused = true)]
+async fn monitor_change_hints_requery_committed_state_without_timer_heartbeats() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "attention-hint").await;
+    let (_owner, host) = owned(&f, &lane);
+    let mut events = f.runtime.shared.bus.subscribe();
+    let hints = |events: &mut event_bus::EventReceiver| {
+        events
+            .drain_pending_snapshot()
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Diagnostic(d)
+                    if d.source == "lane_monitor" && d.code == "lane_stall_changed" =>
+                {
+                    Some(d)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    f.runtime.monitor_lanes().unwrap();
+    assert!(hints(&mut events).is_empty());
+    host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    let first = hints(&mut events);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].run_id.as_deref(),
+        Some(lane.root_run_id.to_string().as_str())
+    );
+    assert_eq!(first[0].thread_id.as_deref(), Some(lane.thread_id.as_str()));
+    assert_eq!(episodes(&f)[0].classification, Class::NoReport);
+    assert_eq!(episodes(&f)[0].nudge_state, LaneNudgeState::Pending);
+    let revision = episodes(&f)[0].revision;
+    f.runtime.monitor_lanes().unwrap();
+    assert!(hints(&mut events).is_empty());
+    assert_eq!(episodes(&f)[0].revision, revision);
+    host.now.fetch_add(30 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert_eq!(hints(&mut events).len(), 1);
+    assert_eq!(episodes(&f)[0].classification, Class::WorkStalled);
+    f.runtime.monitor_lanes().unwrap();
+    assert!(hints(&mut events).is_empty());
+    assert_eq!(
+        f.runtime
+            .drive_lane_deliveries(&lane.thread_id)
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Delivered { notifications: 1 }
+    );
+    let accepted: Vec<_> = events
+        .drain_pending_snapshot()
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Diagnostic(d)
+                if d.source == "lane_delivery" && d.code == "lane_nudge_accepted" =>
+            {
+                Some(d)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(
+        accepted[0].thread_id.as_deref(),
+        Some(lane.thread_id.as_str())
+    );
+    assert_eq!(episodes(&f)[0].nudge_state, LaneNudgeState::Accepted);
+    assert_eq!(
+        f.runtime
+            .drive_lane_deliveries(&lane.thread_id)
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Empty
+    );
+    assert!(
+        !events
+            .drain_pending_snapshot()
+            .into_iter()
+            .any(|e| matches!(e.kind, EventKind::Diagnostic(d) if d.code == "lane_nudge_accepted"))
+    );
 }

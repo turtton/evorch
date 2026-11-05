@@ -60,6 +60,7 @@ struct Observation {
     exempt: bool,
     grace_until: i64,
     children: HashSet<RunId>,
+    episode: Option<(String, u64)>,
 }
 impl LaneMonitor {
     fn drain(&mut self, now: i64) {
@@ -266,6 +267,7 @@ impl AgentRuntime {
                     exempt: false,
                     grace_until: 0,
                     children: HashSet::new(),
+                    episode: None,
                 });
             observed.insert(lane.lane_id.clone());
             if entry.anchor != anchor || entry.artifact != artifact {
@@ -360,7 +362,7 @@ impl AgentRuntime {
                 episode.episode_id,
                 episode.revision,
             )?;
-            if matches!(
+            let episode = if matches!(
                 classification,
                 Class::NoReport | Class::WorkStalled | Class::SilentDone
             ) {
@@ -368,7 +370,26 @@ impl AgentRuntime {
                     observation,
                     episode.episode_id,
                     episode.revision,
-                )?;
+                )?
+            } else {
+                episode
+            };
+            let version = (episode.episode_id, episode.revision);
+            if entry.episode.as_ref() != Some(&version) {
+                // A re-query hint, not another source of attention state. Stable
+                // observations do not emit a timer heartbeat or reorder the ledger.
+                self.shared
+                    .bus
+                    .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
+                        source: "lane_monitor".into(),
+                        severity: event_bus::DiagnosticSeverity::Info,
+                        code: event_bus::event::diagnostic_codes::LANE_STALL_CHANGED.into(),
+                        detail: format!("episode={} revision={}", version.0, version.1),
+                        run_id: Some(target.root_run_id.to_string()),
+                        thread_id: Some(thread.clone()),
+                        call_id: None,
+                    }));
+                entry.episode = Some(version);
             }
         }
         monitor.lanes.retain(|lane, _| observed.contains(lane));
