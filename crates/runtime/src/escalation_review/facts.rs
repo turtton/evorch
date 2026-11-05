@@ -7,7 +7,8 @@
 //!
 //! The item is absent, not null, when the thread has no active link or the feature is off. It
 //! never changes [`EvidenceStamp`](super::EvidenceStamp): that stamp names the user's evidence
-//! only. A change of the link itself is detected by the link's own revision ([`LinkAnchor`]).
+//! only. A change of the link itself is detected by the thread's lifecycle revision
+//! ([`LinkAnchor`]), which also moves when a link comes and goes during one review.
 
 use serde::Serialize;
 use storage::pull_requests::{CheckConclusion, CheckStatus, PullRequestCheck};
@@ -149,23 +150,14 @@ impl HarnessFacts {
     }
 }
 
-/// Which link a review used: its row and the lifecycle revision that created it. `None` when
-/// the review saw no active link (never linked, unlinked, or the feature off).
+/// Which state of the thread's pull request lifecycle a review used: the thread's persistent
+/// lifecycle revision, which moves on every Link and Unlink. It is held whether or not the
+/// thread had an active link, so a link that came and went during the review is noticed. `None`
+/// when the review saw no pull request item at all (feature off, or the run is in no thread).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LinkAnchor(Option<(u64, u64)>);
+pub(crate) struct LinkAnchor(Option<u64>);
 
-impl LinkAnchor {
-    fn of(lookup: &ReviewLookup) -> Self {
-        match lookup {
-            ReviewLookup::Linked(review) => {
-                Self(Some((review.link.link_id, review.link.link_revision)))
-            }
-            _ => Self(None),
-        }
-    }
-}
-
-/// What a review took from pull request tracking: the item and the link it belongs to.
+/// What a review took from pull request tracking: the item and the lifecycle it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PullRequestInput {
     pub(crate) facts: Option<HarnessFacts>,
@@ -181,24 +173,27 @@ impl PullRequestInput {
         }
     }
 
-    fn of(lookup: &ReviewLookup) -> Self {
+    fn of(revision: Option<u64>, lookup: &ReviewLookup) -> Self {
         Self {
             facts: match lookup {
                 ReviewLookup::Linked(review) => Some(HarnessFacts::of(review)),
                 _ => None,
             },
-            anchor: LinkAnchor::of(lookup),
+            anchor: LinkAnchor(revision),
         }
     }
 
     /// The stored facts as they are, marked stale when they are: no process, no network. For
     /// the reviews that never wait (web and upload).
+    ///
+    /// The revision is read before the facts: if the lifecycle moves in between, the anchor is
+    /// the older one and the final check fails.
     pub(crate) async fn snapshot(service: Option<&PullRequestService>, run_id: &str) -> Self {
         let Some(service) = service else {
             return Self::none();
         };
-        match service.snapshot_for_review(run_id).await {
-            Ok(lookup) => Self::of(&lookup),
+        match Self::read(service, run_id).await {
+            Ok(input) => input,
             Err(error) => {
                 tracing::warn!(%error, run_id, "pull request facts were not read for a review");
                 Self::none()
@@ -206,34 +201,53 @@ impl PullRequestInput {
         }
     }
 
+    async fn read(
+        service: &PullRequestService,
+        run_id: &str,
+    ) -> Result<Self, crate::pull_requests::PullRequestError> {
+        let revision = service.review_lifecycle_revision(run_id).await?;
+        let lookup = service.snapshot_for_review(run_id).await?;
+        Ok(Self::of(revision, &lookup))
+    }
+
     /// The facts after a bounded refresh. The caller holds no lock: the refresh may wait for a
     /// `gh` fetch up to the configured deadline. A fetch that failed, timed out or found
     /// nothing is not an error of the review: it goes on with the stored facts, marked stale,
     /// or with none.
     ///
-    /// If the link changed while the refresh waited, the facts that came back belong to a link
-    /// the review did not start with. They are dropped, and the anchor stays on the link the
-    /// review started with, so the final check treats the review as outdated.
+    /// If the lifecycle moved while the refresh waited, the facts that came back belong to a
+    /// link the review did not start with. They are dropped, and the anchor stays on the
+    /// revision the review started with, so the final check treats the review as outdated.
     pub(crate) async fn refreshed(service: Option<&PullRequestService>, run_id: &str) -> Self {
         let Some(service) = service else {
             return Self::none();
         };
-        let started = match service.snapshot_for_review(run_id).await {
-            Ok(lookup) => LinkAnchor::of(&lookup),
+        let started = match service.review_lifecycle_revision(run_id).await {
+            Ok(revision) => LinkAnchor(revision),
             Err(error) => {
                 tracing::warn!(%error, run_id, "pull request facts were not read for a review");
                 return Self::none();
             }
         };
-        let input = match service.refresh_for_review(run_id).await {
-            Ok(supply) => Self::of(&supply.lookup),
+        let supply = match service.refresh_for_review(run_id).await {
+            Ok(supply) => supply,
             Err(error) => {
                 tracing::warn!(%error, run_id, "pull request facts were not refreshed for a review");
                 return Self::snapshot(Some(service), run_id).await;
             }
         };
-        if input.anchor == started {
-            input
+        let after = match service.review_lifecycle_revision(run_id).await {
+            Ok(revision) => LinkAnchor(revision),
+            Err(error) => {
+                tracing::warn!(%error, run_id, "the pull request link could not be checked");
+                return Self {
+                    facts: None,
+                    anchor: started,
+                };
+            }
+        };
+        if after == started {
+            Self::of(started.0, &supply.lookup)
         } else {
             Self {
                 facts: None,
@@ -244,8 +258,8 @@ impl PullRequestInput {
 }
 
 impl LinkAnchor {
-    /// Whether the run's thread still has the link `self` names. A failed read counts as
-    /// changed: an approval that cannot be checked is not kept.
+    /// Whether the run's thread is still at the lifecycle revision `self` names. A failed read
+    /// counts as changed: an approval that cannot be checked is not kept.
     pub(crate) async fn still_holds(
         self,
         service: Option<&PullRequestService>,
@@ -254,8 +268,8 @@ impl LinkAnchor {
         let Some(service) = service else {
             return true;
         };
-        match service.snapshot_for_review(run_id).await {
-            Ok(lookup) => Self::of(&lookup) == self,
+        match service.review_lifecycle_revision(run_id).await {
+            Ok(revision) => LinkAnchor(revision) == self,
             Err(error) => {
                 tracing::warn!(%error, run_id, "the pull request link could not be checked after a review");
                 false

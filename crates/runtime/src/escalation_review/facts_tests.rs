@@ -60,12 +60,26 @@ impl WallClock for ManualClock {
     }
 }
 
+type LookupHook = Box<dyn FnMut(&str) + Send>;
+
+/// Which thread a run is in. A test may run something at each lookup, as if the world changed
+/// while the service was reading the database.
 #[derive(Default)]
-struct Threads(Mutex<HashMap<String, String>>);
+struct Threads {
+    runs: Mutex<HashMap<String, String>>,
+    every_run: Mutex<bool>,
+    on_lookup: Mutex<Option<LookupHook>>,
+}
 
 impl ThreadEnvironment for Threads {
     fn thread_of_run(&self, run_id: &str) -> Option<String> {
-        self.0.lock().unwrap().get(run_id).cloned()
+        if let Some(hook) = self.on_lookup.lock().unwrap().as_mut() {
+            hook(run_id);
+        }
+        if *self.every_run.lock().unwrap() {
+            return Some(THREAD.into());
+        }
+        self.runs.lock().unwrap().get(run_id).cloned()
     }
 
     fn checkout_directories(&self, _thread_id: &str) -> Vec<std::path::PathBuf> {
@@ -108,6 +122,7 @@ struct Harness {
     storage: storage::StorageHandle,
     clock: Arc<ManualClock>,
     bus: Arc<EventBus>,
+    threads: Arc<Threads>,
     events: EventReceiver,
     _storage: storage::Storage,
     _directory: tempfile::TempDir,
@@ -125,6 +140,15 @@ impl Harness {
         settings: PullRequestsConfig,
         approval: EscalationApproval,
         model: Arc<ScriptedModel>,
+    ) -> Self {
+        Self::with_executor(settings, approval, model, tools::ToolExecutor::new)
+    }
+
+    fn with_executor(
+        settings: PullRequestsConfig,
+        approval: EscalationApproval,
+        model: Arc<ScriptedModel>,
+        executor: impl FnOnce(Arc<EventBus>) -> tools::ToolExecutor,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let storage = storage::Storage::open(storage::StorageConfig {
@@ -157,13 +181,13 @@ impl Harness {
         .unwrap();
         let runtime = crate::AgentRuntime::new(
             Arc::clone(&bus),
-            Arc::new(tools::ToolExecutor::new(Arc::clone(&bus))),
+            Arc::new(executor(Arc::clone(&bus))),
             model.clone(),
         );
         assert!(runtime.shared.pull_requests.set(service.clone()).is_ok());
         let id = runtime.reserve_run_id();
         threads
-            .0
+            .runs
             .lock()
             .unwrap()
             .insert(id.to_string(), THREAD.into());
@@ -198,6 +222,7 @@ impl Harness {
             storage: storage.handle(),
             clock,
             bus,
+            threads,
             events,
             _storage: storage,
             _directory: directory,
@@ -987,4 +1012,156 @@ async fn a_fallback_attempt_uses_the_snapshot_the_review_was_built_with() {
         fetches + 1,
         "only the tracker's own fetch"
     );
+}
+
+// Given: a thread with no link when the review starts / When: a pull request is linked and
+// unlinked while the model is answering / Then: the approval is not kept (the lifecycle moved,
+// though the thread ends up unlinked as it began) and the denial breaker does not move
+#[tokio::test(start_paused = true)]
+async fn a_link_that_comes_and_goes_during_the_review_voids_it_even_from_unlinked() {
+    for file_access in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let model = Arc::new(ScriptedModel::gated(
+            (0..4).map(|_| Ok(text_response(APPROVE, FinishReason::Stop))),
+            Arc::clone(&release),
+        ));
+        let harness = Harness::with_model(enabled(), EscalationApproval::Auto, model);
+        harness.source.push_ok(&key(1), harness.passing(1, 'a'));
+
+        let decision = async {
+            if file_access {
+                harness.decide_file().await
+            } else {
+                harness.decide().await
+            }
+        };
+        let (decision, ()) = tokio::join!(decision, async {
+            harness.model.wait_for_request(0).await;
+            harness.link(1).await;
+            harness.unlink().await;
+            release.notify_one();
+        });
+
+        assert!(
+            matches!(&decision, EscalationDecision::Deny { reason }
+                if reason == "review context changed during review"),
+            "file_access={file_access}: the approval was not voided"
+        );
+        let payload = harness.payload(0).await;
+        assert!(payload["context"].get("harness_facts").is_none());
+        assert_eq!(harness.denials(), 0, "file_access={file_access}");
+    }
+}
+
+/// A `web_fetch` that records whether it ran.
+struct RecordingWebFetch(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl tools::Tool for RecordingWebFetch {
+    fn name(&self) -> &'static str {
+        "web_fetch"
+    }
+
+    fn schema(&self) -> Value {
+        json!({"type": "object", "required": ["url"], "properties": {"url": {"type": "string"}}})
+    }
+
+    fn permissions(&self) -> tools::Permissions {
+        tools::Permissions {
+            fs_read: false,
+            fs_write: false,
+            process_spawn: false,
+            network: true,
+        }
+    }
+
+    async fn execute(&self, _input: Value) -> Result<tools::ToolResult, tools::ToolError> {
+        self.0.store(true, Ordering::SeqCst);
+        Ok(tools::ToolResult::success("page"))
+    }
+}
+
+// Given: an approved web_fetch whose last link check is reading the database / When: user
+// evidence arrives during that read / Then: the call is rejected and does not run, because the
+// evidence stamp is read after the link check; with no such evidence it runs
+#[tokio::test(start_paused = true)]
+async fn evidence_that_arrives_while_a_web_approval_is_rechecked_voids_it() {
+    const REQUEST: &str = "Read the release notes page and summarize it.";
+    for interrupted in [false, true] {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let model = Arc::new(ScriptedModel::gated(
+            [Ok(text_response(APPROVE, FinishReason::Stop))],
+            Arc::clone(&release),
+        ));
+        model
+            .add_keyed(
+                REQUEST,
+                [
+                    Ok(crate::escalation_review::support::tool_response(
+                        "fetch-1",
+                        "web_fetch",
+                        json!({"url": "https://example.invalid/release-notes"}),
+                    )),
+                    Ok(text_response("done", FinishReason::Stop)),
+                ],
+            )
+            .await;
+        let flag = Arc::clone(&ran);
+        let harness =
+            Harness::with_executor(enabled(), EscalationApproval::Auto, model, move |bus| {
+                let mut executor = tools::ToolExecutor::new(bus);
+                executor
+                    .register(Arc::new(RecordingWebFetch(flag)))
+                    .unwrap();
+                executor
+            });
+        harness.source.push_ok(&key(1), harness.passing(1, 'a'));
+        harness.link(1).await;
+        *harness.threads.every_run.lock().unwrap() = true;
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shared = Arc::downgrade(&harness.runtime.shared);
+        let fire = Arc::clone(&armed);
+        *harness.threads.on_lookup.lock().unwrap() = Some(Box::new(move |run_id| {
+            if fire.swap(false, Ordering::SeqCst)
+                && let (Some(shared), Ok(id)) = (shared.upgrade(), run_id.parse::<crate::RunId>())
+                && let Some(run) = shared.review_runs.lock().unwrap().get(&id)
+            {
+                run.add_user_request(run_id, "new constraints");
+            }
+        }));
+
+        let chat = harness
+            .runtime
+            .delegate_chat(
+                THREAD,
+                Role::Orchestrator,
+                REQUEST.into(),
+                crate::RunConfig::default(),
+            )
+            .unwrap();
+        let (phase, ()) = tokio::join!(harness.runtime.wait(chat), async {
+            harness.model.wait_for_request(0).await;
+            release.notify_one();
+            harness.model.wait_for_request(1).await;
+            armed.store(interrupted, Ordering::SeqCst);
+            release.notify_one();
+            harness.model.wait_for_request(2).await;
+            release.notify_one();
+        });
+
+        assert_eq!(phase, Ok(event_bus::AgentRunPhase::Done));
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            !interrupted,
+            "interrupted={interrupted}"
+        );
+        if interrupted {
+            let followup = format!("{:?}", harness.model.observed().await[2]);
+            assert!(
+                followup.contains("review context changed during review"),
+                "{followup}"
+            );
+        }
+    }
 }

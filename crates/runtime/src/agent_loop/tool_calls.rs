@@ -1533,11 +1533,6 @@ impl LoopState {
                     };
                     match verdict {
                         Ok(crate::escalation_review::ReviewVerdict::Approve) => {
-                            let current = self.runtime().and_then(|runtime| {
-                                runtime.shared.review_runs.lock().ok().and_then(|runs| {
-                                    runs.get(&self.task.run_id).map(|run| run.stamp())
-                                })
-                            });
                             let link_holds = pull_requests
                                 .anchor
                                 .still_holds(
@@ -1545,6 +1540,13 @@ impl LoopState {
                                     &self.task.run_id.to_string(),
                                 )
                                 .await;
+                            // Read last: evidence that arrived while the link was checked
+                            // must still void this approval.
+                            let current = self.runtime().and_then(|runtime| {
+                                runtime.shared.review_runs.lock().ok().and_then(|runs| {
+                                    runs.get(&self.task.run_id).map(|run| run.stamp())
+                                })
+                            });
                             if !link_holds
                                 || !matches!((stamp, current), (Some(expected), Some(current))
                                     if current.synced && current == expected)
