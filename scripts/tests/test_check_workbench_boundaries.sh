@@ -61,11 +61,12 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","runtime","storage","config","gui","test-support"]'
-EXT='"external": ["serde","serde_json","thiserror","tokio","regex"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","runtime","storage","config","gui","test-support"]'
+EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
-      {"from":"gui","to":"workbench-client"},{"from":"runtime","to":"storage"},{"from":"runtime","to":"serde"}'
+      {"from":"gui","to":"workbench-client"},
+      {"from":"workbench-host","to":"workbench-protocol"},{"from":"workbench-host","to":"runtime"},{"from":"workbench-host","to":"tokio"},{"from":"gui","to":"workbench-host"},{"from":"runtime","to":"storage"},{"from":"runtime","to":"serde"}'
 
 run_case clean_graph ok "boundary check passed" <<SPEC
 {$WS, $EXT, "deps": [$GOOD]}
@@ -165,6 +166,51 @@ SPEC
 CASE_CORE_CRATES="agents apply-patch browser browser-cef catalog config event-bus js-engine model providers recorder routing runtime sandbox secret-guard storage tools"
 run_case built_in_core_list_requires_every_listed_crate fail "core crate 'agents' is not a workspace member" <<SPEC
 {$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+CASE_CORE_CRATES=""
+run_case host_depends_on_gui fail "workbench-host must not depend on GUI or client crate gui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"gui"}]}
+SPEC
+
+run_case host_reaches_client_through_a_workspace_crate fail "workbench-host -> test-support [normal; resolved] -> workbench-client" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"test-support"},{"from":"test-support","to":"workbench-client"}]}
+SPEC
+
+run_case host_reaches_egui_through_a_core_crate fail "GUI or client crate egui@1.0.0" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"egui"}]}
+SPEC
+
+run_case host_declares_a_rendering_crate_only_for_another_target fail "workbench-host declares GUI or client dependency wgpu [normal; declared, optional" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"wgpu","optional":true,"resolved":false}]}
+SPEC
+
+run_case host_reaches_an_optional_rendering_crate_declared_by_a_core_crate fail "workbench-host must not reach GUI or client dependency egui declared by runtime [normal; declared, optional]: workbench-host -> runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"egui","optional":true,"resolved":false}]}
+SPEC
+
+run_case host_reaches_a_target_specific_rendering_crate_two_hops_away fail "declared by test-support [normal; declared, target cfg(unix)]: workbench-host -> test-support" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"test-support"},{"from":"test-support","to":"wgpu","target":"cfg(unix)","resolved":false}]}
+SPEC
+
+run_case a_dev_only_rendering_crate_of_a_host_dependency_is_not_followed ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"egui","kind":"dev","resolved":false}]}
+SPEC
+
+run_case a_rendering_crate_outside_the_host_graph_is_not_a_violation ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"gui","to":"egui"},{"from":"gui","to":"wgpu","optional":true,"resolved":false}]}
+SPEC
+
+run_case host_dev_dependency_on_gui fail "workbench-host -> gui [dev;" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"gui","kind":"dev"}]}
+SPEC
+
+run_case dev_dependencies_of_a_host_dependency_are_not_followed ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-host","to":"test-support"},{"from":"test-support","to":"gui","kind":"dev"}]}
+SPEC
+
+run_case host_package_missing fail "workspace member 'workbench-host' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","runtime"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
 SPEC
 
 echo "$pass passed, $fail failed"

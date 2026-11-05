@@ -1686,3 +1686,55 @@ fn nothing_is_stored_about_a_pull_request_but_structured_fields() {
         }
     }
 }
+
+// Given: links, a candidate and a snapshot written through the single writer / When: a display
+// opens the database read-only / Then: it reads the same lifecycle, snapshot and candidates
+#[test]
+fn a_read_only_display_reads_what_the_writer_committed() {
+    let fixture = Fixture::new();
+    let key = PullRequestKey::github("turtton/evorch", 12).unwrap();
+    let receipt = fixture
+        .handle()
+        .link_pull_request(LinkPullRequest {
+            thread_id: "thread".into(),
+            key: key.clone(),
+            expected_revision: 0,
+            at_ns: 1,
+        })
+        .unwrap();
+    fixture
+        .handle()
+        .present_pull_request_candidate(NewPullRequestCandidate {
+            thread_id: "thread".into(),
+            key: PullRequestKey::github("turtton/evorch", 13).unwrap(),
+            source_run_id: "run".into(),
+            source_call_id: "call".into(),
+            at_ns: 2,
+        })
+        .unwrap();
+
+    let reader = storage::Database::open_read_only(&fixture.config.db_path).unwrap();
+    let state = reader.pull_request_thread_state("thread").unwrap();
+    assert_eq!(state.lifecycle_revision, receipt.lifecycle_revision);
+    assert_eq!(state.active_link.unwrap().key, key);
+    assert_eq!(
+        reader
+            .pull_request_candidates("thread", Some(CandidateState::Presented))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(reader.pull_request_snapshot(&key).unwrap().is_none());
+    let seq = fixture.handle().begin_pull_request_fetch(&key).unwrap();
+    fixture
+        .handle()
+        .commit_pull_request_fetch(&key, seq, facts(PullRequestState::Open), 3)
+        .unwrap();
+    let snapshot = reader.pull_request_snapshot(&key).unwrap().unwrap();
+    let stored = snapshot.facts.unwrap();
+    assert_eq!(stored.state, PullRequestState::Open);
+    assert_eq!(stored.head_sha, facts(PullRequestState::Open).head_sha);
+    let links = reader.active_pull_request_links(0, 10).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].thread_id, "thread");
+}

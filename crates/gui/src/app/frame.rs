@@ -19,6 +19,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if self.poll_lanes(ctx) {
             self.save_sidebar();
         }
+        self.poll_pull_requests(ctx);
         self.sync_thread_mirror(Instant::now());
         self.poll_retention(Instant::now());
         ctx.request_repaint_after(self.logic_repaint_delay());
@@ -30,6 +31,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     ) -> Self {
         self.telemetry.quota = crate::model::telemetry::quota::QuotaState::with_backend(backend);
         self
+    }
+
+    /// Takes what the command sink finished in the background (a refused pull request
+    /// operation, a compaction) and shows it. Called every frame.
+    pub fn poll_command_sink(&mut self) {
+        for event in self.sink.poll() {
+            self.apply_loop_event(event);
+        }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -51,15 +60,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.diff.set_repo_root(self.active_repo_root());
         let sink_started = Instant::now();
-        for event in self.sink.poll() {
-            self.apply_loop_event(event);
-        }
+        self.poll_command_sink();
         let sink_time = sink_started.elapsed();
         self.diff.poll();
         self.poll_evaluations(&ctx);
         if self.poll_lanes(&ctx) {
             self.save_sidebar();
         }
+        self.poll_pull_requests(&ctx);
         self.drain_pty(&ctx);
         self.poll_provider_save();
         self.poll_routing_save();
@@ -343,11 +351,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .is_some_and(|host| host.owner_id() == owner_id) =>
             {
                 self.external_work.invalidate();
+                self.invalidate_pull_request_tracking(thread_id);
                 self.settle_claimed_receipts(thread_id, receipts);
                 // A newly owned thread may hold notices an earlier NACK left pending.
                 self.sink.schedule_lane_deliveries(thread_id);
             }
-            EventKind::Ownership(_) => self.external_work.invalidate(),
+            EventKind::Ownership(ownership) => {
+                self.external_work.invalidate();
+                self.invalidate_pull_request_tracking(&ownership.thread_id);
+            }
+            // A change this process's own runtime published: read it again and raise the
+            // notifications it claimed (a window of another process never does).
+            EventKind::PullRequest(_) => self.apply_local_pull_request_event(event),
             EventKind::Lifecycle(LifecycleEvent::RootWakeRequested { run_id }) => {
                 self.wake_conversation_root(run_id);
             }
@@ -364,9 +379,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Orchestrator(_)
-            // Shown by the pull request surfaces (ADR 0043 PR5), which read the database again.
-            | EventKind::PullRequest(_) => {}
+            | EventKind::Orchestrator(_) => {}
         }
     }
 

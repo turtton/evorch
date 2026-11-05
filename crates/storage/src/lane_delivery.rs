@@ -31,6 +31,8 @@ impl QuestionCapacity {
 /// One diagnostic slot per lane, overwritten/aggregated, never an append-only log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionCapacityBlocked {
+    /// Exact recipient whose owned + inherited quota rejected creation.
+    pub requester_run_id: String,
     pub capacity: QuestionCapacity,
     pub attempts: u64,
     pub first_at_ns: i64,

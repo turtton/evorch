@@ -121,6 +121,7 @@ struct Work {
 const RUN_TABLES: &[(&str, &str)] = &[
     ("run_ledger", "run_id = ?1"),
     ("host_input_receipts", "run_id = ?1"),
+    ("host_chat_submissions", "run_id = ?1"),
     ("review_evidence", "root_run_id = ?1 OR target_run_id = ?1"),
     (
         "review_lineage_edges",
@@ -442,6 +443,19 @@ fn run_tables(
     };
     if table == "run_message_provenance" {
         return provenance_entries(tx, family, cursor, &run);
+    }
+    if table == "host_chat_submissions" {
+        // A database converted from an older layout reaches this before it has the table.
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+             AND name = 'host_chat_submissions')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !present {
+            cursor.table_idx += 1;
+            return Ok(Work::default());
+        }
     }
     if table == "run_context_provenance" {
         // The header goes after its entries (RESTRICT): an entry left for the exclusive
@@ -1056,6 +1070,36 @@ fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, St
 fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
     // New Phase 1c tables do not exist during older-format offline conversion.
+    let phase2_tables: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_stall_episodes')",
+        [],
+        |r| r.get(0),
+    )?;
+    if phase2_tables {
+        for table in [
+            "lane_forward_receipts",
+            "lane_closes",
+            "lane_verifications",
+            "lane_stall_episodes",
+        ] {
+            let bytes_expr = if table == "lane_forward_receipts" {
+                "OCTET_LENGTH(request_json)+OCTET_LENGTH(result_json)"
+            } else if table == "lane_closes" {
+                "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(pr_evidence_json),0)"
+            } else {
+                "OCTET_LENGTH(payload)"
+            };
+            let bytes:u64=tx.query_row(&format!("SELECT COALESCE(SUM(bytes),0) FROM (SELECT {bytes_expr} AS bytes FROM {table} WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)"),params![thread,limit],|r|r.get(0))?;
+            let deleted=tx.execute(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)"),params![thread,limit])?;
+            if deleted > 0 {
+                return Ok(Work {
+                    rows: deleted as u64,
+                    bytes,
+                    ..Work::default()
+                });
+            }
+        }
+    }
     let delivery_tables: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_notifications')",
         [],
@@ -1816,5 +1860,49 @@ mod lane_delivery_tests {
             assert_eq!(count, 0);
         }
         assert!(crate::repo::lanes::get(&conn, "lane").unwrap().is_some());
+        conn.execute_batch(
+            "INSERT INTO lane_stall_episodes(episode_id,lane_id,management_revision,progress_epoch,payload)
+             VALUES ('episode','lane',1,0,'{}');
+             INSERT INTO lane_verifications(verification_id,lane_id,reviewer_run_id,payload)
+             VALUES ('verification','lane','reviewer','{}');
+             INSERT INTO lane_closes(close_id,lane_id,verification_id,payload)
+             VALUES ('close','lane','verification','{}');
+             INSERT INTO lane_forward_receipts(caller_root,operation_id,lane_id,question_id,request_json,result_json)
+             VALUES ('root','op','lane','q','{}','{}');
+             INSERT INTO thread_tombstones(thread_id,family_key,deleted_at_ns)
+             VALUES ('source','family',10);",
+        ).unwrap();
+        for table in ["lane_stall_episodes", "lane_verifications", "lane_closes"] {
+            assert!(
+                conn.execute(&format!("UPDATE {table} SET payload=payload"), [])
+                    .is_err()
+            );
+        }
+        let mut reclaimed_bytes = 0;
+        loop {
+            let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate).unwrap();
+            let work = take_lane_rows(&tx, "source").unwrap();
+            assert!(work.rows <= RECLAIM_ROWS as u64);
+            reclaimed_bytes += work.bytes;
+            tx.commit().unwrap();
+            if work.rows == 0 {
+                break;
+            }
+        }
+        assert!(reclaimed_bytes >= 10);
+        for table in [
+            "lane_stall_episodes",
+            "lane_verifications",
+            "lane_closes",
+            "lane_forward_receipts",
+            "lanes",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
     }
 }

@@ -112,6 +112,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut notifications_action = None;
         let mut request_action = None;
         let mut lane_action = None;
+        let mut pull_request_action = None;
+        let pull_request_badges = self.pull_request_badges();
         let lane_delivery_bound = self.sink.lane_delivery_bound();
         let mut self_improvement_action = None;
         let mut diagnostics_request = false;
@@ -148,6 +150,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 pending_approvals: &self.pending_approvals,
                 request_action: &mut request_action,
                 lane_action: &mut lane_action,
+                pull_requests: &self.pull_requests.model,
+                pull_request_badges: &pull_request_badges,
+                pull_request_action: &mut pull_request_action,
                 lane_delivery_bound,
                 diagnostics_request: &mut diagnostics_request,
                 context_request: &mut context_request,
@@ -291,6 +296,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         if let Some(action) = lane_action {
             self.apply_lane_action(action);
         }
+        if let Some(action) = pull_request_action {
+            self.apply_pull_request_action(action);
+        }
         if let Some(action) = request_action {
             match action {
                 RequestAction::Decide { call_id, approved } => {
@@ -362,6 +370,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 SidebarAction::SwitchThread(thread_id) => self.switch_thread(thread_id),
                 SidebarAction::TogglePin(thread_id) => self.toggle_pin(thread_id),
                 SidebarAction::ToggleArchive(thread_id) => self.toggle_archive(thread_id),
+                SidebarAction::LinkPullRequest(thread_id) => {
+                    self.open_link_dialog(thread_id.to_string());
+                    Ok(())
+                }
             };
             set_sidebar_error(&ctx, result.err().map(|error| error.to_string()));
         }
@@ -383,6 +395,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             }
         }
         self.render_project_dialog(ui.ctx());
+        self.render_link_dialog(ui.ctx());
         self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());

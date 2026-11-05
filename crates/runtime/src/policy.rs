@@ -56,6 +56,10 @@ impl ExecutionPolicy {
             RunPurpose::General => {
                 if is_root && self.role_name == Role::Orchestrator.name() {
                     let lane_tools: &[&str] = if config.lane_scope.is_some() {
+                        // Run-local tool schemas are built once, never hot-swapped.
+                        self.capabilities
+                            .allowed_tools
+                            .insert("lane_forward_question".into());
                         &["lane_report"]
                     } else {
                         &["lane_open", "lane_list", "lane_questions", "lane_answer"]

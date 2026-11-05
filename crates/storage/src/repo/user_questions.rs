@@ -24,11 +24,7 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
             "invalid question: title 1..2048 bytes, at most 3 options of 1..256 bytes",
         ));
     }
-    let count: i64 = conn.query_row(
-        "SELECT count(*) FROM user_questions q WHERE run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)",
-        [&question.run_id],
-        |row| row.get(0),
-    )?;
+    let count = requester_question_count(conn, &question.run_id)?;
     if count >= 32 {
         return Err(StorageError::QuestionCapacity(
             crate::lane_delivery::QuestionCapacity::Requester,
@@ -50,6 +46,18 @@ pub fn create(conn: &Connection, question: &UserQuestion) -> Result<(), StorageE
     conn.execute("INSERT INTO user_questions(id,run_id,root_run_id,root_name,payload) VALUES (?1,?2,?3,?4,?5)",
         params![question.id, question.run_id, question.root_run_id, question.root_name, payload])?;
     Ok(())
+}
+
+/// Creation and attention must use the same recipient set, including answered
+/// questions: answering does not free a per-recipient historical quota slot.
+pub(super) fn requester_question_count(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<u64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM user_questions q WHERE run_id=?1 OR EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=q.id AND l.run_id=?1)",
+        [run_id], |row| row.get(0),
+    )?)
 }
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<UserQuestion>, StorageError> {
@@ -81,6 +89,54 @@ pub fn answer(
     origin: &AnswerOrigin,
     mode: AnswerMode,
 ) -> Result<(), StorageError> {
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        answer_checked(&tx, id, answer, origin, mode)?;
+        tx.commit()?;
+        return Ok(());
+    }
+    answer_checked(conn, id, answer, origin, mode)
+}
+fn answer_checked(
+    conn: &Connection,
+    id: &str,
+    answer: &str,
+    origin: &AnswerOrigin,
+    mode: AnswerMode,
+) -> Result<(), StorageError> {
+    // Canonical routing, not a cached projection or inherited recipient link.
+    let canonical: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM lane_question_routes WHERE question_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(canonical) = &canonical {
+        let route: event_bus::lane::QuestionRouting =
+            serde_json::from_str(canonical).map_err(|e| invalid(&e.to_string()))?;
+        use event_bus::lane::{LaneOperationError, QuestionResponder};
+        let permitted = match (&route.responder, origin) {
+            (QuestionResponder::User, AnswerOrigin::Host { .. }) => true,
+            (
+                QuestionResponder::Lead { thread_id },
+                AnswerOrigin::LaneLead { thread_id: by, .. },
+            ) if thread_id == by => {
+                crate::repo::lanes::get(conn, &route.lane_id)?.is_some_and(|l| {
+                    l.policy == event_bus::LanePolicy::Attached
+                        && l.lead_thread_id.as_deref() == Some(by)
+                        && l.management_revision == route.management_revision
+                })
+            }
+            _ => false,
+        };
+        if !permitted {
+            return Err(StorageError::LaneOperation(
+                LaneOperationError::NotResponder,
+            ));
+        }
+    }
     if answer.trim().is_empty() || answer.len() > 4096 {
         return Err(invalid("answer must be 1..4096 bytes"));
     }
@@ -100,6 +156,41 @@ pub fn answer(
         } else {
             Err(invalid("question already answered"))
         };
+    }
+    // User-rerouted lane questions retain the same return path. This shares the
+    // answer/evidence transaction, so neither a rejected answer nor a crash can
+    // leave a committed answer without its durable lane notification.
+    if matches!(origin, AnswerOrigin::Host { .. })
+        && let Some(canonical) = canonical
+    {
+        let mut route: event_bus::lane::QuestionRouting =
+            serde_json::from_str(&canonical).map_err(|e| invalid(&e.to_string()))?;
+        route.routing_revision = route
+            .routing_revision
+            .checked_add(1)
+            .ok_or(StorageError::OutOfRange("routing revision"))?;
+        let payload = serde_json::to_string(&route).map_err(|e| invalid(&e.to_string()))?;
+        conn.execute(
+            "UPDATE lane_question_routes SET routing_revision=?2,payload=?3 WHERE question_id=?1",
+            params![id, route.routing_revision, payload],
+        )?;
+        question.routing_revision = route.routing_revision;
+        crate::repo::lane_delivery::enqueue(
+            conn,
+            event_bus::lane::LaneNotification {
+                notification_id: String::new(),
+                lane_id: route.lane_id,
+                management_revision: route.management_revision,
+                source_thread_id: route.requester.thread_id.clone(),
+                destination_thread_id: route.requester.thread_id,
+                kind: event_bus::lane::LaneNotificationKind::Answer {
+                    question_id: id.into(),
+                    routing_revision: route.routing_revision,
+                },
+                report_seq: None,
+                created_at_ns: crate::system_time_to_ns(std::time::SystemTime::now())?,
+            },
+        )?;
     }
     question.answer = Some(answer.into());
     question.answer_origin = Some(origin.clone());

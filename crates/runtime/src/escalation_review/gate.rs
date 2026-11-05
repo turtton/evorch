@@ -17,10 +17,10 @@ use tools::{
 };
 
 use super::{
-    CONSECUTIVE_DENIAL_LIMIT, QuickModelReviewer, ReviewContext, ReviewError, ReviewVerdict,
-    review_context,
+    CONSECUTIVE_DENIAL_LIMIT, HarnessFacts, LinkAnchor, PullRequestInput, QuickModelReviewer,
+    ReviewContext, ReviewError, ReviewVerdict, review_context_with_facts,
 };
-use crate::{RunId, runtime::Shared};
+use crate::{RunId, pull_requests::PullRequestService, runtime::Shared};
 
 const HUMAN_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -29,6 +29,28 @@ const HUMAN_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct EvidenceStamp {
     pub revision: u64,
     pub synced: bool,
+}
+
+/// The pull request link an automatic review used, noted once the review has a verdict so the
+/// final check can tell that the link changed while the review ran. Facts that are merely newer
+/// do not change it: only the link's own lifecycle does.
+#[derive(Default)]
+struct LinkWatch(Mutex<Option<LinkAnchor>>);
+
+impl LinkWatch {
+    fn note(&self, anchor: LinkAnchor) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(anchor);
+    }
+
+    fn noted(&self) -> Option<LinkAnchor> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 pub struct SandboxEscalationGate {
@@ -135,10 +157,21 @@ impl SandboxEscalationGate {
         }
     }
 
-    /// The approver's view of this run: real user requests and approved rules.
+    fn pull_request_service(&self) -> Option<PullRequestService> {
+        self.runtime
+            .as_ref()?
+            .upgrade()?
+            .pull_requests
+            .get()
+            .cloned()
+    }
+
+    /// The approver's view of this run: real user requests, approved rules and, when the thread
+    /// tracks a pull request, the facts read just before. Synchronous: nothing is fetched here.
     fn review_context_for(
         &self,
         ctx: &ToolExecutionContext,
+        harness_facts: Option<HarnessFacts>,
     ) -> Option<(ReviewContext, EvidenceStamp)> {
         let shared = self.runtime.as_ref().and_then(Weak::upgrade)?;
         let run_id = ctx.run_id.parse::<crate::RunId>().ok()?;
@@ -152,7 +185,8 @@ impl SandboxEscalationGate {
             Some(project) => project.rules.clone(),
             None => shared.rules(),
         };
-        let (context, stamp) = review_context(run, rules.as_deref()).ok()?;
+        let (context, stamp) =
+            review_context_with_facts(run, rules.as_deref(), harness_facts).ok()?;
         let sink = super::ManifestSink::new(
             self.bus.clone(),
             &ctx.run_id,
@@ -218,12 +252,34 @@ impl SandboxEscalationGate {
     /// Approval is void if the settings change while the decision is pending.
     /// After [`CONSECUTIVE_DENIAL_LIMIT`] consecutive reviewer denials, auto
     /// refuses without review until the user sends new input.
+    #[cfg(test)]
     async fn arbitrate<R, RF, H, HF>(
         &self,
         ctx: &ToolExecutionContext,
         label: &str,
         review: R,
         human: H,
+    ) -> EscalationDecision
+    where
+        R: FnOnce(Arc<QuickModelReviewer>) -> RF,
+        RF: Future<Output = Result<(ReviewVerdict, Option<EvidenceStamp>), ReviewError>>,
+        H: FnOnce() -> HF,
+        HF: Future<Output = EscalationDecision>,
+    {
+        self.arbitrate_watching(ctx, label, review, human, &LinkWatch::default())
+            .await
+    }
+
+    /// [`Self::arbitrate`], also voiding an approval whose review used a pull request link that
+    /// `watch` shows has since changed. Like a change of the user's evidence it neither counts a
+    /// denial nor resets the streak.
+    async fn arbitrate_watching<R, RF, H, HF>(
+        &self,
+        ctx: &ToolExecutionContext,
+        label: &str,
+        review: R,
+        human: H,
+        watch: &LinkWatch,
     ) -> EscalationDecision
     where
         R: FnOnce(Arc<QuickModelReviewer>) -> RF,
@@ -285,14 +341,23 @@ impl SandboxEscalationGate {
         };
         // Environmental invalidation neither counts a denial nor resets the
         // streak, regardless of the model's or human's final answer.
+        let link_changed = match watch.noted() {
+            Some(anchor) => {
+                !anchor
+                    .still_holds(self.pull_request_service().as_ref(), &ctx.run_id)
+                    .await
+            }
+            None => false,
+        };
         let current = self.settings.lock().ok().map(|settings| *settings);
         let current_stamp = self.current_stamp(ctx);
         // An initially unsynced snapshot still permits a human decision when
         // unchanged. Automatic review rejects unsynced evidence at its entry.
-        let context_changed = [starting_stamp, reviewed_stamp]
-            .into_iter()
-            .flatten()
-            .any(|stamp| current_stamp != Some(stamp));
+        let context_changed = link_changed
+            || [starting_stamp, reviewed_stamp]
+                .into_iter()
+                .flatten()
+                .any(|stamp| current_stamp != Some(stamp));
         let settings_changed = current.is_none() || current != settings;
         let decision = if context_changed || settings_changed {
             counted = None;
@@ -429,18 +494,23 @@ impl ShellEscalationGate for SandboxEscalationGate {
         _cwd: Option<&Path>,
         access: ShellAccess,
     ) -> EscalationDecision {
-        self.arbitrate(
+        let watch = &LinkWatch::default();
+        self.arbitrate_watching(
             ctx,
             "shell escalation",
             |reviewer| async move {
-                let snapshot = self.review_context_for(ctx);
+                // Before the context is built, and holding no lock: a fetch may be awaited.
+                let input =
+                    PullRequestInput::refreshed(self.pull_request_service().as_ref(), &ctx.run_id)
+                        .await;
+                let snapshot = self.review_context_for(ctx, input.facts);
                 if self.runtime.is_some() && snapshot.is_none() {
                     return Err(ReviewError::Unsynced);
                 }
                 let (context, stamp) = snapshot.map_or((None, None), |(context, stamp)| {
                     (Some(context), Some(stamp))
                 });
-                reviewer
+                let verdict = reviewer
                     .review_scoped_with_context(
                         &ctx.run_id,
                         command,
@@ -448,10 +518,14 @@ impl ShellEscalationGate for SandboxEscalationGate {
                         context,
                         access,
                     )
-                    .await
-                    .map(|verdict| (verdict, stamp))
+                    .await;
+                if verdict.is_ok() {
+                    watch.note(input.anchor);
+                }
+                verdict.map(|verdict| (verdict, stamp))
             },
             || self.human(ctx, command, justification, access),
+            watch,
         )
         .await
     }
@@ -461,23 +535,31 @@ impl ShellEscalationGate for SandboxEscalationGate {
         ctx: &ToolExecutionContext,
         request: &FileAccessRequest,
     ) -> EscalationDecision {
-        self.arbitrate(
+        let watch = &LinkWatch::default();
+        self.arbitrate_watching(
             ctx,
             "file access escalation",
             |reviewer| async move {
-                let snapshot = self.review_context_for(ctx);
+                let input =
+                    PullRequestInput::refreshed(self.pull_request_service().as_ref(), &ctx.run_id)
+                        .await;
+                let snapshot = self.review_context_for(ctx, input.facts);
                 if self.runtime.is_some() && snapshot.is_none() {
                     return Err(ReviewError::Unsynced);
                 }
                 let (context, stamp) = snapshot.map_or((None, None), |(context, stamp)| {
                     (Some(context), Some(stamp))
                 });
-                reviewer
+                let verdict = reviewer
                     .review_file_access(&ctx.run_id, request, context)
-                    .await
-                    .map(|verdict| (verdict, stamp))
+                    .await;
+                if verdict.is_ok() {
+                    watch.note(input.anchor);
+                }
+                verdict.map(|verdict| (verdict, stamp))
             },
             || self.human_file_access(ctx, request),
+            watch,
         )
         .await
     }
@@ -576,7 +658,7 @@ mod evidence_tests {
             &ctx,
             "test",
             |_| async {
-                let (_, stamp) = gate.review_context_for(&ctx).unwrap();
+                let (_, stamp) = gate.review_context_for(&ctx, None).unwrap();
                 entered.notify_one();
                 changed.notified().await;
                 Ok((ReviewVerdict::Approve, Some(stamp)))
@@ -617,7 +699,7 @@ mod evidence_tests {
                 gate.decide_file_access(&ctx, &request).await,
                 EscalationDecision::Deny { .. }
             ));
-            let snapshot = review_context(run, None);
+            let snapshot = crate::escalation_review::review_context(run, None);
             assert!(matches!(snapshot, Err(ReviewError::Unsynced)));
             let context = snapshot.ok().map(|(context, _)| context);
             let verdict = gate

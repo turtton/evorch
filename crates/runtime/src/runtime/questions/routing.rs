@@ -160,9 +160,10 @@ impl AgentRuntime {
     }
 }
 
-fn question_error(error: storage::StorageError) -> LaneError {
+pub(super) fn question_error(error: storage::StorageError) -> LaneError {
     use storage::StorageError;
     let code = match &error {
+        StorageError::LaneOperation(reason) => reason.as_str(),
         StorageError::QuestionAlreadyAnswered => "already_answered",
         StorageError::StaleRevision {
             kind: "routing", ..

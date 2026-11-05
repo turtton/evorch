@@ -1,5 +1,7 @@
 use super::routing::LaneAnswerRequest;
 use super::*;
+#[path = "forwarding_tests.rs"]
+mod forwarding_tests;
 use crate::{Role, RunConfig, RunStore};
 use event_bus::lane::{LaneDeliveryBinding, QuestionResponder};
 use event_bus::{EventBus, EventKind, LaneBrief, LanePolicy, LifecycleEvent};
@@ -9,6 +11,7 @@ use storage::lane_delivery::LaneQuestionCreated;
 #[derive(Default)]
 struct Idle {
     requests: std::sync::Mutex<Vec<Vec<providers::Message>>>,
+    toolsets: std::sync::Mutex<Vec<Vec<providers::ToolSpec>>>,
 }
 #[async_trait::async_trait]
 impl crate::AgentModel for Idle {
@@ -20,9 +23,10 @@ impl crate::AgentModel for Idle {
         _: &crate::AgentInvocationContext,
         _: Role,
         messages: &[providers::Message],
-        _: &[providers::ToolSpec],
+        tools: &[providers::ToolSpec],
     ) -> Result<providers::ChatResponse, crate::RuntimeError> {
         self.requests.lock().unwrap().push(messages.to_vec());
+        self.toolsets.lock().unwrap().push(tools.to_vec());
         Ok(providers::ChatResponse {
             message: message(providers::Role::Assistant, "idle"),
             finish_reason: providers::FinishReason::Stop,

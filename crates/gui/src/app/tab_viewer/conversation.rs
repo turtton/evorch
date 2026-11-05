@@ -88,7 +88,12 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
             .collect();
         // Version groups are resolved once for this frame's parent/child lookups.
         let lineage = active_thread.map(|_| workspace_ui::LineageIndex::new(&self.sidebar.threads));
+        let chips = thread_id
+            .as_deref()
+            .and_then(|id| self.pull_requests.view(id))
+            .map(crate::model::pull_requests::chips_by_call);
         let ctx = ConversationContext {
+            pull_request_chips: thread_id.as_deref().zip(chips.as_ref()),
             todo: thread_id
                 .as_deref()
                 .and_then(|id| self.thread_todos.get(id)),
@@ -165,6 +170,13 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                         },
                     )
                 }),
+            pull_request: thread_id.as_deref().and_then(|id| {
+                Some(crate::panes::agent::PullRequestBarContext {
+                    view: self.pull_requests.linked(id)?,
+                    expanded: self.pull_requests.bar(id).is_some_and(|bar| bar.expanded),
+                    now_ns: crate::model::pull_requests::now_ns(),
+                })
+            }),
             branch: match (self.focus, active_thread) {
                 (ConversationFocus::Thread, Some(thread)) => {
                     lineage
@@ -211,6 +223,7 @@ impl<S: AgentRunSource> WorkbenchTabViewer<'_, S> {
                 AgentPaneAction::Goal(a) => *self.goal_action = Some(a),
                 AgentPaneAction::Request(a) => *self.request_action = Some(a),
                 AgentPaneAction::Lane(a) => *self.lane_action = Some(a),
+                AgentPaneAction::PullRequest(a) => *self.pull_request_action = Some(a),
                 AgentPaneAction::Agents(a) => *self.agents_action = Some(a),
                 AgentPaneAction::Sidebar(a) => *self.sidebar_action = Some(a),
                 AgentPaneAction::FocusPanel(id) => *self.focus_request = Some(id),

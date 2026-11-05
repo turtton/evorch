@@ -21,7 +21,7 @@ use crate::panes::{
     file_viewer::{FileLink, file_viewer_pane, take_file_links},
     notifications::{NotificationsAction, notifications_pane},
     requests::RequestAction,
-    sidebar::{SidebarAction, sidebar_pane_with_retention},
+    sidebar::{PullRequestsView, SidebarAction, sidebar_pane_with_pull_requests},
     tasks::{TasksAction, tasks_pane},
     terminal::terminal_pane,
 };
@@ -35,6 +35,10 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) pending_approvals: &'a PendingApprovalsModel,
     pub(super) request_action: &'a mut Option<RequestAction>,
     pub(super) lane_action: &'a mut Option<crate::panes::agent::LaneAction>,
+    pub(super) pull_requests: &'a crate::model::pull_requests::PullRequestsModel,
+    pub(super) pull_request_badges:
+        &'a BTreeMap<workspace_ui::ThreadId, crate::model::pull_requests::PullRequestBadge>,
+    pub(super) pull_request_action: &'a mut Option<crate::model::pull_requests::PullRequestAction>,
     pub(super) lane_delivery_bound: bool,
     pub(super) diagnostics_request: &'a mut bool,
     pub(super) context_request: &'a mut bool,
@@ -332,16 +336,21 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
                     })
                     .map(|thread| thread.id.clone())
                     .collect();
-                if let Some(action) = sidebar_pane_with_retention(
+                if let Some(action) = sidebar_pane_with_pull_requests(
                     ui,
                     self.sidebar,
-                    self.phases,
-                    &question_threads,
-                    &approval_threads,
-                    self.unread_threads,
-                    self.externally_working_threads,
-                    self.retention,
+                    (
+                        self.phases,
+                        &question_threads,
+                        &approval_threads,
+                        self.unread_threads,
+                    ),
+                    (self.externally_working_threads, self.retention),
                     self.sidebar_view,
+                    PullRequestsView {
+                        enabled: self.pull_requests.enabled,
+                        badges: Some(self.pull_request_badges),
+                    },
                 ) {
                     *self.sidebar_action = Some(action);
                 }

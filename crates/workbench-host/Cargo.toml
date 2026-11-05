@@ -1,0 +1,36 @@
+[package]
+name = "workbench-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Core-side command handling for the evorch workbench protocol (ADR 0045)."
+
+# The core side of the workbench protocol: it owns the command services that the
+# desktop GUI, the web adapter and the CLI all go through. It may depend on
+# workbench-protocol and on core crates (runtime, storage, event-bus, ...), and
+# must never reach a GUI or client crate. scripts/check-workbench-boundaries.sh
+# enforces that in CI.
+[dependencies]
+workbench-protocol = { path = "../workbench-protocol" }
+config = { path = "../config" }
+event-bus = { path = "../event-bus" }
+runtime = { path = "../runtime" }
+sandbox = { path = "../sandbox" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+storage = { path = "../storage" }
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Test-only entry points for the in-process adapter's tests.
+test-support = []
+
+[dev-dependencies]
+async-trait = { workspace = true }
+rusqlite = { workspace = true }
+providers = { path = "../providers" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tools = { path = "../tools" }

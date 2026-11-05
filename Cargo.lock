@@ -2936,6 +2936,8 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+ "workbench-host",
+ "workbench-protocol",
  "workspace-ui",
 ]
 
@@ -8250,6 +8252,28 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "workbench-protocol",
+]
+
+[[package]]
+name = "workbench-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "config",
+ "event-bus",
+ "providers",
+ "runtime",
+ "rusqlite",
+ "sandbox",
+ "serde_json",
+ "sha2 0.10.9",
+ "storage",
+ "tempfile",
+ "tokio",
+ "tools",
+ "tracing",
+ "uuid",
  "workbench-protocol",
 ]
 
