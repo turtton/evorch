@@ -52,7 +52,8 @@ from the other. All regions are host paths:
   and the Cargo (`registry/{index,cache,src}`, `git/{db,checkouts}`, `bin`) and
   rustup (`toolchains`, `settings.toml`) caches under the host `CARGO_HOME` /
   `RUSTUP_HOME` (not the `/tmp/home` paths the shell sees them at). Cargo
-  credentials and config stay outside.
+  credentials and config are excluded by automatic sharing; explicit allowed
+  directories can expose them and override the cache access.
 
 Allowed directories (ADR 0032) join the same list (see below). When regions
 overlap, the last mounted one decides, as in bwrap. `read` and `grep` may use every region; `write` and `edit` need a
@@ -222,11 +223,31 @@ regions again on every call. A change therefore applies from the running run's
 next command or file tool call; a background shell job keeps the mounts it was
 started with until it exits.
 
-Regions are mounted, and listed for the file tools, in this order, so later ones
-win where they overlap: system read-only paths, the `/tmp` alias of the scratch,
-allowed directories, the scratch at its host path, the tool output store, the
-build caches, then the project root. The `/tmp` alias comes first so that an
-allowed directory under the host `/tmp` is not hidden by it.
+At boundary construction, evorch captures and canonicalizes its process HOME.
+Only allowed directories strictly below that canonical HOME gain a second bind
+at the same relative path under `/tmp/home`, with the same role-based access as
+their original absolute binds. HOME itself, its parents, siblings and external
+paths do not mirror; symlinks are judged by their canonical targets. A missing,
+empty, relative, unresolvable, non-directory or root HOME disables mirrors, with
+no account-database fallback. Both binds use the same live-list snapshot.
+These are shell aliases, not additional `/tmp/home` host file-tool permissions.
+Missing alias parents are created only in private scratch; symlink, type or
+private-HOME mount conflicts fail closed rather than creating host directories.
+
+Shell mounts and file-tool host regions share one precedence plan: system
+read-only paths, the `/tmp` scratch alias, early build caches, allowed originals
+and HOME aliases, scratch at its host path, explicit/thread read-only regions
+(including the tool output store), remaining build caches, explicit read-write
+regions, then the project root. The `/tmp` alias precedes allowed directories so
+it cannot hide one under the host `/tmp`.
+
+Automatic cache binds at or below an explicit mirror are omitted; ancestor
+caches move before it. Canonical cache-source overlap is also considered, while
+separate Cargo/rustup aliases are retained with corresponding access/overlays.
+Explicit mirrors keep their own host identity when cache aliases overlap them.
+Runtime/thread restrictions and later read-write/project overrides apply to
+all corresponding aliases. `without_tool_caches()` disables only automatic
+sharing, not explicit allowed-directory mirrors.
 
 Adding refuses `/` and the home directory itself (after canonicalization),
 paths inside the project root, and paths inside another allowed directory. A
@@ -411,13 +432,24 @@ Inside bwrap the directory is mounted read-write at its own host path and at
 `/tmp`, and `TMPDIR` is the host path. Shells escalated to `unsandboxed` get
 the same `TMPDIR`, and the file tools already resolve that host path, so
 `$TMPDIR/<file>` names one file everywhere. `/tmp` and `~` still differ
-between the shell and the file tools. HOME stays at `/tmp/home` inside the
-scratch: Cargo registry/git caches and installed tool binaries are mounted
-read-only there, and host Cargo credentials/config are excluded. Network
-isolation remains controlled by the existing policy. A sandbox built without
-a scratch directory (benchmarks, and executors shared by runs of a runtime
-without a sandbox root) falls back to a private directory of its own and
-adds no system-message block.
+between the shell and the file tools. HOME stays at `/tmp/home`, CARGO_HOME at
+`/tmp/home/.cargo` and RUSTUP_HOME at `/tmp/home/.rustup` inside the scratch.
+Automatic sharing mounts Cargo registry/git caches and installed tool binaries
+read-only and excludes host Cargo credentials/config; explicit allowed
+HOME-directory mirrors are an exception. Allowing all of `~/.cargo` exposes
+config/credentials too, so allow only the existing `~/.cargo/targets` when the
+goal is sharing the huacnlee/cargo fork's build pool across thread scratches
+(Worker read-write, other roles read-only).
+
+Which Cargo runs depends on the evorch process's `PATH`, not a dev shell opened
+elsewhere. The sandbox does not inherit `RUSTC_WRAPPER`,
+`CARGO_FORK_AUTO_UPDATE` or sccache settings: use
+`CARGO_FORK_AUTO_UPDATE=0 RUSTC_WRAPPER= cargo ...` explicitly when needed.
+sccache configuration, server/socket and cache access are not implicitly shared.
+Network isolation remains controlled by the existing policy. A sandbox built
+without a scratch directory (benchmarks, and executors shared by runs of a
+runtime without a sandbox root) falls back to a private directory of its own
+and adds no system-message block.
 
 Contents last only while this process owns the thread (ADR 0024). Starting or
 claiming a thread empties its directory before use; releasing it or handing

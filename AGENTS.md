@@ -69,6 +69,22 @@ mismatch. Revisit this policy before cutting a v1 release.
   rustfmt, clippy and rust-analyzer still come from the fenix toolchain. CI
   and the crane builds keep the upstream cargo. `nix develop .#upstream-cargo`
   gives the previous setup: fenix's cargo, a `target/` per checkout, sccache.
+- The Cargo selected inside a sandbox depends on the evorch process's
+  `PATH`; entering a dev shell in another terminal does not select the fork
+  for an already-running evorch. To share the fork's build pool across thread
+  scratches, explicitly allow the existing host `~/.cargo/targets`
+  (read-write for Worker, read-only for other roles).
+- Allowed canonical strict descendants of the process HOME are also bound at
+  the same relative paths below `/tmp/home`, with the same access as their
+  original absolute binds. HOME is canonicalized at boundary construction;
+  invalid, non-directory or root HOME disables mirrors. HOME itself, parents,
+  siblings and external paths never mirror. Explicit permissions still apply
+  when automatic cache sharing is disabled. Allow only targets for build
+  sharing: allowing all of `~/.cargo` also exposes config and credentials.
+- The sandbox does not inherit `RUSTC_WRAPPER`, `CARGO_FORK_AUTO_UPDATE` or
+  sccache settings. When needed, run
+  `CARGO_FORK_AUTO_UPDATE=0 RUSTC_WRAPPER= cargo ...` explicitly; sccache
+  configuration and server access are not implicitly shared either.
 - The fork ignores `CARGO_TARGET_DIR`, `build.target-dir` and
   `build.build-dir` (with a warning), so do not set them. Intermediate
   artifacts go to `${CARGO_HOME:-~/.cargo}/targets/<workspace>-<hash>/`, with
