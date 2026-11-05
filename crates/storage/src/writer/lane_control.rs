@@ -49,6 +49,13 @@ impl StorageHandle {
             ledger::nudge_outcome(c, request, &episode_id, expected_revision, state)
         })
     }
+    /// Current close projection only; past closes remain immutable after reopening.
+    pub fn current_lane_close(
+        &self,
+        lane_id: String,
+    ) -> Result<Option<LaneCloseResult>, StorageError> {
+        self.lane_job(false, move |c| ledger::current_close(c, &lane_id))
+    }
     pub fn lane_verification_target(
         &self,
         lane_id: String,

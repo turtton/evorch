@@ -51,6 +51,7 @@ struct Lanes {
 
 fn brief() -> LaneBrief {
     LaneBrief {
+        verification_requirements: Default::default(),
         objective: "an independent deliverable".into(),
         inputs: vec![],
         deliverables: vec!["artifact".into()],

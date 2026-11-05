@@ -2,6 +2,7 @@ use super::*;
 mod delivery;
 mod forwarding;
 mod questions;
+mod verification;
 fn call(id: &str, name: &str, input: Value) -> ScriptedResponse {
     ScriptedResponse::tool_call(id, MODEL, 0, id, name, [input.to_string()])
 }

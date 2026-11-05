@@ -145,6 +145,11 @@ pub enum RunPurpose {
         root_run_id: RunId,
         epoch: u64,
     },
+    /// Runtime-issued independent lane review; never accepted from delegate arguments.
+    LaneVerification {
+        verification_id: event_bus::lane::VerificationId,
+        lead_root: RunId,
+    },
     LessonExtract {
         source_run_id: RunId,
     },

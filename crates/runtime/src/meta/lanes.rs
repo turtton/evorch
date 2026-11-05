@@ -324,6 +324,7 @@ pub(super) fn open_spec(name: &str) -> providers::ToolSpec {
         "objective":{"type":"string"},"inputs":{"type":"array","items":{"type":"object","properties":{"kind":{"enum":["description","thread","message","artifact"]},"value":{"type":"string"}},"required":["kind","value"],"additionalProperties":false}},
         "deliverables":strings(),"acceptance_criteria":strings(),"constraints":strings(),
         "workspace":{"type":"object","properties":{"branch":{"type":"string"},"worktree":{"type":"string"},"notes":{"type":"string"}},"additionalProperties":false},
+        "verification_requirements":{"type":"object","properties":{"pull_request":{"type":"boolean","default":false}},"additionalProperties":false},
         "report_policy":{"enum":["attached","summary","detached"]}},"required":["objective","inputs","deliverables","acceptance_criteria","constraints","report_policy"],"additionalProperties":false}}),
         &["brief"],
     )
