@@ -163,7 +163,7 @@ fn items(
             let limit = d.capacity.limit();
             let count:u64=match d.capacity {
                 crate::lane_delivery::QuestionCapacity::Global=>conn.query_row("SELECT COUNT(*) FROM user_questions WHERE answered=0 AND run_id NOT IN (SELECT run_id FROM run_tombstones)",[],|r|r.get(0))?,
-                crate::lane_delivery::QuestionCapacity::Requester=>conn.query_row("SELECT COALESCE(MAX(n),0) FROM (SELECT COUNT(*) AS n FROM user_questions WHERE root_run_id=?1 AND run_id NOT IN (SELECT run_id FROM run_tombstones) GROUP BY run_id)",[&l.root_run_id],|r|r.get(0))?,
+                crate::lane_delivery::QuestionCapacity::Requester => crate::repo::user_questions::requester_question_count(conn, &d.requester_run_id)?,
             };
             if count >= u64::from(limit) {
                 result.push(item(

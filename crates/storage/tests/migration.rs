@@ -106,8 +106,10 @@ const EXPECTED_TABLES: [&str; 90] = [
     "lane_delivery_destinations",
 ];
 
-const EXPECTED_INDICES: [&str; 82] = [
+const EXPECTED_INDICES: [&str; 84] = [
     "lane_verifications_lane",
+    "lane_closes_lane",
+    "lane_forward_receipts_lane",
     "idx_thread_pull_requests_active",
     "idx_thread_pull_requests_key",
     "idx_thread_pull_request_inheritance_pending",

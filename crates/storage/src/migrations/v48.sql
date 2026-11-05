@@ -24,6 +24,7 @@ CREATE TABLE lane_closes (
  payload TEXT NOT NULL CHECK(OCTET_LENGTH(payload) <= 4096),
  pr_evidence_json TEXT CHECK(OCTET_LENGTH(pr_evidence_json) <= 4096)
 );
+CREATE INDEX lane_closes_lane ON lane_closes(lane_id);
 CREATE TABLE lane_forward_receipts (
  caller_root TEXT NOT NULL,
  operation_id TEXT NOT NULL,
@@ -33,6 +34,7 @@ CREATE TABLE lane_forward_receipts (
  result_json TEXT NOT NULL,
  PRIMARY KEY(caller_root,operation_id)
 );
+CREATE INDEX lane_forward_receipts_lane ON lane_forward_receipts(lane_id);
 CREATE TRIGGER lane_brief_invalidation AFTER UPDATE OF brief_revision ON lanes
 WHEN NEW.brief_revision <> OLD.brief_revision
 BEGIN UPDATE lanes SET request_revision=request_revision+1,current_close_id=NULL WHERE lane_id=NEW.lane_id; END;

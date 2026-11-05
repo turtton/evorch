@@ -59,3 +59,45 @@ fn phase2_preserves_reports_and_starts_separate_monotonic_counters() {
         0
     );
 }
+
+/// Empty-target reclaim probes must not scan unrelated lanes' accumulated history.
+#[test]
+fn phase2_reclaim_indexes_bound_unrelated_history_vm_steps() {
+    let conn = Connection::open_in_memory().unwrap();
+    apply_up_to(&conn, 48).unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    for table in ["lane_closes", "lane_forward_receipts"] {
+        let mut measurements = vec![];
+        for rows in [10, 10_000] {
+            conn.execute(&format!("DELETE FROM {table}"), []).unwrap();
+            // FKs are disabled in this index-only fixture; the probe never returns these rows.
+            let columns = if table == "lane_closes" {
+                "close_id,lane_id,verification_id,payload"
+            } else {
+                "caller_root,operation_id,lane_id,question_id,request_json,result_json"
+            };
+            let values = if table == "lane_closes" {
+                "printf('close-%d',x),'unrelated','v','{}'"
+            } else {
+                "'root',printf('op-%d',x),'unrelated','q','{}','{}'"
+            };
+            conn.execute_batch(&format!("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<{rows}) INSERT INTO {table}({columns}) SELECT {values} FROM n")).unwrap();
+            let bytes = if table == "lane_closes" {
+                "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(pr_evidence_json),0)"
+            } else {
+                "OCTET_LENGTH(request_json)+OCTET_LENGTH(result_json)"
+            };
+            let mut query=conn.prepare(&format!("SELECT COALESCE(SUM(bytes),0) FROM (SELECT {bytes} AS bytes FROM {table} WHERE lane_id='target' LIMIT 100)")).unwrap();
+            assert_eq!(query.query_row([], |r| r.get::<_, u64>(0)).unwrap(), 0);
+            let read = query.get_status(rusqlite::StatementStatus::VmStep);
+            let mut delete=conn.prepare(&format!("DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE lane_id='target' LIMIT 100)")).unwrap();
+            assert_eq!(delete.execute([]).unwrap(), 0);
+            measurements.push(read + delete.get_status(rusqlite::StatementStatus::VmStep));
+        }
+        assert!(measurements[0] > 0);
+        assert!(
+            measurements[1] <= measurements[0] * 2,
+            "{table}: {measurements:?}"
+        );
+    }
+}

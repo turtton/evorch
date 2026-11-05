@@ -1347,3 +1347,154 @@ fn mixed_nudge_batch_charges_only_the_ordinary_wake_source() {
         1
     );
 }
+
+#[test]
+fn first_report_without_artifact_resolves_no_report_only_for_non_working_status() {
+    for status in [
+        LaneStatus::Working,
+        LaneStatus::Ready,
+        LaneStatus::Blocked,
+        LaneStatus::Waiting,
+        LaneStatus::Failed,
+    ] {
+        let f = Fixture::new();
+        let owner = started(&f);
+        let mut r = observation(&f, &owner);
+        r.classification = LaneStallClassification::NoReport;
+        let episode = f.h().observe_lane_stall(r.clone()).unwrap();
+        let pending = f
+            .h()
+            .request_lane_nudge(r.clone(), episode.episode_id.clone(), 1)
+            .unwrap();
+        let mut first = report(status);
+        first.artifact_revision = None;
+        if status == LaneStatus::Failed {
+            first.failure_episode = Some("first-failure".into());
+        }
+        if status == LaneStatus::Ready {
+            f.sql().execute_batch("CREATE TRIGGER fail_first_resolution BEFORE UPDATE ON lane_stall_episodes BEGIN SELECT RAISE(ABORT,'injected resolution failure'); END;").unwrap();
+            assert!(
+                f.h()
+                    .append_lane_report("lane-1", first.clone(), 11)
+                    .is_err()
+            );
+            assert_eq!(f.count("lane_reports"), 0);
+            assert_eq!(
+                f.h().lane_progress_anchor("lane-1".into()).unwrap(),
+                r.progress_anchor
+            );
+            assert_eq!(
+                f.h()
+                    .lane_stall_episode(episode.episode_id.clone())
+                    .unwrap()
+                    .unwrap(),
+                pending
+            );
+            f.sql()
+                .execute_batch("DROP TRIGGER fail_first_resolution")
+                .unwrap();
+        }
+        f.h().append_lane_report("lane-1", first, 12).unwrap();
+        let resolved = status != LaneStatus::Working;
+        let current = f
+            .h()
+            .lane_stall_episode(episode.episode_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.resolved_at_ns.is_some(), resolved, "{status:?}");
+        assert_eq!(
+            current.nudge_state,
+            if resolved {
+                LaneNudgeState::Obsolete
+            } else {
+                LaneNudgeState::Pending
+            }
+        );
+        let state: String = f
+            .sql()
+            .query_row(
+                "SELECT state FROM lane_notifications WHERE notification_id=?1",
+                [pending.notification_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, if resolved { "obsolete" } else { "pending" });
+        assert_eq!(
+            f.h().lane_progress_anchor("lane-1".into()).unwrap().epoch,
+            r.progress_anchor.epoch + u64::from(resolved)
+        );
+        assert_eq!(
+            f.h()
+                .lane_attention(filter(), None, 20)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| matches!(item.kind, LaneAttentionKind::Stall { .. })),
+            !resolved
+        );
+    }
+}
+
+#[test]
+fn inherited_question_quota_attention_uses_the_same_recipient_set_as_creation() {
+    let f = Fixture::new();
+    started(&f);
+    let mut ids = vec![];
+    for n in 0..32 {
+        let q = question(7, n);
+        ids.push(q.id.clone());
+        f.h().create_user_question(&q).unwrap();
+    }
+    f.h().bind_user_questions("run-7", "run-1", &ids).unwrap();
+    let LaneQuestionCreated::CapacityBlocked(diagnostic) =
+        f.create(1, 99, LaneDeliveryBinding::Unbound)
+    else {
+        panic!("inherited quota not enforced")
+    };
+    assert_eq!(diagnostic.requester_run_id, "run-1");
+    assert_eq!(diagnostic.capacity, QuestionCapacity::Requester);
+    let blocked = || {
+        f.h()
+            .lane_attention(filter(), None, 20)
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| {
+                matches!(
+                    i.kind,
+                    LaneAttentionKind::QuestionCapacityBlocked {
+                        capacity: LaneQuestionCapacity::Requester,
+                        limit: 32
+                    }
+                )
+            })
+    };
+    assert!(blocked());
+    // Answering does not free historical per-recipient capacity (unlike the global pending cap).
+    f.h()
+        .answer_user_question(
+            &ids[0],
+            "resolved",
+            &AnswerOrigin::Host {
+                channel: Default::default(),
+            },
+        )
+        .unwrap();
+    assert!(blocked());
+    assert!(matches!(
+        f.create(1, 100, LaneDeliveryBinding::Unbound),
+        LaneQuestionCreated::CapacityBlocked(_)
+    ));
+    // Retention/unlinking a recipient entry really removes it from the creation set.
+    f.sql()
+        .execute(
+            "DELETE FROM user_question_links WHERE run_id='run-1' AND question_id=?1",
+            [&ids[0]],
+        )
+        .unwrap();
+    assert!(!blocked());
+    assert!(matches!(
+        f.create(1, 101, LaneDeliveryBinding::Unbound),
+        LaneQuestionCreated::Created(_)
+    ));
+}

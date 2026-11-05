@@ -243,11 +243,13 @@ pub(crate) fn create_question(
                 .map(parse::<QuestionCapacityBlocked>)
                 .transpose()?
                 .unwrap_or(QuestionCapacityBlocked {
+                    requester_run_id: question.run_id.clone(),
                     capacity,
                     attempts: 0,
                     first_at_ns: at_ns,
                     last_at_ns: at_ns,
                 });
+            diagnostic.requester_run_id = question.run_id.clone();
             diagnostic.capacity = capacity;
             diagnostic.attempts = diagnostic.attempts.saturating_add(1);
             diagnostic.last_at_ns = at_ns;

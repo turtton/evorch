@@ -117,7 +117,9 @@ pub(crate) fn report_progress(
         .artifact_revision
         .as_ref()
         .and_then(ArtifactRevision::fingerprint);
-    let transition = previous.as_ref().is_some_and(|(s, _)| s == "working")
+    // NoReport -> a terminal/waiting report resolves the old no-report episode.
+    // A first Working report alone is not progress and cannot renew a nudge slot.
+    let transition = previous.as_ref().is_none_or(|(s, _)| s == "working")
         && input.status != LaneStatus::Working;
     input_progress(
         conn,
