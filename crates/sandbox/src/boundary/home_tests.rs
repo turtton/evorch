@@ -323,3 +323,73 @@ fn cache_alias_classification_covers_destination_and_canonical_source_relationsh
         }
     }
 }
+
+#[test]
+fn explicit_mirror_identity_survives_custom_cache_and_runtime_projections() {
+    use PathAccess::{ReadOnly, ReadWrite};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let custom = home.join("custom");
+    let source = custom.join("registry/src");
+    let a = home.join(".cargo/registry/src/sub");
+    let b = source.join("sub/deep");
+    fs::create_dir_all(a.join("deep")).unwrap();
+    fs::create_dir_all(a.join("locked")).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    for broad in [false, true] {
+        for action in ["none", "ro", "rw", "workspace"] {
+            fs::write(a.join("deep/x"), "A").unwrap();
+            fs::write(b.join("x"), "B").unwrap();
+            let mut boundary = boundary(&home)
+                .cargo_cache(&custom)
+                .with_allowed(
+                    LivePaths::new(vec![
+                        a.clone(),
+                        if broad { source.clone() } else { b.clone() },
+                    ]),
+                    ReadWrite,
+                )
+                .read_only(a.join("locked"));
+            boundary = match action {
+                "ro" => boundary.read_only(&source),
+                "rw" => boundary.read_only(&source).read_write(&source),
+                "workspace" => {
+                    boundary.workspace_root = source.clone();
+                    boundary
+                }
+                _ => boundary,
+            };
+            let plan = boundary.mount_plan(None, false);
+            let resolve = |path: &Path| {
+                let mount = plan
+                    .mounts
+                    .iter()
+                    .rev()
+                    .find(|m| path.starts_with(&m.sandbox))
+                    .unwrap();
+                (
+                    mount.host.join(path.strip_prefix(&mount.sandbox).unwrap()),
+                    mount.access,
+                )
+            };
+            let a_alias = Path::new("/tmp/home/.cargo/registry/src/sub/deep/x");
+            let b_alias = Path::new("/tmp/home/custom/registry/src/sub/deep/x");
+            assert_eq!(
+                resolve(a_alias),
+                (a.join("deep/x"), ReadWrite),
+                "{broad} {action}"
+            );
+            assert_eq!(resolve(b_alias).0, b.join("x"));
+            assert_eq!(Some(resolve(b_alias).1), boundary.access(&b.join("x")));
+            assert_eq!(
+                resolve(Path::new("/tmp/home/.cargo/registry/src/sub/locked/x")),
+                (a.join("locked/x"), ReadOnly)
+            );
+            assert_eq!(fs::read_to_string(resolve(a_alias).0).unwrap(), "A");
+            assert_eq!(fs::read_to_string(resolve(b_alias).0).unwrap(), "B");
+            fs::write(resolve(a_alias).0, "updated-A").unwrap();
+            assert_eq!(fs::read_to_string(a.join("deep/x")).unwrap(), "updated-A");
+            assert_eq!(fs::read_to_string(b.join("x")).unwrap(), "B");
+        }
+    }
+}

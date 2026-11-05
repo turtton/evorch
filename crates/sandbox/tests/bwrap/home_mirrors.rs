@@ -308,10 +308,10 @@ fn cargo_fork_reuses_one_pool_from_two_private_homes() {
             .with_allowed(LivePaths::new(vec![targets.clone()]), PathAccess::ReadWrite)
             .with_scratch(scratch);
         let sandbox = BwrapSandbox::detect(BwrapConfig::from_boundary(boundary)).unwrap();
-        success(run(sandbox
+        let output = run(sandbox
             .wrap(CommandSpec {
                 program: cargo.clone(),
-                args: vec!["build".into(), "--offline".into()],
+                args: vec!["build".into(), "--offline".into(), "--verbose".into()],
                 cwd: None,
                 extra_env: vec![
                     ("RUSTC".into(), rustc.clone()),
@@ -319,13 +319,16 @@ fn cargo_fork_reuses_one_pool_from_two_private_homes() {
                     ("CARGO_FORK_AUTO_UPDATE".into(), "0".into()),
                 ],
             })
-            .unwrap()));
+            .unwrap());
+        let diagnostics = String::from_utf8_lossy(&output.stderr).into_owned();
+        success(output);
         assert_eq!(
             fs::read_dir(scratch.join("home/.cargo/targets"))
                 .unwrap()
                 .count(),
             0
         );
+        diagnostics
     };
     build(scratch1.path());
     let before = pool_artifacts(&targets);
@@ -333,7 +336,13 @@ fn cargo_fork_reuses_one_pool_from_two_private_homes() {
         !before.is_empty(),
         "fork must write intermediate artifacts in shared targets"
     );
-    build(scratch2.path());
+    let second = build(scratch2.path());
+    assert!(
+        second
+            .lines()
+            .any(|line| line.trim_start().starts_with("Fresh home_pool_probe ")),
+        "{second}"
+    );
     assert_eq!(pool_artifacts(&targets), before);
 }
 
@@ -360,4 +369,87 @@ fn pool_artifacts(root: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+#[test]
+#[ignore = "requires working bwrap namespaces"]
+fn explicit_mirrors_win_over_custom_cache_aliases() {
+    let Some(home) = fixture_home("explicit_mirrors_win_over_custom_cache_aliases") else {
+        return;
+    };
+    let workspace = workspace();
+    let custom = home.join("custom");
+    let source = custom.join("registry/src");
+    let a = home.join(".cargo/registry/src/sub");
+    let b = source.join("sub/deep");
+    fs::create_dir_all(a.join("deep")).unwrap();
+    fs::create_dir_all(a.join("locked")).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    for broad in [false, true] {
+        for action in ["none", "ro", "rw", "workspace"] {
+            fs::write(a.join("deep/x"), "A").unwrap();
+            fs::write(b.join("x"), "B").unwrap();
+            let mut boundary = SandboxBoundary::new(workspace.path().into())
+                .cargo_cache(&custom)
+                .with_allowed(
+                    LivePaths::new(vec![
+                        a.clone(),
+                        if broad { source.clone() } else { b.clone() },
+                    ]),
+                    PathAccess::ReadWrite,
+                )
+                .with_thread_read_directory(
+                    ThreadReadDirectory::capture(&a.join("locked")).unwrap(),
+                );
+            boundary = match action {
+                "ro" => boundary.read_only(&source),
+                "rw" => boundary.read_only(&source).read_write(&source),
+                "workspace" => SandboxBoundary::new(source.clone())
+                    .cargo_cache(&custom)
+                    .with_allowed(
+                        LivePaths::new(vec![
+                            a.clone(),
+                            if broad { source.clone() } else { b.clone() },
+                        ]),
+                        PathAccess::ReadWrite,
+                    )
+                    .with_thread_read_directory(
+                        ThreadReadDirectory::capture(&a.join("locked")).unwrap(),
+                    ),
+                _ => boundary,
+            };
+            let sandbox = BwrapSandbox::detect(BwrapConfig::from_boundary(boundary)).unwrap();
+            success(sh(
+                &sandbox,
+                r#"set -eu
+                test "$(cat "$CARGO_HOME/registry/src/sub/deep/x")" = A
+                test "$(cat "$HOME/custom/registry/src/sub/deep/x")" = B
+                echo updated-A > "$CARGO_HOME/registry/src/sub/deep/x"
+            "#,
+            ));
+            assert_eq!(fs::read_to_string(a.join("deep/x")).unwrap(), "updated-A\n");
+            assert_eq!(fs::read_to_string(b.join("x")).unwrap(), "B");
+            assert!(
+                !sh(
+                    &sandbox,
+                    r#"echo forbidden > "$CARGO_HOME/registry/src/sub/locked/x""#
+                )
+                .status
+                .success()
+            );
+            let output = sh(
+                &sandbox,
+                r#"echo updated-B > "$HOME/custom/registry/src/sub/deep/x""#,
+            );
+            assert_eq!(
+                output.status.success(),
+                action != "ro",
+                "{broad} {action}: {output:?}"
+            );
+            if action != "ro" {
+                assert_eq!(fs::read_to_string(b.join("x")).unwrap(), "updated-B\n");
+            }
+            assert_eq!(fs::read_to_string(a.join("deep/x")).unwrap(), "updated-A\n");
+        }
+    }
 }

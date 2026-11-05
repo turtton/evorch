@@ -92,7 +92,7 @@ impl SandboxBoundary {
                 },
             );
         }
-        let mut overlays = mirrors.clone();
+        let mut overlays = Vec::new();
         let mut projections = mirrors.clone();
         let mut early = Vec::new();
         let mut late = Vec::new();
@@ -159,6 +159,8 @@ impl SandboxBoundary {
                 late.push(mount);
             }
         }
+        overlays.retain(|alias| !shadowed_by_explicit(alias, &mirrors));
+        projections.retain(|alias| !shadowed_by_explicit(alias, &mirrors));
         sort_aliases(&mut overlays);
         sort_aliases(&mut projections);
 
@@ -182,8 +184,18 @@ impl SandboxBoundary {
             );
         }
         mounts.extend(overlays);
+        // Explicit HOME paths own their identity, even when a different host
+        // cache happens to map a descendant onto the same virtual subtree.
+        mounts.extend(mirrors.iter().cloned());
         if let Some(scratch) = scratch {
-            append_region(&mut mounts, &projections, scratch, ReadWrite, false);
+            append_region(
+                &mut mounts,
+                &projections,
+                &mirrors,
+                scratch,
+                ReadWrite,
+                false,
+            );
         }
         for path in self
             .read_only
@@ -191,15 +203,16 @@ impl SandboxBoundary {
             .map(PathBuf::as_path)
             .chain(self.current_thread_read_directories())
         {
-            append_region(&mut mounts, &projections, path, ReadOnly, true);
+            append_region(&mut mounts, &projections, &mirrors, path, ReadOnly, true);
         }
         mounts.extend(late);
         for path in &self.read_write {
-            append_region(&mut mounts, &projections, path, ReadWrite, false);
+            append_region(&mut mounts, &projections, &mirrors, path, ReadWrite, false);
         }
         append_region(
             &mut mounts,
             &projections,
+            &mirrors,
             &self.workspace_root,
             ReadWrite,
             false,
@@ -213,9 +226,41 @@ fn sort_aliases(aliases: &mut Vec<BoundaryMount>) {
     aliases.dedup_by(|a, b| a.sandbox == b.sandbox);
 }
 
+// A virtual path below an explicit mirror must continue to name that mirror's
+// host subtree, not another allowed directory reached through a cache alias.
+fn shadowed_by_explicit(alias: &BoundaryMount, explicit: &[BoundaryMount]) -> bool {
+    explicit.iter().any(|mirror| {
+        alias
+            .sandbox
+            .strip_prefix(&mirror.sandbox)
+            .is_ok_and(|relative| alias.host != mirror.host.join(relative))
+    })
+}
+
+fn project(
+    mirror: &BoundaryMount,
+    path: &Path,
+    access: PathAccess,
+    optional: bool,
+) -> Option<BoundaryMount> {
+    if mirror.host.starts_with(path) {
+        Some(BoundaryMount::alias(
+            &mirror.host,
+            &mirror.sandbox,
+            access,
+            optional,
+        ))
+    } else {
+        path.strip_prefix(&mirror.host).ok().map(|relative| {
+            BoundaryMount::alias(path, &mirror.sandbox.join(relative), access, optional)
+        })
+    }
+}
+
 fn append_region(
     mounts: &mut Vec<BoundaryMount>,
     mirrors: &[BoundaryMount],
+    explicit: &[BoundaryMount],
     path: &Path,
     access: PathAccess,
     optional: bool,
@@ -224,33 +269,42 @@ fn append_region(
     if mirrors.is_empty() {
         return;
     }
-    // Intersect, never project an entire parent (or its unallowed siblings).
-    // Canonical paths also handle a runtime region spelled via a HOME symlink.
     let canonical = path.canonicalize().unwrap_or_else(|_| path.into());
-    let mut aliases = Vec::new();
-    for mirror in mirrors {
-        let alias = if mirror.host.starts_with(&canonical) {
-            Some(BoundaryMount::alias(
-                &mirror.host,
-                &mirror.sandbox,
-                access,
-                optional,
-            ))
-        } else if let Ok(relative) = canonical.strip_prefix(&mirror.host) {
-            Some(BoundaryMount::alias(
-                path,
-                &mirror.sandbox.join(relative),
-                access,
-                optional,
-            ))
-        } else {
-            None
-        };
-        if let Some(alias) = alias {
-            aliases.push(alias);
+    // Intersect, never project an entire parent (or its unallowed siblings).
+    let mut aliases: Vec<_> = mirrors
+        .iter()
+        .filter_map(|mirror| project(mirror, &canonical, access, optional))
+        .filter(|alias| !shadowed_by_explicit(alias, explicit))
+        .collect();
+    sort_aliases(&mut aliases);
+
+    // A broad cache projection can cover a differently sourced explicit mirror.
+    // Restore that subtree after the projection, replaying the current host
+    // precedence rather than resetting it to the declaration's base access.
+    // This preserves prior thread/runtime RO children through later RW aliases.
+    let mut restored = Vec::new();
+    for mirror in explicit.iter().filter(|mirror| {
+        aliases.iter().any(|alias| {
+            mirror
+                .sandbox
+                .strip_prefix(&alias.sandbox)
+                .is_ok_and(|relative| mirror.host != alias.host.join(relative))
+        })
+    }) {
+        restored.push(mirror.clone());
+        for region in mounts
+            .iter()
+            .filter(|m| m.host_region && (!m.cache || m.host.exists()))
+        {
+            let host = region
+                .host
+                .canonicalize()
+                .unwrap_or_else(|_| region.host.clone());
+            if let Some(alias) = project(mirror, &host, region.access, region.optional) {
+                restored.push(alias);
+            }
         }
     }
-    aliases.sort_by(|a, b| a.sandbox.cmp(&b.sandbox));
-    aliases.dedup_by(|a, b| a.sandbox == b.sandbox);
     mounts.extend(aliases);
+    mounts.extend(restored);
 }
