@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use event_bus::{Event, EventBus, EventKind, EventReceiver, PullRequestEvent};
 use gui::app::WorkbenchState;
 use gui::app::pull_requests::StoragePullRequestReader;
@@ -15,130 +14,23 @@ use gui::model::commands::{CommandSink, RecordingSink};
 use gui::model::composer::ProviderStatus;
 use gui::model::notifications::NotificationKind;
 use gui::model::pull_requests::{PrGlyph, PullRequestAction, glyph};
-use gui::model::transcript::TranscriptEntry;
 use gui::runtime_sink::RuntimeCommandSink;
-use providers::{ChatResponse, FinishReason, Message, Role as MessageRole, ToolSpec, Usage};
 use runtime::ownership::OwnerHost;
-use runtime::pull_requests::{FakePullRequestSource, FetchedPullRequest, PullRequestService};
-use runtime::{AgentInvocationContext, AgentModel, AgentRuntime, Role, RunStore, RuntimeError};
-use storage::pull_requests::{
-    CandidateState, CheckConclusion, CheckKind, CheckStatus, NewPullRequestCandidate,
-    PullRequestCheck, PullRequestFacts, PullRequestKey, PullRequestState, ReviewDecision,
-};
+use runtime::pull_requests::{FakePullRequestSource, PullRequestService};
+use runtime::{AgentRuntime, RunStore};
+use storage::pull_requests::{CandidateState, NewPullRequestCandidate};
 use workspace_ui::{ProjectId, SidebarState, ThreadId, UiSettings};
 
 #[path = "support/short_private_directory.rs"]
 mod short_private_directory;
 use short_private_directory::ShortPrivateDirectory;
 
-const THREAD: &str = "t1";
-const REPOSITORY: &str = "turtton/evorch";
-
-struct NoModel;
-
-#[async_trait]
-impl AgentModel for NoModel {
-    async fn complete(
-        &self,
-        _: &AgentInvocationContext,
-        _: Role,
-        _: &[Message],
-        _: &[ToolSpec],
-    ) -> Result<ChatResponse, RuntimeError> {
-        Ok(ChatResponse {
-            usage_reported: true,
-            message: Message {
-                role: MessageRole::Assistant,
-                content: Vec::new(),
-            },
-            finish_reason: FinishReason::Stop,
-            usage: Usage::default(),
-        })
-    }
-
-    fn selected_model(&self, _: Role, _: Option<&str>) -> String {
-        "pull-requests-headless".into()
-    }
-}
-
-fn key(number: u64) -> PullRequestKey {
-    PullRequestKey::github(REPOSITORY, number).unwrap()
-}
-
-fn check(name: &str, conclusion: Option<CheckConclusion>) -> PullRequestCheck {
-    PullRequestCheck {
-        provider_id: name.into(),
-        kind: CheckKind::CheckRun,
-        name: name.into(),
-        status: if conclusion.is_some() {
-            CheckStatus::Completed
-        } else {
-            CheckStatus::InProgress
-        },
-        conclusion,
-        head_sha: sha('a'),
-    }
-}
-
-fn sha(letter: char) -> String {
-    letter.to_string().repeat(40)
-}
-
-fn facts(state: PullRequestState, head: char, checks: Vec<PullRequestCheck>) -> PullRequestFacts {
-    PullRequestFacts {
-        state,
-        base_branch: "main".into(),
-        head_repository: Some(REPOSITORY.into()),
-        head_branch: "feat/gui".into(),
-        head_sha: sha(head),
-        checks,
-        checks_complete: true,
-        review_decision: ReviewDecision::None,
-    }
-}
-
-fn fetched(number: u64, facts: PullRequestFacts) -> FetchedPullRequest {
-    FetchedPullRequest {
-        requested: key(number),
-        canonical: key(number),
-        url: format!("https://github.com/{REPOSITORY}/pull/{number}"),
-        facts,
-        fetched_at_ns: gui::model::pull_requests::now_ns(),
-    }
-}
-
-fn running(number: u64) -> FetchedPullRequest {
-    fetched(
-        number,
-        facts(PullRequestState::Open, 'a', vec![check("ci", None)]),
-    )
-}
-
-fn passing(number: u64) -> FetchedPullRequest {
-    fetched(
-        number,
-        facts(
-            PullRequestState::Open,
-            'a',
-            vec![check("ci", Some(CheckConclusion::Success))],
-        ),
-    )
-}
-
-fn failing(number: u64, head: char) -> FetchedPullRequest {
-    fetched(
-        number,
-        facts(
-            PullRequestState::Open,
-            head,
-            vec![check("ci", Some(CheckConclusion::Failure))],
-        ),
-    )
-}
-
-fn merged(number: u64) -> FetchedPullRequest {
-    fetched(number, facts(PullRequestState::Merged, 'a', Vec::new()))
-}
+#[path = "support/pull_request_world.rs"]
+mod pull_request_world;
+use pull_request_world::{
+    NoModel, REPOSITORY, THREAD, changed, failing, key, link_action, merged, notices, passing,
+    running, settle,
+};
 
 struct World {
     directory: tempfile::TempDir,
@@ -278,35 +170,6 @@ impl World {
     fn database(&self) -> storage::Database {
         storage::Database::open_read_only(&self.config.db_path).unwrap()
     }
-}
-
-fn settle(state: &mut WorkbenchState<DemoSource>) {
-    for _ in 0..4 {
-        state.pump_pull_requests();
-    }
-}
-
-fn changed(thread: &'static str) -> impl Fn(&PullRequestEvent) -> bool {
-    move |event| matches!(event, PullRequestEvent::Changed { thread_id, .. } if thread_id == thread)
-}
-
-fn link_action(locator: &str) -> PullRequestAction {
-    PullRequestAction::Link {
-        thread_id: THREAD.into(),
-        locator: locator.into(),
-    }
-}
-
-fn notices(state: &WorkbenchState<DemoSource>) -> Vec<String> {
-    state
-        .transcript()
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::Notice { text } => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 // Given: a window with the service running / When: "Link PR…" links a pull request, Refresh

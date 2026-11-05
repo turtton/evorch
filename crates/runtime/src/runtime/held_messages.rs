@@ -9,6 +9,29 @@ use super::*;
 pub(crate) const AUTO_WAKE_LIMIT: u32 = 20;
 
 impl AgentRuntime {
+    /// How many messages wait for a recipient that is not running.
+    #[must_use]
+    pub fn held_message_count(&self) -> usize {
+        self.shared
+            .held_messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
+
+    /// How many automatic wakes have been spent, over every conversation.
+    #[must_use]
+    pub fn auto_wake_total(&self) -> u32 {
+        self.shared
+            .auto_wakes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .sum()
+    }
+
     /// Hold `message` for a recipient that is not running. The caller holds the
     /// runs lock, so registration cannot release the queue concurrently.
     #[cfg(test)]
@@ -348,6 +371,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_bookkeeping_readers_follow_holds_wakes_and_resets() {
+        let bus = Arc::new(EventBus::new(64));
+        let runtime = AgentRuntime::new(
+            bus.clone(),
+            Arc::new(ToolExecutor::new(bus)),
+            Arc::new(crate::escalation_review::support::ScriptedModel::new([])),
+        );
+        assert_eq!(
+            (runtime.held_message_count(), runtime.auto_wake_total()),
+            (0, 0)
+        );
+        let (root, recipient) = (RunId::new(1), RunId::new(2));
+        let message = AgentMessage {
+            message_id: "held".into(),
+            sender_run_id: root.to_string(),
+            recipient_run_id: recipient.to_string(),
+            kind: AgentMessageKind::Send,
+            content: "output".into(),
+            reply_to: None,
+        };
+        runtime.hold_message(recipient, message.clone());
+        runtime.hold_message(recipient, message);
+        assert!(runtime.take_auto_wake(root));
+        assert_eq!(
+            (runtime.held_message_count(), runtime.auto_wake_total()),
+            (2, 1)
+        );
+        runtime.release_held_messages(recipient, &RunMailbox::new());
+        runtime.reset_auto_wakes(root);
+        assert_eq!(
+            (runtime.held_message_count(), runtime.auto_wake_total()),
+            (0, 0)
+        );
     }
 
     #[tokio::test]
