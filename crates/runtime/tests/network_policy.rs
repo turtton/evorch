@@ -8,7 +8,9 @@ use std::{net::TcpListener, process::Command};
 #[test]
 #[ignore = "requires usable bwrap"]
 fn every_role_starts_with_an_isolated_process_network() {
-    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+    let workspace =
+        tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .expect("workspace");
     for role in [
         Role::Orchestrator,
         Role::Explorer,
@@ -39,7 +41,9 @@ fn every_role_starts_with_an_isolated_process_network() {
 #[test]
 #[ignore = "requires usable bwrap"]
 fn command_network_variant_connects_without_changing_the_default_sandbox() {
-    let workspace = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("workspace");
+    let workspace =
+        tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .expect("workspace");
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let sandbox = build_sandbox(
         &ExecutionPolicy::for_role(Role::Worker),

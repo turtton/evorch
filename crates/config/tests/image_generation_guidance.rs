@@ -25,7 +25,11 @@ fn ac14_overlays_guide_materials_html_discretion_and_delegation() {
 
 #[test]
 fn ac14_documented_image_chain_config_loads() {
-    let document = include_str!("../../../docs/image-generation.md");
+    let document = std::fs::read_to_string(
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../docs/image-generation.md"),
+    )
+    .expect("image generation guide");
     let toml = document
         .split("```toml\n")
         .nth(1)

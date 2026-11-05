@@ -1970,13 +1970,13 @@ fn take_back(conn: &Connection, version: u32) {
     conn.execute_batch(crate::migrations::UNDO_V46).unwrap();
     conn.execute_batch(crate::migrations::UNDO_V45).unwrap();
     conn.execute_batch(crate::migrations::UNDO_V44).unwrap();
-    conn.execute_batch(include_str!("../../../tests/support/undo_v43.sql"))
+    conn.execute_batch(include_str!("../../../undo/undo_v43.sql"))
         .unwrap();
     if version <= 41 {
         super::testing::take_lessons_back_to_v41(conn).unwrap();
     }
     if version <= 40 {
-        conn.execute_batch(include_str!("../../../tests/support/undo_v41.sql"))
+        conn.execute_batch(include_str!("../../../undo/undo_v41.sql"))
             .unwrap();
     }
     conn.pragma_update(None, "user_version", version).unwrap();

@@ -17,7 +17,7 @@ use storage::usage::{UsageRequestRecord, UsageStatus};
 use storage::{RunContextRecord, Storage, StorageConfig};
 
 fn inspect(db: &Path, args: &[&str]) -> Result<Value, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+    let output = Command::new(std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"))
         .arg("inspect")
         .arg("--db")
         .arg(db)
@@ -275,7 +275,7 @@ fn inspection_refused_by_the_lease_prints_an_error_and_no_json() {
     let maintenance = std::fs::OpenOptions::new().write(true).open(lease).unwrap();
     maintenance.try_lock().unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+    let output = Command::new(std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"))
         .arg("inspect")
         .arg("--db")
         .arg(&db)
@@ -612,7 +612,7 @@ fn blob_store(dir: &Path) -> (PathBuf, rusqlite::Connection) {
 
 /// Runs `evorch inspect` and returns its exit code with the document it printed.
 fn inspect_status(db: &Path, args: &[&str]) -> (i32, Value) {
-    let output = Command::new(env!("CARGO_BIN_EXE_evorch"))
+    let output = Command::new(std::env::var("CARGO_BIN_EXE_evorch").expect("CARGO_BIN_EXE_evorch"))
         .arg("inspect")
         .arg("--db")
         .arg(db)

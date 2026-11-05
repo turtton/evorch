@@ -366,8 +366,9 @@ fn capture_routing_settings_png_evidence() {
     harness.run();
     // When: 実 egui 描画を取得する。
     let frame = harness.capture().expect("GPU capture");
-    let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/gui-evidence/routing-settings");
+    let output =
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../target/gui-evidence/routing-settings");
     std::fs::create_dir_all(&output).expect("directory");
     frame
         .save_png(&output.join("routing-settings.png"))

@@ -31,7 +31,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 #[path = "codex_web_search/support.rs"]
 mod web_search_support;
 
-const CHAT_SSE: &str = include_str!("fixtures/codex/responses_success.sse");
+const CHAT_SSE: &str = include_str!("../fixtures/codex/responses_success.sse");
 const COMPACTION_SSE: &str = "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}}\n\n\
 data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n";
 const RESPONSES_PATH: &str = "/backend-api/codex/responses";

@@ -241,28 +241,28 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
     }
 }
 
-/// Reverts migrations v47 and v46 (see `tests/support/undo_v46.sql`); apply it before [`UNDO_V45`].
+/// Reverts migrations v47 and v46 (see `undo/undo_v46.sql`); apply it before [`UNDO_V45`].
 #[cfg(test)]
 pub(crate) const UNDO_V46: &str = concat!(
-    include_str!("../tests/support/undo_v47.sql"),
-    include_str!("../tests/support/undo_v46.sql")
+    include_str!("../undo/undo_v47.sql"),
+    include_str!("../undo/undo_v46.sql")
 );
 
-/// Reverts migration v45 (see `tests/support/undo_v45.sql`); apply it before [`UNDO_V44`].
+/// Reverts migration v45 (see `undo/undo_v45.sql`); apply it before [`UNDO_V44`].
 #[cfg(test)]
-pub(crate) const UNDO_V45: &str = include_str!("../tests/support/undo_v45.sql");
+pub(crate) const UNDO_V45: &str = include_str!("../undo/undo_v45.sql");
 
-/// Reverts migration v44 (see `tests/support/undo_v44.sql`); apply it before [`UNDO_V43`].
+/// Reverts migration v44 (see `undo/undo_v44.sql`); apply it before [`UNDO_V43`].
 #[cfg(test)]
-pub(crate) const UNDO_V44: &str = include_str!("../tests/support/undo_v44.sql");
+pub(crate) const UNDO_V44: &str = include_str!("../undo/undo_v44.sql");
 
-/// Reverts migration v43 (see `tests/support/undo_v43.sql`); apply it before [`UNDO_V40`].
+/// Reverts migration v43 (see `undo/undo_v43.sql`); apply it before [`UNDO_V40`].
 #[cfg(test)]
-pub(crate) const UNDO_V43: &str = include_str!("../tests/support/undo_v43.sql");
+pub(crate) const UNDO_V43: &str = include_str!("../undo/undo_v43.sql");
 
-/// Reverts migration v40 (see `tests/support/undo_v40.sql`); apply it before [`UNDO_V35`].
+/// Reverts migration v40 (see `undo/undo_v40.sql`); apply it before [`UNDO_V35`].
 #[cfg(test)]
-pub(crate) const UNDO_V40: &str = include_str!("../tests/support/undo_v40.sql");
+pub(crate) const UNDO_V40: &str = include_str!("../undo/undo_v40.sql");
 
 /// Reverts migration v35 on a database whose `threads` table is kept, for tests
 /// that rebuild an older schema by hand. `thread_index_runs` is not restored:

@@ -165,7 +165,7 @@ async fn compatible_cache_key_is_absent_when_streaming() {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string(include_str!("fixtures/openai/stream_text.sse")),
+                .set_body_string(include_str!("../fixtures/openai/stream_text.sse")),
         )
         .mount(&server)
         .await;

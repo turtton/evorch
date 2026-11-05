@@ -111,8 +111,10 @@ fn capture_codex_quota_png_evidence() {
         };
         assert!(harness.has_label(label));
         if let Some(frame) = gui::evidence::capture_or_skip(&mut harness) {
-            let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/gui-evidence/codex-quota");
+            let directory = std::path::Path::new(
+                &std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+            )
+            .join("../../target/gui-evidence/codex-quota");
             std::fs::create_dir_all(&directory).expect("evidence directory");
             frame
                 .save_png(&directory.join(format!("{name}.png")))

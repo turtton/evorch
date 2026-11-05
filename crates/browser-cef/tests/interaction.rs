@@ -291,7 +291,10 @@ document.getElementById("out").textContent = "confirm=" + kept + " prompt=" + na
 #[ignore = "needs the CEF runtime on LD_LIBRARY_PATH; see docs/browser.md"]
 fn the_preview_pane_handles_popups_dialogs_and_copies() {
     let runtime = CefRuntime::initialize(RuntimeConfig {
-        helper_path: PathBuf::from(env!("CARGO_BIN_EXE_evorch-cef-helper")),
+        helper_path: PathBuf::from(
+            std::env::var("CARGO_BIN_EXE_evorch-cef-helper")
+                .expect("CARGO_BIN_EXE_evorch-cef-helper"),
+        ),
         ..RuntimeConfig::offline()
     })
     .expect("CEF runtime");

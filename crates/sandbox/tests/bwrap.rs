@@ -15,7 +15,8 @@ use sandbox::{
 use tempfile::{TempDir, tempdir, tempdir_in};
 
 fn workspace() -> TempDir {
-    tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("作業領域を作成できるはずです")
+    tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .expect("作業領域を作成できるはずです")
 }
 
 fn run(wrapped: WrappedCommand) -> Output {
@@ -32,9 +33,10 @@ fn run(wrapped: WrappedCommand) -> Output {
 #[test]
 fn private_process_namespace_hides_host_root_and_cwd() {
     let workspace = workspace();
-    fs::write(
+    std::fs::copy(
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../rust-toolchain.toml"),
         workspace.path().join("rust-toolchain.toml"),
-        include_str!("../../../rust-toolchain.toml"),
     )
     .unwrap();
     fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n[package]\nname = \"evorch-private-offline-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n").unwrap();

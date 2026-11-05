@@ -920,7 +920,7 @@ impl QuickModelReviewer {
 extern crate self as runtime;
 
 #[cfg(test)]
-#[path = "../tests/support/mod.rs"]
+#[path = "../shared-test-support/mod.rs"]
 pub(crate) mod support;
 
 #[cfg(test)]

@@ -41,7 +41,8 @@ fn codex_capture_panics_when_png_save_fails() {
 fn capture_codex_auth_png_evidence() {
     // Given: an isolated scripted login and a writable review evidence directory.
     let directory =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.opencode/v04-captures");
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../.opencode/v04-captures");
     std::fs::create_dir_all(&directory).expect("Codex capture directory required");
     let (backend, tx) = ScriptedCodexAuthBackend::gated();
     let state = WorkbenchState::new(DemoSource(Vec::new()), &UiSettings::default())
@@ -141,7 +142,8 @@ fn save_codex_frame(frame: gui::headless::CapturedFrame, path: &std::path::Path)
 fn capture_modal_png_evidence() {
     // Given: a writable evidence directory and long provider fields at two viewport sizes.
     let directory =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.opencode/v04-captures");
+        std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("../../.opencode/v04-captures");
     std::fs::create_dir_all(&directory).expect("capture directory writable");
     let probe = tempfile::NamedTempFile::new_in(&directory).expect("capture write probe");
     drop(probe);

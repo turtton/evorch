@@ -99,10 +99,15 @@ fn tool_call_frames_split_arguments_by_index() {
 #[test]
 fn frames_shape_matches_fixture() {
     // Given
-    let fixture = payloads(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../providers/tests/fixtures/openai/stream_tool_call.sse"
-    )));
+    let fixture = payloads(
+        &std::fs::read_to_string(
+            std::path::Path::new(
+                &std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+            )
+            .join("../providers/fixtures/openai/stream_tool_call.sse"),
+        )
+        .expect("provider fixture"),
+    );
     let scenario = ScriptedResponse::tool_call(
         "chatcmpl-2",
         "m",

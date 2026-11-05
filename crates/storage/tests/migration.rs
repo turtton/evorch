@@ -1170,8 +1170,8 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     // lane-only v45 column before reconstructing v41, so each migration runs exactly once.
     connection
         .execute_batch(concat!(
-            include_str!("support/undo_v47.sql"),
-            include_str!("support/undo_v46.sql")
+            include_str!("../undo/undo_v47.sql"),
+            include_str!("../undo/undo_v46.sql")
         ))
         .unwrap();
     connection
@@ -1198,10 +1198,10 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
         )
         .unwrap();
     connection
-        .execute_batch(include_str!("support/undo_v44.sql"))
+        .execute_batch(include_str!("../undo/undo_v44.sql"))
         .unwrap();
     connection
-        .execute_batch(include_str!("support/undo_v43.sql"))
+        .execute_batch(include_str!("../undo/undo_v43.sql"))
         .unwrap();
     connection.pragma_update(None, "user_version", 41).unwrap();
     connection

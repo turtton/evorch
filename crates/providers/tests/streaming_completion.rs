@@ -27,7 +27,7 @@ async fn codex_streaming_preserves_reasoning_text_and_first_token() {
     let server = MockServer::start().await;
     let body = format!(
         "event: response.reasoning_summary_text.delta\ndata: {{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}}\n\n{}",
-        include_str!("fixtures/codex/responses_success.sse")
+        include_str!("../fixtures/codex/responses_success.sse")
     );
     Mock::given(method("POST"))
         .respond_with(
