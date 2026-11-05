@@ -204,6 +204,7 @@ fn may_change_attention(event: &Event) -> bool {
         EventKind::Tool(ToolEvent::UserQuestionUpdated { question }) => {
             question.responder.is_some()
         }
+        EventKind::Diagnostic(diagnostic) if diagnostic.source == "lane_monitor" => true,
         EventKind::Diagnostic(diagnostic) => diagnostic.source == "lane_delivery",
         _ => false,
     }

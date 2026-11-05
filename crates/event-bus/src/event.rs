@@ -496,8 +496,15 @@ pub mod diagnostic_codes {
     /// items as interrupted. The list stays as it was; nothing continues.
     pub const THREAD_TODO_RECONCILE_FAILED: &str = "ThreadTodoReconcileFailed";
 
+    /// A committed lane stall observation changed; re-query the ledger.
+    pub const LANE_STALL_CHANGED: &str = "lane_stall_changed";
+    /// A nudge input receipt committed; re-query the lane state.
+    pub const LANE_NUDGE_ACCEPTED: &str = "lane_nudge_accepted";
+
     /// Every code above.
     pub const ALL: &[&str] = &[
+        LANE_STALL_CHANGED,
+        LANE_NUDGE_ACCEPTED,
         BUDGET_WARNING,
         BUDGET_EXHAUSTED,
         NO_PROGRESS,

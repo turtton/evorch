@@ -388,3 +388,58 @@ fn a_choice_waits_for_the_read_after_an_overtaking_event_and_runs_if_it_still_ho
             if continuation.thread_id == "thread"
     ));
 }
+
+#[test]
+fn monitor_hints_refresh_stall_creation_nudge_changes_and_resolution_from_the_reader() {
+    use workbench_protocol::lane_attention::{
+        LaneEpisodeId, LaneNudgeState, LaneStallClassification,
+    };
+    let (mut workbench, reader, _dir) = workbench();
+    settle(&mut workbench);
+    assert!(workbench.lane_attention().items().is_empty());
+    let hint = || {
+        Event::new(event_bus::DiagnosticEvent {
+            source: "lane_monitor".into(),
+            severity: event_bus::DiagnosticSeverity::Info,
+            code: event_bus::event::diagnostic_codes::LANE_STALL_CHANGED.into(),
+            detail: "re-query the ledger".into(),
+            run_id: Some("lane-root".into()),
+            thread_id: Some("lane-thread-1".into()),
+            call_id: None,
+        })
+    };
+    for (revision, nudge) in [
+        (1, LaneNudgeState::Pending),
+        (2, LaneNudgeState::Accepted),
+        (3, LaneNudgeState::Failed),
+    ] {
+        let mut next = item(revision);
+        next.kind = LaneAttentionKind::Stall {
+            episode: LaneEpisodeId::new("episode").unwrap(),
+            classification: LaneStallClassification::NoReport,
+            nudge,
+        };
+        reader.set(vec![next.clone()]);
+        let reads = reader.reads();
+        workbench.note_attention_event(&hint());
+        settle(&mut workbench);
+        assert_eq!(reader.reads(), reads + 1);
+        assert_eq!(workbench.lane_attention().items(), vec![&next]);
+        assert!(
+            workbench.issued().is_empty(),
+            "nudge is display-only, not an operation"
+        );
+    }
+    reader.set(vec![]);
+    let reads = reader.reads();
+    workbench.note_attention_event(&hint());
+    settle(&mut workbench);
+    assert_eq!(reader.reads(), reads + 1);
+    assert!(workbench.lane_attention().items().is_empty());
+    settle(&mut workbench);
+    assert_eq!(
+        reader.reads(),
+        reads + 1,
+        "GUI frames do not create polling"
+    );
+}

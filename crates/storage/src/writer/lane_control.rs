@@ -116,3 +116,17 @@ impl StorageHandle {
         self.lane_job(false, move |c| ledger::attention(c, filter, cursor, limit))
     }
 }
+
+impl StorageHandle {
+    /// Owned observation CAS; no new episode or renewed nudge allowance.
+    pub fn reclassify_lane_stall(
+        &self,
+        request: ObserveLaneStall,
+        episode_id: String,
+        expected_revision: u64,
+    ) -> Result<LaneStallEpisode, StorageError> {
+        self.lane_job(true, move |c| {
+            ledger::reclassify_stall(c, request, &episode_id, expected_revision)
+        })
+    }
+}

@@ -150,6 +150,8 @@ pub struct SpawnCredits {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LanePresentation {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) nudge_episode_ids: Vec<String>,
     fingerprint: String,
     lanes: Vec<String>,
 }
@@ -301,6 +303,7 @@ impl BudgetCounters {
         self.spawn_credits
             .lane_presentations
             .push(LanePresentation {
+                nudge_episode_ids: Vec::new(),
                 fingerprint: format!("{:x}", Sha256::digest(text)),
                 lanes,
             });

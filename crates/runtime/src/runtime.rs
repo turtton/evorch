@@ -318,6 +318,11 @@ struct SentRecord {
 }
 
 impl AgentRuntime {
+    pub(crate) fn lane_compaction_busy(&self, run: RunId) -> bool {
+        lock_runs(&self.shared.runs)
+            .get(&run)
+            .is_some_and(|entry| entry.compaction_busy.load(Ordering::Acquire))
+    }
     pub(crate) fn review_error(run_id: RunId, reason: impl ToString) -> RuntimeError {
         RuntimeError::ReviewEvidence {
             run_id: run_id.to_string(),
