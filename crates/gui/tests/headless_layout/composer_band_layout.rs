@@ -93,6 +93,8 @@ fn harness(size: egui::Vec2, input: &str) -> Harness<'static, State> {
                     },
                     sandbox_picker: Default::default(),
                     branch: None,
+                    pull_request: None,
+                    pull_request_chips: None,
                 },
                 &mut state.0,
                 &mut state.1,

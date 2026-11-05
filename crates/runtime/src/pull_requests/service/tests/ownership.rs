@@ -227,3 +227,123 @@ async fn a_decision_needs_the_lease_of_its_own_thread() {
     assert!(matches!(fenced, Err(PullRequestError::NotOwner)));
     assert!(process.state("t1").active_link.is_none());
 }
+
+/// A candidate the thread was offered.
+fn offered(process: &Process, number: u64) -> storage::pull_requests::PullRequestCandidate {
+    process
+        .storage_handle
+        .present_pull_request_candidate(storage::pull_requests::NewPullRequestCandidate {
+            thread_id: "t1".into(),
+            key: key(number),
+            source_run_id: "run".into(),
+            source_call_id: "call".into(),
+            at_ns: 1,
+        })
+        .unwrap()
+        .candidate
+}
+
+fn candidate_state(process: &Process, id: u64) -> storage::pull_requests::CandidateState {
+    process
+        .storage_handle
+        .pull_request_candidates("t1", None)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.candidate_id == id)
+        .unwrap()
+        .state
+}
+
+// Given: a permit that was checked, and a lease handed to another process after that check and
+// before the write takes the registry guard / When: the candidate is ignored / Then: the write
+// is refused, the candidate stays undecided and nothing is published
+#[tokio::test(start_paused = true)]
+async fn ignoring_a_candidate_after_the_lease_moved_writes_and_publishes_nothing() {
+    let world = World::new();
+    let mut first = world.process(enabled());
+    let second = world.process(enabled());
+    let permit = first.permit("t1");
+    let candidate = offered(&first, 1);
+    let (host, other, held) = (first.host.clone(), second.host.clone(), permit.clone());
+    first.at_stage(Stage::Guarded, move || {
+        host.handoff(&held, &other).unwrap();
+    });
+
+    let result = first
+        .service
+        .dismiss_candidate("t1", candidate.candidate_id, &permit)
+        .await;
+
+    assert!(
+        matches!(result, Err(PullRequestError::NotOwner)),
+        "{result:?}"
+    );
+    assert_eq!(
+        candidate_state(&first, candidate.candidate_id),
+        storage::pull_requests::CandidateState::Presented
+    );
+    assert!(first.quiet_events().await.is_empty());
+}
+
+// Given: the same move of the lease during a confirmation / Then: no link, no decision and no
+// event: the decision's own event is published under the guard too
+#[tokio::test(start_paused = true)]
+async fn confirming_a_candidate_after_the_lease_moved_links_and_publishes_nothing() {
+    let world = World::new();
+    let mut first = world.process(enabled());
+    let second = world.process(enabled());
+    let permit = first.permit("t1");
+    let candidate = offered(&first, 1);
+    let (host, other, held) = (first.host.clone(), second.host.clone(), permit.clone());
+    first.at_stage(Stage::Guarded, move || {
+        host.handoff(&held, &other).unwrap();
+    });
+
+    let result = first
+        .service
+        .confirm_candidate("t1", candidate.candidate_id, 0, &permit)
+        .await;
+
+    assert!(
+        matches!(result, Err(PullRequestError::NotOwner)),
+        "{result:?}"
+    );
+    assert!(first.state("t1").active_link.is_none());
+    assert_eq!(
+        candidate_state(&first, candidate.candidate_id),
+        storage::pull_requests::CandidateState::Presented
+    );
+    assert!(first.quiet_events().await.is_empty());
+}
+
+// Given: the lease still held / When: a candidate is ignored / Then: it is decided and the event
+// follows the write
+#[tokio::test(start_paused = true)]
+async fn ignoring_a_candidate_while_holding_the_lease_decides_and_announces_it() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    let permit = process.permit("t1");
+    let candidate = offered(&process, 1);
+
+    process
+        .service
+        .dismiss_candidate("t1", candidate.candidate_id, &permit)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        candidate_state(&process, candidate.candidate_id),
+        storage::pull_requests::CandidateState::Dismissed
+    );
+    let events = process.quiet_events().await;
+    assert!(
+        matches!(
+            events.as_slice(),
+            [PullRequestEvent::CandidateChanged {
+                state: event_bus::PullRequestCandidateState::Dismissed,
+                ..
+            }]
+        ),
+        "{events:?}"
+    );
+}

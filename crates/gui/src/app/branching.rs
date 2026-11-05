@@ -246,6 +246,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             Ok(())
         })
         .map_err(WorkbenchError::sidebar_busy)?;
+        // The branch may take the source's open pull request; pinned now, before any run.
+        self.inherit_pull_request_link(source, &id, kind);
         self.transcripts.insert_thread(&id.to_string(), transcript);
         self.switch_thread(id.clone())?;
         self.save_sidebar();

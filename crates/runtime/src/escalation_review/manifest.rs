@@ -136,6 +136,11 @@ pub struct ReviewedContext {
     pub user_request_parts: usize,
     pub project_rules: Option<RulesEntry>,
     pub loaded_skills: Vec<SkillEntry>,
+    /// The `harness_facts` item as sent, by hash and size. Absent when the payload had none.
+    /// The digest covers the value of `context.harness_facts` in the payload (compact JSON,
+    /// keys as the payload text has them), so it can be recomputed from the payload alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_facts: Option<Digest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +421,11 @@ impl ReviewContext {
                 .iter()
                 .map(super::LoadedSkillView::manifest_entry)
                 .collect(),
+            harness_facts: self.harness_facts.as_ref().map(|facts| {
+                // Through `Value` like the payload itself, so the text is the one that was sent.
+                let value = serde_json::to_value(facts).unwrap_or_default();
+                Digest::of(&value.to_string())
+            }),
         }
     }
 }

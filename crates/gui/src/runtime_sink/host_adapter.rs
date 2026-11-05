@@ -106,6 +106,14 @@ pub(super) fn host_command(command: WorkbenchCommand) -> HostCommand {
         WorkbenchCommand::ResumeLaneDeliveries { thread_id } => {
             HostCommand::ResumeLaneDeliveries { thread_id }
         }
+        WorkbenchCommand::LinkPullRequest { .. }
+        | WorkbenchCommand::UnlinkPullRequest { .. }
+        | WorkbenchCommand::RefreshPullRequest { .. }
+        | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
+        | WorkbenchCommand::DismissPullRequestCandidate { .. }
+        | WorkbenchCommand::InheritPullRequest { .. } => {
+            unreachable!("pull request operations are routed by the sink, not the host")
+        }
     }
 }
 

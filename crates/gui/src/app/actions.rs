@@ -656,6 +656,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 tracing::warn!(%reason, "goal loop command rejected");
                 self.push_reason_notice("", &reason);
             }
+            LoopEvent::PullRequestRejected { thread_id, reason } => {
+                self.show_pull_request_rejection(&thread_id, &reason);
+            }
         }
     }
 

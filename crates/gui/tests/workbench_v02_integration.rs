@@ -554,7 +554,13 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::ResumeLaneDeliveries { .. }
             | WorkbenchCommand::DecideToolApproval { .. }
             | WorkbenchCommand::AnswerUserQuestion { .. }
-            | WorkbenchCommand::SetWebToolsEnabled { .. } => None,
+            | WorkbenchCommand::SetWebToolsEnabled { .. }
+            | WorkbenchCommand::LinkPullRequest { .. }
+            | WorkbenchCommand::UnlinkPullRequest { .. }
+            | WorkbenchCommand::RefreshPullRequest { .. }
+            | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
+            | WorkbenchCommand::DismissPullRequestCandidate { .. }
+            | WorkbenchCommand::InheritPullRequest { .. } => None,
         })
         .collect();
     assert_eq!(submissions.len(), 1, "expected exactly one SubmitGoal");

@@ -37,6 +37,14 @@ pub enum NotificationKind {
         /// Every evaluation produced a report.
         all_reported: bool,
     },
+    /// The checks of the thread's pull request finished and some failed.
+    PullRequestChecksFailed {
+        thread_id: ThreadId,
+    },
+    /// The thread's pull request was merged.
+    PullRequestMerged {
+        thread_id: ThreadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +173,8 @@ impl NotificationsModel {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
             NotificationKind::RunStopped => ThreadRunPhase::Stopped,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
+            NotificationKind::PullRequestChecksFailed { .. } => ThreadRunPhase::Waiting,
+            NotificationKind::PullRequestMerged { .. } => ThreadRunPhase::Done,
             NotificationKind::QuestionPending { .. }
             | NotificationKind::ApprovalPending { .. }
             | NotificationKind::RetentionDisabled { .. }
@@ -176,6 +186,16 @@ impl NotificationsModel {
             } => ThreadRunPhase::Waiting,
         };
         self.push(kind, run_id, summary, phase);
+    }
+
+    /// Adds the notification of a pull request transition. The caller has already established
+    /// that it is this process's own to raise and that it is new (ADR 0043).
+    pub fn push_pull_request(&mut self, kind: NotificationKind, summary: String) {
+        let phase = match kind {
+            NotificationKind::PullRequestMerged { .. } => ThreadRunPhase::Done,
+            _ => ThreadRunPhase::Waiting,
+        };
+        self.push(kind, None, summary, phase);
     }
 
     /// Adds a notice about stored events that could not be read and belong to

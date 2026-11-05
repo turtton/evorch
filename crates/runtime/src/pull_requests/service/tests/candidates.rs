@@ -188,7 +188,7 @@ async fn decided_candidates_are_never_offered_again() {
 
     process
         .service
-        .dismiss_candidate("t1", by_number(&process, 1).candidate_id)
+        .dismiss_candidate("t1", by_number(&process, 1).candidate_id, &permit)
         .await
         .unwrap();
     let revision = process.state("t1").lifecycle_revision;
@@ -288,9 +288,10 @@ async fn a_full_thread_keeps_its_decisions_and_takes_no_new_candidate() {
     }
     process.quiet_events().await;
     assert_eq!(presented(&process).len(), 64);
+    let permit = process.permit("t1");
     process
         .service
-        .dismiss_candidate("t1", by_number(&process, 1).candidate_id)
+        .dismiss_candidate("t1", by_number(&process, 1).candidate_id, &permit)
         .await
         .unwrap();
     process.quiet_events().await;

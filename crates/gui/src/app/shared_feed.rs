@@ -316,6 +316,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             EventKind::Ownership(ownership) => {
                 self.ownership_status.invalidate();
                 self.external_work.invalidate();
+                self.invalidate_pull_request_tracking(&ownership.thread_id);
                 if matches!(
                     ownership.action,
                     event_bus::OwnershipAction::Released | event_bus::OwnershipAction::Handoff
@@ -323,6 +324,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     self.settle_released_thread(&ownership.thread_id);
                 }
             }
+            // Display only: read the stored snapshot again. Nothing is republished, fetched or
+            // notified for another process's change.
+            EventKind::PullRequest(_) => self.apply_shared_pull_request_event(event),
             _ => {}
         }
         self.telemetry.apply_event(event);

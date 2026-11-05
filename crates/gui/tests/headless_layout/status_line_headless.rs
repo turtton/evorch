@@ -60,6 +60,8 @@ fn harness(phase: Option<ThreadRunPhase>) -> Harness<'static> {
                     phase,
                     sandbox_picker: Default::default(),
                     branch: None,
+                    pull_request: None,
+                    pull_request_chips: None,
                     model_picker: gui::panes::model_picker::ModelPickerContext {
                         profiles: &[],
                         preference: None,

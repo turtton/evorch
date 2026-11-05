@@ -783,3 +783,54 @@ pub enum InheritanceResolution {
     /// No inheritance was scheduled for the thread.
     Missing,
 }
+
+/// Read-only access for a display that follows the shared database (ADR 0043 GUI). The
+/// writes and the tracking itself stay with the single writer; these only read what it
+/// committed, on the caller's own connection.
+impl crate::Database {
+    /// The lifecycle of a thread's pull request in one read.
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid thread ID.
+    pub fn pull_request_thread_state(
+        &self,
+        thread_id: &str,
+    ) -> Result<ThreadPullRequestState, StorageError> {
+        crate::repo::pull_requests::thread_state(&self.conn, thread_id)
+    }
+
+    /// The shared snapshot of a pull request, if any fetch was ever started for it.
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid key.
+    pub fn pull_request_snapshot(
+        &self,
+        key: &PullRequestKey,
+    ) -> Result<Option<PullRequestSnapshot>, StorageError> {
+        crate::repo::pull_requests::snapshots::get(&self.conn, key)
+    }
+
+    /// The thread's candidates, oldest first, optionally of one state.
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid thread ID.
+    pub fn pull_request_candidates(
+        &self,
+        thread_id: &str,
+        state: Option<CandidateState>,
+    ) -> Result<Vec<PullRequestCandidate>, StorageError> {
+        crate::repo::pull_requests::candidates(&self.conn, thread_id, state)
+    }
+
+    /// Active links of live, unarchived threads in link ID order after `after_link_id`.
+    ///
+    /// # Errors
+    /// SQLite failure.
+    pub fn active_pull_request_links(
+        &self,
+        after_link_id: u64,
+        limit: usize,
+    ) -> Result<Vec<PullRequestLink>, StorageError> {
+        crate::repo::pull_requests::active_links(&self.conn, after_link_id, limit)
+    }
+}

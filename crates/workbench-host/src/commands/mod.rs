@@ -374,6 +374,19 @@ impl CommandService {
         self.poll_compactions()
     }
 
+    /// The permit for `thread` (none without an ownership host or a thread): the same
+    /// lookup every command starts with, for the desktop operations that are not host
+    /// commands.
+    pub fn permit_for_thread(
+        &self,
+        thread: Option<&str>,
+    ) -> Result<Option<runtime::ownership::OwnerPermit>, runtime::ownership::RegistryError> {
+        let Some(host) = &self.ownership else {
+            return Ok(None);
+        };
+        thread.map(|thread| host.owned_permit(thread)).transpose()
+    }
+
     /// The ownership permit `command` needs.
     ///
     /// With an ownership host configured, a command that targets a thread needs
@@ -384,13 +397,7 @@ impl CommandService {
         &self,
         command: &HostCommand,
     ) -> Result<Option<runtime::ownership::OwnerPermit>, HostEvent> {
-        let Some(host) = &self.ownership else {
-            return Ok(None);
-        };
-        command
-            .thread()
-            .map(|thread| host.owned_permit(thread))
-            .transpose()
+        self.permit_for_thread(command.thread())
             .map_err(|error| HostEvent::rejected(RejectKind::Fenced, error.to_string()))
     }
 

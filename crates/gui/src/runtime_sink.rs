@@ -21,6 +21,7 @@ use crate::model::commands::{CommandSink, GoalSubmission, LoopEvent, WorkbenchCo
 
 mod host_adapter;
 mod lane_host;
+mod pull_requests;
 pub use lane_host::GuiLaneDeliveryHost;
 
 /// Prefix of the stream ids GUI processes persist their events under.
@@ -57,6 +58,8 @@ pub struct RuntimeCommandSink {
     /// Attached to every command this window issues.
     provenance: Provenance,
     search_jobs: crate::model::latest_job::LatestJob<SearchJob>,
+    /// Pull request operations that run on the Tokio runtime and their refusals.
+    pull_request_jobs: pull_requests::Jobs,
 }
 
 /// Reply channel, project, query, result limit and continuation cursor of a thread search.
@@ -79,6 +82,7 @@ impl RuntimeCommandSink {
             host: CommandHost::new(CommandService::new(runtime, handle)),
             provenance: workbench_host::provenance::local_desktop(),
             search_jobs: crate::model::latest_job::LatestJob::default(),
+            pull_request_jobs: pull_requests::Jobs::default(),
         }
     }
 
@@ -133,16 +137,23 @@ impl RuntimeCommandSink {
 
 impl CommandSink for RuntimeCommandSink {
     fn poll(&mut self) -> Vec<LoopEvent> {
-        self.host
+        let mut events: Vec<LoopEvent> = self
+            .host
             .service_mut()
             .poll()
             .into_iter()
             .map(host_adapter::loop_event)
-            .collect()
+            .collect();
+        events.extend(self.pull_request_jobs.poll());
+        events
     }
 
     fn has_background_work(&self) -> bool {
-        self.host.service().has_background_work()
+        self.host.service().has_background_work() || self.pull_request_jobs.busy()
+    }
+
+    fn pull_requests_enabled(&self) -> bool {
+        self.pull_requests_on()
     }
 
     fn has_host_input_receipts(&self) -> bool {
@@ -349,6 +360,19 @@ impl CommandSink for RuntimeCommandSink {
     }
 
     fn submit(&mut self, command: WorkbenchCommand) -> Vec<LoopEvent> {
+        if command.is_pull_request() {
+            // Pull request operations are not host commands: they act through the runtime's
+            // pull request service, but still under the thread's ownership permit.
+            let permit = match self.host.service().permit_for_thread(command.thread()) {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return vec![LoopEvent::CommandRejected {
+                        reason: error.to_string(),
+                    }];
+                }
+            };
+            return self.pull_request_command(command, permit);
+        }
         self.host
             .submit_local(host_adapter::host_command(command), &self.provenance)
             .into_iter()
