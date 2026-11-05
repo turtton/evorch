@@ -14,7 +14,11 @@ use crate::panes::{
 };
 
 impl<S: AgentRunSource> WorkbenchState<S> {
-    fn open_notification_thread(&mut self, ctx: &egui::Context, thread_id: workspace_ui::ThreadId) {
+    pub(super) fn open_notification_thread(
+        &mut self,
+        ctx: &egui::Context,
+        thread_id: workspace_ui::ThreadId,
+    ) {
         let result = self.switch_thread(thread_id);
         if result.is_ok() {
             self.return_to_thread();
@@ -110,6 +114,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let mut agents_action = None;
         let mut tasks_action = None;
         let mut notifications_action = None;
+        let mut lane_attention_action = None;
         let mut request_action = None;
         let mut lane_action = None;
         let mut pull_request_action = None;
@@ -160,6 +165,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 question_drafts: &mut self.question_drafts,
                 notifications: &mut self.notifications,
                 notifications_action: &mut notifications_action,
+                lane_attention: &self.attention.board,
+                lane_attention_action: &mut lane_attention_action,
                 attention_acks: &mut self.attention_acks,
                 memory: &mut self.memory,
                 self_improvement: &mut self.self_improvement,
@@ -292,6 +299,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
                 NotificationsAction::OpenEvaluations => self.open_evaluations_tab(),
             }
+        }
+        if let Some(action) = lane_attention_action {
+            self.apply_attention_action(&ctx, action);
         }
         if let Some(action) = lane_action {
             self.apply_lane_action(action);

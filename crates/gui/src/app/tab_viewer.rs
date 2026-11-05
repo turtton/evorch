@@ -46,6 +46,8 @@ pub(super) struct WorkbenchTabViewer<'a, S> {
     pub(super) question_drafts: &'a mut BTreeMap<String, String>,
     pub(super) notifications: &'a mut NotificationsModel,
     pub(super) notifications_action: &'a mut Option<NotificationsAction>,
+    pub(super) lane_attention: &'a crate::model::lane_attention::AttentionBoard,
+    pub(super) lane_attention_action: &'a mut Option<crate::model::lane_attention::AttentionAction>,
     pub(super) attention_acks: &'a mut BTreeMap<(PanelId, String), AttentionAck>,
     pub(super) usage: &'a mut crate::panes::usage::UsagePane,
     pub(super) context_inspector: &'a mut crate::panes::context_inspector::ContextInspectorPane,
@@ -357,6 +359,23 @@ impl<S: AgentRunSource> TabViewer for WorkbenchTabViewer<'_, S> {
             }
             PanelKind::Notifications => {
                 let focused = ui.input(|input| input.viewport().focused);
+                let rows = crate::model::lane_attention::rows(
+                    self.lane_attention,
+                    &self.sidebar.threads,
+                    self.user_questions,
+                );
+                let attention = crate::panes::lane_attention::lane_attention_section(
+                    ui,
+                    self.lane_attention,
+                    &rows,
+                    self.question_drafts,
+                );
+                if let Some(action) = attention.action {
+                    *self.lane_attention_action = Some(action);
+                }
+                if let Some(request) = attention.request {
+                    *self.request_action = Some(request);
+                }
                 if let Some(action) = notifications_pane(ui, self.notifications, focused) {
                     *self.notifications_action = Some(action);
                 }

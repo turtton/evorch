@@ -248,6 +248,11 @@ impl Default for LaneState {
 }
 
 impl LaneState {
+    /// How a ledger read runs off the UI thread and wakes the UI afterwards.
+    pub(super) fn runner(&self) -> (Spawner, Arc<dyn Fn() + Send + Sync>) {
+        (Arc::clone(&self.spawner), Arc::clone(&self.waker))
+    }
+
     /// Remembers the newest root of a thread the sidebar lacks, the oldest threads going
     /// first once too many are waiting. A lane that lost its root this way gets it from
     /// the ledger read.
@@ -354,11 +359,14 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             self.lanes.waker = Arc::new(move || ctx.request_repaint());
             self.lanes.waker_installed = true;
         }
+        let focused = ctx.input(|input| input.viewport().focused);
+        self.observe_attention_focus(focused);
         self.pump_lanes()
     }
 
     /// [`Self::poll_lanes`] without an egui context: what a headless host calls once per tick.
     pub fn pump_lanes(&mut self) -> bool {
+        self.pump_attention();
         if self.lanes.reader.is_none() {
             return false;
         }

@@ -2936,6 +2936,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+ "workbench-protocol",
  "workspace-ui",
 ]
 
