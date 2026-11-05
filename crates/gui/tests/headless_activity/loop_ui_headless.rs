@@ -79,6 +79,7 @@ fn submit_goal_issues_typed_command_once_with_references_and_constraints() {
             | WorkbenchCommand::StopChat { .. }
             | WorkbenchCommand::StopRun { .. }
             | WorkbenchCommand::DeliverFollowUpsNextTurn { .. }
+            | WorkbenchCommand::ResumeLaneDeliveries { .. }
             | WorkbenchCommand::SetGoalReview { .. }
             | WorkbenchCommand::SetGoalChecksPaused { .. }
             | WorkbenchCommand::DecideToolApproval { .. }

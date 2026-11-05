@@ -11,6 +11,7 @@ mod encrypted_reasoning_cache;
 mod hosted_search_cache;
 mod image_generation_cache;
 mod lane_cache;
+mod procedure_boundary_cache;
 #[path = "read_alias_cache/mod.rs"]
 mod read_alias_cache;
 #[path = "run_js_cache/mod.rs"]
@@ -3339,7 +3340,7 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
         vec![
             todo_response(
                 "handoff-procedure",
-                json!([{"content":"Verify the delegated findings","status":"pending"}]),
+                json!([{"content":"Verify the delegated findings","status":"in_progress"}]),
             ),
             note_response("handoff-note", "Frozen handoff finding"),
             read_response(0),
@@ -3400,6 +3401,20 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
     assert!(harness.runtime.thread_goal("procedure-handoff").is_none());
     let child = event_bus::escalation_thread_id(&recipient.to_string());
     let current = harness.runtime.thread_todo(&child).unwrap();
+    // A successful escalation moves the list as written: the source's end of
+    // work marks nothing and publishes no update for the old thread. Only the
+    // new root's own end of work marks the moved list, afterwards.
+    assert_eq!(current.revision, 3);
+    assert_eq!(
+        current.items[0].status,
+        event_bus::ThreadTodoStatus::Interrupted
+    );
+    assert!(events.iter().all(|event| !matches!(
+        &event.kind,
+        EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadTodoUpdated { snapshot })
+            if snapshot.thread_id == "procedure-handoff"
+                && snapshot.items.iter().any(|item| item.status == event_bus::ThreadTodoStatus::Interrupted)
+    )));
     let requests = harness
         .mock
         .recorded_requests()
@@ -3427,7 +3442,13 @@ async fn procedure_and_note_handoff_present_current_state_then_reuse_each_roots_
     assert_eq!(harness.mock.remaining_scripts(), 0);
     let inherited = wire_todo_snapshots(&requests[4]);
     assert_eq!(inherited.len(), 1);
-    assert_eq!(inherited[0].1, current);
+    assert_eq!(inherited[0].1.thread_id, child);
+    assert_eq!(inherited[0].1.revision, 2);
+    assert_eq!(
+        inherited[0].1.items[0].status,
+        event_bus::ThreadTodoStatus::InProgress
+    );
+    assert_eq!(inherited[0].1.items[0].content, current.items[0].content);
     let inherited_notes = wire_working_notes(&requests[4]);
     assert_eq!(inherited_notes.len(), 1);
     assert_eq!(inherited_notes[0]["body"], "Frozen handoff finding");

@@ -1182,6 +1182,75 @@ fn old_notification_keys_stay_claimed_when_the_exact_list_is_trimmed() {
 }
 
 #[test]
+fn a_child_is_pinned_to_the_parents_link_as_read_in_the_same_transaction() {
+    let f = Fixture::new();
+    let h = f.handle();
+
+    // A parent without a link has nothing to pin, and nothing is stored.
+    assert!(
+        h.pin_pull_request_inheritance("child-0", "parent", 5)
+            .unwrap()
+            .is_none()
+    );
+    assert!(h.pull_request_inheritance("child-0").unwrap().is_none());
+
+    // The parent's current link is pinned; a repeat answers with the first row; a later relink
+    // of the parent does not move it.
+    let first = link(&h, "parent", 1, 0);
+    let pinned = h
+        .pin_pull_request_inheritance("child-0", "parent", 6)
+        .unwrap()
+        .unwrap();
+    link(&h, "parent", 2, first.lifecycle_revision);
+    let again = h
+        .pin_pull_request_inheritance("child-0", "parent", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pinned.parent_link_id, first.link.link_id);
+    assert_eq!(pinned, again);
+    let second = h
+        .pin_pull_request_inheritance("child-1", "parent", 8)
+        .unwrap()
+        .unwrap();
+    assert_ne!(second.parent_link_id, first.link.link_id);
+    assert_eq!(second.key, key(2));
+}
+
+#[test]
+fn a_parent_that_relinks_while_children_are_pinned_never_loses_the_inheritance() {
+    let f = Fixture::new();
+    let h = f.handle();
+    link(&h, "parent", 1, 0);
+    let relinking = {
+        let h = h.clone();
+        std::thread::spawn(move || {
+            for number in 2..=80_u64 {
+                let revision = h
+                    .pull_request_thread_state("parent")
+                    .unwrap()
+                    .lifecycle_revision;
+                link(&h, "parent", number, revision);
+            }
+        })
+    };
+
+    // Reading the link and storing the row in two steps loses the inheritance when the parent
+    // relinks in between (the link read has ended by the time it is stored). One transaction pins
+    // the old link or the new one, so every call is answered.
+    for index in 0..300_i64 {
+        let child = format!("child-{index}");
+        let row = h
+            .pin_pull_request_inheritance(&child, "parent", index)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "{child} was not pinned although the parent was linked"
+        );
+    }
+    relinking.join().unwrap();
+}
+
+#[test]
 fn the_local_head_belongs_to_the_link_revision_it_was_observed_under() {
     let f = Fixture::new();
     let h = f.handle();
@@ -1239,6 +1308,38 @@ fn the_local_head_belongs_to_the_link_revision_it_was_observed_under() {
     assert!(
         h.record_pull_request_local_head("t1", 2, "xyz", 61)
             .is_err()
+    );
+}
+
+#[test]
+fn a_local_head_can_be_forgotten_for_its_link_revision() {
+    let f = Fixture::new();
+    let h = f.handle();
+    let revision = link(&h, "t1", 1, 0).link.link_revision;
+    assert!(
+        !h.clear_pull_request_local_head("t1", revision).unwrap(),
+        "nothing stored, nothing cleared"
+    );
+    h.record_pull_request_local_head("t1", revision, &sha('c'), 50)
+        .unwrap();
+
+    assert!(h.clear_pull_request_local_head("t1", revision).unwrap());
+
+    assert!(
+        h.pull_request_thread_state("t1")
+            .unwrap()
+            .local_head
+            .is_none()
+    );
+    // A later observation can be stored again, and a stale revision cannot clear anything.
+    assert!(
+        h.record_pull_request_local_head("t1", revision, &sha('d'), 51)
+            .unwrap()
+    );
+    link(&h, "t1", 2, 1);
+    assert_eq!(
+        rejection(&h.clear_pull_request_local_head("t1", revision).unwrap_err()),
+        &PullRequestRejection::LinkNotActive
     );
 }
 
@@ -1301,7 +1402,7 @@ fn candidates_are_presented_once_and_decided_by_a_person() {
 }
 
 #[test]
-fn undecided_candidates_are_limited_and_decided_ones_make_room() {
+fn a_full_thread_refuses_new_candidates_and_forgets_no_decision() {
     let f = Fixture::new();
     let h = f.handle();
     let present = |number: u64| {
@@ -1320,15 +1421,18 @@ fn undecided_candidates_are_limited_and_decided_ones_make_room() {
     let error = present(max + 1).unwrap_err();
     assert_eq!(rejection(&error), &PullRequestRejection::CandidateLimit);
 
+    // A decided candidate is the memory of the decision: it does not make room, so the
+    // same pull request is never offered again after it.
     let first = h.pull_request_candidates("t1", None).unwrap()[0].candidate_id;
     h.dismiss_pull_request_candidate("t1", first, 500).unwrap();
-    present(max + 1).unwrap();
+    let error = present(max + 1).unwrap_err();
+    assert_eq!(rejection(&error), &PullRequestRejection::CandidateLimit);
     let all = h.pull_request_candidates("t1", None).unwrap();
     assert_eq!(all.len(), PULL_REQUEST_CANDIDATES_MAX);
-    assert!(
-        all.iter().all(|c| c.candidate_id != first),
-        "the decided one made room"
-    );
+    let kept = all.iter().find(|c| c.candidate_id == first).unwrap();
+    assert_eq!(kept.state, CandidateState::Dismissed);
+    let again = present(1).unwrap();
+    assert!(!again.created, "an existing candidate is still answered");
 }
 
 #[test]

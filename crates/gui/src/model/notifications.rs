@@ -158,7 +158,8 @@ impl NotificationsModel {
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_) => return,
+            | EventKind::Ownership(_)
+            | EventKind::PullRequest(_) => return,
         };
         let phase = match &kind {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
@@ -296,6 +297,30 @@ mod tests {
         let mut model = NotificationsModel::default();
         model.apply_event(&transition(AgentRunPhase::Done, None), |_| None);
         model
+    }
+
+    // Given: a pull request change that gives reason for a notification / When: the model sees it
+    // / Then: no notification is raised here (the pull request surfaces own that, ADR 0043)
+    #[test]
+    fn a_pull_request_change_raises_no_notification_in_this_model() {
+        let mut model = NotificationsModel::default();
+        let event = Event::new(event_bus::PullRequestEvent::Changed {
+            thread_id: "thread".into(),
+            link_revision: 1,
+            transition_seq: 1,
+            pull_request: event_bus::PullRequestRef {
+                provider: "github".into(),
+                host: "github.com".into(),
+                repository: "turtton/evorch".into(),
+                number: 7,
+            },
+            fields: vec![event_bus::PullRequestChangedField::Checks],
+            notifications: vec!["checks_failed".into()],
+        });
+
+        model.apply_event(&event, |_| None);
+
+        assert!(model.items().next().is_none());
     }
 
     #[test]

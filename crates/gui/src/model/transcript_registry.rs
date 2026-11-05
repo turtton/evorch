@@ -181,6 +181,8 @@ impl TranscriptRegistry {
             ) => self.route_run(run_id),
             EventKind::Tool(ToolEvent::ArtifactsPresented { run_id, .. }) => self.route_run(run_id),
             EventKind::Ownership(_) => vec![TranscriptKey::Thread],
+            // A pull request change is not a transcript entry: no transcript receives it.
+            EventKind::PullRequest(_) => Vec::new(),
             EventKind::Ledger(event_bus::LedgerEvent::RunLedgerAppended { run_id, .. }) => {
                 vec![TranscriptKey::Run(run_id.clone())]
             }
@@ -366,7 +368,8 @@ impl TranscriptRegistry {
             | EventKind::Compaction(_)
             | EventKind::Orchestrator(_)
             | EventKind::Diagnostic(_)
-            | EventKind::Ownership(_) => {}
+            | EventKind::Ownership(_)
+            | EventKind::PullRequest(_) => {}
         }
 
         if let EventKind::Tool(ToolEvent::ToolStarted {
@@ -421,6 +424,7 @@ impl TranscriptRegistry {
             | EventKind::Fault(_)
             | EventKind::AgentMessage(_)
             | EventKind::Compaction(_)
+            | EventKind::PullRequest(_)
             | EventKind::Orchestrator(_) => None,
         };
         let owner = explicit_thread
@@ -813,6 +817,34 @@ mod tests {
         MessageEvent, ToolEvent,
     };
     use event_bus::{AgentRunPhase, LifecycleEvent};
+
+    // Given: a pull request change for a thread whose transcript is selected / When: it is
+    // routed and applied / Then: no transcript receives it, so it can never reach a model
+    #[test]
+    fn a_pull_request_change_enters_no_transcript() {
+        let mut registry = TranscriptRegistry::new();
+        registry.bind_thread_root("thread", "run-1");
+        registry.select_thread(Some("thread".into()));
+        let event = Event::new(event_bus::PullRequestEvent::Changed {
+            thread_id: "thread".into(),
+            link_revision: 1,
+            transition_seq: 1,
+            pull_request: event_bus::PullRequestRef {
+                provider: "github".into(),
+                host: "github.com".into(),
+                repository: "turtton/evorch".into(),
+                number: 7,
+            },
+            fields: vec![event_bus::PullRequestChangedField::Checks],
+            notifications: vec!["checks_failed".into()],
+        });
+
+        let destinations = registry.route(&event);
+        registry.apply(&event);
+
+        assert!(destinations.is_empty());
+        assert!(registry.thread().entries().is_empty());
+    }
 
     #[test]
     fn run_error_routes_to_owning_thread() {

@@ -654,6 +654,8 @@ fn only_the_documented_rows_are_decoded() {
         ("Tool", "", false, "unclassified"),
         ("Orchestrator", "ThreadTodoUpdated", false, "columns"),
         ("Orchestrator", "ThreadTodoUpdated", true, "probe"),
+        ("PullRequest", "Changed", false, "columns"),
+        ("PullRequest", "Changed", true, "probe"),
     ] {
         let label = match classify(kind, Some(subkind), probe) {
             Reading::Columns => "columns",

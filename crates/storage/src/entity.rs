@@ -362,6 +362,13 @@ impl SecretGuard {
                     .map_err(|error| StorageError::Serialization(error.to_string()))?;
                 self.check_text("event", "Ledger.payload", &payload)
             }
+            // Identifiers, labels and enums only; scanned whole so a future text field is
+            // covered without another arm.
+            EventKind::PullRequest(event) => {
+                let payload = serde_json::to_string(event)
+                    .map_err(|error| StorageError::Serialization(error.to_string()))?;
+                self.check_text("event", "PullRequest.payload", &payload)
+            }
         }
     }
 

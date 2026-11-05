@@ -9,6 +9,13 @@ use crate::model::failure_text;
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
         EventKind::Diagnostic(event) if event.code == "ContextCheckpointSaved" => None,
+        // A lane delivery state change names its thread so views re-read it; it is a
+        // projection signal, shown on the lane and lead cards, not a conversation event.
+        EventKind::Diagnostic(event)
+            if event.source == "lane_delivery" && event.thread_id.is_some() =>
+        {
+            None
+        }
         EventKind::Diagnostic(event) => Some(TranscriptEntry::Diagnostic {
             severity: event.severity,
             text: summary(event),
@@ -132,6 +139,7 @@ pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
         | EventKind::AgentMessage(_)
         | EventKind::Compaction(_)
         | EventKind::Ownership(_)
+        | EventKind::PullRequest(_)
         | EventKind::Orchestrator(_) => None,
     }
 }
@@ -171,6 +179,9 @@ fn wording(code: &str) -> Option<Wording> {
         code::ESCALATION_HANDOFF_FAILED => Fixed("Escalation could not be prepared"),
         code::ESCALATION_ADMISSION_FAILED => Fixed("The escalated Orchestrator did not start"),
         code::CRASH_RECOVERED => Fixed("Recovered from a crash in a previous session"),
+        code::THREAD_TODO_RECONCILE_FAILED => {
+            Fixed("Could not mark unfinished procedure items as interrupted")
+        }
         code::AGENT_RUN_PANICKED => Fixed("The run crashed and was stopped"),
         code::STORAGE_WRITER_HALTED => Fixed("History is no longer being saved"),
         code::SCOPE_DENIED => Lead("Tool call denied"),
@@ -621,5 +632,28 @@ mod tests {
         assert!(registry.thread().entries().is_empty());
         registry.select_thread(Some("owner".into()));
         assert_eq!(registry.thread().entries().len(), 1);
+    }
+
+    #[test]
+    fn a_lane_delivery_state_change_is_a_projection_signal_not_a_transcript_entry() {
+        let diagnostic = |thread: Option<&str>| {
+            event_bus::Event::new(event_bus::DiagnosticEvent {
+                source: "lane_delivery".into(),
+                severity: event_bus::DiagnosticSeverity::Warning,
+                code: "lane_wake_suppressed".into(),
+                detail: String::new(),
+                run_id: None,
+                thread_id: thread.map(str::to_owned),
+                call_id: None,
+            })
+        };
+        let mut registry = crate::model::transcript_registry::TranscriptRegistry::default();
+        registry.select_thread(Some("lead".into()));
+
+        registry.apply(&diagnostic(Some("lead")));
+        assert!(registry.thread().entries().is_empty());
+
+        // A delivery failure that names no thread is still a diagnostic of its own.
+        assert!(entry(&diagnostic(None).kind).is_some());
     }
 }

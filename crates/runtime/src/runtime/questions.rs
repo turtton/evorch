@@ -203,6 +203,7 @@ impl AgentRuntime {
             }
         };
         let question = if let Some(lane) = lane {
+            let lane_thread = lane.thread_id.clone();
             let requester = event_bus::lane::QuestionRequester {
                 run_id: question.run_id.clone(),
                 root_run_id: question.root_run_id.clone(),
@@ -221,6 +222,12 @@ impl AgentRuntime {
             {
                 storage::lane_delivery::LaneQuestionCreated::Created(question) => *question,
                 blocked @ storage::lane_delivery::LaneQuestionCreated::CapacityBlocked(_) => {
+                    self.lane_state_changed(
+                        &lane_thread,
+                        event_bus::DiagnosticSeverity::Warning,
+                        "question_capacity_blocked",
+                        &run.to_string(),
+                    );
                     return Ok(blocked);
                 }
             }

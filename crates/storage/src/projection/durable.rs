@@ -80,6 +80,7 @@ pub(super) fn reconcile(conn: &Connection, events: &[StoredEvent]) -> Result<(),
             | EventKind::Compaction(_)
             | EventKind::Diagnostic(_)
             | EventKind::Ownership(_)
+            | EventKind::PullRequest(_)
             | EventKind::Ledger(_) => {}
         }
     }

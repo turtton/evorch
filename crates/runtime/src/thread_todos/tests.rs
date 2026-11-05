@@ -13,6 +13,10 @@ enum Step {
     Stop,
     Hold(Arc<Notify>, Arc<Notify>),
     GatedTools(Arc<Notify>, Arc<Notify>, Vec<(&'static str, Value)>),
+    /// The provider fails this request.
+    Fail,
+    /// The run task unwinds during this request.
+    Panic,
 }
 type Request = (String, Vec<Message>, Vec<ToolSpec>);
 struct Model {
@@ -45,6 +49,12 @@ impl AgentModel for Model {
             .expect("unexpected provider continuation");
         let calls = match step {
             Step::Tools(calls) => calls,
+            Step::Fail => {
+                return Err(RuntimeError::UnknownRun {
+                    run_id: "fixture provider failure".into(),
+                });
+            }
+            Step::Panic => panic!("fixture panic"),
             Step::Stop => vec![],
             Step::GatedTools(started, release, calls) => {
                 started.notify_one();
@@ -283,10 +293,12 @@ async fn invalid_arguments_leave_the_last_durable_list_unchanged() {
     let run = start(&runtime, Role::Worker, config(), true);
     assert_eq!(runtime.wait(run).await.unwrap(), AgentRunPhase::Done);
     let snapshot = runtime.thread_todo("thread").unwrap();
-    assert_eq!(snapshot.revision, 1);
+    // Only the end of the work period changed it: the run finished with the item
+    // still in progress, so the runtime marked it interrupted exactly once.
+    assert_eq!(snapshot.revision, 2);
     assert_eq!(
         snapshot.items,
-        vec![item("Keep", ThreadTodoStatus::InProgress)]
+        vec![item("Keep", ThreadTodoStatus::Interrupted)]
     );
     let requests = model.requests.lock().unwrap();
     let results = results(&requests);
@@ -426,7 +438,11 @@ async fn todo_only_escalation_moves_list_and_conversation_without_granting_sourc
     assert!(runtime.thread_todo("thread").is_none());
     assert!(runtime.goal_thread(source).is_none());
     assert_eq!(runtime.goal_thread(child), Some(thread));
-    assert!(runtime.write_thread_todo(source, vec![]).is_err());
+    assert!(
+        runtime
+            .write_thread_todo(source, Operation::Replace(vec![]))
+            .is_err()
+    );
     {
         let requests = model.requests.lock().unwrap();
         let child_request = requests.iter().find(|r| r.0 == child.to_string()).unwrap();
@@ -438,9 +454,10 @@ async fn todo_only_escalation_moves_list_and_conversation_without_granting_sourc
     let source_list = runtime
         .write_thread_todo(
             source,
-            vec![item("Separate followup", ThreadTodoStatus::Pending)],
+            Operation::Replace(vec![item("Separate followup", ThreadTodoStatus::Pending)]),
         )
-        .unwrap();
+        .unwrap()
+        .snapshot;
     assert_ne!(source_list.list_id, moved.list_id);
     let mut obsolete = moved.clone();
     obsolete.thread_id = "thread".into();
@@ -519,12 +536,24 @@ async fn compaction_restores_latest_list_after_the_whole_tool_batch_including_cl
             .send_message(run, "Update the current procedure".into())
             .unwrap();
         phase(&mut events, run, AgentRunPhase::Waiting).await;
+        // The finished turn marked the still-running item interrupted afterwards;
+        // the request that followed compaction carried the list as written.
         let snapshot = runtime.thread_todo("thread").unwrap();
-        assert_eq!(snapshot.items, latest);
+        let mut sent = snapshot.clone();
+        sent.items = latest.clone();
+        if clear {
+            assert_eq!(snapshot.items, latest);
+        } else {
+            assert_eq!(
+                snapshot.items,
+                vec![item("Latest step", ThreadTodoStatus::Interrupted)]
+            );
+            sent.revision -= 1;
+        }
         {
             let requests = model.requests.lock().unwrap();
             let messages = &requests.last().unwrap().1;
-            let procedure=messages.iter().position(|message|message.content.iter().any(|block|matches!(block,ContentBlock::Text{text} if text.ends_with(&json!(snapshot).to_string())))).expect("authoritative snapshot after compaction");
+            let procedure=messages.iter().position(|message|message.content.iter().any(|block|matches!(block,ContentBlock::Text{text} if text.ends_with(&json!(sent).to_string())))).expect("authoritative snapshot after compaction");
             assert!(messages[..procedure].iter().any(|message|message.content.iter().any(|block|matches!(block,ContentBlock::Text{text} if text.starts_with("[COMPACTION CHECKPOINT")))));
             let result_positions:Vec<_>=messages.iter().enumerate().filter_map(|(index,message)|message.content.iter().any(|block|matches!(block,ContentBlock::ToolResult{tool_call_id,..} if tool_call_id.starts_with("call-3-"))).then_some(index)).collect();
             assert_eq!(result_positions.len(), 2);
@@ -602,7 +631,11 @@ async fn exhausted_restored_revision_rejects_write_and_handoff_before_any_transf
     let mut snapshot = restored(vec![item("Keep", ThreadTodoStatus::InProgress)]);
     snapshot.revision = u64::MAX;
     runtime.restore_thread_todo(snapshot.clone()).unwrap();
-    assert!(runtime.write_thread_todo(source, vec![]).is_err());
+    assert!(
+        runtime
+            .write_thread_todo(source, Operation::Replace(vec![]))
+            .is_err()
+    );
     let transferred = std::sync::atomic::AtomicBool::new(false);
     assert!(
         runtime
@@ -677,3 +710,7 @@ async fn revoked_owner_cannot_publish_a_procedure_update() {
             ))
     );
 }
+
+mod boundary;
+mod lane;
+mod ops;

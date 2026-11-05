@@ -480,6 +480,25 @@ pub(crate) fn record_local_head(
     Ok(changed > 0)
 }
 
+pub(crate) fn clear_local_head(
+    conn: &Connection,
+    thread_id: &str,
+    link_revision: u64,
+) -> Result<bool, StorageError> {
+    check_id("thread_id", thread_id)?;
+    let tx = immediate(conn)?;
+    tombstone_check(&tx, thread_id)?;
+    bound_link(&tx, thread_id, link_revision)?;
+    let changed = tx.execute(
+        "UPDATE thread_pull_request_state SET local_head_link_revision = NULL, \
+            local_head_sha = NULL, local_head_observed_at_ns = NULL \
+         WHERE thread_id = ?1 AND local_head_link_revision = ?2 AND local_head_sha IS NOT NULL",
+        params![thread_id, link_revision],
+    )?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
 pub(crate) fn next_transition(
     conn: &Connection,
     thread_id: &str,
@@ -658,20 +677,12 @@ pub(crate) fn present_candidate(
         [&new.thread_id],
         |row| row.get(0),
     )?;
+    // A decided candidate is the memory of the decision: dropping it would offer the same
+    // pull request again. So a full thread refuses new candidates instead of making room.
     if held >= PULL_REQUEST_CANDIDATES_MAX {
-        let excess = i64::try_from(held - PULL_REQUEST_CANDIDATES_MAX + 1).unwrap_or(i64::MAX);
-        let dropped = tx.execute(
-            "DELETE FROM thread_pull_request_candidates WHERE candidate_id IN (\
-                SELECT candidate_id FROM thread_pull_request_candidates \
-                WHERE thread_id = ?1 AND state <> 'presented' \
-                ORDER BY updated_at_ns, candidate_id LIMIT ?2)",
-            params![new.thread_id, excess],
-        )?;
-        if dropped < held - PULL_REQUEST_CANDIDATES_MAX + 1 {
-            return Err(StorageError::PullRequest(
-                PullRequestRejection::CandidateLimit,
-            ));
-        }
+        return Err(StorageError::PullRequest(
+            PullRequestRejection::CandidateLimit,
+        ));
     }
     tx.execute(
         "INSERT INTO thread_pull_request_candidates (thread_id, provider, host, repository, \

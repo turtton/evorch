@@ -1307,7 +1307,8 @@ fn build_workbench(
                 .with_event_bus(Arc::clone(&bus))
                 .with_ownership(ownership)
                 .with_memory_storage(storage_config.clone())
-                .with_team_writer(storage.handle()),
+                .with_team_writer(storage.handle())
+                .with_lane_delivery(),
         ));
     match gui::model::system_notifications::NativeSystemNotificationSink::new() {
         Ok(sink) => state = state.with_system_notifications(Arc::new(sink)),

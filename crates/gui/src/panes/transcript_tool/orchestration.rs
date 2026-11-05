@@ -55,11 +55,25 @@ pub(super) fn header(
                 .and_then(|input| input.get("items")?.as_array())
                 .map(Vec::len);
             let mut header = new(icons::LIST_CHECKS, "Update todos");
-            header.meta = count.map(|count| match count {
-                0 => "cleared".to_owned(),
-                1 => "1 item".to_owned(),
-                count => format!("{count} items"),
-            });
+            let update = input.and_then(|input| input.get("update"));
+            header.meta = if input
+                .and_then(|input| input.get("advance")?.as_bool())
+                .is_some_and(|advance| advance)
+            {
+                Some("advance".to_owned())
+            } else if let Some(update) = update {
+                update
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .zip(update.get("status").and_then(Value::as_str))
+                    .map(|(index, status)| format!("[{index}] → {status}"))
+            } else {
+                count.map(|count| match count {
+                    0 => "cleared".to_owned(),
+                    1 => "1 item".to_owned(),
+                    count => format!("{count} items"),
+                })
+            };
             header
         }
         "ask_user" => {
@@ -268,6 +282,21 @@ mod tests {
                 json!({"items": [{"content": "a", "status": "pending"},
                     {"content": "b", "status": "completed"}]}),
                 "Update todos · 2 items",
+            ),
+            (
+                "todo_write",
+                json!({"advance": true, "expected_revision": 3}),
+                "Update todos · advance",
+            ),
+            (
+                "todo_write",
+                json!({"update": {"index": 2, "status": "completed"}, "expected_revision": 3}),
+                "Update todos · [2] → completed",
+            ),
+            (
+                "todo_write",
+                json!({"update": {"index": "x"}, "expected_revision": 3}),
+                "Update todos",
             ),
             (
                 "task_claim",
