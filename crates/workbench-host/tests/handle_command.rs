@@ -52,7 +52,7 @@ fn a_new_message_is_accepted_and_remembers_who_sent_it() {
     assert_eq!(reply.disposition, CommandDisposition::Accepted);
     assert_eq!(reply.submission_id.as_ref().unwrap().as_str(), "sub-1");
     assert!(reply.run_id.is_some());
-    assert_eq!(host.submission_provenance("sub-1"), Some(&web()));
+    assert_eq!(host.submission_provenance("sub-1"), Some(web()));
     assert!(host.service().bindings.chat_runs.contains_key("thread-1"));
 }
 
@@ -83,7 +83,7 @@ fn resending_the_same_submission_changes_nothing_and_a_different_payload_conflic
     assert_eq!(host.service().runtime().list_agents().len(), agents);
     assert_eq!(
         host.submission_provenance("sub-1"),
-        Some(&web()),
+        Some(web()),
         "a resend does not change who sent the original"
     );
 }
@@ -105,7 +105,7 @@ fn a_second_message_to_a_running_thread_is_a_follow_up_for_every_surface() {
     assert_eq!(second.disposition, CommandDisposition::Accepted);
     assert_eq!(second.run_id, first.run_id);
     assert_eq!(host.service().runtime().list_agents().len(), 1);
-    assert_eq!(host.submission_provenance("sub-2"), Some(&cli()));
+    assert_eq!(host.submission_provenance("sub-2"), Some(cli()));
 }
 
 #[test]

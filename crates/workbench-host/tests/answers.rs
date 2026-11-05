@@ -173,12 +173,8 @@ fn resumed_request(provenance: &Provenance, through_desktop_door: bool) -> Strin
     }
     rt.block_on(model.received.notified());
     let request = model.first_request.lock().unwrap().clone().unwrap();
-    // Whether the requester's saved context was stored before the resume is a race of
-    // the fixture, not of the answer, so the restored first message is masked too.
-    request.replace(&question.id, "<question>").replace(
-        "Message { role: User, content: [Text { text: \"Prepare the output\" }] }, ",
-        "",
-    )
+    // The question id is different on every run and is the only thing normalised.
+    request.replace(&question.id, "<question>")
 }
 
 /// Equal, or the first place they differ.
@@ -209,6 +205,10 @@ fn the_conversation_an_answer_resumes_sees_the_same_input_whoever_answered() {
     let from_desktop = resumed_request(&local_desktop(), true);
 
     assert!(from_web.contains("Answer: JSON"));
+    assert!(
+        from_web.contains("Prepare the output"),
+        "the conversation resumed with the context its requester saved"
+    );
     assert_same(&from_web, &from_cli);
     assert_same(&from_web, &from_desktop);
     assert!(!from_web.contains("web-1"));

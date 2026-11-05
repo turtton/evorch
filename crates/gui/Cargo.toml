@@ -72,6 +72,7 @@ workbench-protocol = { path = "../workbench-protocol" }
 notify-rust = "4"
 
 [dev-dependencies]
+workbench-host = { path = "../workbench-host", features = ["test-support"] }
 # The history restore test converts a database the build wrote, after taking it back to version 39.
 storage = { path = "../storage", features = ["unchecked-open"] }
 # Leaves a descriptor without O_CLOEXEC open to check child launches.

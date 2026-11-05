@@ -3,17 +3,16 @@
 
 mod common;
 
-use common::{cli, host_with_project, lost_ownership, project, runtime, send, web};
-use workbench_host::commands::{ChatInput, ComposerRole, HostCommand, HostEvent, RejectKind};
-use workbench_host::projects::StaticProjects;
-use workbench_host::provenance::local_desktop;
-use workbench_protocol::commands::{
-    Command, CommandDisposition, ComposerRole as WireRole, ForkSeed, ModelPreference, SendChat,
+use common::{
+    cli, differing_messages, host_with_project, host_with_two_projects, lost_ownership, runtime,
+    send, web,
 };
+use workbench_host::commands::{ChatInput, ComposerRole, HostCommand, HostEvent, RejectKind};
+use workbench_host::provenance::local_desktop;
+use workbench_protocol::commands::{Command, CommandDisposition};
 use workbench_protocol::envelope::Surface;
 use workbench_protocol::errors::ErrorCode;
-use workbench_protocol::ids::{ProjectId, RunId};
-use workbench_protocol::wire::MessageCount;
+use workbench_protocol::ids::RunId;
 
 fn accepted_run(events: &[HostEvent]) -> String {
     events
@@ -30,53 +29,12 @@ fn any_difference_in_a_resent_message_is_a_conflict() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let other_project = ProjectId::new("project-2").unwrap();
-    let mut projects = StaticProjects::default();
-    projects.insert(&project(), dir.path().to_path_buf());
-    projects.insert(&other_project, elsewhere.path().to_path_buf());
-    let mut host = host_with_project(&rt, runtime(), dir.path()).with_projects(projects);
+    let mut host = host_with_two_projects(&rt, runtime(), dir.path(), elsewhere.path());
     host.handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), web())
         .unwrap();
     let agents = host.service().runtime().list_agents().len();
-    let changed = |edit: &dyn Fn(&mut SendChat)| {
-        let mut message = send("thread-1", "sub-1", "hello");
-        edit(&mut message);
-        message
-    };
-    let variants = [
-        (
-            "thread",
-            changed(&|m| m.thread = "thread-2".to_owned().try_into().unwrap()),
-        ),
-        ("project", changed(&|m| m.project = other_project.clone())),
-        (
-            "composer role",
-            changed(&|m| m.composer_role = WireRole::Orchestrator),
-        ),
-        ("text", changed(&|m| m.text = "bye".into())),
-        ("skills", changed(&|m| m.skills = vec!["review".into()])),
-        (
-            "model preference",
-            changed(&|m| {
-                m.model_preference = Some(ModelPreference {
-                    profile: "fast".into(),
-                    model: None,
-                    reasoning_effort: None,
-                })
-            }),
-        ),
-        (
-            "fork seed",
-            changed(&|m| {
-                m.fork_seed = Some(ForkSeed {
-                    source_run_id: RunId::new("run-1").unwrap(),
-                    context_len: MessageCount(1),
-                })
-            }),
-        ),
-    ];
 
-    for (field, message) in variants {
+    for (field, message) in differing_messages("thread-1", "sub-1", "hello") {
         let error = host
             .handle_command(Command::SendChat(message), cli())
             .unwrap_err();
@@ -84,7 +42,7 @@ fn any_difference_in_a_resent_message_is_a_conflict() {
     }
 
     assert_eq!(host.service().runtime().list_agents().len(), agents);
-    assert_eq!(host.submission_provenance("sub-1"), Some(&web()));
+    assert_eq!(host.submission_provenance("sub-1"), Some(web()));
     let same = host
         .handle_command(Command::SendChat(send("thread-1", "sub-1", "hello")), cli())
         .unwrap();
@@ -160,7 +118,7 @@ fn a_message_sent_through_either_door_is_recognised_by_the_other() {
     );
     let sender = host.submission_provenance("sub-1").unwrap();
     assert_eq!(sender.surface, Surface::Desktop);
-    assert_eq!(host.submission_provenance("sub-2"), Some(&web()));
+    assert_eq!(host.submission_provenance("sub-2"), Some(web()));
 }
 
 #[test]

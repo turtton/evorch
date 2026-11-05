@@ -135,6 +135,8 @@ enum Command {
     ),
     UpdateHostInputReceipts(String, String, ReplyTx<Vec<String>>),
     HostInputReceipts(Vec<String>, ReplyTx<Vec<crate::HostInputReceipt>>),
+    RecordHostChatSubmission(crate::HostChatSubmission, ReplyTx<bool>),
+    HostChatSubmissions(Vec<String>, ReplyTx<Vec<crate::HostChatSubmission>>),
     HostInputReceiptsForRun(String, ReplyTx<Vec<crate::HostInputReceipt>>),
     CompareAndSwapRunContextRestoreState(String, String, String, bool, ReplyTx<bool>),
     InvalidateRunContext(String, ReplyTx),
@@ -781,6 +783,29 @@ impl StorageHandle {
         prompt_ids: &[String],
     ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
         self.request(|reply| Command::HostInputReceipts(prompt_ids.to_vec(), reply))
+    }
+
+    /// Keep a fingerprint of an accepted chat message. The first record for an id stays;
+    /// returns whether this call stored it.
+    ///
+    /// # Errors
+    /// Rejects an invalid record, a tombstoned run, suspended writes or SQLite failure.
+    pub fn record_host_chat_submission(
+        &self,
+        submission: &crate::HostChatSubmission,
+    ) -> Result<bool, StorageError> {
+        self.request(|reply| Command::RecordHostChatSubmission(submission.clone(), reply))
+    }
+
+    /// The recorded chat submissions among `submission_ids`, after all earlier writer requests.
+    ///
+    /// # Errors
+    /// Returns an error for SQLite failure or a closed writer.
+    pub fn host_chat_submissions(
+        &self,
+        submission_ids: &[String],
+    ) -> Result<Vec<crate::HostChatSubmission>, StorageError> {
+        self.request(|reply| Command::HostChatSubmissions(submission_ids.to_vec(), reply))
     }
 
     /// One run's receipts, oldest first, after all earlier writer requests.

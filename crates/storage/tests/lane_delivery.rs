@@ -643,8 +643,11 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     } = f;
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
-    conn.execute_batch(include_str!("../undo/undo_v47.sql"))
-        .unwrap();
+    conn.execute_batch(concat!(
+        include_str!("../undo/undo_v48.sql"),
+        include_str!("../undo/undo_v47.sql")
+    ))
+    .unwrap();
     conn.pragma_update(None, "user_version", 46).unwrap();
     drop(conn);
     let storage = Storage::open(config.clone()).unwrap();

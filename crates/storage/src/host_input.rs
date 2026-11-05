@@ -177,3 +177,40 @@ pub enum HostInputProvenance {
         destination_thread_id: String,
     },
 }
+
+/// A chat message a host accepted, kept so a resend under the same submission id can be
+/// recognised after a restart.
+///
+/// `host_input_receipts` records the words of a message. This records its identity: the
+/// fingerprint is a digest the host computes over every field of the message, so equal
+/// fingerprints mean the same message and a different one never matches. The first record
+/// for an id stays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostChatSubmission {
+    pub submission_id: String,
+    /// Digest of the whole message, computed by the host.
+    pub fingerprint: String,
+    /// The run the message went to.
+    pub run_id: String,
+    /// Who sent it, as the host serialised it.
+    pub provenance_json: String,
+    pub accepted_at_ns: i64,
+}
+
+impl HostChatSubmission {
+    /// # Errors
+    /// Rejects an empty id, fingerprint or run, and oversized fields.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let bad = |what: &str| StorageError::Serialization(format!("host chat submission: {what}"));
+        if self.submission_id.is_empty() || self.run_id.is_empty() {
+            return Err(bad("requires submission and run IDs"));
+        }
+        if self.fingerprint.is_empty() || self.fingerprint.len() > 256 {
+            return Err(bad("fingerprint must be 1..=256 bytes"));
+        }
+        if self.provenance_json.len() > 4096 {
+            return Err(bad("provenance is too large"));
+        }
+        Ok(())
+    }
+}

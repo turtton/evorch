@@ -15,10 +15,16 @@ workbench-protocol = { path = "../workbench-protocol" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
 runtime = { path = "../runtime" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 storage = { path = "../storage" }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+# Test-only entry points for the in-process adapter's tests.
+test-support = []
 
 [dev-dependencies]
 async-trait = { workspace = true }

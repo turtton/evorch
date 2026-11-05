@@ -30,6 +30,7 @@ use crate::commands::{
     NoticeOutcome, PacketReference, ReferenceKind, RejectKind,
 };
 use crate::projects::{ProjectDirectory, StaticProjects};
+use crate::receipts::fingerprint::chat_fingerprint;
 use crate::receipts::{Receipts, SubmissionRecord};
 
 /// The command service together with what the host remembers about commands.
@@ -193,7 +194,10 @@ impl CommandHost {
     }
 
     /// [`Self::submit_local`] under a permit the caller already authorised (or
-    /// none without an ownership host), skipping the lookup.
+    /// none without an ownership host), skipping the lookup. Skipping the lookup is
+    /// only sound for a test that built the permit itself, so this exists only for
+    /// tests (feature `test-support`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn submit_local_authorized(
         &mut self,
         command: HostCommand,
@@ -203,9 +207,19 @@ impl CommandHost {
         self.execute_local(command, permit, provenance)
     }
 
-    /// Who sent the accepted chat named `submission`.
-    pub fn submission_provenance(&self, submission: &str) -> Option<&Provenance> {
-        self.receipts.submission(submission).map(|r| &r.sent_by)
+    /// Who sent the accepted chat named `submission`, from memory or from storage.
+    pub fn submission_provenance(&self, submission: &str) -> Option<Provenance> {
+        if let Some(record) = self.receipts.submission(submission) {
+            return Some(record.sent_by.clone());
+        }
+        let stored = self
+            .service
+            .runtime()
+            .host_chat_submissions(&[submission.to_owned()])
+            .ok()?
+            .into_iter()
+            .next()?;
+        serde_json::from_str(&stored.provenance_json).ok()
     }
 
     /// Who saved the answer to `question`, if this host saw it saved. An answer
@@ -276,14 +290,7 @@ impl CommandHost {
             match event {
                 HostEvent::ChatAccepted { run_id, .. } => {
                     if let Some(chat) = &submission {
-                        self.receipts.record_submission(
-                            &chat.submission_id,
-                            SubmissionRecord {
-                                input: chat.clone(),
-                                run_id: Some(run_id.clone()),
-                                sent_by: provenance.clone(),
-                            },
-                        );
+                        self.remember_submission(chat, run_id, provenance);
                     }
                 }
                 HostEvent::UserAnswerSaved {
@@ -296,52 +303,100 @@ impl CommandHost {
         Executed::Events(events)
     }
 
+    /// Remember an accepted chat in memory and in storage. A storage failure does
+    /// not undo the acceptance; it only means a resend after a restart is refused
+    /// as unverifiable instead of being answered with the original run.
+    fn remember_submission(&mut self, chat: &ChatInput, run_id: &str, provenance: &Provenance) {
+        let fingerprint = chat_fingerprint(chat);
+        let stored =
+            self.service
+                .runtime()
+                .record_host_chat_submission(&storage::HostChatSubmission {
+                    submission_id: chat.submission_id.clone(),
+                    fingerprint: fingerprint.clone(),
+                    run_id: run_id.to_owned(),
+                    provenance_json: serde_json::to_string(provenance).unwrap_or_default(),
+                    accepted_at_ns: storage::system_time_to_ns(std::time::SystemTime::now())
+                        .unwrap_or_default(),
+                });
+        if let Err(error) = stored {
+            tracing::warn!(%error, submission = %chat.submission_id, "could not persist chat submission");
+        }
+        self.receipts.record_submission(
+            &chat.submission_id,
+            SubmissionRecord {
+                fingerprint,
+                run_id: Some(run_id.to_owned()),
+                sent_by: provenance.clone(),
+            },
+        );
+    }
+
     /// The earlier outcome of a chat's submission id: `Ok(Some(run))` for the same
     /// message again, `Err` for an id that cannot be applied, `Ok(None)` for a new
     /// submission.
     ///
-    /// The in-memory ledger compares the whole message (thread, project, composer
-    /// role, text, skills, images, model preference, fork seed). The runtime's
-    /// durable input receipt records only the words, so an id found there alone is
-    /// **never** treated as the same message: it is refused, because applying it
-    /// again could repeat a message and calling it a match could hide a different
-    /// one. Persisting a full fingerprint is a later step.
+    /// "The same message" is the digest of every field of the message
+    /// ([`chat_fingerprint`]): thread, project, composer role, text, skills, images,
+    /// model preference and fork seed. It is looked up in memory, then in storage, so
+    /// the answer survives a restart and the bounded in-memory table. The runtime's
+    /// host input receipt records only the words; an id found only there (accepted
+    /// before fingerprints were stored, or while storing one failed) cannot be
+    /// compared and is **never** treated as the same message: it is refused.
     fn earlier_submission(
         &self,
         chat: &ChatInput,
     ) -> Result<Option<Option<String>>, (RejectKind, String)> {
         let id = chat.submission_id.as_str();
+        let fingerprint = chat_fingerprint(chat);
+        let different = || {
+            (
+                RejectKind::Conflict,
+                format!(
+                    "submission `{}` was already used for a different message",
+                    id.escape_debug()
+                ),
+            )
+        };
         if let Some(record) = self.receipts.submission(id) {
-            return if record.input == *chat {
+            return if record.fingerprint == fingerprint {
                 Ok(Some(record.run_id.clone()))
             } else {
-                Err((
-                    RejectKind::Conflict,
-                    format!(
-                        "submission `{}` was already used for a different message",
-                        id.escape_debug()
-                    ),
-                ))
+                Err(different())
             };
         }
-        let receipts = self
-            .service
-            .runtime()
-            .host_input_receipts(&[id.to_owned()])
-            .map_err(|error| {
-                (
-                    RejectKind::Unavailable,
-                    format!("could not read input receipts: {error}"),
-                )
-            })?;
-        if receipts.is_empty() {
+        let unavailable = |error: storage::StorageError| {
+            (
+                RejectKind::Unavailable,
+                format!("could not read earlier submissions: {error}"),
+            )
+        };
+        let ids = [id.to_owned()];
+        let runtime = self.service.runtime();
+        if let Some(stored) = runtime
+            .host_chat_submissions(&ids)
+            .map_err(unavailable)?
+            .into_iter()
+            .next()
+        {
+            return if stored.fingerprint == fingerprint {
+                Ok(Some(Some(stored.run_id)))
+            } else {
+                Err(different())
+            };
+        }
+        if runtime
+            .host_input_receipts(&ids)
+            .map_err(unavailable)?
+            .is_empty()
+        {
             Ok(None)
         } else {
             Err((
                 RejectKind::Conflict,
                 format!(
-                    "submission `{}` was accepted before this host started; it can no longer \
-                     be checked against this message, so it is not applied again",
+                    "submission `{}` was accepted without a stored fingerprint; it cannot be \
+                     checked against this message, so it is not applied again",
                     id.escape_debug()
                 ),
             ))

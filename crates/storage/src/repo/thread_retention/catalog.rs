@@ -67,6 +67,11 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     ),
     ("run_ledger", ReclaimRun, "run notes, deleted with a grant"),
     ("host_input_receipts", ReclaimRun, "delivery receipts"),
+    (
+        "host_chat_submissions",
+        ReclaimRun,
+        "fingerprints of accepted chat messages, kept with their run",
+    ),
     ("review_evidence", ReclaimRun, "review evidence"),
     ("review_lineage_edges", ReclaimRun, "review lineage"),
     ("assistant_references", ReclaimRun, "approved references"),

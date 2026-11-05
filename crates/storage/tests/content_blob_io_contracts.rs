@@ -71,9 +71,10 @@ const C_GC: u64 = 24;
 /// v43 (the provenance header columns and message table: 97 and 133 frames with v43 added),
 /// and v44 (the event body format: two columns, the reference table and three accounting
 /// triggers on an empty `events` table; 106 and 146 frames with v44 added), and v46 (the five
-/// pull request tables, their indexes and fences; 126 and 181 frames with v46 added), whatever
-/// the number of `thread_runs` rows it leaves alone.
-const MIGRATION_FRAMES: u64 = 220;
+/// pull request tables, their indexes and fences; 126 and 181 frames with v46 added), and v48
+/// (the host chat submission table with its index and fence; 156 and 229 frames with v48
+/// added), whatever the number of `thread_runs` rows it leaves alone.
+const MIGRATION_FRAMES: u64 = 240;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -309,6 +310,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              SELECT printf('r-%07d', x), 't', 'r-0000000', 0 FROM n;
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
+                include_str!("../undo/undo_v48.sql"),
                 include_str!("../undo/undo_v47.sql"),
                 include_str!("../undo/undo_v46.sql")
             ),

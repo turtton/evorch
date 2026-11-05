@@ -1,19 +1,21 @@
 //! What the host remembers about commands it took: receipts and provenance.
 //!
-//! Three bounded, in-memory lookups:
+//! Three bounded, in-memory lookups (the submission one is backed by storage, below):
 //!
 //! - by session and request id, for `GetCommandReceipt`: the reply or error the
 //!   command got. A request id is unique only within its session, so the session
 //!   is part of the key;
-//! - by submission id, for `SendChat` deduplication: the message that was
-//!   accepted, the run it went to and who sent it. Both ingresses (protocol and
-//!   in-process desktop) record and look up here, comparing the host's own
-//!   [`ChatInput`], so a resend through either door is recognised;
+//! - by submission id, for `SendChat` deduplication: a digest of the whole message
+//!   ([`fingerprint::chat_fingerprint`]), the run it went to and who sent it. Both
+//!   ingresses (protocol and in-process desktop) record and look up here, so a
+//!   resend through either door is recognised;
 //! - by question id: who saved the answer first.
 //!
-//! The runtime's durable host input receipt survives a restart but carries only
-//! the words, so it cannot prove two messages are the same; [`crate::ingress`]
-//! treats an id found only there as taken and refuses to apply it again.
+//! The same record is written to storage (`host_chat_submissions`), so after a
+//! restart, or once the bounded table has dropped an id, [`crate::ingress`] still
+//! tells a resend (answered with the original run) from a different message
+//! (refused). The runtime's host input receipt carries only the words and cannot
+//! prove two messages are the same: an id found only there is refused.
 //! Nothing here reaches the model: provenance is bookkeeping beside the command,
 //! not part of any prompt.
 
@@ -25,7 +27,7 @@ use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::ids::{RequestId, SessionId};
 use workbench_protocol::queries::{CommandReceipt, CommandReceiptState};
 
-use crate::commands::ChatInput;
+pub mod fingerprint;
 
 /// Entries kept per table. The oldest are dropped first; a dropped submission
 /// falls back to the durable runtime receipt (refused as unverifiable), a dropped
@@ -71,9 +73,9 @@ impl<V> Bounded<V> {
 /// A chat message the host accepted.
 #[derive(Debug, Clone)]
 pub struct SubmissionRecord {
-    /// What was accepted, to tell a resend from a different message under the
-    /// same id.
-    pub input: ChatInput,
+    /// Digest of the whole message ([`fingerprint::chat_fingerprint`]), to tell a
+    /// resend from a different message under the same id.
+    pub fingerprint: String,
     /// The run it went to.
     pub run_id: Option<String>,
     pub sent_by: Provenance,
