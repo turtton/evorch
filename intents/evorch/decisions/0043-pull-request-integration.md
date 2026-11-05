@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11 時点で Phase 1 の実装に着手。
+Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。Phase 2 は未着手。
 
 ## Context
 
@@ -135,6 +135,19 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 - 案 B（専用の PR パネル）: 会話から視線が離れ、Subagents と同時に見えない。必要になれば、PR バーを補う詳細パネルとして将来加える余地はある。
 - 案 C（Diff タブへの統合）: 既定の左カラム幅に収まらず、Notifications と同じタブ群に入るため隠れる。
 
+### 実装で確定した仕様
+
+Phase 1 の実装を通じて次の仕様を確定した。
+
+- 事実の採用は success_seq の新旧で判定する。
+- 取得を行うのは thread の owner プロセスだけ。owner でない側は表示のみ。GUI の操作は chat_permit を経由する。
+- gh が check なし（null）を返した場合は checks_complete=false として扱い、成功とは扱わない。
+- 障害は FetchStatusChanged で伝え、PR 用の Diagnostic は出さない。
+- レビュー情報は reviewDecision のみ（本文と件数は扱わない）。
+- 審査の anchor は lifecycle_revision。
+- web/upload の審査は snapshot だけを使う。
+- PR バーには、タイトルの代わりに head branch を表示する（タイトルは取得していない）。
+
 ## Consequences
 
 - 紐づけがあるスレッドの審査は、PR・CI・ローカル HEAD の状態を根拠にできる。その分、拒否の一部（状態が見えないことによる拒否）が減ると期待する。実際の減少は未計測。
@@ -159,6 +172,18 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 - auto fix を全体で無効化するスイッチを持つか。
 - レビューコメントを通知の対象に含めるか。
 
+## 既知の制限・残課題
+
+- 別の thread を別の owner が持っていて、それぞれが同じ PR を追跡している場合、取得が重複する。
+- gh の孫プロセスは kill されない。
+- ssh.github.com などの remote 別名は照合しない。`branch.<name>.remote` で fork を参照している場合も照合しない。
+- checks のページ取得中に head が変わった場合の契約テストがない。
+- pending 継承の一覧に cursor がない（先頭 1000 件のまま）。
+- 同じ seq を採用した場合に、1 回だけ前倒しで取得する。
+- 実際の routing fallback と、実際の CAS 拒否を通す統合テストがない。
+- live run への誤配送を検出するテストがない。
+- 主モデルと fallback モデルでの審査効果の評価は、まだ行っていない。
+
 ## 外部の参考
 
 - Copilot CLI `/pr fix ci`: 利用者の操作が起点。
@@ -171,7 +196,7 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 
 ## Validation and limits
 
-- 未実施: 実装、テスト、cache 契約の検証。実装時は、通知が末尾追記のみであることを `scripts/check-cache-contracts.sh` の e2e シナリオに加えて確かめる。
+- 各 PR の cache 契約テストを `scripts/contract-test-filters.sh` の `CACHE_CONTRACT_FILTER` に登録し、回帰テストで検証した。通知が末尾追記のみであることの検証は Phase 2 の実装時に行う。
 - 審査の指示文と `harness_facts` が、実際のモデルの判断（拒否の減少、誤承認の増加がないこと）に与える影響は未評価。主モデルと fallback モデルで比較する。
 - 「約 10%」「33 件」は利用者から示された分類である。ADR 作成時に store で再集計していない。
 

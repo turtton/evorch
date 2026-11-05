@@ -1,5 +1,11 @@
 //! bubblewrap による Linux コマンド隔離を提供します。
 
+mod home;
+use home::prepare_home_aliases;
+
+#[cfg(test)]
+mod home_tests;
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -7,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    boundary::{PathAccess, SandboxBoundary},
+    boundary::{BoundaryMount, SandboxBoundary},
     error::SandboxError,
     exec::{CommandSpec, Sandbox, WrappedCommand, merge_environment},
 };
@@ -45,8 +51,8 @@ impl BwrapConfig {
         self.boundary.workspace_root()
     }
 
-    /// Mount only registry / git caches and tool binaries, never Cargo credentials
-    /// or host config. Cargo's root and lock files remain in the private HOME.
+    /// Automatic sharing mounts only registry / git caches and tool binaries,
+    /// not credentials/config. Explicit allowed directories are an exception.
     pub fn cargo_cache(mut self, path: impl Into<PathBuf>) -> Self {
         self.boundary = self.boundary.cargo_cache(path);
         self
@@ -129,51 +135,28 @@ impl BwrapSandbox {
         })
     }
 
+    /// Inspect arguments; `wrap` additionally prepares and validates HOME aliases.
     pub fn build_argv(&self, spec: &CommandSpec) -> Vec<String> {
+        let plan = self
+            .config
+            .boundary
+            .mount_plan(Some(&self.scratch), self.config.isolate_processes);
+        self.argv_for_mounts(spec, &plan.mounts)
+    }
+
+    fn argv_for_mounts(&self, spec: &CommandSpec, mounts: &[BoundaryMount]) -> Vec<String> {
         let mut args = vec!["--die-with-parent".to_owned()];
         if self.config.isolate_processes {
             args.push("--unshare-pid".to_owned());
         }
-        // Same order as `SandboxBoundary::regions`: a later mount wins.
         let boundary = &self.config.boundary;
-        for path in &boundary.system {
-            let path = path.to_string_lossy().into_owned();
-            args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
+        for mount in mounts.iter().filter(|m| !m.cache || m.host.exists()) {
+            args.extend([
+                mount.flag().to_owned(),
+                mount.host.to_string_lossy().into_owned(),
+                mount.sandbox.to_string_lossy().into_owned(),
+            ]);
         }
-        // `/tmp` serves programs that hardcode it. It is not a host path, so it
-        // goes before allowed directories that may live under the host's `/tmp`.
-        let scratch = self.scratch.to_string_lossy().into_owned();
-        args.extend(["--bind".to_owned(), scratch.clone(), "/tmp".to_owned()]);
-        if let Some(allowed) = boundary.allowed() {
-            // `-try` keeps a directory removed after its declaration from failing the command.
-            let flag = match allowed.access {
-                PathAccess::ReadOnly => "--ro-bind-try",
-                PathAccess::ReadWrite => "--bind-try",
-            };
-            for path in allowed.paths.get().iter() {
-                let path = path.to_string_lossy().into_owned();
-                args.extend([flag.to_owned(), path.clone(), path]);
-            }
-        }
-        // The same directory at its host path lets file tools and unsandboxed
-        // shells resolve `$TMPDIR` paths.
-        args.extend(["--bind".to_owned(), scratch.clone(), scratch]);
-        for path in boundary
-            .read_only
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(boundary.current_thread_read_directories())
-        {
-            let path = path.to_string_lossy().into_owned();
-            args.extend(["--ro-bind-try".to_owned(), path.clone(), path]);
-        }
-        self.append_build_cache_mounts(&mut args);
-        for path in &boundary.read_write {
-            let path = path.to_string_lossy().into_owned();
-            args.extend(["--bind".to_owned(), path.clone(), path]);
-        }
-        let workspace = boundary.workspace_root.to_string_lossy().into_owned();
-        args.extend(["--bind".to_owned(), workspace.clone(), workspace.clone()]);
         args.extend(["--dev".to_owned(), "/dev".to_owned()]);
         args.extend(["--proc".to_owned(), "/proc".to_owned()]);
         if !self.config.allow_network {
@@ -188,32 +171,6 @@ impl BwrapSandbox {
         args.push(spec.program.clone());
         args.extend(spec.args.iter().cloned());
         args
-    }
-
-    fn append_build_cache_mounts(&self, args: &mut Vec<String>) {
-        if self.config.isolate_processes
-            && let Some(home) = self.config.boundary.rustup_home()
-            && home.is_absolute()
-        {
-            // Nix-patched linker scripts embed their original toolchain
-            // path. Preserve that read-only alias without exposing the
-            // original HOME, Rustup settings or Cargo credentials.
-            let toolchains = home.join("toolchains");
-            bind_cache(args, &toolchains, &toolchains);
-        }
-        for mount in self.config.boundary.cache_mounts() {
-            bind_cache(args, &mount.host, &mount.sandbox);
-        }
-    }
-}
-
-fn bind_cache(args: &mut Vec<String>, source: &Path, destination: &Path) {
-    if source.exists() {
-        args.extend([
-            "--ro-bind".to_owned(),
-            source.to_string_lossy().into_owned(),
-            destination.to_string_lossy().into_owned(),
-        ]);
     }
 }
 
@@ -231,7 +188,12 @@ impl Sandbox for BwrapSandbox {
                 detail: format!("/var/tmp の作業領域を作成できません: {error}"),
             }
         })?;
-        let args = self.build_argv(&spec);
+        let plan = self
+            .config
+            .boundary
+            .mount_plan(Some(&self.scratch), self.config.isolate_processes);
+        prepare_home_aliases(&plan, &self.scratch)?;
+        let args = self.argv_for_mounts(&spec, &plan.mounts);
         let mut env = merge_environment(spec.extra_env);
         env.retain(|(key, _)| {
             !matches!(
@@ -325,9 +287,9 @@ pub(crate) fn locate_bwrap() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boundary::{DEFAULT_RO_BINDS, LivePaths};
+    use crate::boundary::{DEFAULT_RO_BINDS, LivePaths, PathAccess};
 
-    fn sandbox(config: BwrapConfig) -> BwrapSandbox {
+    pub(super) fn sandbox(config: BwrapConfig) -> BwrapSandbox {
         let owned = Arc::new(crate::scratch::Scratch::new().unwrap());
         BwrapSandbox {
             program: PathBuf::from("bwrap"),
@@ -337,14 +299,14 @@ mod tests {
         }
     }
 
-    fn is_mount(flag: &str) -> bool {
+    pub(super) fn is_mount(flag: &str) -> bool {
         matches!(
             flag,
             "--bind" | "--bind-try" | "--ro-bind" | "--ro-bind-try"
         )
     }
 
-    fn spec(cwd: Option<PathBuf>) -> CommandSpec {
+    pub(super) fn spec(cwd: Option<PathBuf>) -> CommandSpec {
         CommandSpec {
             program: "sh".to_owned(),
             args: vec!["-c".to_owned(), "true".to_owned()],
