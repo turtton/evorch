@@ -9,6 +9,13 @@ use crate::model::failure_text;
 pub(super) fn entry(kind: &EventKind) -> Option<TranscriptEntry> {
     match kind {
         EventKind::Diagnostic(event) if event.code == "ContextCheckpointSaved" => None,
+        // A lane delivery state change names its thread so views re-read it; it is a
+        // projection signal, shown on the lane and lead cards, not a conversation event.
+        EventKind::Diagnostic(event)
+            if event.source == "lane_delivery" && event.thread_id.is_some() =>
+        {
+            None
+        }
         EventKind::Diagnostic(event) => Some(TranscriptEntry::Diagnostic {
             severity: event.severity,
             text: summary(event),
@@ -621,5 +628,28 @@ mod tests {
         assert!(registry.thread().entries().is_empty());
         registry.select_thread(Some("owner".into()));
         assert_eq!(registry.thread().entries().len(), 1);
+    }
+
+    #[test]
+    fn a_lane_delivery_state_change_is_a_projection_signal_not_a_transcript_entry() {
+        let diagnostic = |thread: Option<&str>| {
+            event_bus::Event::new(event_bus::DiagnosticEvent {
+                source: "lane_delivery".into(),
+                severity: event_bus::DiagnosticSeverity::Warning,
+                code: "lane_wake_suppressed".into(),
+                detail: String::new(),
+                run_id: None,
+                thread_id: thread.map(str::to_owned),
+                call_id: None,
+            })
+        };
+        let mut registry = crate::model::transcript_registry::TranscriptRegistry::default();
+        registry.select_thread(Some("lead".into()));
+
+        registry.apply(&diagnostic(Some("lead")));
+        assert!(registry.thread().entries().is_empty());
+
+        // A delivery failure that names no thread is still a diagnostic of its own.
+        assert!(entry(&diagnostic(None).kind).is_some());
     }
 }

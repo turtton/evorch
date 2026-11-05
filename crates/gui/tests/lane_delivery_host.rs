@@ -175,6 +175,20 @@ impl World {
         }
     }
 
+    /// Waits until every run in `runs` has reached `wanted`, in whatever order they do.
+    async fn all_phase(&mut self, runs: &[RunId], wanted: AgentRunPhase) {
+        let mut pending: HashSet<String> = runs.iter().map(ToString::to_string).collect();
+        while !pending.is_empty() {
+            let event = self.next_event().await;
+            if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged { run_id, to, .. }) =
+                &event.kind
+                && *to == wanted
+            {
+                pending.remove(run_id);
+            }
+        }
+    }
+
     async fn next_event(&mut self) -> event_bus::Event {
         let event = self.events.recv().await.unwrap();
         if let EventKind::Tool(event_bus::ToolEvent::UserQuestionUpdated { question }) = &event.kind
@@ -572,8 +586,12 @@ async fn a_lead_answer_restores_the_finished_lane_through_the_gui_host_and_the_l
         .runtime
         .send_message(lead, "answer the pending lane question".into())
         .unwrap();
-    world.phase(lead, AgentRunPhase::Waiting).await;
-    world.phase(lane.root_run_id, AgentRunPhase::Waiting).await;
+    world
+        .all_phase(&[lead, lane.root_run_id], AgentRunPhase::Waiting)
+        .await;
+    // Both deliveries finished their runs; their drivers are the barrier before the ACKs.
+    world.drive(LEAD).await;
+    world.drive(&lane.thread_id).await;
 
     let stored = world.runtime.user_question(&question.id).unwrap().unwrap();
     assert!(matches!(
@@ -678,6 +696,19 @@ async fn a_users_stop_and_resume_reach_the_lane_views_when_they_are_confirmed() 
     assert!(
         state.lane_detail(&thread).unwrap().delivery.lead_stopped,
         "the held-notification notice appears at the Stop"
+    );
+
+    let refused = sink.submit(WorkbenchCommand::ResumeLaneDeliveries {
+        thread_id: LEAD.into(),
+    });
+    assert!(
+        matches!(refused.as_slice(), [LoopEvent::ChatRejected { reason, .. }] if reason.contains("continue it")),
+        "a stopped lead is not resumed by the notification button: {refused:?}"
+    );
+    world.show(&mut state);
+    assert!(
+        state.lane_detail(&thread).unwrap().delivery.lead_stopped,
+        "and the Stop notice stays"
     );
 
     sink.submit(WorkbenchCommand::ContinueChat(ChatContinuation {

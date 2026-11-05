@@ -1303,4 +1303,24 @@ mod tests {
             Some(AgentPaneAction::Lane(LaneAction::ResumeDelivery { lead })) if lead == "lead"
         ));
     }
+
+    #[test]
+    fn a_stopped_lead_offers_continue_never_a_resume_that_would_not_restart_it() {
+        let mut detail = ready_lane_detail();
+        detail.delivery.guard.suppressed = true;
+        detail.delivery.guard.no_progress_batches = 20;
+        detail.delivery.lead_stopped = true;
+
+        let (mut lane_card, _) = delivery_header(Some(detail.clone()), None, true);
+        lane_card.run_steps(2);
+        assert!(lane_card.query_by_label("Resume notifications").is_none());
+        assert!(lane_card.query_by_label("Continue lead").is_some());
+        assert!(lane_card.query_by_label_contains("Wake paused").is_some());
+
+        let (mut lead_view, _) = delivery_header(None, Some((vec![detail], 0)), true);
+        lead_view.run_steps(2);
+        assert!(lead_view.query_by_label("Resume notifications").is_none());
+        assert!(lead_view.query_by_label("Continue lead").is_some());
+        assert!(lead_view.query_by_label_contains("Wake paused").is_some());
+    }
 }

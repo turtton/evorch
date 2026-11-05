@@ -636,6 +636,25 @@ impl AgentRuntime {
         code: &str,
         detail: &str,
     ) {
+        // A thread with no lane on either side has no lane view to refresh.
+        let involved = self.shared.run_store.get().is_some_and(|store| {
+            store
+                .handle
+                .lane_by_thread(thread)
+                .is_ok_and(|lane| lane.is_some())
+                || store
+                    .handle
+                    .lane_list(storage::lanes::LaneListRequest {
+                        lead_thread_id: thread.into(),
+                        policy: None,
+                        cursor: None,
+                        limit: 1,
+                    })
+                    .is_ok_and(|page| !page.items.is_empty())
+        });
+        if !involved {
+            return;
+        }
         self.shared
             .bus
             .emit(event_bus::Event::new(event_bus::DiagnosticEvent {
@@ -815,6 +834,22 @@ impl AgentRuntime {
         };
         self.deny_deleted_thread(thread).map_err(deleted)?;
         self.deny_deleted_run(&run.to_string()).map_err(deleted)?;
+        if self.operator_stopped(run)
+            || self.shared.run_store.get().is_some_and(|store| {
+                store
+                    .handle
+                    .lane_delivery_destination(thread.to_owned())
+                    .is_ok_and(|destination| destination.is_some_and(|d| d.stopped))
+            })
+        {
+            return Err(Self::review_error(
+                run,
+                LaneError::new(
+                    "lead_stopped",
+                    "the lead was stopped: continue it to resume its lane notifications",
+                ),
+            ));
+        }
         if self.saved_root_thread(run).as_deref() != Some(thread)
             || ownership.is_some_and(|permit| permit.thread_id != thread)
         {

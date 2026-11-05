@@ -68,6 +68,7 @@ pub(super) fn lane_card(
         ui,
         &detail.delivery,
         record.lead_thread_id.as_deref(),
+        !detail.delivery.lead_stopped,
         action,
     );
     if let Some(report) = &detail.latest_report {
@@ -93,6 +94,7 @@ fn delivery_lines(
     ui: &mut egui::Ui,
     delivery: &LaneDeliveryView,
     lead: Option<&str>,
+    resumable: bool,
     action: &mut Option<AgentPaneAction>,
 ) {
     if let Some(line) = delivery.capacity_line() {
@@ -101,6 +103,7 @@ fn delivery_lines(
     if let Some(line) = delivery.suppressed_line() {
         ui.colored_label(palette().WARNING_FG, line);
         if let Some(lead) = lead
+            && resumable
             && ui
                 .small_button("Resume notifications")
                 .on_hover_text("Deliver this lane's held notices to its lead again")
@@ -142,6 +145,8 @@ pub(super) fn lead_card(
             lead.waiting_questions
         )));
     }
+    // A stopped lead is continued, not "resumed": its Stop stays until the user continues it.
+    let stopped = lead.lanes.iter().any(|lane| lane.delivery.lead_stopped);
     for lane in &lead.lanes {
         if lane.delivery.capacity_blocked.is_none() && !lane.delivery.guard.suppressed {
             continue;
@@ -151,14 +156,14 @@ pub(super) fn lead_card(
             lead_stopped: false,
             ..lane.delivery.clone()
         };
-        delivery_lines(ui, &own, Some(lead.thread_id), action);
+        delivery_lines(ui, &own, Some(lead.thread_id), !stopped, action);
     }
-    if lead.lanes.iter().any(|lane| lane.delivery.lead_stopped) {
-        let stopped = LaneDeliveryView {
+    if stopped {
+        let held = LaneDeliveryView {
             lead_stopped: true,
             ..Default::default()
         };
-        delivery_lines(ui, &stopped, Some(lead.thread_id), action);
+        delivery_lines(ui, &held, Some(lead.thread_id), false, action);
     }
 }
 
