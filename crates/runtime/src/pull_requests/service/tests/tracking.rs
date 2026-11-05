@@ -452,6 +452,102 @@ async fn a_merge_found_in_the_shared_snapshot_stops_the_polling_of_a_tracked_key
     );
 }
 
+/// The shared snapshot of pull request 1, as another process leaves it after a merge.
+fn another_process_stores_a_merge(process: &Process) {
+    let seq = process
+        .storage_handle
+        .begin_pull_request_fetch(&key(1))
+        .unwrap();
+    process
+        .storage_handle
+        .commit_pull_request_fetch(&key(1), seq, facts(PullRequestState::Merged, passing()), 5)
+        .unwrap();
+}
+
+// Given: a plan that read a merge from the shared snapshot, and an old fetch that finishes with a
+// failure before the plan is applied / When: the retry deadline passes / Then: the merge was
+// still honoured: a failure settles no fact, so it does not make the plan look stale
+#[tokio::test(start_paused = true)]
+async fn a_failed_fetch_finishing_during_a_plan_does_not_discard_a_merge_it_read() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    another_process_stores_a_merge(&process);
+    let inner = Arc::clone(process.service.inner());
+    process.at_stage(Stage::Planned, move || {
+        let flight = Arc::new(crate::pull_requests::service::Flight::new(Vec::new()));
+        inner.finish(
+            &key(1),
+            &flight,
+            crate::pull_requests::service::FlightOutcome::Failed {
+                seq: 99,
+                error: FetchError::Network("down".into()),
+            },
+        );
+        // The plan stayed stopped long enough for the retry deadline to pass.
+        let mut state = inner.lock();
+        state.keys.get_mut(&key(1)).unwrap().next_due = Some(tokio::time::Instant::now());
+    });
+
+    process.service.notify_changed();
+    settle().await;
+    pass(1_000_000).await;
+
+    assert_eq!(
+        process.source.calls().len(),
+        1,
+        "the merge stops the polling, whatever the stale failure's retry deadline"
+    );
+}
+
+// Given: a plan that read a merge, and a newer fetch of this process that found the pull request
+// open before the plan is applied / When: the plan is applied / Then: it does not undo the newer
+// success: the polling goes on
+#[tokio::test(start_paused = true)]
+async fn an_older_plan_does_not_undo_a_newer_open_success() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process.source.push_ok(&key(1), open_running(1));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+    another_process_stores_a_merge(&process);
+    let inner = Arc::clone(process.service.inner());
+    let storage = process.storage_handle.clone();
+    process.at_stage(Stage::Planned, move || {
+        // This process's newer fetch found the pull request open, and stored it.
+        let seq = storage.begin_pull_request_fetch(&key(1)).unwrap();
+        storage
+            .commit_pull_request_fetch(&key(1), seq, facts(PullRequestState::Open, running()), 6)
+            .unwrap();
+        let flight = Arc::new(crate::pull_requests::service::Flight::new(Vec::new()));
+        inner.finish(
+            &key(1),
+            &flight,
+            crate::pull_requests::service::FlightOutcome::Committed {
+                seq: 99,
+                pending: true,
+                terminal: false,
+            },
+        );
+    });
+
+    process.service.notify_changed();
+    settle().await;
+    pass(30).await;
+
+    assert_eq!(
+        process.source.calls().len(),
+        2,
+        "the newer open success keeps the polling going"
+    );
+}
+
 // Given: tracking is off and a link exists / When: time passes / Then: nothing is fetched,
 // decisions are refused, and turning it on starts the fetch
 #[tokio::test(start_paused = true)]

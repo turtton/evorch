@@ -16,7 +16,7 @@ use storage::pull_requests::{InheritanceResolution, PullRequestKey, PullRequestS
 use tokio::time::Instant;
 
 use super::flight::{Flight, Interest, Target};
-use super::{Inner, KeyState};
+use super::{Inner, KeyState, Stage};
 use crate::ownership::OwnerPermit;
 
 /// Rows read per page of a listing.
@@ -186,6 +186,7 @@ impl Inner {
                 return Some(Instant::now() + Duration::from_secs(config.pending_poll_seconds));
             }
         };
+        self.run_stage_hook(Stage::Planned);
         // Planning waited on the database and the ownership registry: tracking may have been
         // switched off meanwhile, and then nothing is started from this plan.
         if !self.config().enabled {

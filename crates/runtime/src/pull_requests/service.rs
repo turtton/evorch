@@ -223,6 +223,8 @@ pub(crate) enum Stage {
     BeginFetch,
     /// The look for a checkout, right before `git` is started.
     Checkout,
+    /// The scheduler has read its plan and has not yet applied it.
+    Planned,
 }
 
 pub(crate) struct Inner {
@@ -272,12 +274,21 @@ impl Inner {
         stage: Stage,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, PullRequestError> {
+        self.run_stage_hook(stage);
+        self.blocking(work).await
+    }
+
+    /// Runs the hook a test registered for `stage`, once.
+    #[cfg(test)]
+    pub(crate) fn run_stage_hook(&self, stage: Stage) {
         let hook = self.stage_hooks.lock().unwrap().remove(&stage);
         if let Some(hook) = hook {
             hook();
         }
-        self.blocking(work).await
     }
+
+    #[cfg(not(test))]
+    pub(crate) fn run_stage_hook(&self, _stage: Stage) {}
 
     #[cfg(not(test))]
     pub(crate) async fn blocking_at<T: Send + 'static>(

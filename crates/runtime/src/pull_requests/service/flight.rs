@@ -78,7 +78,7 @@ pub(crate) struct Flight {
 }
 
 impl Flight {
-    fn new(interests: Vec<Interest>) -> Self {
+    pub(crate) fn new(interests: Vec<Interest>) -> Self {
         Self {
             interests: Mutex::new(interests),
             outcome: watch::channel(None).0,
@@ -514,7 +514,12 @@ impl Inner {
 
     /// Ends a flight: records when the pull request is due next, removes the flight, tells the
     /// waiters, and wakes the scheduler.
-    fn finish(&self, key: &PullRequestKey, flight: &Arc<Flight>, outcome: FlightOutcome) {
+    pub(crate) fn finish(
+        &self,
+        key: &PullRequestKey,
+        flight: &Arc<Flight>,
+        outcome: FlightOutcome,
+    ) {
         let config = self.config();
         let now = Instant::now();
         {
@@ -526,13 +531,21 @@ impl Inner {
             {
                 state.flights.remove(key);
             }
-            state.finish_counter += 1;
+            // Only a fetch that settled a fact (a stored success) outdates a plan that read the
+            // shared snapshot earlier. A failure learned nothing, so it must not make a plan
+            // that read a merge look stale.
+            if matches!(outcome, FlightOutcome::Committed { .. }) {
+                state.finish_counter += 1;
+            }
             let finished_at = state.finish_counter;
+            let settled = matches!(outcome, FlightOutcome::Committed { .. });
             let entry = state
                 .keys
                 .entry(key.clone())
                 .or_insert_with(|| KeyState::new(now, false));
-            entry.finished_at = finished_at;
+            if settled {
+                entry.finished_at = finished_at;
+            }
             let pending = Duration::from_secs(config.pending_poll_seconds);
             let stable = Duration::from_secs(config.stable_poll_seconds);
             let backoff_max = Duration::from_secs(config.backoff_max_seconds);
