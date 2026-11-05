@@ -4,6 +4,42 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ForwardArgs {
+    question_id: String,
+}
+
+pub(super) fn forward_spec(name: &str) -> providers::ToolSpec {
+    providers::ToolSpec {
+        name: name.into(),
+        description: "Forward an unanswered direct child's question from this current attached lane root to its lead. Keeps the original ID, requester and inherited recipients; never grants user permission. Caller, lane, revisions and retry identity are runtime-owned. Use only when this lane cannot resolve the question. No new question or capacity slot is created.".into(),
+        input_schema: serde_json::json!({"type":"object","properties":{"question_id":{"type":"string","minLength":1,"maxLength":256}},"required":["question_id"],"additionalProperties":false}),
+    }
+}
+pub(super) fn forward(
+    state: &LoopState,
+    runtime: &AgentRuntime,
+    input: serde_json::Value,
+) -> DispatchResult {
+    let args: ForwardArgs = match parse(input) {
+        Ok(args) => args,
+        Err(e) => return error(e),
+    };
+    let Some(operation_id) = state.meta_call_id.as_deref() else {
+        return error(
+            serde_json::json!({"code":"invalid_input","message":"missing tool call identity"})
+                .to_string(),
+        );
+    };
+    match runtime.forward_lane_question(state.caller_run_id(), &args.question_id, operation_id) {
+        Ok(route) => serialize(
+            &serde_json::json!({"question_id":route.question_id,"responder":route.responder,"routing_revision":route.routing_revision}),
+        ),
+        Err(e) => error(serde_json::json!({"code":e.code,"message":e.message}).to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SubagentQuestionsArgs {
     run_id: String,
 }

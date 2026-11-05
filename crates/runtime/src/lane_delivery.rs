@@ -410,6 +410,8 @@ impl AgentRuntime {
                 active = true;
             }
         }
+        self.resume_forwarded_lane_answers(target.root_run_id, thread)
+            .await;
         let claim = {
             let _guard = target
                 .authority
@@ -469,6 +471,8 @@ impl AgentRuntime {
         }
         match execute {
             Ok(notifications) => {
+                self.resume_forwarded_lane_answers(target.root_run_id, thread)
+                    .await;
                 if let Err(error) = store.handle.ack_lane_delivery(claim.clone(), host.now_ns()) {
                     if let Err(nack) = store.handle.nack_lane_delivery(
                         claim.clone(),
