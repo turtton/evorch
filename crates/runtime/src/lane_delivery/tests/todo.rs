@@ -142,3 +142,54 @@ async fn procedure_changes_cause_no_request_wake_delivery_or_mark() {
         AgentRunPhase::Waiting
     );
 }
+
+#[tokio::test]
+async fn a_stopped_lead_is_marked_once_and_a_durable_stop_keeps_it_unresumed() {
+    let mut f = Fixture::new();
+    let (lead, _host) = f.lead().await;
+    let lane = f.lane(lead, "stopped-lane").await;
+    f.runtime
+        .write_thread_todo(
+            lead,
+            crate::thread_todos::Operation::Replace(vec![ThreadTodoItem {
+                content: "Coordinate lanes".into(),
+                status: ThreadTodoStatus::InProgress,
+            }]),
+        )
+        .unwrap();
+    let before = f.model.requests.lock().unwrap().len();
+
+    f.runtime.stop(lead, crate::StopScope::SelfOnly).unwrap();
+    f.runtime.wait(lead).await.unwrap();
+    let stopped = f.runtime.thread_todo("delivery-lead").unwrap();
+    assert_eq!(stopped.revision, 2, "one mark when the work period ended");
+    assert_eq!(stopped.items[0].status, ThreadTodoStatus::Interrupted);
+    assert!(
+        f.storage
+            .handle()
+            .lane_delivery_destination("delivery-lead".into())
+            .unwrap()
+            .unwrap()
+            .stopped
+    );
+
+    // Neither a later report nor an explicit-resume refusal touches the list,
+    // and the stopped lead is not woken to read the notification.
+    f.report(&lane, Some(1), LaneStatus::Ready);
+    let outcome = f.drive().await;
+    assert!(
+        !matches!(outcome, LaneDeliveryOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        f.runtime
+            .resume_lane_deliveries("delivery-lead", lead, None)
+            .is_err()
+    );
+    assert_eq!(f.runtime.thread_todo("delivery-lead").unwrap(), stopped);
+    assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    assert_eq!(
+        f.runtime.inspect_agent(lead).unwrap().phase,
+        AgentRunPhase::Stopped
+    );
+}
