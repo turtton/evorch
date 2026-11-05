@@ -166,6 +166,7 @@ impl EventKind {
                 LedgerEvent::LaneManagementChanged { .. } => "LaneManagementChanged",
                 LedgerEvent::LaneBriefRevised { .. } => "LaneBriefRevised",
             },
+            Self::PullRequest(event) => event.subkind_name(),
             Self::Diagnostic(_) | Self::Ownership(_) => "",
         }
     }
@@ -252,7 +253,7 @@ impl EventKind {
                 OrchestratorEvent::ThreadGoalUpdated { snapshot } => Some(&snapshot.root_run_id),
                 OrchestratorEvent::ThreadTodoUpdated { .. } => None,
             },
-            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) => None,
+            Self::Usage(_) | Self::Fault(_) | Self::Ownership(_) | Self::PullRequest(_) => None,
         }
     }
 }
@@ -284,6 +285,8 @@ pub enum EventKind {
     Ownership(crate::OwnershipEvent),
     /// run 台帳への追記イベント。
     Ledger(LedgerEvent),
+    /// A change to the pull request a thread tracks (ADR 0043). Thread-scoped: it has no run.
+    PullRequest(crate::PullRequestEvent),
 }
 
 /// run 台帳に関するイベント。

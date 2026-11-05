@@ -42,7 +42,8 @@ CACHE_CONTRACT_FILTER='
       | binary(=owned_route_fallback)
       | binary(=builtin_git_skill)
       | binary(=skill_hot_reload_cache)
-      | binary(=thread_tools_cache)))
+      | binary(=thread_tools_cache)
+      | binary(=pull_request_observer_cache)))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & binary(=artifact_pages_cache))
 '

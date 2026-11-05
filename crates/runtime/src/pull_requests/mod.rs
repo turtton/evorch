@@ -8,9 +8,15 @@
 //! What crosses the boundary is structured: the [`storage::pull_requests`] DTOs. A pull
 //! request's body, comments, review texts, CI logs and any counts are never requested.
 
+pub mod candidates;
 pub mod checkout;
+pub mod diff;
 pub mod fake;
 pub mod locator;
+pub mod ownership;
+pub mod review;
+mod runtime;
+pub mod service;
 pub mod source;
 
 use std::time::Duration;
@@ -22,8 +28,16 @@ use storage::pull_requests::{
 };
 
 pub use checkout::{CheckoutMiss, CheckoutResolution, resolve_checkout};
-pub use fake::{FakeProcessRunner, FakePullRequestSource};
+pub use fake::{FakeProcessRunner, FakePullRequestSource, FetchGate};
 pub use locator::{LocatorError, parse_locator};
+pub use ownership::{OwnershipView, ThreadEnvironment};
+pub use review::{
+    Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
+};
+pub use service::{
+    DerivedThreadKind, InheritanceScheduling, PullRequestError, PullRequestService, ServiceParts,
+    SystemWallClock, WallClock,
+};
 pub use source::{GhSource, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec};
 
 /// The facts of one successful fetch, as the source reports them.
@@ -49,6 +63,10 @@ pub struct FetchedPullRequest {
 #[async_trait]
 pub trait PullRequestSource: Send + Sync {
     /// Fetches `key`, giving up after `deadline`.
+    ///
+    /// The service confirms that tracking is on and that the thread still has its lease
+    /// immediately before this call and waits for nothing after it, so an implementation that
+    /// starts a process starts it before its first `await`.
     ///
     /// # Errors
     /// A [`FetchError`]; see its variants. A partial or unrecognized answer is an error,

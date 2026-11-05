@@ -692,7 +692,9 @@ impl TranscriptModel {
             // オーケストレーション状態は goal pane 表示の対象外（明示 no-op）。
             | event_bus::EventKind::Orchestrator(_)
             | event_bus::EventKind::Diagnostic(_)
-            | event_bus::EventKind::Ownership(_) => {}
+            | event_bus::EventKind::Ownership(_)
+            // Pull request changes never enter a transcript (ADR 0043).
+            | event_bus::EventKind::PullRequest(_) => {}
         }
     }
 

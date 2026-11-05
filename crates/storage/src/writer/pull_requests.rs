@@ -152,6 +152,22 @@ impl StorageHandle {
         })
     }
 
+    /// Forgets the thread's local checkout HEAD for the link revision it was observed under:
+    /// the checkout can no longer be named, and an old commit must not stand for it.
+    /// `Ok(false)` when there was nothing stored for that revision.
+    ///
+    /// # Errors
+    /// `PullRequest(NotLinked | LinkNotActive)` when the link revision is no longer the
+    /// active one, `Tombstoned`, suspended writes or a closed writer.
+    pub fn clear_pull_request_local_head(
+        &self,
+        thread_id: &str,
+        link_revision: u64,
+    ) -> Result<bool, StorageError> {
+        let thread_id = thread_id.to_owned();
+        self.pull_request_write(move |conn| repo::clear_local_head(conn, &thread_id, link_revision))
+    }
+
     /// Hands out the next transition sequence of the thread for the active link
     /// `link_revision`. The runtime numbers a state transition (checks failed, merged, …)
     /// with it before it notifies.
@@ -198,7 +214,9 @@ impl StorageHandle {
     }
 
     /// Presents a pull request a tool output suggested. Idempotent per (thread, pull
-    /// request): an existing candidate keeps its state, so a dismissed one is not revived.
+    /// request): an existing candidate keeps its state, so a dismissed or confirmed one is
+    /// never offered again. A thread holds at most [`crate::pull_requests::PULL_REQUEST_CANDIDATES_MAX`] candidates
+    /// of any state; a full thread refuses new ones and drops nothing.
     ///
     /// # Errors
     /// `PullRequest(Invalid | CandidateLimit)`, `Tombstoned` (thread or source run),
@@ -313,6 +331,26 @@ impl StorageHandle {
         new: NewPullRequestInheritance,
     ) -> Result<InheritanceRecord, StorageError> {
         self.pull_request_write(move |conn| repo::inheritance::schedule(conn, &new))
+    }
+
+    /// Schedules the inheritance of whatever active link `parent_thread_id` has, read in the same
+    /// transaction that stores the row: a parent that relinks at the same moment is pinned to its
+    /// old link or its new one, never to neither. `Ok(None)` when the parent has no active link.
+    /// Idempotent: an existing row of the child is returned unchanged.
+    ///
+    /// # Errors
+    /// `PullRequest(LaneThread | SameThread | Invalid)`, `Tombstoned`, suspended writes or a
+    /// closed writer.
+    pub fn pin_pull_request_inheritance(
+        &self,
+        child_thread_id: &str,
+        parent_thread_id: &str,
+        at_ns: i64,
+    ) -> Result<Option<InheritanceRecord>, StorageError> {
+        let (child, parent) = (child_thread_id.to_owned(), parent_thread_id.to_owned());
+        self.pull_request_write(move |conn| {
+            repo::inheritance::schedule_from_parent(conn, &child, &parent, at_ns)
+        })
     }
 
     /// Tries to apply a pending inheritance: it needs the child's revision unchanged, no
