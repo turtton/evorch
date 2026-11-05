@@ -75,6 +75,7 @@ impl AgentModel for LaneModel {
 
 fn brief() -> event_bus::LaneBrief {
     event_bus::LaneBrief {
+        verification_requirements: Default::default(),
         objective: "an independent deliverable".into(),
         inputs: vec![],
         deliverables: vec!["artifact".into()],

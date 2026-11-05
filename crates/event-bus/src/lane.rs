@@ -213,6 +213,9 @@ pub struct LaneWorkspaceDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaneBrief {
+    /// Explicit evidence requirements. Free-form criteria never imply PR tracking.
+    #[serde(default)]
+    pub verification_requirements: LaneVerificationRequirements,
     pub objective: String,
     pub inputs: Vec<LaneInput>,
     pub deliverables: Vec<String>,
@@ -223,6 +226,14 @@ pub struct LaneBrief {
     /// The lane's policy. When a stored brief is read this is the lane's current
     /// policy, not the one it was created with.
     pub report_policy: LanePolicy,
+}
+
+/// Harness-enforced evidence requirements, independent of the Reviewer verdict.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneVerificationRequirements {
+    #[serde(default)]
+    pub pull_request: bool,
 }
 
 /// A report as the runtime accepts it: everything but the identity and sequence the
@@ -605,6 +616,7 @@ mod tests {
 
     fn brief() -> LaneBrief {
         LaneBrief {
+            verification_requirements: Default::default(),
             objective: "ship it".into(),
             inputs: vec![],
             deliverables: vec![],

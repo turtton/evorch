@@ -1817,6 +1817,7 @@ mod lane_delivery_tests {
                 origin_run_id: "root".into(),
                 creation_key: "open".into(),
                 brief: crate::lanes::LaneBrief {
+                    verification_requirements: Default::default(),
                     objective: "task".into(),
                     inputs: vec![],
                     deliverables: vec![],

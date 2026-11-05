@@ -480,6 +480,7 @@ async fn direct_lane_input_case(summary: bool) {
                     f.lead,
                     "summary-direct-input",
                     event_bus::LaneBrief {
+                        verification_requirements: Default::default(),
                         objective: "summary lane".into(),
                         inputs: vec![],
                         deliverables: vec!["artifact".into()],

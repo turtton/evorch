@@ -4,6 +4,23 @@ use super::*;
 mod tests;
 
 impl AgentRuntime {
+    pub(crate) fn spawn_lane_reviewer(
+        &self,
+        parent: RunId,
+        run_id: RunId,
+        prompt: String,
+        config: RunConfig,
+    ) {
+        self.spawn_run_with_handoff(
+            run_id,
+            Some(parent),
+            Role::Reviewer,
+            prompt,
+            config,
+            RunContinuation::Fresh,
+            None,
+        );
+    }
     pub(crate) fn spawn_goal_reviewer(
         &self,
         parent: RunId,
@@ -50,6 +67,7 @@ impl AgentRuntime {
         ) {
             return;
         }
+        self.complete_lane_reviewer(run_id, to);
         // A finished run asks for nothing more; drop its denial streak.
         self.shared.escalation_denials.clear(run_id);
         let mut runs = lock_runs(&self.shared.runs);
