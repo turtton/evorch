@@ -1,0 +1,21 @@
+{
+  "full": {
+    "client_build": {
+      "name": "evorch",
+      "revision": "abc1234",
+      "version": "0.1.0"
+    },
+    "client_instance_id": "client-1",
+    "desired_core": "core-abc",
+    "optional_capabilities": [
+      "snapshot_events.v1"
+    ],
+    "required_capabilities": [
+      "commands.v1",
+      "queries.v1"
+    ],
+    "supported_versions": [
+      1
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "draining": "draining",
+  "failed": "failed",
+  "quiescing": "quiescing",
+  "ready": "ready",
+  "restarting": "restarting",
+  "starting": "starting"
+}

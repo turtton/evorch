@@ -80,6 +80,13 @@ jobs:
           cargo metadata --format-version 1 --locked > "$EVORCH_CI_METADATA_DIR/cargo.json"
           cargo nextest list --workspace --locked --list-type binaries-only --message-format json > "$EVORCH_CI_METADATA_DIR/default-binaries.json"
           cargo build -p config --example dump_schema
+      # ADR 0045 §11: workbench-protocol stays free of workspace crates and
+      # workbench-client depends only on it. Reads `cargo metadata`; needs jq,
+      # which the ubuntu-latest image provides.
+      - name: Workbench crate boundaries
+        run: |
+          scripts/tests/test_check_workbench_boundaries.sh
+          scripts/check-workbench-boundaries.sh
       # CI enforces cost-sensitive invariants with this offline gate. The mock
       # computes cache usage from received input; compaction has an explicit boundary.
       - name: Cache preservation contracts (offline)

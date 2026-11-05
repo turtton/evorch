@@ -1,0 +1,72 @@
+{
+  "lead": {
+    "answer": {
+      "answered_by": {
+        "actor": "human",
+        "client_id": "client-1",
+        "surface": "web"
+      },
+      "text": "yes"
+    },
+    "blocking": true,
+    "id": "q-1",
+    "management_revision": "2",
+    "options": [
+      "yes",
+      "no"
+    ],
+    "raised_by": {
+      "actor": "agent",
+      "agent_run_id": "run-1",
+      "surface": "none"
+    },
+    "requester": {
+      "root_run": "run-root",
+      "run": "run-1",
+      "thread": "thr-1"
+    },
+    "revision": "5",
+    "routing_revision": "1",
+    "target": {
+      "payload": {
+        "lead_run": "run-1",
+        "lead_thread": "thr-1"
+      },
+      "type": "lead"
+    },
+    "title": "Proceed?"
+  },
+  "user": {
+    "answer": {
+      "answered_by": {
+        "actor": "human",
+        "client_id": "client-1",
+        "surface": "web"
+      },
+      "text": "yes"
+    },
+    "blocking": true,
+    "id": "q-1",
+    "management_revision": "2",
+    "options": [
+      "yes",
+      "no"
+    ],
+    "raised_by": {
+      "actor": "agent",
+      "agent_run_id": "run-1",
+      "surface": "none"
+    },
+    "requester": {
+      "root_run": "run-root",
+      "run": "run-1",
+      "thread": "thr-1"
+    },
+    "revision": "5",
+    "routing_revision": "1",
+    "target": {
+      "type": "user"
+    },
+    "title": "Proceed?"
+  }
+}
