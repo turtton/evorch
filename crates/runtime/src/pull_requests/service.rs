@@ -234,16 +234,15 @@ pub(crate) struct State {
     attribution: policy::Attribution,
     /// In-flight log preparation; never a second delivery queue.
     pub(crate) preparing: HashSet<String>,
-    /// At most one automatic preparation attempt per notice/policy in this process.
-    pub(crate) attempted: HashSet<(String, u64)>,
+    /// A failed attempt must not suppress recovery after ownership is reacquired.
+    pub(crate) attempted: HashSet<(String, u64, u64)>,
     /// Children whose inheritance is being resolved.
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
     pub(crate) inheritance_due: HashMap<String, Instant>,
 }
 
-/// A wait on the blocking pool right before a process is started. A test may interrupt it, which
-/// is how "the world changed while the work was queued" is simulated.
+/// Lifecycle boundaries where tests simulate concurrent changes or await completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Stage {
     /// Numbering a fetch, right before `gh` is started.
@@ -254,6 +253,9 @@ pub(crate) enum Stage {
     Planned,
     /// A write for a thread is about to take the registry guard (after its permit was checked).
     Guarded,
+    /// An asynchronous PR preparation has released its single-flight slot.
+    #[cfg(test)]
+    PrPreparationFinished,
 }
 
 pub(crate) struct Inner {

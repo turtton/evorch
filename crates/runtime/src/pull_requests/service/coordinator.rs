@@ -254,10 +254,11 @@ impl PullRequestService {
             })
             .await??;
         // An explicit manual retry is an operator decision, not an automatic retry loop.
-        inner
-            .lock()
-            .attempted
-            .remove(&(notice.notice_id.clone(), notice.policy_revision));
+        inner.lock().attempted.remove(&(
+            notice.notice_id.clone(),
+            notice.policy_revision,
+            target.permit.lease.generation,
+        ));
         inner.spawn_preparation(target, notice.clone());
         inner.wake.notify_one();
         Ok(notice)
@@ -397,9 +398,11 @@ impl Inner {
         {
             let mut state = self.lock();
             if state.preparing.contains(&notice.notice_id)
-                || state
-                    .attempted
-                    .contains(&(notice.notice_id.clone(), notice.policy_revision))
+                || state.attempted.contains(&(
+                    notice.notice_id.clone(),
+                    notice.policy_revision,
+                    target.permit.lease.generation,
+                ))
             {
                 return;
             }
@@ -417,6 +420,8 @@ impl Inner {
                 _ = shutdown.changed() => {}
             }
             inner.lock().preparing.remove(&notice.notice_id);
+            #[cfg(test)]
+            inner.run_stage_hook(super::Stage::PrPreparationFinished);
             inner.wake.notify_one();
         });
     }
@@ -440,9 +445,11 @@ impl Inner {
         {
             return Ok(());
         }
-        self.lock()
-            .attempted
-            .insert((notice.notice_id.clone(), notice.policy_revision));
+        self.lock().attempted.insert((
+            notice.notice_id.clone(),
+            notice.policy_revision,
+            target.permit.lease.generation,
+        ));
         let request = LogRequest::new(notice.key.clone(), &notice.head_sha, facts.checks.clone());
         let bundle = self.logs.fetch_failed_logs(&request).await;
         // Facts are small and structured. Check names/logs never enter instructions or evidence.

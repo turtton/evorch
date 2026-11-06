@@ -562,6 +562,47 @@ impl Default for DeliveryHints {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn reacquiring_ownership_recovers_a_reservation_in_the_same_process() {
+    let w = World::new();
+    let logs = Arc::new(GateLogs::default());
+    let hints = Arc::new(DeliveryHints::default());
+    let first = w.process_with_delivery(enabled(), logs.clone(), hints.clone());
+    *hints.storage.lock().unwrap() = Some(first.storage_handle.clone());
+    first.link_directly("t", 1);
+    let old = target(&first);
+    let seq = snapshot(&first, 'a', false);
+    attribute(&first, &old, seq, 'a');
+    enable(&first, &old).await;
+    logs.arrived.notified().await;
+    let mut disabled = enabled();
+    disabled.enabled = false;
+    let second = w.process(disabled);
+    first.host.handoff(&old.permit, &second.host).unwrap();
+    second
+        .host
+        .handoff(&second.permit("t"), &first.host)
+        .unwrap();
+    let current = target(&first);
+    assert_ne!(current.permit.lease.generation, old.permit.lease.generation);
+    let finished = Arc::new(Notify::new());
+    let signal = Arc::clone(&finished);
+    first.at_stage(super::super::Stage::PrPreparationFinished, move || {
+        signal.notify_one()
+    });
+    logs.release.notify_one();
+    finished.notified().await;
+    let _ = first.service.inner().coordinate(&[current]).await;
+    logs.arrived.notified().await;
+    assert_eq!(notices(&first)[0].phase, PrNoticePhase::Reserved);
+    logs.release.notify_one();
+    hints.ready.notified().await;
+    assert_eq!(notices(&first)[0].phase, PrNoticePhase::Ready);
+    assert_eq!(logs.fake.requests().len(), 2);
+    assert_eq!(hints.scheduled.lock().unwrap().len(), 1);
+}
+
 impl super::super::PrNoticeDelivery for DeliveryHints {
     fn schedule(&self, thread: &str) {
         let storage = self.storage.lock().unwrap();
