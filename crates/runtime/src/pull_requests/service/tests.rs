@@ -143,9 +143,13 @@ pub(super) struct FakeEnvironment {
     directory_requests: std::sync::atomic::AtomicUsize,
     resolutions: std::sync::atomic::AtomicUsize,
     on_directories: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    resolution: Mutex<Option<crate::pull_requests::CheckoutResolution>>,
 }
 
 impl FakeEnvironment {
+    pub(super) fn set_resolution(&self, resolution: crate::pull_requests::CheckoutResolution) {
+        *self.resolution.lock().unwrap() = Some(resolution);
+    }
     pub(super) fn set_directories(&self, directories: Vec<PathBuf>) {
         *self.directories.lock().unwrap() = directories;
     }
@@ -197,6 +201,9 @@ impl ThreadEnvironment for FakeEnvironment {
         budget: Duration,
     ) -> crate::pull_requests::CheckoutResolution {
         self.resolutions.fetch_add(1, Ordering::SeqCst);
+        if let Some(resolution) = self.resolution.lock().unwrap().clone() {
+            return resolution;
+        }
         crate::pull_requests::checkout::resolve_blocking(
             directories,
             head_repository,
@@ -291,6 +298,17 @@ impl World {
     }
 
     pub(super) fn process(&self, settings: PullRequestsConfig) -> Process {
+        self.process_with_logs(
+            settings,
+            Arc::new(crate::pull_requests::FakePullRequestLogSource::new()),
+        )
+    }
+
+    pub(super) fn process_with_logs(
+        &self,
+        settings: PullRequestsConfig,
+        logs: Arc<dyn crate::pull_requests::PullRequestLogSource>,
+    ) -> Process {
         let storage = Storage::open(StorageConfig {
             db_path: self.dir.path().join("evorch.db"),
             ..StorageConfig::default()
@@ -309,18 +327,21 @@ impl World {
         let environment = Arc::new(FakeEnvironment::default());
         let hooks = Arc::new(Hooks::default());
         let events = bus.subscribe();
-        let service = PullRequestService::start(ServiceParts {
-            storage: storage.handle(),
-            source: Arc::new(source.clone()),
-            ownership: Arc::new(HookedOwnership {
-                host: Arc::clone(&host),
-                hooks: Arc::clone(&hooks),
-            }),
-            environment: Arc::clone(&environment) as Arc<dyn ThreadEnvironment>,
-            bus: Arc::clone(&bus),
-            settings,
-            clock: Arc::clone(&self.clock) as Arc<dyn WallClock>,
-        })
+        let service = PullRequestService::start_with_log_source(
+            ServiceParts {
+                storage: storage.handle(),
+                source: Arc::new(source.clone()),
+                ownership: Arc::new(HookedOwnership {
+                    host: Arc::clone(&host),
+                    hooks: Arc::clone(&hooks),
+                }),
+                environment: Arc::clone(&environment) as Arc<dyn ThreadEnvironment>,
+                bus: Arc::clone(&bus),
+                settings,
+                clock: Arc::clone(&self.clock) as Arc<dyn WallClock>,
+            },
+            logs,
+        )
         .unwrap();
         Process {
             storage_handle: storage.handle(),

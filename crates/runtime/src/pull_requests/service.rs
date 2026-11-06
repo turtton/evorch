@@ -16,7 +16,8 @@
 //! - **Inheritance** — a derived thread (an escalation, later a fork or rewind) takes its
 //!   parent's link only while the pull request is confirmed open.
 //!
-//! Nothing here talks to an agent: no notice, no held message, no wake. Changes leave as
+//! Phase 2 prepares bounded notices in the common durable outbox; it never edits history.
+//! Tracking changes leave as
 //! [`PullRequestEvent`]s on the bus, once per change and after the change is stored; a reader
 //! opens the database again instead of trusting the event.
 //!
@@ -25,8 +26,10 @@
 //! the pull request. A result is delivered to a thread only if the process still owns the
 //! thread (checked at completion) and the thread still has the link the fetch was started for.
 
+mod coordinator;
 mod flight;
 mod observer;
+mod policy;
 mod scheduler;
 
 use std::collections::{HashMap, HashSet};
@@ -75,6 +78,9 @@ pub enum PullRequestError {
     /// `[pull_requests] enabled` is false.
     #[error("pull request tracking is disabled")]
     Disabled,
+    /// The head changed or the checks are not eligible.
+    #[error("the pull request head or checks are not eligible")]
+    Ineligible,
     /// The reference is not a github.com pull request.
     #[error("{0}")]
     Locator(#[from] LocatorError),
@@ -209,6 +215,12 @@ pub(crate) struct State {
     pub(crate) flights: HashMap<PullRequestKey, Arc<Flight>>,
     /// Threads a person or a finished command asked to fetch for now.
     pub(crate) forced: HashSet<String>,
+    /// Head attribution is intentionally process-local (restart means unknown).
+    attribution: policy::Attribution,
+    /// In-flight log preparation; never a second delivery queue.
+    pub(crate) preparing: HashSet<String>,
+    /// At most one automatic preparation attempt per notice/policy in this process.
+    pub(crate) attempted: HashSet<(String, u64)>,
     /// Children whose inheritance is being resolved.
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
@@ -232,6 +244,8 @@ pub(crate) enum Stage {
 pub(crate) struct Inner {
     pub(crate) storage: StorageHandle,
     pub(crate) source: Arc<dyn PullRequestSource>,
+    pub(crate) logs: Arc<dyn super::PullRequestLogSource>,
+    coordinator_write: Mutex<()>,
     pub(crate) ownership: Arc<dyn OwnershipView>,
     pub(crate) env: Arc<dyn ThreadEnvironment>,
     pub(crate) bus: Arc<EventBus>,
@@ -492,6 +506,13 @@ impl Inner {
                 Ok(receipt)
             })
             .await??;
+        if receipt.changed {
+            self.lock().attribution.linked(
+                thread_id,
+                permit.lease.generation,
+                receipt.link.link_revision,
+            );
+        }
         self.force(thread_id);
         Ok(receipt)
     }
@@ -609,12 +630,25 @@ impl PullRequestService {
     /// # Errors
     /// The settings are outside their documented ranges.
     pub fn start(parts: ServiceParts) -> Result<Self, config::ConfigError> {
+        Self::start_with_log_source(parts, Arc::new(super::GhLogSource::new()))
+    }
+
+    /// Starts tracking with an injectable bounded log source.
+    ///
+    /// # Errors
+    /// Invalid settings.
+    pub fn start_with_log_source(
+        parts: ServiceParts,
+        logs: Arc<dyn super::PullRequestLogSource>,
+    ) -> Result<Self, config::ConfigError> {
         parts.settings.validate()?;
         let (settings, _) = watch::channel(parts.settings);
         let (shutdown, _) = watch::channel(false);
         let inner = Arc::new(Inner {
             storage: parts.storage,
             source: parts.source,
+            logs,
+            coordinator_write: Mutex::new(()),
             ownership: parts.ownership,
             env: parts.environment,
             bus: parts.bus,
@@ -642,6 +676,12 @@ impl PullRequestService {
     /// The settings are outside their documented ranges (nothing changes).
     pub fn update_settings(&self, settings: PullRequestsConfig) -> Result<(), config::ConfigError> {
         settings.validate()?;
+        let previous = self.inner.config();
+        if (!previous.auto_fix_enabled && settings.auto_fix_enabled)
+            || (!previous.enabled && settings.enabled)
+        {
+            self.inner.lock().attempted.clear();
+        }
         self.inner.settings.send_replace(settings);
         self.inner.wake.notify_one();
         Ok(())

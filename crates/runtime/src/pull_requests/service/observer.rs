@@ -29,7 +29,9 @@ const MAX_TRACKED: usize = 512;
 #[derive(Default)]
 struct Observer {
     /// Calls whose command publishes, until they complete.
-    publishing_calls: HashSet<String>,
+    publishing_calls: HashSet<(String, String)>,
+    completed: HashSet<(String, String)>,
+    attribution_saturated: bool,
     /// Asynchronous jobs (run, job) started by a publishing command.
     publishing_jobs: HashSet<(String, String)>,
     /// Output of jobs still running.
@@ -43,7 +45,12 @@ pub(super) async fn run(inner: Arc<Inner>, mut receiver: event_bus::EventReceive
         tokio::select! {
             event = receiver.recv() => match event {
                 Ok(event) => observer.handle(&inner, &event).await,
-                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Lagged(_)) => {
+                    // Lost correlation is never permission to attribute a later head.
+                    inner.lock().attribution = Default::default();
+                    observer.publishing_calls.clear();
+                    observer.publishing_jobs.clear();
+                }
                 Err(RecvError::Closed) => break,
             },
             changed = shutdown.changed() => {
@@ -62,7 +69,41 @@ fn bounded<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, value: T) {
     set.insert(value);
 }
 
+fn job_success(status: &str, code: Option<i32>) -> bool {
+    status == "completed" && code == Some(0)
+}
+
 impl Observer {
+    async fn finished(&mut self, inner: &Arc<Inner>, run: &str, identity: String, success: bool) {
+        let id = (run.to_owned(), identity);
+        if self.completed.contains(&id) {
+            return;
+        }
+        // Do not evict dedup tombstones and turn a replay into fresh success.
+        // At capacity, keep refreshing but stop attributing new heads (safe unknown).
+        if self.completed.len() >= MAX_TRACKED {
+            self.attribution_saturated = true;
+        }
+        if !self.attribution_saturated {
+            self.completed.insert(id);
+        }
+        if success
+            && !self.attribution_saturated
+            && let Some(thread) = inner.thread_for_run(run).await
+        {
+            let ownership = Arc::clone(&inner.ownership);
+            let t = thread.clone();
+            if let Ok(Some(permit)) = inner.blocking(move || ownership.owned_permit(&t)).await
+                && inner.check_permit(&thread, &permit).await.is_ok()
+            {
+                inner
+                    .lock()
+                    .attribution
+                    .succeeded(&thread, permit.lease.generation);
+            }
+        }
+        inner.force_run(run).await;
+    }
     async fn handle(&mut self, inner: &Arc<Inner>, event: &Event) {
         match &event.kind {
             EventKind::Ownership(_) => inner.wake.notify_one(),
@@ -77,6 +118,7 @@ impl Observer {
                 tool_name,
                 call_id,
                 input,
+                run_id: Some(run_id),
                 ..
             } if tool_name == "shell" => {
                 let command = input
@@ -84,7 +126,10 @@ impl Observer {
                     .and_then(|input| input.get("command"))
                     .and_then(Value::as_str);
                 if command.is_some_and(is_publishing_command) {
-                    bounded(&mut self.publishing_calls, call_id.clone());
+                    bounded(
+                        &mut self.publishing_calls,
+                        (run_id.clone(), call_id.clone()),
+                    );
                 }
             }
             ToolEvent::ToolCompleted {
@@ -94,6 +139,7 @@ impl Observer {
                 detail,
                 run_id: Some(run_id),
                 parent_call_id,
+                is_error,
                 ..
             } => {
                 if is_command_tool(tool_name)
@@ -105,7 +151,7 @@ impl Observer {
                     }
                 }
                 if tool_name == "shell" {
-                    self.shell_returned(inner, run_id, call_id, detail.as_ref())
+                    self.shell_returned(inner, run_id, call_id, detail.as_ref(), *is_error)
                         .await;
                 }
             }
@@ -116,6 +162,7 @@ impl Observer {
                 offset,
                 chunk,
                 status,
+                exit_code,
                 ..
             } => {
                 let stream = (run_id.clone(), job_id.clone());
@@ -134,7 +181,13 @@ impl Observer {
                         }
                     }
                     if self.publishing_jobs.remove(&stream) {
-                        inner.force_run(run_id).await;
+                        self.finished(
+                            inner,
+                            run_id,
+                            format!("job:{job_id}"),
+                            job_success(status, *exit_code),
+                        )
+                        .await;
                     }
                 }
             }
@@ -150,12 +203,27 @@ impl Observer {
         run_id: &str,
         call_id: &str,
         detail: Option<&Value>,
+        is_error: bool,
     ) {
-        let publishing_call = self.publishing_calls.remove(call_id);
+        let publishing_call = self
+            .publishing_calls
+            .remove(&(run_id.to_owned(), call_id.to_owned()));
         let job = detail.and_then(|detail| detail.get("shell_job"));
         let Some(job) = job else {
             if publishing_call {
-                inner.force_run(run_id).await;
+                let code = detail
+                    .and_then(|d| d.get("exit_code"))
+                    .and_then(Value::as_i64);
+                self.finished(
+                    inner,
+                    run_id,
+                    format!("call:{call_id}"),
+                    code.map_or(!is_error, |c| c == 0)
+                        && detail
+                            .and_then(|d| d.get("timed_out_ms"))
+                            .is_none_or(Value::is_null),
+                )
+                .await;
             }
             return;
         };
@@ -170,8 +238,21 @@ impl Observer {
             if publishing_call {
                 bounded(&mut self.publishing_jobs, job);
             }
-        } else if publishing_call || self.publishing_jobs.remove(&job) {
-            inner.force_run(run_id).await;
+        } else {
+            let known = self.publishing_jobs.remove(&job) || publishing_call;
+            if known {
+                let code = detail
+                    .and_then(|d| d.get("shell_job"))
+                    .and_then(|j| j.get("exit_code"))
+                    .and_then(Value::as_i64);
+                self.finished(
+                    inner,
+                    run_id,
+                    format!("job:{job_id}"),
+                    status == "completed" && code == Some(0),
+                )
+                .await;
+            }
         }
     }
 }
@@ -279,5 +360,127 @@ impl Inner {
         Ok(snapshot
             .and_then(|snapshot| snapshot.facts)
             .is_some_and(|facts| facts.state == PullRequestState::Merged))
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::super::tests::*;
+    use super::*;
+    use serde_json::json;
+
+    fn start(observer: &mut Observer, run: &str, call: &str) {
+        observer.publishing_calls.insert((run.into(), call.into()));
+    }
+    fn is_agent(process: &Process, permit: &crate::ownership::OwnerPermit, seq: u64) -> bool {
+        let inner = process.service.inner();
+        let mut state = inner.lock();
+        let head = seq.to_string();
+        state
+            .attribution
+            .adopt("t", permit.lease.generation, 1, seq, &head, Some(&head));
+        state
+            .attribution
+            .agent("t", permit.lease.generation, 1, seq, &head)
+    }
+    #[tokio::test(start_paused = true)]
+    async fn synchronous_exit_code_wins_over_is_error_and_missing_completion_never_succeeds() {
+        let world = World::new();
+        let process = world.process(enabled());
+        let permit = process.permit("t");
+        process.environment.bind("run", "t");
+        let mut observer = Observer::default();
+        for (i, detail, error, expected) in [
+            (1, Some(json!({"exit_code":0})), true, true),
+            (2, Some(json!({"exit_code":1})), false, false),
+            (3, None, true, false),
+            (4, None, false, true),
+        ] {
+            let call = format!("c{i}");
+            start(&mut observer, "run", &call);
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    &call,
+                    detail.as_ref(),
+                    error,
+                )
+                .await;
+            assert_eq!(is_agent(&process, &permit, i), expected);
+        }
+        start(&mut observer, "run", "missing");
+        assert!(!is_agent(&process, &permit, 5));
+        // No matching start is not evidence even with a zero exit code.
+        observer
+            .shell_returned(
+                process.service.inner(),
+                "run",
+                "absent",
+                Some(&json!({"exit_code":0})),
+                false,
+            )
+            .await;
+        assert!(!is_agent(&process, &permit, 6));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn jobs_require_completed_zero_and_duplicate_terminal_events_do_not_credit_the_next_head()
+    {
+        let world = World::new();
+        let process = world.process(enabled());
+        let permit = process.permit("t");
+        process.environment.bind("run", "t");
+        let mut o = Observer::default();
+        for (i, status, exit_code) in [
+            (1, "running", None),
+            (2, "failed", Some(1)),
+            (3, "cancelled", Some(0)),
+            (4, "timed_out", None),
+            (5, "completed", None),
+            (6, "completed", Some(0)),
+        ] {
+            let call = format!("c{i}");
+            start(&mut o, "run", &call);
+            o.shell_returned(process.service.inner(), "run", &call,
+                Some(&json!({"shell_job":{"job_id":format!("j{i}"),"status":status,"exit_code":exit_code}})), false).await;
+            assert_eq!(
+                is_agent(&process, &permit, i),
+                status == "completed" && exit_code == Some(0)
+            );
+        }
+        start(&mut o, "run", "c6");
+        o.shell_returned(
+            process.service.inner(),
+            "run",
+            "c6",
+            Some(&json!({"shell_job":{"job_id":"j6","status":"completed","exit_code":0}})),
+            false,
+        )
+        .await;
+        assert!(!is_agent(&process, &permit, 7));
+        start(&mut o, "run", "background");
+        o.shell_returned(
+            process.service.inner(),
+            "run",
+            "background",
+            Some(&json!({"shell_job":{"job_id":"job","status":"running"}})),
+            false,
+        )
+        .await;
+        assert!(!is_agent(&process, &permit, 8));
+        let event = ToolEvent::ShellJobOutput {
+            job_uid: None,
+            job_id: "job".into(),
+            call_id: Some("background".into()),
+            run_id: Some("run".into()),
+            offset: 0,
+            chunk: String::new(),
+            status: "completed".into(),
+            exit_code: Some(0),
+        };
+        o.tool(process.service.inner(), &event).await;
+        assert!(is_agent(&process, &permit, 9));
+        o.tool(process.service.inner(), &event).await;
+        assert!(!is_agent(&process, &permit, 10));
     }
 }
