@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use workspace_ui::ProjectId;
 
 use super::{WorkbenchError, WorkbenchState};
-use crate::mcp_settings::{McpSettingsModel, mcp_settings_modal};
+use crate::mcp_settings::{
+    McpNoticeAction, McpSettingsAction, McpSettingsModel, mcp_approval_notices, mcp_settings_modal,
+};
 use crate::model::project_dialog::ProjectDialog;
 use crate::model::tasks::AgentRunSource;
 use crate::panes::project_dialog::{ProjectDialogAction, project_dialog_modal};
@@ -69,6 +71,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     pub(super) fn render_project_dialog(&mut self, ctx: &egui::Context) {
+        self.render_mcp_notices(ctx);
         if !matches!(self.project_dialog, ProjectDialog::Settings { .. }) {
             self.mcp_settings.close();
         }
@@ -182,6 +185,53 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         if let Some(action) = mcp_settings_modal(ctx, &mut self.mcp_settings) {
             self.mcp_settings.apply_action(action);
+        }
+    }
+
+    /// Follows every project's MCP status and shows a non-blocking notice when
+    /// a new run skipped an unapproved server. Subscriptions start off-thread.
+    fn render_mcp_notices(&mut self, ctx: &egui::Context) {
+        if !self.mcp_settings.is_available() {
+            return;
+        }
+        if !self.mcp_settings.has_waker() {
+            let ctx = ctx.clone();
+            self.mcp_settings
+                .set_waker(std::sync::Arc::new(move || ctx.request_repaint()));
+        }
+        self.mcp_settings.watch_projects(
+            self.sidebar
+                .projects
+                .iter()
+                .map(|project| project.repo_root.as_path()),
+        );
+        self.mcp_settings.poll();
+        let projects = &self.sidebar.projects;
+        let action = mcp_approval_notices(ctx, self.mcp_settings.approval_notices(), |root| {
+            projects
+                .iter()
+                .find(|project| project.repo_root == root)
+                .map(|project| project.name.clone())
+        });
+        match action {
+            None => {}
+            Some(McpNoticeAction::Dismiss(notice)) => self.mcp_settings.dismiss_notice(&notice),
+            Some(McpNoticeAction::Review(notice)) => {
+                self.mcp_settings.dismiss_notice(&notice);
+                let project = self
+                    .sidebar
+                    .projects
+                    .iter()
+                    .find(|project| project.repo_root == notice.project_root)
+                    .map(|project| project.id.clone());
+                let Some(project) = project else {
+                    return;
+                };
+                self.open_project_settings(project.clone());
+                self.open_mcp_settings(ctx, &project);
+                self.mcp_settings
+                    .apply_action(McpSettingsAction::ReviewApproval(notice.server_id));
+            }
         }
     }
 

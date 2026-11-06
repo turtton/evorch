@@ -9,9 +9,11 @@ use config::mcp::{MCP_ROLE_KEYS, McpServerEntry, McpTransportDefinition};
 
 use super::draft::{
     DraftCheck, DraftField, DraftPair, DraftTransport, DraftValue, DraftValueKind, McpServerDraft,
+    looks_secret,
 };
 use super::{
-    McpEntryActions, McpEntryOrigin, McpLoadState, McpNotice, McpSettingsAction, McpSettingsModel,
+    EditorParts, McpEntryActions, McpEntryOrigin, McpLoadState, McpNotice, McpRowNote,
+    McpSettingsAction, McpSettingsModel,
 };
 use crate::mcp::McpServerStatus;
 use crate::theme::icons;
@@ -56,8 +58,17 @@ pub fn mcp_settings_modal(
                 action = Some(McpSettingsAction::Close);
             }
         });
-    // A stray click or Escape must not throw away an unsaved edit.
-    if action.is_none() && modal.should_close() && model.editor().is_none() {
+    // A stray click or Escape must not throw away an unsaved edit, and Escape
+    // in the approval dialog only closes that dialog.
+    let approval = super::review::approval_modal(ctx, model);
+    if approval.is_some() {
+        return approval;
+    }
+    if action.is_none()
+        && modal.should_close()
+        && model.editor().is_none()
+        && model.approval().is_none()
+    {
         action = Some(McpSettingsAction::Close);
     }
     action
@@ -145,11 +156,11 @@ fn server_list(ui: &mut Ui, model: &McpSettingsModel) -> Option<McpSettingsActio
 fn mcp_editor(ui: &mut Ui, model: &mut McpSettingsModel) -> Option<McpSettingsAction> {
     let check = model.check_editor()?;
     let busy = model.is_busy();
-    let draft = model.editor_mut()?;
+    let parts = model.editor_parts()?;
     let mut action = None;
     soft_frame(palette().SURFACE).show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(SP_2, SP_2);
-        editor_body(ui, draft, &check, busy, &mut action);
+        editor_body(ui, parts, &check, busy, &mut action);
     });
     action
 }
@@ -166,6 +177,12 @@ fn notice(
             ui.colored_label(
                 palette().SUCCESS,
                 "Saved. It applies from the next new run.",
+            );
+        }
+        Some(McpNotice::SecretStored) => {
+            ui.colored_label(
+                palette().SUCCESS,
+                "Saved. The secret is in the OS keychain; .evorch/mcp.toml holds only its entry name. It applies from the next new run.",
             );
         }
         Some(McpNotice::Conflict) => {
@@ -235,6 +252,9 @@ fn server_row(
         ui.label(muted(
             "mcp.toml disables this ID, but no .mcp.json server uses it.",
         ));
+    }
+    if !entry.tombstone {
+        super::review::status_controls(ui, model, id, entry, busy, action);
     }
     for diagnostic in &entry.diagnostics {
         ui.colored_label(
@@ -313,35 +333,28 @@ fn server_row(
     ui.add_space(SP_1);
 }
 
-/// Live connection state from the service. Approval, connection tests and
-/// keychain input attach here and in [`secret_slot`] (later GUI work).
+/// Live state from the service. An approval or revocation made in this
+/// dialog takes precedence until the dialog is closed.
 fn status_slot(ui: &mut Ui, model: &McpSettingsModel, id: &str) {
-    let Some(event) = model.status(id) else {
-        return;
-    };
-    let (text, color) = match event.status {
-        McpServerStatus::Disabled => ("off", palette().TEXT_MUTED),
-        McpServerStatus::Invalid => ("invalid", palette().ERROR_FG),
-        McpServerStatus::NeedsApproval => ("needs approval", palette().WARNING),
-        McpServerStatus::SecretUnavailable => ("secret unavailable", palette().WARNING),
-        McpServerStatus::Connecting => ("connecting", palette().INFO),
-        McpServerStatus::Ready => ("ready", palette().SUCCESS),
-        McpServerStatus::Unavailable => ("unavailable", palette().ERROR_FG),
-        McpServerStatus::ProcessLimitReached => ("process limit", palette().WARNING),
+    let (text, color) = match model.row_note(id) {
+        Some(McpRowNote::Approved) => ("approved", palette().SUCCESS),
+        Some(McpRowNote::Revoked) => super::review::status_badge(McpServerStatus::NeedsApproval),
+        _ => match model.status(id) {
+            Some(event) => super::review::status_badge(event.status),
+            None => return,
+        },
     };
     badge(ui, text, color, palette().SURFACE);
 }
 
-/// Placeholder for storing a value in the OS keychain from the editor.
-fn secret_slot(_ui: &mut Ui, _draft: &McpServerDraft) {}
-
 fn editor_body(
     ui: &mut Ui,
-    draft: &mut McpServerDraft,
+    parts: EditorParts<'_>,
     check: &DraftCheck,
     busy: bool,
     action: &mut Option<McpSettingsAction>,
 ) {
+    let draft = &mut *parts.draft;
     let title = match &draft.existing_id {
         Some(id) => format!("Edit {id}"),
         None => "New MCP server".to_owned(),
@@ -405,7 +418,7 @@ fn editor_body(
             );
         });
     ui.label(muted(SECRET_HINT));
-    secret_slot(ui, draft);
+    super::review::secret_section(ui, parts, check, busy, action);
     for warning in &check.warnings {
         ui.colored_label(palette().WARNING_FG, warning.message());
     }
@@ -504,7 +517,11 @@ fn http_fields(ui: &mut Ui, draft: &mut McpServerDraft, check: &DraftCheck) {
             (None, token) => *token = None,
             (Some(kind), Some(token)) => {
                 token.kind = kind;
-                single_line(ui, &mut token.text, "Bearer token value", value_hint(kind));
+                if kind == DraftValueKind::Text {
+                    masked_line(ui, &mut token.text, "Bearer token value", value_hint(kind));
+                } else {
+                    single_line(ui, &mut token.text, "Bearer token value", value_hint(kind));
+                }
             }
             (Some(kind), token @ None) => {
                 *token = Some(DraftValue {
@@ -568,12 +585,14 @@ fn pair_rows(
                             "Keychain",
                         );
                     });
-                single_line(
-                    ui,
-                    &mut pair.value.text,
-                    &format!("{noun} {} value", index + 1),
-                    value_hint(pair.value.kind),
-                );
+                let label = format!("{noun} {} value", index + 1);
+                let hint = value_hint(pair.value.kind);
+                // Plain text under a credential-like name may be the secret itself.
+                if pair.value.kind == DraftValueKind::Text && looks_secret(&pair.name) {
+                    masked_line(ui, &mut pair.value.text, &label, hint);
+                } else {
+                    single_line(ui, &mut pair.value.text, &label, hint);
+                }
             });
             field_error(ui, check.error(name_field(index)));
             field_error(ui, check.error(value_field(index)));
@@ -600,6 +619,17 @@ fn text_field(ui: &mut Ui, label: &str, value: &mut String, hint: &str, error: O
 fn single_line(ui: &mut Ui, value: &mut String, label: &str, hint: &str) {
     let response = ui.add(
         egui::TextEdit::singleline(value)
+            .hint_text(hint)
+            .desired_width(ui.available_width()),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, label));
+}
+
+/// A token typed as text may be the credential itself: never echo it.
+fn masked_line(ui: &mut Ui, value: &mut String, label: &str, hint: &str) {
+    let response = ui.add(
+        egui::TextEdit::singleline(value)
+            .password(true)
             .hint_text(hint)
             .desired_width(ui.available_width()),
     );

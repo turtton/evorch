@@ -173,8 +173,30 @@ impl DraftCheck {
     }
 }
 
-/// The editor form for one server. Saving always writes the whole definition.
+/// A value of the open draft that can name an OS keychain entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretTarget {
+    /// The bearer token of an HTTP server.
+    Token,
+    /// The environment variable of this name (stdio).
+    Env(String),
+    /// The header of this name (HTTP).
+    Header(String),
+}
+
+impl SecretTarget {
+    /// How the value is named on screen, without its contents.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Token => "Bearer token".to_owned(),
+            Self::Env(name) => format!("Environment variable {name}"),
+            Self::Header(name) => format!("Header {name}"),
+        }
+    }
+}
+
+/// The editor form for one server. Saving always writes the whole definition.
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpServerDraft {
     /// `Some` when editing an existing server ID; IDs are not renamed in place.
     pub existing_id: Option<String>,
@@ -196,7 +218,77 @@ pub struct McpServerDraft {
     pub request_timeout_ms: String,
 }
 
+// Command, arguments, URL and values may carry credentials typed in plain
+// text; Debug shows only the shape of the form.
+impl std::fmt::Debug for McpServerDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerDraft")
+            .field("existing_id", &self.existing_id)
+            .field("id", &self.id)
+            .field("imported", &self.imported)
+            .field("transport", &self.transport)
+            .field("enabled", &self.enabled)
+            .field("roles", &self.roles)
+            .field("args", &self.args.len())
+            .field("env", &self.env)
+            .field("token", &self.token)
+            .field("headers", &self.headers)
+            .field("startup_timeout_ms", &self.startup_timeout_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 impl McpServerDraft {
+    /// Values of the current transport that name a keychain entry, with the
+    /// entry name as typed. Names are references, never secret values.
+    pub fn keychain_references(&self) -> Vec<(SecretTarget, String)> {
+        let pairs = |pairs: &[DraftPair], target: fn(String) -> SecretTarget| {
+            pairs
+                .iter()
+                .filter(|pair| {
+                    pair.value.kind == DraftValueKind::Keychain && !pair.name.trim().is_empty()
+                })
+                .map(|pair| {
+                    (
+                        target(pair.name.trim().to_owned()),
+                        pair.value.text.trim().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        match self.transport {
+            DraftTransport::Stdio => pairs(&self.env, SecretTarget::Env),
+            DraftTransport::Http => {
+                let mut references = Vec::new();
+                if let Some(token) = &self.token
+                    && token.kind == DraftValueKind::Keychain
+                {
+                    references.push((SecretTarget::Token, token.text.trim().to_owned()));
+                }
+                references.extend(pairs(&self.headers, SecretTarget::Header));
+                references
+            }
+        }
+    }
+
+    /// The keychain entry name `target` refers to, if it is a keychain reference.
+    pub fn keychain_name(&self, target: &SecretTarget) -> Option<String> {
+        self.keychain_references()
+            .into_iter()
+            .find(|(candidate, _)| candidate == target)
+            .map(|(_, name)| name)
+    }
+
+    /// Drops the reference from the form. The keychain entry itself is untouched.
+    pub fn remove_secret(&mut self, target: &SecretTarget) {
+        match target {
+            SecretTarget::Token => self.token = None,
+            SecretTarget::Env(name) => self.env.retain(|pair| pair.name.trim() != name),
+            SecretTarget::Header(name) => self.headers.retain(|pair| pair.name.trim() != name),
+        }
+    }
+
     /// A new stdio server published to the default roles.
     pub fn new_server() -> Self {
         Self {
@@ -506,6 +598,11 @@ fn check_pairs(
     valid.then_some(out)
 }
 
+/// Source spelling of a loaded template, with `${VAR}` references unexpanded.
+pub(super) fn template_text(template: &Template) -> String {
+    render(template)
+}
+
 fn render(template: &Template) -> String {
     // Loaded definitions always have a source spelling; fall back to the plain parts.
     render_template(template).unwrap_or_else(|_| {
@@ -600,14 +697,15 @@ fn has_literal(template: &Template) -> bool {
         .any(|part| matches!(part, TemplatePart::Literal { value } if !value.trim().is_empty()))
 }
 
-/// Names that usually carry credentials; only drives a warning, never a block.
-fn looks_secret(name: &str) -> bool {
+/// Names that usually carry credentials. Drives the plain-text warning and
+/// hides such values on screen; never blocks saving. `Authorization` matches
+/// through "auth".
+pub(super) fn looks_secret(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
         "token",
         "secret",
-        "password",
-        "passwd",
+        "pass",
         "key",
         "auth",
         "credential",
