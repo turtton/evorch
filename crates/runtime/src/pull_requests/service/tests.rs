@@ -91,9 +91,18 @@ pub(super) fn fetched(number: u64, facts: PullRequestFacts) -> FetchedPullReques
         requested: key(number),
         canonical: key(number),
         url: format!("https://github.com/{REPOSITORY}/pull/{number}"),
+        display: Default::default(),
         facts,
         fetched_at_ns: 1_000,
     }
+}
+
+/// `fetched` with a title for display.
+pub(super) fn titled(mut fetched: FetchedPullRequest, title: &str) -> FetchedPullRequest {
+    fetched.display = storage::pull_requests::PullRequestDisplay {
+        title: storage::pull_requests::DisplayTitle::from_untrusted(title),
+    };
+    fetched
 }
 
 pub(super) fn open_running(number: u64) -> FetchedPullRequest {

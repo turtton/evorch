@@ -15,8 +15,8 @@ use crate::pull_requests::{
     CandidatePresented, CandidateState, FetchCommit, FetchFailure, InheritanceCursor,
     InheritanceRecord, InheritanceResolution, InheritanceSkipReason, LinkPullRequest, LinkReceipt,
     NewPullRequestCandidate, NewPullRequestInheritance, NotificationKey, PullRequestCandidate,
-    PullRequestFacts, PullRequestKey, PullRequestLink, PullRequestSnapshot, ThreadPullRequestState,
-    UnlinkReceipt,
+    PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestLink, PullRequestSnapshot,
+    ThreadPullRequestState, UnlinkReceipt,
 };
 use crate::repo::pull_requests as repo;
 
@@ -268,13 +268,11 @@ impl StorageHandle {
         self.pull_request_write(move |conn| repo::snapshots::begin_fetch(conn, &key))
     }
 
-    /// Commits a successful fetch. The facts are stored only when `seq` is newer than the
-    /// stored success; the attempt metadata only when it is newer than the last attempt.
-    /// Replaying a result stores nothing twice.
+    /// Commits a successful fetch without anything for a display (the stored title is
+    /// cleared when the facts are adopted). See [`Self::commit_pull_request_fetch_with_display`].
     ///
     /// # Errors
-    /// `PullRequest(Invalid)` for malformed facts or a sequence that was never handed
-    /// out, suspended writes or a closed writer.
+    /// As [`Self::commit_pull_request_fetch_with_display`].
     pub fn commit_pull_request_fetch(
         &self,
         key: &PullRequestKey,
@@ -282,9 +280,34 @@ impl StorageHandle {
         facts: PullRequestFacts,
         at_ns: i64,
     ) -> Result<FetchCommit, StorageError> {
+        self.commit_pull_request_fetch_with_display(
+            key,
+            seq,
+            facts,
+            PullRequestDisplay::default(),
+            at_ns,
+        )
+    }
+
+    /// Commits a successful fetch. The facts and the display data are stored together, only
+    /// when `seq` is newer than the stored success (so an older fetch never overwrites a newer
+    /// title); the attempt metadata only when it is newer than the last attempt. Replaying a
+    /// result stores nothing twice.
+    ///
+    /// # Errors
+    /// `PullRequest(Invalid)` for malformed facts or a sequence that was never handed
+    /// out, suspended writes or a closed writer.
+    pub fn commit_pull_request_fetch_with_display(
+        &self,
+        key: &PullRequestKey,
+        seq: u64,
+        facts: PullRequestFacts,
+        display: PullRequestDisplay,
+        at_ns: i64,
+    ) -> Result<FetchCommit, StorageError> {
         let key = key.clone();
         self.pull_request_write(move |conn| {
-            repo::snapshots::commit_success(conn, &key, seq, &facts, at_ns)
+            repo::snapshots::commit_success(conn, &key, seq, &facts, &display, at_ns)
         })
     }
 

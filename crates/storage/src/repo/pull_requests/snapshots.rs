@@ -6,17 +6,17 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::{enum_at, immediate, key_at, valid_commit_id};
 use crate::StorageError;
 use crate::pull_requests::{
-    CheckStatus, FetchAttempt, FetchCommit, FetchErrorKind, FetchFailure,
+    CheckStatus, DisplayTitle, FetchAttempt, FetchCommit, FetchErrorKind, FetchFailure,
     PULL_REQUEST_BRANCH_MAX_CHARS, PULL_REQUEST_CHECK_ID_MAX_CHARS,
     PULL_REQUEST_CHECK_NAME_MAX_CHARS, PULL_REQUEST_CHECKS_MAX, PULL_REQUEST_ERROR_MAX_CHARS,
-    PullRequestCheck, PullRequestFacts, PullRequestKey, PullRequestSnapshot, PullRequestState,
-    ReviewDecision, invalid, normalize_repository, sanitize_single_line,
+    PullRequestCheck, PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestSnapshot,
+    PullRequestState, ReviewDecision, invalid, normalize_repository, sanitize_single_line,
 };
 
 const COLUMNS: &str = "provider, host, repository, number, state, base_branch, head_repository, \
     head_branch, head_sha, checks_json, checks_complete, review_decision, fetched_at_ns, \
     success_seq, fetch_seq, last_attempt_seq, last_attempt_at_ns, last_error_kind, \
-    last_error_message, consecutive_failures";
+    last_error_message, consecutive_failures, title";
 
 const KEY_WHERE: &str = "provider = ?1 AND host = ?2 AND repository = ?3 AND number = ?4";
 
@@ -152,10 +152,16 @@ pub(crate) fn commit_success(
     key: &PullRequestKey,
     seq: u64,
     facts: &PullRequestFacts,
+    display: &PullRequestDisplay,
     at_ns: i64,
 ) -> Result<FetchCommit, StorageError> {
     let key = key.normalized()?;
     let facts = clean_facts(facts)?;
+    // Cleaned again here: the caller's text is not trusted to have been.
+    let title = display
+        .title
+        .as_ref()
+        .and_then(|title| DisplayTitle::from_untrusted(title.as_str()));
     let checks_json = serde_json::to_string(&facts.checks)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let tx = immediate(conn)?;
@@ -171,7 +177,7 @@ pub(crate) fn commit_success(
                 "UPDATE pull_request_snapshots SET state = ?5, base_branch = ?6, \
                     head_repository = ?7, head_branch = ?8, head_sha = ?9, checks_json = ?10, \
                     checks_complete = ?11, review_decision = ?12, fetched_at_ns = ?13, \
-                    success_seq = ?14 \
+                    success_seq = ?14, title = ?15 \
                  WHERE {KEY_WHERE} AND success_seq < ?14"
             ),
             params![
@@ -189,6 +195,7 @@ pub(crate) fn commit_success(
                 facts.review_decision.as_str(),
                 at_ns,
                 seq,
+                title.as_ref().map(DisplayTitle::as_str),
             ],
         )?;
     }
@@ -325,9 +332,13 @@ pub(crate) fn get(
                         failure,
                     }),
                 };
+                let title: Option<String> = row.get(20)?;
                 Ok(PullRequestSnapshot {
                     key,
                     facts,
+                    display: PullRequestDisplay {
+                        title: title.as_deref().and_then(DisplayTitle::from_untrusted),
+                    },
                     fetched_at_ns: row.get(12)?,
                     success_seq: row.get(13)?,
                     fetch_seq: row.get(14)?,
@@ -353,7 +364,7 @@ pub(crate) fn clear_unshared(
     let cleared = conn.execute(
         "UPDATE pull_request_snapshots SET state = NULL, base_branch = NULL, \
             head_repository = NULL, head_branch = NULL, head_sha = NULL, checks_json = '[]', \
-            checks_complete = 0, review_decision = NULL, fetched_at_ns = NULL, \
+            checks_complete = 0, review_decision = NULL, title = NULL, fetched_at_ns = NULL, \
             last_attempt_at_ns = NULL, last_error_kind = NULL, last_error_message = NULL, \
             consecutive_failures = 0, min_valid_seq = fetch_seq + 1 \
          WHERE (provider, host, repository, number) IN (\

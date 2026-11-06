@@ -35,6 +35,7 @@ fn answer() -> FetchedPullRequest {
         requested: key(),
         canonical: key(),
         url: "https://github.com/turtton/evorch/pull/1".into(),
+        display: Default::default(),
         facts: PullRequestFacts {
             state: PullRequestState::Open,
             base_branch: "main".into(),

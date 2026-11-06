@@ -100,6 +100,17 @@ async fn a_facts_update_changes_only_the_facts_in_the_next_review() {
         "the update reached the review"
     );
     assert_eq!(reviews[0].0, reviews[1].0, "the instruction is static");
+    assert_eq!(
+        world.stored_title().as_deref(),
+        Some("Title for b"),
+        "the title moved with the facts"
+    );
+    for (instruction, payload) in &reviews {
+        assert!(
+            !instruction.contains(TITLE_PREFIX) && !payload.to_string().contains(TITLE_PREFIX),
+            "a title is for the display only"
+        );
+    }
     assert!(reviews[0].0.contains("harness_facts"));
     assert_eq!(
         without_facts(reviews[0].1.clone()),
@@ -132,6 +143,108 @@ async fn a_facts_update_changes_only_the_facts_in_the_next_review() {
     );
     assert!(observed[agent[1]].starts_with(&observed[agent[0]]));
     assert!(!offered[agent[0]].is_empty());
+}
+
+// Given: a pull request whose title is edited between two merges of an agent that are reviewed /
+// When: the review inputs and the agent's own requests are compared / Then: the title is in
+// neither, the review payloads are the same, and the agent sends the same messages and tools
+#[tokio::test]
+async fn a_title_edit_changes_neither_the_review_input_nor_the_agents_requests() {
+    let model = Arc::new(ScriptedModel::new([
+        Ok(text_response(DENY, FinishReason::Stop)),
+        Ok(text_response(DENY, FinishReason::Stop)),
+    ]));
+    model
+        .add_keyed(REQUEST, [Ok(text_response("ready", FinishReason::Stop))])
+        .await;
+    model
+        .add_keyed(
+            DELEGATION,
+            [
+                Ok(merge_call("merge")),
+                Ok(text_response("stopped", FinishReason::Stop)),
+                Ok(merge_call("merge")),
+                Ok(text_response("stopped", FinishReason::Stop)),
+            ],
+        )
+        .await;
+    let bus = Arc::new(EventBus::new(4096));
+    let executor = ToolExecutor::with_standard_tools(
+        Arc::clone(&bus),
+        Arc::new(DirectSandbox::new_unchecked()),
+    );
+    let world = world(model.clone(), executor, bus);
+    let fetched_at = now_ns();
+    world.link(answer('a', fetched_at)).await;
+    let root = world
+        .runtime
+        .delegate_chat(
+            THREAD,
+            Role::Orchestrator,
+            REQUEST.into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(world.runtime.wait(root).await, Ok(AgentRunPhase::Done));
+    let first = world
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, DELEGATION, RunConfig::default())
+        .expect("registered child");
+    assert_eq!(world.runtime.wait(first).await, Ok(AgentRunPhase::Done));
+
+    // When: only the title changes (same facts, same fetch time).
+    let mut renamed = answer('a', fetched_at);
+    renamed.display = display("Renamed after review");
+    world.update_title(renamed).await;
+    let second = world
+        .runtime
+        .delegate_background_as_child(root, Role::Worker, DELEGATION, RunConfig::default())
+        .expect("registered child");
+    assert_eq!(world.runtime.wait(second).await, Ok(AgentRunPhase::Done));
+
+    // Then: both reviews saw the same facts and neither saw a title.
+    assert_eq!(
+        world.stored_title().as_deref(),
+        Some("Renamed after review")
+    );
+    let reviews = reviews(&model, "Review a shell sandbox permission request.").await;
+    assert_eq!(reviews.len(), 2);
+    let normalized = |mut payload: Value| {
+        // The age is measured against the clock when the review is made.
+        payload["context"]["harness_facts"]["pull_request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("age_seconds");
+        payload
+    };
+    assert_eq!(
+        normalized(reviews[0].1.clone()),
+        normalized(reviews[1].1.clone())
+    );
+    for (instruction, payload) in &reviews {
+        let text = format!("{instruction}{payload}");
+        assert!(!text.contains(TITLE_PREFIX) && !text.contains("Renamed"));
+    }
+    let observed = model.observed().await;
+    let offered = model.observed_tools().await;
+    let agent: Vec<usize> = (0..observed.len())
+        .filter(|&index| {
+            !observed[index]
+                .iter()
+                .any(|message| message.role == MessageRole::System)
+                && text_of(&observed[index][0]).starts_with(DELEGATION)
+        })
+        .collect();
+    assert_eq!(agent.len(), 4);
+    let sent = |indexes: &[usize]| {
+        serde_json::to_string(&(
+            indexes.iter().map(|&i| &observed[i]).collect::<Vec<_>>(),
+            indexes.iter().map(|&i| &offered[i]).collect::<Vec<_>>(),
+        ))
+        .unwrap()
+    };
+    assert_eq!(sent(&agent[..2]), sent(&agent[2..]));
+    assert!(!sent(&agent).contains("Renamed") && !sent(&agent).contains(TITLE_PREFIX));
 }
 
 // Given: a linked thread whose stored facts are old / When: a web_fetch call is reviewed /

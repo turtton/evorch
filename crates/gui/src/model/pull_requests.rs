@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use runtime::pull_requests::diff::{ChecksVerdict, checks_verdict};
 use storage::pull_requests::{
     CandidateState, CheckConclusion, CheckStatus, FetchFailure, LocalHeadObservation,
-    PullRequestCandidate, PullRequestFacts, PullRequestKey, PullRequestLink, PullRequestState,
+    PullRequestCandidate, PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestLink,
+    PullRequestState,
 };
 
 /// Facts older than this, in a window that tracks the thread, read as stale: the poll
@@ -33,6 +34,8 @@ pub struct ThreadPullRequest {
     pub local_head: Option<LocalHeadObservation>,
     /// The facts of the newest successful fetch of the linked pull request.
     pub facts: Option<PullRequestFacts>,
+    /// What the same fetch gave for the display only (the cleaned title). Drawn as plain text.
+    pub display: PullRequestDisplay,
     pub fetched_at_ns: Option<i64>,
     /// Set while the newest fetch attempt failed.
     pub failure: Option<FetchFailure>,

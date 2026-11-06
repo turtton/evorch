@@ -4,8 +4,8 @@
 use super::{begin_fetch, clear_unshared, commit_failure, commit_success, get};
 use crate::Database;
 use crate::pull_requests::{
-    FetchErrorKind, FetchFailure, LinkPullRequest, NewPullRequestCandidate, PullRequestFacts,
-    PullRequestKey, PullRequestState, ReviewDecision,
+    DisplayTitle, FetchErrorKind, FetchFailure, LinkPullRequest, NewPullRequestCandidate,
+    PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestState, ReviewDecision,
 };
 use crate::repo::pull_requests as repo;
 
@@ -19,6 +19,12 @@ fn facts() -> PullRequestFacts {
         checks: Vec::new(),
         checks_complete: true,
         review_decision: ReviewDecision::None,
+    }
+}
+
+fn display(title: &str) -> PullRequestDisplay {
+    PullRequestDisplay {
+        title: DisplayTitle::from_untrusted(title),
     }
 }
 
@@ -61,10 +67,29 @@ fn a_fetch_started_before_the_facts_were_cleared_cannot_write_them_back() {
     )
     .unwrap();
     let done = begin_fetch(conn, &with_facts).unwrap();
-    commit_success(conn, &with_facts, done, &facts(), 5).unwrap();
+    commit_success(
+        conn,
+        &with_facts,
+        done,
+        &facts(),
+        &display("Add the title"),
+        5,
+    )
+    .unwrap();
     let running_success = begin_fetch(conn, &with_facts).unwrap();
     let running_failure = begin_fetch(conn, &with_facts).unwrap();
     let running_first = begin_fetch(conn, &first_fetch).unwrap();
+
+    assert_eq!(
+        get(conn, &with_facts)
+            .unwrap()
+            .unwrap()
+            .display
+            .title
+            .unwrap()
+            .as_str(),
+        "Add the title"
+    );
 
     // When: retention clears what only the deleted thread referenced.
     assert_eq!(clear_unshared(conn, "gone", 100).unwrap(), 2);
@@ -73,9 +98,25 @@ fn a_fetch_started_before_the_facts_were_cleared_cannot_write_them_back() {
     // Then: the late results are refused, whether they succeed or fail, with or without
     // earlier facts.
     for commit in [
-        commit_success(conn, &with_facts, running_success, &facts(), 10).unwrap(),
+        commit_success(
+            conn,
+            &with_facts,
+            running_success,
+            &facts(),
+            &display("late"),
+            10,
+        )
+        .unwrap(),
         commit_failure(conn, &with_facts, running_failure, &failure(), 11).unwrap(),
-        commit_success(conn, &first_fetch, running_first, &facts(), 12).unwrap(),
+        commit_success(
+            conn,
+            &first_fetch,
+            running_first,
+            &facts(),
+            &display("late"),
+            12,
+        )
+        .unwrap(),
         commit_failure(conn, &first_fetch, running_first, &failure(), 13).unwrap(),
     ] {
         assert!(
@@ -86,13 +127,16 @@ fn a_fetch_started_before_the_facts_were_cleared_cannot_write_them_back() {
     for key in [&with_facts, &first_fetch] {
         let snapshot = get(conn, key).unwrap().unwrap();
         assert!(snapshot.facts.is_none(), "{key:?}");
+        assert!(snapshot.display.title.is_none(), "{key:?}");
         assert!(snapshot.last_attempt.is_none(), "{key:?}");
     }
 
     // And: a fetch that starts afterwards outranks the cleared ones and is stored.
     let later = begin_fetch(conn, &with_facts).unwrap();
     assert!(later > running_failure);
-    let commit = commit_success(conn, &with_facts, later, &facts(), 20).unwrap();
+    let commit = commit_success(conn, &with_facts, later, &facts(), &display("after"), 20).unwrap();
     assert!(commit.facts_stored && commit.attempt_recorded);
-    assert!(get(conn, &with_facts).unwrap().unwrap().facts.is_some());
+    let stored = get(conn, &with_facts).unwrap().unwrap();
+    assert!(stored.facts.is_some());
+    assert_eq!(stored.display.title.unwrap().as_str(), "after");
 }

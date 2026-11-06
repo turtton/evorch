@@ -57,6 +57,7 @@ pub(crate) fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
             observed_at_ns: 0,
         }),
         facts,
+        display: Default::default(),
         fetched_at_ns: Some(0),
         failure: None,
         candidates: Vec::new(),
