@@ -13,6 +13,10 @@ use workbench_protocol::ids::ProjectId;
 /// Maps a project id to the root directory its threads' runs work in.
 pub trait ProjectDirectory: Send {
     fn root_of(&self, project: &ProjectId) -> Option<PathBuf>;
+    /// Projects exposed by this directory. Older resolvers may expose none.
+    fn entries(&self) -> Vec<(ProjectId, PathBuf)> {
+        Vec::new()
+    }
 }
 
 /// A fixed set of projects, registered by the composing process.
@@ -32,6 +36,12 @@ impl StaticProjects {
 }
 
 impl ProjectDirectory for StaticProjects {
+    fn entries(&self) -> Vec<(ProjectId, PathBuf)> {
+        self.roots
+            .iter()
+            .filter_map(|(id, root)| Some((ProjectId::new(id).ok()?, root.clone())))
+            .collect()
+    }
     fn root_of(&self, project: &ProjectId) -> Option<PathBuf> {
         self.roots.get(project.as_str()).cloned()
     }

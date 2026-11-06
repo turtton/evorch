@@ -216,17 +216,29 @@ impl Inner {
     ) -> FlightOutcome {
         let previous = self.previous_snapshot(key).await;
         let previous_facts = previous.as_ref().and_then(|s| s.facts.clone());
+        let previous_display = previous.as_ref().map(|s| s.display.clone());
         let recovered = previous
             .as_ref()
             .and_then(|s| s.last_attempt.as_ref())
             .is_some_and(|attempt| attempt.failure.is_some());
         let facts = fetched.facts;
-        let (storage, commit_key, commit_facts) =
-            (self.storage.clone(), key.clone(), facts.clone());
+        let display = fetched.display;
+        let (storage, commit_key, commit_facts, commit_display) = (
+            self.storage.clone(),
+            key.clone(),
+            facts.clone(),
+            display.clone(),
+        );
         let at_ns = fetched.fetched_at_ns;
         let commit = match self
             .guarded_any(permits(live), move || {
-                storage.commit_pull_request_fetch(&commit_key, seq, commit_facts, at_ns)
+                storage.commit_pull_request_fetch_with_display(
+                    &commit_key,
+                    seq,
+                    commit_facts,
+                    commit_display,
+                    at_ns,
+                )
             })
             .await
         {
@@ -248,7 +260,16 @@ impl Inner {
             return outcome;
         }
         let change = if commit.facts_stored {
-            diff::compare(previous_facts.as_ref(), &facts)
+            let mut change = diff::compare(previous_facts.as_ref(), &facts);
+            // The first fetch is a baseline that reads everything again anyway.
+            if previous_facts.is_some()
+                && previous_display
+                    .as_ref()
+                    .is_some_and(|previous| diff::display_changed(previous, &display))
+            {
+                change.fields.push(PullRequestChangedField::Display);
+            }
+            change
         } else {
             FactsChange::default()
         };

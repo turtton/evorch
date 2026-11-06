@@ -308,7 +308,7 @@ pub fn question(target: QuestionTarget) -> QuestionView {
         options: vec!["yes".into(), "no".into()],
         answer: Some(QuestionAnswer {
             text: "yes".into(),
-            answered_by: human(),
+            answered_by: Some(human()),
         }),
         revision: Revision(5),
         raised_by: agent(),

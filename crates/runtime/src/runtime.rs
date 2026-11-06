@@ -241,6 +241,20 @@ pub(crate) enum HostProvenance {
     PersistedHostSubmission { run_id: RunId },
 }
 
+/// The waiter's mailbox, the replier's phase and the waiter's mailbox version.
+type ReplyWaitParts = (
+    Arc<RunMailbox>,
+    watch::Receiver<AgentRunPhase>,
+    watch::Receiver<u64>,
+);
+
+/// How a reply wait that also watches the caller's own answers ended.
+#[derive(Debug)]
+pub(crate) enum ReplyOutcome {
+    Reply(AgentMessage),
+    AnswersReady(Vec<String>),
+}
+
 pub(crate) struct ReviewSeed {
     provenance: HostProvenance,
     context: crate::escalation_review::ReviewRunContext,
@@ -2314,6 +2328,30 @@ impl AgentRuntime {
         }
     }
 
+    /// Core-side read projection access. No bodies are resolved unless the reader asks.
+    pub fn with_storage_reader<T>(
+        &self,
+        read: impl FnOnce(&storage::Database) -> Result<T, storage::StorageError>,
+    ) -> Result<Option<T>, storage::StorageError> {
+        self.shared
+            .run_store
+            .get()
+            .map(|store| store.with_database(read))
+            .transpose()
+    }
+
+    /// Subscribe to local durable event commits without changing persistence.
+    pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
+        if let Some(store) = self.shared.run_store.get() {
+            store.handle.observe_event_commits(observer);
+        }
+    }
+
+    /// The core event bus, shared by host projections and the approval registry.
+    pub fn event_bus(&self) -> Arc<EventBus> {
+        Arc::clone(&self.shared.bus)
+    }
+
     /// Whether this runtime persists runs. Without a run store nothing a host records
     /// outlives the process, and nothing is ever deleted by retention.
     pub fn has_run_store(&self) -> bool {
@@ -3223,36 +3261,85 @@ impl AgentRuntime {
         message_id: &str,
         timeout: Duration,
     ) -> Result<AgentMessage, RuntimeError> {
-        let (waiter_mailbox, mut replier_phase_rx, version_rx) = {
-            let runs = lock_runs(&self.shared.runs);
-            let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-            let sent = self
-                .shared
-                .sent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let record = sent
-                .get(message_id)
-                .ok_or_else(|| RuntimeError::UnknownMessage {
-                    message_id: message_id.to_string(),
-                })?;
-            if record.sender != run_id {
-                return Err(RuntimeError::UnknownMessage {
-                    message_id: message_id.to_string(),
-                });
+        match self
+            .wait_reply_or_answers(run_id, message_id, timeout, None)
+            .await?
+        {
+            ReplyOutcome::Reply(reply) => Ok(reply),
+            ReplyOutcome::AnswersReady(_) => {
+                unreachable!("answers are watched only when the caller passes a delivered set")
             }
-            let replier_entry =
-                runs.get(&record.recipient)
-                    .ok_or_else(|| RuntimeError::RunTerminated {
-                        run_id: record.recipient.to_string(),
-                    })?;
-            let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
-            let replier_phase_rx = replier_entry.phase_rx.clone();
-            let version_rx = waiter_entry.mailbox.subscribe_version();
-            (waiter_mailbox, replier_phase_rx, version_rx)
-        };
+        }
+    }
+
+    /// Checks that `run_id` sent `message_id` and that its recipient is still
+    /// registered, as a reply wait requires.
+    ///
+    /// # Errors
+    /// [`RuntimeError::UnknownMessage`] for an unknown or foreign message,
+    /// [`RuntimeError::RunTerminated`] once the recipient is gone.
+    pub(crate) fn check_reply_wait(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+    ) -> Result<(), RuntimeError> {
+        self.reply_wait_parts(run_id, message_id).map(|_| ())
+    }
+
+    fn reply_wait_parts(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+    ) -> Result<ReplyWaitParts, RuntimeError> {
+        let runs = lock_runs(&self.shared.runs);
+        let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+        let sent = self
+            .shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = sent
+            .get(message_id)
+            .ok_or_else(|| RuntimeError::UnknownMessage {
+                message_id: message_id.to_string(),
+            })?;
+        if record.sender != run_id {
+            return Err(RuntimeError::UnknownMessage {
+                message_id: message_id.to_string(),
+            });
+        }
+        let replier_entry =
+            runs.get(&record.recipient)
+                .ok_or_else(|| RuntimeError::RunTerminated {
+                    run_id: record.recipient.to_string(),
+                })?;
+        let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
+        let replier_phase_rx = replier_entry.phase_rx.clone();
+        let version_rx = waiter_entry.mailbox.subscribe_version();
+        Ok((waiter_mailbox, replier_phase_rx, version_rx))
+    }
+
+    /// [`Self::wait_reply`] that also ends when a question of `run_id` gets an
+    /// answer outside `delivered` (the answers already in its history).
+    ///
+    /// The answer wake-up leaves the sent record in place, so the caller can
+    /// wait on the same `message_id` again. A reply that is already queued wins
+    /// over an answer; the answer text reaches the model through the loop's own
+    /// answer flush, never through this result.
+    pub(crate) async fn wait_reply_or_answers(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+        timeout: Duration,
+        delivered: Option<&HashSet<String>>,
+    ) -> Result<ReplyOutcome, RuntimeError> {
+        let (waiter_mailbox, mut replier_phase_rx, version_rx) =
+            self.reply_wait_parts(run_id, message_id)?;
 
         let mut version_rx = version_rx;
+        // Subscribe before the first answer check so an answer cannot slip
+        // between that check and the wait below.
+        let mut question_changes = self.shared.question_version.subscribe();
         let deadline = Instant::now() + timeout;
 
         let current_phase = *self.entry(run_id)?.phase_rx.borrow();
@@ -3266,7 +3353,14 @@ impl AgentRuntime {
                     && message.reply_to.as_deref() == Some(message_id)
             }) {
                 self.remove_sent_record(message_id);
-                break Ok(reply);
+                break Ok(ReplyOutcome::Reply(reply));
+            }
+
+            if let Some(delivered) = delivered {
+                let ids = self.undelivered_answer_ids(run_id, delivered);
+                if !ids.is_empty() {
+                    break Ok(ReplyOutcome::AnswersReady(ids));
+                }
             }
 
             let current_replier_phase = *replier_phase_rx.borrow();
@@ -3298,6 +3392,7 @@ impl AgentRuntime {
                         });
                     }
                 }
+                _ = question_changes.changed(), if delivered.is_some() => {}
                 changed = replier_phase_rx.changed() => {
                     if changed.is_err() {
                         self.remove_sent_record(message_id);

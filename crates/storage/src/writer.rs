@@ -243,7 +243,7 @@ impl Storage {
             })
             .map_err(|error| StorageError::Io(error.to_string()))?;
         Ok(Self(
-            StorageHandle(tx, max_event_bytes, reader_config),
+            StorageHandle(tx, max_event_bytes, reader_config, Default::default()),
             Some(writer),
         ))
     }
@@ -272,9 +272,44 @@ impl Drop for Storage {
 
 /// single-writer へ同期要求または lossy usage を送る共有 handle です。
 #[derive(Debug, Clone)]
-pub struct StorageHandle(SyncSender<Command>, u64, Arc<StorageConfig>);
+pub struct StorageHandle(
+    SyncSender<Command>,
+    u64,
+    Arc<StorageConfig>,
+    Arc<CommitObservers>,
+);
+
+#[derive(Default)]
+struct CommitObservers(std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>);
+impl std::fmt::Debug for CommitObservers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommitObservers").finish_non_exhaustive()
+    }
+}
+impl CommitObservers {
+    fn notify(&self) {
+        let observers: Vec<_> = {
+            let mut observers = self.0.lock().unwrap();
+            observers.retain(|o| o.strong_count() > 0);
+            observers
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect()
+        };
+        for observer in observers {
+            observer();
+        }
+    }
+}
 
 impl StorageHandle {
+    /// Register a nonblocking wake-up after a successful local event-log commit.
+    /// Notifications may coalesce; readers must follow their durable event ID.
+    /// Retain the callback to stay subscribed; dropping it unregisters lazily.
+    pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
+        self.3.0.lock().unwrap().push(Arc::downgrade(observer));
+    }
+
     /// Serialized payload limit, retained in memory without contacting the writer.
     pub fn max_event_bytes(&self) -> u64 {
         self.1
@@ -870,14 +905,18 @@ impl StorageHandle {
         event: &Event,
         validator: event_bus::MutationValidator,
     ) -> Result<(), StorageError> {
-        self.request(|reply| {
+        let result = self.request(|reply| {
             Command::AppendFencedEvent(
                 session_id.map(String::from),
                 event.clone(),
                 validator,
                 reply,
             )
-        })
+        });
+        if result.is_ok() {
+            self.3.notify();
+        }
+        result
     }
     pub fn append_team_snapshot(
         &self,
@@ -1013,7 +1052,11 @@ impl StorageHandle {
                 reply,
             ))
             .map_err(|_| StorageError::WriterClosed)?;
-        result.recv().map_err(|_| StorageError::WriterClosed)?
+        let result = result.recv().map_err(|_| StorageError::WriterClosed)?;
+        if result.is_ok() {
+            self.3.notify();
+        }
+        result
     }
 
     /// カタログ更新履歴を writer 経由で保存します。

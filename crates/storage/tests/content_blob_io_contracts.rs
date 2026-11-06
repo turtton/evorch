@@ -74,9 +74,10 @@ const C_GC: u64 = 24;
 /// pull request tables, their indexes and fences; 126 and 181 frames with v46 added), whatever
 /// v47 (delivery schema), and v48 (four Phase 2 tables, their indexes, three empty
 /// lane header columns and fences: 255 frames with 100,000 rows), and v49 (the host chat submission
-/// table with its index and fence: 270 frames with 100,000 rows), and v50 (management
-/// receipts, fences and five header columns: 195 frames with 10 rows, 291 with 100,000;
-/// both execute 83,362 VM steps). The row-independent ceiling includes these schema
+/// table with its index and fence: 270 frames with 100,000 rows), v50 (pull request
+/// title), and v51 (management receipts, fences and five header columns: 198 frames
+/// with 10 rows, 293 with 100,000; both execute 87,930 VM steps). The row-independent
+/// ceiling includes these schema
 /// pages; the VM-step comparison below still forbids scans.
 const MIGRATION_FRAMES: u64 = 300;
 
@@ -315,6 +316,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v51.sql"),
                     include_str!("../undo/undo_v50.sql"),
                     include_str!("../undo/undo_v49.sql"),
                     include_str!("../undo/undo_v48.sql"),
@@ -338,7 +340,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v50 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v51 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

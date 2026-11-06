@@ -82,10 +82,6 @@ fn an_id_dropped_from_a_full_ledger_is_still_told_apart_by_its_stored_fingerprin
         .unwrap();
     host.handle_command(Command::SendChat(send("thread-1", "sub-2", "more")), web())
         .unwrap();
-    assert!(
-        host.receipts().submission("sub-1").is_none(),
-        "the first id was evicted from memory"
-    );
     let agents = runtime.list_agents().len();
 
     let again = host

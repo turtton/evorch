@@ -6,13 +6,15 @@
 //! services that come later. Nothing here schedules, stores, publishes or shows anything.
 //!
 //! What crosses the boundary is structured: the [`storage::pull_requests`] DTOs. A pull
-//! request's body, comments, review texts, CI logs and any counts are never requested.
+//! request's body, comments, review texts, CI logs and any counts are never requested; the
+//! title is, for display only.
 
 pub mod candidates;
 pub mod checkout;
 pub mod diff;
 pub mod fake;
 pub mod locator;
+pub mod log_source;
 pub mod ownership;
 pub mod review;
 mod runtime;
@@ -23,13 +25,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use storage::pull_requests::{
-    FetchErrorKind, FetchFailure, PULL_REQUEST_ERROR_MAX_CHARS, PullRequestFacts, PullRequestKey,
-    sanitize_single_line,
+    FetchErrorKind, FetchFailure, PULL_REQUEST_ERROR_MAX_CHARS, PullRequestDisplay,
+    PullRequestFacts, PullRequestKey, sanitize_single_line,
 };
 
 pub use checkout::{CheckoutMiss, CheckoutResolution, resolve_checkout};
 pub use fake::{FakeProcessRunner, FakePullRequestSource, FetchGate};
 pub use locator::{LocatorError, parse_locator};
+pub use log_source::{
+    CiLogBundle, CiLogRun, CiLogSkip, FakePullRequestLogSource, GhLogSource, LogLimits, LogRequest,
+    LogSkipKind, LogSkipReason, PullRequestLogSource, minimal_ci_log_data, render_ci_log_data,
+};
 pub use ownership::{OwnershipView, ThreadEnvironment};
 pub use review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
@@ -54,6 +60,9 @@ pub struct FetchedPullRequest {
     ///
     /// [`StorageHandle::commit_pull_request_fetch`]: storage::StorageHandle::commit_pull_request_fetch
     pub facts: PullRequestFacts,
+    /// What the same fetch gave for a display only (the cleaned title). Stored with the
+    /// facts but never part of them.
+    pub display: PullRequestDisplay,
     /// When the fetch ended, in nanoseconds since the Unix epoch.
     pub fetched_at_ns: i64,
 }

@@ -121,3 +121,7 @@ pub use writer::{
     Storage, StorageHandle, StorageStatistics, THREAD_INDEX_LEASE_NS, ThreadIndexCounters,
     ThreadIndexJobStatus, WalWaitStatus,
 };
+
+/// Full-body read instrumentation, available only to test consumers.
+#[cfg(feature = "test-support")]
+pub mod test_support;

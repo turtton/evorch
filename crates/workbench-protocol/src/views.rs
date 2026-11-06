@@ -149,13 +149,17 @@ pub enum QuestionTarget {
 #[serde(deny_unknown_fields)]
 pub struct QuestionAnswer {
     pub text: String,
-    pub answered_by: Provenance,
+    /// Absent for a legacy answer whose authenticated source was not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<Provenance>,
 }
 
 impl QuestionAnswer {
     pub fn validate(&self) -> Result<(), ValidationError> {
         check_bytes("answer.text", &self.text, MAX_TEXT_BYTES, true)?;
-        self.answered_by.validate()
+        self.answered_by
+            .as_ref()
+            .map_or(Ok(()), Provenance::validate)
     }
 }
 

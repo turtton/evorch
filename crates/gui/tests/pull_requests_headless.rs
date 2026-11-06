@@ -885,6 +885,68 @@ async fn a_merge_the_runtime_found_notifies_once() {
     assert_eq!(window.notifications().items().count(), 1);
 }
 
+// Given: a linked pull request whose title is edited on GitHub and nothing else changes / When:
+// the runtime publishes the change and the window reads again / Then: the bar has the new title
+// and no notification was raised
+#[tokio::test]
+async fn a_title_edit_alone_refreshes_the_bar_without_a_notification() {
+    let mut world = World::new();
+    let mut window = world.window();
+    let titled = |title: &str| {
+        let mut answer = passing(12);
+        answer.display = storage::pull_requests::PullRequestDisplay {
+            title: storage::pull_requests::DisplayTitle::from_untrusted(title),
+        };
+        answer
+    };
+    world.source.push_ok(&key(12), titled("First title"));
+    world.source.push_ok(&key(12), titled("Edited title"));
+    world.source.repeat_last();
+    settle(&mut window);
+    window.apply_pull_request_action(link_action("turtton/evorch#12"));
+    world.until(changed(THREAD)).await;
+    world.show(&mut window);
+    let title_of = |window: &WorkbenchState<DemoSource>| {
+        window
+            .pull_request_model()
+            .linked(THREAD)
+            .unwrap()
+            .display
+            .title
+            .as_ref()
+            .map(|title| title.as_str().to_owned())
+    };
+    assert_eq!(title_of(&window).as_deref(), Some("First title"));
+
+    window.apply_pull_request_action(PullRequestAction::Refresh {
+        thread_id: THREAD.into(),
+    });
+    world.until(changed(THREAD)).await;
+    let published: Vec<_> = world
+        .seen
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::PullRequest(PullRequestEvent::Changed {
+                fields,
+                notifications,
+                ..
+            }) => Some((fields.clone(), notifications.clone())),
+            _ => None,
+        })
+        .collect();
+    world.show(&mut window);
+
+    assert_eq!(
+        published.last().unwrap(),
+        &(
+            vec![event_bus::PullRequestChangedField::Display],
+            Vec::new()
+        )
+    );
+    assert_eq!(title_of(&window).as_deref(), Some("Edited title"));
+    assert_eq!(window.notifications().items().count(), 0);
+}
+
 type Held = Arc<std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
 /// Runs the reads that were held back, in the order they were started.

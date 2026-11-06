@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 50;
+const LATEST_SCHEMA: u32 = 51;
 
 const EXPECTED_TABLES: [&str; 92] = [
     "thread_pull_request_state",
@@ -1182,6 +1182,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../undo/undo_v51.sql"),
                 include_str!("../undo/undo_v50.sql"),
                 include_str!("../undo/undo_v49.sql"),
                 include_str!("../undo/undo_v48.sql"),

@@ -20,6 +20,8 @@ mod support;
 mod unauthorized_recovery_cache;
 #[path = "usage_missing_cache/mod.rs"]
 mod usage_missing_cache;
+#[path = "wait_wakeup_cache/mod.rs"]
+mod wait_wakeup_cache;
 #[path = "web_tools_cache/mod.rs"]
 mod web_tools_cache;
 use std::sync::Arc;

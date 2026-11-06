@@ -10,9 +10,10 @@
 //!
 //! The host is written into `--repo`, and `GH_HOST`/`GH_REPO` are removed from the
 //! environment, so no variable can send the request to another host. The fields are
-//! [`GH_JSON_FIELDS`]: identity, state, base and head, and `statusCheckRollup` and
-//! `reviewDecision`. The title, body, comments, reviews, commits, files and every count are
-//! not requested; a test pins the list.
+//! [`GH_JSON_FIELDS`]: identity, the title (kept for display only, cleaned like any third-party
+//! text and never part of the facts), state, base and head, and `statusCheckRollup` and
+//! `reviewDecision`. The body, comments, reviews, commits, files and every count are not
+//! requested; a test pins the list.
 //!
 //! # Checks and their pagination
 //!
@@ -37,9 +38,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use storage::pull_requests::{
-    CheckConclusion, CheckKind, CheckStatus, PULL_REQUEST_BRANCH_MAX_CHARS,
+    CheckConclusion, CheckKind, CheckStatus, DisplayTitle, PULL_REQUEST_BRANCH_MAX_CHARS,
     PULL_REQUEST_CHECK_ID_MAX_CHARS, PULL_REQUEST_CHECK_NAME_MAX_CHARS, PULL_REQUEST_CHECKS_MAX,
-    PullRequestCheck, PullRequestFacts, PullRequestKey, PullRequestState, ReviewDecision,
+    PullRequestCheck, PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestState,
+    ReviewDecision,
 };
 use tokio::io::AsyncReadExt;
 
@@ -48,6 +50,7 @@ use super::{FetchError, FetchedPullRequest, PullRequestSource, clean_text, locat
 /// The `--json` fields requested from `gh pr view`. Nothing else is asked for.
 pub const GH_JSON_FIELDS: &[&str] = &[
     "number",
+    "title",
     "url",
     "state",
     "baseRefName",
@@ -302,7 +305,7 @@ impl GhSource {
     }
 }
 
-fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
+pub(super) fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
     key.normalized().map_err(|_| {
         if key.host.trim().eq_ignore_ascii_case("github.com") {
             FetchError::InvalidReference("malformed repository or number".into())
@@ -310,6 +313,27 @@ fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
             FetchError::InvalidHost(clean_text(&format!("host {:?}", key.host), 64))
         }
     })
+}
+
+/// A `gh` process with the environment every `gh` call here runs in: non-interactive, no
+/// pager or colour, and no variable that could point it at another host. `stdout_limit`
+/// bounds what is read; the stderr limit is [`GH_STDERR_LIMIT`].
+pub(super) fn gh_process_spec(
+    program: &str,
+    args: Vec<String>,
+    stdout_limit: usize,
+) -> ProcessSpec {
+    ProcessSpec {
+        program: program.to_owned(),
+        args,
+        env_remove: ENV_REMOVE.iter().map(|name| (*name).to_owned()).collect(),
+        env_set: ENV_SET
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        stdout_limit,
+        stderr_limit: GH_STDERR_LIMIT,
+    }
 }
 
 /// The argument vector of `gh pr view` for `key` (a normalized key).
@@ -348,19 +372,20 @@ impl PullRequestSource for GhSource {
             return Err(FetchError::invalid_response("output over the size limit"));
         }
         let fetched_at_ns = (self.clock)();
-        let (canonical, url, facts) = parse_output(&key, &output.stdout)?;
+        let (canonical, url, facts, display) = parse_output(&key, &output.stdout)?;
         Ok(FetchedPullRequest {
             requested: key,
             canonical,
             url,
             facts,
+            display,
             fetched_at_ns,
         })
     }
 }
 
 /// What a failed `gh` run means, from its exit code and (bounded, redacted) stderr.
-fn classify_failure(output: &ProcessOutput) -> FetchError {
+pub(super) fn classify_failure(output: &ProcessOutput) -> FetchError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let lower = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
@@ -431,6 +456,9 @@ fn classify_failure(output: &ProcessOutput) -> FetchError {
 #[derive(Deserialize)]
 struct RawPullRequest {
     number: Option<u64>,
+    /// Display only. Any JSON value is tolerated: a title that is missing, `null` or not a
+    /// string must not fail the whole answer.
+    title: Option<serde_json::Value>,
     url: Option<String>,
     state: Option<String>,
     #[serde(rename = "baseRefName")]
@@ -493,7 +521,7 @@ fn required<T>(value: Option<T>, field: &str) -> Result<T, FetchError> {
 pub fn parse_output(
     requested: &PullRequestKey,
     stdout: &[u8],
-) -> Result<(PullRequestKey, String, PullRequestFacts), FetchError> {
+) -> Result<(PullRequestKey, String, PullRequestFacts, PullRequestDisplay), FetchError> {
     let raw: RawPullRequest = serde_json::from_slice(stdout).map_err(|error| {
         invalid(&format!(
             "not the expected JSON ({})",
@@ -528,6 +556,12 @@ pub fn parse_output(
         Some(list) => checks(list, &head_sha)?,
         None => (Vec::new(), false),
     };
+    let display = PullRequestDisplay {
+        title: match raw.title {
+            Some(serde_json::Value::String(title)) => DisplayTitle::from_untrusted(&title),
+            _ => None,
+        },
+    };
     Ok((
         canonical,
         url,
@@ -541,6 +575,7 @@ pub fn parse_output(
             checks_complete,
             review_decision,
         },
+        display,
     ))
 }
 

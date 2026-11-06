@@ -290,7 +290,9 @@ impl AgentRuntime {
         answer: &str,
     ) -> Result<UserQuestion, String> {
         let (child, question) = self.persist_subagent_answer(caller, id, answer)?;
-        self.resume_answered_child(caller, child, &question).await?;
+        self.resume_answered_child(caller, child, &question)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(question)
     }
 
@@ -727,6 +729,24 @@ impl AgentRuntime {
             Some(store) => store.user_questions(run).map_err(|e| e.to_string()),
             None => Ok(Vec::new()),
         }
+    }
+    /// IDs of `run`'s answered questions not in `delivered`, sorted. Waiting
+    /// tools use it to return when an answer for the caller arrives; the answer
+    /// text reaches the model through the loop's own answer flush.
+    pub(crate) fn undelivered_answer_ids(
+        &self,
+        run: RunId,
+        delivered: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let mut ids = self
+            .user_answers(run)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|question| question.answer.is_some() && !delivered.contains(&question.id))
+            .map(|question| question.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
     pub(crate) fn has_pending_user_questions(&self, run: RunId) -> bool {
         self.user_answers(run)

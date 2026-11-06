@@ -112,6 +112,7 @@ pub fn fetched(number: u64, facts: PullRequestFacts) -> FetchedPullRequest {
         requested: key(number),
         canonical: key(number),
         url: format!("https://github.com/{REPOSITORY}/pull/{number}"),
+        display: Default::default(),
         facts,
         fetched_at_ns: gui::model::pull_requests::now_ns(),
     }

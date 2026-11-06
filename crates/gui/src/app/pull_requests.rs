@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use event_bus::{Event, EventKind, PullRequestEvent, PullRequestRef};
 use storage::Database;
-use storage::pull_requests::PullRequestKey;
+use storage::pull_requests::{PullRequestDisplay, PullRequestKey};
 
 use super::WorkbenchState;
 use super::lanes::{Spawner, thread_spawner};
@@ -69,16 +69,17 @@ impl PullRequestReader for StoragePullRequestReader {
         let fail = |error: storage::StorageError| error.to_string();
         let db = self.open()?;
         let state = db.pull_request_thread_state(thread_id).map_err(fail)?;
-        let (facts, fetched_at_ns, failure) = match &state.active_link {
+        let (facts, display, fetched_at_ns, failure) = match &state.active_link {
             Some(link) => match db.pull_request_snapshot(&link.key).map_err(fail)? {
                 Some(snapshot) => (
                     snapshot.facts,
+                    snapshot.display,
                     snapshot.fetched_at_ns,
                     snapshot.last_attempt.and_then(|attempt| attempt.failure),
                 ),
-                None => (None, None, None),
+                None => (None, PullRequestDisplay::default(), None, None),
             },
-            None => (None, None, None),
+            None => (None, PullRequestDisplay::default(), None, None),
         };
         let candidates = db.pull_request_candidates(thread_id, None).map_err(fail)?;
         Ok(ThreadPullRequest {
@@ -88,6 +89,7 @@ impl PullRequestReader for StoragePullRequestReader {
             link: state.active_link,
             local_head: state.local_head,
             facts,
+            display,
             fetched_at_ns,
             failure,
             candidates,

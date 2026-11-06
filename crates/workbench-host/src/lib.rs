@@ -14,8 +14,11 @@
 pub mod commands;
 pub mod ingress;
 pub mod lane;
+pub mod projection;
 pub mod projects;
 pub mod provenance;
+pub mod queries;
 pub mod receipts;
+pub mod subscriptions;
 
 pub use ingress::CommandHost;

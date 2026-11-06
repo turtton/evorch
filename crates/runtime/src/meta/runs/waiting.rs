@@ -90,6 +90,9 @@ struct WaitRequest {
     legacy: bool,
     /// Question IDs already reported to the caller; only others end the wait.
     reported: HashSet<String>,
+    /// The caller's answered questions already in its history; an answer outside
+    /// this set ends the wait, and the loop injects its text afterwards.
+    delivered: HashSet<String>,
 }
 
 impl WaitArgs {
@@ -114,6 +117,7 @@ impl WaitArgs {
             deadline: None,
             legacy,
             reported: HashSet::new(),
+            delivered: HashSet::new(),
         })
     }
 }
@@ -153,6 +157,7 @@ async fn wait_with(
         return error(message);
     }
     request.reported.clone_from(&state.reported_questions);
+    request.delivered = state.delivered_answer_ids();
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
@@ -204,6 +209,7 @@ async fn wait_with(
     let advanced = record_observations(state, runtime, &request, &result);
     let phase_only = request.legacy
         && result["inbox_ready"] != true
+        && result["answer_ready"] != true
         && result["user_input_ready"] == false
         && result["messages"].as_array().is_none_or(Vec::is_empty)
         && result["attention_run_ids"]
@@ -278,7 +284,8 @@ fn record_observations(
     state.reported_questions.extend(questions);
     let received = result["messages"].as_array().is_some_and(|m| !m.is_empty())
         || result["inbox_ready"] == true
-        || result["user_input_ready"] == true;
+        || result["user_input_ready"] == true
+        || result["answer_ready"] == true;
     if asked || received {
         state.budget.mark_progress();
         advanced = true;
@@ -322,20 +329,31 @@ async fn observe(
     let mut inbox_changes = mailbox.subscribe_version();
     let inbox_ready = mailbox.has_interrupting_message();
     let attention = new_question_runs(runtime, &request.runs, &request.reported);
+    // Every result reports answers the caller has not seen yet, whatever ended
+    // the wait.
     let answer = |runs, attention, inbox_ready, timed_out| {
-        Ok(response(
-            runs,
-            attention,
-            inbox_ready,
-            request.deadline.map(|_| timed_out),
+        let answers = runtime.undelivered_answer_ids(caller, &request.delivered);
+        Ok(with_answers(
+            response(
+                runs,
+                attention,
+                inbox_ready,
+                request.deadline.map(|_| timed_out),
+            ),
+            answers,
         ))
     };
+    let answered = !runtime
+        .undelivered_answer_ids(caller, &request.delivered)
+        .is_empty();
     if satisfied(&initial, request.mode)
         || !attention.is_empty()
         || inbox_ready
+        || answered
         || request.deadline.is_some_and(|deadline| deadline.is_zero())
     {
-        let timed_out = !satisfied(&initial, request.mode) && attention.is_empty() && !inbox_ready;
+        let timed_out =
+            !satisfied(&initial, request.mode) && attention.is_empty() && !inbox_ready && !answered;
         return answer(initial, attention, inbox_ready, timed_out);
     }
     // AgentRuntime::wait subscribes to each run's existing watch channel. A
@@ -375,7 +393,10 @@ async fn observe(
             changed = questions.changed() => {
                 if changed.is_ok() {
                     let attention = new_question_runs(runtime, &request.runs, &request.reported);
-                    if !attention.is_empty() {
+                    let answered = !runtime
+                        .undelivered_answer_ids(caller, &request.delivered)
+                        .is_empty();
+                    if !attention.is_empty() || answered {
                         let runs = snapshots(runtime, caller, &request.runs)?;
                         return answer(runs, attention, mailbox.has_interrupting_message(), false);
                     }
@@ -450,6 +471,17 @@ fn new_question_runs(
             })
         })
         .collect()
+}
+
+/// Marks a result that carries answers to the caller's own questions that are
+/// not yet in its history. The answer text is injected once after the tool
+/// result by the agent loop, never here.
+fn with_answers(mut result: WaitResult, question_ids: Vec<String>) -> WaitResult {
+    if !question_ids.is_empty() {
+        result["answer_ready"] = Value::Bool(true);
+        result["question_ids"] = json!(question_ids);
+    }
+    result
 }
 
 fn response(

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use super::{DispatchResult, EmptyArgs, error, parse, parse_run_id, serialize, success};
 use crate::AgentRuntime;
 use crate::agent_loop::LoopState;
+use crate::runtime::ReplyOutcome;
 
 #[derive(Deserialize)]
 pub(super) struct SendMessageArgs {
@@ -134,20 +135,78 @@ pub(super) async fn wait_reply(
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
-    let result = runtime
-        .wait_reply(
-            state.caller_run_id(),
+    // Answers already in the history do not end the wait; a new one does, and
+    // flush_user_answers injects its text after this tool result.
+    let delivered = state.delivered_answer_ids();
+    let caller = state.caller_run_id();
+    let mut cancel = state.channels.cancel_rx.clone();
+    let outcome = if let Err(runtime_error) = runtime.check_reply_wait(caller, &args.message_id) {
+        // An unknown or foreign message_id fails whatever input is pending.
+        WaitOutcome::Finished(Err(runtime_error))
+    } else if state.has_pending_user_messages() {
+        // Another wait in this same tool batch may already have received input.
+        WaitOutcome::UserInput
+    } else {
+        let wait = runtime.wait_reply_or_answers(
+            caller,
             &args.message_id,
             Duration::from_millis(args.timeout_ms),
-        )
-        .await;
+            Some(&delivered),
+        );
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.wait_for(|interrupt| interrupt.is_interrupted()) => {
+                    break WaitOutcome::Cancelled;
+                }
+                result = &mut wait => break WaitOutcome::Finished(result),
+                // Inject after ToolResults, never between ToolUse and ToolResult.
+                Some(message) = state.channels.inbox_rx.recv() => {
+                    state.queue_user_message(message);
+                    if state.has_pending_user_messages() {
+                        break WaitOutcome::UserInput;
+                    }
+                }
+            }
+        }
+    };
+    if !matches!(outcome, WaitOutcome::Cancelled) {
+        // Input that arrived as the wait ended is kept for the normal injection
+        // after this tool batch, as `wait` does.
+        while let Ok(message) = state.channels.inbox_rx.try_recv() {
+            state.queue_user_message(message);
+        }
+    }
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }
-    match result {
-        Ok(reply) => serialize(&reply),
-        Err(runtime_error) => error(runtime_error.to_string()),
+    match outcome {
+        WaitOutcome::Cancelled => error("wait cancelled"),
+        WaitOutcome::UserInput => {
+            state.budget.mark_progress();
+            serialize(&serde_json::json!({
+                "status": "user_input_ready",
+                "message_id": args.message_id,
+            }))
+        }
+        WaitOutcome::Finished(Ok(ReplyOutcome::Reply(reply))) => serialize(&reply),
+        WaitOutcome::Finished(Ok(ReplyOutcome::AnswersReady(question_ids))) => {
+            state.budget.mark_progress();
+            serialize(&serde_json::json!({
+                "status": "answer_ready",
+                "question_ids": question_ids,
+                "message_id": args.message_id,
+            }))
+        }
+        WaitOutcome::Finished(Err(runtime_error)) => error(runtime_error.to_string()),
     }
+}
+
+enum WaitOutcome {
+    Cancelled,
+    UserInput,
+    Finished(Result<ReplyOutcome, crate::RuntimeError>),
 }
 
 pub(super) fn inbox(

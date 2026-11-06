@@ -662,6 +662,82 @@ async fn a_disabled_service_fetches_nothing_and_refuses_decisions() {
     assert_eq!(process.source.calls().len(), 1);
 }
 
+// Given: a link whose title is edited on GitHub while its facts stay the same / When: the next
+// fetch finds it / Then: a display-only change is published, without a notification, and the
+// stored title is the new one; a fetch that finds the same title publishes nothing
+#[tokio::test(start_paused = true)]
+async fn a_title_edit_alone_is_published_for_the_display_without_a_notification() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process
+        .source
+        .push_ok(&key(1), titled(open_passing(1), "First title"));
+    process
+        .source
+        .push_ok(&key(1), titled(open_passing(1), "Second title"));
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    let baseline = process.next().await;
+    assert_eq!(
+        changed(&baseline).0.len(),
+        6,
+        "the first fetch is a baseline"
+    );
+
+    pass(300).await;
+    let edited = process.next().await;
+
+    let (fields, notifications, _) = changed(&edited);
+    assert_eq!(fields, [PullRequestChangedField::Display]);
+    assert!(notifications.is_empty());
+    let snapshot = process
+        .storage_handle
+        .pull_request_snapshot(&key(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot.display.title.as_ref().map(|title| title.as_str()),
+        Some("Second title")
+    );
+    pass(300).await;
+    assert_eq!(process.source.calls().len(), 3);
+    assert!(
+        process.quiet_events().await.is_empty(),
+        "the same title again publishes nothing"
+    );
+}
+
+// Given: a title edit together with a merge / When: fetched / Then: the merge keeps its own
+// notification and the display change adds none
+#[tokio::test(start_paused = true)]
+async fn a_title_edit_with_a_merge_adds_no_notification_of_its_own() {
+    let world = World::new();
+    let mut process = world.process(enabled());
+    process
+        .source
+        .push_ok(&key(1), titled(open_running(1), "Before"));
+    process.source.push_ok(
+        &key(1),
+        titled(
+            fetched(1, facts(PullRequestState::Merged, passing())),
+            "After",
+        ),
+    );
+    process.source.repeat_last();
+    process.link("t1", 1).await;
+    process.next().await;
+    process.next().await;
+
+    pass(30).await;
+    let merged = process.next().await;
+
+    let (fields, notifications, _) = changed(&merged);
+    assert!(fields.contains(&PullRequestChangedField::State));
+    assert!(fields.contains(&PullRequestChangedField::Display));
+    assert_eq!(notifications, ["merged"]);
+}
+
 // Given: tracking is on but no thread is linked / When: time passes / Then: nothing is fetched
 #[tokio::test(start_paused = true)]
 async fn an_unlinked_service_fetches_nothing() {

@@ -268,7 +268,14 @@ impl Database {
         &self,
         prompt_ids: &[String],
     ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
-        crate::repo::host_input_receipt::for_ids(&self.conn, prompt_ids)
+        let receipts = crate::repo::host_input_receipt::for_ids(&self.conn, prompt_ids)?;
+        #[cfg(feature = "test-support")]
+        crate::test_support::record(
+            &self.conn,
+            receipts.len() as u64,
+            receipts.iter().map(|r| r.text.len() as u64).sum(),
+        );
+        Ok(receipts)
     }
 
     /// The recorded chat submissions among `submission_ids`; one whose run was deleted
@@ -322,7 +329,36 @@ impl Database {
         &self,
         run_id: &str,
     ) -> Result<Vec<crate::HostInputReceipt>, StorageError> {
-        crate::repo::host_input_receipt::for_run(&self.conn, run_id)
+        let receipts = crate::repo::host_input_receipt::for_run(&self.conn, run_id)?;
+        #[cfg(feature = "test-support")]
+        crate::test_support::record(
+            &self.conn,
+            receipts.len() as u64,
+            receipts.iter().map(|r| r.text.len() as u64).sum(),
+        );
+        Ok(receipts)
+    }
+
+    /// Human input receipt metadata, without selecting the text column.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn host_input_receipt_headers(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::host_input::HostInputReceiptHeader>, StorageError> {
+        crate::repo::host_input_receipt::headers_for_run(&self.conn, run_id)
+    }
+
+    /// Committed human inputs in acceptance order, without loading large text.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn delivered_host_input_history(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::host_input::DeliveredHostInput>, StorageError> {
+        crate::repo::host_input_receipt::delivered_history(&self.conn, run_id)
     }
 
     /// Read one consistent, bounded snapshot of a root and its persisted descendants.
@@ -775,7 +811,18 @@ impl Database {
         &self,
         refs: &[crate::BodyRef],
     ) -> Result<Vec<Result<String, crate::BodyFailure>>, StorageError> {
-        crate::resolve_bodies(&self.conn, refs)
+        let bodies = crate::resolve_bodies(&self.conn, refs)?;
+        #[cfg(feature = "test-support")]
+        crate::test_support::record(
+            &self.conn,
+            refs.len() as u64,
+            bodies
+                .iter()
+                .filter_map(|r| r.as_ref().ok())
+                .map(|s| s.len() as u64)
+                .sum(),
+        );
+        Ok(bodies)
     }
 
     /// inclusive な window_start 範囲の usage バケットをキー順で返します。

@@ -1004,3 +1004,61 @@ async fn lag_and_a_parallel_tool_completion_remain_unobservable_until_a_full_bou
         f.runtime.wait(run).await.unwrap();
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn lag_with_a_child_completion_suffix_keeps_the_child_wait_healthy_until_a_full_boundary() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "lag-child").await;
+    let (_owner, host) = owned(&f, &lane);
+    f.runtime.monitor_lanes().unwrap();
+    f.model.block_next.store(true, Ordering::SeqCst);
+    let child = f
+        .runtime
+        .delegate_background_as_child(
+            lane.root_run_id,
+            Role::Worker,
+            "long provider child",
+            RunConfig::default(),
+        )
+        .unwrap();
+    f.model.blocked.notified().await;
+    // Overflow the real receiver so the child's start/progress events are lost
+    // while its provider call stays live. The surviving completion-only suffix
+    // is not a whole-run observation and must not end the healthy child wait.
+    let bus = &f.runtime.shared.bus;
+    for _ in 0..16_384 {
+        bus.emit(Event::new(ToolEvent::ToolCompleted {
+            tool_name: "shell".into(),
+            call_id: "completed".into(),
+            is_error: false,
+            output: None,
+            detail: None,
+            run_id: Some(child.to_string()),
+            parent_call_id: None,
+        }));
+    }
+    host.now.fetch_add(120 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(120 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert!(
+        episodes(&f).is_empty(),
+        "an unobserved child activity cannot prove the child wait ended"
+    );
+    // A whole-run activity boundary re-establishes observability.
+    bus.emit(Event::new(LifecycleEvent::RunProgress {
+        run_id: child.to_string(),
+        activity: event_bus::RunActivity::Idle,
+        compaction_operation_id: None,
+        context: None,
+    }));
+    f.runtime.monitor_lanes().unwrap();
+    host.now.fetch_add(5 * MINUTE, Ordering::SeqCst);
+    f.runtime.monitor_lanes().unwrap();
+    assert_eq!(episodes(&f)[0].classification, Class::WorkStalled);
+    for run in [child, lane.root_run_id, lead] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
+}
