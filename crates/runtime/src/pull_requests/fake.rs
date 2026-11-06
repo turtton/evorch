@@ -279,6 +279,7 @@ mod tests {
             requested: key(number),
             canonical: key(number),
             url: format!("https://github.com/turtton/evorch/pull/{number}"),
+            display: Default::default(),
             facts: PullRequestFacts {
                 state,
                 base_branch: "main".into(),

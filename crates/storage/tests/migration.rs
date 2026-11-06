@@ -11,7 +11,7 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 49;
+const LATEST_SCHEMA: u32 = 50;
 
 const EXPECTED_TABLES: [&str; 91] = [
     "thread_pull_request_state",

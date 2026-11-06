@@ -44,6 +44,8 @@ pub const PULL_REQUEST_CHECK_NAME_MAX_CHARS: usize = 160;
 pub const PULL_REQUEST_CHECK_ID_MAX_CHARS: usize = 128;
 /// Longest branch name, in characters.
 pub const PULL_REQUEST_BRANCH_MAX_CHARS: usize = 255;
+/// Longest pull request title kept for display, in characters.
+pub const PULL_REQUEST_TITLE_MAX_CHARS: usize = 256;
 /// Longest stored fetch error message (or inheritance attempt note), in characters.
 pub const PULL_REQUEST_ERROR_MAX_CHARS: usize = 256;
 /// Candidates one thread keeps, decided ones included; a full thread takes no new one.
@@ -643,6 +645,56 @@ pub struct PullRequestFacts {
     pub review_decision: ReviewDecision,
 }
 
+/// A pull request title made safe to keep and to draw: the text of a third party, redacted,
+/// single-line and bounded. Display only: it is never part of [`PullRequestFacts`], so it
+/// reaches neither a review's facts nor its manifest, and no agent input is built from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayTitle(String);
+
+impl DisplayTitle {
+    /// Cleans `raw`. Invisible format characters (zero-width and bidirectional controls)
+    /// are dropped first, so none can split a credential or reorder what is drawn; then the
+    /// whole text is redacted (a credential that crosses the limit is masked before anything
+    /// is cut), and only then made single-line and bounded by
+    /// [`PULL_REQUEST_TITLE_MAX_CHARS`]. `None` when nothing is left. Idempotent.
+    #[must_use]
+    pub fn from_untrusted(raw: &str) -> Option<Self> {
+        let visible: String = raw.chars().filter(|ch| !is_invisible_format(*ch)).collect();
+        let redacted = secret_guard::SecretRedactor::from_env()
+            .redact(&visible)
+            .text;
+        let text = sanitize_single_line(&redacted, PULL_REQUEST_TITLE_MAX_CHARS);
+        (!text.is_empty()).then_some(Self(text))
+    }
+
+    /// The cleaned text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn is_invisible_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
+}
+
+/// What a snapshot keeps for a display only. Stored with the facts of the same fetch (the
+/// same sequence adopts both), but not part of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullRequestDisplay {
+    /// The title; `None` when the fetch gave none that could be kept.
+    pub title: Option<DisplayTitle>,
+}
+
 /// A failed fetch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchFailure {
@@ -670,6 +722,8 @@ pub struct PullRequestSnapshot {
     pub key: PullRequestKey,
     /// The facts of the newest successful fetch; `None` before the first one.
     pub facts: Option<PullRequestFacts>,
+    /// What the same fetch gave for a display only; empty before the first one.
+    pub display: PullRequestDisplay,
     /// When that fetch ended.
     pub fetched_at_ns: Option<i64>,
     /// The sequence of that fetch.

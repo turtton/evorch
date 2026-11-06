@@ -81,6 +81,12 @@ fn fetched(number: u64, conclusion: Option<CheckConclusion>) -> FetchedPullReque
         requested: key(number),
         canonical: key(number),
         url: format!("https://github.com/turtton/evorch/pull/{number}"),
+        // The title is edited between the two fetches: it must not reach the model.
+        display: runtime_title(if conclusion.is_some() {
+            "Edited pull request title"
+        } else {
+            "First pull request title"
+        }),
         facts: PullRequestFacts {
             state: PullRequestState::Open,
             base_branch: "main".into(),
@@ -103,6 +109,12 @@ fn fetched(number: u64, conclusion: Option<CheckConclusion>) -> FetchedPullReque
             review_decision: ReviewDecision::None,
         },
         fetched_at_ns: 1_000,
+    }
+}
+
+fn runtime_title(text: &str) -> storage::pull_requests::PullRequestDisplay {
+    storage::pull_requests::PullRequestDisplay {
+        title: storage::pull_requests::DisplayTitle::from_untrusted(text),
     }
 }
 
@@ -279,6 +291,12 @@ async fn gui_pull_request_operations_leave_the_next_request_untouched() {
         serde_json::to_string(&operated).unwrap(),
         serde_json::to_string(&plain).unwrap(),
         "an operation changed what the model is sent"
+    );
+    assert!(
+        !serde_json::to_string(&operated)
+            .unwrap()
+            .contains("pull request title"),
+        "a title reached the model"
     );
     assert!(
         operated[1].0.starts_with(&operated[0].0),

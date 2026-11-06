@@ -1145,6 +1145,7 @@ async fn an_owned_lane_refreshes_pr_facts_on_verify_and_close_never_fetches() {
             requested: key.clone(),
             canonical: key.clone(),
             url: "https://github.com/owner/repo/pull/2".into(),
+            display: Default::default(),
             facts: facts(),
             fetched_at_ns: crate::pull_requests::WallClock::now_ns(&*clock),
         },

@@ -81,6 +81,9 @@ pub enum PullRequestChangedField {
     Refs,
     /// The commit the thread's local checkout is at.
     LocalHead,
+    /// What is kept for display only (the title). A reader shows it again; it is never a
+    /// reason for a notification, and no review or agent input is built from it.
+    Display,
 }
 
 /// Whether fetching the facts works. Published when the class of the problem changes, not

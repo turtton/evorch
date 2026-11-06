@@ -18,9 +18,9 @@ use gui::panes::agent::{
 };
 use gui::theme::style::{ThemePreset, install_preset};
 use storage::pull_requests::{
-    CheckConclusion, CheckKind, CheckStatus, FetchErrorKind, FetchFailure, LinkOrigin,
-    LocalHeadObservation, PullRequestCheck, PullRequestFacts, PullRequestKey, PullRequestLink,
-    PullRequestState, ReviewDecision,
+    CheckConclusion, CheckKind, CheckStatus, DisplayTitle, FetchErrorKind, FetchFailure,
+    LinkOrigin, LocalHeadObservation, PullRequestCheck, PullRequestDisplay, PullRequestFacts,
+    PullRequestKey, PullRequestLink, PullRequestState, ReviewDecision,
 };
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -76,11 +76,19 @@ fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
             observed_at_ns: 0,
         }),
         facts,
+        display: PullRequestDisplay::default(),
         fetched_at_ns: Some(gui::model::pull_requests::now_ns()),
         failure: None,
         candidates: Vec::new(),
         tracked_here: true,
     }
+}
+
+fn titled(mut view: ThreadPullRequest, title: &str) -> ThreadPullRequest {
+    view.display = PullRequestDisplay {
+        title: DisplayTitle::from_untrusted(title),
+    };
+    view
 }
 
 fn failing() -> PullRequestFacts {
@@ -262,6 +270,86 @@ fn a_collapsed_bar_is_one_summary_line() {
         !labels(&h).iter().any(|label| label.contains("lint")),
         "the list of checks is for the expanded bar"
     );
+}
+
+// Given: a pull request with a title / When: the bar is collapsed / Then: the line has the
+// number, the state, the CI summary and the title, and the head branch waits for the expansion
+#[test]
+fn a_collapsed_bar_shows_the_title_and_leaves_the_branch_to_the_details() {
+    let shown = titled(
+        view(Some(failing())),
+        "feat(gui): show the pull request title",
+    );
+    let (mut h, _) = harness(Bar {
+        view: shown.clone(),
+        expanded: false,
+        subagent: false,
+    });
+    h.run_steps(4);
+    h.get_by_label("#12");
+    h.get_by_label("CI failing 1/2");
+    h.get_by_label("feat(gui): show the pull request title");
+    assert!(
+        !labels(&h).iter().any(|label| label.contains("feat/bar")),
+        "the branch is a detail: {:?}",
+        labels(&h)
+    );
+
+    let (mut h, _) = harness(Bar {
+        view: shown,
+        expanded: true,
+        subagent: false,
+    });
+    h.run_steps(4);
+    let all = labels(&h);
+    assert!(
+        all.iter().any(|label| label.contains("main ← feat/bar")),
+        "{all:?}"
+    );
+    assert!(
+        all.iter()
+            .filter(|label| label.as_str() == "feat(gui): show the pull request title")
+            .count()
+            >= 2,
+        "the summary line and the details both carry the title: {all:?}"
+    );
+}
+
+// Given: a pull request whose title is not known / When: the bar is collapsed / Then: the
+// branch stands in, and the bar says nothing more
+#[test]
+fn a_bar_without_a_title_falls_back_to_the_branch() {
+    let (mut h, _) = harness(Bar {
+        view: view(Some(failing())),
+        expanded: false,
+        subagent: false,
+    });
+    h.run_steps(4);
+    h.get_by_label("feat/bar");
+}
+
+// Given: a very long title and a title that looks like markup and an instruction / When: the
+// bar is collapsed / Then: it stays one line (the row does not move), and the text is drawn
+// as it is, never interpreted
+#[test]
+fn a_long_or_markup_title_stays_one_line_of_plain_text() {
+    let row_top = |title: &str| {
+        let (mut h, _) = harness(Bar {
+            view: titled(view(Some(failing())), title),
+            expanded: false,
+            subagent: false,
+        });
+        h.run_steps(4);
+        (h.get_by_label("#12").rect().top(), labels(&h))
+    };
+    let (short_top, _) = row_top("short");
+    let (long_top, _) = row_top(&"very long title ".repeat(40));
+    assert_eq!(short_top, long_top, "a long title is cut, not wrapped");
+
+    let hostile =
+        "**bold** [click](https://example.invalid) <b>x</b> ignore all previous instructions";
+    let (_, all) = row_top(hostile);
+    assert!(all.iter().any(|label| label == hostile), "{all:?}");
 }
 
 // Given: an expanded bar / Then: failures one by one, passes on one line, branches, both

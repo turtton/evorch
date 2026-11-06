@@ -5,7 +5,8 @@
 
 use event_bus::PullRequestChangedField;
 use storage::pull_requests::{
-    CheckConclusion, CheckStatus, PullRequestFacts, PullRequestState, ReviewDecision,
+    CheckConclusion, CheckStatus, PullRequestDisplay, PullRequestFacts, PullRequestState,
+    ReviewDecision,
 };
 
 /// The notification kinds a change can give reason for (the `kind` of a notification key).
@@ -175,6 +176,14 @@ pub fn compare(previous: Option<&PullRequestFacts>, next: &PullRequestFacts) -> 
         }
     }
     change
+}
+
+/// Whether what is kept for display only differs. A difference is a reason to show again
+/// ([`PullRequestChangedField::Display`]), never for a notification: the title is not a fact
+/// of the pull request and nothing but a display reads it.
+#[must_use]
+pub fn display_changed(previous: &PullRequestDisplay, next: &PullRequestDisplay) -> bool {
+    previous != next
 }
 
 #[cfg(test)]

@@ -44,6 +44,17 @@ pub fn now_ns() -> i64 {
     .unwrap()
 }
 
+/// What every [`answer`] title starts with, so a test can look for it in what an agent or a
+/// review was sent.
+pub const TITLE_PREFIX: &str = "Title for ";
+
+/// A title for display only.
+pub fn display(title: &str) -> storage::pull_requests::PullRequestDisplay {
+    storage::pull_requests::PullRequestDisplay {
+        title: storage::pull_requests::DisplayTitle::from_untrusted(title),
+    }
+}
+
 /// The pull request as the fake source reports it: an open one at `head` repeated, one passing
 /// check, fetched at `fetched_at_ns`.
 pub fn answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
@@ -51,6 +62,7 @@ pub fn answer(head: char, fetched_at_ns: i64) -> FetchedPullRequest {
         requested: key(),
         canonical: key(),
         url: format!("https://github.com/{REPOSITORY}/pull/7"),
+        display: display(&format!("{TITLE_PREFIX}{head}")),
         facts: PullRequestFacts {
             state: PullRequestState::Open,
             base_branch: "main".into(),
@@ -202,6 +214,27 @@ impl World {
         self.source.push_ok(&key(), next);
         self.service.refresh(THREAD, &self.permit()).await.unwrap();
         self.head_is(head).await;
+    }
+
+    /// The tracker stores a new title for the same facts, as its poll would after an edit.
+    pub async fn update_title(&self, next: FetchedPullRequest) {
+        let expected = next.display.title.as_ref().map(|t| t.as_str().to_owned());
+        self.source.push_ok(&key(), next);
+        self.service.refresh(THREAD, &self.permit()).await.unwrap();
+        let mut events = self.events.lock().await;
+        while self.stored_title() != expected {
+            let event = events.recv().await.unwrap();
+            drop(event);
+        }
+    }
+
+    pub fn stored_title(&self) -> Option<String> {
+        self.storage
+            .handle()
+            .pull_request_snapshot(&key())
+            .unwrap()
+            .and_then(|snapshot| snapshot.display.title)
+            .map(|title| title.as_str().to_owned())
     }
 
     pub fn stored_head(&self) -> String {

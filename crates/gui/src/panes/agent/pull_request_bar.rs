@@ -238,8 +238,15 @@ fn summary_row(
                     label.on_hover_text(hover);
                 }
             }
-            if let Some(facts) = &view.facts {
-                ui.add(egui::Label::new(muted(facts.head_branch.as_str())).truncate());
+            // Last, so the title takes the room that is left and is cut at the end. It is
+            // plain text from a third party; the hover shows the whole cleaned text.
+            if let Some(title) = view.display.title.as_ref() {
+                ui.add(egui::Label::new(title.as_str()).truncate())
+                    .on_hover_text(title.as_str());
+            } else if let Some(facts) = &view.facts {
+                // No title was fetched (yet): the branch says which pull request this is.
+                ui.add(egui::Label::new(muted(facts.head_branch.as_str())).truncate())
+                    .on_hover_text("Title not fetched");
             }
         });
     });
@@ -257,6 +264,9 @@ fn details(ui: &mut egui::Ui, bar: &PullRequestBarContext<'_>) {
     };
     if let Some(label) = view.label() {
         ui.label(medium(label));
+    }
+    if let Some(title) = view.display.title.as_ref() {
+        ui.add(egui::Label::new(title.as_str()).wrap());
     }
     checks(ui, facts, view.failure.is_none());
     ui.add_space(SP_1);
