@@ -309,6 +309,15 @@ impl World {
         settings: PullRequestsConfig,
         logs: Arc<dyn crate::pull_requests::PullRequestLogSource>,
     ) -> Process {
+        self.process_with_delivery(settings, logs, Arc::new(super::NoNoticeDelivery))
+    }
+
+    pub(super) fn process_with_delivery(
+        &self,
+        settings: PullRequestsConfig,
+        logs: Arc<dyn crate::pull_requests::PullRequestLogSource>,
+        delivery: Arc<dyn super::PrNoticeDelivery>,
+    ) -> Process {
         let storage = Storage::open(StorageConfig {
             db_path: self.dir.path().join("evorch.db"),
             ..StorageConfig::default()
@@ -327,7 +336,7 @@ impl World {
         let environment = Arc::new(FakeEnvironment::default());
         let hooks = Arc::new(Hooks::default());
         let events = bus.subscribe();
-        let service = PullRequestService::start_with_log_source(
+        let service = PullRequestService::start_with_notice_delivery(
             ServiceParts {
                 storage: storage.handle(),
                 source: Arc::new(source.clone()),
@@ -341,6 +350,7 @@ impl World {
                 clock: Arc::clone(&self.clock) as Arc<dyn WallClock>,
             },
             logs,
+            delivery,
         )
         .unwrap();
         Process {

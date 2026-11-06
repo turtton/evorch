@@ -158,6 +158,21 @@ pub enum InheritanceScheduling {
     Scheduled(Box<InheritanceRecord>),
 }
 
+/// Shared-outbox integration. These callbacks are hints, never authority or another queue.
+pub trait PrNoticeDelivery: Send + Sync {
+    /// Kick delivery for a destination after its ready/outbox transaction commits.
+    fn schedule(&self, thread: &str);
+    /// Coalesced hints after durable explicit Resume and guard reset.
+    /// The default has no producer; standalone services still perform their startup scan.
+    fn subscribe_resumes(&self) -> watch::Receiver<u64> {
+        watch::channel(0).1
+    }
+}
+struct NoNoticeDelivery;
+impl PrNoticeDelivery for NoNoticeDelivery {
+    fn schedule(&self, _: &str) {}
+}
+
 /// Everything the service is built from.
 pub struct ServiceParts {
     /// Where the rows live.
@@ -245,7 +260,7 @@ pub(crate) struct Inner {
     pub(crate) storage: StorageHandle,
     pub(crate) source: Arc<dyn PullRequestSource>,
     pub(crate) logs: Arc<dyn super::PullRequestLogSource>,
-    coordinator_write: Mutex<()>,
+    delivery: Arc<dyn PrNoticeDelivery>,
     pub(crate) ownership: Arc<dyn OwnershipView>,
     pub(crate) env: Arc<dyn ThreadEnvironment>,
     pub(crate) bus: Arc<EventBus>,
@@ -641,6 +656,18 @@ impl PullRequestService {
         parts: ServiceParts,
         logs: Arc<dyn super::PullRequestLogSource>,
     ) -> Result<Self, config::ConfigError> {
+        Self::start_with_notice_delivery(parts, logs, Arc::new(NoNoticeDelivery))
+    }
+
+    /// Starts tracking with bounded logs and shared-outbox wake/Resume integration.
+    ///
+    /// # Errors
+    /// Invalid settings.
+    pub fn start_with_notice_delivery(
+        parts: ServiceParts,
+        logs: Arc<dyn super::PullRequestLogSource>,
+        delivery: Arc<dyn PrNoticeDelivery>,
+    ) -> Result<Self, config::ConfigError> {
         parts.settings.validate()?;
         let (settings, _) = watch::channel(parts.settings);
         let (shutdown, _) = watch::channel(false);
@@ -648,7 +675,7 @@ impl PullRequestService {
             storage: parts.storage,
             source: parts.source,
             logs,
-            coordinator_write: Mutex::new(()),
+            delivery,
             ownership: parts.ownership,
             env: parts.environment,
             bus: parts.bus,
@@ -661,6 +688,8 @@ impl PullRequestService {
             stage_hooks: Mutex::default(),
         });
         let receiver = inner.bus.subscribe();
+        let resumes = inner.delivery.subscribe_resumes();
+        tokio::spawn(coordinator::observe_resumes(Arc::clone(&inner), resumes));
         tokio::spawn(scheduler::run(Arc::clone(&inner)));
         tokio::spawn(observer::run(Arc::clone(&inner), receiver));
         Ok(Self {

@@ -35,6 +35,20 @@ impl StorageHandle {
     pub fn cancel_pr_notice(&self, id: String) -> Result<(), StorageError> {
         self.lane_job(true, move |c| pr::cancel(c, &id))
     }
+    /// Ready + outbox insertion only if the complete expected reservation still matches.
+    /// Comparison and writes share one immediate transaction; a stale/missing record is a no-op.
+    pub fn ready_pr_notice_if_current(
+        &self,
+        expected: PrNotice,
+        payload: String,
+    ) -> Result<Option<PrNotice>, StorageError> {
+        self.lane_job(true, move |c| pr::ready_if_current(c, &expected, &payload))
+    }
+    /// Cancel only the observed reservation/ready record, never a replacement with the same ID.
+    /// Returns false for a stale/missing record, without changing the outbox or budget.
+    pub fn cancel_pr_notice_if_current(&self, expected: PrNotice) -> Result<bool, StorageError> {
+        self.lane_job(true, move |c| pr::cancel_if_current(c, &expected))
+    }
     /// Read preparation/payload separately from the outbox reference.
     pub fn pr_notice(&self, id: String) -> Result<Option<PrNotice>, StorageError> {
         self.lane_job(false, move |c| pr::notice(c, &id))

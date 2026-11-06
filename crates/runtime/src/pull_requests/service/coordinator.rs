@@ -16,6 +16,26 @@ mod tests;
 
 type Result<T> = std::result::Result<T, PullRequestError>;
 
+pub(super) async fn observe_resumes(
+    inner: Arc<Inner>,
+    mut resumes: tokio::sync::watch::Receiver<u64>,
+) {
+    let mut shutdown = inner.shutdown.subscribe();
+    if *shutdown.borrow() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            result = resumes.changed() => {
+                if result.is_err() { break; }
+                // Full durable-link rescan, not a per-GUI delta or authority token.
+                inner.wake.notify_one();
+            }
+            _ = shutdown.changed() => break,
+        }
+    }
+}
+
 fn current(storage: &StorageHandle, target: &Target) -> Result<PullRequestSnapshot> {
     let thread = storage.pull_request_thread_state(&target.thread_id)?;
     let link = thread.active_link.ok_or(PullRequestError::NotLinked)?;
@@ -156,14 +176,9 @@ impl PullRequestService {
         inner.enabled()?;
         inner.check_permit(thread, permit).await?;
         let storage = inner.storage.clone();
-        let writer = Arc::clone(inner);
         let thread = thread.to_owned();
         let result = inner
             .guarded(permit, move || -> Result<_> {
-                let _serial = writer
-                    .coordinator_write
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let link = storage
                     .pull_request_thread_state(&thread)?
                     .active_link
@@ -235,10 +250,6 @@ impl PullRequestService {
         let t = target.clone();
         let notice = inner
             .guarded(permit, move || {
-                let _serial = owner
-                    .coordinator_write
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 owner.reserve_notice(&t, PrNoticeMode::Manual, Some(&head))
             })
             .await??;
@@ -320,10 +331,6 @@ impl Inner {
             let t = target.clone();
             let scanned = self
                 .guarded(&target.permit, move || -> Result<_> {
-                    let _serial = inner
-                        .coordinator_write
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let policy = inner.storage.pr_auto_fix_state(t.key.clone())?;
                     let mut cursor = String::new();
                     let mut reserved = Vec::new();
@@ -345,7 +352,7 @@ impl Inner {
                             if notice.link_revision != t.link_revision
                                 || valid_notice(&inner, &t, &notice)?.is_none()
                             {
-                                inner.storage.cancel_pr_notice(notice.notice_id)?;
+                                inner.storage.cancel_pr_notice_if_current(notice)?;
                             } else if notice.phase == PrNoticePhase::Reserved
                                 && allowed(&inner.storage, &t)?
                             {
@@ -456,18 +463,16 @@ impl Inner {
         let inner = Arc::clone(self);
         let (t, n) = (target.clone(), notice.clone());
         self.guarded(&target.permit, move || -> Result<()> {
-            let _serial = inner
-                .coordinator_write
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // A cancelled ID may already be reserved by a newer request.
-            if inner.storage.pr_notice(n.notice_id.clone())?.as_ref() != Some(&n) {
-                return Ok(());
-            }
             if valid_notice(&inner, &t, &n)?.is_some() {
-                inner.storage.ready_pr_notice(n.notice_id, payload)?;
+                if inner
+                    .storage
+                    .ready_pr_notice_if_current(n, payload)?
+                    .is_some()
+                {
+                    inner.delivery.schedule(&t.thread_id);
+                }
             } else {
-                inner.storage.cancel_pr_notice(n.notice_id)?;
+                inner.storage.cancel_pr_notice_if_current(n)?;
             }
             Ok(())
         })

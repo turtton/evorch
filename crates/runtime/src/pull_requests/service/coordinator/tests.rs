@@ -500,3 +500,128 @@ async fn manual_does_not_resume_stop_but_is_independent_of_the_global_auto_switc
     assert_eq!(notices(&p)[0].phase, PrNoticePhase::Ready);
     assert_eq!(logs.requests().len(), 1);
 }
+
+struct DeliveryHints {
+    resumes: tokio::sync::watch::Sender<u64>,
+    scheduled: std::sync::Mutex<Vec<String>>,
+    storage: std::sync::Mutex<Option<storage::StorageHandle>>,
+    ready: Notify,
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_log_completion_cannot_ready_a_replacement_manual_request() {
+    let w = World::new();
+    let logs = Arc::new(GateLogs::default());
+    let hints = Arc::new(DeliveryHints::default());
+    let p = w.process_with_delivery(enabled(), logs.clone(), hints.clone());
+    *hints.storage.lock().unwrap() = Some(p.storage_handle.clone());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    let seq = snapshot(&p, 'a', false);
+    attribute(&p, &t, seq, 'a');
+    enable(&p, &t).await;
+    logs.arrived.notified().await;
+    let old = notices(&p).pop().unwrap();
+    let other = storage::Storage::open(storage::StorageConfig {
+        db_path: w.dir.path().join("evorch.db"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(
+        other
+            .handle()
+            .cancel_pr_notice_if_current(old.clone())
+            .unwrap()
+    );
+    let manual = p
+        .service
+        .request_manual_notice("t", 1, &"a".repeat(40), &t.permit)
+        .await
+        .unwrap();
+    assert_eq!(manual.notice_id, old.notice_id);
+    assert!(manual.reservation_revision > old.reservation_revision);
+    logs.release.notify_one();
+    // This explicit arrival distinguishes fresh preparation from a stale result
+    // incorrectly making the replacement ready.
+    logs.arrived.notified().await;
+    assert_eq!(notices(&p)[0].phase, PrNoticePhase::Reserved);
+    logs.release.notify_one();
+    hints.ready.notified().await;
+    assert_eq!(notices(&p)[0].phase, PrNoticePhase::Ready);
+    assert_eq!(notices(&p)[0].mode, PrNoticeMode::Manual);
+    assert_eq!(logs.fake.requests().len(), 2);
+}
+
+impl Default for DeliveryHints {
+    fn default() -> Self {
+        Self {
+            resumes: tokio::sync::watch::channel(0).0,
+            scheduled: Default::default(),
+            storage: Default::default(),
+            ready: Notify::new(),
+        }
+    }
+}
+impl super::super::PrNoticeDelivery for DeliveryHints {
+    fn schedule(&self, thread: &str) {
+        let storage = self.storage.lock().unwrap();
+        assert!(
+            storage
+                .as_ref()
+                .unwrap()
+                .pr_notices(key(1), String::new())
+                .unwrap()
+                .iter()
+                .any(|n| n.phase == PrNoticePhase::Ready)
+        );
+        self.scheduled.lock().unwrap().push(thread.into());
+        self.ready.notify_one();
+    }
+    fn subscribe_resumes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.resumes.subscribe()
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn explicit_resume_hint_rescans_links_and_ready_commit_kicks_the_destination_once() {
+    let w = World::new();
+    let hints = Arc::new(DeliveryHints::default());
+    let logs = Arc::new(FakePullRequestLogSource::new());
+    let p = w.process_with_delivery(enabled(), logs.clone(), hints.clone());
+    *hints.storage.lock().unwrap() = Some(p.storage_handle.clone());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    let seq = snapshot(&p, 'a', false);
+    attribute(&p, &t, seq, 'a');
+    let owner = LaneDeliveryOwner {
+        root_run_id: "root".into(),
+        generation: 1,
+        ownership_generation: t.permit.lease.generation,
+    };
+    let epoch = p
+        .storage_handle
+        .bind_lane_delivery_destination("t".into(), 0, owner.clone(), LaneDestinationAction::Stop)
+        .unwrap();
+    enable(&p, &t).await;
+    settle().await;
+    assert!(notices(&p).is_empty());
+    // A hint alone cannot confer Resume authority.
+    hints.resumes.send_modify(|version| *version += 1);
+    settle().await;
+    assert!(notices(&p).is_empty());
+    assert!(logs.requests().is_empty());
+    p.storage_handle
+        .bind_lane_delivery_destination(
+            "t".into(),
+            epoch,
+            owner,
+            LaneDestinationAction::ExplicitUserResume,
+        )
+        .unwrap();
+    hints.resumes.send_modify(|version| *version += 1);
+    hints.ready.notified().await;
+    assert_eq!(*hints.scheduled.lock().unwrap(), ["t"]);
+    assert_eq!(logs.requests().len(), 1);
+    hints.resumes.send_modify(|version| *version += 1);
+    settle().await;
+    assert_eq!(hints.scheduled.lock().unwrap().len(), 1);
+}

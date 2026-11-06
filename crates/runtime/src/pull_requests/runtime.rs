@@ -7,14 +7,23 @@ use std::sync::Arc;
 use config::PullRequestsConfig;
 
 use super::{
-    DerivedThreadKind, OwnershipView, PullRequestService, PullRequestSource, ServiceParts,
-    SystemWallClock, ThreadEnvironment,
+    DerivedThreadKind, OwnershipView, PrNoticeDelivery, PullRequestService, PullRequestSource,
+    ServiceParts, SystemWallClock, ThreadEnvironment,
 };
 use crate::{AgentRuntime, WeakAgentRuntime};
 
 /// Reads thread facts from the runtime without keeping it alive.
 struct RuntimeEnvironment {
     runtime: WeakAgentRuntime,
+}
+
+impl PrNoticeDelivery for RuntimeEnvironment {
+    fn schedule(&self, thread: &str) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.schedule_lane_deliveries(thread);
+        }
+    }
+    // C supplies subscribe_harness_delivery_resumes after integration.
 }
 
 impl ThreadEnvironment for RuntimeEnvironment {
@@ -101,17 +110,23 @@ impl AgentRuntime {
             .ok_or_else(|| "pull request tracking needs the run store".to_owned())?
             .handle
             .clone();
-        let service = PullRequestService::start(ServiceParts {
-            storage,
-            source,
-            ownership,
-            environment: Arc::new(RuntimeEnvironment {
+        let service = PullRequestService::start_with_notice_delivery(
+            ServiceParts {
+                storage,
+                source,
+                ownership,
+                environment: Arc::new(RuntimeEnvironment {
+                    runtime: self.downgrade(),
+                }),
+                bus: Arc::clone(&self.shared.bus),
+                settings,
+                clock: Arc::new(SystemWallClock),
+            },
+            Arc::new(super::GhLogSource::new()),
+            Arc::new(RuntimeEnvironment {
                 runtime: self.downgrade(),
             }),
-            bus: Arc::clone(&self.shared.bus),
-            settings,
-            clock: Arc::new(SystemWallClock),
-        })
+        )
         .map_err(|error| error.to_string())?;
         Ok(self.shared.pull_requests.get_or_init(|| service).clone())
     }
