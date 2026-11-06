@@ -1,7 +1,8 @@
 //! JSON endpoints: `POST /api/v1/request` and `GET /api/v1/health`.
 
 use crate::backend::{WebSession, WorkbenchBackend};
-use crate::http_error::{error_response, json_response, reply_response};
+use crate::http_error::{error_response, json_response, reject, reply_response};
+use crate::security::close_connection;
 use crate::state::AppState;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
@@ -9,12 +10,13 @@ use axum::response::Response;
 use http::StatusCode;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use workbench_protocol::envelope::{
     Control, Provenance, ReplyEnvelope, ReplyPayload, ReplyResult, RequestBody, RequestEnvelope,
     Surface, decode_request,
 };
 use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
-use workbench_protocol::handshake::CoreStatus;
+use workbench_protocol::handshake::ServerHello;
 use workbench_protocol::ids::{ClientId, RequestId};
 
 fn internal() -> WorkbenchError {
@@ -41,20 +43,44 @@ fn reply(request_id: RequestId, result: ReplyResult) -> Response {
     reply_response(ReplyEnvelope { request_id, result })
 }
 
+fn too_large() -> Response {
+    let mut response = error_response(
+        WorkbenchError::new(
+            ErrorCode::LimitExceeded,
+            "request body is too large",
+            RetryAdvice::Never,
+        ),
+        None,
+    );
+    close_connection(&mut response);
+    response
+}
+
+/// Read the whole body, or say why not. The answer closes the connection:
+/// the rest of an unfinished body would otherwise be read as the next request.
+async fn read_body(
+    body: Body,
+    limit: usize,
+    deadline: Duration,
+) -> Result<axum::body::Bytes, Box<Response>> {
+    let outcome = tokio::time::timeout(deadline, to_bytes(body, limit)).await;
+    let mut failure = match outcome {
+        Ok(Ok(bytes)) => return Ok(bytes),
+        Ok(Err(_)) => return Err(Box::new(too_large())),
+        Err(_) => reject(
+            StatusCode::REQUEST_TIMEOUT,
+            ErrorCode::InvalidRequest,
+            "request body was not received in time",
+        ),
+    };
+    close_connection(&mut failure);
+    Err(Box::new(failure))
+}
+
 pub(crate) async fn request<B: WorkbenchBackend>(
     State(state): State<Arc<AppState<B>>>,
     request: Request<Body>,
 ) -> Response {
-    let too_large = || {
-        error_response(
-            WorkbenchError::new(
-                ErrorCode::LimitExceeded,
-                "request body is too large",
-                RetryAdvice::Never,
-            ),
-            None,
-        )
-    };
     let limit = state.max_request_bytes;
     let declared = request
         .headers()
@@ -64,8 +90,9 @@ pub(crate) async fn request<B: WorkbenchBackend>(
     if declared.is_some_and(|length| length > limit) {
         return too_large();
     }
-    let Ok(bytes) = to_bytes(request.into_body(), limit).await else {
-        return too_large();
+    let bytes = match read_body(request.into_body(), limit, state.body_read_timeout).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
     };
 
     let envelope = match decode_request(&bytes, &state.wire_limits) {
@@ -97,11 +124,25 @@ pub(crate) async fn request<B: WorkbenchBackend>(
         Ok(pair) => pair,
         Err(error) => return error_response(error, Some(&request_id)),
     };
+    let Ok(slot) = Arc::clone(&state.shared.backend_slots).try_acquire_owned() else {
+        return error_response(
+            WorkbenchError::new(
+                ErrorCode::Busy,
+                "too many requests in flight",
+                RetryAdvice::SameRequest,
+            ),
+            Some(&request_id),
+        );
+    };
     // A command must finish even if the browser goes away mid-request; the
-    // request id lets the browser ask again and get the recorded outcome.
+    // request id lets the browser ask again and get the recorded outcome. The
+    // slot belongs to the task, so a disconnect does not free it early.
     let backend = Arc::clone(&state.backend);
-    let handle =
-        tokio::spawn(async move { backend.handle_request(&session, envelope, provenance).await });
+    let handle = tokio::spawn(async move {
+        let answer = backend.handle_request(&session, envelope, provenance).await;
+        drop(slot);
+        answer
+    });
     match handle.await {
         Ok(answer) if answer.request_id == request_id => reply_response(answer),
         Ok(_) | Err(_) => error_response(internal(), Some(&request_id)),
@@ -109,16 +150,27 @@ pub(crate) async fn request<B: WorkbenchBackend>(
 }
 
 #[derive(Serialize)]
+struct Adapter {
+    name: &'static str,
+    version: &'static str,
+}
+
+#[derive(Serialize)]
 struct Health<'a> {
     status: &'static str,
-    core: &'a CoreStatus,
+    adapter: Adapter,
+    hello: &'a ServerHello,
 }
 
 pub(crate) async fn health<B: WorkbenchBackend>(State(state): State<Arc<AppState<B>>>) -> Response {
-    match state.backend.core_status().await {
-        Ok(core) => match serde_json::to_vec(&Health {
+    match state.backend.server_hello().await {
+        Ok(hello) => match serde_json::to_vec(&Health {
             status: "ok",
-            core: &core,
+            adapter: Adapter {
+                name: env!("CARGO_PKG_NAME"),
+                version: env!("CARGO_PKG_VERSION"),
+            },
+            hello: &hello,
         }) {
             Ok(body) => json_response(StatusCode::OK, body),
             Err(_) => error_response(internal(), None),
@@ -131,5 +183,30 @@ pub(crate) async fn fallback<B: WorkbenchBackend>(
     State(state): State<Arc<AppState<B>>>,
     request: Request<Body>,
 ) -> Response {
-    crate::assets::serve(state.assets, request.method(), request.uri().path())
+    let path = request.uri().path();
+    if path.starts_with("/api/") {
+        return reject(StatusCode::NOT_FOUND, ErrorCode::NotFound, "not found");
+    }
+    crate::assets::serve(state.assets, request.method(), path)
+}
+
+/// The answer to a method a known API path does not support. Registered as the
+/// route's own fallback, since the router would otherwise answer `405` with
+/// the body of its not-found fallback and a `HEAD` entry in `Allow`.
+pub(crate) fn method_not_allowed(
+    allow: &'static str,
+) -> impl Fn() -> std::future::Ready<Response> + Clone + Send + Sync + 'static {
+    move || {
+        let mut response = reject(
+            StatusCode::METHOD_NOT_ALLOWED,
+            ErrorCode::InvalidRequest,
+            "method not allowed",
+        );
+        response
+            .headers_mut()
+            .insert(http::header::ALLOW, http::HeaderValue::from_static(allow));
+        // The request body, if any, is not read.
+        close_connection(&mut response);
+        std::future::ready(response)
+    }
 }

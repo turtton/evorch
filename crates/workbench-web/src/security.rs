@@ -41,6 +41,10 @@ const COOP: HeaderName = HeaderName::from_static("cross-origin-opener-policy");
 pub(crate) struct Shared {
     pub(crate) policy: Policy,
     pub(crate) in_flight: Arc<Semaphore>,
+    /// Slots for backend calls. A slot is held by the task that runs the call,
+    /// not by the HTTP handler, so a client that disconnects cannot start more
+    /// backend work than the limit while its earlier command is still running.
+    pub(crate) backend_slots: Arc<Semaphore>,
     pub(crate) sse_slots: Arc<Semaphore>,
     pub(crate) shutdown: ShutdownSignal,
 }
@@ -82,6 +86,18 @@ fn check_head(shared: &Shared, request: &Request) -> Result<(), Box<Response>> {
         )));
     }
     let headers = request.headers();
+    if method == Method::GET {
+        let has_length = headers
+            .get(header::CONTENT_LENGTH)
+            .is_some_and(|value| value.as_bytes() != b"0");
+        if has_length || headers.contains_key(header::TRANSFER_ENCODING) {
+            return Err(Box::new(reject(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                "GET requests must not have a body",
+            )));
+        }
+    }
 
     let host = match single_header(headers, &header::HOST) {
         Ok(Some(host)) if shared.policy.host_allowed(host) => host,
@@ -132,6 +148,14 @@ fn add_security_headers(response: &mut Response, api: bool) {
     );
 }
 
+/// Close the connection after this answer. Used when the request body was not
+/// read, so a client cannot keep the connection busy by never finishing it.
+pub(crate) fn close_connection(response: &mut Response) {
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+}
+
 /// The outermost layer: checks the head, bounds concurrency and stamps the
 /// security headers on every answer, rejections included.
 pub(crate) async fn guard(
@@ -141,14 +165,22 @@ pub(crate) async fn guard(
 ) -> Response {
     let api = request.uri().path().starts_with("/api/");
     let mut response = match check_head(&shared, &request) {
-        Err(rejection) => *rejection,
+        Err(rejection) => {
+            let mut rejection = *rejection;
+            close_connection(&mut rejection);
+            rejection
+        }
         Ok(()) => match Arc::clone(&shared.in_flight).try_acquire_owned() {
             Ok(_permit) => next.run(request).await,
-            Err(_) => reject(
-                StatusCode::TOO_MANY_REQUESTS,
-                ErrorCode::Busy,
-                "too many requests in flight",
-            ),
+            Err(_) => {
+                let mut busy = reject(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    ErrorCode::Busy,
+                    "too many requests in flight",
+                );
+                close_connection(&mut busy);
+                busy
+            }
         },
     };
     add_security_headers(&mut response, api);

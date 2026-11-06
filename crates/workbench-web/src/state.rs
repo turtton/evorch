@@ -12,6 +12,7 @@ pub(crate) struct AppState<B> {
     pub(crate) wire_limits: WireLimits,
     pub(crate) sse_keepalive: Duration,
     pub(crate) max_request_bytes: usize,
+    pub(crate) body_read_timeout: Duration,
     pub(crate) assets: &'static [StaticAsset],
     client_counter: AtomicU64,
 }
@@ -29,6 +30,7 @@ impl<B> AppState<B> {
             wire_limits: config.wire_limits,
             sse_keepalive: config.sse_keepalive,
             max_request_bytes: config.max_request_bytes,
+            body_read_timeout: config.body_read_timeout,
             assets,
             client_counter: AtomicU64::new(1),
         }

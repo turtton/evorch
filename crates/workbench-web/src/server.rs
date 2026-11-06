@@ -11,7 +11,9 @@ use crate::state::AppState;
 use axum::Router;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
-use axum::serve::Listener;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -21,7 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 /// Why the server could not start or stopped abnormally.
 #[derive(Debug, thiserror::Error)]
@@ -63,14 +65,24 @@ impl WebApp {
         let shared = Arc::new(Shared {
             policy,
             in_flight: Arc::new(Semaphore::new(config.max_in_flight_requests)),
+            backend_slots: Arc::new(Semaphore::new(config.max_in_flight_requests)),
             sse_slots: Arc::new(Semaphore::new(config.max_sse_streams)),
             shutdown: shutdown.clone(),
         });
         let state = Arc::new(AppState::new(backend, Arc::clone(&shared), config, assets));
         let router = Router::new()
-            .route("/api/v1/request", post(api::request::<B>))
-            .route("/api/v1/events", get(sse::events::<B>))
-            .route("/api/v1/health", get(api::health::<B>))
+            .route(
+                "/api/v1/request",
+                post(api::request::<B>).fallback(api::method_not_allowed("POST")),
+            )
+            .route(
+                "/api/v1/events",
+                get(sse::events::<B>).fallback(api::method_not_allowed("GET")),
+            )
+            .route(
+                "/api/v1/health",
+                get(api::health::<B>).fallback(api::method_not_allowed("GET")),
+            )
             .fallback(api::fallback::<B>)
             .with_state(state)
             .layer(from_fn_with_state(shared, guard));
@@ -131,12 +143,15 @@ impl WebServer {
             slots: Arc::new(Semaphore::new(config.max_connections)),
         };
         let shutdown = app.shutdown_signal();
-        let stop = shutdown.clone();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app.router())
-                .with_graceful_shutdown(async move { stop.triggered().await })
-                .await
-        });
+        let task = tokio::spawn(serve(
+            listener,
+            app.router(),
+            ServeSettings {
+                header_read_timeout: config.header_read_timeout,
+                shutdown_grace: config.shutdown_grace,
+            },
+            shutdown.clone(),
+        ));
         Ok(Some(Self {
             local_addr,
             shutdown,
@@ -169,17 +184,79 @@ impl Drop for WebServer {
     }
 }
 
+struct ServeSettings {
+    header_read_timeout: Duration,
+    shutdown_grace: Duration,
+}
+
+/// Accept connections until shutdown, then drain them.
+///
+/// Draining waits `shutdown_grace` for open connections to finish, then drops
+/// the rest. Dropping a connection cancels its HTTP handler only: a command the
+/// backend has accepted runs in its own task and is not interrupted.
+async fn serve(
+    mut listener: LimitedListener,
+    router: Router,
+    settings: ServeSettings,
+    shutdown: ShutdownSignal,
+) -> io::Result<()> {
+    let service = TowerToHyperService::new(router);
+    let mut connections: JoinSet<()> = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.triggered() => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            (stream, _peer) = listener.accept() => {
+                connections.spawn(serve_connection(
+                    stream,
+                    service.clone(),
+                    settings.header_read_timeout,
+                    shutdown.clone(),
+                ));
+            }
+        }
+    }
+    // Stop accepting before draining so no new connection can slip in.
+    drop(listener);
+    let drained = tokio::time::timeout(settings.shutdown_grace, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    }
+    Ok(())
+}
+
+async fn serve_connection(
+    stream: LimitedStream,
+    service: TowerToHyperService<Router>,
+    header_read_timeout: Duration,
+    shutdown: ShutdownSignal,
+) {
+    let connection = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_read_timeout)
+        .keep_alive(true)
+        .serve_connection(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = connection.as_mut() => return,
+        () = shutdown.triggered() => connection.as_mut().graceful_shutdown(),
+    }
+    let _ = connection.await;
+}
+
 /// A TCP listener that closes connections beyond `max_connections`.
 struct LimitedListener {
     inner: TcpListener,
     slots: Arc<Semaphore>,
 }
 
-impl Listener for LimitedListener {
-    type Io = LimitedStream;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+impl LimitedListener {
+    async fn accept(&mut self) -> (LimitedStream, SocketAddr) {
         loop {
             let (stream, addr) = match self.inner.accept().await {
                 Ok(accepted) => accepted,
@@ -208,10 +285,6 @@ impl Listener for LimitedListener {
                 Err(_) => drop(stream),
             }
         }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
     }
 }
 

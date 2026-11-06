@@ -605,7 +605,16 @@ async fn health_reports_core_status_or_the_mapped_error() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["core"]["state"], "ready");
+    assert_eq!(body["adapter"]["name"], "workbench-web");
+    let hello = &body["hello"];
+    assert_eq!(hello["protocol_version"], 1);
+    assert_eq!(hello["server_build"]["version"], "9.9.9");
+    assert_eq!(hello["instance_epoch"], "7");
+    assert_eq!(hello["core"], "core-test");
+    assert_eq!(hello["status"]["state"], "ready");
+    let capabilities = hello["capabilities"].as_array().unwrap();
+    assert!(capabilities.iter().any(|c| c == "commands.v1"));
+    assert!(capabilities.iter().any(|c| c == "snapshot_events.v1"));
 
     backend.fail_status(WorkbenchError::new(
         ErrorCode::Draining,
@@ -725,4 +734,129 @@ async fn a_command_finishes_even_if_the_browser_gives_up() {
         backend.with_seen(|seen| seen[0].request.request_id.as_str().to_owned()),
         "req-22"
     );
+}
+
+#[tokio::test]
+async fn api_404_and_405_use_the_common_error_format() {
+    let backend = Arc::new(FakeBackend::new());
+    let router = app(&backend);
+
+    for (method, uri, status, allow) in [
+        ("GET", "/api/v1/nope", 404, None),
+        ("POST", "/api/v1/nope", 404, None),
+        ("GET", "/api/", 404, None),
+        ("GET", "/api/v1/request", 405, Some("POST")),
+        ("POST", "/api/v1/health", 405, Some("GET")),
+        ("POST", "/api/v1/events", 405, Some("GET")),
+        ("PUT", "/api/v1/request", 405, Some("POST")),
+        ("DELETE", "/api/v1/health", 405, Some("GET")),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", HOST)
+            .header("content-type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        let response = send(&router, request).await;
+        assert_eq!(response.status().as_u16(), status, "{method} {uri}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json",
+            "{method} {uri}"
+        );
+        // The router adds `HEAD` next to `GET`; only the named method matters.
+        let advertised = response
+            .headers()
+            .get(header::ALLOW)
+            .map(|v| v.to_str().unwrap().to_owned());
+        match allow {
+            Some(expected) => assert!(
+                advertised
+                    .as_deref()
+                    .is_some_and(|a| a.split(',').any(|m| m.trim() == expected)),
+                "{method} {uri}: {advertised:?}"
+            ),
+            None => assert_eq!(advertised, None, "{method} {uri}"),
+        }
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = body_json(response).await;
+        assert_eq!(body["status"], "error", "{method} {uri}: {body}");
+        let code = if status == 404 {
+            "not_found"
+        } else {
+            "invalid_request"
+        };
+        assert_eq!(body["payload"]["code"], code, "{method} {uri}");
+    }
+    assert_eq!(backend.seen_count(), 0);
+
+    // Static paths keep a plain 404, which is not part of the API contract.
+    let page = send(&router, get("/missing").body(Body::empty()).unwrap()).await;
+    assert_eq!(page.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        page.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+}
+
+#[tokio::test]
+async fn rejections_made_before_reading_the_body_close_the_connection() {
+    let backend = Arc::new(FakeBackend::new());
+    let router = app(&backend);
+    let wrong_type = Request::builder()
+        .method("POST")
+        .uri("/api/v1/request")
+        .header("host", HOST)
+        .header("content-type", "text/plain")
+        .body(Body::from("x"))
+        .unwrap();
+    let mut wrong_host = post_json(&query_request("req-30"));
+    wrong_host
+        .headers_mut()
+        .insert("host", "evil.example".parse().unwrap());
+    for request in [wrong_type, wrong_host] {
+        let response = send(&router, request).await;
+        assert_eq!(response.headers()[header::CONNECTION], "close");
+    }
+    // An accepted request does not force a close.
+    let ok = send(&router, post_json(&query_request("req-31"))).await;
+    assert!(ok.headers().get(header::CONNECTION).is_none());
+}
+
+#[tokio::test]
+async fn disconnecting_does_not_free_the_backend_slot_of_a_running_command() {
+    let (backend, mut entered, mut done) = FakeBackend::gated();
+    let backend = Arc::new(backend);
+    let config = WebServerConfig {
+        max_in_flight_requests: 1,
+        ..WebServerConfig::default()
+    };
+    let router = app_with(config, &backend);
+
+    let first = tokio::spawn({
+        let router = router.clone();
+        async move { send(&router, post_json(&command_request("req-40"))).await }
+    });
+    entered.recv().await.unwrap();
+    // The browser gives up. The HTTP slot is gone but the command still runs.
+    first.abort();
+    let _ = first.await;
+
+    // Starting over must not start a second backend call beside the first.
+    let retry = send(&router, post_json(&command_request("req-41"))).await;
+    assert_eq!(retry.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = body_json(retry).await;
+    assert_eq!(body["payload"]["code"], "busy");
+    assert_eq!(body["request_id"], "req-41");
+    assert_eq!(backend.with_seen(|seen| seen.len()), 0);
+
+    // Once the first call finishes (it releases its slot in the same task
+    // step as it returns, before this receiver wakes) the slot is free.
+    backend.release(1);
+    done.recv().await.unwrap();
+    backend.release(1);
+    let again = send(&router, post_json(&command_request("req-41"))).await;
+    assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(backend.seen_count(), 2);
 }

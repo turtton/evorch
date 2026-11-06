@@ -133,9 +133,16 @@ async fn serves_requests_over_a_loopback_socket() {
         .write_all(request_text("GET", "/api/v1/health", "evil.example", "", "").as_bytes())
         .await
         .unwrap();
-    assert_eq!(read_response(&mut stream).await.0, 403);
+    let (status, head, _) = read_response(&mut stream).await;
+    assert_eq!(status, 403);
+    // A refused request leaves its body unread, so the server closes the connection.
+    assert!(head.to_ascii_lowercase().contains("connection: close"));
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
 
     // Same-origin browser POST with the real port in Origin.
+    let mut stream = connect(addr).await;
     let origin = format!("Origin: http://{host}\r\nContent-Type: application/json\r\n");
     stream
         .write_all(request_text("POST", "/api/v1/request", &host, &origin, &body).as_bytes())
@@ -252,4 +259,33 @@ async fn dropping_the_handle_starts_shutdown() {
     let mut rest = Vec::new();
     stream.read_to_end(&mut rest).await.unwrap();
     events.closed().await;
+}
+
+#[tokio::test]
+async fn serves_on_the_ipv6_loopback_when_the_host_has_one() {
+    let backend = Arc::new(FakeBackend::new());
+    let config = WebServerConfig {
+        bind: "[::1]:0".parse().unwrap(),
+        ..enabled()
+    };
+    let server = match WebServer::start(config, backend).await {
+        Ok(server) => server.expect("server is enabled"),
+        // A host without IPv6 cannot bind ::1; nothing to check there.
+        Err(WebServerError::Bind(error)) => {
+            eprintln!("skipping: cannot bind [::1]: {error}");
+            return;
+        }
+        Err(other) => panic!("{other}"),
+    };
+    let addr = server.local_addr();
+    assert!(addr.is_ipv6() && addr.ip().is_loopback());
+
+    let mut stream = connect(addr).await;
+    // Browsers send `[::1]:port`, which std prints for a v6 socket address.
+    stream
+        .write_all(request_text("GET", "/api/v1/health", &addr.to_string(), "", "").as_bytes())
+        .await
+        .unwrap();
+    assert_eq!(read_response(&mut stream).await.0, 200);
+    server.shutdown().await.unwrap();
 }

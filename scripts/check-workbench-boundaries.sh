@@ -30,7 +30,7 @@ HOST=workbench-host
 WEB=workbench-web
 PROTOCOL_EXTERNAL_ALLOW="serde serde_json thiserror"
 CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
-WEB_EXTERNAL_ALLOW="axum futures-core http serde serde_json thiserror tokio"
+WEB_EXTERNAL_ALLOW="axum futures-core http http-body-util hyper hyper-util serde serde_json thiserror tokio"
 # workbench-host is the core side of the protocol. It may use core crates and
 # the protocol, but nothing that draws or that speaks as a client.
 HOST_FORBIDDEN_WORKSPACE="gui workspace-ui workbench-client browser-cef evorch"

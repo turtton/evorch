@@ -38,6 +38,16 @@ pub struct WebServerConfig {
     pub max_sse_streams: usize,
     /// How often an idle SSE stream sends a comment line.
     pub sse_keepalive: Duration,
+    /// How long a connection may take to deliver a complete request head. It
+    /// also closes keep-alive connections that stay idle, so a client cannot
+    /// hold a connection slot without asking for anything.
+    pub header_read_timeout: Duration,
+    /// How long a request body may take to arrive in full. A body that is not
+    /// complete by then is answered with `408` and the connection is closed.
+    pub body_read_timeout: Duration,
+    /// How long shutdown waits for open connections to finish before it drops
+    /// them. A command a backend has already accepted keeps running.
+    pub shutdown_grace: Duration,
     /// Per-subscription queue bounds (`subscription_queue_events` and
     /// `subscription_queue_bytes`) and the limits request decoding uses.
     pub wire_limits: WireLimits,
@@ -55,6 +65,9 @@ impl Default for WebServerConfig {
             max_in_flight_requests: 32,
             max_sse_streams: 16,
             sse_keepalive: Duration::from_secs(15),
+            header_read_timeout: Duration::from_secs(10),
+            body_read_timeout: Duration::from_secs(30),
+            shutdown_grace: Duration::from_secs(5),
             wire_limits: WireLimits::default(),
         }
     }
@@ -106,8 +119,15 @@ impl WebServerConfig {
         if self.max_sse_streams == 0 {
             return Err(ConfigError::InvalidLimit("max_sse_streams must be > 0"));
         }
-        if self.sse_keepalive.is_zero() {
-            return Err(ConfigError::InvalidLimit("sse_keepalive must be > 0"));
+        for (message, value) in [
+            ("sse_keepalive must be > 0", self.sse_keepalive),
+            ("header_read_timeout must be > 0", self.header_read_timeout),
+            ("body_read_timeout must be > 0", self.body_read_timeout),
+            ("shutdown_grace must be > 0", self.shutdown_grace),
+        ] {
+            if value.is_zero() {
+                return Err(ConfigError::InvalidLimit(message));
+            }
         }
         self.wire_limits.validate()?;
 

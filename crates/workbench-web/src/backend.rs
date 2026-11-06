@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use workbench_protocol::envelope::{Provenance, ReplyEnvelope, RequestEnvelope};
 use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::events::{EventEnvelope, Subscribe, SubscriptionStarted};
-use workbench_protocol::handshake::CoreStatus;
+use workbench_protocol::handshake::ServerHello;
 use workbench_protocol::ids::{ClientId, SessionId};
 
 /// The web client a request came from, as the adapter's ingress resolved it.
@@ -83,6 +83,8 @@ pub trait WorkbenchBackend: Send + Sync + 'static {
         subscribe: Subscribe,
     ) -> impl Future<Output = Result<BackendSubscription, WorkbenchError>> + Send;
 
-    /// Current core status, for `GET /api/v1/health`.
-    fn core_status(&self) -> impl Future<Output = Result<CoreStatus, WorkbenchError>> + Send;
+    /// What the core is and how it is doing, for `GET /api/v1/health`: server
+    /// build, protocol version, capabilities, core identity and epoch, limits
+    /// and status. The same value a socket client gets from the handshake.
+    fn server_hello(&self) -> impl Future<Output = Result<ServerHello, WorkbenchError>> + Send;
 }

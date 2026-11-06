@@ -13,12 +13,14 @@ workbench-protocol = { path = "../workbench-protocol" }
 axum = { workspace = true }
 futures-core = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "macros", "time"] }
 
 [dev-dependencies]
-http-body-util = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }

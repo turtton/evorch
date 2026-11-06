@@ -261,9 +261,17 @@ async fn a_slow_client_gets_resync_required_and_is_cut_off() {
     assert_eq!(last.json()["event"]["type"], "resync_required");
     assert_eq!(last.json()["event"]["payload"]["reason"], "slow_subscriber");
     assert_eq!(last.id, None);
-    // started + at most 3 queued events + the resync; far fewer than 20.
-    assert!(ids.len() <= 5, "{ids:?}");
-    assert!(ids.len() >= 3, "{ids:?}");
+    // Exactly: started, the 3 events the queue holds, and the resync.
+    assert_eq!(
+        ids,
+        [
+            Some("1:0".to_owned()),
+            Some("1:1".to_owned()),
+            Some("1:2".to_owned()),
+            Some("1:3".to_owned()),
+            None
+        ]
+    );
 }
 
 #[tokio::test]

@@ -16,8 +16,13 @@ use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::events::{
     EventCursor, EventEnvelope, Subscribe, SubscriptionStarted, UiEvent,
 };
-use workbench_protocol::handshake::{ActivityCounts, CoreState, CoreStatus};
-use workbench_protocol::ids::{ClientId, RequestId, SessionId, SubscriptionId, ThreadId};
+use workbench_protocol::handshake::{
+    ActivityCounts, BuildInfo, Capability, CoreState, CoreStatus, ProtocolVersion, ServerHello,
+    WireLimits,
+};
+use workbench_protocol::ids::{
+    ClientId, CoreIdentity, RequestId, SessionId, SubscriptionId, ThreadId,
+};
 use workbench_protocol::queries::{Query, QueryReply};
 use workbench_protocol::wire::{InstanceEpoch, Sequence};
 use workbench_web::{BackendSubscription, WebSession, WorkbenchBackend};
@@ -121,6 +126,22 @@ pub fn core_status() -> CoreStatus {
     }
 }
 
+pub fn server_hello() -> ServerHello {
+    ServerHello {
+        protocol_version: ProtocolVersion::CURRENT,
+        capabilities: Capability::ALL.to_vec(),
+        server_build: BuildInfo {
+            name: "evorch-core".to_owned(),
+            version: "9.9.9".to_owned(),
+            revision: Some("abc123".to_owned()),
+        },
+        core: CoreIdentity::new("core-test").unwrap(),
+        instance_epoch: InstanceEpoch(7),
+        limits: WireLimits::default(),
+        status: core_status(),
+    }
+}
+
 impl WorkbenchBackend for FakeBackend {
     async fn handle_request(
         &self,
@@ -182,10 +203,10 @@ impl WorkbenchBackend for FakeBackend {
             .expect("test did not script a subscription")
     }
 
-    async fn core_status(&self) -> Result<CoreStatus, WorkbenchError> {
+    async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
         match self.inner.lock().unwrap().status_error.clone() {
             Some(error) => Err(error),
-            None => Ok(core_status()),
+            None => Ok(server_hello()),
         }
     }
 }

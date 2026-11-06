@@ -62,12 +62,12 @@ run_case() {
 }
 
 WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","runtime","storage","config","gui","test-support"]'
-EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core"]'
+EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
       {"from":"gui","to":"workbench-client"},
       {"from":"workbench-host","to":"workbench-protocol"},{"from":"workbench-host","to":"runtime"},{"from":"workbench-host","to":"tokio"},{"from":"gui","to":"workbench-host"},
-      {"from":"workbench-web","to":"workbench-protocol"},{"from":"workbench-web","to":"axum"},{"from":"workbench-web","to":"http"},{"from":"workbench-web","to":"futures-core"},{"from":"workbench-web","to":"serde"},{"from":"workbench-web","to":"serde_json"},{"from":"workbench-web","to":"thiserror"},{"from":"workbench-web","to":"tokio"},
+      {"from":"workbench-web","to":"workbench-protocol"},{"from":"workbench-web","to":"axum"},{"from":"workbench-web","to":"http"},{"from":"workbench-web","to":"http-body-util"},{"from":"workbench-web","to":"hyper"},{"from":"workbench-web","to":"hyper-util"},{"from":"workbench-web","to":"futures-core"},{"from":"workbench-web","to":"serde"},{"from":"workbench-web","to":"serde_json"},{"from":"workbench-web","to":"thiserror"},{"from":"workbench-web","to":"tokio"},
       {"from":"runtime","to":"storage"},{"from":"runtime","to":"serde"}'
 
 run_case clean_graph ok "boundary check passed" <<SPEC

@@ -8,7 +8,7 @@
 //! |---|---|
 //! | `POST /api/v1/request` | a `RequestEnvelope` (command or query) in, a `ReplyEnvelope` out |
 //! | `GET /api/v1/events?scope=..&after=..` | SSE: `subscription_started`, then `ui_event` messages |
-//! | `GET /api/v1/health` | core status |
+//! | `GET /api/v1/health` | adapter version and the core's `ServerHello` (build, protocol version, capabilities, epoch, status) |
 //! | `GET /` and assets | embedded front end ([`StaticAsset`]) |
 //!
 //! # Boundaries
@@ -24,6 +24,11 @@
 //!   Tailscale Serve in front of the loopback port, whose name must be added
 //!   to [`WebServerConfig::allowed_hosts`]. There is no authentication of
 //!   users; the browser-facing checks are listed in the `security` module.
+//! - **Slow clients.** A request head, a request body and an idle keep-alive
+//!   connection each have a deadline ([`WebServerConfig::header_read_timeout`],
+//!   [`WebServerConfig::body_read_timeout`]); shutdown stops waiting for open
+//!   connections after [`WebServerConfig::shutdown_grace`] without interrupting
+//!   a command the backend already accepted.
 //! - **Errors.** [`http_error`] documents the status mapping. Internal error
 //!   text never reaches the browser.
 

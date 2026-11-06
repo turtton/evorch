@@ -32,6 +32,8 @@ hickory-resolver = { version = "0.25", features = ["system-config", "tokio"] }
 htmd = "0.5.5"
 http = "1"
 http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 ipnet = "2"
 jsonschema = { version = "0.52", default-features = false }
