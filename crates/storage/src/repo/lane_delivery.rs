@@ -176,7 +176,7 @@ pub(crate) fn routing(
     conn: &Connection,
     question_id: &str,
 ) -> Result<Option<QuestionRouting>, StorageError> {
-    let payload: Option<String> = conn.query_row("SELECT r.payload FROM lane_question_routes r WHERE question_id=?1 AND requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND (responder_thread_id IS NULL OR responder_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=r.lane_id AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))", [question_id], |r| r.get(0)).optional()?;
+    let payload: Option<String> = conn.query_row("SELECT r.payload FROM lane_question_routes r WHERE question_id=?1 AND requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND (responder_thread_id IS NULL OR responder_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) OR EXISTS(SELECT 1 FROM user_questions q WHERE q.id=r.question_id AND q.answered=1)) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=r.lane_id AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))", [question_id], |r| r.get(0)).optional()?;
     payload.as_deref().map(parse).transpose()
 }
 fn project(question: &mut UserQuestion, route: &QuestionRouting) {

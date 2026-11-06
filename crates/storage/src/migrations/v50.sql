@@ -44,3 +44,38 @@ CREATE TRIGGER fence_user_questions_update BEFORE UPDATE ON user_questions
 WHEN (NEW.run_id IN (SELECT run_id FROM run_tombstones) OR NEW.root_run_id IN (SELECT run_id FROM run_tombstones))
  AND NOT EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id=NEW.id AND l.run_id NOT IN (SELECT run_id FROM run_tombstones))
 BEGIN SELECT RAISE(ABORT,'run or thread is tombstoned'); END;
+
+-- Accepted Answer source/responder IDs are provenance, not ownership edges.
+-- Only existing Answers with unchanged identity can be ACKed/re-stamped after
+-- their source is reclaimed. Inserts and live destinations/lanes stay fenced.
+DROP TRIGGER fence_lane_notifications_update;
+CREATE TRIGGER fence_lane_notifications_update BEFORE UPDATE ON lane_notifications
+WHEN (NEW.source_thread_id IN (SELECT thread_id FROM thread_tombstones)
+ AND NOT (OLD.event_kind='answer' AND NEW.event_kind='answer'
+  AND NEW.notification_id=OLD.notification_id AND NEW.lane_id=OLD.lane_id
+  AND NEW.source_thread_id=OLD.source_thread_id AND NEW.destination_thread_id=OLD.destination_thread_id))
+ OR NEW.destination_thread_id IN (SELECT thread_id FROM thread_tombstones)
+ OR EXISTS (SELECT 1 FROM lanes WHERE lane_id=NEW.lane_id AND thread_id IN (SELECT thread_id FROM thread_tombstones))
+BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
+-- UPSERT fires INSERT fences before conflict UPDATE. Repeating an existing
+-- lane's source is not assigning a new dead source.
+DROP TRIGGER fence_threads_insert;
+CREATE TRIGGER fence_threads_insert BEFORE INSERT ON threads
+WHEN NEW.thread_id IN (SELECT thread_id FROM thread_tombstones)
+ OR NEW.parent_thread_id IN (SELECT thread_id FROM thread_tombstones)
+ OR (NEW.escalation_source_run_id IN (SELECT run_id FROM run_tombstones)
+  AND NOT EXISTS(SELECT 1 FROM threads t JOIN lanes l ON l.thread_id=t.thread_id
+   WHERE t.thread_id=NEW.thread_id AND t.escalation_source_run_id=NEW.escalation_source_run_id))
+ OR NEW.root_run_id IN (SELECT run_id FROM run_tombstones)
+BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;
+-- Handoff may retain escalation_source_run_id as provenance on an existing lane.
+-- It never permits assigning a new dead source, or updating a deleted owner/root.
+DROP TRIGGER fence_threads_update;
+CREATE TRIGGER fence_threads_update BEFORE UPDATE ON threads
+WHEN NEW.thread_id IN (SELECT thread_id FROM thread_tombstones)
+ OR NEW.parent_thread_id IN (SELECT thread_id FROM thread_tombstones)
+ OR (NEW.escalation_source_run_id IN (SELECT run_id FROM run_tombstones)
+  AND NOT (NEW.escalation_source_run_id IS OLD.escalation_source_run_id
+   AND EXISTS(SELECT 1 FROM lanes l WHERE l.thread_id=NEW.thread_id)))
+ OR NEW.root_run_id IN (SELECT run_id FROM run_tombstones)
+BEGIN SELECT RAISE(ABORT, 'run or thread is tombstoned'); END;

@@ -1,6 +1,6 @@
 //! Destination single flight, lease fencing and durable receipt/ACK repair.
 use super::*;
-const LIVE_NOTICE: &str = "n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
+const LIVE_NOTICE: &str = "(n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
 pub(crate) fn inbox(
     conn: &Connection,
     destination: &str,
@@ -208,7 +208,11 @@ fn check_claim(
         if !received(conn, notice)? {
             crate::repo::lane_control::check_nudge(conn, notice)?;
         }
-        live_thread(conn, &notice.source_thread_id)?;
+        // An accepted answer is owned by its live requester, not by the
+        // lifetime of the answering lead (source remains immutable provenance).
+        if !matches!(notice.kind, LaneNotificationKind::Answer { .. }) {
+            live_thread(conn, &notice.source_thread_id)?;
+        }
         let current = lane(conn, &notice.lane_id)?;
         if matches!(notice.kind, LaneNotificationKind::Nudge { .. })
             && (current.root_run_id.as_deref() != Some(&claim.owner.root_run_id)

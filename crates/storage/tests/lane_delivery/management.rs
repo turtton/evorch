@@ -127,6 +127,36 @@ fn accepted_answer_survives_detach_before_delivery_and_after_receipt_without_dup
         }
         let result = manage(&f, 1, LaneManagementAction::Detach);
         assert_eq!(result.lane.management_revision, 2);
+        // The old lead alone is tombstoned/reclaimed while this independent lane
+        // still owns its accepted Answer, including a previously saved receipt.
+        f.sql()
+            .execute_batch(
+                "INSERT INTO thread_tombstones VALUES ('lead','old-lead',50);
+            INSERT INTO run_tombstones VALUES ('lead-root','lead','old-lead');
+            INSERT INTO reclaim_jobs(family_key,state,created_at_ns,updated_at_ns)
+            VALUES ('old-lead','db_pending',50,50);",
+            )
+            .unwrap();
+        loop {
+            let progress = f
+                .h()
+                .reclaim_step(storage::thread_retention::ReclaimBudget::default())
+                .unwrap();
+            assert_eq!(progress.last_error, None);
+            if progress.jobs_db_pending == 0 {
+                break;
+            }
+        }
+        let retained = f.h().lane_inbox("thread-1".into(), String::new()).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].notification_id, id);
+        assert_eq!(retained[0].source_thread_id, "lead");
+        assert!(
+            f.h()
+                .lane_question_routing(answered.id.clone())
+                .unwrap()
+                .is_some()
+        );
         assert!(
             f.h()
                 .accept_lane_delivery(old.clone(), lane_snapshot(), 12)

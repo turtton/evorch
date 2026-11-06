@@ -6,6 +6,9 @@
 //! nothing and loses nothing. Rows too large for a bounded step are listed in
 //! `reclaim_oversized` for the exclusive startup phase.
 
+#[path = "reclaim_questions.rs"]
+mod questions;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +137,7 @@ const RUN_TABLES: &[(&str, &str)] = &[
     ("user_question_links", "run_id = ?1"),
     (
         "user_questions",
-        "(run_id = ?1 OR root_run_id = ?1 OR run_id IN (SELECT run_id FROM run_tombstones) OR root_run_id IN (SELECT run_id FROM run_tombstones)) AND NOT EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id = user_questions.id)",
+        "run_id = ?1 AND NOT EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id = user_questions.id)",
     ),
     // The message rows name the header in a RESTRICT foreign key: they go first.
     ("run_message_provenance", "run_id = ?1"),
@@ -444,6 +447,13 @@ fn run_tables(
         advance_run(tx, family, cursor)?;
         return Ok(Work::default());
     };
+    if table == "user_question_links" {
+        let work = questions::take(tx, &run)?;
+        if work.rows == 0 {
+            cursor.table_idx += 1;
+        }
+        return Ok(work);
+    }
     if table == "run_message_provenance" {
         return provenance_entries(tx, family, cursor, &run);
     }
@@ -1134,12 +1144,12 @@ fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageErr
         for (table, predicate, bytes_expr) in [
             (
                 "lane_question_routes",
-                "requester_thread_id=?1 OR responder_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "requester_thread_id=?1 OR (responder_thread_id=?1 AND NOT EXISTS(SELECT 1 FROM user_questions q WHERE q.id=lane_question_routes.question_id AND q.answered=1)) OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
                 "OCTET_LENGTH(payload)+COALESCE(OCTET_LENGTH(operation_json),0)",
             ),
             (
                 "lane_notifications",
-                "source_thread_id=?1 OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "(source_thread_id=?1 AND event_kind<>'answer') OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
                 "OCTET_LENGTH(payload)",
             ),
             (

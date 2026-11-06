@@ -95,6 +95,51 @@ fn source_reclaim_keeps_live_recipient_question_and_answer_then_last_recipient_c
             f.count("SELECT COUNT(*) FROM user_question_links WHERE run_id='target-run'"),
             1
         );
+        // The immutable handoff source is provenance, not an update fence on
+        // an existing live lane after its source has been reclaimed.
+        let mut mirror = storage::threads::ThreadUpsert {
+            thread_id: "target".into(),
+            root_run_id: Some("target-run".into()),
+            escalation_source_run_id: Some("source-run".into()),
+            title: Some("runtime independent target".into()),
+            updated_at_ns: 50,
+            ..Default::default()
+        };
+        h.upsert_thread_runtime(&mirror).unwrap();
+        mirror.title = Some("host independent target".into());
+        assert_eq!(
+            h.upsert_threads_host(std::slice::from_ref(&mirror))
+                .unwrap(),
+            0
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM threads WHERE thread_id='target' AND title='host independent target' AND escalation_source_run_id='source-run'"), 1);
+        let c = Connection::open(&f.path).unwrap();
+        c.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('another-dead-source','gone','gone')", []).unwrap();
+        assert!(c.execute("UPDATE threads SET escalation_source_run_id='another-dead-source' WHERE thread_id='target'", []).is_err());
+        assert!(c.execute("INSERT INTO threads(thread_id,escalation_source_run_id) VALUES ('new-target','source-run')", []).is_err());
+        drop(c);
+        mirror.escalation_source_run_id = Some("another-dead-source".into());
+        assert!(matches!(
+            h.upsert_thread_runtime(&mirror),
+            Err(storage::StorageError::Tombstoned { .. })
+        ));
+        assert_eq!(
+            h.upsert_threads_host(std::slice::from_ref(&mirror))
+                .unwrap(),
+            1
+        );
+        mirror.thread_id = "new-target".into();
+        mirror.root_run_id = None;
+        mirror.escalation_source_run_id = Some("source-run".into());
+        assert!(matches!(
+            h.upsert_thread_runtime(&mirror),
+            Err(storage::StorageError::Tombstoned { .. })
+        ));
+        assert_eq!(
+            h.upsert_threads_host(std::slice::from_ref(&mirror))
+                .unwrap(),
+            1
+        );
         if !answer_before_reclaim {
             h.answer_user_question(&q.id, "accepted", &origin).unwrap();
         }
