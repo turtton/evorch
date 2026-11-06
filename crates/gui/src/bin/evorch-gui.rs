@@ -706,6 +706,7 @@ struct Prepared {
     storage_fallback: Option<tempfile::TempDir>,
     ownership_root: PathBuf,
     artifact_directory: PathBuf,
+    mcp_services: Option<runtime::mcp::McpHostServices>,
 }
 
 impl Prepared {
@@ -775,7 +776,24 @@ fn prepare() -> Result<Prepared, GuiError> {
         || PathBuf::from("artifacts"),
         |parent| parent.join("artifacts"),
     );
+    // Probe only the native keychain before the window exists, never on a render
+    // frame. Provider open_default() is deliberately NOT reused for MCP.
+    let mcp_services = (!arguments.demo).then(|| {
+        use runtime::mcp::{McpCredentialBackend, McpHostServices, SecretUnavailableReason};
+        let backend = match sandbox::credential::open_keychain_only() {
+            Ok(store) => McpCredentialBackend::Available(store),
+            Err(sandbox::CredentialError::KeychainLocked) => {
+                McpCredentialBackend::Unavailable(SecretUnavailableReason::Locked)
+            }
+            Err(sandbox::CredentialError::KeychainCancelled) => {
+                McpCredentialBackend::Unavailable(SecretUnavailableReason::Denied)
+            }
+            Err(_) => McpCredentialBackend::Unavailable(SecretUnavailableReason::Unavailable),
+        };
+        McpHostServices::for_user(backend)
+    });
     Ok(Prepared {
+        mcp_services,
         arguments,
         settings,
         repo_root,
@@ -833,6 +851,7 @@ fn build_workbench(
         storage_fallback,
         ownership_root,
         artifact_directory,
+        mcp_services,
     } = prepared;
     let repaint_ctx = Arc::new(OnceLock::<egui::Context>::new());
     let _ = repaint_ctx.set(ctx.clone());
@@ -1025,6 +1044,10 @@ fn build_workbench(
         runtime
     } else {
         runtime.with_sandbox_root(effective_project_root.clone())
+    };
+    let runtime = match &mcp_services {
+        Some(services) => runtime.with_mcp_service(services.runs.clone()),
+        None => runtime,
     };
     let sandbox_runtime = runtime.clone();
     let runtime = match runtime::RunStore::open(&storage_config, storage.handle()) {
@@ -1322,7 +1345,17 @@ fn build_workbench(
     #[cfg(not(feature = "cef"))]
     let artifact_opener = portal_opener;
     // 会話と goal の投入を production 経路で接続する CommandSink (demo も同様)。
+    let mcp_gui_service = mcp_services
+        .map(|services| services.gui)
+        .unwrap_or_else(|| {
+            Arc::new(runtime::mcp::UnavailableMcpService::new(
+                runtime::mcp::McpCredentialBackend::Unavailable(
+                    runtime::mcp::SecretUnavailableReason::Unavailable,
+                ),
+            ))
+        });
     let mut state = WorkbenchState::new(runtime.clone(), &settings)?
+        .with_mcp_settings_service(mcp_gui_service, Some(handle.clone()))
         .with_folder_picker(Arc::new(gui::model::folder_picker::PortalFolderPicker))
         .with_artifact_opener(artifact_opener)
         .with_provider_status(provider_status)

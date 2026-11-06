@@ -184,8 +184,8 @@ pub trait McpGuiService: Send + Sync {
     ) -> Result<McpServerStatus, McpErrorKind>;
     async fn save_secret(&self, request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind>;
 }
-/// T0 fail-closed service: records injection without probing backends or doing I/O.
-/// E replaces this with the real service after A/B/C/D; benchmark must not call it.
+/// Fail-closed fallback for disabled hosts or failed local service composition.
+/// Records injection without probing backends or doing I/O; benchmark never calls it.
 pub struct UnavailableMcpService {
     credentials: McpCredentialBackend,
     statuses: watch::Sender<Vec<McpStatusEvent>>,

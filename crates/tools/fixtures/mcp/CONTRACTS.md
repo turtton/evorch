@@ -207,8 +207,9 @@ The old registry constructor/discover adapter is removed. Runtime scope tests us
 frozen bindings, real approved HTTP transport and modern discovery, preserving
 scope/per-tool denial before I/O, one CLI approval, lifecycle events and safe
 five-key diagnostic detail. No wildcard/test alias bypasses the role boundary.
-Runtime restore/continue wiring (E3) and GUI backend/binary injection (E4) remain
-separate work; this backend's restore method currently fails closed.
+Runtime restore/continue wiring (E3) remains separate work; this backend's
+restore method currently fails closed. The GUI backend and host injection are
+implemented as described below.
 
 Secret failures remain distinct: SecretUnavailable / SecretLocked / SecretDenied /
 SecretMissing. MissingEnvironment(McpValueField) carries only a fixed field enum
@@ -240,3 +241,36 @@ at 512 UTF-8 bytes per field; long links retain their full reference in an artif
 At most 8 media/reference artifacts and the existing 4 images are retained per
 result, and an exceeded ceiling is explicitly reported. Artifact failure is safe
 and visible; raw filesystem errors/base64 payloads are not copied into the model.
+
+## Privileged GUI service and host composition (E4)
+
+`ProjectMcpService` implements all eight existing `McpGuiService` operations in
+`runtime/src/mcp/service/gui.rs`. Settings and override edits are background
+filesystem operations only: no DNS, discovery, process launch or credential read.
+Approval preview may explicitly inspect DNS, never connect or resolve secrets.
+Confirmation re-reads source revision (again after DNS), reprojects the fingerprint
+and passes preview identity/revision/fingerprint to the approval ledger. Approval
+never adds tools to an existing snapshot. Revoke invalidates existing permits.
+
+Connection tests follow the same authorization, destination, secret and process
+admission path as runs. Their short-lived session is shut down/reaped before
+returning Ready; cancellation uses the same cancel context. Settings/status events
+use only safe DTOs. Unavailable with no reason means configured/approved but not
+currently tested; Ready records the last successful preparation/test, not a new
+permission or a promise of a persistent GUI session. Removed settings prune notices.
+
+`SaveMcpSecret` accepts only a matching server Upsert containing the same logical
+keychain reference. It checks revision/validation first, writes the injected native
+store, then atomically saves TOML. Conflict maps to ConfigConflict (not StalePreview).
+Rollback only removes a newly-created key still unused by current settings and
+unchanged by another writer; rotations never delete pre-existing keys. A failed
+rotation may already have updated the existing credential, without changing its
+logical reference. No plaintext provider-store fallback is used.
+
+`McpHostServices::for_user(backend)` composes run/gui trait objects from one service
+instance, sharing its approval ledger and project limiter. The GUI builds a native
+keychain-only backend before the window exists, injects run services into runtime
+and GUI services via `WorkbenchState::with_mcp_settings_service`; demo is inert.
+The headless composition does native backend initialization on a blocking worker
+and exposes no approval action to the agent. Tools/runtime remain keychain-feature
+independent; tests inject memory backends and explicitly unavailable classifications.

@@ -1,4 +1,5 @@
 //! Approved, run-local MCP preparation. No constructor starts or contacts a server.
+mod gui;
 use super::{
     McpRunService, PrepareMcpRun, ProjectMcpLimiter, RestoreMcpRun, RunMcpLease,
     mcp_config_error_kind,
@@ -45,6 +46,8 @@ pub struct ProjectMcpService {
 struct ServiceInner {
     approvals: Arc<dyn McpApprovalStore>,
     secrets: SecretResolver,
+    credentials: McpCredentialBackend,
+    secret_write: Mutex<()>,
     guard: Arc<NetworkGuard>,
     limiter: Arc<ProjectMcpLimiter>,
     stdio: Option<Arc<dyn McpTransportFactory>>,
@@ -60,7 +63,9 @@ impl ProjectMcpService {
         Self {
             inner: Arc::new(ServiceInner {
                 approvals,
-                secrets: SecretResolver::new(backend),
+                secrets: SecretResolver::new(backend.clone()),
+                credentials: backend,
+                secret_write: Mutex::new(()),
                 http: Arc::new(HttpTransportFactory::new(guard.clone())),
                 stdio: None,
                 guard,
@@ -272,7 +277,11 @@ impl ServiceInner {
         definition: &McpServerDefinition,
         run_cancel: &CancelContext,
     ) -> Result<Arc<PreparedSession>, McpErrorKind> {
-        let (resolved, permit) = self.resolved(scope, revision, definition).await?;
+        let (resolved, permit) = tokio::select! {
+            biased;
+            _ = run_cancel.cancelled() => return Err(McpErrorKind::Cancelled),
+            result = self.resolved(scope, revision, definition) => result?,
+        };
         if run_cancel.is_cancelled() {
             return Err(McpErrorKind::Cancelled);
         }

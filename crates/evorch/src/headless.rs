@@ -326,6 +326,29 @@ async fn drive(
         SandboxChoice::Production => composed.runtime.with_sandbox_root(args.project_dir.clone()),
         SandboxChoice::DirectUnchecked => composed.runtime,
     };
+    // External MCP never uses the provider store's plaintext fallback. Absence,
+    // lock or denial is injected safely; literal/env servers remain usable.
+    let mcp_services = tokio::task::spawn_blocking(|| {
+        let mcp_backend = match sandbox::credential::open_keychain_only() {
+            Ok(store) => runtime::mcp::McpCredentialBackend::Available(store),
+            Err(CredentialError::KeychainLocked) => {
+                runtime::mcp::McpCredentialBackend::Unavailable(
+                    runtime::mcp::SecretUnavailableReason::Locked,
+                )
+            }
+            Err(CredentialError::KeychainCancelled) => {
+                runtime::mcp::McpCredentialBackend::Unavailable(
+                    runtime::mcp::SecretUnavailableReason::Denied,
+                )
+            }
+            Err(_) => runtime::mcp::McpCredentialBackend::Unavailable(
+                runtime::mcp::SecretUnavailableReason::Unavailable,
+            ),
+        };
+        runtime::mcp::McpHostServices::for_user(mcp_backend)
+    })
+    .await?;
+    runtime = runtime.with_mcp_service(mcp_services.runs);
     if let Some(persistence) = persistence {
         let store = RunStore::open(&persistence.storage_config, persistence.bridge.handle())
             .map_err(|error| HeadlessError::Database(error.to_string()))?;
