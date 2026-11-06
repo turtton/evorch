@@ -55,6 +55,7 @@ CACHE_CONTRACT_FILTER='
 IO_CONTRACT_FILTER='
   (package(=storage) & (binary(=lane_delivery) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))
   | (package(=runtime) & kind(lib) & test(ownership::tests))
+  | (package(=runtime) & binary(=pull_request_log_source_io))
   | (package(=gui) & (
       (kind(lib) & test(storage_bridge))
       | binary(=evorch-gui)
