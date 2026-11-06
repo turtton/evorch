@@ -28,12 +28,14 @@ const MAX_TRACKED: usize = 512;
 
 #[derive(Default)]
 struct Observer {
-    /// Calls whose command publishes, until they complete.
+    /// Phase 1 refresh correlations, including read-only `gh pr` commands.
     publishing_calls: HashSet<(String, String)>,
+    attributable_calls: HashSet<(String, String)>,
     completed: HashSet<(String, String)>,
     attribution_saturated: bool,
     /// Asynchronous jobs (run, job) started by a publishing command.
     publishing_jobs: HashSet<(String, String)>,
+    attributable_jobs: HashSet<(String, String)>,
     /// Output of jobs still running.
     streams: HashMap<(String, String), StreamScanner>,
 }
@@ -50,6 +52,8 @@ pub(super) async fn run(inner: Arc<Inner>, mut receiver: event_bus::EventReceive
                     inner.lock().attribution = Default::default();
                     observer.publishing_calls.clear();
                     observer.publishing_jobs.clear();
+                    observer.attributable_calls.clear();
+                    observer.attributable_jobs.clear();
                 }
                 Err(RecvError::Closed) => break,
             },
@@ -73,7 +77,148 @@ fn job_success(status: &str, code: Option<i32>) -> bool {
     status == "completed" && code == Some(0)
 }
 
+// Refresh intentionally accepts more commands than attribution. In particular, successful
+// `gh pr view` must not turn somebody else's new head into an agent push.
+fn attributable_command(command: &str) -> bool {
+    let Some(words) = simple_command_words(command) else {
+        return false;
+    };
+    let mut args = words.iter().map(String::as_str);
+    let program = args.next().and_then(|p| p.rsplit('/').next());
+    match program {
+        Some("git") => {
+            while let Some(arg) = args.next() {
+                match arg {
+                    "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" => {
+                        if args.next().is_none() {
+                            return false;
+                        }
+                    }
+                    "--no-pager" | "--no-optional-locks" | "--no-replace-objects" => {}
+                    arg if arg.starts_with("-c") && arg.len() > 2
+                        || arg.starts_with("-C") && arg.len() > 2
+                        || arg.starts_with("--git-dir=")
+                        || arg.starts_with("--work-tree=")
+                        || arg.starts_with("--namespace=") => {}
+                    "push" => {
+                        return !args.any(|a| {
+                            matches!(a, "--dry-run" | "--help")
+                                || a.starts_with("--dry-run=")
+                                || a.starts_with("--help=")
+                                || (a.starts_with('-')
+                                    && !a.starts_with("--")
+                                    && a[1..].contains(['n', 'h']))
+                        });
+                    }
+                    _ => return false,
+                }
+            }
+            false
+        }
+        Some("gh") => {
+            while let Some(arg) = args.next() {
+                match arg {
+                    "-R" | "--repo" | "--hostname" => {
+                        if args.next().is_none() {
+                            return false;
+                        }
+                    }
+                    arg if arg.starts_with("--repo=") || arg.starts_with("--hostname=") => {}
+                    "pr" => {
+                        return args.next() == Some("create")
+                            && !args.any(|a| {
+                                matches!(a, "--dry-run" | "--help")
+                                    || a.starts_with("--dry-run=")
+                                    || a.starts_with("--help=")
+                                    || (a.starts_with('-')
+                                        && !a.starts_with("--")
+                                        && a[1..].contains('h'))
+                            });
+                    }
+                    _ => return false,
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+// A literal single-command subset, not a shell interpreter. Unknown syntax loses
+// attribution rather than guessing which command a successful shell actually ran.
+fn simple_command_words(command: &str) -> Option<Vec<String>> {
+    let mut chars = command.trim_matches([' ', '\t', '\n', '\r']).chars();
+    let (mut quote, mut present) = (None, false);
+    let mut word = String::new();
+    let mut words = Vec::new();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\n' | '\r') {
+            return None;
+        }
+        if quote == Some('\'') {
+            if c == '\'' {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+        } else if c == '\\' {
+            let next = chars.next()?;
+            if matches!(next, '\n' | '\r')
+                || quote == Some('"') && !matches!(next, '\\' | '"' | '$' | '`')
+            {
+                return None;
+            }
+            word.push(next);
+            present = true;
+        } else if matches!(c, '$' | '`') {
+            return None;
+        } else if quote == Some('"') {
+            if c == '"' {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+        } else {
+            match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    present = true;
+                }
+                '|' | '&' | ';' | '(' | ')' | '{' | '}' | '<' | '>' | '#' | '*' | '?' | '['
+                | ']' | '~' => return None,
+                ' ' | '\t' => {
+                    if present {
+                        words.push(std::mem::take(&mut word));
+                        present = false;
+                    }
+                }
+                _ => {
+                    word.push(c);
+                    present = true;
+                }
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if present {
+        words.push(word);
+    }
+    Some(words)
+}
+
 impl Observer {
+    fn started(&mut self, run: &str, call: &str, command: &str) {
+        let id = (run.to_owned(), call.to_owned());
+        if is_publishing_command(command) {
+            bounded(&mut self.publishing_calls, id.clone());
+        }
+        if attributable_command(command) {
+            bounded(&mut self.attributable_calls, id);
+        }
+    }
+
     async fn finished(&mut self, inner: &Arc<Inner>, run: &str, identity: String, success: bool) {
         let id = (run.to_owned(), identity);
         if self.completed.contains(&id) {
@@ -125,11 +270,8 @@ impl Observer {
                     .as_ref()
                     .and_then(|input| input.get("command"))
                     .and_then(Value::as_str);
-                if command.is_some_and(is_publishing_command) {
-                    bounded(
-                        &mut self.publishing_calls,
-                        (run_id.clone(), call_id.clone()),
-                    );
+                if let Some(command) = command {
+                    self.started(run_id, call_id, command);
                 }
             }
             ToolEvent::ToolCompleted {
@@ -180,12 +322,13 @@ impl Observer {
                             inner.offer(run_id, source_call, key).await;
                         }
                     }
+                    let attributable = self.attributable_jobs.remove(&stream);
                     if self.publishing_jobs.remove(&stream) {
                         self.finished(
                             inner,
                             run_id,
                             format!("job:{job_id}"),
-                            job_success(status, *exit_code),
+                            attributable && job_success(status, *exit_code),
                         )
                         .await;
                     }
@@ -208,9 +351,13 @@ impl Observer {
         let publishing_call = self
             .publishing_calls
             .remove(&(run_id.to_owned(), call_id.to_owned()));
+        let attributable_call = self
+            .attributable_calls
+            .remove(&(run_id.to_owned(), call_id.to_owned()));
+        let known_call = publishing_call || attributable_call;
         let job = detail.and_then(|detail| detail.get("shell_job"));
         let Some(job) = job else {
-            if publishing_call {
+            if known_call {
                 let code = detail
                     .and_then(|d| d.get("exit_code"))
                     .and_then(Value::as_i64);
@@ -218,7 +365,8 @@ impl Observer {
                     inner,
                     run_id,
                     format!("call:{call_id}"),
-                    code.map_or(!is_error, |c| c == 0)
+                    attributable_call
+                        && code.map_or(!is_error, |c| c == 0)
                         && detail
                             .and_then(|d| d.get("timed_out_ms"))
                             .is_none_or(Value::is_null),
@@ -235,11 +383,15 @@ impl Observer {
         };
         let job = (run_id.to_owned(), job_id.to_owned());
         if status == "running" {
-            if publishing_call {
-                bounded(&mut self.publishing_jobs, job);
+            if known_call {
+                bounded(&mut self.publishing_jobs, job.clone());
+            }
+            if attributable_call {
+                bounded(&mut self.attributable_jobs, job);
             }
         } else {
-            let known = self.publishing_jobs.remove(&job) || publishing_call;
+            let known = self.publishing_jobs.remove(&job) || known_call;
+            let attributable = self.attributable_jobs.remove(&job) || attributable_call;
             if known {
                 let code = detail
                     .and_then(|d| d.get("shell_job"))
@@ -249,7 +401,7 @@ impl Observer {
                     inner,
                     run_id,
                     format!("job:{job_id}"),
-                    status == "completed" && code == Some(0),
+                    attributable && status == "completed" && code == Some(0),
                 )
                 .await;
             }
@@ -370,7 +522,105 @@ mod attribution_tests {
     use serde_json::json;
 
     fn start(observer: &mut Observer, run: &str, call: &str) {
-        observer.publishing_calls.insert((run.into(), call.into()));
+        observer.started(run, call, "git push origin feature");
+    }
+    #[test]
+    fn attribution_accepts_literal_quoted_pushes_but_not_read_only_or_ambiguous_shells() {
+        for command in [
+            "git push",
+            "git -c 'credential.helper=!gh auth git-credential' push origin feature",
+            "git -c \"credential.helper=!gh auth git-credential\" -C '/a b' push",
+            "/usr/bin/git --work-tree='/a b' push origin feature",
+            "gh -R owner/repo pr create --title 'a && b' --body ''",
+        ] {
+            assert!(attributable_command(command), "{command}");
+        }
+        for command in [
+            "gh pr view",
+            "gh pr checks",
+            "gh pr list",
+            "git --help push",
+            "git push --dry-run",
+            "git push -nq",
+            "git\u{a0}push",
+            "git push *",
+            "gh pr create --help",
+            "gh pr create --dry-run",
+            "gh pr create --dry-run=true",
+            "gh pr create --help=true",
+            "git push && echo done",
+            "git push | tee output",
+            "(git push)",
+            "git push; false",
+            "git push $(remote)",
+            "git push `remote`",
+            "git -c 'unclosed push",
+            "git push\ntrue",
+            "git -c",
+        ] {
+            assert!(!attributable_command(command), "{command}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_only_pr_commands_still_refresh_without_crediting_sync_or_job_success() {
+        let world = World::new();
+        let process = world.process(enabled());
+        let permit = process.permit("t");
+        process.environment.bind("run", "t");
+        let mut observer = Observer::default();
+        for (seq, command, expected) in [
+            (1, "gh pr view", false),
+            (2, "gh pr checks", false),
+            (3, "git push && echo done", false),
+            (
+                4,
+                "git -c 'credential.helper=!gh auth git-credential' push",
+                true,
+            ),
+            (5, "gh pr create", true),
+        ] {
+            let call = format!("call-{seq}");
+            observer.started("run", &call, command);
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    &call,
+                    Some(&json!({"exit_code":0})),
+                    false,
+                )
+                .await;
+            assert_eq!(is_agent(&process, &permit, seq), expected, "{command}");
+            assert!(process.service.inner().lock().forced.remove("t"));
+        }
+        observer.started("run", "job-call", "gh pr list");
+        observer
+            .shell_returned(
+                process.service.inner(),
+                "run",
+                "job-call",
+                Some(&json!({"shell_job":{"job_id":"read-job","status":"running"}})),
+                false,
+            )
+            .await;
+        observer
+            .tool(
+                process.service.inner(),
+                &ToolEvent::ShellJobOutput {
+                    job_uid: None,
+                    job_id: "read-job".into(),
+                    call_id: Some("job-call".into()),
+                    run_id: Some("run".into()),
+                    offset: 0,
+                    chunk: String::new(),
+                    status: "completed".into(),
+                    exit_code: Some(0),
+                },
+            )
+            .await;
+        assert!(!is_agent(&process, &permit, 6));
+        assert!(process.service.inner().lock().forced.contains("t"));
     }
     fn is_agent(process: &Process, permit: &crate::ownership::OwnerPermit, seq: u64) -> bool {
         let inner = process.service.inner();

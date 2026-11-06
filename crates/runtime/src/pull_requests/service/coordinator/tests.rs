@@ -81,12 +81,6 @@ async fn baseline_pending_completion_and_toggle_work_without_gui_notifications()
     let n = notices(&p);
     assert_eq!(n.len(), 1);
     assert_eq!(n[0].phase, PrNoticePhase::Ready);
-    assert!(
-        n[0].payload
-            .as_ref()
-            .unwrap()
-            .starts_with("[harness-notice kind=pr_checks_failed")
-    );
     p.service.notify_changed();
     settle().await;
     assert_eq!(logs.requests().len(), 1);

@@ -3,11 +3,11 @@
 use super::policy::eligible_facts;
 use super::{Inner, PullRequestError, PullRequestService, Target};
 use crate::ownership::OwnerPermit;
-use crate::pull_requests::{LogRequest, render_ci_log_data};
+use crate::pull_requests::LogRequest;
 use std::sync::Arc;
 use std::time::Duration;
 use storage::pull_request_auto_fix::*;
-use storage::pull_requests::{PullRequestFacts, PullRequestSnapshot};
+use storage::pull_requests::{CheckConclusion, CheckStatus, PullRequestFacts, PullRequestSnapshot};
 use storage::{StorageError, StorageHandle};
 use tokio::time::Instant;
 
@@ -97,6 +97,24 @@ fn valid_notice(
 }
 
 impl PullRequestService {
+    /// Read the linked PR's durable policy, budget and cooldown without granting authority.
+    ///
+    /// # Errors
+    /// No active link, or a storage error.
+    pub async fn auto_fix_state(&self, thread: &str) -> Result<PrAutoFixState> {
+        let storage = self.inner.storage.clone();
+        let thread = thread.to_owned();
+        self.inner
+            .blocking(move || -> Result<_> {
+                let link = storage
+                    .pull_request_thread_state(&thread)?
+                    .active_link
+                    .ok_or(PullRequestError::NotLinked)?;
+                Ok(storage.pr_auto_fix_state(link.key)?)
+            })
+            .await?
+    }
+
     /// Opt in/out without changing another thread's confirmed destination.
     /// Link and policy revisions are independent CAS values.
     ///
@@ -177,7 +195,8 @@ impl PullRequestService {
         inner.check_permit(thread, permit).await?;
         let storage = inner.storage.clone();
         let thread = thread.to_owned();
-        let result = inner
+        let owned_permit = permit.clone();
+        let (result, target) = inner
             .guarded(permit, move || -> Result<_> {
                 let link = storage
                     .pull_request_thread_state(&thread)?
@@ -186,6 +205,13 @@ impl PullRequestService {
                 if link.link_revision != revision {
                     return Err(PullRequestError::StaleRevision);
                 }
+                let target = Target {
+                    thread_id: thread.clone(),
+                    key: link.key.clone(),
+                    link_id: link.link_id,
+                    link_revision: link.link_revision,
+                    permit: owned_permit,
+                };
                 let previous = storage.pr_auto_fix_state(link.key.clone())?;
                 let destination = match confirmed {
                     Some(destination) => destination,
@@ -204,16 +230,19 @@ impl PullRequestService {
                         previous.destination_thread_id
                     }
                 };
-                Ok(storage.update_pr_auto_fix_policy(PrPolicyUpdate {
+                let result = storage.update_pr_auto_fix_policy(PrPolicyUpdate {
                     key: link.key,
                     expected_policy_revision: expected,
                     expected_destination_thread_id: destination,
                     destination_thread_id: thread,
                     link_revision: revision,
                     action,
-                })?)
+                })?;
+                Ok((result, target))
             })
             .await??;
+        // An explicit policy action completes its evaluation even when no GUI delta exists.
+        let _ = inner.coordinate(&[target]).await;
         inner.wake.notify_one();
         Ok(result)
     }
@@ -450,23 +479,33 @@ impl Inner {
             notice.policy_revision,
             target.permit.lease.generation,
         ));
-        let request = LogRequest::new(notice.key.clone(), &notice.head_sha, facts.checks.clone());
+        let failed_checks: Vec<_> = facts
+            .checks
+            .into_iter()
+            .filter(|check| {
+                check.status == CheckStatus::Completed
+                    && matches!(
+                        check.conclusion,
+                        Some(
+                            CheckConclusion::Failure
+                                | CheckConclusion::TimedOut
+                                | CheckConclusion::StartupFailure
+                        )
+                    )
+            })
+            .collect();
+        let names = failed_checks
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>();
+        let request = LogRequest::new(notice.key.clone(), &notice.head_sha, failed_checks);
         let bundle = self.logs.fetch_failed_logs(&request).await;
-        // Facts are small and structured. Check names/logs never enter instructions or evidence.
-        let mut payload = format!(
-            "[harness-notice kind=pr_checks_failed pr=#{} head={}]\nrepo: {}\nchecks: failed\nobserved_at: {}\n",
-            notice.key.number,
-            notice.head_sha,
-            notice.key.repository,
-            observed_at_ns.unwrap_or_default()
+        let payload = crate::lane_delivery::prepare_pr_notice_payload(
+            notice,
+            &names,
+            &observed_at_ns.unwrap_or_default().to_string(),
+            Some(&bundle),
         );
-        if let Some(log) = render_ci_log_data(
-            &bundle,
-            PR_NOTICE_PAYLOAD_MAX.saturating_sub(payload.len() + 1),
-        ) {
-            payload.push('\n');
-            payload.push_str(&log);
-        }
         let inner = Arc::clone(self);
         let (t, n) = (target.clone(), notice.clone());
         self.guarded(&target.permit, move || -> Result<()> {

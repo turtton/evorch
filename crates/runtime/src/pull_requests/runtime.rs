@@ -23,7 +23,12 @@ impl PrNoticeDelivery for RuntimeEnvironment {
             runtime.schedule_lane_deliveries(thread);
         }
     }
-    // C supplies subscribe_harness_delivery_resumes after integration.
+    fn subscribe_resumes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.runtime.upgrade().map_or_else(
+            || tokio::sync::watch::channel(0).1,
+            |runtime| runtime.subscribe_harness_delivery_resumes(),
+        )
+    }
 }
 
 impl ThreadEnvironment for RuntimeEnvironment {
