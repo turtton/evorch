@@ -1,0 +1,24 @@
+[package]
+name = "workbench-web"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Web adapter (HTTP + SSE) for the evorch workbench protocol (ADR 0045)."
+
+# Core-side adapter, but deliberately not dependent on the core: it speaks
+# workbench-protocol types to a `WorkbenchBackend` the core binary implements.
+# scripts/check-workbench-boundaries.sh enforces the allowed dependencies.
+[dependencies]
+workbench-protocol = { path = "../workbench-protocol" }
+axum = { workspace = true }
+futures-core = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "net", "io-util", "macros", "time"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }

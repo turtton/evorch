@@ -12,6 +12,10 @@
 #   5. workbench-host reaches a GUI or client crate (gui, workspace-ui,
 #      workbench-client, browser-cef, evorch) or a rendering stack
 #      (egui, eframe, wgpu, winit, CEF) through any dependency path.
+#   6. workbench-web (the HTTP + SSE adapter) reaches any workspace crate other
+#      than workbench-protocol, reaches a GUI or rendering crate, or declares a
+#      third-party dependency outside its small allowlist. It is a protocol
+#      adapter: the core binary connects it to workbench-host.
 # Each violation prints the dependency path that causes it.
 #
 # Usage: scripts/check-workbench-boundaries.sh [metadata.json]
@@ -23,11 +27,17 @@ cd "$(dirname "$0")/.."
 PROTOCOL=workbench-protocol
 CLIENT=workbench-client
 HOST=workbench-host
+WEB=workbench-web
 PROTOCOL_EXTERNAL_ALLOW="serde serde_json thiserror"
 CLIENT_EXTERNAL_ALLOW="serde thiserror tokio"
+WEB_EXTERNAL_ALLOW="axum futures-core http serde serde_json thiserror tokio"
 # workbench-host is the core side of the protocol. It may use core crates and
 # the protocol, but nothing that draws or that speaks as a client.
 HOST_FORBIDDEN_WORKSPACE="gui workspace-ui workbench-client browser-cef evorch"
+# workbench-web may only use the protocol (closure_violations); this list names
+# the front-end crates for the rendering-stack check, which also covers
+# third-party crates.
+WEB_FORBIDDEN_WORKSPACE="gui workspace-ui workbench-client workbench-host browser-cef evorch"
 HOST_FORBIDDEN_EXTERNAL='^(eframe|egui|egui[-_][a-z_-]+|epaint|emath|ecolor|wgpu|wgpu[-_][a-z_-]+|winit|glow|cef|cef[-_][a-z_-]+)$'
 # Core implementation crates. They own runtime state and must never import the
 # client protocol; the core-side workbench-host crate is where DTO
@@ -82,7 +92,7 @@ jq -r -f "$work/edges.jq" "$work/metadata.json" > "$work/edges.tsv"
 violations="$work/violations.txt"
 : > "$violations"
 
-for crate in "$PROTOCOL" "$CLIENT" "$HOST"; do
+for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB"; do
   if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
     echo "boundary check: workspace member '$crate' not found; the check would pass vacuously" >> "$violations"
   fi
@@ -131,10 +141,12 @@ closure_violations() {
     }' "$work/edges.tsv"
 }
 
-# Everything reachable from workbench-host (dev edges only at the root) must be
-# free of GUI and client crates, workspace or third-party.
-host_violations() {
-  awk -F'\t' -v root="$HOST" -v forbidden=" $HOST_FORBIDDEN_WORKSPACE " -v external_re="$HOST_FORBIDDEN_EXTERNAL" '
+# Everything reachable from a root (dev edges only at the root) must be free of
+# GUI and client crates, workspace or third-party. Used for workbench-host and
+# workbench-web.
+gui_free_violations() {
+  local root=$1 forbidden=$2
+  awk -F'\t' -v root="$root" -v forbidden=" $forbidden " -v external_re="$HOST_FORBIDDEN_EXTERNAL" '
     $1 == "W" { ws[$2] = 1 }
     # Third-party dependencies a manifest declares, including optional and
     # target-specific ones that the resolved graph leaves out.
@@ -234,9 +246,12 @@ core_reach_violations() {
 
 closure_violations "$PROTOCOL" "" >> "$violations"
 closure_violations "$CLIENT" "$PROTOCOL" >> "$violations"
-host_violations >> "$violations"
+gui_free_violations "$HOST" "$HOST_FORBIDDEN_WORKSPACE" >> "$violations"
+gui_free_violations "$WEB" "$WEB_FORBIDDEN_WORKSPACE" >> "$violations"
 external_violations "$PROTOCOL" "$PROTOCOL_EXTERNAL_ALLOW" >> "$violations"
 external_violations "$CLIENT" "$CLIENT_EXTERNAL_ALLOW" >> "$violations"
+closure_violations "$WEB" "$PROTOCOL" >> "$violations"
+external_violations "$WEB" "$WEB_EXTERNAL_ALLOW" >> "$violations"
 core_reach_violations >> "$violations"
 
 if [[ -s "$violations" ]]; then
