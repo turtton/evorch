@@ -521,11 +521,15 @@ fn http_fields(ui: &mut Ui, draft: &mut McpServerDraft, check: &DraftCheck) {
                 ui.selectable_value(&mut kind, None, "None");
                 ui.selectable_value(&mut kind, Some(DraftValueKind::Text), "Text / ${VAR}");
                 ui.selectable_value(&mut kind, Some(DraftValueKind::Keychain), "Keychain");
+            })
+            .response
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Bearer token source")
             });
         match (kind, &mut draft.token) {
             (None, token) => *token = None,
             (Some(kind), Some(token)) => {
-                token.kind = kind;
+                token.set_kind(kind);
                 if kind == DraftValueKind::Text {
                     masked_line(ui, &mut token.text, "Bearer token value", value_hint(kind));
                 } else {
@@ -580,6 +584,7 @@ fn pair_rows(
                 name.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, &label)
                 });
+                let mut kind = pair.value.kind;
                 egui::ComboBox::from_id_salt("kind")
                     .width(88.0)
                     .selected_text(match pair.value.kind {
@@ -587,13 +592,18 @@ fn pair_rows(
                         DraftValueKind::Keychain => "Keychain",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut pair.value.kind, DraftValueKind::Text, "Text");
-                        ui.selectable_value(
-                            &mut pair.value.kind,
-                            DraftValueKind::Keychain,
-                            "Keychain",
-                        );
+                        ui.selectable_value(&mut kind, DraftValueKind::Text, "Text");
+                        ui.selectable_value(&mut kind, DraftValueKind::Keychain, "Keychain");
+                    })
+                    .response
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::ComboBox,
+                            true,
+                            format!("{noun} {} source", index + 1),
+                        )
                     });
+                pair.value.set_kind(kind);
                 let label = format!("{noun} {} value", index + 1);
                 let hint = value_hint(pair.value.kind);
                 // Plain text under a credential-like name may be the secret itself.

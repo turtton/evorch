@@ -21,10 +21,10 @@ use gui::mcp::{
     McpServerStatus, McpSettingsView, McpStatusEvent, SaveMcpSecret,
 };
 use gui::mcp_settings::{
-    APPROVE_LABEL, DraftTransport, DraftValue, MCP_SERVERS_BUTTON_LABEL, McpApprovalState,
-    McpNotice, McpRowNote, McpServerDraft, McpSettingsAction, NEXT_RUN_NOTICE, NOTICE_REVIEW_LABEL,
-    OTHER_CHANGES_TEXT, OTHER_MAYBE_CHANGED_TEXT, OUTSIDE_SANDBOX_WARNING, REVIEW_AGAIN_LABEL,
-    STALE_PREVIEW_TEXT, STORE_SECRET_LABEL, SecretTarget, TEST_REFUSED_TEXT,
+    APPROVE_LABEL, DraftPair, DraftTransport, DraftValue, DraftValueKind, MCP_SERVERS_BUTTON_LABEL,
+    McpApprovalState, McpNotice, McpRowNote, McpServerDraft, McpSettingsAction, NEXT_RUN_NOTICE,
+    NOTICE_REVIEW_LABEL, OTHER_CHANGES_TEXT, OTHER_MAYBE_CHANGED_TEXT, OUTSIDE_SANDBOX_WARNING,
+    REVIEW_AGAIN_LABEL, STALE_PREVIEW_TEXT, STORE_SECRET_LABEL, SecretTarget, TEST_REFUSED_TEXT,
     UNVERIFIED_CONTENT_NOTE, secret_delete_failed_text, secret_delete_partial_text,
     secret_deleted_text, secret_error_text,
 };
@@ -671,6 +671,138 @@ fn token_input_persists_only_keychain_reference() {
             .label_value("Bearer token value")
             .is_some_and(|value| value.contains("sk-plain-typed"))
     );
+}
+
+#[derive(Clone, Copy)]
+enum KindSwitchField {
+    Token,
+    Environment,
+    Header,
+}
+
+impl KindSwitchField {
+    fn value(self, fixture: &mut Fixture) -> &mut DraftValue {
+        let draft = fixture
+            .harness
+            .state_mut()
+            .mcp_settings_mut()
+            .editor_mut()
+            .unwrap();
+        match self {
+            Self::Token => draft.token.as_mut().expect("token"),
+            Self::Environment => &mut draft.env[0].value,
+            Self::Header => &mut draft.headers[0].value,
+        }
+    }
+}
+
+fn kind_switch_drops_plaintext(field: KindSwitchField) {
+    const VALUE: &str = "kind-switch-plaintext-sentinel";
+    const REFERENCE: &str = "safe-reference";
+    let (source, server, combo_label, value_label, text_option) = match field {
+        KindSwitchField::Token => (
+            HTTP,
+            "remote",
+            "Bearer token source",
+            "Bearer token value",
+            "Text / ${VAR}",
+        ),
+        KindSwitchField::Environment => (
+            STDIO,
+            "files",
+            "Variable 1 source",
+            "Variable 1 value",
+            "Text",
+        ),
+        KindSwitchField::Header => (HTTP, "remote", "Header 1 source", "Header 1 value", "Text"),
+    };
+    let mut fixture = Fixture::new(source);
+    fixture.open_settings();
+    fixture.click(&format!("Edit {server}"));
+    {
+        let draft = fixture
+            .harness
+            .state_mut()
+            .mcp_settings_mut()
+            .editor_mut()
+            .unwrap();
+        draft.token = None;
+        draft.headers.clear();
+        let pair = |name: &str| DraftPair {
+            name: name.into(),
+            value: DraftValue::text(VALUE),
+        };
+        match field {
+            KindSwitchField::Token => draft.token = Some(DraftValue::text(VALUE)),
+            KindSwitchField::Environment => draft.env = vec![pair("API_TOKEN")],
+            KindSwitchField::Header => draft.headers = vec![pair("Authorization")],
+        }
+    }
+    fixture.harness.run();
+    assert_eq!(field.value(&mut fixture).text, VALUE);
+    assert!(
+        !fixture
+            .harness
+            .label_value(value_label)
+            .is_some_and(|v| v.contains(VALUE))
+    );
+    fixture.click(combo_label);
+    fixture.click("Keychain");
+    assert!(
+        !fixture
+            .harness
+            .label_value(value_label)
+            .is_some_and(|v| v.contains(VALUE))
+    );
+    assert!(!fixture.harness.has_label(VALUE));
+    fixture.harness.click_label(value_label);
+    fixture.harness.run();
+    fixture
+        .harness
+        .key_press(egui::Modifiers::COMMAND, egui::Key::Z);
+    fixture.harness.run();
+    {
+        let entry = field.value(&mut fixture);
+        assert_eq!(entry.kind, DraftValueKind::Keychain);
+        assert!(
+            entry.text.is_empty(),
+            "a plaintext credential must not become a reference name"
+        );
+        entry.text = REFERENCE.into();
+    }
+    fixture.harness.run();
+    // Switching back also starts blank: reference names are not plaintext values.
+    fixture.click(combo_label);
+    fixture.click(text_option);
+    assert!(field.value(&mut fixture).text.is_empty());
+    fixture.click(combo_label);
+    fixture.click("Keychain");
+    field.value(&mut fixture).text = REFERENCE.into();
+    fixture.harness.run();
+    fixture.click(gui::mcp_settings::SAVE_SERVER_LABEL);
+    let table = fixture.server_table(server);
+    let saved = match field {
+        KindSwitchField::Token => &table["token"],
+        KindSwitchField::Environment => &table["env"]["API_TOKEN"],
+        KindSwitchField::Header => &table["headers"]["Authorization"],
+    };
+    assert_eq!(saved["keychain"].as_str(), Some(REFERENCE));
+    assert!(!fixture.toml().contains(VALUE));
+}
+
+#[test]
+fn token_kind_switch_does_not_reveal_or_persist_plaintext() {
+    kind_switch_drops_plaintext(KindSwitchField::Token);
+}
+
+#[test]
+fn env_kind_switch_does_not_reveal_or_persist_plaintext() {
+    kind_switch_drops_plaintext(KindSwitchField::Environment);
+}
+
+#[test]
+fn header_kind_switch_does_not_reveal_or_persist_plaintext() {
+    kind_switch_drops_plaintext(KindSwitchField::Header);
 }
 
 #[test]

@@ -65,6 +65,14 @@ impl DraftValue {
         }
     }
 
+    /// Source modes have different meanings; never reinterpret a credential as a key name.
+    pub(super) fn set_kind(&mut self, kind: DraftValueKind) {
+        if self.kind != kind {
+            self.text.clear();
+            self.kind = kind;
+        }
+    }
+
     fn from_source(source: &ValueSource) -> Self {
         match source {
             ValueSource::Template { template } => Self::text(render(template)),
