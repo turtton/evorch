@@ -17,12 +17,12 @@
 //! The runtime publishes the matching event (`LaneRecord::created_event` and its
 //! siblings) **only after** the call returned `Ok`; the ledger never publishes.
 //!
-//! Nothing here starts a run, decides who may call it or moves a thread between
-//! families: that is the runtime's and the GUI's. Detach and re-attach *transitions*
-//! belong to Phase 3; this layer only holds their data.
+//! This module never starts/stops a run or rewrites conversation history. Durable
+//! management transitions, authorization fences and projection repair contracts live
+//! in [`crate::lane_management`]; the host owns sidebar projection and family locks.
 
 use event_bus::LedgerEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use event_bus::{
     LANE_ARTIFACT_REFS_MAX, LANE_LIST_PAGE_MAX, LANE_LIST_PAGE_MAX_BYTES, LANE_QUESTION_REFS_MAX,
@@ -75,16 +75,8 @@ pub struct NewLane {
     pub at_ns: i64,
 }
 
-/// A change of the management relation: who leads and under which policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneManagementChange {
-    /// `Some` exactly when the policy is attached or summary.
-    pub lead_thread_id: Option<String>,
-    pub policy: LanePolicy,
-}
-
 /// A stored lane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneRecord {
     pub lane_id: String,
     pub thread_id: String,
@@ -97,6 +89,8 @@ pub struct LaneRecord {
     pub policy: LanePolicy,
     /// Raised by every change of lead or policy. Starts at 1.
     pub management_revision: u64,
+    /// Membership epoch of the current independent family; None while managed.
+    pub detached_since_management_revision: Option<u64>,
     /// The brief; its `report_policy` is the current [`Self::policy`].
     pub brief: LaneBrief,
     /// Raised by every changed brief. Starts at 1.

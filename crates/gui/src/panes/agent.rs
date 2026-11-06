@@ -1061,6 +1061,7 @@ mod tests {
             lead_thread_id: Some("lead".into()),
             policy: LanePolicy::Attached,
             management_revision: 1,
+            detached_since_management_revision: None,
             brief: LaneBrief {
                 verification_requirements: Default::default(),
                 objective: "Ship it".into(),

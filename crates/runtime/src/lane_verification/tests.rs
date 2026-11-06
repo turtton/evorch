@@ -242,6 +242,7 @@ impl Fixture {
             .handle()
             .append_lane_report_with_delivery(
                 self.lane.lane_id.clone(),
+                1,
                 event_bus::LaneReportInput {
                     artifact_revision: Some(ArtifactRevision::Sha256(format!(
                         "{:x}",
@@ -760,13 +761,15 @@ async fn only_current_lead_can_verify_and_detached_lanes_are_not_closable() {
     let lane = f.storage.handle().lane(&f.lane.lane_id).unwrap().unwrap();
     f.storage
         .handle()
-        .change_lane_management(
-            &lane.lane_id,
-            lane.management_revision,
-            storage::lanes::LaneManagementChange {
-                lead_thread_id: None,
-                policy: LanePolicy::Detached,
+        .apply_lane_management_transition(
+            storage::lane_management::LaneManagementRequest {
+                operation_id: format!("transition:{}", 3),
+                lane_id: lane.lane_id.clone(),
+                expected_management_revision: lane.management_revision,
+                action: storage::lane_management::LaneManagementAction::Detach,
             },
+            storage::lane_management::LaneManagementActor::User,
+            None,
             3,
         )
         .unwrap();
@@ -1009,6 +1012,7 @@ fn commit_fixture(f: &Fixture) -> (String, String) {
         .handle()
         .append_lane_report_with_delivery(
             lane.lane_id,
+            1,
             event_bus::LaneReportInput {
                 artifact_revision: Some(ArtifactRevision::CommitSha(head.clone())),
                 failure_episode: None,
@@ -1094,6 +1098,7 @@ async fn a_brief_and_ready_update_between_the_lane_and_target_reads_is_rejected(
             updater
                 .append_lane_report_with_delivery(
                     lane_id,
+                    1,
                     event_bus::LaneReportInput {
                         artifact_revision: Some(ArtifactRevision::Sha256(digest)),
                         failure_episode: None,

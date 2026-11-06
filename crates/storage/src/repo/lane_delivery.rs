@@ -494,20 +494,39 @@ pub(crate) fn questions(
 pub(crate) fn append_report(
     conn: &Connection,
     lane_id: &str,
+    expected_management_revision: u64,
     input: crate::lanes::LaneReportInput,
     at_ns: i64,
 ) -> Result<crate::lanes::LaneReportAppended, StorageError> {
     let tx = transaction(conn)?;
-    let appended = crate::repo::lanes::append_report_in_transaction(&tx, lane_id, &input, at_ns)?;
+    let appended =
+        append_report_in_transaction(&tx, lane_id, expected_management_revision, input, at_ns)?;
+    tx.commit()?;
+    Ok(appended)
+}
+pub(crate) fn append_report_in_transaction(
+    tx: &Transaction<'_>,
+    lane_id: &str,
+    expected_management_revision: u64,
+    input: crate::lanes::LaneReportInput,
+    at_ns: i64,
+) -> Result<crate::lanes::LaneReportAppended, StorageError> {
+    let appended = crate::repo::lanes::append_report_in_transaction(
+        tx,
+        lane_id,
+        expected_management_revision,
+        &input,
+        at_ns,
+    )?;
     // A new terminal artifact must unblock delivery even if runtime crashes
     // immediately after this source commit, before scheduling its outbox.
     if matches!(
         input.status,
         event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
     ) {
-        let expected = guard(&tx, lane_id)?.revision;
+        let expected = guard(tx, lane_id)?.revision;
         guards::update_guard_in_transaction(
-            &tx,
+            tx,
             lane_id,
             expected,
             LaneGuardSignal::TerminalArtifact {
@@ -536,7 +555,7 @@ pub(crate) fn append_report(
         };
         if let Some(kind) = kind {
             enqueue(
-                &tx,
+                tx,
                 LaneNotification {
                     notification_id: String::new(),
                     lane_id: lane_id.into(),
@@ -550,7 +569,6 @@ pub(crate) fn append_report(
             )?;
         }
     }
-    tx.commit()?;
     Ok(appended)
 }
 

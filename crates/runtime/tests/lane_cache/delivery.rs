@@ -140,6 +140,7 @@ impl Fixture {
             .handle()
             .append_lane_report_with_delivery(
                 self.lanes[index].clone(),
+                1,
                 event_bus::LaneReportInput {
                     status,
                     summary: format!("immutable artifact revision {revision}"),

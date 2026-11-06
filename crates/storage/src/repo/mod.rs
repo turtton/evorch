@@ -14,6 +14,7 @@ pub(crate) mod host_chat_submission;
 pub(crate) mod host_input_receipt;
 pub(crate) mod lane_control;
 pub(crate) mod lane_delivery;
+pub(crate) mod lane_management;
 pub(crate) mod lanes;
 pub(crate) mod memory;
 pub mod message;

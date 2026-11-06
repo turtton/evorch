@@ -128,11 +128,14 @@ const RUN_TABLES: &[(&str, &str)] = &[
         "child_run_id = ?1 OR parent_run_id = ?1",
     ),
     ("assistant_references", "source_run_id = ?1"),
+    // Delete only this recipient's links. A source must never delete another
+    // (live or not-yet-reclaimed) recipient's link. Collect retained bodies once
+    // the last link is physically gone: no unbounded FK cascade through links.
+    ("user_question_links", "run_id = ?1"),
     (
-        "user_question_links",
-        "run_id = ?1 OR question_id IN (SELECT id FROM user_questions WHERE run_id = ?1)",
+        "user_questions",
+        "(run_id = ?1 OR root_run_id = ?1 OR run_id IN (SELECT run_id FROM run_tombstones) OR root_run_id IN (SELECT run_id FROM run_tombstones)) AND NOT EXISTS (SELECT 1 FROM user_question_links l WHERE l.question_id = user_questions.id)",
     ),
-    ("user_questions", "run_id = ?1"),
     // The message rows name the header in a RESTRICT foreign key: they go first.
     ("run_message_provenance", "run_id = ?1"),
     ("run_context_provenance", "run_id = ?1"),
@@ -1069,6 +1072,28 @@ fn take_pull_request_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, St
 /// DELETE, so reclaim always progresses, and each step is bounded.
 fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageError> {
     let limit = i64::try_from(RECLAIM_ROWS).unwrap_or(i64::MAX);
+    // Management receipts precede their FK owner and are reclaimed in bounded batches.
+    let management: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_management_receipts')",
+        [],
+        |r| r.get(0),
+    )?;
+    if management {
+        let bytes: u64 = tx.query_row(
+            "SELECT COALESCE(SUM(bytes),0) FROM (SELECT OCTET_LENGTH(request_json)+OCTET_LENGTH(actor_json)+OCTET_LENGTH(result_json) AS bytes FROM lane_management_receipts WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)",
+            params![thread, limit], |r| r.get(0),
+        )?;
+        let rows = tx.execute(
+            "DELETE FROM lane_management_receipts WHERE rowid IN (SELECT rowid FROM lane_management_receipts WHERE lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1) LIMIT ?2)", params![thread, limit],
+        )?;
+        if rows > 0 {
+            return Ok(Work {
+                rows: rows as u64,
+                bytes,
+                ..Work::default()
+            });
+        }
+    }
     // New Phase 1c tables do not exist during older-format offline conversion.
     let phase2_tables: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='lane_stall_episodes')",
@@ -1870,6 +1895,8 @@ mod lane_delivery_tests {
              VALUES ('close','lane','verification','{}');
              INSERT INTO lane_forward_receipts(caller_root,operation_id,lane_id,question_id,request_json,result_json)
              VALUES ('root','op','lane','q','{}','{}');
+             INSERT INTO lane_management_receipts(operation_id,lane_id,request_json,actor_json,result_json,created_at_ns)
+             VALUES ('management','lane','{}','{}','{}',1);
              INSERT INTO thread_tombstones(thread_id,family_key,deleted_at_ns)
              VALUES ('source','family',10);",
         ).unwrap();
@@ -1896,6 +1923,7 @@ mod lane_delivery_tests {
             "lane_verifications",
             "lane_closes",
             "lane_forward_receipts",
+            "lane_management_receipts",
             "lanes",
         ] {
             assert_eq!(

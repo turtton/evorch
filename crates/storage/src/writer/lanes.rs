@@ -7,8 +7,8 @@ use rusqlite::Connection;
 use super::{Command, StorageHandle};
 use crate::StorageError;
 use crate::lanes::{
-    LaneBrief, LaneCreation, LaneListPage, LaneListRequest, LaneManagementChange, LaneRecord,
-    LaneReport, LaneReportAppended, LaneReportInput, LaneUpdate, NewLane,
+    LaneBrief, LaneCreation, LaneListPage, LaneListRequest, LaneRecord, LaneReport,
+    LaneReportAppended, LaneReportInput, LaneUpdate, NewLane,
 };
 
 /// A job for the writer thread: the connection and whether writes are suspended.
@@ -125,33 +125,19 @@ impl StorageHandle {
     pub fn append_lane_report(
         &self,
         lane_id: &str,
+        expected_management_revision: u64,
         report: LaneReportInput,
         at_ns: i64,
     ) -> Result<LaneReportAppended, StorageError> {
         let lane_id = lane_id.to_owned();
         self.lane_write(move |conn| {
-            crate::repo::lanes::append_report(conn, &lane_id, &report, at_ns)
-        })
-    }
-
-    /// Moves the lead and policy of a lane from `expected_revision`, the management
-    /// revision the caller read. The origin never changes. This is the data step of a
-    /// policy change, a detach or a re-attach; whether a caller may take it is decided
-    /// above the ledger.
-    ///
-    /// # Errors
-    /// `StaleRevision { kind: "management" }` when the lane moved on, an inconsistent
-    /// lead and policy, `LaneNotFound`, suspended writes or a closed writer.
-    pub fn change_lane_management(
-        &self,
-        lane_id: &str,
-        expected_revision: u64,
-        change: LaneManagementChange,
-        at_ns: i64,
-    ) -> Result<LaneUpdate, StorageError> {
-        let lane_id = lane_id.to_owned();
-        self.lane_write(move |conn| {
-            crate::repo::lanes::change_management(conn, &lane_id, expected_revision, &change, at_ns)
+            crate::repo::lanes::append_report(
+                conn,
+                &lane_id,
+                expected_management_revision,
+                &report,
+                at_ns,
+            )
         })
     }
 

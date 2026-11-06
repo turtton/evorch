@@ -120,7 +120,12 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         ReclaimThread,
         "destination thread control and lease",
     ),
-    ("lane_state", Keep, "ledger revision singleton"),
+    ("lane_state", Keep, "ledger/topology revision singleton"),
+    (
+        "lane_management_receipts",
+        ReclaimThread,
+        "bounded management operation receipts of the deleted lane",
+    ),
     ("lane_stall_episodes", ReclaimThread, "lane episode history"),
     (
         "lane_verifications",
