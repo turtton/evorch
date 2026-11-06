@@ -92,6 +92,7 @@ fn pending() -> PendingQuery {
 }
 fn history(page: PageRequest) -> Query {
     Query::ReadCommittedHistory(ReadCommittedHistory {
+        direction: Default::default(),
         thread: ThreadId::new("thread-1").unwrap(),
         run: None,
         page,
@@ -581,7 +582,7 @@ fn snapshot_pages_remain_frozen_and_tombstones_revoke_old_pages_and_replay() {
             .snapshot_page(&id, &PageRequest::default())
             .unwrap_err()
             .code,
-        ErrorCode::Conflict
+        ErrorCode::ResyncRequired
     );
     let terminal = f.rt.block_on(sub.recv()).unwrap();
     assert!(matches!(
@@ -1044,59 +1045,68 @@ fn late_delivery_resynchronizes_instead_of_silently_reindexing_history() {
 }
 #[test]
 fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
-    for delete_run in [false, true] {
-        let f = Fixture::new();
-        let first_id = saved_event(
-            &f,
-            10,
-            MessageEvent::MessageCompleted {
-                run_id: "run-1".into(),
-                text: "first".into(),
-            },
-        );
-        saved_event(
-            &f,
-            20,
-            MessageEvent::MessageCompleted {
-                run_id: "run-1".into(),
-                text: "second".into(),
-            },
-        );
-        if delete_run {
-            f.thread("thread-1", "run-2", "First");
-            saved_event(
+    for direction in [HistoryDirection::Forward, HistoryDirection::Backward] {
+        let history = |page| {
+            let Query::ReadCommittedHistory(mut q) = history(page) else {
+                unreachable!()
+            };
+            q.direction = direction;
+            Query::ReadCommittedHistory(q)
+        };
+        for delete_run in [false, true] {
+            let f = Fixture::new();
+            let first_id = saved_event(
                 &f,
-                30,
+                10,
                 MessageEvent::MessageCompleted {
-                    run_id: "run-2".into(),
-                    text: "third".into(),
+                    run_id: "run-1".into(),
+                    text: "first".into(),
                 },
             );
+            saved_event(
+                &f,
+                20,
+                MessageEvent::MessageCompleted {
+                    run_id: "run-1".into(),
+                    text: "second".into(),
+                },
+            );
+            if delete_run {
+                f.thread("thread-1", "run-2", "First");
+                saved_event(
+                    &f,
+                    30,
+                    MessageEvent::MessageCompleted {
+                        run_id: "run-2".into(),
+                        text: "third".into(),
+                    },
+                );
+            }
+            let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
+                cursor: None,
+                limit: 1,
+            })) else {
+                panic!()
+            };
+            let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+            if delete_run {
+                db.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('run-1','thread-1','family')", []).unwrap();
+            } else {
+                db.execute("DELETE FROM events WHERE id=?1", [first_id])
+                    .unwrap();
+            }
+            let err = f
+                .host
+                .handle_query(
+                    &SessionId::new("session").unwrap(),
+                    &history(PageRequest {
+                        cursor: page.next_cursor,
+                        limit: 1,
+                    }),
+                )
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::Conflict);
         }
-        let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
-            cursor: None,
-            limit: 1,
-        })) else {
-            panic!()
-        };
-        let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
-        if delete_run {
-            db.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('run-1','thread-1','family')", []).unwrap();
-        } else {
-            db.execute("DELETE FROM events WHERE id=?1", [first_id])
-                .unwrap();
-        }
-        let err = f
-            .host
-            .handle_query(
-                &SessionId::new("session").unwrap(),
-                &history(PageRequest {
-                    cursor: page.next_cursor,
-                    limit: 1,
-                }),
-            )
-            .unwrap_err();
-        assert_eq!(err.code, ErrorCode::Conflict);
     }
 }
 
@@ -1636,4 +1646,424 @@ fn receipt_link_deduplicates_initial_task_copies_but_keeps_changed_instructions(
             text: "changed instructions".into()
         }
     );
+}
+
+fn approval_input_request(ticket: &sandbox::approval::PendingApproval) -> GetApprovalInput {
+    GetApprovalInput {
+        approval_id: ApprovalId::new(&ticket.id().value).unwrap(),
+        core_epoch: InstanceEpoch(ticket.id().core_epoch),
+        approval_revision: Revision(1),
+        offset: ByteOffset(0),
+        max_bytes: 65_536,
+    }
+}
+fn query_error(f: &Fixture, query: Query) -> ErrorCode {
+    f.host
+        .handle_query(&SessionId::new("session").unwrap(), &query)
+        .unwrap_err()
+        .code
+}
+#[test]
+fn complete_approval_input_chunks_bind_identity_and_recheck_resolution() {
+    let mut f = current_thread_fixture();
+    let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+    let input = serde_json::json!({"command":"あ".repeat(35_000)});
+    let ticket = registry.register(
+        ApprovalRequest {
+            run_id: "run-1",
+            thread_id: Some("thread-1"),
+            tool_name: "shell",
+            call_id: "large",
+            input: Some(input.clone()),
+        },
+        Duration::from_secs(3600),
+    );
+    let mut request = approval_input_request(&ticket);
+    let QueryReply::Approvals(list) = f.query(Query::ListApprovals(pending())) else {
+        panic!()
+    };
+    let view = &list.items[0];
+    assert!(view.summary_truncated);
+    assert_eq!(view.input_bytes.get(), input.to_string().len() as u64);
+    let mut complete = String::new();
+    let mut second = None;
+    loop {
+        let QueryReply::ApprovalInput(chunk) = f.query(Query::GetApprovalInput(request.clone()))
+        else {
+            panic!()
+        };
+        QueryReply::ApprovalInput(chunk.clone())
+            .validate(&Default::default())
+            .unwrap();
+        assert_eq!(chunk.approval_id, request.approval_id);
+        assert_eq!(chunk.core_epoch, request.core_epoch);
+        assert_eq!(chunk.approval_revision, request.approval_revision);
+        assert_eq!(chunk.offset.get(), complete.len() as u64);
+        assert!(chunk.text.len() <= 65_536);
+        complete.push_str(&chunk.text);
+        let Some(next) = chunk.next_offset else { break };
+        second.get_or_insert(next);
+        request.offset = next;
+    }
+    assert_eq!(complete, input.to_string());
+    request.offset = ByteOffset(complete.len() as u64);
+    let QueryReply::ApprovalInput(eof) = f.query(Query::GetApprovalInput(request.clone())) else {
+        panic!()
+    };
+    assert!(eof.text.is_empty());
+    assert!(eof.next_offset.is_none());
+    for (offset, max_bytes, code) in [
+        (ByteOffset(13), 65_536, ErrorCode::InvalidRequest),
+        (ByteOffset(u64::MAX), 65_536, ErrorCode::InvalidRequest),
+        (ByteOffset(0), 3, ErrorCode::InvalidRequest),
+        (ByteOffset(0), 65_537, ErrorCode::InvalidRequest),
+    ] {
+        let mut bad = request.clone();
+        bad.offset = offset;
+        bad.max_bytes = max_bytes;
+        assert_eq!(query_error(&f, Query::GetApprovalInput(bad)), code);
+    }
+    let mut bad = request.clone();
+    bad.core_epoch = InstanceEpoch(request.core_epoch.get() + 1);
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(bad)),
+        ErrorCode::StaleEpoch
+    );
+    let mut bad = request.clone();
+    bad.approval_revision = Revision(2);
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(bad)),
+        ErrorCode::StaleRevision
+    );
+    let mut bad = request.clone();
+    bad.approval_id = ApprovalId::new("unknown").unwrap();
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(bad)),
+        ErrorCode::NotFound
+    );
+    f.host
+        .handle_request(
+            &SessionId::new("session").unwrap(),
+            &RequestId::new("resolve-input").unwrap(),
+            Command::DecideToolApproval(DecideToolApproval {
+                approval_id: request.approval_id.clone(),
+                core_epoch: request.core_epoch,
+                approval_revision: request.approval_revision,
+                decision: ApprovalDecision::Deny,
+            }),
+            common::web(),
+        )
+        .unwrap();
+    request.offset = second.unwrap();
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(request)),
+        ErrorCode::AlreadyResolved
+    );
+    assert_eq!(f.rt.block_on(ticket.wait()), ApprovalState::Denied);
+}
+
+#[test]
+fn approval_input_rejects_expired_cancelled_oversized_and_deleted_entries() {
+    let f = current_thread_fixture();
+    let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+    let register = |input, timeout| {
+        registry.register(
+            ApprovalRequest {
+                run_id: "run-1",
+                thread_id: Some("thread-1"),
+                tool_name: "shell",
+                call_id: "input",
+                input,
+            },
+            timeout,
+        )
+    };
+    let expired = register(Some(serde_json::json!("input")), Duration::ZERO);
+    assert_eq!(
+        query_error(
+            &f,
+            Query::GetApprovalInput(approval_input_request(&expired))
+        ),
+        ErrorCode::AlreadyResolved
+    );
+    let cancelled = register(None, Duration::from_secs(3600));
+    let request = approval_input_request(&cancelled);
+    let QueryReply::ApprovalInput(empty) = f.query(Query::GetApprovalInput(request.clone())) else {
+        panic!()
+    };
+    assert_eq!(empty.total_bytes, ByteOffset(0));
+    assert!(empty.text.is_empty());
+    drop(cancelled);
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(request)),
+        ErrorCode::AlreadyResolved
+    );
+    let oversized = register(
+        Some(serde_json::json!("a".repeat(1024 * 1024))),
+        Duration::from_secs(3600),
+    );
+    assert_eq!(
+        query_error(
+            &f,
+            Query::GetApprovalInput(approval_input_request(&oversized))
+        ),
+        ErrorCode::LimitExceeded
+    );
+    let deleted = register(Some(serde_json::json!({"x":1})), Duration::from_secs(3600));
+    let request = approval_input_request(&deleted);
+    let QueryReply::Approvals(list) = f.query(Query::ListApprovals(pending())) else {
+        panic!()
+    };
+    assert!(!list.items[0].summary_truncated);
+    f.tombstone();
+    assert_eq!(
+        query_error(&f, Query::GetApprovalInput(request)),
+        ErrorCode::NotFound
+    );
+}
+
+#[test]
+fn snapshot_query_reads_every_frozen_item_after_connection_closure() {
+    let f = current_thread_fixture();
+    for i in 2..=48 {
+        f.thread(&format!("thread-{i}"), &format!("run-{i}"), "next");
+    }
+    let q = UserQuestion {
+        id: "snapshot-question".into(),
+        run_id: "run-1".into(),
+        root_run_id: "run-1".into(),
+        root_name: "chat:Worker:thread-1".into(),
+        recipient_run_ids: vec![],
+        title: "format?".into(),
+        options: vec![],
+        blocking: true,
+        answer: None,
+        answer_origin: None,
+        responder: Some(event_bus::lane::QuestionResponder::User),
+        routing_revision: 0,
+        management_revision: None,
+    };
+    f.store.handle().create_user_question(&q).unwrap();
+    let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+    let _approval = registry.register(
+        ApprovalRequest {
+            run_id: "run-1",
+            thread_id: Some("thread-1"),
+            tool_name: "shell",
+            call_id: "snapshot",
+            input: Some(serde_json::json!({"command":"echo hi"})),
+        },
+        Duration::from_secs(3600),
+    );
+    let sub = f.subscribe();
+    let id = sub.started.snapshot_id.clone().unwrap();
+    let high_water = sub.started.high_water;
+    let initial = sub.started.initial_page.as_ref().unwrap().clone();
+    assert_eq!(initial.items.len(), 50);
+    f.host
+        .projection()
+        .unsubscribe(&sub.started.subscription_id);
+    drop(sub);
+    f.thread("later", "run-later", "not in this cut");
+    let mut items = initial.items;
+    let mut cursor = initial.next_cursor;
+    while let Some(next) = cursor {
+        // A different HTTP session needs no live subscription identifier.
+        let QueryReply::Snapshot(reply) = f
+            .host
+            .handle_query(
+                &SessionId::new("another-connection").unwrap(),
+                &Query::ReadSnapshot(ReadSnapshot {
+                    snapshot_id: id.clone(),
+                    page: PageRequest {
+                        cursor: Some(next),
+                        limit: 17,
+                    },
+                }),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(reply.snapshot_id, id);
+        assert_eq!(reply.high_water, high_water);
+        assert_eq!(reply.page.snapshot_revision, initial.snapshot_revision);
+        cursor = reply.page.next_cursor;
+        items.extend(reply.page.items);
+    }
+    assert_eq!(items.len(), 100);
+    let mut keys = std::collections::BTreeSet::new();
+    for item in items {
+        let key = match item {
+            SnapshotItem::CoreStatus(_) => "status".into(),
+            SnapshotItem::Project(p) => format!("project:{}", p.id),
+            SnapshotItem::Thread(t) => {
+                assert_ne!(t.id.as_str(), "later");
+                format!("thread:{}", t.id)
+            }
+            SnapshotItem::Run(r) => format!("run:{}", r.id),
+            SnapshotItem::Question(q) => format!("question:{}", q.id),
+            SnapshotItem::Approval(a) => format!("approval:{}", a.id),
+        };
+        assert!(keys.insert(key), "duplicate snapshot item");
+    }
+    assert_eq!(keys.iter().filter(|k| k.starts_with("thread:")).count(), 48);
+    assert_eq!(
+        keys.iter().filter(|k| k.starts_with("question:")).count(),
+        1
+    );
+    assert_eq!(
+        keys.iter().filter(|k| k.starts_with("approval:")).count(),
+        1
+    );
+    // Count retention is independent of connection closure too.
+    for _ in 0..4 {
+        let _ = f.subscribe();
+    }
+    assert_eq!(
+        query_error(
+            &f,
+            Query::ReadSnapshot(ReadSnapshot {
+                snapshot_id: id,
+                page: PageRequest::default()
+            })
+        ),
+        ErrorCode::ResyncRequired
+    );
+}
+
+#[test]
+fn backward_history_pages_from_tail_are_frozen_chronological_and_metadata_only() {
+    let f = current_thread_fixture();
+    let meter = read_meter(&f);
+    for i in 0..5 {
+        saved_event(
+            &f,
+            10 + i,
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: format!("{i}{}", "片".repeat(10_000)),
+            },
+        );
+    }
+    let read = |request: ReadCommittedHistory| {
+        let QueryReply::CommittedHistory(page) = f.query(Query::ReadCommittedHistory(request))
+        else {
+            panic!()
+        };
+        page
+    };
+    let mut request = ReadCommittedHistory {
+        thread: ThreadId::new("thread-1").unwrap(),
+        run: None,
+        direction: HistoryDirection::Backward,
+        page: PageRequest {
+            cursor: None,
+            limit: 2,
+        },
+    };
+    let tail = read(request.clone());
+    assert_eq!(
+        tail.items.iter().map(|m| m.index.get()).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(
+        tail.items
+            .iter()
+            .all(|m| matches!(m.content, MessageContent::Body(_)))
+    );
+    saved_event(
+        &f,
+        20,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "new after cut".into(),
+        },
+    );
+    request.page.cursor = tail.next_cursor;
+    let middle = read(request.clone());
+    assert_eq!(middle.snapshot_revision, tail.snapshot_revision);
+    assert_eq!(
+        middle
+            .items
+            .iter()
+            .map(|m| m.index.get())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let mut wrong = request.clone();
+    wrong.direction = HistoryDirection::Forward;
+    assert_eq!(
+        query_error(&f, Query::ReadCommittedHistory(wrong)),
+        ErrorCode::Conflict
+    );
+    request.page.cursor = middle.next_cursor;
+    let head = read(request.clone());
+    assert_eq!(
+        head.items.iter().map(|m| m.index.get()).collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert!(head.next_cursor.is_none());
+    assert_eq!(
+        meter.counts(),
+        storage::test_support::BodyReadCounts::default()
+    );
+    request.page.cursor = None;
+    assert_eq!(
+        read(request.clone()).items.last().unwrap().index,
+        Sequence(5)
+    );
+    f.tombstone();
+    assert_eq!(
+        query_error(&f, Query::ReadCommittedHistory(request)),
+        ErrorCode::NotFound
+    );
+}
+
+#[test]
+fn approval_input_masks_before_chunking_and_accepts_exactly_one_mib() {
+    let f = current_thread_fixture();
+    let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+    let secret = format!("sk-{}", "a".repeat(32));
+    let raw = serde_json::json!(format!("{} {secret}", "x".repeat(65_520)));
+    let ticket = registry.register(
+        ApprovalRequest {
+            run_id: "run-1",
+            thread_id: Some("thread-1"),
+            tool_name: "shell",
+            call_id: "mask",
+            input: Some(raw),
+        },
+        Duration::from_secs(3600),
+    );
+    let mut request = approval_input_request(&ticket);
+    let mut complete = String::new();
+    loop {
+        let QueryReply::ApprovalInput(chunk) = f.query(Query::GetApprovalInput(request.clone()))
+        else {
+            panic!()
+        };
+        complete.push_str(&chunk.text);
+        let Some(next) = chunk.next_offset else { break };
+        request.offset = next;
+    }
+    assert!(!complete.contains(&secret));
+    assert!(complete.contains("[REDACTED:openai-style-key]"));
+    let largest = registry.register(
+        ApprovalRequest {
+            run_id: "run-1",
+            thread_id: Some("thread-1"),
+            tool_name: "shell",
+            call_id: "maximum",
+            input: Some(serde_json::json!("a".repeat(1024 * 1024 - 2))),
+        },
+        Duration::from_secs(3600),
+    );
+    let QueryReply::ApprovalInput(chunk) =
+        f.query(Query::GetApprovalInput(approval_input_request(&largest)))
+    else {
+        panic!()
+    };
+    assert_eq!(chunk.total_bytes, ByteOffset(1024 * 1024));
+    assert_eq!(chunk.text.len(), 65_536);
 }

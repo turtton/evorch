@@ -1,5 +1,6 @@
 //! Read-only protocol services. Cursors are server-issued capabilities tied to
 //! a query and collection revision; none contain storage paths or SQL offsets.
+pub(crate) mod approval;
 mod history;
 mod models;
 
@@ -23,7 +24,13 @@ pub(crate) fn error(code: ErrorCode, text: &str) -> WorkbenchError {
     WorkbenchError::new(
         code,
         text,
-        if matches!(code, ErrorCode::Conflict) {
+        if matches!(
+            code,
+            ErrorCode::Conflict
+                | ErrorCode::ResyncRequired
+                | ErrorCode::StaleEpoch
+                | ErrorCode::StaleRevision
+        ) {
             RetryAdvice::AfterResync
         } else {
             RetryAdvice::Never
@@ -41,12 +48,15 @@ pub(crate) fn revision<T: Serialize>(value: &T) -> Revision {
     let hash = Sha256::digest(serde_json::to_vec(value).expect("serializable view"));
     Revision(u64::from_be_bytes(hash[..8].try_into().unwrap()))
 }
-pub(crate) fn text(value: &str, max: usize) -> String {
+pub(crate) fn masked(value: &str) -> String {
     static REDACTOR: std::sync::OnceLock<secret_guard::SecretRedactor> = std::sync::OnceLock::new();
-    let masked = REDACTOR
+    REDACTOR
         .get_or_init(secret_guard::SecretRedactor::from_env)
         .redact(value)
-        .text;
+        .text
+}
+pub(crate) fn text(value: &str, max: usize) -> String {
+    let masked = masked(value);
     // Agent-authored question text permits control characters. Count their
     // JSON escapes too so one valid view cannot consume the whole frame.
     let mut encoded = 2usize;
@@ -89,6 +99,70 @@ impl Pager {
             })
             .map(|(_, _, revision, _)| Some(*revision))
             .ok_or_else(|| error(ErrorCode::Conflict, "unknown page cursor or wrong query"))
+    }
+    /// Backward cursors hold an exclusive end offset; items within each page
+    /// stay chronological so a client can prepend the older page unchanged.
+    pub fn page_backward<T: Clone + Serialize>(
+        &self,
+        key: &str,
+        items: &[T],
+        request: &PageRequest,
+        rev: Revision,
+    ) -> Result<Page<T>, WorkbenchError> {
+        request.validate()?;
+        let mut tokens = self.0.lock().unwrap();
+        let end = match &request.cursor {
+            None => items.len(),
+            Some(cursor) => {
+                let (_, query, revision, offset) = tokens
+                    .iter()
+                    .find(|e| e.0 == cursor.as_str())
+                    .ok_or_else(|| {
+                    error(ErrorCode::Conflict, "unknown or expired page cursor")
+                })?;
+                if query != key || *revision != rev || *offset > items.len() {
+                    return Err(error(
+                        ErrorCode::Conflict,
+                        "page cursor belongs to another query or snapshot",
+                    ));
+                }
+                *offset
+            }
+        };
+        let mut start = end;
+        let mut bytes = 256;
+        while start > 0 && end - start < request.limit as usize {
+            let size = serde_json::to_vec(&items[start - 1])
+                .expect("serializable view")
+                .len()
+                + 1;
+            if bytes + size > PAGE_BYTES {
+                if start == end {
+                    return Err(error(
+                        ErrorCode::InvalidRequest,
+                        "one view exceeds page byte limit",
+                    ));
+                }
+                break;
+            }
+            bytes += size;
+            start -= 1;
+        }
+        let next_cursor = if start > 0 {
+            let token = uuid::Uuid::new_v4().to_string();
+            tokens.push_back((token.clone(), key.to_owned(), rev, start));
+            while tokens.len() > 4096 {
+                tokens.pop_front();
+            }
+            Some(PageCursor::new(token).unwrap())
+        } else {
+            None
+        };
+        Ok(Page {
+            items: items[start..end].to_vec(),
+            next_cursor,
+            snapshot_revision: rev,
+        })
     }
     pub fn page<T: Clone + Serialize>(
         &self,

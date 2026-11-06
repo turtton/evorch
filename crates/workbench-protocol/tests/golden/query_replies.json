@@ -1,4 +1,16 @@
 {
+  "approval_input": {
+    "payload": {
+      "approval_id": "ap-1",
+      "approval_revision": "2",
+      "core_epoch": "7",
+      "next_offset": "6",
+      "offset": "0",
+      "text": "héllo",
+      "total_bytes": "10"
+    },
+    "type": "approval_input"
+  },
   "approvals": {
     "payload": {
       "items": [
@@ -10,10 +22,12 @@
             "surface": "web"
           },
           "id": "ap-1",
+          "input_bytes": "22",
           "revision": "2",
           "run": "run-1",
           "state": "pending",
           "summary": "rm -rf build",
+          "summary_truncated": false,
           "thread": "thr-1",
           "tool_name": "shell"
         }
@@ -195,6 +209,39 @@
       "snapshot_revision": "100"
     },
     "type": "runs"
+  },
+  "snapshot": {
+    "payload": {
+      "high_water": {
+        "core_epoch": "7",
+        "sequence": "40"
+      },
+      "page": {
+        "items": [
+          {
+            "payload": {
+              "retention_reasons": [
+                "active_turn",
+                "connected_clients"
+              ],
+              "running": {
+                "clients": 3,
+                "shell_jobs": 1,
+                "tool_calls": 2,
+                "turns": 1,
+                "waiting_lanes": 0
+              },
+              "state": "ready"
+            },
+            "type": "core_status"
+          }
+        ],
+        "next_cursor": "cur-2",
+        "snapshot_revision": "100"
+      },
+      "snapshot_id": "snap-1"
+    },
+    "type": "snapshot"
   },
   "thread": {
     "payload": {
