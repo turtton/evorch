@@ -196,6 +196,11 @@ impl Projection {
     pub(crate) fn configure(&self, projects: Vec<(ProjectId, PathBuf)>) {
         self.state.lock().unwrap().projects = projects;
     }
+    /// Epoch used by the handshake and subscription cursors.
+    pub fn instance_epoch(&self) -> InstanceEpoch {
+        InstanceEpoch(self.state.lock().unwrap().epoch)
+    }
+
     pub fn approval_registry(&self) -> &Arc<ApprovalRegistry> {
         &self.registry
     }

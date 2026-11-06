@@ -170,7 +170,8 @@ pub struct RequestRejection {
 /// An unknown command, query or control type is reported as
 /// [`ErrorCode::UnsupportedCapability`] (a newer client talking to an older
 /// core); every other defect is [`ErrorCode::InvalidRequest`] or
-/// [`ErrorCode::LimitExceeded`].
+/// [`ErrorCode::LimitExceeded`]. Diagnostics must not quote input tokens: a
+/// transport can reject the frame before the backend output guard is reached.
 pub fn decode_request(
     bytes: &[u8],
     limits: &WireLimits,
@@ -178,7 +179,13 @@ pub fn decode_request(
     let probe: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|error| RequestRejection {
             request_id: None,
-            error: WorkbenchError::invalid_request(format!("frame is not valid JSON: {error}")),
+            // Parser diagnostics may quote attacker-controlled tokens. Only
+            // structural position information is safe before backend protection.
+            error: WorkbenchError::invalid_request(format!(
+                "frame is not valid JSON at line {}, column {}",
+                error.line(),
+                error.column()
+            )),
         })?;
     let request_id = probe
         .get("request_id")
@@ -195,22 +202,21 @@ pub fn decode_request(
     // The envelope is a closed shape too: a stray top-level field (a client
     // trying to supply provenance, say) is refused, not ignored.
     if let Some(object) = probe.as_object()
-        && let Some(extra) = object.keys().find(|key| {
+        && object.keys().any(|key| {
             !matches!(
                 key.as_str(),
                 "request_id" | "session_id" | "kind" | "payload"
             )
         })
     {
-        return Err(rejection(WorkbenchError::invalid_request(format!(
-            "unexpected request field `{}`",
-            extra.escape_debug()
-        ))));
+        return Err(rejection(WorkbenchError::invalid_request(
+            "unexpected request field",
+        )));
     }
 
     let envelope: RequestEnvelope = match serde_json::from_value(probe.clone()) {
         Ok(envelope) => envelope,
-        Err(error) => {
+        Err(_) => {
             let known: Option<&[&str]> = match probe.get("kind").and_then(|k| k.as_str()) {
                 Some("command") => Some(&Command::TYPES),
                 Some("query") => Some(&Query::TYPES),
@@ -225,13 +231,13 @@ pub fn decode_request(
             {
                 return Err(rejection(WorkbenchError::new(
                     ErrorCode::UnsupportedCapability,
-                    format!("unknown request type `{}`", ty.escape_debug()),
+                    "unknown request type",
                     RetryAdvice::Never,
                 )));
             }
-            return Err(rejection(WorkbenchError::invalid_request(format!(
-                "malformed request: {error}"
-            ))));
+            return Err(rejection(WorkbenchError::invalid_request(
+                "malformed request",
+            )));
         }
     };
     envelope

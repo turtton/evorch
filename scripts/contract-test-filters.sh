@@ -48,6 +48,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=pull_request_observer_cache)
       | binary(=pull_request_review_cache)
       | binary(=pull_request_e2e)))
+  | (package(=evorch-core) & binary(=core_cache))
   | (package(=tools) & binary(=bounded_output))
   | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))

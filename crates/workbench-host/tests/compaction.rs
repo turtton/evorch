@@ -149,9 +149,7 @@ async fn saved_command_reports_completion_or_failure_and_never_starts_an_agent_t
                     skills: Vec::new(),
                 }
             )).as_slice(), [HostEvent::ChatRejected { reason, .. }] if reason.contains("in progress")));
-            (sink.service_mut().compaction_task("thread").unwrap())
-                .await
-                .unwrap();
+            sink.service().background_work_notify().notified().await;
             let progress = events.drain_pending_snapshot();
             let starts: Vec<_> = progress
                 .iter()

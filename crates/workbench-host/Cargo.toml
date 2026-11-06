@@ -14,7 +14,10 @@ description = "Core-side command handling for the evorch workbench protocol (ADR
 workbench-protocol = { path = "../workbench-protocol" }
 config = { path = "../config" }
 event-bus = { path = "../event-bus" }
+model = { path = "../model" }
+providers = { path = "../providers" }
 runtime = { path = "../runtime" }
+tools = { path = "../tools" }
 sandbox = { path = "../sandbox" }
 serde_json = { workspace = true }
 serde = { workspace = true }
@@ -25,6 +28,10 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+recorder = { path = "../recorder" }
+routing = { path = "../routing" }
+thiserror = { workspace = true }
+
 [features]
 # Test-only entry points for the in-process adapter's tests.
 test-support = []
@@ -33,7 +40,5 @@ test-support = []
 storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
-providers = { path = "../providers" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tools = { path = "../tools" }

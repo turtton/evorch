@@ -121,7 +121,7 @@
             printf '%s\n' "''${cargoVendorDir:?}" > "$out/cargo-vendor-dir"
           '';
         };
-        shippedCargoArgs = "-p evorch -p gui --bin evorch --bin evorch-gui";
+        shippedCargoArgs = "-p evorch -p gui -p evorch-core --bin evorch --bin evorch-gui --bin evorch-core";
         cargoArtifacts = craneLib.buildDepsOnly (commonArgs // depsOnlyArgs // {
           cargoExtraArgs = shippedCargoArgs;
           doCheck = false;
@@ -161,6 +161,8 @@
           postFixup = ''
             wrapProgram "$out/bin/evorch-gui" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibraries}"
+            wrapProgram "$out/bin/evorch-core" \
+              --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
           '';
           doInstallCheck = true;
           installCheckPhase = ''
@@ -181,6 +183,21 @@
             runHook postInstallCheck
           '';
           meta.mainProgram = "evorch-gui";
+        });
+        evorch-core = craneLib.buildPackage (commonArgs // {
+          pname = "evorch-core";
+          inherit cargoArtifacts;
+          cargoExtraArgs = "-p evorch-core --bin evorch-core";
+          doCheck = false;
+          postFixup = ''
+            wrapProgram "$out/bin/evorch-core" \
+              --prefix PATH : "${pkgs.lib.makeBinPath ([ pkgs.which pkgs.git pkgs.coreutils ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.bubblewrap ])}"
+          '';
+          doInstallCheck = true;
+          installCheckPhase = ''
+            "$out/bin/evorch-core" --help | grep '^usage: evorch-core '
+          '';
+          meta.mainProgram = "evorch-core";
         });
         # CEF for the in-app HTML preview (ADR 0034 B), pinned to the build cef-rs
         # 154.5.0 binds. cef-dll-sys reads it through CEF_PATH instead of
@@ -329,6 +346,7 @@
         } ''
           mkdir -p $out/bin
           ln -s ${evorch}/bin/evorch $out/bin/evorch
+          ln -s ${evorch}/bin/evorch-core $out/bin/evorch-core
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui
           ln -s ${evorch-gui-cef}/bin/evorch-gui-cef $out/bin/evorch-gui-cef
         '';
@@ -467,7 +485,7 @@
         packages = {
           default = defaultPackage;
           # Without CEF on every system; CI smoke-tests this one.
-          inherit evorch;
+          inherit evorch evorch-core;
           evorch-gui = defaultPackage;
           # cargoArtifacts (crane buildDepsOnly) を attic に push するための専用出力。
           # Cargo manifests/config、lockfile、toolchain とビルド設定が同じなら
