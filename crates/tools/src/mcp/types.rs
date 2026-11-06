@@ -17,7 +17,7 @@ pub struct McpClientInfo {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolDefinition {
     pub name: String,
@@ -250,11 +250,13 @@ pub struct McpApprovalPreview {
     /// Safe structured warnings, never URL/headers/args/environment values.
     pub warnings: Vec<ApprovalWarning>,
     pub previous_fingerprint: Option<ApprovalFingerprint>,
+    /// Only the safe metadata actually recorded at the last approval.
+    pub previous_summary: Option<McpApprovalSummary>,
     pub summary: McpApprovalSummary,
     pub approved_ips: Vec<IpAddr>,
 }
 /// Safe diff/preview metadata: no argument, URL query or header values.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpApprovalSummary {
     pub executable: Option<PathBuf>,
@@ -263,7 +265,7 @@ pub struct McpApprovalSummary {
     pub environment_keys: Vec<String>,
     pub secret_references: Vec<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpDestinationSummary {
     pub scheme: String,
@@ -353,17 +355,19 @@ impl fmt::Debug for ResolvedMcpTransport {
         f.write_str("ResolvedMcpTransport(<redacted>)")
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenMcpTool {
     pub public_name: String,
+    /// Frozen permission class; restoring never reads config to invent this.
+    pub transport: super::registry::McpToolTransport,
     pub remote: RemoteToolKey,
     pub definition: McpToolDefinition,
     pub approval_fingerprint: ApprovalFingerprint,
     pub definition_fingerprint: DefinitionFingerprint,
 }
 /// Ordered once at preparation. Restore registers this without discovery.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenMcpSnapshot {
     pub tools: Vec<FrozenMcpTool>,

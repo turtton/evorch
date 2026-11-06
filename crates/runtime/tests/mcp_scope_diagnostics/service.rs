@@ -60,6 +60,7 @@ impl Service {
             serde_json::from_value(json!({"name":"read","inputSchema":{"type":"object"}})).unwrap();
         let snapshot = FrozenMcpSnapshot::from_servers([McpServerTools {
             server_id: "fixture".into(),
+            transport: tools::mcp::McpToolTransport::Http,
             approval_fingerprint: inspection.fingerprint,
             definitions: vec![tool],
         }])

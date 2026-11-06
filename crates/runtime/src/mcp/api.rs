@@ -6,7 +6,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
 use tools::mcp::{
     McpErrorKind,
-    transport::{CancelContext, McpTransport, ShutdownReason},
+    transport::{CancelContext, ShutdownReason},
     types::{
         ApprovalScope, ConfirmMcpApproval, FrozenMcpSnapshot, McpApprovalPreview,
         McpCredentialBackend, McpServerStatus, McpStatusEvent,
@@ -50,7 +50,6 @@ pub struct RunMcpLease {
     registry: Option<Arc<tools::mcp::McpToolRegistry>>,
     cancel: Option<CancelContext>,
     statuses: Vec<McpStatusEvent>,
-    sessions: Vec<Arc<dyn McpTransport>>,
 }
 impl RunMcpLease {
     /// Pure restore: no loader, credential lookup, permit, process or connection.
@@ -60,7 +59,6 @@ impl RunMcpLease {
             registry: None,
             cancel: None,
             statuses: Vec::new(),
-            sessions: Vec::new(),
         }
     }
     /// Pure host integration for a registry whose frozen metadata is already
@@ -77,14 +75,12 @@ impl RunMcpLease {
     pub(super) fn prepared(
         snapshot: FrozenMcpSnapshot,
         statuses: Vec<McpStatusEvent>,
-        sessions: Vec<Arc<dyn McpTransport>>,
         registry: Arc<tools::mcp::McpToolRegistry>,
         cancel: CancelContext,
     ) -> Self {
         Self {
             snapshot: Arc::new(snapshot),
             statuses,
-            sessions,
             registry: Some(registry),
             cancel: Some(cancel),
         }
@@ -96,13 +92,11 @@ impl RunMcpLease {
         base: &tools::ToolExecutor,
         bus: Arc<event_bus::EventBus>,
     ) -> Result<tools::ToolExecutor, McpErrorKind> {
-        let tools = self
-            .registry
-            .as_ref()
-            .map(|registry| registry.tools())
-            .transpose()
-            .map_err(|error| error.kind)?
-            .unwrap_or_default();
+        let registry = match &self.registry {
+            Some(registry) => registry.clone(),
+            None => unavailable_registry(&self.snapshot)?,
+        };
+        let tools = registry.tools().map_err(|error| error.kind)?;
         base.fork_with_run_tools(
             tools
                 .into_iter()
@@ -118,8 +112,11 @@ impl RunMcpLease {
     }
     /// Each transport also provides Drop cleanup if owner cancellation aborts this.
     pub async fn shutdown(&self, reason: ShutdownReason) {
-        for session in &self.sessions {
-            let _ = session.shutdown(reason).await;
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+        if let Some(registry) = &self.registry {
+            registry.shutdown(reason).await;
         }
     }
 }
@@ -154,6 +151,23 @@ pub struct SaveMcpSecret {
     pub expected_revision: SourceRevision,
     pub mutation: McpOverrideMutation,
 }
+/// Remove a reference and its scoped native-keychain entry. No secret value is carried.
+#[derive(Debug)]
+pub struct DeleteMcpSecret {
+    pub scope: ApprovalScope,
+    pub logical_name: String,
+    pub expected_revision: SourceRevision,
+    /// Complete replacement with every reference to logical_name removed.
+    pub mutation: McpOverrideMutation,
+}
+/// The reference was saved first. A keychain error is a PARTIAL success:
+/// settings are saved, but an unavailable/locked/denied key may remain. Never
+/// undo settings or claim that the secret was deleted in this case.
+#[derive(Debug)]
+pub struct DeleteMcpSecretOutcome {
+    pub view: McpSettingsView,
+    pub keychain_error: Option<McpErrorKind>,
+}
 /// Privileged GUI-only API. Not an agent tool, not model ask_user approval.
 /// Call on a background executor, never synchronously on the render thread.
 #[async_trait]
@@ -183,6 +197,14 @@ pub trait McpGuiService: Send + Sync {
         cancel: CancelContext,
     ) -> Result<McpServerStatus, McpErrorKind>;
     async fn save_secret(&self, request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind>;
+    /// Configuration failure never deletes an existing key. Hosts without this
+    /// privileged operation fail closed; it is never an agent-tool capability.
+    async fn delete_secret(
+        &self,
+        _request: DeleteMcpSecret,
+    ) -> Result<DeleteMcpSecretOutcome, McpErrorKind> {
+        Err(McpErrorKind::Unavailable)
+    }
 }
 /// Fail-closed fallback for disabled hosts or failed local service composition.
 /// Records injection without probing backends or doing I/O; benchmark never calls it.
@@ -207,7 +229,7 @@ impl McpRunService for UnavailableMcpService {
         Err(McpErrorKind::Unavailable)
     }
     fn restore_snapshot(&self, request: RestoreMcpRun) -> Result<RunMcpLease, McpErrorKind> {
-        Ok(RunMcpLease::restore_snapshot(request.snapshot))
+        RunMcpLease::from_registry(unavailable_registry(&request.snapshot)?)
     }
 }
 #[async_trait]
@@ -253,4 +275,41 @@ impl McpGuiService for UnavailableMcpService {
     async fn save_secret(&self, _request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind> {
         Err(McpErrorKind::Unavailable)
     }
+}
+
+// Even an unavailable host must retain exactly the already-sent definitions.
+// Only execution is refused; provider schemas and conversation history stay put.
+struct UnavailableConnector;
+#[async_trait]
+impl tools::mcp::McpRegistryConnector for UnavailableConnector {
+    fn tool_transport(&self, _: &str) -> tools::mcp::McpToolTransport {
+        tools::mcp::McpToolTransport::Stdio
+    }
+    async fn check_execution(
+        &self,
+        tool: &tools::mcp::types::FrozenMcpTool,
+    ) -> Result<(), tools::mcp::McpError> {
+        Err(unavailable_error(tool))
+    }
+    async fn connect(
+        &self,
+        tool: &tools::mcp::types::FrozenMcpTool,
+    ) -> Result<Arc<dyn tools::mcp::McpRegistrySession>, tools::mcp::McpError> {
+        Err(unavailable_error(tool))
+    }
+}
+fn unavailable_error(tool: &tools::mcp::types::FrozenMcpTool) -> tools::mcp::McpError {
+    tools::mcp::McpError {
+        server: tool.remote.server_id.clone(),
+        method: "tools/call",
+        request_id: None,
+        kind: McpErrorKind::Unavailable,
+    }
+}
+fn unavailable_registry(
+    snapshot: &FrozenMcpSnapshot,
+) -> Result<Arc<tools::mcp::McpToolRegistry>, McpErrorKind> {
+    tools::mcp::McpToolRegistry::from_snapshot(snapshot.clone(), Arc::new(UnavailableConnector))
+        .map(Arc::new)
+        .map_err(|e| e.kind)
 }

@@ -32,7 +32,8 @@ use tools::{
         types::{
             ApprovalPermit, ApprovalScope, FrozenMcpSnapshot, FrozenMcpTool, McpApprovalInspection,
             McpApprovalStore, McpCredentialBackend, McpServerStatus, McpStatusEvent,
-            ResolvedMcpServer, ResolvedMcpTransport, SecretUnavailableReason,
+            PREPARATION_TIMEOUT_MS, ResolvedMcpServer, ResolvedMcpTransport,
+            SecretUnavailableReason,
         },
     },
 };
@@ -196,8 +197,13 @@ impl ServiceInner {
         scope: &ApprovalScope,
         revision: SourceRevision,
         definition: &McpServerDefinition,
+        expected_fingerprint: Option<tools::mcp::types::ApprovalFingerprint>,
     ) -> Result<(ResolvedMcpServer, ApprovalPermit), McpErrorKind> {
         let (inspection, permit, target) = self.authorize(scope, revision, definition).await?;
+        // Restored bindings must match before secrets are resolved or I/O starts.
+        if expected_fingerprint.is_some_and(|expected| expected != inspection.fingerprint) {
+            return Err(McpErrorKind::ApprovalRevoked);
+        }
         let transport = match (&definition.transport, target) {
             (
                 McpTransportDefinition::Stdio { args, env, .. },
@@ -276,18 +282,26 @@ impl ServiceInner {
         revision: SourceRevision,
         definition: &McpServerDefinition,
         run_cancel: &CancelContext,
+        expected_fingerprint: Option<tools::mcp::types::ApprovalFingerprint>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Arc<PreparedSession>, McpErrorKind> {
+        // One budget covers resolution, connection, negotiation and all list pages.
+        let deadline = deadline.unwrap_or_else(|| {
+            tokio::time::Instant::now() + Duration::from_millis(PREPARATION_TIMEOUT_MS)
+        });
         let (resolved, permit) = tokio::select! {
             biased;
-            _ = run_cancel.cancelled() => return Err(McpErrorKind::Cancelled),
-            result = self.resolved(scope, revision, definition) => result?,
+            _=run_cancel.cancelled()=>return Err(McpErrorKind::Cancelled),
+            result=tokio::time::timeout_at(deadline,self.resolved(scope,revision,definition,expected_fingerprint))=>result.unwrap_or(Err(McpErrorKind::Timeout))?,
         };
-        if run_cancel.is_cancelled() {
-            return Err(McpErrorKind::Cancelled);
-        }
         let kind = match resolved.transport {
             ResolvedMcpTransport::Stdio { .. } => TransportKind::Stdio,
             ResolvedMcpTransport::Http { .. } => TransportKind::Http,
+        };
+        let _http_admission = if kind == TransportKind::Http {
+            Some(self.limiter.try_http_preparation(&scope.canonical_root)?)
+        } else {
+            None
         };
         let fingerprint = resolved.fingerprint;
         let startup = resolved.startup_timeout;
@@ -298,56 +312,75 @@ impl ServiceInner {
             status: McpServerStatus::Connecting,
             reason: None,
         });
-        let (raw, native_stdio): (Arc<dyn McpTransport>, Option<Arc<StdioTransport>>) =
-            if kind == TransportKind::Stdio && self.stdio.is_none() {
-                let transport = StdioTransport::connect(
-                    resolved,
-                    permit,
-                    self.limiter.clone(),
-                    owner.cancel.clone(),
-                )
-                .await
-                .map_err(|error| error.kind)?;
-                (transport.clone(), Some(transport))
-            } else {
-                let factory = if kind == TransportKind::Stdio {
-                    self.stdio.as_ref().expect("injected factory")
+        let connect = async {
+            let pair: (Arc<dyn McpTransport>, Option<Arc<StdioTransport>>) =
+                if kind == TransportKind::Stdio && self.stdio.is_none() {
+                    let transport = StdioTransport::connect(
+                        resolved,
+                        permit,
+                        self.limiter.clone(),
+                        owner.cancel.clone(),
+                    )
+                    .await
+                    .map_err(|error| error.kind)?;
+                    (transport.clone(), Some(transport))
                 } else {
-                    &self.http
+                    let factory = if kind == TransportKind::Stdio {
+                        self.stdio.as_ref().expect("injected factory")
+                    } else {
+                        &self.http
+                    };
+                    (
+                        factory
+                            .connect(resolved, permit, self.limiter.clone(), owner.cancel.clone())
+                            .await
+                            .map_err(|error| error.kind)?,
+                        None,
+                    )
                 };
-                (
-                    factory
-                        .connect(resolved, permit, self.limiter.clone(), owner.cancel.clone())
-                        .await
-                        .map_err(|error| error.kind)?,
-                    None,
-                )
-            };
-        let client = McpClient::connect_transport_with_timeouts(
-            raw.clone(),
-            scope.server_id.clone(),
-            kind,
-            McpClientInfo {
-                name: "evorch".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            },
-            startup,
-            request_timeout,
-            owner.cancel.clone(),
-        )
-        .await;
-        let mut client = match client {
-            Ok(client) => client,
-            Err(error) => {
-                let _ = raw.shutdown(ShutdownReason::InitializationFailed).await;
-                return Err(error.kind);
-            }
+            Ok::<_, McpErrorKind>(pair)
         };
-        let definitions = match client.list_tools().await {
-            Ok(tools) => tools,
-            Err(error) => {
-                let _ = raw.shutdown(ShutdownReason::InitializationFailed).await;
-                return Err(error.kind);
+        let (raw, native_stdio) = tokio::select! {
+            biased;
+            _=run_cancel.cancelled()=>return Err(McpErrorKind::Cancelled),
+            result=tokio::time::timeout_at(deadline,connect)=>result.unwrap_or(Err(McpErrorKind::Timeout))?,
+        };
+        let initialize = async {
+            let mut client = McpClient::connect_transport_with_timeouts(
+                raw.clone(),
+                scope.server_id.clone(),
+                kind,
+                McpClientInfo {
+                    name: "evorch".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                },
+                startup,
+                request_timeout,
+                owner.cancel.clone(),
+            )
+            .await
+            .map_err(|error| error.kind)?;
+            let definitions = client.list_tools().await.map_err(|error| error.kind)?;
+            Ok::<_, McpErrorKind>((client, definitions))
+        };
+        let result = tokio::select! {
+            biased;
+            _=run_cancel.cancelled()=>Err(McpErrorKind::Cancelled),
+            result=tokio::time::timeout_at(deadline,initialize)=>result.unwrap_or(Err(McpErrorKind::Timeout)),
+        };
+        let (client, definitions) = match result {
+            Ok(prepared) => prepared,
+            Err(kind) => {
+                // Once a transport exists, cancellation/deadline must await cleanup,
+                // not merely drop the initialization future and hope Drop can reap.
+                let _ = raw
+                    .shutdown(if kind == McpErrorKind::Cancelled {
+                        ShutdownReason::Cancelled
+                    } else {
+                        ShutdownReason::InitializationFailed
+                    })
+                    .await;
+                return Err(kind);
             }
         };
         Ok(Arc::new(PreparedSession {
@@ -357,11 +390,14 @@ impl ServiceInner {
                 restarted: false,
             }),
             native_stdio,
+            kind,
             label: scope.server_id.clone(),
             startup,
             request_timeout,
             definitions,
             fingerprint,
+            limiter: self.limiter.clone(),
+            root: scope.canonical_root.clone(),
             raw,
             _owner: owner,
         }))
@@ -399,9 +435,12 @@ impl Drop for SessionOwner {
     }
 }
 struct PreparedSession {
+    limiter: Arc<ProjectMcpLimiter>,
+    root: PathBuf,
     fingerprint: tools::mcp::types::ApprovalFingerprint,
     client: AsyncMutex<ClientState>,
     native_stdio: Option<Arc<StdioTransport>>,
+    kind: TransportKind,
     label: String,
     startup: Duration,
     request_timeout: Duration,
@@ -432,27 +471,62 @@ impl McpRegistrySession for PreparedSession {
                 request_id: None,
                 kind,
             };
-            let Some(transport) = self.native_stdio.as_ref().filter(|_| !state.restarted) else {
-                return Err(error(McpErrorKind::Unavailable));
+            let modern_http = self.kind == TransportKind::Http
+                && state.client.era() == tools::mcp::protocol::ProtocolEra::Modern;
+            let _http_admission = if self.kind == TransportKind::Http {
+                Some(
+                    self.limiter
+                        .try_http_preparation(&self.root)
+                        .map_err(error)?,
+                )
+            } else {
+                None
             };
-            // A new, explicit call may replace a dead process once. The failed
-            // call was already returned as unknown; it is never replayed here.
-            state.restarted = true;
-            transport.restart(self._owner.cancel.clone()).await?;
-            let mut client = McpClient::connect_transport_with_timeouts(
-                self.raw.clone(),
-                self.label.clone(),
-                TransportKind::Stdio,
-                McpClientInfo {
-                    name: "evorch".into(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-                self.startup,
-                self.request_timeout,
-                self._owner.cancel.clone(),
-            )
-            .await?;
-            let live = client.list_tools().await?;
+            let recovery = async {
+                let live = if modern_http {
+                    // Modern HTTP is stateless. This is a later, DIFFERENT explicit
+                    // call: re-list before it, never replay the unknown call.
+                    state.client.list_tools().await?
+                } else {
+                    if state.restarted {
+                        return Err(error(McpErrorKind::Unavailable));
+                    }
+                    state.restarted = true;
+                    if self.kind == TransportKind::Stdio {
+                        let Some(transport) = self.native_stdio.as_ref() else {
+                            return Err(error(McpErrorKind::Unavailable));
+                        };
+                        transport.restart(self._owner.cancel.clone()).await?;
+                    }
+                    // Legacy HTTP may initialize a replacement session ONCE. A
+                    // stdio process generation likewise gets one new negotiation.
+                    let mut client = McpClient::connect_transport_with_timeouts(
+                        self.raw.clone(),
+                        self.label.clone(),
+                        self.kind,
+                        McpClientInfo {
+                            name: "evorch".into(),
+                            version: env!("CARGO_PKG_VERSION").into(),
+                        },
+                        self.startup,
+                        self.request_timeout,
+                        self._owner.cancel.clone(),
+                    )
+                    .await?;
+                    if self.kind == TransportKind::Http && client.era() != state.client.era() {
+                        return Err(error(McpErrorKind::Protocol));
+                    }
+                    let live = client.list_tools().await?;
+                    state.client = client;
+                    live
+                };
+                Ok(live)
+            };
+            let live = tokio::select! {
+                biased;
+                _=self._owner.cancel.cancelled()=>return Err(error(McpErrorKind::Cancelled)),
+                result=tokio::time::timeout(Duration::from_millis(PREPARATION_TIMEOUT_MS),recovery)=>result.map_err(|_|error(McpErrorKind::Timeout))??,
+            };
             if self
                 .definitions
                 .iter()
@@ -460,7 +534,6 @@ impl McpRegistrySession for PreparedSession {
             {
                 return Err(error(McpErrorKind::DefinitionChanged));
             }
-            state.client = client;
             state.failed = false;
         }
         match state.client.call_tool(name, args).await {
@@ -479,7 +552,8 @@ struct RunConnector {
     inner: Arc<ServiceInner>,
     root: PathBuf,
     role: Role,
-    sessions: BTreeMap<String, Arc<PreparedSession>>,
+    sessions: AsyncMutex<BTreeMap<String, Arc<PreparedSession>>>,
+    cancel: CancelContext,
     transports: BTreeMap<String, McpToolTransport>,
 }
 #[async_trait]
@@ -492,8 +566,11 @@ impl McpRegistryConnector for RunConnector {
     }
     async fn check_execution(&self, tool: &FrozenMcpTool) -> Result<(), McpError> {
         let check = async {
+            if self.cancel.is_cancelled() {
+                return Err(McpErrorKind::Cancelled);
+            }
             let config = mcp::load_project(&self.root).map_err(mcp_config_error_kind)?;
-            if config.preparation_blocked {
+            if config.preparation_blocked || config.canonical_root != self.root {
                 return Err(McpErrorKind::Configuration);
             }
             let definition = config
@@ -501,7 +578,12 @@ impl McpRegistryConnector for RunConnector {
                 .get(&tool.remote.server_id)
                 .and_then(|entry| entry.definition.as_ref())
                 .ok_or(McpErrorKind::ApprovalRevoked)?;
-            if !definition.enabled
+            let kind = match definition.transport {
+                McpTransportDefinition::Stdio { .. } => McpToolTransport::Stdio,
+                McpTransportDefinition::Http { .. } => McpToolTransport::Http,
+            };
+            if kind != tool.transport
+                || !definition.enabled
                 || !definition
                     .roles
                     .iter()
@@ -531,16 +613,73 @@ impl McpRegistryConnector for RunConnector {
         })
     }
     async fn connect(&self, tool: &FrozenMcpTool) -> Result<Arc<dyn McpRegistrySession>, McpError> {
-        self.sessions
+        let error = |kind| McpError {
+            server: tool.remote.server_id.clone(),
+            method: "tools/call",
+            request_id: None,
+            kind,
+        };
+        let mut sessions = self.sessions.lock().await;
+        if self.cancel.is_cancelled() {
+            return Err(error(McpErrorKind::Cancelled));
+        }
+        if let Some(session) = sessions.get(&tool.remote.server_id) {
+            return Ok(session.clone());
+        }
+        // Registration was inert. Recheck before the first lazy preparation too.
+        self.check_execution(tool).await?;
+        let config = mcp::load_project(&self.root).map_err(|e| error(mcp_config_error_kind(e)))?;
+        let definition = config
+            .servers
             .get(&tool.remote.server_id)
-            .cloned()
-            .map(|v| v as Arc<dyn McpRegistrySession>)
-            .ok_or_else(|| McpError {
-                server: tool.remote.server_id.clone(),
-                method: "tools/call",
-                request_id: None,
-                kind: McpErrorKind::Unavailable,
-            })
+            .and_then(|entry| entry.definition.as_ref())
+            .ok_or_else(|| error(McpErrorKind::ApprovalRevoked))?;
+        if !definition.enabled
+            || !definition
+                .roles
+                .iter()
+                .any(|role| role == self.role.config_key())
+        {
+            return Err(error(McpErrorKind::ApprovalRevoked));
+        }
+        let scope = ApprovalScope {
+            canonical_root: self.root.clone(),
+            server_id: tool.remote.server_id.clone(),
+        };
+        let session = self
+            .inner
+            .prepare_server(
+                &scope,
+                config.revision,
+                definition,
+                &self.cancel,
+                Some(tool.approval_fingerprint),
+                None,
+            )
+            .await
+            .map_err(error)?;
+        if session.fingerprint != tool.approval_fingerprint {
+            let _ = session
+                .raw
+                .shutdown(ShutdownReason::InitializationFailed)
+                .await;
+            return Err(error(McpErrorKind::ApprovalRevoked));
+        }
+        sessions.insert(tool.remote.server_id.clone(), session.clone());
+        Ok(session)
+    }
+    async fn shutdown(&self, reason: ShutdownReason) {
+        self.cancel.cancel();
+        let raw: Vec<_> = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| session.raw.clone())
+            .collect();
+        for transport in raw {
+            let _ = transport.shutdown(reason).await;
+        }
     }
 }
 #[async_trait]
@@ -565,7 +704,7 @@ impl McpRunService for ProjectMcpService {
         let mut servers = Vec::new();
         let mut sessions = BTreeMap::new();
         let mut transports = BTreeMap::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(PREPARATION_TIMEOUT_MS);
         // Sequential admission is deterministic by server ID and also bounds HTTP
         // discovery concurrency (one); the project process limiter never waits.
         for (id, entry) in &config.servers {
@@ -573,43 +712,52 @@ impl McpRunService for ProjectMcpService {
                 canonical_root: config.canonical_root.clone(),
                 server_id: id.clone(),
             };
-            let (status, reason) = if config.preparation_blocked
-                || entry.definition.is_none() && !entry.tombstone
-            {
-                (McpServerStatus::Invalid, Some(McpErrorKind::Configuration))
-            } else if entry.tombstone
-                || entry.definition.as_ref().is_some_and(|d| {
-                    !d.enabled || !d.roles.iter().any(|role| role == request.role.config_key())
-                })
-            {
-                (McpServerStatus::Disabled, None)
-            } else {
-                let definition = entry.definition.as_ref().expect("checked definition");
-                let result = tokio::select! {
-                    biased;
-                    _=request.cancel.cancelled()=>Err(McpErrorKind::Cancelled),
-                    result=tokio::time::timeout_at(deadline,self.inner.prepare_server(&scope,config.revision,definition,&request.cancel))=>result.unwrap_or(Err(McpErrorKind::Timeout)),
-                };
-                match result {
-                    Ok(session) => {
-                        servers.push(McpServerTools {
-                            server_id: id.clone(),
-                            approval_fingerprint: session.fingerprint,
-                            definitions: session.definitions.clone(),
-                        });
-                        transports.insert(
-                            id.clone(),
-                            match definition.transport {
-                                McpTransportDefinition::Stdio { .. } => McpToolTransport::Stdio,
-                                McpTransportDefinition::Http { .. } => McpToolTransport::Http,
-                            },
-                        );
-                        sessions.insert(id.clone(), session);
-                        (McpServerStatus::Ready, None)
+            let (status, reason) =
+                if config.preparation_blocked || entry.definition.is_none() && !entry.tombstone {
+                    (McpServerStatus::Invalid, Some(McpErrorKind::Configuration))
+                } else if entry.tombstone
+                    || entry.definition.as_ref().is_some_and(|d| {
+                        !d.enabled || !d.roles.iter().any(|role| role == request.role.config_key())
+                    })
+                {
+                    (McpServerStatus::Disabled, None)
+                } else {
+                    let definition = entry.definition.as_ref().expect("checked definition");
+                    let result = self
+                        .inner
+                        .prepare_server(
+                            &scope,
+                            config.revision,
+                            definition,
+                            &request.cancel,
+                            None,
+                            Some(deadline),
+                        )
+                        .await;
+                    match result {
+                        Ok(session) => {
+                            servers.push(McpServerTools {
+                                server_id: id.clone(),
+                                transport: match definition.transport {
+                                    McpTransportDefinition::Stdio { .. } => McpToolTransport::Stdio,
+                                    McpTransportDefinition::Http { .. } => McpToolTransport::Http,
+                                },
+                                approval_fingerprint: session.fingerprint,
+                                definitions: session.definitions.clone(),
+                            });
+                            transports.insert(
+                                id.clone(),
+                                match definition.transport {
+                                    McpTransportDefinition::Stdio { .. } => McpToolTransport::Stdio,
+                                    McpTransportDefinition::Http { .. } => McpToolTransport::Http,
+                                },
+                            );
+                            sessions.insert(id.clone(), session);
+                            (McpServerStatus::Ready, None)
+                        }
+                        Err(kind) => (status_for(kind), Some(kind)),
                     }
-                    Err(kind) => (status_for(kind), Some(kind)),
-                }
-            };
+                };
             let event = McpStatusEvent {
                 scope,
                 status,
@@ -619,15 +767,12 @@ impl McpRunService for ProjectMcpService {
             statuses.push(event);
         }
         let snapshot = FrozenMcpSnapshot::from_servers(servers).map_err(|error| error.kind)?;
-        let raw = sessions
-            .values()
-            .map(|session| session.raw.clone())
-            .collect();
         let connector = Arc::new(RunConnector {
             inner: self.inner.clone(),
             root: config.canonical_root,
             role: request.role,
-            sessions,
+            sessions: AsyncMutex::new(sessions),
+            cancel: request.cancel.clone(),
             transports,
         });
         let registry = Arc::new(
@@ -637,15 +782,39 @@ impl McpRunService for ProjectMcpService {
         Ok(RunMcpLease::prepared(
             snapshot,
             statuses,
-            raw,
             registry,
             request.cancel,
         ))
     }
-    fn restore_snapshot(&self, _request: RestoreMcpRun) -> Result<RunMcpLease, McpErrorKind> {
-        // E3 will bind a lazy connector. Never silently perform fresh discovery on
-        // a history-bearing conversation before that restore contract is installed.
-        Err(McpErrorKind::Unavailable)
+    fn restore_snapshot(&self, request: RestoreMcpRun) -> Result<RunMcpLease, McpErrorKind> {
+        // No canonicalize/load/env/DNS/credentials/admission, or task spawning.
+        if !request.context.canonical_root.is_absolute() {
+            return Err(McpErrorKind::Configuration);
+        }
+        let transports = request
+            .snapshot
+            .tools
+            .iter()
+            .map(|tool| (tool.remote.server_id.clone(), tool.transport))
+            .collect();
+        let connector = Arc::new(RunConnector {
+            inner: self.inner.clone(),
+            root: request.context.canonical_root,
+            role: request.context.role,
+            sessions: AsyncMutex::new(BTreeMap::new()),
+            transports,
+            cancel: request.context.cancel.clone(),
+        });
+        let registry = Arc::new(
+            McpToolRegistry::from_snapshot(request.snapshot.clone(), connector)
+                .map_err(|e| e.kind)?,
+        );
+        Ok(RunMcpLease::prepared(
+            request.snapshot,
+            Vec::new(),
+            registry,
+            request.context.cancel,
+        ))
     }
 }
 fn process_env(name: &str) -> Option<String> {

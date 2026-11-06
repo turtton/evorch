@@ -1,6 +1,8 @@
 //! Privileged GUI operations. Never registered as agent tools.
 use super::*;
-use crate::mcp::{McpGuiService, McpSettingsView, SaveMcpSecret};
+use crate::mcp::{
+    DeleteMcpSecret, DeleteMcpSecretOutcome, McpGuiService, McpSettingsView, SaveMcpSecret,
+};
 use config::mcp::{McpOverrideMutation, ProjectMcpConfig};
 use tools::mcp::{
     secrets::{credential_error_reason, credential_key},
@@ -128,10 +130,8 @@ impl ServiceInner {
         });
     }
 }
-#[async_trait]
-impl McpGuiService for ProjectMcpService {
-    async fn settings(&self, root: PathBuf) -> Result<McpSettingsView, McpErrorKind> {
-        let config = mcp::load_project(&root).map_err(mcp_config_error_kind)?;
+impl ProjectMcpService {
+    fn settings_view(&self, config: ProjectMcpConfig) -> McpSettingsView {
         let previous = self
             .subscribe_status(config.canonical_root.clone())
             .borrow()
@@ -180,7 +180,14 @@ impl McpGuiService for ProjectMcpService {
                 .or_insert_with(|| watch::channel(Vec::new()).0)
                 .send_replace(statuses.clone());
         }
-        Ok(McpSettingsView { config, statuses })
+        McpSettingsView { config, statuses }
+    }
+}
+#[async_trait]
+impl McpGuiService for ProjectMcpService {
+    async fn settings(&self, root: PathBuf) -> Result<McpSettingsView, McpErrorKind> {
+        let config = mcp::load_project(&root).map_err(mcp_config_error_kind)?;
+        Ok(self.settings_view(config))
     }
     async fn save_override(
         &self,
@@ -255,7 +262,7 @@ impl McpGuiService for ProjectMcpService {
             }
             let session = self
                 .inner
-                .prepare_server(&scope, revision, &definition, &cancel)
+                .prepare_server(&scope, revision, &definition, &cancel, None, None)
                 .await?;
             // Short-lived lease uses precisely the run admission path and always reaps.
             let valid = match load_scope(&scope, revision, McpErrorKind::ConfigConflict) {
@@ -293,6 +300,69 @@ impl McpGuiService for ProjectMcpService {
                 Err(kind)
             }
         }
+    }
+    async fn delete_secret(
+        &self,
+        request: DeleteMcpSecret,
+    ) -> Result<DeleteMcpSecretOutcome, McpErrorKind> {
+        let root = request.scope.canonical_root.clone();
+        let (saved, keychain_error) = {
+            let _serial = self
+                .inner
+                .secret_write
+                .lock()
+                .map_err(|_| McpErrorKind::Unavailable)?;
+            let (current, _) = load_scope(
+                &request.scope,
+                request.expected_revision,
+                McpErrorKind::ConfigConflict,
+            )?;
+            mcp::validate::validate_keychain_name(&request.logical_name)
+                .map_err(mcp_config_error_kind)?;
+            let McpOverrideMutation::Upsert {
+                server_id,
+                definition,
+            } = &request.mutation
+            else {
+                return Err(McpErrorKind::Configuration);
+            };
+            if server_id != &request.scope.server_id
+                || references(definition, &request.logical_name)
+            {
+                return Err(McpErrorKind::Configuration);
+            }
+            mcp::validate::validate_server(server_id, definition).map_err(mcp_config_error_kind)?;
+            // Never delete an in-use credential before a conflicting save fails.
+            let saved = mcp::save_override(&root, current.revision, request.mutation)
+                .map_err(mcp_config_error_kind)?;
+            let still_unused = mcp::load_project(&root).is_ok_and(|live| {
+                live.revision == saved.revision
+                    && !live.preparation_blocked
+                    && !live
+                        .servers
+                        .get(&request.scope.server_id)
+                        .and_then(|entry| entry.definition.as_ref())
+                        .is_some_and(|definition| references(definition, &request.logical_name))
+            });
+            let keychain_error = if !still_unused {
+                Some(McpErrorKind::ConfigConflict)
+            } else {
+                match &self.inner.credentials {
+                    McpCredentialBackend::Unavailable(reason) => Some(secret_error(*reason)),
+                    McpCredentialBackend::Available(store) => store
+                        .delete(&credential_key(&request.scope, &request.logical_name))
+                        .err()
+                        .map(|error| secret_error(credential_error_reason(error))),
+                }
+            };
+            (saved, keychain_error)
+        };
+        Ok(DeleteMcpSecretOutcome {
+            // Report the committed write, not a fallible later reload. A GUI
+            // refresh may observe another edit but must not undo this outcome.
+            view: self.settings_view(saved),
+            keychain_error,
+        })
     }
     async fn save_secret(&self, request: SaveMcpSecret) -> Result<McpSettingsView, McpErrorKind> {
         let root = request.scope.canonical_root.clone();

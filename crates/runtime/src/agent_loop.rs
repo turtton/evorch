@@ -162,6 +162,7 @@ pub(crate) struct LoopState {
     benchmark_checked: bool,
     benchmark_replay: bool,
     mcp_lease: Option<crate::mcp::RunMcpLease>,
+    inherited_mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     mcp_cancellation: Option<mcp_setup::RunMcpCancellation>,
     pub(crate) task: RunTask,
     pub(crate) shared: LoopShared,
@@ -257,6 +258,7 @@ impl LoopState {
             benchmark_checked: false,
             benchmark_replay: false,
             mcp_lease: None,
+            inherited_mcp_snapshot: None,
             mcp_cancellation: None,
             task,
             shared,
@@ -367,6 +369,13 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             .upgrade()
             .is_some_and(|runtime| runtime.benchmark_recording.get().is_some());
     let restored = task.restored.take();
+    let mcp_snapshot = if benchmark_mode {
+        None
+    } else {
+        restored
+            .as_ref()
+            .and_then(|state| state.mcp_snapshot.clone())
+    };
     let is_restored = restored.is_some();
     let mut review_skill_refs = restored
         .as_ref()
@@ -462,6 +471,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
         }
     };
     let mut state = LoopState::new(task, loop_shared, channels, context, image_model, policy);
+    state.inherited_mcp_snapshot = mcp_snapshot;
     state.budget.spawn_credits = state.task.config.spawn_credits.clone();
     state.thread_id = thread_id;
     state.boundary_pending = boundary_pending;
@@ -624,11 +634,15 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
             }
         }
         // Benchmark bypasses the service itself, not merely its transports.
-        // E3 installs saved snapshots for restore/continue; never rediscover here.
-        if !benchmark_mode && !is_restored && !history_only {
-            state
-                .prepare_mcp_run(project.as_ref().map(|project| project.root.clone()))
-                .await;
+        if !benchmark_mode
+            && !state
+                .prepare_mcp_run(
+                    project.as_ref().map(|project| project.root.clone()),
+                    is_restored || history_only,
+                )
+                .await
+        {
+            return;
         }
         // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
         // 決まるため、LoopState 構築後に確定させる。

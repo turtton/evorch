@@ -21,6 +21,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     pub(crate) provenance: provenance::ConversationProvenance,
     /// Revision of the snapshot this state was read from, or last saved. A
     /// state built from a bare record has none and cannot be saved.
@@ -97,6 +98,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            mcp_snapshot: descriptor.mcp_snapshot,
             provenance: provenance::ConversationProvenance::unknown(),
             snapshot_revision: revision::SnapshotRevision::unknown(),
             admission_reservation: None,
@@ -153,6 +155,9 @@ pub struct InterruptedToolCall {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRestoreDescriptor {
+    /// Frozen definitions/order/bindings/permission class, never live sessions or secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub responses_replay: Option<crate::ResponsesReplayState>,
     /// Identifies one unregistered chat attempt for conditional consumption release.
@@ -540,6 +545,7 @@ fn write_snapshot_with_context(
         }
     };
     let descriptor = RunRestoreDescriptor {
+        mcp_snapshot: state.frozen_mcp_snapshot().cloned(),
         responses_replay: Some(context.responses_replay.for_saved_end(end)),
         admission_reservation_id: None,
         thread_id: state.thread_id.clone(),
@@ -572,7 +578,9 @@ fn write_snapshot_with_context(
             .iter()
             .map(|spec| spec.name.clone())
             .collect(),
-        project_root: config.project_root.clone(),
+        project_root: state
+            .mcp_project_root()
+            .or_else(|| config.project_root.clone()),
         pending_escalation: None,
         completed_turn_end: state
             .completed_turn_end

@@ -57,3 +57,18 @@ impl McpApprovalStore for UnavailableApprovals {
         Err(McpErrorKind::NeedsApproval)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gui_and_runs_share_the_same_privileged_service_instance() {
+        let services = McpHostServices::for_user(McpCredentialBackend::Unavailable(
+            SecretUnavailableReason::Unavailable,
+        ));
+        assert!(std::ptr::addr_eq(
+            Arc::as_ptr(&services.runs),
+            Arc::as_ptr(&services.gui)
+        ));
+    }
+}

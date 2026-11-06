@@ -14,18 +14,46 @@ impl Drop for RunMcpCancellation {
     }
 }
 impl LoopState {
-    pub(super) async fn prepare_mcp_run(&mut self, root: Option<PathBuf>) {
+    pub(crate) fn frozen_mcp_snapshot(&self) -> Option<&tools::mcp::types::FrozenMcpSnapshot> {
+        self.mcp_lease
+            .as_ref()
+            .map(|lease| lease.snapshot())
+            .or(self.inherited_mcp_snapshot.as_ref())
+    }
+    pub(crate) fn mcp_project_root(&self) -> Option<PathBuf> {
+        self.mcp_lease
+            .as_ref()?
+            .statuses()
+            .first()
+            .map(|status| status.scope.canonical_root.clone())
+    }
+    pub(super) async fn prepare_mcp_run(&mut self, root: Option<PathBuf>, restore: bool) -> bool {
         let Some(runtime) = self.runtime() else {
-            return;
+            return true;
         };
-        let Some(service) = runtime.shared.mcp_service.get().cloned() else {
-            return;
+        let service = match runtime.shared.mcp_service.get().cloned() {
+            Some(service) => service,
+            None if !restore => return true,
+            None => Arc::new(crate::mcp::UnavailableMcpService::new(
+                crate::mcp::McpCredentialBackend::Unavailable(
+                    crate::mcp::SecretUnavailableReason::Unavailable,
+                ),
+            )) as Arc<dyn crate::mcp::McpRunService>,
         };
         let Some(root) = root
             .or_else(|| self.task.config.project_root.clone())
             .or_else(|| self.shared.executor.default_cwd())
         else {
-            return;
+            if restore
+                && self
+                    .inherited_mcp_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.tools.is_empty())
+            {
+                self.finish_error("Saved MCP project identity is unavailable".into());
+                return false;
+            }
+            return true;
         };
         let cancel = CancelContext::default();
         let token = cancel.clone();
@@ -46,15 +74,21 @@ impl LoopState {
             cancel: cancel.clone(),
             bridge,
         });
-        match service
-            .prepare_new_run(crate::mcp::PrepareMcpRun {
-                canonical_root: root,
-                run_id: self.task.run_id.to_string(),
-                role: self.task.role,
-                cancel,
+        let context = crate::mcp::PrepareMcpRun {
+            canonical_root: root,
+            run_id: self.task.run_id.to_string(),
+            role: self.task.role,
+            cancel,
+        };
+        let prepared = if restore {
+            service.restore_snapshot(crate::mcp::RestoreMcpRun {
+                context,
+                snapshot: self.inherited_mcp_snapshot.clone().unwrap_or_default(),
             })
-            .await
-        {
+        } else {
+            service.prepare_new_run(context).await
+        };
+        match prepared {
             Ok(lease) => {
                 for status in lease.statuses() {
                     if let Some(reason) = status.reason {
@@ -80,11 +114,22 @@ impl LoopState {
                             .shutdown(tools::mcp::transport::ShutdownReason::InitializationFailed)
                             .await;
                         self.mcp_diagnostic(kind, None);
+                        if restore {
+                            self.finish_error("Saved MCP tools cannot be registered".into());
+                            return false;
+                        }
                     }
                 }
             }
-            Err(kind) => self.mcp_diagnostic(kind, None),
+            Err(kind) => {
+                self.mcp_diagnostic(kind, None);
+                if restore {
+                    self.finish_error("Saved MCP tools cannot be restored".into());
+                    return false;
+                }
+            }
         }
+        true
     }
     fn mcp_diagnostic(
         &self,

@@ -690,3 +690,36 @@ fn removing_secret_references_does_not_force_unneeded_public_https_confirmation(
         Err(McpErrorKind::NeedsApproval)
     ));
 }
+
+#[test]
+fn previous_approval_summary_is_the_recorded_safe_metadata_not_current_values() {
+    let dir = tempdir().unwrap();
+    let ledger = ApprovalLedger::at_user_config_dir(dir.path().into()).unwrap();
+    let mut first = definition();
+    let McpTransportDefinition::Stdio { env, args, .. } = &mut first.transport else {
+        panic!("stdio")
+    };
+    env.insert(
+        "API_TOKEN".into(),
+        ValueSource::Template {
+            template: literal("env-secret-sentinel"),
+        },
+    );
+    args.push(literal("--token=arg-secret-sentinel"));
+    let before = inspect(&first);
+    approve(&ledger, &before);
+    let raw = std::fs::read_to_string(dir.path().join("mcp-approvals.json")).unwrap();
+    assert!(!raw.contains("env-secret-sentinel"));
+    assert!(!raw.contains("arg-secret-sentinel"));
+    let mut second = definition();
+    let McpTransportDefinition::Stdio { env, .. } = &mut second.transport else {
+        panic!("stdio")
+    };
+    env.insert("NEW_KEY".into(), source("new-ref"));
+    let current = inspect(&second);
+    let preview = ledger.preview(&current).unwrap();
+    assert_eq!(preview.previous_summary.as_ref(), Some(&before.summary));
+    assert_eq!(preview.summary, current.summary);
+    assert_ne!(preview.summary, before.summary);
+    assert!(!format!("{preview:?}").contains("secret-sentinel"));
+}

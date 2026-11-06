@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::OnceCell;
 
 /// The host-process capability must not be represented as network-only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum McpToolTransport {
     Http,
     Stdio,
@@ -56,10 +56,13 @@ pub trait McpRegistryConnector: Send + Sync {
     /// May return this run's already-prepared session. Enforce permit, shared
     /// limiter, cancellation and restart budget here, before any I/O.
     async fn connect(&self, tool: &FrozenMcpTool) -> Result<Arc<dyn McpRegistrySession>, McpError>;
+    /// Await cleanup of every session, including those opened lazily on restore.
+    async fn shutdown(&self, _reason: super::transport::ShutdownReason) {}
 }
 
 pub struct McpServerTools {
     pub server_id: String,
+    pub transport: McpToolTransport,
     pub approval_fingerprint: ApprovalFingerprint,
     pub definitions: Vec<McpToolDefinition>,
 }
@@ -101,7 +104,12 @@ impl FrozenMcpSnapshot {
                 if definitions
                     .insert(
                         (key.server_id.clone(), key.tool_name.clone()),
-                        (key, definition, server.approval_fingerprint),
+                        (
+                            key,
+                            definition,
+                            server.approval_fingerprint,
+                            server.transport,
+                        ),
                     )
                     .is_some()
                 {
@@ -113,15 +121,16 @@ impl FrozenMcpSnapshot {
                 }
             }
         }
-        let bindings = McpNameBindings::new(definitions.values().map(|(key, _, _)| key.clone()))
+        let bindings = McpNameBindings::new(definitions.values().map(|(key, _, _, _)| key.clone()))
             .map_err(|_| error("catalog", "tools/list", McpErrorKind::Configuration))?;
         let mut tools = Vec::with_capacity(definitions.len());
         for (public_name, key) in bindings.iter() {
-            let (_, definition, approval_fingerprint) = definitions
+            let (_, definition, approval_fingerprint, transport) = definitions
                 .remove(&(key.server_id.clone(), key.tool_name.clone()))
                 .expect("binding was built from these definitions");
             tools.push(FrozenMcpTool {
                 public_name: public_name.into(),
+                transport,
                 remote: key.clone(),
                 definition_fingerprint: DefinitionFingerprint::for_definition(&definition),
                 definition,
@@ -204,9 +213,16 @@ impl McpToolRegistry {
             sessions
                 .entry(tool.remote.server_id.clone())
                 .or_insert_with(OnceCell::const_new);
-            transports
-                .entry(tool.remote.server_id.clone())
-                .or_insert_with(|| connector.tool_transport(&tool.remote.server_id));
+            if transports
+                .insert(tool.remote.server_id.clone(), tool.transport)
+                .is_some_and(|previous| previous != tool.transport)
+            {
+                return Err(error(
+                    &tool.remote.server_id,
+                    "tools/list",
+                    McpErrorKind::Configuration,
+                ));
+            }
         }
         Ok(Self {
             backend: FrozenRegistry {
@@ -216,6 +232,10 @@ impl McpToolRegistry {
                 transports,
             },
         })
+    }
+
+    pub async fn shutdown(&self, reason: super::transport::ShutdownReason) {
+        self.backend.connector.shutdown(reason).await;
     }
 
     pub fn snapshot(&self) -> Option<&FrozenMcpSnapshot> {
@@ -399,6 +419,7 @@ mod tests {
     fn server(id: &str, definitions: Vec<McpToolDefinition>) -> McpServerTools {
         McpServerTools {
             server_id: id.into(),
+            transport: McpToolTransport::Http,
             approval_fingerprint: ApprovalFingerprint([1; 32]),
             definitions,
         }
@@ -741,7 +762,9 @@ mod tests {
     fn stdio_permissions_include_host_process_capabilities() {
         let connector = FakeConnector::new(vec![definition("read")]);
         *connector.transport.lock().unwrap() = McpToolTransport::Stdio;
-        let registry = registry(snapshot(vec![definition("read")]), &connector);
+        let mut saved = snapshot(vec![definition("read")]);
+        saved.tools[0].transport = McpToolTransport::Stdio;
+        let registry = registry(saved, &connector);
         let permissions = registry.tools().unwrap()[0].permissions();
         assert!(
             permissions.fs_read

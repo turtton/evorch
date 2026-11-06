@@ -25,3 +25,5 @@ No worker starts implementation before T0 commit. Once parallel work starts, E
 owns synchronization, not per-worker pulls into a dirty shared tree. Report owned
 paths, changes, exact tests/results, unknowns and explicit staging paths to E.
 PR creation is deferred (or draft only); merge needs separate permission.
+
+E3 ownership transfer: approval previous-summary changes in `tools/src/mcp/approval.rs` and `tools/tests/mcp_approval.rs` are integrated by E (parent assignment). E also owns runtime restore fixture initializer repairs and the GUI service reexport. F2 keeps its four settings/controller/action-test files; G keeps cache E2E, script filters and user docs.

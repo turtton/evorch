@@ -5,7 +5,8 @@ use event_bus::LifecycleEvent;
 impl LoopState {
     pub(super) async fn finalize(&mut self) {
         let run_id = self.task.run_id.to_string();
-        if let Some(lease) = self.mcp_lease.take() {
+        // Keep frozen metadata available to the terminal snapshot after session cleanup.
+        if let Some(lease) = &self.mcp_lease {
             lease
                 .shutdown(tools::mcp::transport::ShutdownReason::Completed)
                 .await;

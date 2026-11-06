@@ -10,7 +10,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tools::{
@@ -24,7 +24,16 @@ use tools::{
 };
 
 #[derive(Default)]
-struct Factory(AtomicUsize);
+struct WireState {
+    calls: Mutex<Vec<serde_json::Value>>,
+    lists: AtomicUsize,
+    initializes: AtomicUsize,
+    fail_calls: AtomicUsize,
+    changed_schema: AtomicBool,
+    legacy: AtomicBool,
+}
+#[derive(Default)]
+struct Factory(AtomicUsize, Arc<WireState>);
 #[async_trait]
 impl McpTransportFactory for Factory {
     async fn connect(
@@ -46,10 +55,10 @@ impl McpTransportFactory for Factory {
             _ => None,
         };
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(Transport(Mutex::new(slot))))
+        Ok(Arc::new(Transport(Mutex::new(slot), self.1.clone())))
     }
 }
-struct Transport(Mutex<Option<Box<dyn McpProcessPermit>>>);
+struct Transport(Mutex<Option<Box<dyn McpProcessPermit>>>, Arc<WireState>);
 #[async_trait]
 impl McpTransport for Transport {
     async fn exchange(
@@ -57,14 +66,40 @@ impl McpTransport for Transport {
         request: RpcRequest,
         _: CancelContext,
     ) -> Result<McpResponseEnvelope, McpError> {
+        if request.method == "server/discover" && self.1.legacy.load(Ordering::SeqCst) {
+            return McpResponseEnvelope::new(Some(400),McpResponseHeaders::default(),vec![serde_json::from_value(json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32601,"message":"Method not found"}})).unwrap()],64).map_err(error);
+        }
         let result = match request.method.as_str() {
+            "initialize" => {
+                self.1.initializes.fetch_add(1, Ordering::SeqCst);
+                json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+            }
             "server/discover" => {
                 json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"})
             }
             "tools/list" => {
-                json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"read","description":"remote definition","inputSchema":{"type":"object"}}]})
+                self.1.lists.fetch_add(1, Ordering::SeqCst);
+                let schema = if self.1.changed_schema.load(Ordering::SeqCst) {
+                    json!({"type":"object","properties":{"changed":{"type":"string"}}})
+                } else {
+                    json!({"type":"object"})
+                };
+                json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"read","description":"remote definition","inputSchema":schema}]})
             }
             "tools/call" => {
+                self.1
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push(request.params["arguments"].clone());
+                if self
+                    .1
+                    .fail_calls
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+                {
+                    return Err(error(McpErrorKind::OutcomeUnknown));
+                }
                 json!({"resultType":"complete","content":[{"type":"text","text":"mcp-ok"}]})
             }
             _ => panic!("unexpected method"),
@@ -500,6 +535,7 @@ async fn missing_environment_is_safe_and_consistent_for_env_and_args() {
 }
 struct Model {
     observed: Mutex<Vec<Vec<String>>>,
+    observed_schemas: Mutex<Vec<Vec<providers::ToolSpec>>>,
 }
 
 struct ServiceSpy(AtomicUsize);
@@ -535,6 +571,7 @@ async fn benchmark_never_prepares_mcp() {
         let bus = Arc::new(EventBus::new(64));
         let model = Arc::new(Model {
             observed: Mutex::new(Vec::new()),
+            observed_schemas: Mutex::new(Vec::new()),
         });
         let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
             .with_mcp_service(spy.clone());
@@ -580,6 +617,7 @@ impl AgentModel for Model {
             .lock()
             .unwrap()
             .push(tools.iter().map(|tool| tool.name.clone()).collect());
+        self.observed_schemas.lock().unwrap().push(tools.to_vec());
         Ok(providers::ChatResponse {
             message: providers::Message {
                 role: providers::Role::Assistant,
@@ -601,6 +639,7 @@ async fn unapproved_server_is_skipped_and_run_continues() {
     let bus = Arc::new(EventBus::new(64));
     let model = Arc::new(Model {
         observed: Mutex::new(Vec::new()),
+        observed_schemas: Mutex::new(Vec::new()),
     });
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_mcp_service(service.clone());
@@ -628,6 +667,7 @@ async fn approved_names_are_published_after_executor_rebuild_without_role_leakag
     let bus = Arc::new(EventBus::new(64));
     let model = Arc::new(Model {
         observed: Mutex::new(Vec::new()),
+        observed_schemas: Mutex::new(Vec::new()),
     });
     let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
         .with_mcp_service(service);
@@ -834,7 +874,9 @@ async fn gui_http_preview_pins_only_the_checked_destination_without_connecting()
 struct MemorySecrets {
     values: Mutex<std::collections::BTreeMap<String, sandbox::Secret>>,
     after_set: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    after_delete: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     deletes: AtomicUsize,
+    fail_delete: AtomicBool,
 }
 impl sandbox::CredentialStore for MemorySecrets {
     fn get(&self, key: &str) -> Result<Option<sandbox::Secret>, sandbox::CredentialError> {
@@ -852,7 +894,13 @@ impl sandbox::CredentialStore for MemorySecrets {
     }
     fn delete(&self, key: &str) -> Result<(), sandbox::CredentialError> {
         self.deletes.fetch_add(1, Ordering::SeqCst);
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(sandbox::CredentialError::KeychainLocked);
+        }
         self.values.lock().unwrap().remove(key);
+        if let Some(hook) = self.after_delete.lock().unwrap().take() {
+            hook();
+        }
         Ok(())
     }
 }
@@ -1055,7 +1103,9 @@ impl McpTransport for BlockingTransport {
             cancel.cancelled().await;
             Err(error(McpErrorKind::Cancelled))
         } else {
-            Transport(Mutex::new(None)).exchange(request, cancel).await
+            Transport(Mutex::new(None), Default::default())
+                .exchange(request, cancel)
+                .await
         }
     }
     async fn notify(&self, _: RpcNotification) -> Result<(), McpError> {
@@ -1147,4 +1197,622 @@ async fn gui_public_https_without_credentials_does_not_require_approval() {
         McpServerStatus::Ready
     );
     assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+}
+
+fn saved_executor(lease: &runtime::mcp::RunMcpLease) -> ToolExecutor {
+    let bus = Arc::new(EventBus::new(64));
+    lease
+        .register_executor(&ToolExecutor::new(bus.clone()), bus)
+        .unwrap()
+}
+fn tool_context() -> tools::ToolExecutionContext {
+    tools::ToolExecutionContext {
+        run_id: "restored".into(),
+        ..Default::default()
+    }
+}
+#[tokio::test]
+async fn restore_registers_snapshot_without_reading_config_or_connecting() {
+    let root = project("");
+    let factory = Arc::new(Factory::default());
+    approve(root.path(), &ledger(root.path()));
+    let service = service(root.path(), factory.clone(), unavailable());
+    let first = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let snapshot = first.snapshot().clone();
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    first.shutdown(ShutdownReason::Completed).await;
+    // A missing config cannot affect pure registration or the frozen schemas.
+    std::fs::remove_file(root.path().join(".evorch/mcp.toml")).unwrap();
+    let restored = service
+        .restore_snapshot(runtime::mcp::RestoreMcpRun {
+            context: request(root.path(), Role::Worker),
+            snapshot,
+        })
+        .unwrap();
+    let executor = saved_executor(&restored);
+    assert!(executor.tool_permissions("mcp__fixture__read").is_some());
+    assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+    assert_eq!(serde_json::to_vec(restored.snapshot()).unwrap(), bytes);
+    let output = executor
+        .execute(&tool_context(), "mcp__fixture__read", "missing", json!({}))
+        .await
+        .unwrap();
+    assert!(output.is_error);
+    assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+    restored.shutdown(ShutdownReason::Completed).await;
+}
+#[tokio::test]
+async fn restore_first_call_connects_once_and_checks_live_definition() {
+    for changed in [false, true] {
+        let root = project("");
+        let factory = Arc::new(Factory::default());
+        approve(root.path(), &ledger(root.path()));
+        let service = service(root.path(), factory.clone(), unavailable());
+        let first = service
+            .prepare_new_run(request(root.path(), Role::Worker))
+            .await
+            .unwrap();
+        let snapshot = first.snapshot().clone();
+        first.shutdown(ShutdownReason::Completed).await;
+        factory.1.changed_schema.store(changed, Ordering::SeqCst);
+        let restored = service
+            .restore_snapshot(runtime::mcp::RestoreMcpRun {
+                context: request(root.path(), Role::Worker),
+                snapshot: snapshot.clone(),
+            })
+            .unwrap();
+        let executor = saved_executor(&restored);
+        assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+        let result = executor
+            .execute(&tool_context(), "mcp__fixture__read", "lazy", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, changed);
+        assert_eq!(factory.0.load(Ordering::SeqCst), 2);
+        assert_eq!(factory.1.calls.lock().unwrap().len(), usize::from(!changed));
+        assert_eq!(restored.snapshot(), &snapshot);
+        if changed {
+            assert_eq!(result.detail.unwrap()["class"], "definition_changed");
+        }
+        restored.shutdown(ShutdownReason::Completed).await;
+        let slots: Vec<_> = (0..4)
+            .map(|_| service.limiter().try_acquire(root.path()).unwrap())
+            .collect();
+        drop(slots);
+    }
+}
+#[tokio::test]
+async fn restored_snapshot_is_retained_when_host_service_is_unavailable() {
+    let root = project("");
+    let factory = Arc::new(Factory::default());
+    approve(root.path(), &ledger(root.path()));
+    let service = service(root.path(), factory.clone(), unavailable());
+    let first = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let snapshot = first.snapshot().clone();
+    first.shutdown(ShutdownReason::Completed).await;
+    let absent = runtime::mcp::UnavailableMcpService::new(unavailable());
+    let restored = absent
+        .restore_snapshot(runtime::mcp::RestoreMcpRun {
+            context: request(root.path(), Role::Worker),
+            snapshot: snapshot.clone(),
+        })
+        .unwrap();
+    let executor = saved_executor(&restored);
+    let output = executor
+        .execute(
+            &tool_context(),
+            "mcp__fixture__read",
+            "unavailable",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert!(output.is_error);
+    assert_eq!(output.detail.unwrap()["class"], "unavailable");
+    assert_eq!(restored.snapshot(), &snapshot);
+    assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn restored_revoked_or_wrong_role_never_connects() {
+    for role in [Role::Worker, Role::Advisor] {
+        let root = project("");
+        let factory = Arc::new(Factory::default());
+        let approvals = ledger(root.path());
+        approve(root.path(), &approvals);
+        let service = service(root.path(), factory.clone(), unavailable());
+        let first = service
+            .prepare_new_run(request(root.path(), Role::Worker))
+            .await
+            .unwrap();
+        let snapshot = first.snapshot().clone();
+        first.shutdown(ShutdownReason::Completed).await;
+        if role == Role::Worker {
+            service.revoke_approval(scope(root.path())).await.unwrap();
+        }
+        let restored = service
+            .restore_snapshot(runtime::mcp::RestoreMcpRun {
+                context: request(root.path(), role),
+                snapshot: snapshot.clone(),
+            })
+            .unwrap();
+        let output = saved_executor(&restored)
+            .execute(&tool_context(), "mcp__fixture__read", "denied", json!({}))
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+        assert_eq!(restored.snapshot(), &snapshot);
+    }
+}
+fn public_http_project() -> tempfile::TempDir {
+    let root = project("");
+    std::fs::write(
+        root.path().join(".evorch/mcp.toml"),
+        "version=1\n[servers.fixture]\ntype='http'\nurl='https://8.8.8.8/mcp'\n",
+    )
+    .unwrap();
+    root
+}
+#[tokio::test]
+async fn modern_http_unknown_call_is_not_replayed_but_later_explicit_call_recovers() {
+    let root = public_http_project();
+    let factory = Arc::new(Factory::default());
+    let service = service(root.path(), factory.clone(), unavailable());
+    let lease = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let snapshot = lease.snapshot().clone();
+    let executor = saved_executor(&lease);
+    factory.1.fail_calls.store(1, Ordering::SeqCst);
+    let first = executor
+        .execute(
+            &tool_context(),
+            "mcp__fixture__read",
+            "unknown",
+            json!({"request":"one"}),
+        )
+        .await
+        .unwrap();
+    assert!(first.is_error);
+    assert_eq!(first.detail.unwrap()["class"], "outcome_unknown");
+    assert_eq!(
+        factory.1.calls.lock().unwrap().as_slice(),
+        &[json!({"request":"one"})]
+    );
+    assert_eq!(factory.1.lists.load(Ordering::SeqCst), 1);
+    let second = executor
+        .execute(
+            &tool_context(),
+            "mcp__fixture__read",
+            "other",
+            json!({"request":"two"}),
+        )
+        .await
+        .unwrap();
+    assert!(!second.is_error);
+    assert_eq!(factory.1.lists.load(Ordering::SeqCst), 2);
+    assert_eq!(factory.1.initializes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        factory.1.calls.lock().unwrap().as_slice(),
+        &[json!({"request":"one"}), json!({"request":"two"})]
+    );
+    assert_eq!(lease.snapshot(), &snapshot);
+    lease.shutdown(ShutdownReason::Completed).await;
+}
+#[tokio::test]
+async fn legacy_http_reinitializes_only_once_for_a_later_explicit_call() {
+    let root = public_http_project();
+    let factory = Arc::new(Factory::default());
+    factory.1.legacy.store(true, Ordering::SeqCst);
+    let service = service(root.path(), factory.clone(), unavailable());
+    let lease = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let executor = saved_executor(&lease);
+    assert_eq!(factory.1.initializes.load(Ordering::SeqCst), 1);
+    factory.1.fail_calls.store(1, Ordering::SeqCst);
+    assert!(
+        executor
+            .execute(
+                &tool_context(),
+                "mcp__fixture__read",
+                "one",
+                json!({"request":1})
+            )
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert_eq!(factory.1.initializes.load(Ordering::SeqCst), 1);
+    assert!(
+        !executor
+            .execute(
+                &tool_context(),
+                "mcp__fixture__read",
+                "two",
+                json!({"request":2})
+            )
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert_eq!(factory.1.initializes.load(Ordering::SeqCst), 2);
+    factory.1.fail_calls.store(1, Ordering::SeqCst);
+    assert!(
+        executor
+            .execute(
+                &tool_context(),
+                "mcp__fixture__read",
+                "three",
+                json!({"request":3})
+            )
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert!(
+        executor
+            .execute(
+                &tool_context(),
+                "mcp__fixture__read",
+                "four",
+                json!({"request":4})
+            )
+            .await
+            .unwrap()
+            .is_error
+    );
+    assert_eq!(factory.1.initializes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        factory.1.calls.lock().unwrap().as_slice(),
+        &[
+            json!({"request":1}),
+            json!({"request":2}),
+            json!({"request":3})
+        ]
+    );
+    lease.shutdown(ShutdownReason::Completed).await;
+}
+fn delete_request(root: &Path) -> runtime::mcp::DeleteMcpSecret {
+    let config = config::mcp::load_project(root).unwrap();
+    let mut definition = config.servers["fixture"].definition.clone().unwrap();
+    let config::mcp::McpTransportDefinition::Stdio { env, .. } = &mut definition.transport else {
+        panic!("stdio")
+    };
+    env.remove("TOKEN");
+    runtime::mcp::DeleteMcpSecret {
+        scope: scope(root),
+        logical_name: "token".into(),
+        expected_revision: config.revision,
+        mutation: config::mcp::McpOverrideMutation::Upsert {
+            server_id: "fixture".into(),
+            definition,
+        },
+    }
+}
+#[tokio::test]
+async fn gui_secret_delete_saves_reference_removal_before_deleting_only_its_key() {
+    for failed in [false, true] {
+        let root = project("");
+        let store = Arc::new(MemorySecrets::default());
+        let service = service(
+            root.path(),
+            Arc::new(Factory::default()),
+            McpCredentialBackend::Available(store.clone()),
+        );
+        service
+            .save_secret(secret_request(root.path(), "secret-delete-sentinel"))
+            .await
+            .unwrap();
+        let key = tools::mcp::secrets::credential_key(&scope(root.path()), "token");
+        store.values.lock().unwrap().insert(
+            "unrelated-provider-key".into(),
+            sandbox::Secret::from("untouched".to_owned()),
+        );
+        store.fail_delete.store(failed, Ordering::SeqCst);
+        let result = service
+            .delete_secret(delete_request(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.keychain_error,
+            failed.then_some(McpErrorKind::SecretLocked)
+        );
+        let definition = result.view.config.servers["fixture"]
+            .definition
+            .as_ref()
+            .unwrap();
+        let config::mcp::McpTransportDefinition::Stdio { env, .. } = &definition.transport else {
+            panic!("stdio")
+        };
+        assert!(!env.contains_key("TOKEN"));
+        let values = store.values.lock().unwrap();
+        assert_eq!(values.contains_key(&key), failed);
+        assert!(values.contains_key("unrelated-provider-key"));
+        assert!(!format!("{result:?}").contains("secret-delete-sentinel"));
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 1);
+    }
+}
+#[tokio::test]
+async fn gui_stale_or_still_referenced_secret_delete_never_deletes_a_key() {
+    let root = project("");
+    let store = Arc::new(MemorySecrets::default());
+    let service = service(
+        root.path(),
+        Arc::new(Factory::default()),
+        McpCredentialBackend::Available(store.clone()),
+    );
+    service
+        .save_secret(secret_request(root.path(), "kept"))
+        .await
+        .unwrap();
+    let mut invalid = delete_request(root.path());
+    let config::mcp::McpOverrideMutation::Upsert { definition, .. } = &mut invalid.mutation else {
+        panic!("upsert")
+    };
+    let config::mcp::McpTransportDefinition::Stdio { env, .. } = &mut definition.transport else {
+        panic!("stdio")
+    };
+    env.insert(
+        "SECOND_TOKEN".into(),
+        config::mcp::ValueSource::Keychain {
+            name: "token".into(),
+        },
+    );
+    let before = std::fs::read(root.path().join(".evorch/mcp.toml")).unwrap();
+    assert_eq!(
+        service.delete_secret(invalid).await.unwrap_err(),
+        McpErrorKind::Configuration
+    );
+    assert_eq!(
+        std::fs::read(root.path().join(".evorch/mcp.toml")).unwrap(),
+        before
+    );
+    let stale = delete_request(root.path());
+    std::fs::write(
+        root.path().join(".evorch/mcp.toml"),
+        [before, b"\n# external edit\n".to_vec()].concat(),
+    )
+    .unwrap();
+    assert_eq!(
+        service.delete_secret(stale).await.unwrap_err(),
+        McpErrorKind::ConfigConflict
+    );
+    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    assert_eq!(store.values.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn persisted_chat_restores_the_frozen_mcp_snapshot_without_discovery() {
+    for prepared in [false, true] {
+        let root = project("");
+        approve(root.path(), &ledger(root.path()));
+        let factory = Arc::new(Factory::default());
+        let service = Arc::new(service(root.path(), factory.clone(), unavailable()));
+        let config = storage::StorageConfig {
+            db_path: root.path().join("restore.sqlite3"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(config.clone()).unwrap();
+        let model = Arc::new(Model {
+            observed: Default::default(),
+            observed_schemas: Default::default(),
+        });
+        let build = || {
+            let bus = Arc::new(EventBus::new(64));
+            AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+                .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap())
+        };
+        let runtime = build();
+        let runtime = if prepared {
+            runtime.with_mcp_service(service.clone())
+        } else {
+            runtime
+        };
+        let first = runtime.delegate_background(
+            Role::Worker,
+            "prior".into(),
+            RunConfig {
+                name: Some(format!("chat:{}:frozen", Role::Worker.name())),
+                project_root: Some(root.path().join(".")),
+                ..Default::default()
+            },
+        );
+        runtime.wait(first).await.unwrap();
+        drop(runtime);
+        if prepared {
+            let record = storage::Database::open(&config)
+                .unwrap()
+                .run_context(&first.to_string())
+                .unwrap()
+                .unwrap();
+            let descriptor: serde_json::Value = serde_json::from_str(&record.config_json).unwrap();
+            assert_eq!(
+                descriptor["project_root"].as_str().unwrap(),
+                root.path().canonicalize().unwrap().to_str().unwrap()
+            );
+            assert!(descriptor["mcp_snapshot"].is_object());
+        }
+        let raw = std::fs::read(root.path().join(".evorch/mcp.toml")).unwrap();
+        std::fs::remove_file(root.path().join(".evorch/mcp.toml")).unwrap();
+        factory.1.changed_schema.store(true, Ordering::SeqCst);
+        let runtime = build().with_mcp_service(service);
+        let continued = runtime
+            .delegate_chat(
+                "frozen",
+                Role::Worker,
+                "followup".into(),
+                RunConfig {
+                    project_root: Some(root.path().to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        runtime.wait(continued).await.unwrap();
+        assert_eq!(factory.0.load(Ordering::SeqCst), usize::from(prepared));
+        let external = |tools: &Vec<providers::ToolSpec>| {
+            tools
+                .iter()
+                .filter(|tool| tool.name.starts_with("mcp__"))
+                .map(|tool| serde_json::to_value(tool).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let original = {
+            let observed = model.observed_schemas.lock().unwrap();
+            assert_eq!(observed.len(), 2);
+            let original = external(&observed[0]);
+            assert_eq!(original.len(), usize::from(prepared));
+            assert_eq!(original, external(&observed[1]));
+            original
+        };
+        std::fs::write(root.path().join(".evorch/mcp.toml"), raw).unwrap();
+        let fresh = runtime.delegate_background(
+            Role::Worker,
+            "fresh".into(),
+            RunConfig {
+                project_root: Some(root.path().to_owned()),
+                ..Default::default()
+            },
+        );
+        runtime.wait(fresh).await.unwrap();
+        assert_eq!(factory.0.load(Ordering::SeqCst), usize::from(prepared) + 1);
+        let observed = model.observed_schemas.lock().unwrap();
+        assert_ne!(original, external(&observed[2]));
+    }
+}
+#[tokio::test]
+async fn gui_secret_delete_without_backend_is_a_reported_reference_only_success() {
+    let root = project("");
+    let store = Arc::new(MemorySecrets::default());
+    let factory = Arc::new(Factory::default());
+    let available = service(
+        root.path(),
+        factory.clone(),
+        McpCredentialBackend::Available(store.clone()),
+    );
+    available
+        .save_secret(secret_request(root.path(), "retained-unavailable"))
+        .await
+        .unwrap();
+    let unavailable = service(root.path(), factory, unavailable());
+    let result = unavailable
+        .delete_secret(delete_request(root.path()))
+        .await
+        .unwrap();
+    assert_eq!(result.keychain_error, Some(McpErrorKind::SecretUnavailable));
+    assert_eq!(store.values.lock().unwrap().len(), 1);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    let config::mcp::McpTransportDefinition::Stdio { env, .. } =
+        &result.view.config.servers["fixture"]
+            .definition
+            .as_ref()
+            .unwrap()
+            .transport
+    else {
+        panic!("stdio")
+    };
+    assert!(!env.contains_key("TOKEN"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn preparation_deadline_awaits_cleanup_for_gui_and_new_run() {
+    for gui in [true, false] {
+        let root = project("");
+        approve(root.path(), &ledger(root.path()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(BlockingFactory {
+            entered: entered.clone(),
+            shutdowns: shutdowns.clone(),
+        });
+        let service = Arc::new(
+            ProjectMcpService::new(
+                unavailable(),
+                ledger(root.path()),
+                Arc::new(NetworkGuard::new().unwrap()),
+            )
+            .with_transport_factories(factory.clone(), factory),
+        );
+        let request = request(root.path(), Role::Worker);
+        let scope = scope(root.path());
+        let revision = config::mcp::load_project(root.path()).unwrap().revision;
+        let task = tokio::spawn({
+            let service = service.clone();
+            async move {
+                if gui {
+                    assert_eq!(
+                        service
+                            .test_connection(scope, revision, CancelContext::default())
+                            .await
+                            .unwrap_err(),
+                        McpErrorKind::Timeout
+                    )
+                } else {
+                    let lease = service.prepare_new_run(request).await.unwrap();
+                    assert!(lease.snapshot().tools.is_empty());
+                    assert_eq!(lease.statuses()[0].reason, Some(McpErrorKind::Timeout));
+                }
+            }
+        });
+        entered.notified().await;
+        tokio::time::advance(std::time::Duration::from_millis(
+            tools::mcp::types::PREPARATION_TIMEOUT_MS,
+        ))
+        .await;
+        task.await.unwrap();
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        let slots: Vec<_> = (0..4)
+            .map(|_| service.limiter().try_acquire(root.path()).unwrap())
+            .collect();
+        drop(slots);
+    }
+}
+
+#[tokio::test]
+async fn gui_secret_delete_reports_committed_success_even_if_a_later_config_reload_fails() {
+    let root = project("");
+    let store = Arc::new(MemorySecrets::default());
+    let service = service(
+        root.path(),
+        Arc::new(Factory::default()),
+        McpCredentialBackend::Available(store.clone()),
+    );
+    service
+        .save_secret(secret_request(root.path(), "removed"))
+        .await
+        .unwrap();
+    let path = root.path().join(".evorch/mcp.toml");
+    *store.after_delete.lock().unwrap() = Some(Box::new(move || {
+        std::fs::write(path, "broken external edit [").unwrap()
+    }));
+    let result = service
+        .delete_secret(delete_request(root.path()))
+        .await
+        .unwrap();
+    assert_eq!(result.keychain_error, None);
+    assert!(store.values.lock().unwrap().is_empty());
+    assert!(!result.view.config.preparation_blocked);
+    let config::mcp::McpTransportDefinition::Stdio { env, .. } =
+        &result.view.config.servers["fixture"]
+            .definition
+            .as_ref()
+            .unwrap()
+            .transport
+    else {
+        panic!("stdio")
+    };
+    assert!(!env.contains_key("TOKEN"));
+    assert!(
+        config::mcp::load_project(root.path())
+            .unwrap()
+            .preparation_blocked
+    );
 }

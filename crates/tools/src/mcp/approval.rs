@@ -238,6 +238,8 @@ struct Ledger {
 struct Record {
     scope: ApprovalScope,
     fingerprint: ApprovalFingerprint,
+    // Bounded by MAX_LEDGER_BYTES; contains no argument/query/header/env values.
+    summary: McpApprovalSummary,
     approved_ips: Vec<IpAddr>,
     revoked: bool,
 }
@@ -424,7 +426,11 @@ impl McpApprovalStore for ApprovalLedger {
             source_revision: current.source_revision,
             fingerprint: current.fingerprint,
             warnings: current.warnings.clone(),
-            previous_fingerprint: previous.filter(|r| !r.revoked).map(|r| r.fingerprint),
+            previous_fingerprint: previous
+                .as_ref()
+                .filter(|r| !r.revoked)
+                .map(|r| r.fingerprint),
+            previous_summary: previous.filter(|r| !r.revoked).map(|r| r.summary),
             summary: current.summary.clone(),
             approved_ips: current.approved_ips.clone(),
         };
@@ -463,6 +469,7 @@ impl McpApprovalStore for ApprovalLedger {
         ledger.entries.push(Record {
             scope: current.scope.clone(),
             fingerprint: current.fingerprint,
+            summary: current.summary.clone(),
             approved_ips: current.approved_ips.clone(),
             revoked: false,
         });
@@ -484,6 +491,7 @@ impl McpApprovalStore for ApprovalLedger {
         ledger.entries.push(Record {
             scope: scope.clone(),
             fingerprint: ApprovalFingerprint([0; 32]),
+            summary: McpApprovalSummary::default(),
             approved_ips: vec![],
             revoked: true,
         });

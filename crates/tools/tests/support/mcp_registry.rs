@@ -60,6 +60,7 @@ impl DormantMcp {
     pub fn new(definition: McpToolDefinition) -> Self {
         let snapshot = FrozenMcpSnapshot::from_servers([McpServerTools {
             server_id: "fixture".into(),
+            transport: tools::mcp::McpToolTransport::Http,
             approval_fingerprint: ApprovalFingerprint::from_projection(b"fixture"),
             definitions: vec![definition],
         }])

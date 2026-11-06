@@ -106,6 +106,9 @@ fn fixture_with_model(
         benchmark: None,
         benchmark_checked: false,
         benchmark_replay: false,
+        mcp_lease: None,
+        mcp_cancellation: None,
+        inherited_mcp_snapshot: None,
         task: RunTask {
             publication: crate::runtime::ExecutionControl::new(false).publication(),
             ancestry: Default::default(),

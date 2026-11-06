@@ -207,9 +207,8 @@ The old registry constructor/discover adapter is removed. Runtime scope tests us
 frozen bindings, real approved HTTP transport and modern discovery, preserving
 scope/per-tool denial before I/O, one CLI approval, lifecycle events and safe
 five-key diagnostic detail. No wildcard/test alias bypasses the role boundary.
-Runtime restore/continue wiring (E3) remains separate work; this backend's
-restore method currently fails closed. The GUI backend and host injection are
-implemented as described below.
+Runtime restore/continue wiring (E3) restores saved definitions without I/O, as
+described below. The GUI backend and host injection are implemented below.
 
 Secret failures remain distinct: SecretUnavailable / SecretLocked / SecretDenied /
 SecretMissing. MissingEnvironment(McpValueField) carries only a fixed field enum
@@ -274,3 +273,46 @@ and GUI services via `WorkbenchState::with_mcp_settings_service`; demo is inert.
 The headless composition does native backend initialization on a blocking worker
 and exposes no approval action to the agent. Tools/runtime remain keychain-feature
 independent; tests inject memory backends and explicitly unavailable classifications.
+
+## Restore, recovery and secret removal (E3)
+
+- `FrozenMcpTool.transport: McpToolTransport` persists the original permission class.
+  Registration never asks the current connector to reinterpret it. Changed live
+  transport rejects execution instead of reducing stdio to network-only powers.
+- `RunRestoreDescriptor.mcp_snapshot: Option<FrozenMcpSnapshot>` saves ordered
+  definitions, bindings and fingerprints, but no session/process/permit/secret.
+  None means no MCP preparation: history inherits an empty set, not new discovery.
+  Terminal cleanup retains frozen metadata until persistence finishes.
+- `restore_snapshot(RestoreMcpRun)` constructs the registry/lease synchronously,
+  without filesystem/env/DNS/credentials/admission or task spawning. An unavailable
+  service still registers saved definitions with a refusing connector. First call
+  checks enabled/role/consent/destination, lazy-connects, then compares the called
+  remote definition. Denial/mismatch never changes schemas or existing history.
+- `McpRegistryConnector::shutdown` owns prepared and later lazy sessions. Lease
+  shutdown/cancellation stops the connector, so executor references outliving the
+  lease cannot spawn replacements. No session or discovery is shared across runs.
+- HTTP preparation has four nonwaiting slots per canonical project, across run,
+  GUI and lazy paths, separate from the four live-stdio slots. Exhaustion is a
+  classified LimitExceeded. Each preparation has a 30000ms budget; new runs share
+  one total deadline across servers. Deadline/cancel after transport creation
+  awaits shutdown/reap. The deadline regression uses paused Tokio time.
+- Unknown calls are returned once, never replayed. On a DIFFERENT explicit later
+  call, modern HTTP re-lists statelessly; legacy HTTP may reinitialize once. Fixed
+  definitions/consent/destination remain authoritative.
+- `McpApprovalPreview.previous_summary` is the last approved safe ledger summary,
+  not a reconstruction from current config. Only executable/canonical cwd,
+  destination origin, environment KEY NAMES and reference names are saved; no
+  arguments or literal/expanded env/header/token values enter this record.
+- `DeleteMcpSecret { scope, logical_name, expected_revision, mutation }` requires a
+  matching-server full Upsert removing ALL references to that logical key. Validate
+  and atomically save TOML BEFORE scoped key deletion; failed save never deletes
+  an existing key. Recheck live config before delete. `DeleteMcpSecretOutcome {
+  view, keychain_error }` distinguishes full success from reference-saved/key-retained
+  partial success (locked/denied/unavailable/conflict). Never use plaintext fallback
+  or delete unrelated/provider keys. GUI must not label partial success as complete
+  deletion or as a completely failed save.
+
+E3 regressions cover service restore and database-backed chat restart, including a
+conversation started without an MCP service. Only a new independent run receives
+changed schemas. Host identity compares GUI/run Arc data pointers. Real OS-keychain
+smoke remains a separate final validation item.
