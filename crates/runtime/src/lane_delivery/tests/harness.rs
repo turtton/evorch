@@ -151,6 +151,32 @@ async fn waiting_and_done_use_harness_receipts_without_lane_credit_or_human_auth
     assert_eq!((images, evidence), (0, None));
 }
 #[tokio::test]
+async fn failed_restore_admission_retries_same_notice_without_explicit_resume() {
+    let mut f = Fixture::new();
+    let (run, host) = f.lead().await;
+    f.finish(run).await;
+    let n = notice(&f, 1, 42, PrNoticeMode::Manual);
+    f.model.admission_required.store(true, Ordering::SeqCst);
+    f.model.fail_admission_next.store(true, Ordering::SeqCst);
+    assert_eq!(
+        f.runtime
+            .drive_lane_deliveries("delivery-lead")
+            .await
+            .unwrap(),
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed)
+    );
+    assert_eq!(phase(&f, &n), PrNoticePhase::Ready);
+    assert_eq!(occurrences(&f, run, 1), 0);
+    assert!(f.runtime.wait_admission(run).await.is_err());
+    // A new delivery kick, not ExplicitUserResume, retries the durable notice.
+    delivered(&f).await;
+    f.runtime.wait(run).await.unwrap();
+    assert_eq!(phase(&f, &n), PrNoticePhase::Adopted);
+    assert_eq!(occurrences(&f, run, 1), 1);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn commit_failure_retries_same_id_and_ack_failure_never_reappends() {
     let mut f = Fixture::new();
     let (run, _) = f.lead().await;
@@ -495,74 +521,125 @@ async fn expired_pr_lease_is_recovered_by_the_common_startup_worker() {
 #[tokio::test]
 async fn receipt_restart_recovers_unpresented_input_with_or_without_ack_repair() {
     for fail_ack in [false, true] {
-        let mut f = Fixture::new();
-        let (run, host) = f.lead().await;
-        f.finish(run).await;
-        let n = notice(&f, 1, 42, PrNoticeMode::Manual);
-        let before = f.model.requests.lock().unwrap().len();
-        let (release, pending) = tokio::sync::oneshot::channel();
-        *f.model.fail_after.lock().unwrap() = Some(pending);
-        f.model.fail_next.store(true, Ordering::SeqCst);
-        if fail_ack {
-            f.sql("CREATE TRIGGER fail_recovery_ack BEFORE UPDATE OF state ON lane_notifications WHEN NEW.state='acked' AND NEW.source_kind='pull_request_checks_failed' BEGIN SELECT RAISE(ABORT,'injected'); END;");
-        }
-        let result = f.runtime.drive_lane_deliveries("delivery-lead").await;
-        assert_eq!(result.is_err(), fail_ack);
-        let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
-        let state: String = conn
-            .query_row(
-                "SELECT state FROM lane_notifications WHERE notification_id=?1",
-                [&n.notice_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, if fail_ack { "pending" } else { "acked" });
-        // The provider rejection must occur after the ACK boundary, not race it.
-        release.send(()).unwrap();
-        f.runtime.wait(run).await.unwrap();
-        assert_eq!(f.model.requests.lock().unwrap().len(), before);
-        if fail_ack {
-            f.sql("DROP TRIGGER fail_recovery_ack");
-        }
-        assert_eq!(
-            f.storage
-                .handle()
-                .pending_pr_delivery_destinations(String::new())
-                .unwrap(),
-            vec!["delivery-lead"],
-            "an adopted but unpresented input must remain discoverable even after ACK"
-        );
-        let bus = Arc::new(EventBus::new(1024));
-        let restarted = AgentRuntime::new(
-            bus.clone(),
-            Arc::new(tools::ToolExecutor::new(bus)),
-            f.model.clone(),
-        )
-        .with_run_store(crate::RunStore::open(&f.config, f.storage.handle()).unwrap());
-        *restarted.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
-        restarted.drive_pending_lane_deliveries().await.unwrap();
-        restarted.wait_admission(run).await.unwrap();
-        restarted.wait(run).await.unwrap();
-        assert_eq!(phase(&f, &n), PrNoticePhase::Adopted);
-        assert_eq!(occurrences(&f, run, 1), 1);
-        assert_eq!(host.restores.load(Ordering::SeqCst), 2);
-        assert!(f.model.requests.lock().unwrap().len() > before);
-        assert!(
-            f.storage
-                .handle()
-                .pending_pr_delivery_destinations(String::new())
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            f.storage
-                .handle()
-                .pr_wake_guard(key(42))
-                .unwrap()
-                .no_progress_batches,
-            1
-        );
+        recover_unpresented_input(fail_ack, false).await;
     }
+}
+
+#[tokio::test]
+async fn pr_receipt_recovers_error_snapshot_with_unpresented_lane_nudge() {
+    for fail_ack in [false, true] {
+        recover_unpresented_input(fail_ack, true).await;
+    }
+}
+
+async fn recover_unpresented_input(fail_ack: bool, failed_nudge: bool) {
+    let mut f = Fixture::new();
+    let (run, host) = f.lead().await;
+    f.finish(run).await;
+    let n = notice(&f, 1, 42, PrNoticeMode::Manual);
+    let before = f.model.requests.lock().unwrap().len();
+    let (release, pending) = tokio::sync::oneshot::channel();
+    *f.model.fail_after.lock().unwrap() = Some(pending);
+    f.model.fail_next.store(true, Ordering::SeqCst);
+    if fail_ack {
+        f.sql("CREATE TRIGGER fail_recovery_ack BEFORE UPDATE OF state ON lane_notifications WHEN NEW.state='acked' AND NEW.source_kind='pull_request_checks_failed' BEGIN SELECT RAISE(ABORT,'injected'); END;");
+    }
+    let result = f.runtime.drive_lane_deliveries("delivery-lead").await;
+    assert_eq!(result.is_err(), fail_ack);
+    let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM lane_notifications WHERE notification_id=?1",
+            [&n.notice_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, if fail_ack { "pending" } else { "acked" });
+    // The provider rejection must occur after the ACK boundary, not race it.
+    release.send(()).unwrap();
+    f.runtime.wait(run).await.unwrap();
+    assert_eq!(f.model.requests.lock().unwrap().len(), before);
+    if fail_ack {
+        f.sql("DROP TRIGGER fail_recovery_ack");
+    }
+    if failed_nudge {
+        // A mixed persisted snapshot: the independently unpresented Lane
+        // nudge must not veto recovery of an already adopted PR input.
+        let presentation = serde_json::json!([{
+            "nudge_episode_ids": ["unpresented-nudge"],
+            "fingerprint": "unpresented-lane-input",
+            "lanes": []
+        }]);
+        let mut bundle = f
+            .runtime
+            .shared
+            .run_store
+            .get()
+            .unwrap()
+            .restore_bundle(run)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bundle.record.terminal_phase, "Error");
+        let mut descriptor: crate::restore::RunRestoreDescriptor =
+            serde_json::from_str(&bundle.record.config_json).unwrap();
+        assert!(descriptor.harness_notice_pending);
+        descriptor.spawn_credits.lane_presentations = serde_json::from_value(presentation).unwrap();
+        bundle.record.config_json = serde_json::to_string(&descriptor).unwrap();
+        let provenance = bundle.provenance.unwrap();
+        f.storage
+            .handle()
+            .save_snapshot_bundle(&storage::thread_index::SnapshotWrite {
+                record: bundle.record,
+                expected_snapshot_revision: Some(bundle.snapshot_revision),
+                binding: None,
+                status: provenance.status,
+                map: provenance.map,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        f.storage
+            .handle()
+            .pending_pr_delivery_destinations(String::new())
+            .unwrap(),
+        vec!["delivery-lead"],
+        "an adopted but unpresented input must remain discoverable even after ACK"
+    );
+    let bus = Arc::new(EventBus::new(1024));
+    let restarted = AgentRuntime::new(
+        bus.clone(),
+        Arc::new(tools::ToolExecutor::new(bus)),
+        f.model.clone(),
+    )
+    .with_run_store(crate::RunStore::open(&f.config, f.storage.handle()).unwrap());
+    *restarted.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
+    restarted.drive_pending_lane_deliveries().await.unwrap();
+    assert_eq!(
+        host.restores.load(Ordering::SeqCst),
+        2,
+        "the pending PR input must restore even with a failed Lane nudge"
+    );
+    restarted.wait_admission(run).await.unwrap();
+    restarted.wait(run).await.unwrap();
+    assert_eq!(phase(&f, &n), PrNoticePhase::Adopted);
+    assert_eq!(occurrences(&f, run, 1), 1);
+    assert_eq!(host.restores.load(Ordering::SeqCst), 2);
+    assert!(f.model.requests.lock().unwrap().len() > before);
+    assert!(
+        f.storage
+            .handle()
+            .pending_pr_delivery_destinations(String::new())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.storage
+            .handle()
+            .pr_wake_guard(key(42))
+            .unwrap()
+            .no_progress_batches,
+        1
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -468,13 +468,21 @@ impl AgentRuntime {
             Ok(t) => t,
             Err(reason) => return Ok(LaneDeliveryOutcome::Nacked(reason)),
         };
-        // An explicit resume may still be registering its new incarnation.
-        tokio::select! {
-            result = self.wait_admission(target.root_run_id) => {
-                result.map_err(|e| LaneError::new("restore_failed", e.to_string()))?;
-            }
-            _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
-                return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+        // Wait for an incarnation still being registered, not a retained
+        // failure from an earlier restore. The latter must allow a fresh try.
+        if self
+            .admission_snapshot(target.root_run_id)
+            .is_some_and(|admission| admission.result.is_none())
+        {
+            tokio::select! {
+                result = self.wait_admission(target.root_run_id) => {
+                    if result.is_err() {
+                        return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
+                    return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+                }
             }
         }
         if let Err(reason) = self.check_delivery_target(thread, &target) {
@@ -499,14 +507,14 @@ impl AgentRuntime {
                 serde_json::from_str(&record.config_json)
                     .map_err(|e| LaneError::new("unknown_thread", e.to_string()))?;
             let destination = store.handle.lane_delivery_destination(thread.to_owned())?;
-            if (record.terminal_phase != "Error"
-                || !descriptor
-                    .spawn_credits
-                    .lane_presentations
-                    .iter()
-                    .any(|p| !p.nudge_episode_ids.is_empty()))
-                && (!descriptor.spawn_credits.lane_presentations.is_empty()
-                    || descriptor.harness_notice_pending)
+            if (descriptor.harness_notice_pending
+                || (!descriptor.spawn_credits.lane_presentations.is_empty()
+                    && (record.terminal_phase != "Error"
+                        || !descriptor
+                            .spawn_credits
+                            .lane_presentations
+                            .iter()
+                            .any(|p| !p.nudge_episode_ids.is_empty()))))
                 && destination.as_ref().is_some_and(|d| {
                     !d.stopped
                         && d.owner
@@ -529,7 +537,9 @@ impl AgentRuntime {
                 }
                 tokio::select! {
                     result = self.wait_admission(target.root_run_id) => {
-                        result.map_err(|e| LaneError::new("restore_failed", e.to_string()))?;
+                        if result.is_err() {
+                            return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));
+                        }
                     }
                     _ = tokio::time::sleep(Duration::from_nanos(LEASE_NS.cast_unsigned())) => {
                         return Ok(LaneDeliveryOutcome::Nacked(LaneDeliveryNack::RestoreFailed));

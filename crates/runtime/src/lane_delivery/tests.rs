@@ -56,6 +56,8 @@ async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {
 struct Model {
     finish: AtomicBool,
     fail_next: AtomicBool,
+    admission_required: AtomicBool,
+    fail_admission_next: AtomicBool,
     fail_after: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     block_next: AtomicBool,
     blocked: tokio::sync::Notify,
@@ -64,6 +66,18 @@ struct Model {
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
+    fn requires_admission(&self) -> bool {
+        self.admission_required.load(Ordering::SeqCst)
+    }
+    async fn admit(&self, _: &AgentInvocationContext, _: Role) -> Result<(), RuntimeError> {
+        if self.fail_admission_next.swap(false, Ordering::SeqCst) {
+            Err(RuntimeError::Model {
+                reason: "injected transient restore admission failure".into(),
+            })
+        } else {
+            Ok(())
+        }
+    }
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "test".into()
     }
