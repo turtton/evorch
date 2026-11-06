@@ -173,7 +173,8 @@ impl McpToolBinding {
 }
 
 /// A frozen registry never discovers during construction/registration. The
-/// temporary legacy constructor supports existing reserved-name/scope tests.
+/// temporary legacy constructor supports the not-yet-migrated runtime scope harness.
+/// External project servers must use `from_snapshot` with a checked connector.
 pub struct McpToolRegistry {
     backend: RegistryBackend,
 }
@@ -401,6 +402,7 @@ mod tests {
         calls: StdMutex<Vec<(String, Value)>>,
         outcome: StdMutex<Option<McpErrorKind>>,
         tool_error: AtomicBool,
+        structured: StdMutex<Option<serde_json::Map<String, Value>>>,
     }
     #[async_trait]
     impl McpRegistrySession for FakeSession {
@@ -422,7 +424,7 @@ mod tests {
                         text: "remote result".into(),
                     }],
                     is_error: self.tool_error.load(Ordering::SeqCst),
-                    structured_content: None,
+                    structured_content: self.structured.lock().unwrap().clone(),
                 },
                 json!({"server":"fixture","method":"tools/call","class":"ok","status":null}),
             ))
@@ -444,6 +446,7 @@ mod tests {
                     calls: StdMutex::new(Vec::new()),
                     outcome: StdMutex::new(None),
                     tool_error: AtomicBool::new(false),
+                    structured: StdMutex::new(None),
                 }),
                 checks: AtomicUsize::new(0),
                 connects: StdMutex::new(Vec::new()),
@@ -757,14 +760,46 @@ mod tests {
     async fn server_tool_error_is_not_a_transport_success() {
         let connector = FakeConnector::new(vec![definition("read")]);
         connector.session.tool_error.store(true, Ordering::SeqCst);
+        *connector.session.structured.lock().unwrap() =
+            Some(json!({"rejected":true}).as_object().unwrap().clone());
         let registry = registry(snapshot(vec![definition("read")]), &connector);
         let result = registry.tools().unwrap()[0]
             .execute(json!({}))
             .await
             .unwrap();
         assert!(result.is_error);
-        assert_eq!(result.content, "remote result");
+        assert_eq!(result.content.lines().next(), Some("remote result"));
+        assert_eq!(
+            serde_json::from_str::<Value>(result.content.lines().last().unwrap()).unwrap(),
+            json!({"rejected":true})
+        );
         assert_eq!(result.detail.unwrap()["class"], "tool_rejected");
+        assert_eq!(connector.session.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn large_structured_results_are_bounded_once_at_return() {
+        let connector = FakeConnector::new(vec![definition("read")]);
+        *connector.session.structured.lock().unwrap() = Some(
+            json!({"payload":"あ".repeat(20_000)})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let registry = registry(snapshot(vec![definition("read")]), &connector);
+        let result = registry.tools().unwrap()[0]
+            .execute(json!({}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.len() < crate::output::PREVIEW_BYTES + 2048);
+        assert!(result.detail.as_ref().unwrap()["output_artifact"]["path"].is_string());
+        let again = crate::output::limit_result(result.clone());
+        assert_eq!(again.content, result.content);
+        assert_eq!(
+            again.detail, result.detail,
+            "executor must preserve the first artifact reference"
+        );
         assert_eq!(connector.session.calls.lock().unwrap().len(), 1);
     }
 

@@ -182,8 +182,11 @@ pure registration from live runtime authority:
   `isError` remains tool failure with `tool_rejected`, not transport failure.
 
 Concrete runtime connector composition is deferred until A/B/C/D are complete.
-The old `McpToolRegistry::new` remains only to keep existing guarded-HTTP tests
-intact while the new path is tested with injected, I/O-free sessions.
+The tools executor/reserved-name tests now use only frozen bindings and an inert
+connector spy. The old `McpToolRegistry::new` remains temporarily for the runtime
+guarded-HTTP scope harness: removing it and migrating that harness must be atomic
+with trusted service/lease injection and concrete run-local role grants (E2).
+Do not add a global wildcard or test-only alias to bypass the role boundary.
 
 ### Existing test migration checklist (live integration stage)
 
@@ -199,3 +202,13 @@ Shared follow-up additions: `McpErrorKind::ConfigConflict` is distinct from
 without retaining raw causes. GUI reexports this classification through runtime,
 not a regular tools dependency. `McpToolContent::ResourceLink` has the exact MCP
 wire tag `resource_link`.
+
+Tool results preserve structuredContent as JSON text. Return-time output bounding
+uses the existing tools output artifact contract (the executor does not re-cut an
+already-bounded result). Audio and embedded resources retain only already-returned
+payload bytes in local artifacts, with bounded MIME/URI/size explanations. Resource
+links are references only; no URI is fetched. Metadata is JSON-quoted and capped
+at 512 UTF-8 bytes per field; long links retain their full reference in an artifact.
+At most 8 media/reference artifacts and the existing 4 images are retained per
+result, and an exceeded ceiling is explicitly reported. Artifact failure is safe
+and visible; raw filesystem errors/base64 payloads are not copied into the model.

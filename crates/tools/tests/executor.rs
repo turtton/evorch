@@ -3,6 +3,9 @@
 //! ツール実行の窓口として、開始・完了イベントの発行、引数スキーマ検証、
 //! 制御マーカのエスケープ（ADR 0008）を検証する。
 
+#[path = "support/mcp_registry.rs"]
+mod mcp_registry;
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -1121,19 +1124,6 @@ async fn executor_reads_null_in_optional_typed_fields_as_omitted() {
 // what null means there (such as clearing a value), and dropping it would change the call.
 #[tokio::test]
 async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
-    let registry = Arc::new(tools::mcp::McpToolRegistry::new(
-        Arc::new(tools::NetworkGuard::new().expect("guard")),
-        tools::mcp::McpClientConfig {
-            server_label: "fixture".into(),
-            endpoint: "https://mcp.invalid/mcp".into(),
-            extra_headers: Default::default(),
-            timeout: std::time::Duration::from_secs(1),
-        },
-        tools::mcp::McpClientInfo {
-            name: "test".into(),
-            version: "1".into(),
-        },
-    ));
     let definition = serde_json::from_value(serde_json::json!({
         "name": "update_issue",
         "inputSchema": {
@@ -1143,16 +1133,17 @@ async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
         }
     }))
     .expect("definition");
+    let fixture = mcp_registry::DormantMcp::new(definition);
+    let tool = fixture.tool();
+    let public_name = tool.name().to_owned();
     let mut executor = ToolExecutor::new(Arc::new(EventBus::new(16)));
-    executor
-        .register(Arc::new(registry.tool(definition)))
-        .expect("register");
+    executor.register(tool).expect("register");
     let executor = Arc::new(executor);
     let validate = |args: serde_json::Value| {
         executor
             .validate_call(
                 test_ctx("run-1"),
-                "update_issue".into(),
+                public_name.clone(),
                 "call-1".into(),
                 args,
             )
@@ -1164,4 +1155,5 @@ async fn executor_leaves_null_in_mcp_tool_fields_to_validation() {
     let error = validate(serde_json::json!({"title": "t", "assignee": null}))
         .expect("null in an MCP tool field is not read as omitted");
     assert!(matches!(error, ToolError::InvalidArgs { .. }), "{error:?}");
+    fixture.connector.assert_unused();
 }

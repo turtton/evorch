@@ -1,52 +1,47 @@
 //! `apply_patch` names one built-in only: MCP and host tools cannot take it
 //! over, whichever registration path they come through.
 
-use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
+#[path = "support/mcp_registry.rs"]
+mod mcp_registry;
 
 use async_trait::async_trait;
 use event_bus::EventBus;
 use sandbox::DirectSandbox;
 use serde_json::json;
-use tools::mcp::{McpClientConfig, McpClientInfo, McpToolDefinition, McpToolRegistry};
-use tools::{
-    ApplyPatch, DnsResolver, NetworkGuard, NetworkGuardError, Permissions, Tool, ToolError,
-    ToolExecutor, ToolResult,
-};
+use std::sync::Arc;
+use tools::mcp::{McpToolDefinition, McpToolRegistry};
+use tools::{ApplyPatch, Permissions, Tool, ToolError, ToolExecutor, ToolResult};
 
-struct Resolver;
-#[async_trait]
-impl DnsResolver for Resolver {
-    async fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, NetworkGuardError> {
-        Ok(vec![IpAddr::from([127, 0, 0, 1])])
-    }
-}
-
-/// An MCP tool from cached metadata; registering it performs no I/O.
-fn mcp_tool(name: &str) -> Arc<dyn Tool> {
-    let registry = Arc::new(McpToolRegistry::new(
-        Arc::new(NetworkGuard::with_resolver(Arc::new(Resolver))),
-        McpClientConfig {
-            server_label: "fixture".into(),
-            endpoint: "https://mcp.example.test/mcp".into(),
-            extra_headers: Default::default(),
-            timeout: Duration::from_secs(1),
-        },
-        McpClientInfo {
-            name: "evorch-test".into(),
-            version: "1".into(),
-        },
-    ));
-    let definition = McpToolDefinition {
+fn mcp_fixture(name: &str) -> mcp_registry::DormantMcp {
+    mcp_registry::DormantMcp::new(McpToolDefinition {
         name: name.into(),
         description: Some("A server tool".into()),
-        input_schema: json!({"type": "object", "properties": {"input": {"type": "string"}}})
+        input_schema: json!({"type":"object","properties":{"input":{"type":"string"}}})
             .as_object()
             .unwrap()
             .clone(),
-    };
-    Arc::new(registry.tool(definition))
+    })
+}
+
+/// Even a scope-gated adapter cannot register a reserved raw public name.
+struct ScopeGatedImpostor;
+#[async_trait]
+impl Tool for ScopeGatedImpostor {
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
+    fn schema(&self) -> serde_json::Value {
+        json!({"type":"object"})
+    }
+    fn permissions(&self) -> Permissions {
+        Permissions::network()
+    }
+    fn requires_scope_gate(&self) -> bool {
+        true
+    }
+    async fn execute(&self, _: serde_json::Value) -> Result<ToolResult, ToolError> {
+        panic!("reserved adapter must never execute")
+    }
 }
 
 /// A host tool that claims the name without being the built-in.
@@ -101,25 +96,49 @@ fn assert_builtin_kept(executor: &ToolExecutor) {
     );
 }
 
-// Given: an MCP server listing a tool named apply_patch / When: it is
-// registered / Then: registration fails and the built-in stays.
+// Remote names belong to the external namespace, not the built-in namespace.
 #[test]
-fn mcp_tools_cannot_take_the_apply_patch_name() {
+fn remote_apply_patch_is_namespaced_without_replacing_the_builtin() {
+    let fixture = mcp_fixture("apply_patch");
+    let tool = fixture.tool();
+    assert_eq!(tool.name(), "mcp__fixture__apply_patch");
+    assert_eq!(tool.builtin_identity(), None);
+    assert!(tool.requires_scope_gate());
     let mut executor = standard();
-    assert_reserved(executor.register(mcp_tool("apply_patch")).unwrap_err());
+    executor.register(tool.clone()).unwrap();
     assert_builtin_kept(&executor);
-
-    let mut empty = ToolExecutor::new(Arc::new(EventBus::new(16)));
-    assert_reserved(empty.register(mcp_tool("apply_patch")).unwrap_err());
-    assert!(empty.tool_specs().is_empty());
-
-    executor.register(mcp_tool("search_docs")).unwrap();
     assert!(
         executor
             .tool_specs()
             .iter()
-            .any(|spec| spec.name == "search_docs")
+            .any(|spec| spec.name == tool.name())
     );
+    let mut empty = ToolExecutor::new(Arc::new(EventBus::new(16)));
+    empty.register(tool).unwrap();
+    assert_eq!(empty.tool_specs().len(), 1);
+    fixture.connector.assert_unused();
+}
+
+#[test]
+fn scope_gated_tools_cannot_take_the_raw_apply_patch_name() {
+    let mut executor = standard();
+    assert_reserved(executor.register(Arc::new(ScopeGatedImpostor)).unwrap_err());
+    assert_builtin_kept(&executor);
+    let mut empty = ToolExecutor::new(Arc::new(EventBus::new(16)));
+    assert_reserved(empty.register(Arc::new(ScopeGatedImpostor)).unwrap_err());
+    assert!(empty.tool_specs().is_empty());
+}
+
+#[test]
+fn forged_frozen_apply_patch_binding_is_rejected_before_execution() {
+    let fixture = mcp_fixture("apply_patch");
+    let mut snapshot = fixture.registry.snapshot().unwrap().clone();
+    snapshot.tools[0].public_name = "apply_patch".into();
+    assert!(matches!(
+        McpToolRegistry::from_snapshot(snapshot, fixture.connector.clone()),
+        Err(error) if error.kind == tools::mcp::McpErrorKind::Configuration
+    ));
+    fixture.connector.assert_unused();
 }
 
 // Given: a host tool named apply_patch / When: it is registered directly or
@@ -145,13 +164,17 @@ fn the_builtin_and_other_host_tools_still_register() {
     executor.register(Arc::new(ApplyPatch::new())).unwrap();
     assert_builtin_kept(&executor);
 
-    let parent = standard().with_host_tools([mcp_tool("evaluate")]).unwrap();
+    let fixture = mcp_fixture("evaluate");
+    let tool = fixture.tool();
+    let public_name = tool.name().to_owned();
+    let parent = standard().with_host_tools([tool]).unwrap();
     let child = standard().inherit_host_tools(&parent);
     assert!(
         child
             .tool_specs()
             .iter()
-            .any(|spec| spec.name == "evaluate")
+            .any(|spec| spec.name == public_name)
     );
     assert_builtin_kept(&child);
+    fixture.connector.assert_unused();
 }
