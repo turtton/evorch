@@ -299,6 +299,12 @@ pub struct McpApprovalInspection {
 /// preview/check are NOT execution and must not spawn/connect/resolve secrets.
 /// DNS needed for destination preview is an explicit checked service operation.
 pub trait McpApprovalStore: Send + Sync {
+    /// Read saved destination constraints without DNS, secrets or a connection.
+    /// This is metadata, not an execution permit; callers must still check a fresh
+    /// inspection. No record means no private-address exception.
+    fn approved_ips(&self, _scope: &ApprovalScope) -> Result<Vec<IpAddr>, super::McpErrorKind> {
+        Ok(Vec::new())
+    }
     fn preview(
         &self,
         inspection: &McpApprovalInspection,

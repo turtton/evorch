@@ -40,6 +40,7 @@ sha2 = { workspace = true }
 storage = { path = "../storage" }
 thiserror = { workspace = true }
 tools = { path = "../tools" }
+url = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
 tracing = { workspace = true }
 
@@ -53,7 +54,6 @@ storage = { path = "../storage", features = ["unchecked-open"] }
 # S8 copies only the approved backup, using SQLite's online backup API.
 rusqlite = { workspace = true, features = ["backup"] }
 test-support = { path = "../test-support" }
-url = { workspace = true }
 jsonschema = { workspace = true }
 wiremock = { workspace = true }
 rcgen = { workspace = true }

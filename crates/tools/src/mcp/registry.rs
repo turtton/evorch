@@ -1,18 +1,17 @@
 use super::{
-    McpClient, McpClientConfig, McpClientInfo, McpError, McpErrorKind, McpTool, McpToolDefinition,
-    McpToolResult,
+    McpError, McpErrorKind, McpTool, McpToolDefinition, McpToolResult,
     names::{McpNameBindings, name_matches_key},
     types::{
         ApprovalFingerprint, DefinitionFingerprint, FrozenMcpSnapshot, FrozenMcpTool, RemoteToolKey,
     },
 };
-use crate::{NetworkGuard, Permissions};
+use crate::Permissions;
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::OnceCell;
 
 /// The host-process capability must not be represented as network-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,63 +132,35 @@ impl FrozenMcpSnapshot {
     }
 }
 
-struct LegacySession {
-    client: Mutex<McpClient>,
-    definitions: Vec<McpToolDefinition>,
-}
-struct LegacyRegistry {
-    guard: Arc<NetworkGuard>,
-    config: McpClientConfig,
-    info: McpClientInfo,
-    session: OnceCell<LegacySession>,
-}
 struct FrozenRegistry {
     snapshot: FrozenMcpSnapshot,
     connector: Arc<dyn McpRegistryConnector>,
     sessions: BTreeMap<String, OnceCell<Arc<dyn McpRegistrySession>>>,
     transports: BTreeMap<String, McpToolTransport>,
 }
-enum RegistryBackend {
-    Legacy(Box<LegacyRegistry>),
-    Frozen(FrozenRegistry),
-}
+
 pub(super) enum McpToolBinding {
-    Legacy(McpToolDefinition),
     Frozen(Arc<FrozenMcpTool>),
 }
 impl McpToolBinding {
     pub(super) fn definition(&self) -> &McpToolDefinition {
         match self {
-            Self::Legacy(definition) => definition,
             Self::Frozen(tool) => &tool.definition,
         }
     }
     pub(super) fn public_name(&self) -> &str {
         match self {
-            Self::Legacy(definition) => &definition.name,
             Self::Frozen(tool) => &tool.public_name,
         }
     }
 }
 
-/// A frozen registry never discovers during construction/registration. The
-/// temporary legacy constructor supports the not-yet-migrated runtime scope harness.
-/// External project servers must use `from_snapshot` with a checked connector.
+/// Construction/registration never discovers. External project servers use
+/// explicit snapshot bindings and a checked connector via `from_snapshot`.
 pub struct McpToolRegistry {
-    backend: RegistryBackend,
+    backend: FrozenRegistry,
 }
 impl McpToolRegistry {
-    pub fn new(guard: Arc<NetworkGuard>, config: McpClientConfig, info: McpClientInfo) -> Self {
-        Self {
-            backend: RegistryBackend::Legacy(Box::new(LegacyRegistry {
-                guard,
-                config,
-                info,
-                session: OnceCell::const_new(),
-            })),
-        }
-    }
-
     /// Validate saved bindings without sorting, rewriting or contacting a server.
     pub fn from_snapshot(
         snapshot: FrozenMcpSnapshot,
@@ -238,27 +209,22 @@ impl McpToolRegistry {
                 .or_insert_with(|| connector.tool_transport(&tool.remote.server_id));
         }
         Ok(Self {
-            backend: RegistryBackend::Frozen(FrozenRegistry {
+            backend: FrozenRegistry {
                 snapshot,
                 connector,
                 sessions,
                 transports,
-            }),
+            },
         })
     }
 
     pub fn snapshot(&self) -> Option<&FrozenMcpSnapshot> {
-        match &self.backend {
-            RegistryBackend::Frozen(registry) => Some(&registry.snapshot),
-            RegistryBackend::Legacy(_) => None,
-        }
+        Some(&self.backend.snapshot)
     }
 
     /// Frozen public order is returned unchanged, including during restore.
     pub fn tools(self: &Arc<Self>) -> Result<Vec<McpTool>, McpError> {
-        let RegistryBackend::Frozen(registry) = &self.backend else {
-            return Err(error("catalog", "tools/list", McpErrorKind::Configuration));
-        };
+        let registry = &self.backend;
         Ok(registry
             .snapshot
             .tools
@@ -273,109 +239,50 @@ impl McpToolRegistry {
             .collect())
     }
 
-    /// Legacy explicit discovery only. Frozen snapshots are never refreshed.
-    pub async fn discover(self: &Arc<Self>) -> Result<Vec<McpTool>, McpError> {
-        match &self.backend {
-            RegistryBackend::Legacy(registry) => Ok(registry
-                .session()
-                .await?
-                .definitions
-                .iter()
-                .cloned()
-                .map(|definition| self.tool(definition))
-                .collect()),
-            RegistryBackend::Frozen(_) => self.tools(),
-        }
-    }
-
-    /// Legacy cached-metadata adapter. It cannot execute against a frozen registry.
-    pub fn tool(self: &Arc<Self>, definition: McpToolDefinition) -> McpTool {
-        McpTool::new(definition, Arc::clone(self))
-    }
-
     pub(super) async fn call(
         &self,
         binding: &McpToolBinding,
         args: serde_json::Value,
     ) -> Result<(McpToolResult, serde_json::Value), McpError> {
-        match (&self.backend, binding) {
-            (RegistryBackend::Legacy(registry), McpToolBinding::Legacy(definition)) => {
-                let session = registry.session().await?;
-                if !session.definitions.iter().any(|live| {
-                    live.name == definition.name && live.input_schema == definition.input_schema
-                }) {
-                    return Err(error(
-                        &registry.config.server_label,
-                        "tools/list",
-                        McpErrorKind::Configuration,
-                    ));
-                }
-                let mut client = session.client.lock().await;
-                let result = client.call_tool(&definition.name, args).await?;
-                Ok((result, client.call_success_detail()))
-            }
-            (RegistryBackend::Frozen(registry), McpToolBinding::Frozen(tool)) => {
-                registry.connector.check_execution(tool).await?;
-                let cell = &registry.sessions[&tool.remote.server_id];
-                let session = cell
-                    .get_or_try_init(|| registry.connector.connect(tool))
-                    .await?;
-                let mut seen = HashSet::new();
-                let mut matching = false;
-                if session.definitions().len() > super::types::MAX_TOOLS {
-                    return Err(error(
-                        &tool.remote.server_id,
-                        "tools/list",
-                        McpErrorKind::LimitExceeded,
-                    ));
-                }
-                for definition in session.definitions() {
-                    if !seen.insert(&definition.name) {
-                        return Err(error(
-                            &tool.remote.server_id,
-                            "tools/list",
-                            McpErrorKind::Protocol,
-                        ));
-                    }
-                    if definition.name == tool.remote.tool_name {
-                        matching = DefinitionFingerprint::for_definition(definition)
-                            == tool.definition_fingerprint;
-                    }
-                }
-                if !matching {
-                    return Err(error(
-                        &tool.remote.server_id,
-                        "tools/call",
-                        McpErrorKind::DefinitionChanged,
-                    ));
-                }
-                registry.connector.check_execution(tool).await?;
-                // Never retry a call: a failed response can hide a completed side effect.
-                session.call_tool(&tool.remote.tool_name, args).await
-            }
-            _ => Err(error("catalog", "tools/call", McpErrorKind::Configuration)),
+        let registry = &self.backend;
+        let McpToolBinding::Frozen(tool) = binding;
+        registry.connector.check_execution(tool).await?;
+        let cell = &registry.sessions[&tool.remote.server_id];
+        let session = cell
+            .get_or_try_init(|| registry.connector.connect(tool))
+            .await?;
+        let mut seen = HashSet::new();
+        let mut matching = false;
+        if session.definitions().len() > super::types::MAX_TOOLS {
+            return Err(error(
+                &tool.remote.server_id,
+                "tools/list",
+                McpErrorKind::LimitExceeded,
+            ));
         }
-    }
-}
-impl LegacyRegistry {
-    async fn session(&self) -> Result<&LegacySession, McpError> {
-        self.session
-            .get_or_try_init(|| async {
-                let config = McpClientConfig {
-                    server_label: self.config.server_label.clone(),
-                    endpoint: self.config.endpoint.clone(),
-                    extra_headers: self.config.extra_headers.clone(),
-                    timeout: self.config.timeout,
-                };
-                let mut client =
-                    McpClient::connect(Arc::clone(&self.guard), config, self.info.clone()).await?;
-                let definitions = client.list_tools().await?;
-                Ok(LegacySession {
-                    client: Mutex::new(client),
-                    definitions,
-                })
-            })
-            .await
+        for definition in session.definitions() {
+            if !seen.insert(&definition.name) {
+                return Err(error(
+                    &tool.remote.server_id,
+                    "tools/list",
+                    McpErrorKind::Protocol,
+                ));
+            }
+            if definition.name == tool.remote.tool_name {
+                matching = DefinitionFingerprint::for_definition(definition)
+                    == tool.definition_fingerprint;
+            }
+        }
+        if !matching {
+            return Err(error(
+                &tool.remote.server_id,
+                "tools/call",
+                McpErrorKind::DefinitionChanged,
+            ));
+        }
+        registry.connector.check_execution(tool).await?;
+        // Never retry a call: a failed response can hide a completed side effect.
+        session.call_tool(&tool.remote.tool_name, args).await
     }
 }
 fn error(server: &str, method: &'static str, kind: McpErrorKind) -> McpError {
@@ -548,7 +455,7 @@ mod tests {
             tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
             vec!["mcp__files__b", "mcp__files__a"]
         );
-        assert_eq!(registry.discover().await.unwrap().len(), 2);
+        assert_eq!(registry.tools().unwrap().len(), 2);
         assert_eq!(
             serde_json::to_vec(registry.snapshot().unwrap()).unwrap(),
             bytes

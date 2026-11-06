@@ -181,12 +181,40 @@ pure registration from live runtime authority:
   It returns `(McpToolResult, safe diagnostic detail)`. Calls are never retried.
   `isError` remains tool failure with `tool_rejected`, not transport failure.
 
-Concrete runtime connector composition is deferred until A/B/C/D are complete.
-The tools executor/reserved-name tests now use only frozen bindings and an inert
-connector spy. The old `McpToolRegistry::new` remains temporarily for the runtime
-guarded-HTTP scope harness: removing it and migrating that harness must be atomic
-with trusted service/lease injection and concrete run-local role grants (E2).
-Do not add a global wildcard or test-only alias to bypass the role boundary.
+E2 installs `runtime::mcp::ProjectMcpService`. Its constructor is inert and takes
+an injected `McpCredentialBackend`, `McpApprovalStore` and `NetworkGuard`. The same
+service owns `ProjectMcpLimiter` (4 stdio processes); `limiter()` is shared with
+GUI testing/lazy restore. `with_transport_factories` is a trusted host/test seam,
+not a model API. Preparation loads config, filters enabled/role before authority
+or secret access, checks approval, resolves secrets, negotiates/lists with configured
+timeouts, then freezes names/schemas. Admission is server-ID ordered and sequential
+(HTTP concurrency 1), with a 30-second total preparation budget. Only failed servers
+are excluded. Broken project TOML is classified even with no lower-priority servers.
+
+`AgentRuntime::with_mcp_service` injects the backend without doing I/O. New-run
+preparation occurs after executor rebuilding and before provider tool specs; only
+that run's concrete MCP names are granted. `RunMcpLease::register_executor` forks
+an executor without adding run tools to host-tool inheritance. Benchmark paths do
+not call the service at all. Status watch state and diagnostic events carry only
+safe DTOs; no transient status changes schemas/descriptions. Every call rechecks
+current enabled/role/approval/destination. The native stdio session retains its
+concrete supervisor: after an uncertain failed call is returned, a later explicit
+call may restart once, renegotiate and compare fixed definitions. The failed call
+is never replayed. Lease shutdown awaits transport cleanup before the run ends;
+Drop/run cancellation also owns cleanup.
+
+The old registry constructor/discover adapter is removed. Runtime scope tests use
+frozen bindings, real approved HTTP transport and modern discovery, preserving
+scope/per-tool denial before I/O, one CLI approval, lifecycle events and safe
+five-key diagnostic detail. No wildcard/test alias bypasses the role boundary.
+Runtime restore/continue wiring (E3) and GUI backend/binary injection (E4) remain
+separate work; this backend's restore method currently fails closed.
+
+Secret failures remain distinct: SecretUnavailable / SecretLocked / SecretDenied /
+SecretMissing. MissingEnvironment(McpValueField) carries only a fixed field enum
+(command/args/cwd/env/url/headers/token), never variable names or values. The
+McpError::detail five-key shape is unchanged; GUI diagnostic wording covers these
+classifications.
 
 ### Existing test migration checklist (live integration stage)
 

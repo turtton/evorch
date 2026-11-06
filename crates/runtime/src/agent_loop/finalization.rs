@@ -5,6 +5,12 @@ use event_bus::LifecycleEvent;
 impl LoopState {
     pub(super) async fn finalize(&mut self) {
         let run_id = self.task.run_id.to_string();
+        if let Some(lease) = self.mcp_lease.take() {
+            lease
+                .shutdown(tools::mcp::transport::ShutdownReason::Completed)
+                .await;
+        }
+        self.mcp_cancellation.take();
         // Cancelled tool futures may leave a supervisor reaping its child.
         // Every terminal path waits before shell, ownership or workspace teardown.
         self.shared.executor.drain_post_edit_hooks().await;

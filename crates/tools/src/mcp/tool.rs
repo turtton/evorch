@@ -1,7 +1,4 @@
-use super::{
-    McpToolDefinition, McpToolRegistry, McpToolTransport, registry::McpToolBinding,
-    types::FrozenMcpTool,
-};
+use super::{McpToolRegistry, McpToolTransport, registry::McpToolBinding, types::FrozenMcpTool};
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
@@ -17,15 +14,6 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    pub(super) fn new(definition: McpToolDefinition, registry: Arc<McpToolRegistry>) -> Self {
-        Self {
-            binding: McpToolBinding::Legacy(definition),
-            transport: McpToolTransport::Http,
-            registry,
-            event_bus: None,
-        }
-    }
-
     pub(super) fn new_frozen(
         tool: FrozenMcpTool,
         registry: Arc<McpToolRegistry>,

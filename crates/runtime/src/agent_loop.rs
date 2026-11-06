@@ -13,6 +13,7 @@ mod durable;
 mod finalization;
 mod host_inputs;
 mod identical_calls;
+mod mcp_setup;
 mod messages;
 mod observability;
 #[cfg(test)]
@@ -160,6 +161,8 @@ pub(crate) struct LoopState {
     benchmark: Option<crate::benchmark::BenchmarkCheckpoint>,
     benchmark_checked: bool,
     benchmark_replay: bool,
+    mcp_lease: Option<crate::mcp::RunMcpLease>,
+    mcp_cancellation: Option<mcp_setup::RunMcpCancellation>,
     pub(crate) task: RunTask,
     pub(crate) shared: LoopShared,
     pub(crate) channels: LoopChannels,
@@ -253,6 +256,8 @@ impl LoopState {
             benchmark: None,
             benchmark_checked: false,
             benchmark_replay: false,
+            mcp_lease: None,
+            mcp_cancellation: None,
             task,
             shared,
             channels,
@@ -617,6 +622,13 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     return;
                 }
             }
+        }
+        // Benchmark bypasses the service itself, not merely its transports.
+        // E3 installs saved snapshots for restore/continue; never rediscover here.
+        if !benchmark_mode && !is_restored && !history_only {
+            state
+                .prepare_mcp_run(project.as_ref().map(|project| project.root.clone()))
+                .await;
         }
         // tool_specs は state.policy と skill 接続状態 (state.skills()) の両方から
         // 決まるため、LoopState 構築後に確定させる。

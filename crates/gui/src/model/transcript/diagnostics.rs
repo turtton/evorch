@@ -289,6 +289,12 @@ fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
         "approval_revoked" => "startup approval was revoked".to_owned(),
         "stale_preview" => "the approval preview is stale".to_owned(),
         "secret_unavailable" => "a required secret is unavailable".to_owned(),
+        "secret_locked" => "the secret backend is locked".to_owned(),
+        "secret_denied" => "access to a required secret was denied".to_owned(),
+        "secret_missing" => "a required secret was not found".to_owned(),
+        class if class.starts_with("missing_environment_") => {
+            "a required environment variable is missing".to_owned()
+        }
         "process_limit_reached" => "the project process limit was reached".to_owned(),
         "unavailable" => "the MCP service is unavailable".to_owned(),
         "cancelled" => "the request was cancelled".to_owned(),
@@ -445,7 +451,7 @@ mod tests {
     // class breaks this test) / When: shown / Then: natural English, never the raw class
     #[test]
     fn every_mcp_failure_class_reads_as_english() {
-        use tools::mcp::{McpError, McpErrorKind};
+        use tools::mcp::{McpError, McpErrorKind, McpValueField};
         let kinds = [
             McpErrorKind::Timeout,
             McpErrorKind::Transport,
@@ -459,6 +465,10 @@ mod tests {
             McpErrorKind::ApprovalRevoked,
             McpErrorKind::StalePreview,
             McpErrorKind::SecretUnavailable,
+            McpErrorKind::SecretLocked,
+            McpErrorKind::SecretDenied,
+            McpErrorKind::SecretMissing,
+            McpErrorKind::MissingEnvironment(McpValueField::Env),
             McpErrorKind::ProcessLimitReached,
             McpErrorKind::Unavailable,
             McpErrorKind::Cancelled,
@@ -481,6 +491,10 @@ mod tests {
                 McpErrorKind::ApprovalRevoked => "startup approval was revoked",
                 McpErrorKind::StalePreview => "the approval preview is stale",
                 McpErrorKind::SecretUnavailable => "a required secret is unavailable",
+                McpErrorKind::SecretLocked => "the secret backend is locked",
+                McpErrorKind::SecretDenied => "access to a required secret was denied",
+                McpErrorKind::SecretMissing => "a required secret was not found",
+                McpErrorKind::MissingEnvironment(_) => "a required environment variable is missing",
                 McpErrorKind::ProcessLimitReached => "the project process limit was reached",
                 McpErrorKind::Unavailable => "the MCP service is unavailable",
                 McpErrorKind::Cancelled => "the request was cancelled",

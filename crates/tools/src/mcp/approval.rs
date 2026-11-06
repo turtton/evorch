@@ -390,6 +390,25 @@ fn same_identity(preview: &McpApprovalPreview, current: &McpApprovalInspection) 
             == serde_json::to_value(&current.warnings).ok()
 }
 impl McpApprovalStore for ApprovalLedger {
+    fn approved_ips(&self, scope: &ApprovalScope) -> Result<Vec<IpAddr>, McpErrorKind> {
+        let state = self.state.lock().map_err(|_| McpErrorKind::Unavailable)?;
+        if state.denied.contains(scope) {
+            return Err(McpErrorKind::NeedsApproval);
+        }
+        let _lock = self
+            .locked_file()
+            .map_err(|_| McpErrorKind::NeedsApproval)?;
+        let ledger = self.load().ok_or(McpErrorKind::NeedsApproval)?;
+        match ledger
+            .entries
+            .into_iter()
+            .find(|record| &record.scope == scope)
+        {
+            Some(record) if record.revoked => Err(McpErrorKind::NeedsApproval),
+            Some(record) => Ok(record.approved_ips),
+            None => Ok(Vec::new()),
+        }
+    }
     fn preview(&self, current: &McpApprovalInspection) -> Result<McpApprovalPreview, McpErrorKind> {
         let mut state = self.state.lock().map_err(|_| McpErrorKind::Unavailable)?;
         let _lock = self.locked_file()?;

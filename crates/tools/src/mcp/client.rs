@@ -404,7 +404,8 @@ impl McpClient {
             }
         }
     }
-    pub(super) fn call_success_detail(&self) -> Value {
+    /// Bounded request correlation only; no response, URL or credentials.
+    pub fn call_success_detail(&self) -> Value {
         match &self.inner {
             ClientInner::Legacy(client) => client.call_success_detail(),
             ClientInner::External { session, .. } => {

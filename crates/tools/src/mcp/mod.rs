@@ -17,7 +17,7 @@ pub mod types;
 pub(crate) mod wire;
 
 pub use client::McpClient;
-pub use error::{McpError, McpErrorKind};
+pub use error::{McpError, McpErrorKind, McpValueField};
 pub use registry::{
     McpRegistryConnector, McpRegistrySession, McpServerTools, McpToolRegistry, McpToolTransport,
 };

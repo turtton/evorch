@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// Value-less configuration location. Never includes names or expanded values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum McpValueField {
+    #[error("command")]
+    Command,
+    #[error("args")]
+    Args,
+    #[error("cwd")]
+    Cwd,
+    #[error("env")]
+    Env,
+    #[error("url")]
+    Url,
+    #[error("headers")]
+    Headers,
+    #[error("token")]
+    Token,
+}
+
 /// Classified failure only: no underlying error, response, URL or headers are retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum McpErrorKind {
@@ -28,6 +47,14 @@ pub enum McpErrorKind {
     StalePreview,
     #[error("secret_unavailable")]
     SecretUnavailable,
+    #[error("secret_locked")]
+    SecretLocked,
+    #[error("secret_denied")]
+    SecretDenied,
+    #[error("secret_missing")]
+    SecretMissing,
+    #[error("missing_environment_{0}")]
+    MissingEnvironment(McpValueField),
     #[error("process_limit_reached")]
     ProcessLimitReached,
     #[error("unavailable")]
@@ -69,6 +96,10 @@ impl McpError {
             | McpErrorKind::ApprovalRevoked
             | McpErrorKind::StalePreview
             | McpErrorKind::SecretUnavailable
+            | McpErrorKind::SecretLocked
+            | McpErrorKind::SecretDenied
+            | McpErrorKind::SecretMissing
+            | McpErrorKind::MissingEnvironment(_)
             | McpErrorKind::ProcessLimitReached
             | McpErrorKind::Unavailable
             | McpErrorKind::Cancelled

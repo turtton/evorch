@@ -60,19 +60,34 @@ are additional to the no-default-features build gate.
 - legacy_initialize_is_not_cancelled
 - unknown_call_outcome_is_not_replayed
 
-## E: crates/runtime/tests/mcp_integration.rs
+## E2: crates/runtime/tests/mcp_prepare.rs
 
 - unapproved_stdio_never_spawns
 - unapproved_http_never_connects
 - unapproved_server_is_skipped_and_run_continues
 - worker_is_default_and_other_roles_do_not_connect
-- run_js_cannot_invoke_external_mcp
 - stdio_limit_is_shared_across_project_runs_and_gui_test
 - benchmark_never_prepares_mcp
+- credential_failure_reasons_remain_distinct_without_fallback
+- missing_environment_is_safe_and_consistent_for_env_and_args
+- revocation_denies_existing_session_without_changing_snapshot
+- unknown_call_is_not_replayed_and_next_explicit_call_restarts_once
+- approved_names_are_published_after_executor_rebuild_without_role_leakage
+- broken_toml_without_servers_is_reported_without_connection
+
+The GUI limiter check uses the actual shared limiter at E2; E4 adds the privileged
+GUI test-connection entry point. No real keychain or external service is required.
+
+## E2: crates/tools/tests/executor.rs
+
+- run_js_cannot_invoke_external_mcp (real dispatcher and fixed CALLABLE_TOOLS)
+
+## E3: runtime restore/continue integration (pending)
+
 - restore_registers_snapshot_without_connecting
 - restore_first_call_checks_live_definition
 
-## E: crates/tools/tests/mcp_names.rs
+## E: crates/tools/src/mcp/{names,registry}.rs unit tests
 
 - external_names_use_hash_without_sanitizing
 - external_names_fit_provider_constraints

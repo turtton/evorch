@@ -47,6 +47,8 @@ pub struct RestoreMcpRun {
 /// immutable even after config edits, revocation, cancellation or listChanged.
 pub struct RunMcpLease {
     snapshot: Arc<FrozenMcpSnapshot>,
+    registry: Option<Arc<tools::mcp::McpToolRegistry>>,
+    cancel: Option<CancelContext>,
     statuses: Vec<McpStatusEvent>,
     sessions: Vec<Arc<dyn McpTransport>>,
 }
@@ -55,9 +57,58 @@ impl RunMcpLease {
     pub fn restore_snapshot(snapshot: FrozenMcpSnapshot) -> Self {
         Self {
             snapshot: Arc::new(snapshot),
+            registry: None,
+            cancel: None,
             statuses: Vec::new(),
             sessions: Vec::new(),
         }
+    }
+    /// Pure host integration for a registry whose frozen metadata is already
+    /// known. Lazy connectors still enforce live approval before first execution.
+    pub fn from_registry(registry: Arc<tools::mcp::McpToolRegistry>) -> Result<Self, McpErrorKind> {
+        let snapshot = registry
+            .snapshot()
+            .ok_or(McpErrorKind::Configuration)?
+            .clone();
+        let mut lease = Self::restore_snapshot(snapshot);
+        lease.registry = Some(registry);
+        Ok(lease)
+    }
+    pub(super) fn prepared(
+        snapshot: FrozenMcpSnapshot,
+        statuses: Vec<McpStatusEvent>,
+        sessions: Vec<Arc<dyn McpTransport>>,
+        registry: Arc<tools::mcp::McpToolRegistry>,
+        cancel: CancelContext,
+    ) -> Self {
+        Self {
+            snapshot: Arc::new(snapshot),
+            statuses,
+            sessions,
+            registry: Some(registry),
+            cancel: Some(cancel),
+        }
+    }
+    /// Inert, atomic registration into a run-local executor. Never a host-tools
+    /// inheritance entry and never a mutation of another run's base executor.
+    pub fn register_executor(
+        &self,
+        base: &tools::ToolExecutor,
+        bus: Arc<event_bus::EventBus>,
+    ) -> Result<tools::ToolExecutor, McpErrorKind> {
+        let tools = self
+            .registry
+            .as_ref()
+            .map(|registry| registry.tools())
+            .transpose()
+            .map_err(|error| error.kind)?
+            .unwrap_or_default();
+        base.fork_with_run_tools(
+            tools
+                .into_iter()
+                .map(|tool| Arc::new(tool.with_event_bus(bus.clone())) as Arc<dyn tools::Tool>),
+        )
+        .map_err(|_| McpErrorKind::Configuration)
     }
     pub fn snapshot(&self) -> &FrozenMcpSnapshot {
         &self.snapshot
@@ -69,6 +120,13 @@ impl RunMcpLease {
     pub async fn shutdown(&self, reason: ShutdownReason) {
         for session in &self.sessions {
             let _ = session.shutdown(reason).await;
+        }
+    }
+}
+impl Drop for RunMcpLease {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
         }
     }
 }

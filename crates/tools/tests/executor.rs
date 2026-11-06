@@ -42,6 +42,65 @@ fn test_ctx(run_id: &str) -> ToolExecutionContext {
     }
 }
 
+#[tokio::test]
+async fn run_js_cannot_invoke_external_mcp() {
+    use tools::tools::run_js::{ChildCall, ChildOutcome, RunJs, RunJsHost, WorkerLauncher};
+    #[derive(Debug)]
+    struct Host(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl RunJsHost for Host {
+        // Deliberately advertise an external name: the fixed dispatcher must
+        // reject it even if a host implementation mistakenly offers one.
+        fn tool_names(&self) -> Vec<String> {
+            vec!["mcp__fixture__read".into()]
+        }
+        fn settings(&self) -> config::RunJsConfig {
+            config::RunJsConfig::default()
+        }
+        fn shares_wave(&self, _: &str) -> bool {
+            true
+        }
+        async fn call(&self, _: ChildCall) -> ChildOutcome {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("external MCP must not reach the run_js host")
+        }
+    }
+    let host = Arc::new(Host(std::sync::atomic::AtomicUsize::new(0)));
+    let launcher = WorkerLauncher::injected(
+        Arc::new(DirectSandbox::new_unchecked()),
+        "sh".into(),
+        vec![
+            "-c".into(),
+            // The worker protocol, not a real JS engine, makes the forbidden call.
+            r#"read -r run
+printf '%s\n' '{"type":"tool_call","id":1,"name":"mcp__fixture__read","args":{}}'
+read -r result
+printf '%s\n' '{"type":"done","value":null}'
+"#
+            .into(),
+        ],
+    );
+    let ctx = ToolExecutionContext {
+        run_id: "run".into(),
+        call_id: Some("parent".into()),
+        run_js_host: Some(host.clone()),
+        ..Default::default()
+    };
+    let result = RunJs::with_launcher(launcher)
+        .execute_with_context(&ctx, serde_json::json!({"code":"return await tools.mcp__fixture__read({});", "timeout_ms": 60000}))
+        .await
+        .unwrap();
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("the JS worker called a tool that run_js does not provide"),
+        "{}",
+        result.content
+    );
+}
+
 /// イベントから [`ToolEvent`] を取り出す。
 fn tool_event(event: &Event) -> &ToolEvent {
     let EventKind::Tool(tool_event) = &event.kind else {
