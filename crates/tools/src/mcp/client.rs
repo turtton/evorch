@@ -12,13 +12,13 @@ use std::{collections::HashSet, sync::Arc};
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// A successfully initialized session. Calls are serialized with unique session-local ids.
-pub struct McpClient {
+struct LegacyClient {
     guard: Arc<NetworkGuard>,
     config: McpClientConfig,
     next_id: i64,
 }
 
-impl McpClient {
+impl LegacyClient {
     /// Completes initialization before making the client available to callers.
     /// Cancellation or failure drops the incomplete client; no automatic retry occurs.
     pub async fn connect(
@@ -224,4 +224,216 @@ impl McpClient {
             kind,
         }
     }
+}
+
+use super::{
+    protocol::{ProtocolEra, ProtocolVersion, Session},
+    transport::api::{CancelContext, McpTransport, ShutdownReason, TransportKind},
+    types::{MAX_LIST_BYTES, MAX_LIST_PAGES, MAX_TOOLS},
+};
+use std::time::Duration;
+/// External clients use connect_transport. The original constructor preserves the
+/// existing operator-registered legacy integration until its callers migrate.
+pub struct McpClient {
+    inner: ClientInner,
+}
+enum ClientInner {
+    Legacy(LegacyClient),
+    External {
+        session: Session,
+        kind: TransportKind,
+    },
+}
+impl McpClient {
+    pub async fn connect(
+        guard: Arc<NetworkGuard>,
+        config: McpClientConfig,
+        info: McpClientInfo,
+    ) -> Result<Self, McpError> {
+        Ok(Self {
+            inner: ClientInner::Legacy(LegacyClient::connect(guard, config, info).await?),
+        })
+    }
+    pub async fn connect_transport(
+        transport: Arc<dyn McpTransport>,
+        server_label: String,
+        kind: TransportKind,
+        info: McpClientInfo,
+        timeout: Duration,
+        cancel: CancelContext,
+    ) -> Result<Self, McpError> {
+        Ok(Self {
+            inner: ClientInner::External {
+                session: Session::connect(transport, server_label, kind, info, timeout, cancel)
+                    .await?,
+                kind,
+            },
+        })
+    }
+    /// Separate deadlines for negotiation and subsequent tool requests.
+    pub async fn connect_transport_with_timeouts(
+        transport: Arc<dyn McpTransport>,
+        server_label: String,
+        kind: TransportKind,
+        info: McpClientInfo,
+        startup_timeout: Duration,
+        request_timeout: Duration,
+        cancel: CancelContext,
+    ) -> Result<Self, McpError> {
+        if request_timeout.is_zero() {
+            return Err(McpError {
+                server: server_label,
+                method: "server/discover",
+                request_id: None,
+                kind: McpErrorKind::Configuration,
+            });
+        }
+        let mut client =
+            Self::connect_transport(transport, server_label, kind, info, startup_timeout, cancel)
+                .await?;
+        if let ClientInner::External { session, .. } = &mut client.inner {
+            session.set_request_timeout(request_timeout);
+        }
+        Ok(client)
+    }
+    pub fn era(&self) -> ProtocolEra {
+        match &self.inner {
+            ClientInner::Legacy(_) => ProtocolEra::Legacy,
+            ClientInner::External { session, .. } => session.era(),
+        }
+    }
+    pub fn version(&self) -> ProtocolVersion {
+        match &self.inner {
+            ClientInner::Legacy(_) => ProtocolVersion::V2025_03_26,
+            ClientInner::External { session, .. } => session.version(),
+        }
+    }
+    pub async fn list_tools(&mut self) -> Result<Vec<McpToolDefinition>, McpError> {
+        let ClientInner::External { session, kind } = &mut self.inner else {
+            if let ClientInner::Legacy(client) = &mut self.inner {
+                return client.list_tools().await;
+            }
+            unreachable!()
+        };
+        let mut tools = Vec::new();
+        let mut names = HashSet::new();
+        let mut cursors = HashSet::new();
+        let mut params = json!({});
+        let mut total = 0usize;
+        let mut count = 0usize;
+        for page in 0..MAX_LIST_PAGES {
+            let result = session.rpc("tools/list", params).await?;
+            let error = |kind| session.error("tools/list", Some(session.last_id()), kind);
+            total = total
+                .checked_add(session.last_received_bytes)
+                .ok_or_else(|| error(McpErrorKind::LimitExceeded))?;
+            if total > MAX_LIST_BYTES {
+                return Err(error(McpErrorKind::LimitExceeded));
+            }
+            let entries = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or_else(|| error(McpErrorKind::Protocol))?;
+            count = count
+                .checked_add(entries.len())
+                .ok_or_else(|| error(McpErrorKind::LimitExceeded))?;
+            if count > MAX_TOOLS {
+                return Err(error(McpErrorKind::LimitExceeded));
+            }
+            for value in entries {
+                let name = value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .ok_or_else(|| error(McpErrorKind::Protocol))?;
+                if !names.insert(name.to_owned()) {
+                    return Err(error(McpErrorKind::Protocol));
+                }
+                // Malformed definition/schema excludes only this tool, but duplicate
+                // names and framing errors above invalidate the entire server.
+                let Ok(tool) = serde_json::from_value::<McpToolDefinition>(value.clone()) else {
+                    continue;
+                };
+                if !valid_tool_schema(&tool)
+                    || (*kind == TransportKind::Http
+                        && super::headers::parameter_headers(&tool).is_err())
+                {
+                    continue;
+                }
+                tools.push(tool);
+            }
+            match result.get("nextCursor") {
+                None => return Ok(tools),
+                Some(Value::String(cursor)) if !cursor.is_empty() => {
+                    if !cursors.insert(cursor.clone()) {
+                        return Err(error(McpErrorKind::Protocol));
+                    }
+                    if page + 1 == MAX_LIST_PAGES {
+                        return Err(error(McpErrorKind::LimitExceeded));
+                    }
+                    params = json!({"cursor":cursor});
+                }
+                _ => return Err(error(McpErrorKind::Protocol)),
+            }
+        }
+        unreachable!("bounded pagination")
+    }
+    pub async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        match &mut self.inner {
+            ClientInner::Legacy(client) => client.call_tool(name, arguments).await,
+            ClientInner::External { session, .. } => {
+                if !arguments.is_object() {
+                    return Err(session.error("tools/call", None, McpErrorKind::Configuration));
+                }
+                let result = session
+                    .rpc("tools/call", json!({"name":name,"arguments":arguments}))
+                    .await?;
+                // isError is a successful protocol result carrying a tool failure,
+                // not a transport error. Preserve its explanatory content for E.
+                serde_json::from_value(result).map_err(|_| {
+                    session.error(
+                        "tools/call",
+                        Some(session.last_id()),
+                        McpErrorKind::Protocol,
+                    )
+                })
+            }
+        }
+    }
+    pub(super) fn call_success_detail(&self) -> Value {
+        match &self.inner {
+            ClientInner::Legacy(client) => client.call_success_detail(),
+            ClientInner::External { session, .. } => {
+                json!({"server":session.label(),"method":"tools/call","request_id":session.last_id(),"class":"success","status":null})
+            }
+        }
+    }
+    pub async fn shutdown(&self, reason: ShutdownReason) -> Result<(), McpError> {
+        match &self.inner {
+            ClientInner::Legacy(_) => Ok(()),
+            ClientInner::External { session, .. } => session.shutdown(reason).await,
+        }
+    }
+}
+/// Never let untrusted schemas authorize HTTP or filesystem retrieval.
+fn valid_tool_schema(tool: &McpToolDefinition) -> bool {
+    struct NoRetrieval;
+    impl jsonschema::Retrieve for NoRetrieval {
+        fn retrieve(
+            &self,
+            _uri: &jsonschema::Uri<String>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            Err(std::io::Error::other("external schema retrieval disabled").into())
+        }
+    }
+    let schema = Value::Object(tool.input_schema.clone());
+    schema.get("type").and_then(Value::as_str) == Some("object")
+        && jsonschema::options()
+            .with_retriever(NoRetrieval)
+            .build(&schema)
+            .is_ok()
 }
