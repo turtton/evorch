@@ -4,6 +4,9 @@ pub(crate) fn current_close(
     lane_id: &str,
 ) -> Result<Option<LaneCloseResult>, StorageError> {
     let l = lane(conn, lane_id)?;
+    if !l.policy.is_managed() {
+        return Ok(None);
+    }
     managed(conn, lane_id, l.management_revision, None)?;
     let payload: Option<String> = conn.query_row("SELECT c.payload FROM lanes l JOIN lane_closes c ON c.close_id=l.current_close_id WHERE l.lane_id=?1 AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones)", [lane_id], |row| row.get(0)).optional()?;
     payload.as_deref().map(parse).transpose()

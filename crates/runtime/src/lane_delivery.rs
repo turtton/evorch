@@ -1079,6 +1079,7 @@ impl AgentRuntime {
         }
         let appended = store.handle.append_lane_report_with_delivery(
             lane.lane_id.clone(),
+            lane.management_revision,
             event_bus::LaneReportInput {
                 status: LaneStatus::Failed,
                 summary: "Runtime execution or recovery failed; inspect the run diagnostic.".into(),

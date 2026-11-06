@@ -236,7 +236,7 @@ fn unbound_and_legacy_questions_stay_user_routed_without_retroactive_reports() {
     let old = question(1, 0);
     f.h().create_user_question(&old).unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 1)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 1)
         .unwrap();
     assert_eq!(f.h().lane_question_routing(old.id.clone()).unwrap(), None);
     assert!(
@@ -289,36 +289,36 @@ fn report_semantics_deduplicate_summary_and_sequence_but_not_revision_or_episode
     f.lane(1, LanePolicy::Attached);
     let first = f
         .h()
-        .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Ready), 2)
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Ready), 2)
         .unwrap();
     let mut second = report(LaneStatus::Ready);
     second.summary = "different words".into();
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), second.clone(), 3)
+        .append_lane_report_with_delivery("lane-1".into(), 1, second.clone(), 3)
         .unwrap();
     assert_eq!(f.count("lane_notifications"), 1);
     assert_eq!(first.report.artifact_revision, second.artifact_revision);
     second.artifact_revision = Some(ArtifactRevision::CommitSha("b".repeat(40)));
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), second, 4)
+        .append_lane_report_with_delivery("lane-1".into(), 1, second, 4)
         .unwrap();
     let mut failed = report(LaneStatus::Failed);
     assert!(
         f.h()
-            .append_lane_report_with_delivery("lane-1".into(), failed.clone(), 5)
+            .append_lane_report_with_delivery("lane-1".into(), 1, failed.clone(), 5)
             .is_err()
     );
     assert_eq!(f.count("lane_reports"), 3);
     failed.failure_episode = Some("episode-1".into());
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), failed.clone(), 6)
+        .append_lane_report_with_delivery("lane-1".into(), 1, failed.clone(), 6)
         .unwrap();
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), failed.clone(), 7)
+        .append_lane_report_with_delivery("lane-1".into(), 1, failed.clone(), 7)
         .unwrap();
     failed.failure_episode = Some("episode-2".into());
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), failed, 8)
+        .append_lane_report_with_delivery("lane-1".into(), 1, failed, 8)
         .unwrap();
     assert_eq!(f.count("lane_notifications"), 4);
 }
@@ -565,13 +565,15 @@ fn management_changes_expire_question_cursor_and_delivery_authority() {
     let page = f.h().lane_questions("lead".into(), None).unwrap();
     assert!(page.has_more);
     f.h()
-        .change_lane_management(
-            "lane-1",
-            1,
-            LaneManagementChange {
-                lead_thread_id: Some("new-lead".into()),
-                policy: LanePolicy::Attached,
+        .apply_lane_management_transition(
+            storage::lane_management::LaneManagementRequest {
+                operation_id: format!("transition:{}", 5),
+                lane_id: ("lane-1").to_string(),
+                expected_management_revision: 1,
+                action: storage::lane_management::LaneManagementAction::Detach,
             },
+            storage::lane_management::LaneManagementActor::User,
+            None,
             5,
         )
         .unwrap();
@@ -637,7 +639,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     f.lane(1, LanePolicy::Attached);
     f.h().create_user_question(&question(1, 0)).unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 2)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 2)
         .unwrap();
     let Fixture {
         _dir,
@@ -647,6 +649,7 @@ fn v46_upgrade_does_not_route_existing_questions_or_backfill_terminal_reports() 
     drop(storage);
     let conn = Connection::open(&config.db_path).unwrap();
     conn.execute_batch(concat!(
+        include_str!("../undo/undo_v51.sql"),
         include_str!("../undo/undo_v50.sql"),
         include_str!("../undo/undo_v49.sql"),
         include_str!("../undo/undo_v48.sql"),
@@ -721,14 +724,14 @@ fn milestones_coalesce_only_before_claim_and_keep_claimed_references_immutable()
     f.lane(1, LanePolicy::Attached);
     for at in 2..5 {
         f.h()
-            .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Working), at)
+            .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Working), at)
             .unwrap();
     }
     assert_eq!(f.count("lane_notifications"), 1);
     let first = claim(&f.h(), 10);
     assert_eq!(first.notifications[0].report_seq, Some(3));
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Working), 11)
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Working), 11)
         .unwrap();
     assert_eq!(f.count("lane_notifications"), 2);
     f.h()

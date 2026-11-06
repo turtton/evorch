@@ -7,8 +7,8 @@ use rusqlite::Connection;
 use storage::StorageError;
 use storage::lanes::{
     LANE_LIST_PAGE_MAX, LANE_LIST_PAGE_MAX_BYTES, LANE_LIST_SNAPSHOTS_PER_LEAD, LaneBrief,
-    LaneConflictReason, LaneCursorError, LaneListPage, LaneListRequest, LaneManagementChange,
-    LanePolicy, LaneReportInput, LaneReportProducer, LaneScope, LaneStatus, LaneValidationKind,
+    LaneConflictReason, LaneCursorError, LaneListPage, LaneListRequest, LanePolicy,
+    LaneReportInput, LaneReportProducer, LaneScope, LaneStatus, LaneValidationKind,
     LaneWorkspaceDeclaration, NewLane,
 };
 use storage::threads::{ThreadLineageKind, ThreadUpsert};
@@ -270,83 +270,41 @@ fn input_that_is_empty_oversized_or_secret_is_refused_and_stores_nothing() {
 
 #[test]
 fn management_changes_move_from_the_revision_the_caller_read() {
+    use storage::lane_management::*;
     let f = Fixture::new();
     let handle = f.handle();
-    let lane = handle.create_lane(new_lane(1, 10)).unwrap().lane;
-
-    // When: the lead and policy change from revision 1.
+    handle.create_lane(new_lane(1, 10)).unwrap();
+    let request = LaneManagementRequest {
+        operation_id: "summary".into(),
+        lane_id: "lane-001".into(),
+        expected_management_revision: 1,
+        action: LaneManagementAction::SetPolicy {
+            policy: ManagedLanePolicy::Summary,
+        },
+    };
     let summary = handle
-        .change_lane_management(
-            "lane-001",
-            1,
-            LaneManagementChange {
-                lead_thread_id: Some("other-lead".into()),
-                policy: LanePolicy::Summary,
-            },
-            20,
-        )
+        .apply_lane_management_transition(request.clone(), LaneManagementActor::User, None, 20)
         .unwrap();
     assert!(summary.changed);
     assert_eq!(summary.lane.management_revision, 2);
-    assert_eq!(summary.lane.lead_thread_id.as_deref(), Some("other-lead"));
-    assert_eq!(summary.lane.brief.report_policy, LanePolicy::Summary);
-
-    // Then: a writer that still holds revision 1 is refused with stale_revision.
-    let stale = handle
-        .change_lane_management(
-            "lane-001",
-            1,
-            LaneManagementChange {
-                lead_thread_id: None,
-                policy: LanePolicy::Detached,
-            },
-            21,
-        )
-        .unwrap_err();
+    assert_eq!(summary.lane.lead_thread_id.as_deref(), Some("lead"));
+    let mut stale = request.clone();
+    stale.operation_id = "stale".into();
     assert_eq!(
-        stale,
-        StorageError::StaleRevision {
-            kind: "management",
-            expected: 1,
-            current: 2
-        }
+        handle
+            .apply_lane_management_transition(stale, LaneManagementActor::User, None, 21)
+            .unwrap_err(),
+        StorageError::LaneManagement(LaneManagementError::StaleManagementRevision)
     );
-    assert!(stale.to_string().contains("stale_revision"));
-
-    // And: asking for what is stored changes nothing.
-    let same = handle
-        .change_lane_management(
-            "lane-001",
-            2,
-            LaneManagementChange {
-                lead_thread_id: Some("other-lead".into()),
-                policy: LanePolicy::Summary,
-            },
-            22,
-        )
-        .unwrap();
-    assert!(!same.changed);
-    assert_eq!(same.lane.management_revision, 2);
-
-    // And: a lead without a managed policy (or the reverse) is refused.
-    for (lead, policy) in [
-        (Some("lead"), LanePolicy::Detached),
-        (None, LanePolicy::Attached),
-    ] {
-        let error = handle
-            .change_lane_management(
-                "lane-001",
-                2,
-                LaneManagementChange {
-                    lead_thread_id: lead.map(str::to_owned),
-                    policy,
-                },
-                23,
-            )
-            .unwrap_err();
-        assert!(matches!(error, StorageError::LaneInvalid(_)), "{error:?}");
-    }
-    assert_eq!(lane.origin_thread_id, "lead");
+    let mut same = request;
+    same.operation_id = "same".into();
+    same.expected_management_revision = 2;
+    assert!(
+        !handle
+            .apply_lane_management_transition(same, LaneManagementActor::User, None, 22)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]
@@ -358,13 +316,15 @@ fn detaching_keeps_the_origin_and_a_host_mirror_cannot_undo_or_hide_it() {
 
     // When: the data step of a detach is taken.
     let detached = handle
-        .change_lane_management(
-            "lane-001",
-            1,
-            LaneManagementChange {
-                lead_thread_id: None,
-                policy: LanePolicy::Detached,
+        .apply_lane_management_transition(
+            storage::lane_management::LaneManagementRequest {
+                operation_id: format!("transition:{}", 20),
+                lane_id: ("lane-001").to_string(),
+                expected_management_revision: 1,
+                action: storage::lane_management::LaneManagementAction::Detach,
             },
+            storage::lane_management::LaneManagementActor::User,
+            None,
             20,
         )
         .unwrap()
@@ -416,7 +376,7 @@ fn the_database_itself_refuses_to_rewrite_origin_scope_counters_or_reports() {
     let handle = f.handle();
     handle.create_lane(new_lane(1, 10)).unwrap();
     handle
-        .append_lane_report("lane-001", report(LaneStatus::Working, "one"), 11)
+        .append_lane_report("lane-001", 1, report(LaneStatus::Working, "one"), 11)
         .unwrap();
     let conn = f.sql();
 
@@ -459,6 +419,7 @@ fn reports_are_numbered_by_the_ledger_in_order_and_never_change() {
         let appended = handle
             .append_lane_report(
                 "lane-001",
+                1,
                 report(status, &format!("step {index}")),
                 100 + index as i64,
             )
@@ -503,7 +464,7 @@ fn oversized_empty_or_secret_reports_are_errors_and_leave_no_trace() {
 
     let mut long = report(LaneStatus::Working, &"x".repeat(1025));
     let error = handle
-        .append_lane_report("lane-001", long.clone(), 11)
+        .append_lane_report("lane-001", 1, long.clone(), 11)
         .unwrap_err();
     assert!(matches!(
         error,
@@ -513,13 +474,13 @@ fn oversized_empty_or_secret_reports_are_errors_and_leave_no_trace() {
     long.summary = "ok".into();
     long.artifact_refs = vec!["a".into(); 9];
     assert!(matches!(
-        handle.append_lane_report("lane-001", long, 12).unwrap_err(),
+        handle.append_lane_report("lane-001", 1, long, 12).unwrap_err(),
         StorageError::LaneInvalid(ref e)
             if matches!(e.kind, LaneValidationKind::TooMany { max: 8, actual: 9 })
     ));
     assert!(matches!(
         handle
-            .append_lane_report("lane-001", report(LaneStatus::Ready, " "), 13)
+            .append_lane_report("lane-001", 1, report(LaneStatus::Ready, " "), 13)
             .unwrap_err(),
         StorageError::LaneInvalid(ref e) if e.kind == LaneValidationKind::Empty
     ));
@@ -527,6 +488,7 @@ fn oversized_empty_or_secret_reports_are_errors_and_leave_no_trace() {
         handle
             .append_lane_report(
                 "lane-001",
+                1,
                 report(
                     LaneStatus::Ready,
                     &format!("token sk-{}", "abcdefghijklmnopqrstuvwxyz0123456789")
@@ -538,7 +500,7 @@ fn oversized_empty_or_secret_reports_are_errors_and_leave_no_trace() {
     ));
     assert!(matches!(
         handle
-            .append_lane_report("missing", report(LaneStatus::Ready, "x"), 15)
+            .append_lane_report("missing", 1, report(LaneStatus::Ready, "x"), 15)
             .unwrap_err(),
         StorageError::LaneNotFound { .. }
     ));
@@ -552,7 +514,7 @@ fn oversized_empty_or_secret_reports_are_errors_and_leave_no_trace() {
             .is_empty()
     );
     let first = handle
-        .append_lane_report("lane-001", report(LaneStatus::Working, "fine"), 16)
+        .append_lane_report("lane-001", 1, report(LaneStatus::Working, "fine"), 16)
         .unwrap();
     assert_eq!(first.report.report_seq, 1);
 }
@@ -623,6 +585,8 @@ fn v45_migration_keeps_pending_v44_intents_recoverable() {
         let conn = Connection::open(&config.db_path).unwrap();
         conn.execute_batch(concat!(
             concat!(
+                include_str!("../undo/undo_v51.sql"),
+                include_str!("../undo/undo_v50.sql"),
                 include_str!("../undo/undo_v49.sql"),
                 include_str!("../undo/undo_v48.sql"),
                 include_str!("../undo/undo_v47.sql")
@@ -793,7 +757,7 @@ fn lane_list_orders_by_latest_activity_then_lane_id_and_reads_never_reorder() {
         200
     );
     handle
-        .append_lane_report("lane-003", report(LaneStatus::Working, "tick"), 300)
+        .append_lane_report("lane-003", 1, report(LaneStatus::Working, "tick"), 300)
         .unwrap();
     let moved = handle.lane_list(list_request(None)).unwrap();
     assert_eq!(
@@ -837,7 +801,7 @@ fn pages_hold_twenty_lanes_and_cover_every_lane_once_while_the_ledger_changes() 
     handle.touch_lane_activity("lane-001", 20_000).unwrap();
     handle.create_lane(new_lane(46, 30_000)).unwrap();
     handle
-        .append_lane_report("lane-040", report(LaneStatus::Ready, "done"), 40_000)
+        .append_lane_report("lane-040", 1, report(LaneStatus::Ready, "done"), 40_000)
         .unwrap();
     let fresh = ids(&handle.lane_list(list_request(None)).unwrap());
     assert_ne!(fresh[..5], expected[..5], "a new listing sees the changes");
@@ -886,25 +850,25 @@ fn a_lane_the_lead_no_longer_manages_drops_out_of_later_pages() {
     // Newest first: lane-025 .. lane-006 on the first page, lane-005 .. lane-001 next.
     assert_eq!(first.items[0].lane_id, "lane-025");
     handle
-        .change_lane_management(
-            "lane-003",
-            1,
-            LaneManagementChange {
-                lead_thread_id: None,
-                policy: LanePolicy::Detached,
+        .apply_lane_management_transition(
+            storage::lane_management::LaneManagementRequest {
+                operation_id: format!("transition:{}", 100),
+                lane_id: ("lane-003").to_string(),
+                expected_management_revision: 1,
+                action: storage::lane_management::LaneManagementAction::Detach,
             },
+            storage::lane_management::LaneManagementActor::User,
+            None,
             100,
         )
         .unwrap();
 
-    let second = handle
-        .lane_list(list_request(first.next_cursor.clone()))
-        .unwrap();
     assert_eq!(
-        ids(&second),
-        ["lane-005", "lane-004", "lane-002", "lane-001"]
+        handle
+            .lane_list(list_request(first.next_cursor))
+            .unwrap_err(),
+        StorageError::LaneCursor(LaneCursorError::Stale)
     );
-    assert!(!second.has_more);
 }
 
 #[test]
@@ -969,7 +933,7 @@ fn a_page_stops_at_sixteen_kib_and_the_rest_follows_through_the_cursor() {
         big.question_refs = vec!["q".repeat(256)];
         big.reason_code = Some("r".repeat(64));
         handle
-            .append_lane_report(&format!("lane-{n:03}"), big, 1_000 + i64::from(n))
+            .append_lane_report(&format!("lane-{n:03}"), 1, big, 1_000 + i64::from(n))
             .unwrap();
     }
 
@@ -1019,7 +983,7 @@ fn a_deleted_thread_hides_its_lane_and_fences_every_write() {
     assert!(handle.lane_by_thread("thread-001").unwrap().is_none());
     assert!(matches!(
         handle
-            .append_lane_report("lane-001", report(LaneStatus::Working, "late"), 20)
+            .append_lane_report("lane-001", 1, report(LaneStatus::Working, "late"), 20)
             .unwrap_err(),
         StorageError::LaneNotFound { .. }
     ));
@@ -1085,7 +1049,7 @@ fn events_describe_the_committed_state_and_a_replay_is_not_an_event() {
         }
     );
     let appended = handle
-        .append_lane_report("lane-001", report(LaneStatus::Ready, "done"), 11)
+        .append_lane_report("lane-001", 1, report(LaneStatus::Ready, "done"), 11)
         .unwrap();
     assert_eq!(
         appended
@@ -1103,7 +1067,7 @@ fn events_describe_the_committed_state_and_a_replay_is_not_an_event() {
     // A failed write returns an error, so there is nothing to publish.
     assert!(
         handle
-            .append_lane_report("lane-001", report(LaneStatus::Ready, ""), 12)
+            .append_lane_report("lane-001", 1, report(LaneStatus::Ready, ""), 12)
             .is_err()
     );
 }
@@ -1128,7 +1092,7 @@ fn a_report_is_limited_by_its_serialized_size_and_a_refusal_leaves_the_history_a
     escaped.question_refs = vec!["\"".repeat(256); 4];
     for oversized in [by_sum, escaped] {
         let error = handle
-            .append_lane_report("lane-001", oversized, 11)
+            .append_lane_report("lane-001", 1, oversized, 11)
             .unwrap_err();
         assert!(
             matches!(error, StorageError::LaneInvalid(ref e) if e.field == "report"),
@@ -1163,7 +1127,7 @@ fn a_report_is_limited_by_its_serialized_size_and_a_refusal_leaves_the_history_a
         let mut candidate = report(LaneStatus::Working, &"x".repeat(1024));
         candidate.artifact_refs = vec!["y".repeat(256); 8];
         candidate.question_refs = vec!["q".repeat(length); 3];
-        match handle.append_lane_report("lane-001", candidate, 12) {
+        match handle.append_lane_report("lane-001", 1, candidate, 12) {
             Ok(appended) => {
                 accepted = serde_json::to_string(&appended.report).unwrap().len();
                 assert!(accepted <= 4096, "{accepted} bytes accepted");
@@ -1212,7 +1176,7 @@ fn a_workspace_that_serializes_large_is_refused_so_a_list_entry_stays_small() {
         big.artifact_refs = vec!["a".repeat(256); 6];
         big.question_refs = vec!["q".repeat(200)];
         handle
-            .append_lane_report(&format!("lane-{n:03}"), big, 1_000 + i64::from(n))
+            .append_lane_report(&format!("lane-{n:03}"), 1, big, 1_000 + i64::from(n))
             .unwrap();
     }
     let mut seen = Vec::new();
@@ -1259,7 +1223,7 @@ fn a_write_that_fails_half_way_leaves_nothing_behind() {
     .unwrap();
     assert!(
         handle
-            .append_lane_report("lane-001", report(LaneStatus::Working, "x"), 11)
+            .append_lane_report("lane-001", 1, report(LaneStatus::Working, "x"), 11)
             .is_err()
     );
     conn.execute_batch("DROP TRIGGER inject_report").unwrap();
@@ -1291,7 +1255,7 @@ fn a_write_that_fails_half_way_leaves_nothing_behind() {
     );
     assert_eq!(
         handle
-            .append_lane_report("lane-001", report(LaneStatus::Working, "x"), 13)
+            .append_lane_report("lane-001", 1, report(LaneStatus::Working, "x"), 13)
             .unwrap()
             .report
             .report_seq,
@@ -1443,4 +1407,45 @@ fn an_operator_stop_hardens_into_a_cancellation_but_a_cancellation_is_never_loos
             .as_deref(),
         Some("cancelled before root start")
     );
+}
+
+#[test]
+fn policy_edit_invalidates_filtered_cursor_without_leaking_changed_member() {
+    use storage::lane_management::*;
+    let f = Fixture::new();
+    let h = f.handle();
+    for n in 1..=25 {
+        h.create_lane(new_lane(n, i64::from(n))).unwrap();
+    }
+    let mut request = list_request(None);
+    request.policy = Some(LanePolicy::Attached);
+    let first = h.lane_list(request.clone()).unwrap();
+    assert!(first.has_more);
+    h.apply_lane_management_transition(
+        LaneManagementRequest {
+            operation_id: "policy-cursor".into(),
+            lane_id: "lane-003".into(),
+            expected_management_revision: 1,
+            action: LaneManagementAction::SetPolicy {
+                policy: ManagedLanePolicy::Summary,
+            },
+        },
+        LaneManagementActor::User,
+        None,
+        30,
+    )
+    .unwrap();
+    request.cursor = first.next_cursor;
+    assert_eq!(
+        h.lane_list(request.clone()).unwrap_err(),
+        StorageError::LaneCursor(LaneCursorError::Stale)
+    );
+    request.cursor = None;
+    let page = h.lane_list(request.clone()).unwrap();
+    request.cursor = page.next_cursor;
+    let second = h.lane_list(request).unwrap();
+    assert!(!second.items.iter().any(|i| i.lane_id == "lane-003"));
+    let mut summary = list_request(None);
+    summary.policy = Some(LanePolicy::Summary);
+    assert_eq!(ids(&h.lane_list(summary).unwrap()), vec!["lane-003"]);
 }

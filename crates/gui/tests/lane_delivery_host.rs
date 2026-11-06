@@ -819,6 +819,7 @@ async fn a_destination_the_window_does_not_know_is_nacked_and_its_notification_s
     handle
         .append_lane_report_with_delivery(
             "ghost-lane".into(),
+            1,
             event_bus::LaneReportInput {
                 status: event_bus::LaneStatus::Ready,
                 summary: "done".into(),
@@ -875,6 +876,7 @@ async fn attention_query_and_display_leave_a_static_provider_input_and_saved_pre
         .handle()
         .append_lane_report_with_delivery(
             lane.lane_id.clone(),
+            1,
             event_bus::LaneReportInput {
                 status: event_bus::LaneStatus::Ready,
                 summary: "unverified artifact".into(),

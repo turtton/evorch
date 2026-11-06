@@ -1,5 +1,8 @@
 use super::*;
-fn check_observation(conn: &Connection, r: &ObserveLaneStall) -> Result<LaneRecord, StorageError> {
+pub(crate) fn check_observation(
+    conn: &Connection,
+    r: &ObserveLaneStall,
+) -> Result<LaneRecord, StorageError> {
     let l = managed(conn, &r.lane_id, r.management_revision, None)?;
     let destination = crate::repo::lane_delivery::destination(conn, &l.thread_id)?
         .ok_or_else(|| err(LaneOperationError::OwnershipLost))?;
@@ -42,8 +45,9 @@ pub(crate) fn observe_stall(
         "le-{}",
         digest(&(&l.lane_id, l.management_revision, &r.progress_anchor))?
     );
-    if let Some(e) = episode(&tx, &episode_id)? {
-        return Ok(e);
+    let existing: Option<String> = tx.query_row("SELECT payload FROM lane_stall_episodes WHERE lane_id=?1 AND management_revision=?2 AND progress_epoch=?3", params![l.lane_id,l.management_revision,r.progress_anchor.epoch], |row| row.get(0)).optional()?;
+    if let Some(e) = existing {
+        return parse(&e);
     }
     let e = LaneStallEpisode {
         episode_id,

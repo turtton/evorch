@@ -176,7 +176,7 @@ pub(crate) fn routing(
     conn: &Connection,
     question_id: &str,
 ) -> Result<Option<QuestionRouting>, StorageError> {
-    let payload: Option<String> = conn.query_row("SELECT r.payload FROM lane_question_routes r WHERE question_id=?1 AND requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND (responder_thread_id IS NULL OR responder_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=r.lane_id AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))", [question_id], |r| r.get(0)).optional()?;
+    let payload: Option<String> = conn.query_row("SELECT r.payload FROM lane_question_routes r WHERE question_id=?1 AND requester_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_root_run_id NOT IN (SELECT run_id FROM run_tombstones) AND requester_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND (responder_thread_id IS NULL OR responder_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) OR EXISTS(SELECT 1 FROM user_questions q WHERE q.id=r.question_id AND q.answered=1)) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=r.lane_id AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))", [question_id], |r| r.get(0)).optional()?;
     payload.as_deref().map(parse).transpose()
 }
 fn project(question: &mut UserQuestion, route: &QuestionRouting) {
@@ -494,20 +494,39 @@ pub(crate) fn questions(
 pub(crate) fn append_report(
     conn: &Connection,
     lane_id: &str,
+    expected_management_revision: u64,
     input: crate::lanes::LaneReportInput,
     at_ns: i64,
 ) -> Result<crate::lanes::LaneReportAppended, StorageError> {
     let tx = transaction(conn)?;
-    let appended = crate::repo::lanes::append_report_in_transaction(&tx, lane_id, &input, at_ns)?;
+    let appended =
+        append_report_in_transaction(&tx, lane_id, expected_management_revision, input, at_ns)?;
+    tx.commit()?;
+    Ok(appended)
+}
+pub(crate) fn append_report_in_transaction(
+    tx: &Transaction<'_>,
+    lane_id: &str,
+    expected_management_revision: u64,
+    input: crate::lanes::LaneReportInput,
+    at_ns: i64,
+) -> Result<crate::lanes::LaneReportAppended, StorageError> {
+    let appended = crate::repo::lanes::append_report_in_transaction(
+        tx,
+        lane_id,
+        expected_management_revision,
+        &input,
+        at_ns,
+    )?;
     // A new terminal artifact must unblock delivery even if runtime crashes
     // immediately after this source commit, before scheduling its outbox.
     if matches!(
         input.status,
         event_bus::LaneStatus::Ready | event_bus::LaneStatus::Failed
     ) {
-        let expected = guard(&tx, lane_id)?.revision;
+        let expected = guard(tx, lane_id)?.revision;
         guards::update_guard_in_transaction(
-            &tx,
+            tx,
             lane_id,
             expected,
             LaneGuardSignal::TerminalArtifact {
@@ -536,7 +555,7 @@ pub(crate) fn append_report(
         };
         if let Some(kind) = kind {
             enqueue(
-                &tx,
+                tx,
                 LaneNotification {
                     notification_id: String::new(),
                     lane_id: lane_id.into(),
@@ -550,7 +569,6 @@ pub(crate) fn append_report(
             )?;
         }
     }
-    tx.commit()?;
     Ok(appended)
 }
 
