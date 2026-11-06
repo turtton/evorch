@@ -8,6 +8,7 @@ tokio::task_local! {
     pub(super) static AFTER_RECEIPT_BARRIER: Arc<tokio::sync::Barrier>;
     pub(super) static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 }
+mod harness;
 pub(super) mod integration;
 mod lease;
 mod monitor;
@@ -55,6 +56,7 @@ async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {
 struct Model {
     finish: AtomicBool,
     fail_next: AtomicBool,
+    fail_after: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     block_next: AtomicBool,
     blocked: tokio::sync::Notify,
     requests: Mutex<Vec<Vec<Message>>>,
@@ -77,6 +79,10 @@ impl AgentModel for Model {
             std::future::pending::<()>().await;
         }
         if self.fail_next.swap(false, Ordering::SeqCst) {
+            let release = self.fail_after.lock().unwrap().take();
+            if let Some(release) = release {
+                release.await.expect("fault injection release");
+            }
             return Err(RuntimeError::Model {
                 reason: "injected pre-send provider rejection".into(),
             });

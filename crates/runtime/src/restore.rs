@@ -21,6 +21,7 @@ pub(crate) use escalation::persist_escalation_seed;
 pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
+    pub(crate) harness_notice_pending: bool,
     pub(crate) provenance: provenance::ConversationProvenance,
     /// Revision of the snapshot this state was read from, or last saved. A
     /// state built from a bare record has none and cannot be saved.
@@ -97,6 +98,7 @@ impl RestoredState {
                         .any(|block| matches!(block, providers::ContentBlock::ToolUse { .. }))
             });
         Ok(Self {
+            harness_notice_pending: descriptor.harness_notice_pending,
             provenance: provenance::ConversationProvenance::unknown(),
             snapshot_revision: revision::SnapshotRevision::unknown(),
             admission_reservation: None,
@@ -165,6 +167,9 @@ pub struct RunRestoreDescriptor {
     pub lane_scope: Option<event_bus::LaneScope>,
     #[serde(default)]
     pub spawn_credits: crate::budget_tracker::SpawnCredits,
+    /// Recovery marker only, never Lane progress or user authority.
+    #[serde(default)]
+    pub harness_notice_pending: bool,
     /// Explicit input provenance, never reconstructed by counting canonical history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<providers::RequestTurnContext>,
@@ -404,7 +409,29 @@ pub(crate) fn persist_lane_delivery(
         "Checkpoint",
         context.messages.len(),
         &[],
-        Some((claim, now)),
+        Some((
+            &crate::lane_delivery::outbox::DeliveryClaim::Lane(claim.clone()),
+            now,
+        )),
+    )
+}
+
+pub(crate) fn persist_pr_delivery(
+    state: &LoopState,
+    context: &crate::AgentContext,
+    claim: &storage::pull_request_auto_fix::PrDeliveryClaim,
+    now: i64,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+    write_snapshot_with_context(
+        state,
+        context,
+        "Checkpoint",
+        context.messages.len(),
+        &[],
+        Some((
+            &crate::lane_delivery::outbox::DeliveryClaim::PullRequest(claim.clone()),
+            now,
+        )),
     )
 }
 
@@ -424,7 +451,7 @@ fn write_snapshot_with_context(
     terminal_phase: &str,
     end: usize,
     settled: &[storage::HostInputTransition],
-    lane: Option<(&storage::lane_delivery::LaneDeliveryClaim, i64)>,
+    lane: Option<(&crate::lane_delivery::outbox::DeliveryClaim, i64)>,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     context
         .responses_replay
@@ -545,6 +572,7 @@ fn write_snapshot_with_context(
         thread_id: state.thread_id.clone(),
         lane_scope: config.lane_scope,
         spawn_credits: state.budget.spawn_credits.clone(),
+        harness_notice_pending: context.harness_notice_pending,
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),
@@ -633,10 +661,24 @@ fn write_snapshot_with_context(
         .ok_or(SnapshotError::RevisionUnknown)?;
     let write = context.provenance.write(record, expected)?;
     let (saved, applied) = if let Some((claim, now)) = lane {
-        let saved = store
-            .handle
-            .accept_lane_delivery(claim.clone(), write, now)?
-            .ok_or(SnapshotError::RevisionUnknown)?;
+        use crate::lane_delivery::outbox::DeliveryClaim;
+        let saved = match claim {
+            DeliveryClaim::Lane(claim) => {
+                store
+                    .handle
+                    .accept_lane_delivery(claim.clone(), write, now)?
+            }
+            DeliveryClaim::PullRequest(claim) => store.handle.accept_pr_delivery(
+                claim.clone(),
+                write,
+                now,
+                runtime.pull_requests().map_or(
+                    config::PullRequestsConfig::default().auto_fix_enabled,
+                    |s| s.settings().auto_fix_enabled,
+                ),
+            )?,
+        }
+        .ok_or(SnapshotError::RevisionUnknown)?;
         (saved, Vec::new())
     } else {
         store

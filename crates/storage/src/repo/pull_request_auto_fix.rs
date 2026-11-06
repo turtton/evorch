@@ -392,7 +392,22 @@ pub(crate) fn pending_destinations(
     conn: &Connection,
     after: &str,
 ) -> Result<Vec<String>, StorageError> {
-    let mut q=conn.prepare("SELECT DISTINCT destination_thread_id FROM lane_notifications WHERE source_kind='pull_request_checks_failed' AND state='pending' AND destination_thread_id>?1 AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY destination_thread_id LIMIT 20")?;
+    let mut q = conn.prepare(
+        "SELECT thread_id FROM (
+           SELECT destination_thread_id AS thread_id FROM lane_notifications
+           WHERE source_kind='pull_request_checks_failed' AND state='pending'
+             AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+           UNION
+           SELECT d.thread_id FROM lane_delivery_destinations d
+           JOIN run_contexts c ON c.run_id=json_extract(d.owner_json,'$.root_run_id')
+           WHERE d.stopped=0 AND c.parent_run_id IS NULL
+             AND c.terminal_phase IN ('Checkpoint','Error','Done')
+             AND c.run_id NOT IN (SELECT run_id FROM run_tombstones)
+             AND d.thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+             AND CASE WHEN json_valid(c.config_json)
+               THEN json_extract(c.config_json,'$.harness_notice_pending')=1 ELSE 0 END
+         ) WHERE thread_id>?1 ORDER BY thread_id LIMIT 20",
+    )?;
     Ok(q.query_map([after], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }
