@@ -13,6 +13,7 @@ pub mod checkout;
 pub mod diff;
 pub mod fake;
 pub mod locator;
+pub mod log_source;
 pub mod ownership;
 pub mod review;
 mod runtime;
@@ -30,6 +31,10 @@ use storage::pull_requests::{
 pub use checkout::{CheckoutMiss, CheckoutResolution, resolve_checkout};
 pub use fake::{FakeProcessRunner, FakePullRequestSource, FetchGate};
 pub use locator::{LocatorError, parse_locator};
+pub use log_source::{
+    CiLogBundle, CiLogRun, CiLogSkip, FakePullRequestLogSource, GhLogSource, LogLimits, LogRequest,
+    LogSkipKind, LogSkipReason, PullRequestLogSource, render_ci_log_data,
+};
 pub use ownership::{OwnershipView, ThreadEnvironment};
 pub use review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
