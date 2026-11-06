@@ -86,6 +86,54 @@ async fn baseline_pending_completion_and_toggle_work_without_gui_notifications()
     assert_eq!(logs.requests().len(), 1);
 }
 #[tokio::test(start_paused = true)]
+async fn re_reserving_the_same_sha_after_pending_prepares_the_new_reservation() {
+    let w = World::new();
+    let logs = Arc::new(FakePullRequestLogSource::new());
+    let p = w.process_with_logs(enabled(), logs.clone());
+    p.link_directly("t", 1);
+    let t = target(&p);
+    let seq = snapshot(&p, 'a', false);
+    attribute(&p, &t, seq, 'a');
+    enable(&p, &t).await;
+    settle().await;
+    let first = notices(&p)[0].clone();
+    assert_eq!(first.phase, PrNoticePhase::Ready);
+
+    let seq = snapshot(&p, 'a', true);
+    p.service.inner().lock().attribution.adopt(
+        "t",
+        t.permit.lease.generation,
+        1,
+        seq,
+        &"a".repeat(40),
+        None,
+    );
+    p.service.inner().coordinate(std::slice::from_ref(&t)).await;
+    assert_eq!(notices(&p)[0].phase, PrNoticePhase::Cancelled);
+    let seq = snapshot(&p, 'a', false);
+    p.service.inner().lock().attribution.adopt(
+        "t",
+        t.permit.lease.generation,
+        1,
+        seq,
+        &"a".repeat(40),
+        None,
+    );
+    p.service.inner().coordinate(std::slice::from_ref(&t)).await;
+    // Storage and permit stages are inline in these virtual-time fixtures; drain runnable work.
+    settle().await;
+    let second = notices(&p)[0].clone();
+    assert_eq!(second.notice_id, first.notice_id);
+    assert!(second.reservation_revision > first.reservation_revision);
+    assert_eq!(second.phase, PrNoticePhase::Ready);
+    assert_eq!(logs.requests().len(), 2);
+    // Reevaluating the same reservation must not fetch the logs repeatedly.
+    p.service.inner().coordinate(std::slice::from_ref(&t)).await;
+    settle().await;
+    assert_eq!(logs.requests().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn off_unknown_and_non_owner_neither_reserve_nor_fetch_logs() {
     for (on, agent) in [(false, true), (true, false)] {
         let w = World::new();

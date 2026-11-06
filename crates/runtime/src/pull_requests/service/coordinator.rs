@@ -287,6 +287,7 @@ impl PullRequestService {
             notice.notice_id.clone(),
             notice.policy_revision,
             target.permit.lease.generation,
+            notice.reservation_revision,
         ));
         inner.spawn_preparation(target, notice.clone());
         inner.wake.notify_one();
@@ -431,6 +432,7 @@ impl Inner {
                     notice.notice_id.clone(),
                     notice.policy_revision,
                     target.permit.lease.generation,
+                    notice.reservation_revision,
                 ))
             {
                 return;
@@ -478,6 +480,7 @@ impl Inner {
             notice.notice_id.clone(),
             notice.policy_revision,
             target.permit.lease.generation,
+            notice.reservation_revision,
         ));
         let failed_checks: Vec<_> = facts
             .checks

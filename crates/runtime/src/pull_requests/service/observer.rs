@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use event_bus::{Event, EventKind, PullRequestEvent, ToolEvent};
+use event_bus::{AgentRunPhase, Event, EventKind, LifecycleEvent, PullRequestEvent, ToolEvent};
 use serde_json::Value;
 use storage::StorageError;
 use storage::pull_requests::{
@@ -31,8 +31,9 @@ struct Observer {
     /// Phase 1 refresh correlations, including read-only `gh pr` commands.
     publishing_calls: HashSet<(String, String)>,
     attributable_calls: HashSet<(String, String)>,
+    /// Publishing terminal identities live only until the owning run becomes terminal.
+    /// Read-only refreshes need no attribution tombstones. There is no process-wide quota.
     completed: HashSet<(String, String)>,
-    attribution_saturated: bool,
     /// Asynchronous jobs (run, job) started by a publishing command.
     publishing_jobs: HashSet<(String, String)>,
     attributable_jobs: HashSet<(String, String)>,
@@ -102,8 +103,12 @@ fn attributable_command(command: &str) -> bool {
                         || arg.starts_with("--namespace=") => {}
                     "push" => {
                         return !args.any(|a| {
-                            matches!(a, "--dry-run" | "--help")
-                                || a.starts_with("--dry-run=")
+                            // Git accepts unique long-option prefixes such as --dry-r.
+                            // Ambiguous dry-run prefixes are unknown as well.
+                            (a.starts_with("--")
+                                && a.len() > 2
+                                && "--dry-run".starts_with(a.split('=').next().unwrap()))
+                                || a == "--help"
                                 || a.starts_with("--help=")
                                 || (a.starts_with('-')
                                     && !a.starts_with("--")
@@ -219,23 +224,22 @@ impl Observer {
         }
     }
 
-    async fn finished(&mut self, inner: &Arc<Inner>, run: &str, identity: String, success: bool) {
-        let id = (run.to_owned(), identity);
-        if self.completed.contains(&id) {
-            return;
-        }
-        // Do not evict dedup tombstones and turn a replay into fresh success.
-        // At capacity, keep refreshing but stop attributing new heads (safe unknown).
-        if self.completed.len() >= MAX_TRACKED {
-            self.attribution_saturated = true;
-        }
-        if !self.attribution_saturated {
-            self.completed.insert(id);
-        }
-        if success
-            && !self.attribution_saturated
-            && let Some(thread) = inner.thread_for_run(run).await
-        {
+    async fn finished(
+        &mut self,
+        inner: &Arc<Inner>,
+        run: &str,
+        identity: String,
+        publishing: Option<bool>,
+    ) {
+        let success = if let Some(success) = publishing {
+            if !self.completed.insert((run.to_owned(), identity)) {
+                return;
+            }
+            success
+        } else {
+            false
+        };
+        if success && let Some(thread) = inner.thread_for_run(run).await {
             let ownership = Arc::clone(&inner.ownership);
             let t = thread.clone();
             if let Ok(Some(permit)) = inner.blocking(move || ownership.owned_permit(&t)).await
@@ -249,8 +253,21 @@ impl Observer {
         }
         inner.force_run(run).await;
     }
+    fn forget_run(&mut self, run: &str) {
+        self.completed.retain(|(id, _)| id != run);
+        self.publishing_calls.retain(|(id, _)| id != run);
+        self.attributable_calls.retain(|(id, _)| id != run);
+        self.publishing_jobs.retain(|(id, _)| id != run);
+        self.attributable_jobs.retain(|(id, _)| id != run);
+        self.streams.retain(|(id, _), _| id != run);
+    }
     async fn handle(&mut self, inner: &Arc<Inner>, event: &Event) {
         match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+                run_id,
+                to: AgentRunPhase::Done | AgentRunPhase::Error | AgentRunPhase::Stopped,
+                ..
+            }) => self.forget_run(run_id),
             EventKind::Ownership(_) => inner.wake.notify_one(),
             EventKind::Tool(tool) if inner.config().enabled => self.tool(inner, tool).await,
             _ => {}
@@ -328,7 +345,7 @@ impl Observer {
                             inner,
                             run_id,
                             format!("job:{job_id}"),
-                            attributable && job_success(status, *exit_code),
+                            attributable.then_some(job_success(status, *exit_code)),
                         )
                         .await;
                     }
@@ -365,11 +382,12 @@ impl Observer {
                     inner,
                     run_id,
                     format!("call:{call_id}"),
-                    attributable_call
-                        && code.map_or(!is_error, |c| c == 0)
-                        && detail
-                            .and_then(|d| d.get("timed_out_ms"))
-                            .is_none_or(Value::is_null),
+                    attributable_call.then_some(
+                        code.map_or(!is_error, |c| c == 0)
+                            && detail
+                                .and_then(|d| d.get("timed_out_ms"))
+                                .is_none_or(Value::is_null),
+                    ),
                 )
                 .await;
             }
@@ -401,7 +419,7 @@ impl Observer {
                     inner,
                     run_id,
                     format!("job:{job_id}"),
-                    attributable && status == "completed" && code == Some(0),
+                    attributable.then_some(status == "completed" && code == Some(0)),
                 )
                 .await;
             }
@@ -633,6 +651,150 @@ mod attribution_tests {
             .attribution
             .agent("t", permit.lease.generation, 1, seq, &head)
     }
+    #[test]
+    fn dry_run_abbreviations_never_grant_publishing_attribution() {
+        assert!(!attributable_command("git push --dry-r origin feature"));
+        // Conservatively reject even ambiguous prefixes, not just Git's unique --dr... forms.
+        for len in 3..="--dry-run".len() {
+            let option = &"--dry-run"[..len];
+            for suffix in ["", "=true"] {
+                let command = format!("git push {option}{suffix} origin feature");
+                assert!(!attributable_command(&command), "{command}");
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn many_completions_do_not_permanently_disable_publishing_attribution() {
+        for command in ["gh pr view", "git push"] {
+            let world = World::new();
+            let process = world.process(enabled());
+            let permit = process.permit("t");
+            process.environment.bind("run", "t");
+            let mut observer = Observer::default();
+            for seq in 1..=u64::try_from(MAX_TRACKED + 1).unwrap() {
+                let call = format!("call-{seq}");
+                observer.started("run", &call, command);
+                observer
+                    .shell_returned(
+                        process.service.inner(),
+                        "run",
+                        &call,
+                        Some(&json!({"exit_code":0})),
+                        false,
+                    )
+                    .await;
+                // Each adopted head consumes this interval; old successes cannot mask the bug.
+                let _ = is_agent(&process, &permit, seq);
+            }
+            if command == "gh pr view" {
+                assert!(
+                    observer.completed.is_empty(),
+                    "read-only refreshes need no tombstones"
+                );
+            }
+            start(&mut observer, "run", "new-push");
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    "new-push",
+                    Some(&json!({"exit_code":0})),
+                    false,
+                )
+                .await;
+            let seq = u64::try_from(MAX_TRACKED + 2).unwrap();
+            assert!(is_agent(&process, &permit, seq), "after {command}");
+            // Replaying even the full start/complete pair within the run is not a new push.
+            start(&mut observer, "run", "new-push");
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    "new-push",
+                    Some(&json!({"exit_code":0})),
+                    false,
+                )
+                .await;
+            assert!(!is_agent(&process, &permit, seq + 1));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_runs_release_correlations_without_accepting_late_job_success() {
+        use event_bus::{AgentRunPhase, LifecycleEvent};
+        for phase in [
+            AgentRunPhase::Done,
+            AgentRunPhase::Error,
+            AgentRunPhase::Stopped,
+        ] {
+            let world = World::new();
+            let process = world.process(enabled());
+            let permit = process.permit("t");
+            process.environment.bind("run", "t");
+            let mut observer = Observer::default();
+            start(&mut observer, "run", "done");
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    "done",
+                    Some(&json!({"exit_code":0})),
+                    false,
+                )
+                .await;
+            assert!(is_agent(&process, &permit, 1));
+            start(&mut observer, "run", "job");
+            observer
+                .shell_returned(
+                    process.service.inner(),
+                    "run",
+                    "job",
+                    Some(&json!({"shell_job":{"job_id":"j","status":"running"}})),
+                    false,
+                )
+                .await;
+            // Cleanup must not destroy another still-active run's dedup state.
+            observer.started("other", "pending", "git push");
+            observer
+                .handle(
+                    process.service.inner(),
+                    &Event::new(LifecycleEvent::AgentRunStateChanged {
+                        run_id: "run".into(),
+                        from: AgentRunPhase::Running,
+                        to: phase,
+                        reason: None,
+                    }),
+                )
+                .await;
+            assert!(observer.completed.iter().all(|(run, _)| run != "run"));
+            assert!(
+                observer
+                    .attributable_calls
+                    .contains(&("other".into(), "pending".into()))
+            );
+            observer
+                .tool(
+                    process.service.inner(),
+                    &ToolEvent::ShellJobOutput {
+                        job_uid: None,
+                        job_id: "j".into(),
+                        call_id: Some("job".into()),
+                        run_id: Some("run".into()),
+                        offset: 0,
+                        chunk: String::new(),
+                        status: "completed".into(),
+                        exit_code: Some(0),
+                    },
+                )
+                .await;
+            assert!(
+                !is_agent(&process, &permit, 2),
+                "late success after {phase:?}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn synchronous_exit_code_wins_over_is_error_and_missing_completion_never_succeeds() {
         let world = World::new();

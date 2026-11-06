@@ -234,8 +234,8 @@ pub(crate) struct State {
     attribution: policy::Attribution,
     /// In-flight log preparation; never a second delivery queue.
     pub(crate) preparing: HashSet<String>,
-    /// A failed attempt must not suppress recovery after ownership is reacquired.
-    pub(crate) attempted: HashSet<(String, u64, u64)>,
+    /// Attempts are scoped to the notice, policy, owner and reservation generations.
+    pub(crate) attempted: HashSet<(String, u64, u64, u64)>,
     /// Children whose inheritance is being resolved.
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.

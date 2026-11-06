@@ -518,3 +518,101 @@ async fn off_unknown_pending_and_cooldown_are_silent_then_notices_append_and_reu
     w.runtime.cancel(w.run).unwrap();
     w.runtime.wait(w.run).await.unwrap();
 }
+
+#[tokio::test]
+async fn standard_runtime_rechecks_the_global_switch_after_ready_before_model_input() {
+    for off_after_ready in [true, false] {
+        let mut w = World::new().await;
+        w.toggle(true).await;
+        w.service.shutdown();
+        // Use the production registration and weak-runtime adapters, not ServiceParts DI.
+        // Disable polling to isolate the final adoption gate: the producer must not cancel
+        // the Ready record before the common driver gets to recheck the global switch.
+        w.service = w
+            .runtime
+            .start_pull_requests(
+                w._owner.clone(),
+                Arc::new(w.source.clone()),
+                config::PullRequestsConfig {
+                    enabled: false,
+                    auto_fix_enabled: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let policy = w.service.auto_fix_state(THREAD).await.unwrap();
+        let snapshot = w
+            .store
+            .handle()
+            .pull_request_snapshot(&key())
+            .unwrap()
+            .unwrap();
+        let reserved = w
+            .store
+            .handle()
+            .reserve_pr_notice(PrNoticeReservation {
+                key: key(),
+                head_sha: "a".repeat(40),
+                mode: PrNoticeMode::Auto,
+                destination_thread_id: THREAD.into(),
+                link_revision: 1,
+                expected_policy_revision: policy.policy_revision,
+                success_seq: snapshot.success_seq,
+                auto_fix_enabled: true,
+                now_ns: w.clock.now_ns(),
+            })
+            .unwrap();
+        let payload = runtime::lane_delivery::prepare_pr_notice_payload(
+            &reserved,
+            &["unit".into()],
+            "observed CI failure",
+            None,
+        );
+        w.store
+            .handle()
+            .ready_pr_notice(reserved.notice_id, payload)
+            .unwrap();
+        assert_eq!(w.notices()[0].phase, PrNoticePhase::Ready);
+        if off_after_ready {
+            let mut settings = w.service.settings();
+            settings.auto_fix_enabled = false;
+            w.service.update_settings(settings).unwrap();
+        } else {
+            w.mock.enqueue(vec![text("handled durable notification")]);
+        }
+        assert_eq!(
+            w.runtime
+                .pull_requests()
+                .unwrap()
+                .settings()
+                .auto_fix_enabled,
+            !off_after_ready
+        );
+        let before = w.requests();
+        w.runtime.drive_pending_lane_deliveries().await.unwrap();
+        if off_after_ready {
+            assert_ne!(w.notices()[0].phase, PrNoticePhase::Adopted);
+            assert_eq!(w.requests(), before, "global Off must not call the model");
+        } else {
+            assert_eq!(w.notices()[0].phase, PrNoticePhase::Adopted);
+            w.phase(AgentRunPhase::Waiting).await;
+            assert_eq!(w.requests().len(), before.len() + 1);
+        }
+        // A normal later turn must reuse the old prefix, with a notice only in the On case.
+        w.mock.enqueue(vec![text("ordinary followup answer")]);
+        w.runtime
+            .send_message(w.run, "ordinary followup after the gate".into())
+            .unwrap();
+        w.phase(AgentRunPhase::Waiting).await;
+        let requests = w.requests();
+        let last_messages = requests.last().unwrap()["messages"].to_string();
+        assert_eq!(
+            last_messages.matches(MARKER).count(),
+            usize::from(!off_after_ready)
+        );
+        w.verify();
+        w.service.shutdown();
+        w.runtime.cancel(w.run).unwrap();
+        w.runtime.wait(w.run).await.unwrap();
+    }
+}
