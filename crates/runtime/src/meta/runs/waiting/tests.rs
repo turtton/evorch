@@ -108,6 +108,7 @@ fn request(runs: Vec<RunId>, mode: WaitMode, timeout_ms: u64) -> WaitRequest {
         deadline: Some(Duration::from_millis(timeout_ms)),
         legacy: false,
         reported: HashSet::new(),
+        delivered: HashSet::new(),
     }
 }
 

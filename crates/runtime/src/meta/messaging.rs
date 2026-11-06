@@ -9,6 +9,7 @@ use serde::Deserialize;
 use super::{DispatchResult, EmptyArgs, error, parse, parse_run_id, serialize, success};
 use crate::AgentRuntime;
 use crate::agent_loop::LoopState;
+use crate::runtime::ReplyOutcome;
 
 #[derive(Deserialize)]
 pub(super) struct SendMessageArgs {
@@ -134,18 +135,30 @@ pub(super) async fn wait_reply(
     if state.transition(AgentRunPhase::Waiting, None).is_err() {
         return error("parent run could not enter Waiting");
     }
+    // Answers already in the history do not end the wait; a new one does, and
+    // flush_user_answers injects its text after this tool result.
+    let delivered = state.delivered_answer_ids();
     let result = runtime
-        .wait_reply(
+        .wait_reply_or_answers(
             state.caller_run_id(),
             &args.message_id,
             Duration::from_millis(args.timeout_ms),
+            Some(&delivered),
         )
         .await;
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }
     match result {
-        Ok(reply) => serialize(&reply),
+        Ok(ReplyOutcome::Reply(reply)) => serialize(&reply),
+        Ok(ReplyOutcome::AnswersReady(question_ids)) => {
+            state.budget.mark_progress();
+            serialize(&serde_json::json!({
+                "status": "answer_ready",
+                "question_ids": question_ids,
+                "message_id": args.message_id,
+            }))
+        }
         Err(runtime_error) => error(runtime_error.to_string()),
     }
 }

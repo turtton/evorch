@@ -241,6 +241,13 @@ pub(crate) enum HostProvenance {
     PersistedHostSubmission { run_id: RunId },
 }
 
+/// How a reply wait that also watches the caller's own answers ended.
+#[derive(Debug)]
+pub(crate) enum ReplyOutcome {
+    Reply(AgentMessage),
+    AnswersReady(Vec<String>),
+}
+
 pub(crate) struct ReviewSeed {
     provenance: HostProvenance,
     context: crate::escalation_review::ReviewRunContext,
@@ -3223,6 +3230,31 @@ impl AgentRuntime {
         message_id: &str,
         timeout: Duration,
     ) -> Result<AgentMessage, RuntimeError> {
+        match self
+            .wait_reply_or_answers(run_id, message_id, timeout, None)
+            .await?
+        {
+            ReplyOutcome::Reply(reply) => Ok(reply),
+            ReplyOutcome::AnswersReady(_) => {
+                unreachable!("answers are watched only when the caller passes a delivered set")
+            }
+        }
+    }
+
+    /// [`Self::wait_reply`] that also ends when a question of `run_id` gets an
+    /// answer outside `delivered` (the answers already in its history).
+    ///
+    /// The answer wake-up leaves the sent record in place, so the caller can
+    /// wait on the same `message_id` again. A reply that is already queued wins
+    /// over an answer; the answer text reaches the model through the loop's own
+    /// answer flush, never through this result.
+    pub(crate) async fn wait_reply_or_answers(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+        timeout: Duration,
+        delivered: Option<&HashSet<String>>,
+    ) -> Result<ReplyOutcome, RuntimeError> {
         let (waiter_mailbox, mut replier_phase_rx, version_rx) = {
             let runs = lock_runs(&self.shared.runs);
             let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
@@ -3253,6 +3285,9 @@ impl AgentRuntime {
         };
 
         let mut version_rx = version_rx;
+        // Subscribe before the first answer check so an answer cannot slip
+        // between that check and the wait below.
+        let mut question_changes = self.shared.question_version.subscribe();
         let deadline = Instant::now() + timeout;
 
         let current_phase = *self.entry(run_id)?.phase_rx.borrow();
@@ -3266,7 +3301,14 @@ impl AgentRuntime {
                     && message.reply_to.as_deref() == Some(message_id)
             }) {
                 self.remove_sent_record(message_id);
-                break Ok(reply);
+                break Ok(ReplyOutcome::Reply(reply));
+            }
+
+            if let Some(delivered) = delivered {
+                let ids = self.undelivered_answer_ids(run_id, delivered);
+                if !ids.is_empty() {
+                    break Ok(ReplyOutcome::AnswersReady(ids));
+                }
             }
 
             let current_replier_phase = *replier_phase_rx.borrow();
@@ -3298,6 +3340,7 @@ impl AgentRuntime {
                         });
                     }
                 }
+                _ = question_changes.changed(), if delivered.is_some() => {}
                 changed = replier_phase_rx.changed() => {
                     if changed.is_err() {
                         self.remove_sent_record(message_id);
