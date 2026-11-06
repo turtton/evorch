@@ -128,7 +128,10 @@ async fn pending_lane(
     let model = Arc::new(AdmissionGate::default());
     let first = runtime(&f.config, &f.storage, bus.clone(), model.clone());
     let host = f.host(bus);
-    start_owned_runtime(&first, &host).unwrap().await.unwrap();
+    start_owned_runtime(&first, &host, &tokio::runtime::Handle::current())
+        .unwrap()
+        .await
+        .unwrap();
     let lead = first
         .delegate_chat(
             "lead",
@@ -204,7 +207,8 @@ async fn cancelled_pending_intent_is_not_revived_by_a_new_runtime_startup() {
         let next = runtime(&f.config, &f.storage, bus.clone(), recovered_model.clone());
         let current = f.host(bus);
         // The new startup cannot steal the first live host's pending admission.
-        let recovery = start_owned_runtime(&next, &current).unwrap();
+        let recovery =
+            start_owned_runtime(&next, &current, &tokio::runtime::Handle::current()).unwrap();
         assert!(
             next.recover_unstarted_lanes(Some(&current))
                 .unwrap()
@@ -252,7 +256,10 @@ async fn cancelled_pending_intent_is_not_revived_by_a_new_runtime_startup() {
         let bus = Arc::new(EventBus::new(256));
         let next = runtime(&f.config, &f.storage, bus.clone(), recovered_model.clone());
         let current = f.host(bus);
-        start_owned_runtime(&next, &current).unwrap().await.unwrap();
+        start_owned_runtime(&next, &current, &tokio::runtime::Handle::current())
+            .unwrap()
+            .await
+            .unwrap();
         assert!(
             next.recover_unstarted_lanes(Some(&current))
                 .unwrap()
@@ -276,7 +283,8 @@ async fn startup_recovers_a_crashed_intent_with_a_new_runtime_and_current_host_o
     let model = Arc::new(AdmissionGate::default());
     let next = runtime(&f.config, &f.storage, bus.clone(), model.clone());
     let current = f.host(bus);
-    let recovery = start_owned_runtime(&next, &current).unwrap();
+    let recovery =
+        start_owned_runtime(&next, &current, &tokio::runtime::Handle::current()).unwrap();
     assert!(
         next.recover_unstarted_lanes(Some(&current))
             .unwrap()
@@ -286,7 +294,10 @@ async fn startup_recovers_a_crashed_intent_with_a_new_runtime_and_current_host_o
     // No second startup call: virtual time drives the original lease retry driver.
     waiting(&mut events, lane.root_run_id).await;
     recovery.await.unwrap();
-    start_owned_runtime(&next, &current).unwrap().await.unwrap();
+    start_owned_runtime(&next, &current, &tokio::runtime::Handle::current())
+        .unwrap()
+        .await
+        .unwrap();
     assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
     let record = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
     assert!(record.start_blocked_reason.is_none());
@@ -308,6 +319,33 @@ async fn startup_recovers_a_crashed_intent_with_a_new_runtime_and_current_host_o
 }
 
 #[tokio::test(start_paused = true)]
+async fn startup_recovery_from_the_synchronous_gui_thread_runs_on_the_given_runtime() {
+    let (f, lane) = crash_before_root().await;
+    f.crashed_lease(&lane, 0);
+    let bus = Arc::new(EventBus::new(256));
+    let mut events = bus.subscribe();
+    let model = Arc::new(AdmissionGate::default());
+    let next = runtime(&f.config, &f.storage, bus.clone(), model.clone());
+    let current = f.host(bus);
+    let handle = tokio::runtime::Handle::current();
+    // The GUI main thread has no ambient Tokio context (unlike spawn_blocking threads).
+    let recovery = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                assert!(tokio::runtime::Handle::try_current().is_err());
+                start_owned_runtime(&next, &current, &handle).unwrap()
+            })
+            .join()
+            .unwrap()
+    });
+    waiting(&mut events, lane.root_run_id).await;
+    recovery.await.unwrap();
+    assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
+    next.cancel(lane.root_run_id).unwrap();
+    next.wait(lane.root_run_id).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn local_setup_failure_is_held_and_the_startup_driver_finishes() {
     let (f, lane) = crash_before_root().await;
     f.crashed_lease(&lane, 0);
@@ -316,7 +354,8 @@ async fn local_setup_failure_is_held_and_the_startup_driver_finishes() {
     let next = runtime(&f.config, &f.storage, bus.clone(), model.clone())
         .with_sandbox_root(f._dir.path().to_path_buf());
     let current = f.host(bus);
-    let recovery = start_owned_runtime(&next, &current).unwrap();
+    let recovery =
+        start_owned_runtime(&next, &current, &tokio::runtime::Handle::current()).unwrap();
     let blocker = f._dir.path().join("not-a-scratch-directory");
     std::fs::write(&blocker, b"file").unwrap();
     // This current-thread test installs the broken scratch before yielding to the
@@ -332,7 +371,10 @@ async fn local_setup_failure_is_held_and_the_startup_driver_finishes() {
     assert_eq!(record.generation, 0);
     assert_eq!(model.completions.load(Ordering::SeqCst), 0);
     assert!(f.storage.handle().unstarted_lanes(10).unwrap().is_empty());
-    start_owned_runtime(&next, &current).unwrap().await.unwrap();
+    start_owned_runtime(&next, &current, &tokio::runtime::Handle::current())
+        .unwrap()
+        .await
+        .unwrap();
     assert!(!current.quiesce().unwrap());
 }
 
@@ -374,7 +416,10 @@ async fn operator_stopped_pending_intent_survives_restart_unrecovered_and_resume
     let next_model = Arc::new(AdmissionGate::default());
     let next = runtime(&f.config, &f.storage, bus.clone(), next_model.clone());
     let current = f.host(bus);
-    start_owned_runtime(&next, &current).unwrap().await.unwrap();
+    start_owned_runtime(&next, &current, &tokio::runtime::Handle::current())
+        .unwrap()
+        .await
+        .unwrap();
     assert!(
         next.recover_unstarted_lanes(Some(&current))
             .unwrap()

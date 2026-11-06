@@ -43,10 +43,13 @@ const EVENT_CAPACITY: usize = 2048;
 mod lane_startup_tests;
 
 /// Called only after the current host and retention fence are installed.
+/// The GUI thread is synchronous; recovery spawns its driver and lane roots on `handle`.
 fn start_owned_runtime(
     runtime: &AgentRuntime,
     ownership: &Arc<runtime::ownership::OwnerHost>,
+    handle: &tokio::runtime::Handle,
 ) -> Result<tokio::task::JoinHandle<()>, runtime::lanes::LaneError> {
+    let _guard = handle.enter();
     runtime.set_thread_scratch(ownership.thread_scratch());
     runtime.recover_lanes_on_startup(ownership)
 }
@@ -1288,7 +1291,7 @@ fn build_workbench(
     };
     // Recover durable lane intents under this host, never serialized authority.
     // Keep the retained storage/host guard alive before starting any root.
-    start_owned_runtime(&runtime, &ownership)
+    start_owned_runtime(&runtime, &ownership, &handle)
         .map_err(|error| GuiError::Startup(format!("lane recovery: {error}")))?;
     {
         let _enter = handle.enter();
