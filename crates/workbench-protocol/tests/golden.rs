@@ -23,7 +23,7 @@ use workbench_protocol::views::*;
 use workbench_protocol::wire::*;
 
 fn golden_path(group: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("tests/golden")
         .join(format!("{group}.json"))
 }
@@ -296,6 +296,11 @@ fn views_golden() {
     check(
         "question_targets",
         vec![
+            ("answered_source_unknown".into(), {
+                let mut q = question(QuestionTarget::User);
+                q.answer.as_mut().unwrap().answered_by = None;
+                q
+            }),
             ("user".into(), question(QuestionTarget::User)),
             (
                 "lead".into(),

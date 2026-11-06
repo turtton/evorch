@@ -277,7 +277,10 @@ pub fn answered_question(answer: String) -> QuestionView {
         options: vec![],
         answer: Some(QuestionAnswer {
             text: answer,
-            answered_by: Provenance::human(Surface::Web, ClientId::new("client-2").unwrap()),
+            answered_by: Some(Provenance::human(
+                Surface::Web,
+                ClientId::new("client-2").unwrap(),
+            )),
         }),
         revision: Revision(2),
         raised_by: Provenance::agent(run),

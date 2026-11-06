@@ -19,6 +19,8 @@ zstd = "0.13"
 event-bus = { path = "../event-bus" }
 
 [features]
+# Read instrumentation for downstream regression tests; absent from product builds.
+test-support = []
 # `Database::open_unchecked`: opens an old-format database without the conversion gate.
 # Only the tests of the historical migrations enable it (through the dev-dependency on
 # this crate below); no product crate does.

@@ -286,3 +286,63 @@ pub(crate) fn origins(
     }
     Ok(origins)
 }
+
+/// Read committed transcript input descriptors, retaining long text in SQLite.
+pub(crate) fn delivered_history(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<crate::host_input::DeliveredHostInput>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT prompt_id, run_id, CASE WHEN octet_length(text) <= 16384 THEN text END, octet_length(text), accepted_at_ns,
+         prompt_id = (SELECT prompt_id FROM host_input_receipts WHERE run_id = ?1
+             AND json_extract(provenance_json,'$.kind')='user' ORDER BY acceptance_seq, accepted_at_ns, prompt_id LIMIT 1)
+         FROM host_input_receipts WHERE run_id = ?1 AND status = 'delivered'
+         AND json_extract(provenance_json,'$.kind')='user'
+         AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+         AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+         ORDER BY accepted_at_ns, prompt_id"
+    )?;
+    let rows = statement.query_map([run_id], |row| {
+        Ok(crate::host_input::DeliveredHostInput {
+            prompt_id: row.get(0)?,
+            run_id: row.get(1)?,
+            text: row.get(2)?,
+            text_bytes: row.get(3)?,
+            accepted_at_ns: row.get(4)?,
+            first_in_run: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Human delivery metadata; unlike for_run, this never selects the text column.
+pub(crate) fn headers_for_run(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<crate::host_input::HostInputReceiptHeader>, StorageError> {
+    let mut statement = conn.prepare(
+        "SELECT prompt_id, run_id, status FROM host_input_receipts WHERE run_id=?1
+        AND json_extract(provenance_json,'$.kind')='user'
+        AND run_id NOT IN (SELECT run_id FROM run_tombstones)
+        AND root_run_id NOT IN (SELECT run_id FROM run_tombstones)
+        ORDER BY accepted_at_ns, prompt_id",
+    )?;
+    let rows = statement.query_map([run_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (prompt_id, run_id, status) = row?;
+        let status = HostInputStatus::parse(&status)
+            .ok_or_else(|| StorageError::Serialization("invalid host input status".into()))?;
+        Ok(crate::host_input::HostInputReceiptHeader {
+            prompt_id,
+            run_id,
+            status,
+        })
+    })
+    .collect()
+}

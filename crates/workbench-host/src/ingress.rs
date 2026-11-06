@@ -20,8 +20,7 @@ use workbench_protocol::commands::{
     SubmitGoal, WithdrawFollowUp,
 };
 use workbench_protocol::envelope::Provenance;
-use workbench_protocol::errors::{ErrorCode, ErrorDetails, RetryAdvice, WorkbenchError};
-use workbench_protocol::handshake::Capability;
+use workbench_protocol::errors::{ErrorCode, RetryAdvice, WorkbenchError};
 use workbench_protocol::ids::{ProjectId, RequestId, SessionId, SubmissionId};
 use workbench_protocol::queries::{CommandReceipt, Query, QueryReply};
 
@@ -38,6 +37,7 @@ pub struct CommandHost {
     service: CommandService,
     receipts: Receipts,
     projects: Box<dyn ProjectDirectory>,
+    projection: std::sync::Arc<crate::projection::Projection>,
 }
 
 /// What the host knows about a submission id.
@@ -67,14 +67,21 @@ enum Executed {
 
 impl CommandHost {
     pub fn new(service: CommandService) -> Self {
+        let projection = crate::projection::Projection::new(
+            service.runtime().clone(),
+            service.handle(),
+            Default::default(),
+        );
         Self {
             service,
+            projection,
             receipts: Receipts::default(),
             projects: Box::new(StaticProjects::default()),
         }
     }
 
     pub fn with_projects(mut self, projects: impl ProjectDirectory + 'static) -> Self {
+        self.projection.configure(projects.entries());
         self.projects = Box::new(projects);
         self
     }
@@ -94,6 +101,7 @@ impl CommandHost {
         &mut self.service
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn receipts(&self) -> &Receipts {
         &self.receipts
     }
@@ -105,9 +113,8 @@ impl CommandHost {
     /// answered [`CommandDisposition::AlreadyApplied`] without a second run, a
     /// different message under the same id is [`ErrorCode::Conflict`].
     ///
-    /// `AnswerUserQuestion.question_revision` is **not enforced**: the runtime does
-    /// not version questions yet, so the value is accepted and ignored. A question
-    /// answered meanwhile is still refused as already resolved.
+    /// Pending answers must quote the current routing revision. An already-saved
+    /// identical answer remains an idempotent repeat.
     ///
     /// # Errors
     /// A structured error when the command is invalid, refused, or conflicts
@@ -122,8 +129,21 @@ impl CommandHost {
         match command {
             Command::SendChat(send) => self.send_chat(&send, &provenance),
             Command::WithdrawFollowUp(withdraw) => self.withdraw_follow_up(&withdraw),
-            Command::DecideToolApproval(_) => Err(approvals_unavailable()),
+            Command::DecideToolApproval(decide) => self.decide_approval(&decide, &provenance),
             other => {
+                if let Command::AnswerUserQuestion(answer) = &other
+                    && let Ok(Some(question)) = self
+                        .service
+                        .runtime()
+                        .user_question(answer.question_id.as_str())
+                    && question.answer.is_none()
+                    && question.routing_revision != answer.question_revision.get()
+                {
+                    return Err(reject_error(
+                        RejectKind::Conflict,
+                        "question routing changed; refresh before answering",
+                    ));
+                }
                 let host_command = self.translate(other)?;
                 let events = self.authorize_and_execute(host_command, &provenance)?;
                 reply_from_events(events, None)
@@ -140,19 +160,45 @@ impl CommandHost {
         command: Command,
         provenance: Provenance,
     ) -> Result<CommandReply, WorkbenchError> {
+        let subject = match &command {
+            Command::AnswerUserQuestion(q) => self
+                .service
+                .runtime()
+                .user_question(q.question_id.as_str())
+                .ok()
+                .flatten()
+                .map(|question| {
+                    let thread = self
+                        .service
+                        .runtime()
+                        .with_storage_reader(|db| {
+                            Ok(db.thread_of_run(&question.run_id)?.map(|r| r.thread_id))
+                        })
+                        .ok()
+                        .flatten()
+                        .flatten();
+                    (Some(question.run_id), thread)
+                }),
+            _ => None,
+        };
         let result = self
             .handle_command(command, provenance.clone())
             .map_err(|error| error.for_request(request.clone()));
-        self.receipts
+        let recorded = self
+            .receipts
             .record_request(session, request, &provenance, &result);
+        if recorded && let Some((run, thread)) = subject {
+            self.receipts
+                .associate_request(session, request, run, thread);
+        }
         result
     }
 
-    /// The queries this host answers: today only what became of an earlier command.
-    ///
-    /// # Errors
-    /// [`ErrorCode::UnsupportedCapability`] for every other query; the read side
-    /// of the protocol is a later step.
+    /// Shared transport-independent read and subscription service.
+    pub fn projection(&self) -> &std::sync::Arc<crate::projection::Projection> {
+        &self.projection
+    }
+
     pub fn handle_query(
         &self,
         session: &SessionId,
@@ -162,15 +208,126 @@ impl CommandHost {
             Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
                 self.command_receipt(session, request_id)?,
             )),
-            other => Err(WorkbenchError::new(
-                ErrorCode::UnsupportedCapability,
-                "this host does not serve that query yet",
-                RetryAdvice::Never,
-            )
-            .with_details(ErrorDetails::MissingCapabilities {
-                capabilities: vec![other.required_capability().into()],
-            })),
+            other => self.projection.query(other),
         }
+    }
+
+    /// Complete immutable arguments for an authenticated human's confirmation.
+    /// List summaries are not sufficient evidence for offering Approve.
+    pub fn full_approval_input(
+        &self,
+        approval_id: &workbench_protocol::ids::ApprovalId,
+        epoch: workbench_protocol::wire::InstanceEpoch,
+        revision: workbench_protocol::wire::Revision,
+        provenance: &Provenance,
+    ) -> Result<Option<std::sync::Arc<serde_json::Value>>, WorkbenchError> {
+        provenance.validate()?;
+        if provenance.actor != workbench_protocol::envelope::Actor::Human {
+            return Err(reject_error(
+                RejectKind::Fenced,
+                "approval input requires human ingress",
+            ));
+        }
+        let registry = self.projection.approval_registry();
+        let id = sandbox::approval::ApprovalId {
+            core_epoch: epoch.get(),
+            value: approval_id.as_str().to_owned(),
+        };
+        if let Some(approval) = registry.get(&id) {
+            if !self
+                .service
+                .runtime()
+                .deleted_runs(&[approval.run_id])
+                .map_err(crate::queries::storage_error)?
+                .is_empty()
+            {
+                return Err(reject_error(
+                    RejectKind::NotFound,
+                    "approval conversation was deleted",
+                ));
+            }
+            if let (Some(ownership), Some(thread)) = (self.service.ownership(), approval.thread_id)
+            {
+                ownership.owned_permit(&thread).map_err(|_| {
+                    reject_error(RejectKind::Fenced, "approval conversation is not owned")
+                })?;
+            }
+        }
+        registry
+            .full_input(&id, revision.get())
+            .map_err(approval_error)
+    }
+
+    fn decide_approval(
+        &self,
+        decide: &workbench_protocol::commands::DecideToolApproval,
+        provenance: &Provenance,
+    ) -> Result<CommandReply, WorkbenchError> {
+        use sandbox::approval::{
+            ApprovalActor, ApprovalDecision, ApprovalId, ApprovalProvenance, ApprovalSurface,
+        };
+        use workbench_protocol::envelope::{Actor, Surface};
+        if provenance.actor != Actor::Human {
+            return Err(reject_error(
+                RejectKind::Fenced,
+                "tool approvals require human ingress",
+            ));
+        }
+        let registry = self.projection.approval_registry();
+        let id = ApprovalId {
+            core_epoch: decide.core_epoch.get(),
+            value: decide.approval_id.as_str().to_owned(),
+        };
+        if let Some(approval) = registry.get(&id) {
+            if !self
+                .service
+                .runtime()
+                .deleted_runs(std::slice::from_ref(&approval.run_id))
+                .map_err(crate::queries::storage_error)?
+                .is_empty()
+            {
+                return Err(reject_error(
+                    RejectKind::NotFound,
+                    "approval conversation was deleted",
+                ));
+            }
+            if let (Some(ownership), Some(thread)) = (self.service.ownership(), &approval.thread_id)
+            {
+                ownership.owned_permit(thread).map_err(|_| {
+                    reject_error(RejectKind::Fenced, "approval conversation is not owned")
+                })?;
+            }
+        }
+        let decided = registry
+            .resolve(
+                &id,
+                decide.approval_revision.get(),
+                match decide.decision {
+                    workbench_protocol::commands::ApprovalDecision::Approve => {
+                        ApprovalDecision::Approve
+                    }
+                    workbench_protocol::commands::ApprovalDecision::Deny => ApprovalDecision::Deny,
+                },
+                ApprovalProvenance {
+                    actor: ApprovalActor::Human,
+                    surface: match provenance.surface {
+                        Surface::Web => ApprovalSurface::Web,
+                        Surface::Desktop => ApprovalSurface::Desktop,
+                        Surface::Cli => ApprovalSurface::Cli,
+                        Surface::None => ApprovalSurface::None,
+                    },
+                },
+            )
+            .map_err(approval_error)?;
+        if let Err(error) = self.projection.approval_changed(&decided.id) {
+            tracing::warn!(code = ?error.code, "approval resolved; projection refresh failed");
+        }
+        Ok(CommandReply {
+            disposition: CommandDisposition::Accepted,
+            submission_id: None,
+            run_id: None,
+            thread_revision: None,
+        })
     }
 
     /// What became of `request` in `session`. An applied request whose submission or
@@ -224,6 +381,15 @@ impl CommandHost {
         let Some(subject) = self.receipts.request_subject(session, request) else {
             return Ok(false);
         };
+        if let Some(thread) = &subject.thread
+            && self
+                .service
+                .runtime()
+                .with_storage_reader(|db| Ok(db.tombstones()?.contains_thread(thread)))?
+                .unwrap_or(false)
+        {
+            return Ok(true);
+        }
         if let Some(run) = &subject.run
             && !self
                 .service
@@ -371,9 +537,15 @@ impl CommandHost {
                 HostEvent::UserAnswerSaved {
                     question_id,
                     newly_saved: true,
-                } => self.receipts.record_answer(question_id, provenance),
+                } => {
+                    self.receipts.record_answer(question_id, provenance);
+                    self.projection.note_answer(question_id, provenance);
+                }
                 _ => {}
             }
+        }
+        if let Err(error) = self.projection.refresh() {
+            tracing::warn!(code = ?error.code, "host projection refresh failed");
         }
         Executed::Events(events)
     }
@@ -595,7 +767,6 @@ impl CommandHost {
                 thread,
                 question_id,
                 answer,
-                // Not enforced; see `handle_command`.
                 question_revision: _,
             }) => HostCommand::AnswerUserQuestion {
                 thread_id: thread.as_str().to_owned(),
@@ -711,20 +882,6 @@ fn refusal_error(refusal: HostEvent) -> WorkbenchError {
     }
 }
 
-/// Approval decisions are validated against the approval registry (ADR 0045
-/// P4), which the host does not have yet. Refusing is safer than guessing which
-/// pending tool call an approval id names.
-fn approvals_unavailable() -> WorkbenchError {
-    WorkbenchError::new(
-        ErrorCode::UnsupportedCapability,
-        "tool approval decisions are not available until the approval registry lands",
-        RetryAdvice::Never,
-    )
-    .with_details(ErrorDetails::MissingCapabilities {
-        capabilities: vec![Capability::Approvals.into()],
-    })
-}
-
 /// The protocol error for a refusal the command service reported.
 pub fn reject_error(kind: RejectKind, reason: &str) -> WorkbenchError {
     let (code, retry) = match kind {
@@ -781,4 +938,21 @@ fn reply_from_events(
         Some(text) if !applied => Err(reject_error(RejectKind::Conflict, &text)),
         _ => Ok(reply),
     }
+}
+
+fn approval_error(e: sandbox::approval::ApprovalError) -> WorkbenchError {
+    use sandbox::approval::ApprovalError;
+    reject_error(
+        match e {
+            ApprovalError::AlreadyDecided(_) => RejectKind::AlreadyResolved,
+            ApprovalError::Unknown | ApprovalError::Expired | ApprovalError::Cancelled => {
+                RejectKind::NotFound
+            }
+            ApprovalError::WrongEpoch | ApprovalError::RevisionMismatch { .. } => {
+                RejectKind::Conflict
+            }
+            ApprovalError::InputTooLarge { .. } => RejectKind::Invalid,
+        },
+        &e.to_string(),
+    )
 }
