@@ -259,8 +259,11 @@ impl McpGuiService for ProjectMcpService {
     ) -> Result<McpServerStatus, McpErrorKind> {
         let result = async {
             let (_, definition) = load_scope(&scope, revision, McpErrorKind::ConfigConflict)?;
-            if !definition.enabled || definition.roles.is_empty() {
+            if !definition.enabled {
                 return Ok(McpServerStatus::Disabled);
+            }
+            if definition.roles.is_empty() {
+                return Err(McpErrorKind::RoleNotAllowed);
             }
             if cancel.is_cancelled() {
                 return Err(McpErrorKind::Cancelled);

@@ -1498,6 +1498,30 @@ async fn http_preparation_limit_reports_admission_instead_of_response_size() {
     assert_eq!(shutdowns.load(Ordering::SeqCst), MAX_HTTP_PREPARATIONS);
 }
 
+#[tokio::test]
+async fn connection_test_distinguishes_unpublished_roles_from_disabled_settings() {
+    for enabled in [false, true] {
+        let root = project(&format!("enabled={enabled}\nroles=[]"));
+        let factory = Arc::new(Factory::default());
+        let service = service(root.path(), factory.clone(), unavailable());
+        let revision = config::mcp::load_project(root.path()).unwrap().revision;
+        let result = service
+            .test_connection(scope(root.path()), revision, CancelContext::default())
+            .await;
+        let view = service.settings(root.path().to_owned()).await.unwrap();
+        if enabled {
+            assert_eq!(result, Err(McpErrorKind::RoleNotAllowed));
+            assert_eq!(view.statuses[0].status, McpServerStatus::Unavailable);
+            assert_eq!(view.statuses[0].reason, Some(McpErrorKind::RoleNotAllowed));
+        } else {
+            assert_eq!(result, Ok(McpServerStatus::Disabled));
+            assert_eq!(view.statuses[0].status, McpServerStatus::Disabled);
+            assert_eq!(view.statuses[0].reason, None);
+        }
+        assert_eq!(factory.0.load(Ordering::SeqCst), 0);
+    }
+}
+
 fn public_http_project() -> tempfile::TempDir {
     let root = project("");
     std::fs::write(
