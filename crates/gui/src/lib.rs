@@ -18,6 +18,7 @@ pub mod html_preview;
 pub mod keymap;
 pub mod logging;
 pub mod mcp;
+pub mod mcp_settings;
 pub mod model;
 pub mod panes;
 pub mod pty;
