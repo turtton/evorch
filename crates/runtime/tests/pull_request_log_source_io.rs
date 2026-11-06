@@ -39,12 +39,7 @@ fn check(provider_id: &str) -> PullRequestCheck {
 }
 
 fn request(provider_id: &str) -> LogRequest {
-    LogRequest::new(
-        key(),
-        SHA,
-        Some("turtton/evorch".to_owned()),
-        vec![check(provider_id)],
-    )
+    LogRequest::new(key(), SHA, vec![check(provider_id)])
 }
 
 fn run_json(id: u64) -> String {
@@ -55,7 +50,6 @@ fn run_json(id: u64) -> String {
         "status": "completed",
         "conclusion": "failure",
         "repository": "turtton/evorch",
-        "head_repository": "turtton/evorch",
         "pull_requests": [{"number": 481, "base_url": "https://api.github.com/repos/turtton/evorch"}],
     })
     .to_string()
@@ -212,7 +206,7 @@ async fn an_endless_log_is_cut_and_the_result_stays_bounded() {
     assert!(bundle.runs[0].raw_truncated);
     assert!(bundle.runs[0].excerpt.len() <= 8 * 1024);
     assert!(bundle.runs[0].excerpt.split('\n').count() <= 200);
-    let wrapped = render_ci_log_data(&bundle, 16 * 1024);
+    let wrapped = render_ci_log_data(&bundle, 16 * 1024).unwrap();
     assert!(wrapped.len() <= 16 * 1024, "{}", wrapped.len());
 }
 
@@ -232,7 +226,10 @@ async fn a_credential_straddling_the_raw_limit_leaves_no_piece() {
 
     let run = &bundle.runs[0];
     assert!(run.raw_truncated);
-    for text in [run.excerpt.clone(), render_ci_log_data(&bundle, 16 * 1024)] {
+    for text in [
+        run.excerpt.clone(),
+        render_ci_log_data(&bundle, 16 * 1024).unwrap(),
+    ] {
         assert!(
             !text.contains("ghp_") && !text.contains("A1b2C3d4E5A1"),
             "{text}"

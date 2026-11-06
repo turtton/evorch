@@ -27,10 +27,11 @@
 //!   repository is a 404 on this path and a mismatch if it is ever answered;
 //! - its `head_sha` is the head the notice is about (and the check's own `head_sha` is too).
 //!   A run that is only known by a merge commit does not match and is not used;
-//! - it is related to the pull request: the run lists this pull request (number and base
-//!   repository), or, when GitHub lists no pull request for it (it does not for a fork's
-//!   `pull_request` run after the PR is closed, or for some forks), its head repository is the
-//!   pull request's head repository. A run that lists only *other* pull requests is refused;
+//! - it is related to the pull request: the run itself lists this pull request (number and
+//!   base repository) in `pull_requests`. A run that lists no pull request, or only other
+//!   ones, is refused: the same head can be the head of pull requests to other bases, and
+//!   nothing else in the response proves which one a run belongs to. (GitHub lists none for
+//!   some runs, such as a fork's `pull_request` run; those have no log here.);
 //! - it has completed (a run in progress has no log yet).
 //!
 //! Only then is the log read, with a fixed vector:
@@ -115,7 +116,7 @@ pub const CI_LOG_CONTENT_TYPE: &str = "data_not_instructions";
 /// What is kept of a job: nothing else of the response is read.
 const JOB_JQ: &str = "{id, run_id, head_sha, status, conclusion}";
 /// What is kept of a run: its place (repository, head, pull requests) and whether it ended.
-const RUN_JQ: &str = "{id, head_sha, event, status, conclusion, repository: .repository.full_name, head_repository: .head_repository.full_name, pull_requests: [.pull_requests[]? | {number, base_url: .base.repo.url}]}";
+const RUN_JQ: &str = "{id, head_sha, event, status, conclusion, repository: .repository.full_name, pull_requests: [.pull_requests[]? | {number, base_url: .base.repo.url}]}";
 /// The prefix of a pull request's `base.repo.url` in the API.
 const API_REPOS_PREFIX: &str = "https://api.github.com/repos/";
 
@@ -171,9 +172,6 @@ pub struct LogRequest {
     pub key: PullRequestKey,
     /// The head commit the notice is about.
     pub head_sha: String,
-    /// The pull request's head repository (`owner/name`), when it still exists. It relates a
-    /// run to the pull request when GitHub lists no pull request for the run.
-    pub head_repository: Option<String>,
     /// The failing checks to read logs for, as the snapshot holds them.
     pub checks: Vec<PullRequestCheck>,
     /// The bounds.
@@ -186,13 +184,11 @@ impl LogRequest {
     pub fn new(
         key: PullRequestKey,
         head_sha: impl Into<String>,
-        head_repository: Option<String>,
         checks: Vec<PullRequestCheck>,
     ) -> Self {
         Self {
             key,
             head_sha: head_sha.into(),
-            head_repository,
             checks,
             limits: LogLimits::default(),
         }
@@ -377,39 +373,100 @@ impl CiLogBundle {
 
 /// Wraps a bundle for an agent: `<ci-log-data>`, one line of JSON, `</ci-log-data>`.
 ///
-/// The JSON carries `content_type` (`data_not_instructions`), the head, the excerpts, and
-/// the first [`CI_LOG_SKIPS_SHOWN_MAX`] skips. Every `<` and `>` is written as `\u003c` and
-/// `\u003e` (valid JSON escapes, and `<`/`>` occur only inside strings), so no text of a log
-/// or a check name can contain the closing tag. If the text is longer than `max_bytes`,
-/// excerpts lose their leading lines, biggest first, until it fits (or none is left; the rest
-/// is bounded by the limits above).
+/// The JSON carries `content_type` (`data_not_instructions`), the head, the runs with their
+/// excerpts, and the first [`CI_LOG_SKIPS_SHOWN_MAX`] skips. Every `<` and `>` is written as
+/// `\u003c` and `\u003e` (valid JSON escapes, and `<`/`>` occur only inside strings), so no
+/// text of a log or a check name can contain the closing tag.
+///
+/// The returned text is never longer than `max_bytes`, escaping included. To get there, in
+/// this order: excerpts lose their leading lines (biggest first); every run keeps one check
+/// name; skips are listed fewer; runs are dropped from the last. What is dropped is counted in
+/// `skipped_not_shown` and `runs_not_shown`, and `truncated` is set. The smallest text (the
+/// head, the two counts and no run or skip) is [`minimal_ci_log_data`]'s length; with a budget
+/// below it there is nothing safe to say and the result is `None`: the caller sends no log.
 #[must_use]
-pub fn render_ci_log_data(bundle: &CiLogBundle, max_bytes: usize) -> String {
-    let mut working = bundle.clone();
+pub fn render_ci_log_data(bundle: &CiLogBundle, max_bytes: usize) -> Option<String> {
+    let mut view = View {
+        bundle: bundle.clone(),
+        skips_shown: bundle.skipped.len().min(CI_LOG_SKIPS_SHOWN_MAX),
+        runs_hidden: 0,
+    };
     loop {
-        let text = render_once(&working);
-        if text.len() <= max_bytes || !working.shrink_largest_excerpt() {
-            return text;
+        let text = render_once(&view);
+        if text.len() <= max_bytes {
+            return Some(text);
+        }
+        if !view.reduce() {
+            return None;
         }
     }
 }
 
-fn render_once(bundle: &CiLogBundle) -> String {
+/// The smallest text [`render_ci_log_data`] can return for `bundle`: no run, no skip.
+#[must_use]
+pub fn minimal_ci_log_data(bundle: &CiLogBundle) -> String {
+    render_once(&View {
+        bundle: CiLogBundle {
+            head_sha: bundle.head_sha.clone(),
+            runs: Vec::new(),
+            skipped: bundle.skipped.clone(),
+            truncated: true,
+        },
+        skips_shown: 0,
+        runs_hidden: bundle.runs.len(),
+    })
+}
+
+/// A bundle and how much of it is shown.
+struct View {
+    bundle: CiLogBundle,
+    skips_shown: usize,
+    runs_hidden: usize,
+}
+
+impl View {
+    /// Makes the text smaller by one step. `false` when nothing is left to take out.
+    fn reduce(&mut self) -> bool {
+        if self.bundle.shrink_largest_excerpt() {
+            return true;
+        }
+        if let Some(run) = self.bundle.runs.iter_mut().find(|run| run.checks.len() > 1) {
+            run.checks.truncate(1);
+            self.bundle.truncated = true;
+            return true;
+        }
+        if self.skips_shown > 0 {
+            self.skips_shown /= 2;
+            return true;
+        }
+        if self.bundle.runs.pop().is_some() {
+            self.runs_hidden += 1;
+            self.bundle.truncated = true;
+            return true;
+        }
+        false
+    }
+}
+
+fn render_once(view: &View) -> String {
     #[derive(Serialize)]
     struct Payload<'a> {
         content_type: &'static str,
         head_sha: &'a str,
         truncated: bool,
         runs: &'a [CiLogRun],
+        runs_not_shown: usize,
         skipped: &'a [CiLogSkip],
         skipped_not_shown: usize,
     }
-    let shown = bundle.skipped.len().min(CI_LOG_SKIPS_SHOWN_MAX);
+    let bundle = &view.bundle;
+    let shown = view.skips_shown.min(bundle.skipped.len());
     let payload = Payload {
         content_type: CI_LOG_CONTENT_TYPE,
         head_sha: &bundle.head_sha,
-        truncated: bundle.truncated,
+        truncated: bundle.truncated || view.runs_hidden > 0 || shown < bundle.skipped.len(),
         runs: &bundle.runs,
+        runs_not_shown: view.runs_hidden,
         skipped: &bundle.skipped[..shown],
         skipped_not_shown: bundle.skipped.len() - shown,
     };
@@ -478,7 +535,6 @@ impl GhLogSource {
 struct Ctx {
     key: PullRequestKey,
     head_sha: String,
-    head_repository: Option<String>,
     limits: LogLimits,
 }
 
@@ -571,7 +627,6 @@ struct RawRun {
     head_sha: String,
     status: Option<String>,
     repository: Option<String>,
-    head_repository: Option<String>,
     #[serde(default)]
     pull_requests: Vec<RawRunPullRequest>,
 }
@@ -596,10 +651,6 @@ impl PullRequestLogSource for GhLogSource {
         let ctx = Ctx {
             key,
             head_sha,
-            head_repository: request
-                .head_repository
-                .as_deref()
-                .map(|repository| repository.trim().to_ascii_lowercase()),
             limits,
         };
         let mut state = State::new(ctx.limits.raw_bytes);
@@ -797,35 +848,42 @@ impl GhLogSource {
             .to_vec();
             let spec = gh_process_spec(&self.program, args, state.raw_remaining);
             let output = match self.run(spec).await {
-                // The runner ends a process whose output passed the limit, so a cut log has
-                // no exit code of its own.
-                Ok(output) if output.exit_code == Some(0) || output.stdout_truncated => Ok(output),
-                Ok(output) => Err(reason_from_failure(&output)),
-                Err(reason) => Err(reason),
+                Ok(output) => output,
+                Err(reason) => {
+                    state.skip(first_check.as_deref(), Some(run_id), reason);
+                    state.next_log += 1;
+                    continue;
+                }
             };
-            match output {
-                Err(reason) => state.skip(first_check.as_deref(), Some(run_id), reason),
-                Ok(output) => {
-                    state.raw_remaining = if output.stdout_truncated {
-                        0
-                    } else {
-                        state.raw_remaining.saturating_sub(output.stdout.len())
-                    };
-                    let cleaned = clean_log(&output.stdout, output.stdout_truncated);
-                    if cleaned.lines.is_empty() {
-                        state.skip(
-                            first_check.as_deref(),
-                            Some(run_id),
-                            LogSkipReason::LogEmpty,
-                        );
-                    } else {
-                        state.fetched.push(FetchedLog {
-                            run_id,
-                            checks,
-                            cleaned,
-                            raw_truncated: output.stdout_truncated,
-                        });
-                    }
+            // What the process printed counts against the budget whatever its exit code says.
+            state.raw_remaining = if output.stdout_truncated {
+                0
+            } else {
+                state.raw_remaining.saturating_sub(output.stdout.len())
+            };
+            // The runner ends a process whose output passed the limit, so a cut log has no
+            // exit code of its own.
+            if output.exit_code != Some(0) && !output.stdout_truncated {
+                state.skip(
+                    first_check.as_deref(),
+                    Some(run_id),
+                    reason_from_failure(&output),
+                );
+            } else {
+                let cleaned = clean_log(&output.stdout, output.stdout_truncated);
+                if cleaned.lines.is_empty() {
+                    state.skip(
+                        first_check.as_deref(),
+                        Some(run_id),
+                        LogSkipReason::LogEmpty,
+                    );
+                } else {
+                    state.fetched.push(FetchedLog {
+                        run_id,
+                        checks,
+                        cleaned,
+                        raw_truncated: output.stdout_truncated,
+                    });
                 }
             }
             state.next_log += 1;
@@ -853,19 +911,14 @@ fn verify_run(ctx: &Ctx, run_id: u64, run: &RawRun) -> Result<(), LogSkipReason>
     if !run.head_sha.eq_ignore_ascii_case(&ctx.head_sha) {
         return Err(LogSkipReason::HeadMismatch);
     }
-    let related = if run.pull_requests.is_empty() {
-        let head_repository = run.head_repository.as_deref().map(str::to_ascii_lowercase);
-        head_repository.is_some() && head_repository == ctx.head_repository
-    } else {
-        run.pull_requests.iter().any(|pull_request| {
-            pull_request.number == ctx.key.number
-                && pull_request
-                    .base_url
-                    .as_deref()
-                    .and_then(|url| url.strip_prefix(API_REPOS_PREFIX))
-                    .is_some_and(|repository| repository.eq_ignore_ascii_case(&ctx.key.repository))
-        })
-    };
+    let related = run.pull_requests.iter().any(|pull_request| {
+        pull_request.number == ctx.key.number
+            && pull_request
+                .base_url
+                .as_deref()
+                .and_then(|url| url.strip_prefix(API_REPOS_PREFIX))
+                .is_some_and(|repository| repository.eq_ignore_ascii_case(&ctx.key.repository))
+    });
     if !related {
         return Err(LogSkipReason::PullRequestMismatch);
     }

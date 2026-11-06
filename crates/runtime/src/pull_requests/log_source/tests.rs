@@ -28,7 +28,7 @@ fn check(provider_id: &str, name: &str) -> PullRequestCheck {
 }
 
 fn request(checks: Vec<PullRequestCheck>) -> LogRequest {
-    LogRequest::new(key(), SHA, Some("turtton/evorch".to_owned()), checks)
+    LogRequest::new(key(), SHA, checks)
 }
 
 fn source(runner: &FakeProcessRunner) -> GhLogSource {
@@ -43,7 +43,6 @@ fn run_json(id: u64, head: &str, repository: &str, pulls: &[(u64, &str)], status
         "status": status,
         "conclusion": "failure",
         "repository": repository,
-        "head_repository": "turtton/evorch",
         "pull_requests": pulls
             .iter()
             .map(|(number, repo)| json!({
@@ -353,30 +352,26 @@ async fn a_run_that_is_not_this_pull_requests_head_has_no_log() {
     }
 }
 
-// Given: a run for which GitHub lists no pull request / When: read / Then: it is used only
-// when its head repository is the pull request's head repository
+// Given: a run that lists no pull request, which could belong to another pull request with the
+// same head and another base / When: read / Then: it is refused and its log is never asked for
 #[tokio::test(start_paused = true)]
-async fn an_unlisted_run_is_related_by_its_head_repository() {
-    let unlisted = run_json(111, SHA, "turtton/evorch", &[], "completed");
-    for (head_repository, expected_runs) in [
-        (Some("turtton/evorch"), 1),
-        (Some("TURTTON/Evorch"), 1),
-        (Some("fork/evorch"), 0),
-        (None, 0),
-    ] {
-        let runner = FakeProcessRunner::new();
-        runner.push_exit(0, &unlisted, "");
-        runner.push_exit(0, "boom\n", "");
-        let mut request = request(vec![check("run:111", "CI / build")]);
-        request.head_repository = head_repository.map(str::to_owned);
+async fn a_run_that_lists_no_pull_request_has_no_log() {
+    let runner = FakeProcessRunner::new();
+    runner.push_exit(
+        0,
+        &run_json(111, SHA, "turtton/evorch", &[], "completed"),
+        "",
+    );
 
-        let bundle = fetch(&runner, &request).await;
+    let bundle = fetch(&runner, &request(vec![check("run:111", "CI / build")])).await;
 
-        assert_eq!(bundle.runs.len(), expected_runs, "{head_repository:?}");
-        if expected_runs == 0 {
-            assert_eq!(reasons(&bundle), vec![LogSkipReason::PullRequestMismatch]);
-        }
-    }
+    assert_eq!(reasons(&bundle), vec![LogSkipReason::PullRequestMismatch]);
+    assert!(bundle.runs.is_empty());
+    assert_eq!(
+        endpoints(&runner),
+        vec!["repos/turtton/evorch/actions/runs/111".to_owned()],
+        "no `run view`"
+    );
 }
 
 // Given: failures of gh / When: read / Then: each is a typed reason; none panics
@@ -849,7 +844,7 @@ async fn the_wrapper_cannot_be_closed_from_inside() {
     let bundle = fetch(&runner, &request(vec![check("run:1", &name)])).await;
     assert_eq!(bundle.runs[0].excerpt, hostile);
 
-    let text = render_ci_log_data(&bundle, 16 * 1024);
+    let text = render_ci_log_data(&bundle, 16 * 1024).unwrap();
 
     assert_eq!(text.matches(CI_LOG_DATA_OPEN).count(), 1, "{text}");
     assert_eq!(text.matches(CLOSING).count(), 1, "{text}");
@@ -884,9 +879,9 @@ fn the_wrapper_is_cut_to_its_size_by_dropping_old_lines() {
         skipped: Vec::new(),
         truncated: false,
     };
-    let full = render_ci_log_data(&bundle, usize::MAX);
+    let full = render_ci_log_data(&bundle, usize::MAX).unwrap();
 
-    let cut = render_ci_log_data(&bundle, 600);
+    let cut = render_ci_log_data(&bundle, 600).unwrap();
 
     assert!(full.len() > 600);
     assert!(cut.len() <= 600, "{}", cut.len());
@@ -914,7 +909,7 @@ async fn raw_stderr_is_never_part_of_the_result() {
 
     for text in [
         format!("{bundle:?}"),
-        render_ci_log_data(&bundle, 16 * 1024),
+        render_ci_log_data(&bundle, 16 * 1024).unwrap(),
     ] {
         assert!(
             !text.contains("ghp_") && !text.contains("sensitive-detail"),
@@ -1052,4 +1047,110 @@ async fn the_deadline_drops_the_running_process() {
 
     assert_eq!(reasons(&bundle), vec![LogSkipReason::DeadlineExceeded]);
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+// Given: a failing `gh run view` that printed a lot before it exited non-zero / When: read /
+// Then: the output counts against the raw budget, and the next read is asked for only what is
+// left (or not made at all when nothing is)
+#[tokio::test(start_paused = true)]
+async fn the_output_of_a_failing_process_is_charged_to_the_raw_budget() {
+    for (printed, second_limit) in [(40, Some(20)), (60, None)] {
+        let runner = FakeProcessRunner::new();
+        runner.push_exit(0, &good_run(1), "");
+        runner.push_exit(0, &good_run(2), "");
+        runner.push_exit(1, &"x".repeat(printed), "log not found: 1");
+        runner.push_exit(0, "second log\n", "");
+        let mut request = request(vec![check("run:1", "one"), check("run:2", "two")]);
+        request.limits.raw_bytes = 60;
+
+        let bundle = fetch(&runner, &request).await;
+
+        let limits: Vec<_> = runner
+            .specs()
+            .iter()
+            .filter(|spec| spec.args[0] == "run")
+            .map(|spec| spec.stdout_limit)
+            .collect();
+        match second_limit {
+            Some(left) => {
+                assert_eq!(limits, vec![60, left]);
+                assert_eq!(bundle.runs.len(), 1);
+                assert_eq!(reasons(&bundle), vec![LogSkipReason::LogExpired]);
+            }
+            None => {
+                assert_eq!(limits, vec![60], "no second read once the budget is gone");
+                assert!(bundle.runs.is_empty());
+                assert_eq!(
+                    reasons(&bundle),
+                    vec![LogSkipReason::LogExpired, LogSkipReason::RawLimit]
+                );
+            }
+        }
+    }
+}
+
+fn bundle_of_long_names() -> CiLogBundle {
+    let name = "<".repeat(160);
+    let run = |run_id| CiLogRun {
+        run_id,
+        checks: (0..5).map(|n| format!("{n}{name}")).collect(),
+        excerpt: "<line>".to_owned(),
+        lines_omitted: 0,
+        raw_truncated: false,
+        line_cut: false,
+        lossy_utf8: false,
+        redactions: 0,
+    };
+    CiLogBundle {
+        head_sha: SHA.to_owned(),
+        runs: (1..=3).map(run).collect(),
+        skipped: (0..12)
+            .map(|n| CiLogSkip {
+                check: Some(format!("{n}{name}")),
+                run_id: Some(n),
+                reason: LogSkipReason::HeadMismatch,
+            })
+            .collect(),
+        truncated: false,
+    }
+}
+
+// Given: a bundle whose check and skip names are 160 characters of `<` (six bytes each once
+// escaped) / When: wrapped with budgets from large to tiny / Then: the text is within the
+// budget every time, still one parseable line, and says what was left out; below the smallest
+// text there is none
+#[test]
+fn the_wrapper_fits_its_budget_even_when_only_metadata_is_left() {
+    let bundle = bundle_of_long_names();
+    let full = render_ci_log_data(&bundle, usize::MAX).unwrap();
+    assert!(
+        full.len() > 16 * 1024,
+        "the fixture must overflow: {}",
+        full.len()
+    );
+    let minimal = minimal_ci_log_data(&bundle);
+
+    for budget in [16 * 1024, 4096, 1500, 700, minimal.len()] {
+        let text = render_ci_log_data(&bundle, budget).unwrap_or_else(|| panic!("{budget}"));
+        assert!(text.len() <= budget, "{} > {budget}", text.len());
+        assert_eq!(text.matches(CLOSING).count(), 1);
+        let body = &text[CI_LOG_DATA_OPEN.len() + 1..text.len() - CLOSING.len() - 1];
+        assert!(!body.contains('\n') && !body.contains('<') && !body.contains('>'));
+        let parsed: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["head_sha"], SHA);
+        assert_eq!(parsed["truncated"], true);
+        let shown_runs = parsed["runs"].as_array().unwrap().len();
+        assert_eq!(
+            shown_runs + parsed["runs_not_shown"].as_u64().unwrap() as usize,
+            3
+        );
+        let shown_skips = parsed["skipped"].as_array().unwrap().len();
+        assert_eq!(
+            shown_skips + parsed["skipped_not_shown"].as_u64().unwrap() as usize,
+            12
+        );
+    }
+    assert_eq!(render_ci_log_data(&bundle, minimal.len()).unwrap(), minimal);
+    assert_eq!(render_ci_log_data(&bundle, minimal.len() - 1), None);
+    assert_eq!(render_ci_log_data(&bundle, 0), None);
 }

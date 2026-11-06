@@ -33,7 +33,7 @@ pub use fake::{FakeProcessRunner, FakePullRequestSource, FetchGate};
 pub use locator::{LocatorError, parse_locator};
 pub use log_source::{
     CiLogBundle, CiLogRun, CiLogSkip, FakePullRequestLogSource, GhLogSource, LogLimits, LogRequest,
-    LogSkipKind, LogSkipReason, PullRequestLogSource, render_ci_log_data,
+    LogSkipKind, LogSkipReason, PullRequestLogSource, minimal_ci_log_data, render_ci_log_data,
 };
 pub use ownership::{OwnershipView, ThreadEnvironment};
 pub use review::{
