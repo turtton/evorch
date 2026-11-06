@@ -10,7 +10,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::ToolResult;
 use secret_guard::SecretRedactor;
@@ -325,6 +325,30 @@ fn locked_slot(root: &Path, index: usize) -> io::Result<(PathBuf, File)> {
     Ok((dir, lock))
 }
 
+fn lock_cursor(cursor: &File) -> io::Result<()> {
+    // The sandbox can lock this file through its read-only output mount. Allow
+    // ordinary writers time to finish, but never wait indefinitely for a holder
+    // that refuses to release it, especially while a shell job holds its mutex.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cursor.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "temporary output cursor is busy",
+            ));
+        }
+        std::thread::sleep(backoff.min(remaining));
+        backoff = (backoff * 2).min(Duration::from_millis(25));
+    }
+}
+
 fn next_slot(root: &Path) -> io::Result<(PathBuf, File)> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut cursor = OpenOptions::new()
@@ -344,7 +368,7 @@ fn next_slot(root: &Path) -> io::Result<(PathBuf, File)> {
     {
         return Err(io::Error::other("invalid temporary output cursor file"));
     }
-    cursor.lock()?;
+    lock_cursor(&cursor)?;
     let mut next = [0];
     let first = match cursor.read(&mut next)? {
         0 => 0,
@@ -692,6 +716,59 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), label);
             assert!(slots.insert(path.parent().unwrap().to_owned()));
         }
+    }
+
+    #[test]
+    fn a_read_only_cursor_lock_cannot_stall_saves_and_is_released_on_process_death() {
+        use std::io::BufRead;
+        use std::os::unix::process::ExitStatusExt;
+
+        const CHILD: &str = "EVORCH_OUTPUT_CURSOR_HOLDER";
+        const READY: &str = "output cursor locked";
+        const TEST: &str = "output::tests::a_read_only_cursor_lock_cannot_stall_saves_and_is_released_on_process_death";
+        if let Some(root) = std::env::var_os(CHILD) {
+            // A read-only sandbox mount does not prevent flock(LOCK_EX).
+            let cursor = File::open(Path::new(&root).join(".next")).unwrap();
+            cursor.lock().unwrap();
+            println!("\n{READY}");
+            std::io::stdout().flush().unwrap();
+            let _ = std::io::stdin().read_exact(&mut [0]);
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let (first, _) = store().save(root.path(), "first").unwrap();
+        let cursor_path = root.path().join(".next");
+        let before = std::fs::read(&cursor_path).unwrap();
+        let entries = std::fs::read_dir(root.path()).unwrap().count();
+        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, root.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut control = std::io::BufReader::new(holder.stdout.take().unwrap());
+        let ready = (&mut control).lines().any(|line| line.unwrap() == READY);
+        assert!(ready, "holder exited before acquiring the read-only lock");
+
+        // The holder cannot release its lock until this save returns: a blocking
+        // allocator forms a dependency cycle, not a test-time deadline failure.
+        let error = store().save(root.path(), "blocked").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&cursor_path).unwrap(), before);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), entries);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+
+        holder.kill().unwrap();
+        assert!(holder.wait().unwrap().signal().is_some());
+        drop(control);
+        let (after, _) = store().save(root.path(), "after process death").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(after).unwrap(),
+            "after process death"
+        );
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
     }
 
     #[test]
