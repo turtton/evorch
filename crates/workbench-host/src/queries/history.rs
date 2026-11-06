@@ -336,7 +336,8 @@ type PendingParts = (usize, usize, Vec<(String, bool)>);
 struct Scanner {
     positions: std::collections::BTreeMap<String, u64>,
     parts: std::collections::BTreeMap<(String, String), PendingParts>,
-    first_user: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
+    initial_receipts: std::collections::BTreeSet<String>,
+    first_prompt: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
     last_assistant: std::collections::BTreeMap<String, Vec<([u8; 32], u64)>>,
 }
 impl Scanner {
@@ -369,50 +370,33 @@ impl Scanner {
             let (run, role, body) = committed_text(kind)?;
             (run, role, vec![(body.to_owned(), tokenized)])
         };
+        let prompt = matches!(
+            kind,
+            EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
+        );
         self.message(
             run,
             role,
             parts,
-            matches!(
-                kind,
-                EventKind::Lifecycle(LifecycleEvent::TaskPromptPublished { .. })
-            ),
+            prompt,
             matches!(
                 kind,
                 EventKind::Message(MessageEvent::FinalResultPublished { .. })
             ),
         )
     }
-    fn input(
-        &mut self,
-        db: &storage::Database,
-        input: storage::host_input::DeliveredHostInput,
-    ) -> Result<Option<RawMessage>, storage::StorageError> {
+    fn input(&mut self, input: storage::host_input::DeliveredHostInput) -> Option<RawMessage> {
+        if input.first_in_run {
+            self.initial_receipts.insert(input.run_id.clone());
+        }
         if let Some(value) = input.text {
-            return Ok(self.message(
+            return self.message(
                 &input.run_id,
                 MessageRole::User,
                 vec![(value, false)],
                 false,
                 false,
-            ));
-        }
-        if !self.first_user.contains_key(&input.run_id) {
-            // Only the first instruction needs equality against TaskPromptPublished.
-            // Read that one selected receipt, never every large followup body.
-            use sha2::{Digest, Sha256};
-            if let Some(receipt) = db
-                .host_input_receipts(std::slice::from_ref(&input.prompt_id))?
-                .first()
-            {
-                self.first_user.insert(
-                    input.run_id.clone(),
-                    vec![(
-                        Sha256::digest(receipt.text.as_bytes()).into(),
-                        receipt.text.len() as u64,
-                    )],
-                );
-            }
+            );
         }
         let index = self.positions.entry(input.run_id.clone()).or_default();
         let raw = RawMessage {
@@ -426,7 +410,7 @@ impl Scanner {
             }),
         };
         *index += 1;
-        Ok(Some(raw))
+        Some(raw)
     }
     fn message(
         &mut self,
@@ -462,11 +446,19 @@ impl Scanner {
         {
             return None;
         }
-        if role == MessageRole::User {
-            if prompt && self.first_user.get(run) == Some(&key) {
+        if prompt {
+            if self.first_prompt.get(run) == Some(&key) {
                 return None;
             }
-            self.first_user.entry(run.to_owned()).or_insert(key.clone());
+            if !self.first_prompt.contains_key(run) {
+                self.first_prompt.insert(run.to_owned(), key.clone());
+                // The first accepted receipt ID of this run, replayed before its
+                // first task, establishes identity without comparing bodies.
+                // Later changed instructions are not that initial submission.
+                if self.initial_receipts.contains(run) {
+                    return None;
+                }
+            }
         }
         if role == MessageRole::Assistant {
             self.last_assistant.insert(run.to_owned(), key);
@@ -524,22 +516,8 @@ fn committed_messages(
             // Match the GUI's durable replay: accepted user inputs precede the
             // first event at or after their acceptance timestamp (ID breaks ties).
             while inputs.peek().is_some_and(|r| r.accepted_at_ns <= at) {
-                match scanner.input(db, inputs.next().unwrap()) {
-                    Ok(Some(message)) => raw.push(message),
-                    Ok(None) => {}
-                    Err(e) => failure = Some(e),
-                }
-            }
-            // A multipart assistant and a single-token finish have different
-            // descriptor shapes even when their logical text is identical. Only
-            // this ambiguous equality reads the selected assistant parts, one at
-            // a time; ordinary history stays entirely deferred.
-            match duplicates_multipart_finish(db, &raw, &row.event.kind, row.format) {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(e) => {
-                    failure = Some(e);
-                    return;
+                if let Some(message) = scanner.input(inputs.next().unwrap()) {
+                    raw.push(message);
                 }
             }
             if let Some(message) = scanner.observe(
@@ -555,67 +533,9 @@ fn committed_messages(
     }
     // A receipt is authoritative even if its notification has not been stored.
     for input in inputs {
-        if let Some(message) = scanner.input(db, input)? {
+        if let Some(message) = scanner.input(input) {
             raw.push(message);
         }
     }
     Ok(raw)
-}
-
-fn duplicates_multipart_finish(
-    db: &storage::Database,
-    history: &[RawMessage],
-    kind: &EventKind,
-    format: storage::StoredFormat,
-) -> Result<bool, storage::StorageError> {
-    use sha2::{Digest, Sha256};
-    let EventKind::Message(MessageEvent::FinalResultPublished { run_id, text }) = kind else {
-        return Ok(false);
-    };
-    let Some(last) = history
-        .iter()
-        .rev()
-        .find(|m| m.run == *run_id && m.role == MessageRole::Assistant)
-        .filter(|m| m.parts.len() > 1)
-    else {
-        return Ok(false);
-    };
-    let finish = (format == storage::StoredFormat::Tokenized)
-        .then(|| storage::BodyRef::from_token(text))
-        .flatten();
-    let bytes = finish.map_or(text.len() as u64, |r| r.byte_len);
-    let part_bytes: u64 = last
-        .parts
-        .iter()
-        .map(|(part, deferred)| {
-            if *deferred {
-                storage::BodyRef::from_token(part).unwrap().byte_len
-            } else {
-                part.len() as u64
-            }
-        })
-        .sum();
-    if bytes != part_bytes {
-        return Ok(false);
-    }
-    let expected: [u8; 32] =
-        finish.map_or_else(|| Sha256::digest(text.as_bytes()).into(), |r| r.hash);
-    let mut joined = Sha256::new();
-    for (part, deferred) in &last.parts {
-        if *deferred {
-            let body = db
-                .resolve_bodies(&[storage::BodyRef::from_token(part).unwrap()])?
-                .pop()
-                .ok_or_else(|| {
-                    storage::StorageError::Io("multipart equality body is unavailable".into())
-                })?
-                .map_err(|_| {
-                    storage::StorageError::Io("multipart equality body is unreadable".into())
-                })?;
-            joined.update(body.as_bytes());
-        } else {
-            joined.update(part.as_bytes());
-        }
-    }
-    Ok(<[u8; 32]>::from(joined.finalize()) == expected)
 }

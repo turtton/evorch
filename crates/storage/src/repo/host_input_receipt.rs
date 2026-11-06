@@ -293,7 +293,9 @@ pub(crate) fn delivered_history(
     run_id: &str,
 ) -> Result<Vec<crate::host_input::DeliveredHostInput>, StorageError> {
     let mut statement = conn.prepare(
-        "SELECT prompt_id, run_id, CASE WHEN length(CAST(text AS BLOB)) <= 16384 THEN text END, length(CAST(text AS BLOB)), accepted_at_ns
+        "SELECT prompt_id, run_id, CASE WHEN octet_length(text) <= 16384 THEN text END, octet_length(text), accepted_at_ns,
+         prompt_id = (SELECT prompt_id FROM host_input_receipts WHERE run_id = ?1
+             AND json_extract(provenance_json,'$.kind')='user' ORDER BY acceptance_seq, accepted_at_ns, prompt_id LIMIT 1)
          FROM host_input_receipts WHERE run_id = ?1 AND status = 'delivered'
          AND json_extract(provenance_json,'$.kind')='user'
          AND run_id NOT IN (SELECT run_id FROM run_tombstones)
@@ -307,6 +309,7 @@ pub(crate) fn delivered_history(
             text: row.get(2)?,
             text_bytes: row.get(3)?,
             accepted_at_ns: row.get(4)?,
+            first_in_run: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

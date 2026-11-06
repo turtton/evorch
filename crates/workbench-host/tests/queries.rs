@@ -800,6 +800,16 @@ fn saved_event(f: &Fixture, at: u64, kind: impl Into<event_bus::EventKind>) -> i
         .unwrap()
 }
 fn input(f: &Fixture, id: &str, text: &str, at: i64, status: storage::HostInputStatus) {
+    input_for(f, "run-1", id, text, at, status);
+}
+fn input_for(
+    f: &Fixture,
+    run: &str,
+    id: &str,
+    text: &str,
+    at: i64,
+    status: storage::HostInputStatus,
+) {
     f.store
         .handle()
         .append_host_input_accepted(
@@ -809,8 +819,8 @@ fn input(f: &Fixture, id: &str, text: &str, at: i64, status: storage::HostInputS
             &storage::HostInputReceipt {
                 provenance: storage::HostInputProvenance::User,
                 prompt_id: id.into(),
-                run_id: "run-1".into(),
-                root_run_id: "run-1".into(),
+                run_id: run.into(),
+                root_run_id: run.into(),
                 text: text.into(),
                 image_count: 0,
                 status,
@@ -1239,9 +1249,10 @@ fn approval_registered_and_decided_between_refreshes_still_emits_changed() {
 }
 
 #[test]
-fn deferred_multipart_finish_deduplicates_logical_text_not_descriptor_shape() {
+fn deferred_multipart_finish_retains_distinct_descriptor_shapes_without_prereading_bodies() {
     let f = Fixture::new();
     let mut sub = f.subscribe();
+    let meter = read_meter(&f);
     let part = "片".repeat(10_000);
     for index in 0..2 {
         saved_event(
@@ -1265,8 +1276,10 @@ fn deferred_multipart_finish_deduplicates_logical_text_not_descriptor_shape() {
             text: part.repeat(2),
         },
     );
+    let finish = next_message(&f, &mut sub);
+    assert_eq!(finish.index, Sequence(1));
     let page = messages(&f);
-    assert_eq!(page.len(), 1);
+    assert_eq!(page.len(), 2);
     assert_eq!(page[0].run, committed.run);
     assert_eq!(page[0].index, committed.index);
     assert_eq!(page[0].role, committed.role);
@@ -1279,6 +1292,348 @@ fn deferred_multipart_finish_deduplicates_logical_text_not_descriptor_shape() {
         },
     );
     let distinct = next_message(&f, &mut sub);
-    assert_eq!(distinct.index.get(), 1);
-    assert_eq!(messages(&f).len(), 2);
+    assert_eq!(distinct.index.get(), 2);
+    assert_eq!(messages(&f).len(), 3);
+    assert_eq!(
+        meter.counts(),
+        storage::test_support::BodyReadCounts::default()
+    );
+    let MessageContent::Body(reference) = committed.content else {
+        panic!()
+    };
+    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
+        body_id: reference.body_id,
+        offset: ByteOffset(0),
+        max_bytes: 65536,
+    })) else {
+        panic!()
+    };
+    assert_eq!(chunk.text, part.repeat(2));
+    assert_eq!(
+        meter.counts(),
+        storage::test_support::BodyReadCounts {
+            calls: 2,
+            bytes: 60_000
+        }
+    );
+}
+
+fn current_thread_fixture() -> Fixture {
+    Fixture::with_runtime(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+}
+fn read_meter(f: &Fixture) -> std::sync::Arc<storage::test_support::BodyReadMeter> {
+    f.runtime
+        .with_storage_reader(|db| Ok(storage::test_support::meter_full_body_reads(db)))
+        .unwrap()
+        .unwrap()
+}
+#[test]
+fn history_and_subscription_do_not_resolve_missing_or_corrupt_page_external_bodies() {
+    for multipart in [false, true] {
+        for missing in [false, true] {
+            let f = current_thread_fixture();
+            saved_event(
+                &f,
+                5,
+                MessageEvent::MessageCompleted {
+                    run_id: "run-1".into(),
+                    text: "first".into(),
+                },
+            );
+            let part = "片".repeat(10_000);
+            if multipart {
+                for index in 0..2 {
+                    saved_event(
+                        &f,
+                        10 + index as u64,
+                        MessageEvent::MessagePart {
+                            run_id: "run-1".into(),
+                            response_id: "large".into(),
+                            text: part.clone(),
+                            index,
+                            total: 2,
+                        },
+                    );
+                }
+            } else {
+                saved_event(
+                    &f,
+                    10,
+                    MessageEvent::MessageCompleted {
+                        run_id: "run-1".into(),
+                        text: part.repeat(2),
+                    },
+                );
+            }
+            saved_event(
+                &f,
+                12,
+                MessageEvent::FinalResultPublished {
+                    run_id: "run-1".into(),
+                    text: part.repeat(2),
+                },
+            );
+            let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+            // Deliberately damage only a content blob, never its event descriptor.
+            db.pragma_update(None, "foreign_keys", false).unwrap();
+            let damaged = db.execute(if missing {
+                "DELETE FROM content_blobs WHERE id=(SELECT MIN(id) FROM content_blobs)"
+            } else {
+                "UPDATE content_blobs SET data=X'00' WHERE id=(SELECT MIN(id) FROM content_blobs)"
+            }, []).unwrap();
+            assert_eq!(damaged, 1);
+            let meter = read_meter(&f);
+            let mut sub = f.subscribe();
+            let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
+                cursor: None,
+                limit: 1,
+            })) else {
+                panic!()
+            };
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(
+                page.items[0].content,
+                MessageContent::Inline {
+                    text: "first".into()
+                }
+            );
+            assert!(page.next_cursor.is_some());
+            // Single digest equality still deduplicates a finish whose blob is
+            // unavailable; incomparable multipart descriptors remain separate.
+            let all = messages(&f);
+            assert_eq!(all.len(), if multipart { 3 } else { 2 });
+            saved_event(
+                &f,
+                20,
+                MessageEvent::MessageCompleted {
+                    run_id: "run-1".into(),
+                    text: "after".into(),
+                },
+            );
+            let after = next_message(&f, &mut sub);
+            assert_eq!(after.index, Sequence(if multipart { 3 } else { 2 }));
+            assert_eq!(
+                after.content,
+                MessageContent::Inline {
+                    text: "after".into()
+                }
+            );
+            assert_eq!(
+                meter.counts(),
+                storage::test_support::BodyReadCounts::default()
+            );
+        }
+    }
+}
+#[test]
+fn small_history_pages_and_subscription_updates_read_no_large_input_bodies() {
+    let f = current_thread_fixture();
+    let body = "😀".repeat(20_000);
+    for n in 0..3 {
+        let run = format!("run-{}", n + 1);
+        f.thread("thread-1", &run, "First");
+        input_for(
+            &f,
+            &run,
+            &format!("{run}-initial"),
+            &body,
+            10 + n * 100,
+            storage::HostInputStatus::Delivered,
+        );
+        // Older events without user_text can contain expanded instructions:
+        // receipt/run/order identity, not text equality, establishes the link.
+        saved_event(
+            &f,
+            (20 + n * 100) as u64,
+            event_bus::LifecycleEvent::TaskPromptPublished {
+                run_id: run.clone(),
+                agent_name: "Worker".into(),
+                role: "Worker".into(),
+                parent_run_id: None,
+                prompt: "expanded instructions, not the human text".into(),
+                user_text: None,
+                skills: vec![],
+            },
+        );
+        input_for(
+            &f,
+            &run,
+            &format!("{run}-followup"),
+            &body,
+            40 + n * 100,
+            storage::HostInputStatus::Delivered,
+        );
+    }
+    let meter = read_meter(&f);
+    let mut cursor = None;
+    let mut items = vec![];
+    for _ in 0..6 {
+        let QueryReply::CommittedHistory(page) = f.query(history(PageRequest { cursor, limit: 1 }))
+        else {
+            panic!()
+        };
+        assert_eq!(page.items.len(), 1);
+        cursor = page.next_cursor;
+        items.extend(page.items);
+    }
+    assert!(cursor.is_none());
+    assert!(
+        items
+            .iter()
+            .all(|m| m.role == MessageRole::User && matches!(m.content, MessageContent::Body(_)))
+    );
+    for n in 1..=3 {
+        let run = format!("run-{n}");
+        let indices: Vec<_> = items
+            .iter()
+            .filter(|m| m.run.as_str() == run)
+            .map(|m| m.index)
+            .collect();
+        assert_eq!(indices, [Sequence(0), Sequence(1)]);
+    }
+    let mut sub = f.subscribe();
+    input(
+        &f,
+        "new-followup",
+        &body,
+        1000,
+        storage::HostInputStatus::Delivered,
+    );
+    f.runtime
+        .event_bus()
+        .emit(Event::new(event_bus::LifecycleEvent::HostInputDelivered {
+            run_id: "run-1".into(),
+            prompt_id: "new-followup".into(),
+        }));
+    let changed = next_message(&f, &mut sub);
+    assert_eq!(changed.index, Sequence(2));
+    assert!(matches!(changed.content, MessageContent::Body(_)));
+    assert_eq!(
+        meter.counts(),
+        storage::test_support::BodyReadCounts::default()
+    );
+    // Positive control proves the meter measures actual full bytes, not the
+    // bounded wire chunk, when the caller explicitly asks for one body.
+    let MessageContent::Body(reference) = &items[0].content else {
+        panic!()
+    };
+    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
+        body_id: reference.body_id.clone(),
+        offset: ByteOffset(0),
+        max_bytes: 65536,
+    })) else {
+        panic!()
+    };
+    assert_eq!(chunk.text.len(), 65536);
+    assert_eq!(
+        meter.counts(),
+        storage::test_support::BodyReadCounts {
+            calls: 1,
+            bytes: body.len() as u64
+        }
+    );
+}
+#[test]
+fn first_delivered_followup_is_not_mistaken_for_the_runs_initial_receipt() {
+    let f = current_thread_fixture();
+    input(
+        &f,
+        "z-initial",
+        "initial",
+        10,
+        storage::HostInputStatus::Accepted,
+    );
+    input(
+        &f,
+        "a-followup",
+        "followup",
+        10,
+        storage::HostInputStatus::Delivered,
+    );
+    saved_event(
+        &f,
+        20,
+        event_bus::LifecycleEvent::TaskPromptPublished {
+            run_id: "run-1".into(),
+            agent_name: "Worker".into(),
+            role: "Worker".into(),
+            parent_run_id: None,
+            prompt: "initial".into(),
+            user_text: Some("initial".into()),
+            skills: vec![],
+        },
+    );
+    // Same timestamps and reverse lexical IDs must not override the durable
+    // acceptance sequence when determining which submission supplied the task.
+    let headers = f
+        .runtime
+        .with_storage_reader(|db| db.delivered_host_input_history("run-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(headers.len(), 1);
+    assert!(!headers[0].first_in_run);
+    let items = messages(&f);
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0].content,
+        MessageContent::Inline {
+            text: "followup".into()
+        }
+    );
+    assert_eq!(
+        items[1].content,
+        MessageContent::Inline {
+            text: "initial".into()
+        }
+    );
+}
+
+#[test]
+fn receipt_link_deduplicates_initial_task_copies_but_keeps_changed_instructions() {
+    let f = current_thread_fixture();
+    input(
+        &f,
+        "initial",
+        "human input",
+        10,
+        storage::HostInputStatus::Delivered,
+    );
+    for (at, prompt) in [
+        (20, "expanded initial task"),
+        (30, "changed instructions"),
+        (40, "expanded initial task"),
+    ] {
+        saved_event(
+            &f,
+            at,
+            event_bus::LifecycleEvent::TaskPromptPublished {
+                run_id: "run-1".into(),
+                agent_name: "Worker".into(),
+                role: "Worker".into(),
+                parent_run_id: None,
+                prompt: prompt.into(),
+                user_text: None,
+                skills: vec![],
+            },
+        );
+    }
+    let items = messages(&f);
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0].content,
+        MessageContent::Inline {
+            text: "human input".into()
+        }
+    );
+    assert_eq!(
+        items[1].content,
+        MessageContent::Inline {
+            text: "changed instructions".into()
+        }
+    );
 }

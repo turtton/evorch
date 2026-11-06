@@ -82,6 +82,8 @@ pub struct DeliveredHostInput {
     pub text: Option<String>,
     pub text_bytes: u64,
     pub accepted_at_ns: i64,
+    /// Earliest accepted human receipt in this run, including non-delivered states.
+    pub first_in_run: bool,
 }
 
 /// What the runtime recorded for a submission: the host's own words and the

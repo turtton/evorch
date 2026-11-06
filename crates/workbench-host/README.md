@@ -71,17 +71,24 @@ or runtime execution/prompt changes are introduced.
 ReadCommittedHistory and MessageCommitted share one canonical deferred scanner.
 It emits completed/assembled assistant messages, nonempty finish results (unless
 identical to that run's last assistant message), task prompts, delivered human
-input receipts and tool outputs. Initial task prompts matching the first human
-input are suppressed; distinct submissions of identical text remain distinct.
-Human inputs merge by acceptance timestamp and ID ahead of the corresponding
-stored event, matching GUI history replay. Accepted, withdrawn, dropped and
-unknown receipts are not committed messages; a Delivered receipt is sufficient
-without persisting its notification. The storage descriptor API leaves texts over
-16 KiB in SQLite for ReadBody. Only the selected first input may be read for
-initial-instruction equality against a deferred TaskPromptPublished body hash.
-When multipart assistant descriptors and a single finish descriptor have the same
-length but incomparable segment hashes, only that selected assistant is hashed
-part-by-part for exact equality; no list of historical full bodies is loaded.
+input receipts and tool outputs. Initial instructions are linked to the earliest
+accepted human receipt ID in each run by acceptance_seq (all statuses): only a
+Delivered initial receipt preceding that run's first task prompt suppresses the
+prompt. Repeated descriptors of that initial task are deduplicated; changed
+later instructions and distinct submissions of identical text remain visible.
+Human inputs merge by acceptance timestamp and ID ahead of the corresponding stored event, matching GUI history replay.
+Accepted, withdrawn, dropped and unknown receipts are not themselves committed
+messages; a Delivered receipt is sufficient without persisting its notification.
+The storage descriptor API leaves texts over 16 KiB in SQLite for ReadBody,
+using SQLite's metadata-only octet_length for the byte count. Query paging and
+projection refresh never resolve deferred bodies, including initial inputs.
+Finish deduplication compares available segment digests/ref descriptors only.
+Like GUI BodyText segment equality, multipart refs and a single whole-body ref
+are incomparable and remain separate messages, without loading either body.
+Missing/corrupt page-external blobs therefore cannot prevent reading an earlier
+page. The feature-gated storage read meter tests zero full-body calls/bytes on
+both history pages and subscription refresh, with an explicit ReadBody positive
+control.
 
 A late delivery or retention can change an already published message prefix.
 The host verifies each run's previous prefix digest, advances the stream epoch

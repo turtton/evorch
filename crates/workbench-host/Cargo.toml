@@ -30,6 +30,7 @@ uuid = { workspace = true }
 test-support = []
 
 [dev-dependencies]
+storage = { path = "../storage", features = ["test-support"] }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 providers = { path = "../providers" }
