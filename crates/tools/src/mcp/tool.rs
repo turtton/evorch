@@ -1,21 +1,39 @@
-use super::{McpToolDefinition, McpToolRegistry};
+use super::{
+    McpToolDefinition, McpToolRegistry, McpToolTransport, registry::McpToolBinding,
+    types::FrozenMcpTool,
+};
 use crate::{Permissions, Tool, ToolError, ToolExecutionContext, ToolResult};
 use event_bus::event::diagnostic_codes;
 use event_bus::{DiagnosticEvent, DiagnosticSeverity, Event, EventBus};
 use std::sync::Arc;
 
-/// MCP HTTP adapter. MCP tool metadata declares no local resource requirements,
-/// so the minimal mapping is network-only, never implicit local filesystem/spawn grants.
+/// Explicit public binding plus the original remote definition. Startup consent
+/// and the executor's per-call scope/permission gate remain separate authorities.
 pub struct McpTool {
-    definition: McpToolDefinition,
+    binding: McpToolBinding,
+    transport: McpToolTransport,
     registry: Arc<McpToolRegistry>,
     event_bus: Option<Arc<EventBus>>,
 }
 
 impl McpTool {
-    pub(super) const fn new(definition: McpToolDefinition, registry: Arc<McpToolRegistry>) -> Self {
+    pub(super) fn new(definition: McpToolDefinition, registry: Arc<McpToolRegistry>) -> Self {
         Self {
-            definition,
+            binding: McpToolBinding::Legacy(definition),
+            transport: McpToolTransport::Http,
+            registry,
+            event_bus: None,
+        }
+    }
+
+    pub(super) fn new_frozen(
+        tool: FrozenMcpTool,
+        registry: Arc<McpToolRegistry>,
+        transport: McpToolTransport,
+    ) -> Self {
+        Self {
+            binding: McpToolBinding::Frozen(Arc::new(tool)),
+            transport,
             registry,
             event_bus: None,
         }
@@ -32,12 +50,30 @@ impl McpTool {
         args: serde_json::Value,
         ctx: Option<&ToolExecutionContext>,
     ) -> Result<ToolResult, ToolError> {
-        let (result, detail, severity) = match self.registry.call(&self.definition, args).await {
-            Ok((result, detail)) => (
-                with_images(ToolResult::success(result.text()), &result),
-                detail,
-                DiagnosticSeverity::Info,
-            ),
+        let (result, detail, severity) = match self.registry.call(&self.binding, args).await {
+            Ok((result, mut detail)) => {
+                if result.is_error
+                    && let Some(metadata) = detail.as_object_mut()
+                {
+                    metadata.insert("class".into(), serde_json::json!("tool_rejected"));
+                }
+                (
+                    with_images(
+                        if result.is_error {
+                            ToolResult::error(result.text())
+                        } else {
+                            ToolResult::success(result.text())
+                        },
+                        &result,
+                    ),
+                    detail,
+                    if result.is_error {
+                        DiagnosticSeverity::Error
+                    } else {
+                        DiagnosticSeverity::Info
+                    },
+                )
+            }
             Err(error) => (
                 ToolResult::error(error.to_string()),
                 error.detail(),
@@ -91,13 +127,20 @@ fn mcp_image(data: &str, mime_type: &str) -> Result<crate::ToolImage, String> {
 #[async_trait::async_trait]
 impl Tool for McpTool {
     fn name(&self) -> &str {
-        &self.definition.name
+        self.binding.public_name()
+    }
+    fn description(&self) -> &str {
+        self.binding
+            .definition()
+            .description
+            .as_deref()
+            .unwrap_or("")
     }
     fn schema(&self) -> serde_json::Value {
-        serde_json::Value::Object(self.definition.input_schema.clone())
+        serde_json::Value::Object(self.binding.definition().input_schema.clone())
     }
     fn permissions(&self) -> Permissions {
-        Permissions::network()
+        self.transport.permissions()
     }
     fn requires_scope_gate(&self) -> bool {
         true

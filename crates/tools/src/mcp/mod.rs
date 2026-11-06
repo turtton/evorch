@@ -18,7 +18,9 @@ pub(crate) mod wire;
 
 pub use client::McpClient;
 pub use error::{McpError, McpErrorKind};
-pub use registry::McpToolRegistry;
+pub use registry::{
+    McpRegistryConnector, McpRegistrySession, McpServerTools, McpToolRegistry, McpToolTransport,
+};
 pub use tool::McpTool;
 pub use types::{
     ApprovalFingerprint, DefinitionFingerprint, FrozenMcpSnapshot, McpCredentialBackend,

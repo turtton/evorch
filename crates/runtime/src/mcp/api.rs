@@ -13,6 +13,23 @@ use tools::mcp::{
     },
 };
 
+/// Configuration save races are distinct from stale approval previews. Keep the
+/// GUI boundary classified: never forward filesystem errors or source text.
+pub fn mcp_config_error_kind(error: config::mcp::McpConfigError) -> McpErrorKind {
+    use config::mcp::McpConfigError;
+    match error {
+        McpConfigError::Conflict => McpErrorKind::ConfigConflict,
+        McpConfigError::LimitExceeded => McpErrorKind::LimitExceeded,
+        McpConfigError::Unavailable => McpErrorKind::Unavailable,
+        McpConfigError::Io
+        | McpConfigError::Syntax
+        | McpConfigError::Invalid
+        | McpConfigError::InvalidTemplate
+        | McpConfigError::MissingEnvironment
+        | McpConfigError::Symlink => McpErrorKind::Configuration,
+    }
+}
+
 /// Ephemeral run inputs, never serialized into restore descriptors.
 #[derive(Debug, Clone)]
 pub struct PrepareMcpRun {

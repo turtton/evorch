@@ -13,6 +13,22 @@ use tools::mcp::{
     transport::{CancelContext, McpProcessLimiter},
     types::*,
 };
+#[test]
+fn mcp_configuration_conflict_is_not_a_stale_approval_preview() {
+    let kind = mcp_config_error_kind(config::mcp::McpConfigError::Conflict);
+    assert_eq!(kind, McpErrorKind::ConfigConflict);
+    assert_ne!(kind, McpErrorKind::StalePreview);
+    let detail = tools::mcp::McpError {
+        server: "fixture".into(),
+        method: "config/save",
+        request_id: None,
+        kind,
+    }
+    .detail();
+    assert_eq!(detail["class"], "config_conflict");
+    assert_eq!(detail["status"], serde_json::Value::Null);
+}
+
 struct SpyStore(AtomicUsize);
 impl CredentialStore for SpyStore {
     fn get(&self, _: &str) -> Result<Option<Secret>, CredentialError> {

@@ -4,6 +4,7 @@ mod api;
 mod limiter;
 pub use api::*;
 pub use limiter::ProjectMcpLimiter;
+pub use tools::mcp::McpErrorKind;
 
 pub use tools::mcp::types::{
     ConfirmMcpApproval, McpApprovalPreview, McpServerStatus, McpStatusEvent,

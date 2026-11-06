@@ -45,6 +45,7 @@ pub enum McpToolContent {
     Resource {
         resource: Map<String, Value>,
     },
+    #[serde(rename = "resource_link")]
     ResourceLink {
         uri: String,
         name: String,

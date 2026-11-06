@@ -18,6 +18,8 @@ pub enum McpErrorKind {
     ToolRejected,
     #[error("configuration")]
     Configuration,
+    #[error("config_conflict")]
+    ConfigConflict,
     #[error("needs_approval")]
     NeedsApproval,
     #[error("approval_revoked")]
@@ -62,6 +64,7 @@ impl McpError {
             | McpErrorKind::ServerRejected
             | McpErrorKind::ToolRejected
             | McpErrorKind::Configuration
+            | McpErrorKind::ConfigConflict
             | McpErrorKind::NeedsApproval
             | McpErrorKind::ApprovalRevoked
             | McpErrorKind::StalePreview

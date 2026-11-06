@@ -146,3 +146,56 @@ T0 tests check the contract primitives, fixture driver, inert service and search
 helper behavior. They do NOT assert that unimplemented production transports,
 approval persistence or runtime integration already work. C/D/B/E/F/G add the
 behavioral tests in TEST-MAP.md; do not replace them with copied instructions.
+
+## E pure registration layer
+
+`mcp::names::McpNameBindings::new` consumes the complete accepted remote-key set.
+It exposes `public_name`, `remote_key` and public-name-sorted `iter`; it never
+sanitizes or reverse-parses. Normal-name collisions hash **both** tuples. The
+hash input is `evorch.mcp.external-name.v1\0`, then each UTF-8 tuple component
+prefixed by its unsigned 64-bit big-endian byte length. SHA-256 is base64url,
+without padding. Final collisions/duplicate remote keys are errors.
+
+`FrozenMcpSnapshot::from_servers(McpServerTools)` assigns names after client-side
+schema exclusion and sorts once. `McpToolRegistry::from_snapshot(snapshot,
+connector)` checks saved bindings/fingerprints without I/O and preserves their
+saved order, including a historical hash whose collision partner is absent.
+`tools()` registers those definitions; `snapshot()` returns them unchanged.
+
+The new exported `McpRegistryConnector`/`McpRegistrySession` interfaces separate
+pure registration from live runtime authority:
+
+- `tool_transport` is pure metadata. Stdio declares filesystem/process/network
+  capabilities; HTTP is network-only. Hints never lower these permissions.
+- `check_execution` receives the saved `FrozenMcpTool` and must check current
+  enabled/role/consent/destination. The registry calls it before lazy connection
+  and immediately before every remote call. No config flag mints consent.
+- `connect` must use the approved factory/shared limiter/run cancellation and
+  enforce restart limits. It may return a session already prepared for this run,
+  but must not share discovery between runs. The connector/run lease owns
+  transport cleanup, including lazy sessions created after restore.
+- `definitions()` returns already-discovered metadata without I/O. A call checks
+  the used definition's full fingerprint (name, description, input schema).
+  Changed/missing definitions reject the call; no schema/history is rewritten.
+- `call_tool` receives the original bound remote name, never the public name.
+  It returns `(McpToolResult, safe diagnostic detail)`. Calls are never retried.
+  `isError` remains tool failure with `tool_rejected`, not transport failure.
+
+Concrete runtime connector composition is deferred until A/B/C/D are complete.
+The old `McpToolRegistry::new` remains only to keep existing guarded-HTTP tests
+intact while the new path is tested with injected, I/O-free sessions.
+
+### Existing test migration checklist (live integration stage)
+
+| Existing test | Replacement and invariant that must remain |
+| --- | --- |
+| `tools/tests/executor.rs` optional-null MCP validation | Frozen fake registry, concrete public name from binding. Both validation outcomes leave connector/call counts zero. Keep `reads_null_as_omitted = false`. |
+| `tools/tests/apply_patch_reserved_name.rs` | Keep direct `ToolExecutor` reserved-name denial for a scope-gated non-builtin impostor, add forged frozen-binding rejection, and verify remote `apply_patch` is namespaced without replacing the builtin. Keep host-inheritance coverage. Do not simply delete the raw-name denial. |
+| `runtime/tests/mcp_scope_e2e.rs` | Move registration to frozen bindings/concrete role allowlist. Preserve scope/policy denial with zero I/O, approval provenance/order, and the real guarded transport diagnostic scenarios; update fixture IDs only when moving to modern-first transport. |
+| `runtime/tests/mcp_scope_diagnostics/mod.rs` | Reuse migrated scope harness; preserve safe classified status/server/request correlation and absence of URL/header/body/credential material. |
+
+Shared follow-up additions: `McpErrorKind::ConfigConflict` is distinct from
+`StalePreview`; runtime `mcp_config_error_kind` maps configuration save conflicts
+without retaining raw causes. GUI reexports this classification through runtime,
+not a regular tools dependency. `McpToolContent::ResourceLink` has the exact MCP
+wire tag `resource_link`.
