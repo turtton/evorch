@@ -46,6 +46,22 @@ impl LoopState {
         }
     }
 
+    /// IDs of answered questions that are already in this run's history. A tool
+    /// that waits for an answer to arrive treats any other answer as new: the
+    /// answer text itself is injected later by `flush_user_answers`, once.
+    pub(crate) fn delivered_answer_ids(&self) -> std::collections::HashSet<String> {
+        let Some(runtime) = self.runtime() else {
+            return std::collections::HashSet::new();
+        };
+        runtime
+            .user_answers(self.task.run_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|question| question.answer.is_some() && self.has_user_answer(question))
+            .map(|question| question.id)
+            .collect()
+    }
+
     pub(super) fn flush_user_answers(&mut self) -> Result<bool, String> {
         let Some(runtime) = self.runtime() else {
             return Ok(false);

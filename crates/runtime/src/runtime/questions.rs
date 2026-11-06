@@ -730,6 +730,24 @@ impl AgentRuntime {
             None => Ok(Vec::new()),
         }
     }
+    /// IDs of `run`'s answered questions not in `delivered`, sorted. Waiting
+    /// tools use it to return when an answer for the caller arrives; the answer
+    /// text reaches the model through the loop's own answer flush.
+    pub(crate) fn undelivered_answer_ids(
+        &self,
+        run: RunId,
+        delivered: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let mut ids = self
+            .user_answers(run)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|question| question.answer.is_some() && !delivered.contains(&question.id))
+            .map(|question| question.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
     pub(crate) fn has_pending_user_questions(&self, run: RunId) -> bool {
         self.user_answers(run)
             .is_ok_and(|questions| questions.iter().any(|q| q.blocking && q.answer.is_none()))
