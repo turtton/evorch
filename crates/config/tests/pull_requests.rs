@@ -28,6 +28,7 @@ fn tracking_is_disabled_by_default_in_both_load_paths() {
         assert_eq!(loaded, PullRequestsConfig::default());
         assert!(!loaded.enabled);
         assert!(loaded.include_in_review);
+        assert!(loaded.auto_fix_enabled);
     }
 }
 
@@ -37,7 +38,7 @@ fn a_project_layer_cannot_enable_tracking_but_a_user_layer_can() {
     let opts = options(root.path());
     put(
         &root.path().join("project/.evorch/config.toml"),
-        "[pull_requests]\nenabled = true\npending_poll_seconds = 6\n",
+        "[pull_requests]\nauto_fix_enabled = false\nenabled = true\npending_poll_seconds = 6\n",
     );
     put(
         &root.path().join("project/.evorch/config.d/90-pr.toml"),
@@ -57,10 +58,11 @@ fn a_project_layer_cannot_enable_tracking_but_a_user_layer_can() {
     );
     put(
         &root.path().join("user/config.d/20-pr.toml"),
-        "[pull_requests]\npending_poll_seconds = 12\ninclude_in_review = false\n",
+        "[pull_requests]\nauto_fix_enabled = false\npending_poll_seconds = 12\ninclude_in_review = false\n",
     );
     let expected = PullRequestsConfig {
         enabled: true,
+        auto_fix_enabled: false,
         include_in_review: false,
         pending_poll_seconds: 12,
         ..Default::default()
@@ -80,17 +82,22 @@ fn environment_and_cli_overrides_cannot_change_the_section() {
     let mut opts = options(root.path());
     put(
         &root.path().join("user/config.toml"),
-        "[pull_requests]\nstable_poll_seconds = 600\n",
+        "[pull_requests]\nauto_fix_enabled = false\nstable_poll_seconds = 600\n",
     );
     opts.read_env = true;
-    opts.env = Some(BTreeMap::from([(
-        "EVORCH_PULL_REQUESTS__ENABLED".into(),
-        "true".into(),
-    )]));
-    opts.cli_overrides = Some(toml::from_str("[pull_requests]\nenabled = true\n").unwrap());
+    opts.env = Some(BTreeMap::from([
+        ("EVORCH_PULL_REQUESTS__ENABLED".into(), "true".into()),
+        (
+            "EVORCH_PULL_REQUESTS__AUTO_FIX_ENABLED".into(),
+            "true".into(),
+        ),
+    ]));
+    opts.cli_overrides =
+        Some(toml::from_str("[pull_requests]\nenabled = true\nauto_fix_enabled = true\n").unwrap());
     for load in [Config::load, Config::load_strict] {
         let loaded = load(&opts).unwrap().pull_requests;
         assert!(!loaded.enabled);
+        assert!(!loaded.auto_fix_enabled);
         assert_eq!(loaded.stable_poll_seconds, 600);
     }
 }

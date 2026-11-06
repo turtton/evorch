@@ -64,10 +64,9 @@ pub fn downgrade_to_v39(path: &Path) -> Result<(), StorageError> {
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
     conn.execute_batch(concat!(
         concat!(
-            concat!(
-                include_str!("../../../undo/undo_v50.sql"),
-                include_str!("../../../undo/undo_v49.sql")
-            ),
+            include_str!("../../../undo/undo_v51.sql"),
+            include_str!("../../../undo/undo_v50.sql"),
+            include_str!("../../../undo/undo_v49.sql"),
             include_str!("../../../undo/undo_v48.sql"),
             include_str!("../../../undo/undo_v47.sql")
         ),
@@ -186,10 +185,9 @@ pub fn downgrade_to_v43(path: &Path) -> Result<(), StorageError> {
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(concat!(
         concat!(
-            concat!(
-                include_str!("../../../undo/undo_v50.sql"),
-                include_str!("../../../undo/undo_v49.sql")
-            ),
+            include_str!("../../../undo/undo_v51.sql"),
+            include_str!("../../../undo/undo_v50.sql"),
+            include_str!("../../../undo/undo_v49.sql"),
             include_str!("../../../undo/undo_v48.sql"),
             include_str!("../../../undo/undo_v47.sql")
         ),
