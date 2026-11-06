@@ -17,6 +17,8 @@ event-bus = { path = "../event-bus" }
 runtime = { path = "../runtime" }
 sandbox = { path = "../sandbox" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+secret-guard = { path = "../secret-guard" }
 sha2 = { workspace = true }
 storage = { path = "../storage" }
 tokio = { workspace = true, features = ["sync", "rt"] }

@@ -698,7 +698,7 @@ fn answered(text: String) -> QuestionView {
     let mut q = question(QuestionTarget::User);
     q.answer = Some(QuestionAnswer {
         text,
-        answered_by: human(),
+        answered_by: Some(human()),
     });
     q
 }
@@ -729,10 +729,10 @@ fn a_question_answer_is_bounded_on_every_received_path() {
         assert!(frame.validate(&limits).is_err());
     }
     let mut incoherent = answered("ok".into());
-    incoherent.answer.as_mut().unwrap().answered_by = Provenance {
+    incoherent.answer.as_mut().unwrap().answered_by = Some(Provenance {
         agent_run_id: None,
         ..agent()
-    };
+    });
     assert!(incoherent.validate().is_err());
 }
 

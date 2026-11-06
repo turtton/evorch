@@ -100,6 +100,7 @@ struct RequestRecord {
 pub struct Subject {
     pub submission: Option<String>,
     pub run: Option<String>,
+    pub thread: Option<String>,
 }
 
 pub struct Receipts {
@@ -136,9 +137,13 @@ impl Receipts {
         request: &RequestId,
         provenance: &Provenance,
         result: &Result<CommandReply, WorkbenchError>,
-    ) {
+    ) -> bool {
+        if self.requests.get(&request_key(session, request)).is_some() {
+            return false;
+        }
         let subject = match result {
             Ok(reply) => Subject {
+                thread: None,
                 submission: reply
                     .submission_id
                     .as_ref()
@@ -163,6 +168,24 @@ impl Receipts {
                 subject,
             },
         );
+        true
+    }
+
+    pub(crate) fn associate_request(
+        &mut self,
+        session: &SessionId,
+        request: &RequestId,
+        run: Option<String>,
+        thread: Option<String>,
+    ) {
+        if let Some(record) = self
+            .requests
+            .entries
+            .get_mut(&request_key(session, request))
+        {
+            record.subject.run = run.or(record.subject.run.take());
+            record.subject.thread = thread;
+        }
     }
 
     /// What became of `request` in `session`. A request the host has no record of
