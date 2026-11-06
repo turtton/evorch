@@ -121,6 +121,21 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
         "destination thread control and lease",
     ),
     ("lane_state", Keep, "ledger revision singleton"),
+    (
+        "pr_auto_fix_state",
+        Keep,
+        "PR-wide budget, policy and source guard survive thread deletion",
+    ),
+    (
+        "pr_notices",
+        Keep,
+        "PR/SHA dedup survives deletion; tombstone trigger clears thread references and payload",
+    ),
+    (
+        "pr_auto_fix_limit_events",
+        Keep,
+        "one exhaustion event per PR budget epoch",
+    ),
     ("lane_stall_episodes", ReclaimThread, "lane episode history"),
     (
         "lane_verifications",

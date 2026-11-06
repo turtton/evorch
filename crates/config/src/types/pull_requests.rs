@@ -29,6 +29,8 @@ pub const BACKOFF_MAX_SECONDS_RANGE: std::ops::RangeInclusive<u64> = 30..=86_400
 pub struct PullRequestsConfig {
     /// PR の紐づけ・取得・追跡を行う。既定 false（opt-in）。false の間は何も取得しない。
     pub enabled: bool,
+    /// 自動修正通知の全体スイッチ。既定 true。PR ごとの opt-in は別に必要。
+    pub auto_fix_enabled: bool,
     /// 取得した PR の事実を escalation 審査の入力に含める。既定 true。
     pub include_in_review: bool,
     /// check が pending の PR を取得し直す間隔（秒）。5..=3600、既定 30。
@@ -52,6 +54,7 @@ impl Default for PullRequestsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            auto_fix_enabled: true,
             include_in_review: true,
             pending_poll_seconds: 30,
             stable_poll_seconds: 300,
