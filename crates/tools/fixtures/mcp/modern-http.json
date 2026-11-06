@@ -1,0 +1,182 @@
+{
+  "name": "modern HTTP POST + incremental SSE with peer still open",
+  "steps": [
+    {
+      "event": "send",
+      "value": {
+        "method": "POST",
+        "headers": {
+          "Accept": "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": "2026-07-28",
+          "Mcp-Method": "server/discover"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "server/discover",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities": {},
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "evorch",
+                "version": "0.1.0"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": "receive",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "resultType": "complete",
+            "supportedVersions": [
+              "2026-07-28"
+            ],
+            "capabilities": {
+              "tools": {}
+            },
+            "ttlMs": 0,
+            "cacheScope": "private"
+          }
+        }
+      }
+    },
+    {
+      "event": "send",
+      "value": {
+        "method": "POST",
+        "headers": {
+          "Accept": "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": "2026-07-28",
+          "Mcp-Method": "tools/list"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "method": "tools/list",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities": {},
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "evorch",
+                "version": "0.1.0"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": "receive",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "resultType": "complete",
+            "tools": [
+              {
+                "name": "echo",
+                "description": "Echo the input",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string",
+                      "x-mcp-header": "Region"
+                    }
+                  },
+                  "required": [
+                    "text",
+                    "region"
+                  ]
+                }
+              }
+            ],
+            "ttlMs": 0,
+            "cacheScope": "private"
+          }
+        }
+      }
+    },
+    {
+      "event": "send",
+      "value": {
+        "method": "POST",
+        "headers": {
+          "Accept": "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": "2026-07-28",
+          "Mcp-Method": "tools/call",
+          "Mcp-Name": "echo",
+          "Mcp-Param-Region": "west"
+        },
+        "body": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "method": "tools/call",
+          "params": {
+            "name": "echo",
+            "arguments": {
+              "text": "hello",
+              "region": "west"
+            },
+            "_meta": {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities": {},
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "evorch",
+                "version": "0.1.0"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "event": "receive",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/event-stream"
+        },
+        "chunks": [
+          "event: message\nda",
+          "ta: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":2,\"progress\":1}}\n\n",
+          "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n\n"
+        ]
+      }
+    },
+    {
+      "event": "signal",
+      "name": "final_response_written"
+    },
+    {
+      "event": "gate",
+      "name": "client_completed_before_eof"
+    },
+    {
+      "event": "close"
+    }
+  ]
+}

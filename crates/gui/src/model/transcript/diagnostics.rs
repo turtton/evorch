@@ -284,6 +284,17 @@ fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
         "server_rejected" => "the server rejected the request".to_owned(),
         "tool_rejected" => "the tool reported an error".to_owned(),
         "configuration" => "the server is misconfigured".to_owned(),
+        "needs_approval" => "startup approval is required".to_owned(),
+        "approval_revoked" => "startup approval was revoked".to_owned(),
+        "stale_preview" => "the approval preview is stale".to_owned(),
+        "secret_unavailable" => "a required secret is unavailable".to_owned(),
+        "process_limit_reached" => "the project process limit was reached".to_owned(),
+        "unavailable" => "the MCP service is unavailable".to_owned(),
+        "cancelled" => "the request was cancelled".to_owned(),
+        "outcome_unknown" => "the call outcome is unknown".to_owned(),
+        "mrtr_unsupported" => "interactive continuation is unsupported".to_owned(),
+        "limit_exceeded" => "a safety limit was exceeded".to_owned(),
+        "definition_changed" => "the tool definition changed".to_owned(),
         _ => return None,
     })
 }
@@ -442,6 +453,17 @@ mod tests {
             McpErrorKind::ServerRejected,
             McpErrorKind::ToolRejected,
             McpErrorKind::Configuration,
+            McpErrorKind::NeedsApproval,
+            McpErrorKind::ApprovalRevoked,
+            McpErrorKind::StalePreview,
+            McpErrorKind::SecretUnavailable,
+            McpErrorKind::ProcessLimitReached,
+            McpErrorKind::Unavailable,
+            McpErrorKind::Cancelled,
+            McpErrorKind::OutcomeUnknown,
+            McpErrorKind::InputRequired,
+            McpErrorKind::LimitExceeded,
+            McpErrorKind::DefinitionChanged,
         ];
         for kind in kinds {
             let expected = match kind {
@@ -452,6 +474,17 @@ mod tests {
                 McpErrorKind::ServerRejected => "the server rejected the request",
                 McpErrorKind::ToolRejected => "the tool reported an error",
                 McpErrorKind::Configuration => "the server is misconfigured",
+                McpErrorKind::NeedsApproval => "startup approval is required",
+                McpErrorKind::ApprovalRevoked => "startup approval was revoked",
+                McpErrorKind::StalePreview => "the approval preview is stale",
+                McpErrorKind::SecretUnavailable => "a required secret is unavailable",
+                McpErrorKind::ProcessLimitReached => "the project process limit was reached",
+                McpErrorKind::Unavailable => "the MCP service is unavailable",
+                McpErrorKind::Cancelled => "the request was cancelled",
+                McpErrorKind::OutcomeUnknown => "the call outcome is unknown",
+                McpErrorKind::InputRequired => "interactive continuation is unsupported",
+                McpErrorKind::LimitExceeded => "a safety limit was exceeded",
+                McpErrorKind::DefinitionChanged => "the tool definition changed",
             };
             let detail = McpError {
                 server: "docs".into(),

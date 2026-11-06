@@ -128,6 +128,14 @@ pub fn open_default(dir: impl AsRef<Path>) -> Result<Arc<dyn CredentialStore>, C
     }
 }
 
+/// Explicit keychain-only composition entry. Never calls FileCredentialStore or
+/// open_default. Worker B installs the platform backend; T0 stays inert/fail-closed.
+pub fn open_keychain_only() -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    Err(CredentialError::KeychainUnavailable {
+        detail: "keychain-only backend unavailable".into(),
+    })
+}
+
 fn io_error(error: std::io::Error) -> CredentialError {
     CredentialError::Io {
         detail: error.to_string(),
