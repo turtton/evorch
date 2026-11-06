@@ -45,6 +45,10 @@ pub enum NotificationKind {
     PullRequestMerged {
         thread_id: ThreadId,
     },
+    /// Auto fix used its automatic sends and turned itself off.
+    PullRequestAutoFixLimit {
+        thread_id: ThreadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +179,8 @@ impl NotificationsModel {
             NotificationKind::RunCompleted => ThreadRunPhase::Done,
             NotificationKind::RunStopped => ThreadRunPhase::Stopped,
             NotificationKind::RunFailed { .. } => ThreadRunPhase::Error,
-            NotificationKind::PullRequestChecksFailed { .. } => ThreadRunPhase::Waiting,
+            NotificationKind::PullRequestChecksFailed { .. }
+            | NotificationKind::PullRequestAutoFixLimit { .. } => ThreadRunPhase::Waiting,
             NotificationKind::PullRequestMerged { .. } => ThreadRunPhase::Done,
             NotificationKind::QuestionPending { .. }
             | NotificationKind::ApprovalPending { .. }

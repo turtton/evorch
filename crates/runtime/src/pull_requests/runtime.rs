@@ -105,6 +105,26 @@ impl AgentRuntime {
         source: Arc<dyn PullRequestSource>,
         settings: PullRequestsConfig,
     ) -> Result<PullRequestService, String> {
+        self.start_pull_requests_with_log_source(
+            ownership,
+            source,
+            settings,
+            Arc::new(super::GhLogSource::new()),
+        )
+    }
+
+    /// [`Self::start_pull_requests`] with the source of the CI failure logs a notice carries
+    /// (the `gh` CLI in production; a script in tests that must not reach a network).
+    ///
+    /// # Errors
+    /// As [`Self::start_pull_requests`].
+    pub fn start_pull_requests_with_log_source(
+        &self,
+        ownership: Arc<dyn OwnershipView>,
+        source: Arc<dyn PullRequestSource>,
+        settings: PullRequestsConfig,
+        logs: Arc<dyn super::PullRequestLogSource>,
+    ) -> Result<PullRequestService, String> {
         if let Some(existing) = self.shared.pull_requests.get() {
             return Ok(existing.clone());
         }
@@ -127,7 +147,7 @@ impl AgentRuntime {
                 settings,
                 clock: Arc::new(SystemWallClock),
             },
-            Arc::new(super::GhLogSource::new()),
+            logs,
             Arc::new(RuntimeEnvironment {
                 runtime: self.downgrade(),
             }),

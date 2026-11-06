@@ -17,14 +17,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use event_bus::{Event, EventKind, PullRequestEvent, PullRequestRef};
+use event_bus::{Event, EventKind, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef};
 use storage::Database;
 use storage::pull_requests::{PullRequestDisplay, PullRequestKey};
 
 use super::WorkbenchState;
 use super::lanes::{Spawner, thread_spawner};
 use crate::model::commands::WorkbenchCommand;
-use crate::model::pull_requests::{PullRequestAction, PullRequestsModel, ThreadPullRequest};
+use crate::model::harness_card::HarnessCard;
+use crate::model::pull_requests::{
+    AutoFixView, HeadNotice, PullRequestAction, PullRequestsModel, ThreadPullRequest,
+};
 use crate::model::tasks::AgentRunSource;
 
 /// Reads reading the database at once.
@@ -46,6 +49,13 @@ pub trait PullRequestReader: Send + Sync + 'static {
     /// # Errors
     /// A message when the database cannot be read.
     fn linked_threads(&self) -> Result<Vec<String>, String>;
+
+    /// The card of an adopted harness notice, by its durable ID. `None` while the notice is
+    /// not (or no longer) in the database as an adopted one.
+    ///
+    /// # Errors
+    /// A message when the database cannot be read.
+    fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String>;
 }
 
 /// Reads through a read-only connection to the shared database.
@@ -82,6 +92,10 @@ impl PullRequestReader for StoragePullRequestReader {
             None => (None, PullRequestDisplay::default(), None, None),
         };
         let candidates = db.pull_request_candidates(thread_id, None).map_err(fail)?;
+        let auto_fix = match &state.active_link {
+            Some(link) => Some(read_auto_fix(&db, thread_id, &link.key, &facts).map_err(fail)?),
+            None => None,
+        };
         Ok(ThreadPullRequest {
             thread_id: thread_id.to_owned(),
             lifecycle_revision: state.lifecycle_revision,
@@ -94,7 +108,16 @@ impl PullRequestReader for StoragePullRequestReader {
             failure,
             candidates,
             tracked_here: false,
+            auto_fix,
         })
+    }
+
+    fn harness_card(&self, notice_id: &str) -> Result<Option<HarnessCard>, String> {
+        let notice = self
+            .open()?
+            .pr_notice(notice_id)
+            .map_err(|error| error.to_string())?;
+        Ok(notice.as_ref().and_then(HarnessCard::from_notice))
     }
 
     fn linked_threads(&self) -> Result<Vec<String>, String> {
@@ -117,6 +140,35 @@ impl PullRequestReader for StoragePullRequestReader {
     }
 }
 
+/// The PR-wide auto fix, the notice of the shown head and the thread's Stop, in the read that
+/// also took the snapshot.
+fn read_auto_fix(
+    db: &Database,
+    thread_id: &str,
+    key: &PullRequestKey,
+    facts: &Option<storage::pull_requests::PullRequestFacts>,
+) -> Result<AutoFixView, storage::StorageError> {
+    let state = db.pr_auto_fix_state(key)?;
+    let head_notice = match facts {
+        Some(facts) => db
+            .pr_notice_for_head(key, &facts.head_sha)?
+            .map(|notice| HeadNotice {
+                notice_id: notice.notice_id,
+                phase: notice.phase,
+                mode: notice.mode,
+            }),
+        None => None,
+    };
+    Ok(AutoFixView {
+        state,
+        head_notice,
+        this_stopped: db
+            .lane_delivery_destination(thread_id)?
+            .is_some_and(|destination| destination.stopped),
+        suppressed: db.pr_wake_guard(key)?.suppressed,
+    })
+}
+
 /// Whether this process holds the lease of a thread (it then polls its pull request).
 pub type OwnerProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
@@ -127,6 +179,8 @@ enum Loaded {
     Thread(String, u64, Result<Box<ThreadPullRequest>, String>),
     Linked(Result<Vec<String>, String>),
     Slug(String, Option<String>),
+    /// The card of a harness notice the transcript shows without it.
+    Card(String, Result<Option<Box<HarnessCard>>, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +197,19 @@ pub struct LinkDialog {
     pub input: String,
     /// `owner/name` of the thread's project, once read; `None` while unknown.
     pub project_slug: Option<String>,
+}
+
+/// The confirmation shown before auto fix moves to another thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationDialog {
+    /// The thread that would receive the CI failures from now on.
+    pub thread_id: String,
+    /// The thread that has them now, as the person last saw it.
+    pub previous_thread_id: String,
+    /// What the dialog names that thread (its title, or its ID when unknown).
+    pub previous_label: String,
+    pub link_revision: u64,
+    pub policy_revision: u64,
 }
 
 /// The pull request side of the Workbench.
@@ -172,6 +239,33 @@ pub(super) struct PullRequestState {
     pending_notices: Vec<PendingNotice>,
     notified: std::collections::VecDeque<(String, u64, u64, String)>,
     pub(super) dialog: Option<LinkDialog>,
+    pub(super) destination_dialog: Option<DestinationDialog>,
+    /// Operations issued and not yet answered by an event or a refusal, so a second click on
+    /// the same state does not issue a second operation.
+    issued: BTreeSet<(String, IssuedOp)>,
+    /// The automatic-limit notifications the runtime claimed, held like `pending_notices`.
+    pending_limits: Vec<PendingLimit>,
+    /// `(pull request, budget epoch)` already notified.
+    limit_notified: std::collections::VecDeque<(String, u64)>,
+    /// A transcript may show a notice whose card is not read yet.
+    cards_dirty: bool,
+    cards_in_flight: BTreeSet<String>,
+}
+
+/// What an operation is about, for [`PullRequestState::issued`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum IssuedOp {
+    Policy(u64, u64, &'static str),
+    Send(u64, String),
+}
+
+/// An automatic-limit notification waiting for the database to confirm it.
+struct PendingLimit {
+    thread_id: String,
+    link_revision: u64,
+    reference: PullRequestRef,
+    epoch: u64,
+    arrived: u64,
 }
 
 impl Default for PullRequestState {
@@ -196,6 +290,12 @@ impl Default for PullRequestState {
             pending_notices: Vec::new(),
             notified: std::collections::VecDeque::new(),
             dialog: None,
+            destination_dialog: None,
+            issued: BTreeSet::new(),
+            pending_limits: Vec::new(),
+            limit_notified: std::collections::VecDeque::new(),
+            cards_dirty: false,
+            cards_in_flight: BTreeSet::new(),
         }
     }
 }
@@ -244,6 +344,17 @@ impl PullRequestState {
         for thread in others {
             self.request(&thread);
         }
+    }
+
+    fn remember_limit_notified(&mut self, key: (String, u64)) -> bool {
+        if self.limit_notified.contains(&key) {
+            return false;
+        }
+        self.limit_notified.push_back(key);
+        while self.limit_notified.len() > NOTIFIED_KEPT {
+            self.limit_notified.pop_front();
+        }
+        true
     }
 
     fn remember_notified(&mut self, key: (String, u64, u64, String)) -> bool {
@@ -317,12 +428,46 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         while let Ok(loaded) = self.pull_requests.results.try_recv() {
             self.apply_loaded_pull_request(loaded);
         }
+        self.start_harness_card_reads();
         if !enabled {
             self.pull_requests.queued.clear();
             return;
         }
         self.refresh_shown_pull_request();
         self.start_pull_request_reads();
+    }
+
+    /// Asks for the notices a transcript shows without their card, once per request: the
+    /// reads run off the UI thread, and a notice not stored yet stays a bare tag.
+    fn start_harness_card_reads(&mut self) {
+        if !self.pull_requests.cards_dirty {
+            return;
+        }
+        let Some(reader) = self.pull_requests.reader.clone() else {
+            return;
+        };
+        self.pull_requests.cards_dirty = false;
+        for notice_id in self.transcripts.unfilled_harness_notices() {
+            if !self.pull_requests.cards_in_flight.insert(notice_id.clone()) {
+                continue;
+            }
+            let sender = self.pull_requests.sender.clone();
+            let waker = Arc::clone(&self.pull_requests.waker);
+            let reader = Arc::clone(&reader);
+            (self.pull_requests.spawner)(Box::new(move || {
+                let result = reader
+                    .harness_card(&notice_id)
+                    .map(|card| card.map(Box::new));
+                let _ = sender.send(Loaded::Card(notice_id, result));
+                waker();
+            }));
+        }
+    }
+
+    /// A transcript may now show a notice whose card is not read yet (a delivery event, or a
+    /// history that was just restored).
+    pub(super) fn note_harness_notices(&mut self) {
+        self.pull_requests.cards_dirty = true;
     }
 
     fn refresh_shown_pull_request(&mut self) {
@@ -407,6 +552,18 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     }
                 }
             }
+            Loaded::Card(notice_id, result) => {
+                self.pull_requests.cards_in_flight.remove(&notice_id);
+                match result {
+                    Ok(Some(card)) => {
+                        self.transcripts.fill_harness_card(&card);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%notice_id, %error, "harness card read failed");
+                    }
+                }
+            }
             Loaded::Slug(thread, slug) => {
                 if let Some(dialog) = &mut self.pull_requests.dialog
                     && dialog.thread_id == thread
@@ -436,6 +593,38 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .insert((thread_id.clone(), *link_revision));
         }
         self.pull_requests.invalidate(change);
+        if let PullRequestEvent::AutoFixChanged {
+            thread_id,
+            link_revision,
+            pull_request,
+            reason,
+            ..
+        } = change
+        {
+            // The answer to what this window issued has arrived (the read it started follows).
+            self.pull_requests
+                .issued
+                .retain(|(thread, _)| thread != thread_id);
+            if let PullRequestAutoFixChange::Adopted {
+                automatic,
+                limit_epoch,
+            } = reason
+            {
+                if *automatic {
+                    // The notice is working on the failure now: the bar gets out of the way.
+                    self.pull_requests.model.bar_mut(thread_id).collapse();
+                }
+                if let Some(epoch) = limit_epoch {
+                    self.pull_requests.pending_limits.push(PendingLimit {
+                        thread_id: thread_id.clone(),
+                        link_revision: *link_revision,
+                        reference: pull_request.clone(),
+                        epoch: *epoch,
+                        arrived: self.pull_requests.epoch,
+                    });
+                }
+            }
+        }
         if let PullRequestEvent::Changed {
             thread_id,
             link_revision,
@@ -478,6 +667,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// any window, a relink, or a lost lease while it waited drops it. One transition notifies
     /// once.
     fn settle_pending_notices(&mut self, view: &ThreadPullRequest, started: u64) {
+        self.settle_pending_limits(view, started);
         let (due, waiting): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.pull_requests.pending_notices)
                 .into_iter()
@@ -507,6 +697,66 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 );
             }
         }
+    }
+
+    /// The limit notifications that waited for `view`: raised once per pull request and
+    /// budget epoch, only while a read made after the adoption shows that auto fix did stop
+    /// at that epoch, the thread still linked to the same link and this process holding it.
+    fn settle_pending_limits(&mut self, view: &ThreadPullRequest, started: u64) {
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pull_requests.pending_limits)
+                .into_iter()
+                .partition(|limit| limit.thread_id == view.thread_id && limit.arrived <= started);
+        self.pull_requests.pending_limits = waiting;
+        let linked = view.link.as_ref().map(|link| link.link_revision);
+        for limit in due {
+            let stopped = view
+                .auto_fix
+                .as_ref()
+                .is_some_and(|auto| auto.state.limit_reached_epoch == Some(limit.epoch));
+            let still_wanted = view.tracked_here
+                && stopped
+                && linked == Some(limit.link_revision)
+                && !self
+                    .pull_requests
+                    .ended
+                    .contains(&(limit.thread_id.clone(), limit.link_revision));
+            let key = (
+                format!(
+                    "{}/{}#{}",
+                    limit.reference.host, limit.reference.repository, limit.reference.number
+                ),
+                limit.epoch,
+            );
+            if still_wanted && self.pull_requests.remember_limit_notified(key) {
+                self.raise_auto_fix_limit_notification(&limit.thread_id, &limit.reference);
+            }
+        }
+    }
+
+    fn raise_auto_fix_limit_notification(&mut self, thread_id: &str, reference: &PullRequestRef) {
+        let title = self
+            .sidebar
+            .threads
+            .iter()
+            .find(|thread| thread.id.to_string() == thread_id)
+            .map(|thread| thread.title.clone());
+        let summary = format!(
+            "Auto fix stopped on {}#{} after {} sends",
+            reference.repository,
+            reference.number,
+            storage::pull_request_auto_fix::PR_AUTO_FIX_LIMIT
+        );
+        let summary = match title {
+            Some(title) => format!("{summary} · {title}"),
+            None => summary,
+        };
+        self.notifications.push_pull_request(
+            crate::model::notifications::NotificationKind::PullRequestAutoFixLimit {
+                thread_id: workspace_ui::ThreadId::new(thread_id),
+            },
+            summary,
+        );
     }
 
     /// Folds a pull request event another process published: only the display is read again.
@@ -603,6 +853,12 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     pub(super) fn show_pull_request_rejection(&mut self, thread_id: &str, reason: &str) {
         tracing::warn!(thread = thread_id, %reason, "pull request operation refused");
         self.push_notice(format!("Pull request: {reason}"));
+        // What was refused may be what the screen no longer shows: read it again, and let the
+        // person try again from the new state.
+        self.pull_requests
+            .issued
+            .retain(|(thread, _)| thread != thread_id);
+        self.pull_requests.request(thread_id);
     }
 
     /// Runs what the user asked of a pull request surface (a click on the bar, a chip, the
@@ -613,6 +869,65 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             PullRequestAction::ToggleExpanded { thread_id } => {
                 let bar = self.pull_requests.model.bar_mut(&thread_id);
                 bar.expanded = !bar.expanded;
+            }
+            PullRequestAction::ToggleAutoFix { thread_id } => self.toggle_auto_fix(thread_id),
+            PullRequestAction::ConfirmAutoFixDestination { thread_id } => {
+                let Some(dialog) = self.pull_requests.destination_dialog.take() else {
+                    return;
+                };
+                if dialog.thread_id != thread_id {
+                    return;
+                }
+                let op = IssuedOp::Policy(dialog.link_revision, dialog.policy_revision, "move");
+                self.issue_pull_request_command(
+                    &thread_id,
+                    op,
+                    WorkbenchCommand::ChangePullRequestAutoFixDestination {
+                        thread_id: thread_id.clone(),
+                        link_revision: dialog.link_revision,
+                        policy_revision: dialog.policy_revision,
+                        confirmed_previous: Some(dialog.previous_thread_id),
+                    },
+                );
+            }
+            PullRequestAction::CancelAutoFixDestination => {
+                self.pull_requests.destination_dialog = None;
+            }
+            PullRequestAction::ResetAutoFixBudget { thread_id } => {
+                let Some(controls) = self.auto_fix_controls(&thread_id) else {
+                    return;
+                };
+                if controls.reset.is_some_and(|reset| reset.enabled) {
+                    let op =
+                        IssuedOp::Policy(controls.link_revision, controls.policy_revision, "reset");
+                    self.issue_pull_request_command(
+                        &thread_id,
+                        op,
+                        WorkbenchCommand::ResetPullRequestAutoFixBudget {
+                            thread_id: thread_id.clone(),
+                            link_revision: controls.link_revision,
+                            policy_revision: controls.policy_revision,
+                        },
+                    );
+                }
+            }
+            PullRequestAction::SendToAgent { thread_id } => {
+                let Some(controls) = self.auto_fix_controls(&thread_id) else {
+                    return;
+                };
+                let Some(head) = controls.head_sha.clone().filter(|_| controls.send.enabled) else {
+                    return;
+                };
+                let op = IssuedOp::Send(controls.link_revision, head.clone());
+                self.issue_pull_request_command(
+                    &thread_id,
+                    op,
+                    WorkbenchCommand::SendPullRequestNotice {
+                        thread_id: thread_id.clone(),
+                        link_revision: controls.link_revision,
+                        expected_head: head,
+                    },
+                );
             }
             PullRequestAction::Refresh { thread_id } => {
                 if self.pull_request_permit(&thread_id) {
@@ -686,6 +1001,106 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     });
                 }
             }
+        }
+    }
+
+    /// The auto fix controls of a thread's bar, as the last read of the database says.
+    #[must_use]
+    pub fn auto_fix_controls(
+        &self,
+        thread: &str,
+    ) -> Option<crate::model::pull_requests::AutoFixControls> {
+        crate::model::pull_requests::auto_fix_controls(
+            self.pull_requests.model.linked(thread)?,
+            crate::model::pull_requests::now_ns(),
+        )
+    }
+
+    /// The confirmation of moving auto fix to another thread, while it is open.
+    #[must_use]
+    pub fn destination_dialog(&self) -> Option<&DestinationDialog> {
+        self.pull_requests.destination_dialog.as_ref()
+    }
+
+    /// Issues an operation once: a second click on the state that issued it does nothing until
+    /// the runtime answered (an event, or a refusal).
+    fn issue_pull_request_command(
+        &mut self,
+        thread_id: &str,
+        op: IssuedOp,
+        command: WorkbenchCommand,
+    ) {
+        if self
+            .pull_requests
+            .issued
+            .contains(&(thread_id.to_owned(), op.clone()))
+            || !self.pull_request_permit(thread_id)
+        {
+            return;
+        }
+        self.pull_requests.issued.insert((thread_id.to_owned(), op));
+        self.submit_pull_request_command(command);
+    }
+
+    fn toggle_auto_fix(&mut self, thread_id: String) {
+        let Some(controls) = self.auto_fix_controls(&thread_id) else {
+            return;
+        };
+        if !controls.toggle.enabled {
+            return;
+        }
+        let (link_revision, policy_revision) = (controls.link_revision, controls.policy_revision);
+        if let Some(previous) = controls.moves_from.clone().filter(|_| !controls.on_here) {
+            // The person confirms before another thread loses its auto fix.
+            let previous_label = self
+                .sidebar
+                .threads
+                .iter()
+                .find(|thread| thread.id.to_string() == previous)
+                .map_or_else(|| previous.clone(), |thread| thread.title.clone());
+            self.pull_requests.destination_dialog = Some(DestinationDialog {
+                thread_id,
+                previous_thread_id: previous,
+                previous_label,
+                link_revision,
+                policy_revision,
+            });
+            return;
+        }
+        let enabled = !controls.on_here;
+        let op = IssuedOp::Policy(
+            link_revision,
+            policy_revision,
+            if enabled { "on" } else { "off" },
+        );
+        self.issue_pull_request_command(
+            &thread_id.clone(),
+            op,
+            WorkbenchCommand::SetPullRequestAutoFix {
+                thread_id,
+                link_revision,
+                policy_revision,
+                enabled,
+            },
+        );
+    }
+
+    /// Draws the confirmation of moving auto fix and runs its answer.
+    pub(super) fn render_destination_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &self.pull_requests.destination_dialog else {
+            return;
+        };
+        let thread_id = dialog.thread_id.clone();
+        match crate::panes::pull_request_dialog::destination_dialog(ctx, dialog) {
+            Some(crate::panes::pull_request_dialog::DestinationDialogAction::Move) => {
+                self.apply_pull_request_action(PullRequestAction::ConfirmAutoFixDestination {
+                    thread_id,
+                });
+            }
+            Some(crate::panes::pull_request_dialog::DestinationDialogAction::Cancel) => {
+                self.apply_pull_request_action(PullRequestAction::CancelAutoFixDestination);
+            }
+            None => {}
         }
     }
 

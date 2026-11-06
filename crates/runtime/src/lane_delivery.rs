@@ -8,7 +8,7 @@ use crate::{AgentRuntime, RunConfig, RunId, lanes::LaneError};
 use event_bus::lane::{LaneDeliveryBinding, LaneNotificationKind};
 use event_bus::{AgentRunPhase, LaneReport, LaneStatus};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-pub use harness::prepare_pr_notice_payload;
+pub use harness::{PrNoticeLog, PrNoticeView, prepare_pr_notice_payload, view_pr_notice_payload};
 use outbox::DeliveryClaim;
 use std::{
     collections::{HashMap, HashSet},

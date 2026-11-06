@@ -330,6 +330,7 @@ fn accepts_runs(event: &Event, mut accepts: impl FnMut(&str) -> bool) -> bool {
             | LifecycleEvent::HostInputDelivered { run_id, .. }
             | LifecycleEvent::HostInputDropped { run_id, .. }
             | LifecycleEvent::HostInputUnknown { run_id, .. }
+            | LifecycleEvent::HarnessNoticeDelivered { run_id, .. }
             | LifecycleEvent::AgentRunStateChanged { run_id, .. }
             | LifecycleEvent::TurnCompleted { run_id, .. }
             | LifecycleEvent::EscalationProposed { run_id, .. } => accepts(run_id),

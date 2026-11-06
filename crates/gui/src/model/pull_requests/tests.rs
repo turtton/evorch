@@ -1,7 +1,7 @@
 use super::*;
 use storage::pull_requests::{CheckKind, LinkOrigin, PullRequestCheck, ReviewDecision};
 
-const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub(crate) const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 pub(crate) fn check(
@@ -62,10 +62,11 @@ pub(crate) fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
         failure: None,
         candidates: Vec::new(),
         tracked_here: true,
+        auto_fix: None,
     }
 }
 
-fn passing() -> PullRequestFacts {
+pub(crate) fn passing() -> PullRequestFacts {
     facts(
         PullRequestState::Open,
         vec![check(
@@ -77,7 +78,7 @@ fn passing() -> PullRequestFacts {
     )
 }
 
-fn failing() -> PullRequestFacts {
+pub(crate) fn failing() -> PullRequestFacts {
     facts(
         PullRequestState::Open,
         vec![
@@ -314,4 +315,264 @@ fn a_disabled_model_shows_nothing() {
     model.enabled = true;
     assert!(model.linked("thread").is_some());
     assert_eq!(model.linked_views().count(), 1);
+}
+
+// --- auto fix controls (ADR 0043 Phase 2, PR E) ---
+
+const MINUTE_NS: i64 = 60 * 1_000_000_000;
+
+pub(crate) fn auto_state(f: impl FnOnce(&mut PrAutoFixState)) -> PrAutoFixState {
+    let mut state = PrAutoFixState {
+        key: PullRequestKey::github("turtton/evorch", 12).unwrap(),
+        enabled: false,
+        destination_thread_id: None,
+        link_revision: None,
+        policy_revision: 4,
+        budget_epoch: 0,
+        used: 0,
+        reserved: 0,
+        cooldown_until_ns: None,
+        stop_reason: None,
+        limit_reached_epoch: None,
+    };
+    f(&mut state);
+    state
+}
+
+pub(crate) fn on_here(state: &mut PrAutoFixState) {
+    state.enabled = true;
+    state.destination_thread_id = Some("thread".into());
+    state.link_revision = Some(1);
+}
+
+pub(crate) fn with_auto(
+    facts: PullRequestFacts,
+    state: PrAutoFixState,
+    shape: impl FnOnce(&mut AutoFixView),
+) -> ThreadPullRequest {
+    let mut shown = view(Some(facts));
+    let mut auto = AutoFixView {
+        state,
+        head_notice: None,
+        this_stopped: false,
+        suppressed: false,
+    };
+    shape(&mut auto);
+    shown.auto_fix = Some(auto);
+    shown
+}
+
+fn texts(controls: &AutoFixControls) -> Vec<&str> {
+    controls
+        .chips
+        .iter()
+        .map(|chip| chip.text.as_str())
+        .collect()
+}
+
+pub(crate) fn notice(phase: PrNoticePhase, mode: PrNoticeMode) -> HeadNotice {
+    HeadNotice {
+        notice_id: "prn-1".into(),
+        phase,
+        mode,
+    }
+}
+
+// Given: a failing pull request with auto fix off, nobody holding it / Then: the toggle and
+// the send are both available, and the toggle is not "on"
+#[test]
+fn an_opted_out_failing_pull_request_can_be_switched_on_or_sent() {
+    let shown = with_auto(failing(), auto_state(|_| {}), |_| {});
+    let controls = auto_fix_controls(&shown, 0).unwrap();
+    assert!(!controls.on_here);
+    assert!(controls.toggle.enabled && controls.send.enabled);
+    assert!(controls.reset.is_none() && controls.moves_from.is_none());
+    assert!(controls.chips.is_empty());
+    assert_eq!(controls.policy_revision, 4);
+    assert_eq!(controls.link_revision, 1);
+    assert_eq!(controls.head_sha.as_deref(), Some(SHA_A));
+}
+
+// Given: auto fix on for this thread with one send used and a cooldown / Then: the chips say
+// what is left and how long the cooldown has to go, rounded up to a minute
+#[test]
+fn an_active_auto_fix_shows_what_is_left_and_the_cooldown() {
+    let state = auto_state(|s| {
+        on_here(s);
+        s.used = 1;
+        s.reserved = 0;
+        s.cooldown_until_ns = Some(7 * MINUTE_NS - 5);
+    });
+    let controls = auto_fix_controls(&with_auto(failing(), state, |_| {}), 0).unwrap();
+    assert!(controls.on_here);
+    assert_eq!(texts(&controls), ["2 left", "cooldown 7m"]);
+    // The cooldown is gone once it passed.
+    let later = auto_fix_controls(
+        &with_auto(
+            failing(),
+            auto_state(|s| {
+                on_here(s);
+                s.cooldown_until_ns = Some(MINUTE_NS);
+            }),
+            |_| {},
+        ),
+        2 * MINUTE_NS,
+    )
+    .unwrap();
+    assert_eq!(texts(&later), ["3 left"]);
+}
+
+// Given: a reservation counts against the budget / Then: the left count includes it
+#[test]
+fn reserved_sends_count_against_what_is_left() {
+    let state = auto_state(|s| {
+        on_here(s);
+        s.used = 1;
+        s.reserved = 1;
+    });
+    let controls = auto_fix_controls(&with_auto(failing(), state, |_| {}), 0).unwrap();
+    assert_eq!(texts(&controls), ["1 left"]);
+}
+
+// Given: the third automatic send turned auto fix off / Then: the limit shows, the toggle is
+// off with its reason, and only the thread that has the budget can reset it
+#[test]
+fn the_limit_stops_the_toggle_and_offers_a_reset_to_the_owner_of_the_budget() {
+    let limited = |destination: &str| {
+        auto_state(|s| {
+            s.enabled = false;
+            s.used = 3;
+            s.destination_thread_id = Some(destination.into());
+            s.link_revision = Some(1);
+            s.stop_reason = Some("limit_reached".into());
+            s.limit_reached_epoch = Some(0);
+        })
+    };
+    let here = auto_fix_controls(&with_auto(failing(), limited("thread"), |_| {}), 0).unwrap();
+    assert_eq!(texts(&here), ["Limit reached 3/3"]);
+    assert!(!here.toggle.enabled);
+    assert!(here.toggle.hover.contains("reset"));
+    let reset = here.reset.unwrap();
+    assert!(reset.enabled);
+
+    let elsewhere = auto_fix_controls(&with_auto(failing(), limited("other"), |_| {}), 0).unwrap();
+    let reset = elsewhere.reset.unwrap();
+    assert!(!reset.enabled && !reset.hover.is_empty());
+}
+
+// Given: auto fix is on for this thread and the failure still has checks running / Then: the
+// failure stays failing, auto fix says it waits, and the person can still send
+#[test]
+fn a_failure_with_checks_still_running_makes_auto_fix_wait_but_not_the_person() {
+    let pending = facts(
+        PullRequestState::Open,
+        vec![
+            check("a", CheckStatus::Completed, Some(CheckConclusion::Failure)),
+            check("b", CheckStatus::InProgress, None),
+        ],
+        true,
+    );
+    let shown = with_auto(pending, auto_state(on_here), |_| {});
+    assert_eq!(glyph(&shown), Some(PrGlyph::Failing));
+    let controls = auto_fix_controls(&shown, 0).unwrap();
+    assert!(texts(&controls).contains(&"Waiting for checks"));
+    assert!(controls.send.enabled);
+}
+
+// Given: a failing head that is not the thread's own checkout / Then: auto fix says the commit
+// is external and is not sent by itself, while the person may send it
+#[test]
+fn an_external_head_is_labelled_and_can_still_be_sent_by_hand() {
+    let mut shown = with_auto(failing(), auto_state(on_here), |_| {});
+    shown.local_head = None;
+    let controls = auto_fix_controls(&shown, 0).unwrap();
+    assert!(texts(&controls).contains(&"External commit"));
+    assert!(controls.send.enabled);
+}
+
+// Given: the head's notice is being prepared, or was adopted / Then: the send is off with the
+// reason, and the chip says which
+#[test]
+fn a_head_that_was_sent_or_is_being_sent_cannot_be_sent_again() {
+    for (phase, chip, hover) in [
+        (PrNoticePhase::Reserved, "Sending", "Sending"),
+        (PrNoticePhase::Ready, "Sending", "Sending"),
+        (PrNoticePhase::Adopted, "Sent", "Already sent"),
+    ] {
+        let shown = with_auto(failing(), auto_state(|_| {}), |auto| {
+            auto.head_notice = Some(notice(phase, PrNoticeMode::Manual));
+        });
+        let controls = auto_fix_controls(&shown, 0).unwrap();
+        assert_eq!(texts(&controls), [chip]);
+        assert!(!controls.send.enabled);
+        assert!(controls.send.hover.starts_with(hover), "{controls:?}");
+    }
+    // A cancelled notice leaves the head free to send.
+    let shown = with_auto(failing(), auto_state(|_| {}), |auto| {
+        auto.head_notice = Some(notice(PrNoticePhase::Cancelled, PrNoticeMode::Auto));
+    });
+    assert!(auto_fix_controls(&shown, 0).unwrap().send.enabled);
+}
+
+// Given: the thread was stopped or woke without progress too often / Then: the send is off with
+// the reason and a chip says so; an explicit resume is what clears it
+#[test]
+fn a_stopped_or_paused_thread_says_so_and_cannot_be_sent_to() {
+    let stopped = with_auto(failing(), auto_state(|_| {}), |auto| {
+        auto.this_stopped = true
+    });
+    let controls = auto_fix_controls(&stopped, 0).unwrap();
+    assert_eq!(texts(&controls), ["Stopped"]);
+    assert!(!controls.send.enabled && controls.send.hover.contains("resume"));
+    let paused = with_auto(failing(), auto_state(|_| {}), |auto| auto.suppressed = true);
+    let controls = auto_fix_controls(&paused, 0).unwrap();
+    assert_eq!(texts(&controls), ["Paused"]);
+    assert!(!controls.send.enabled);
+}
+
+// Given: a window that does not hold the thread / Then: nothing can act and the hover says why
+#[test]
+fn a_window_that_does_not_track_the_thread_only_shows() {
+    let mut shown = with_auto(failing(), auto_state(|_| {}), |_| {});
+    shown.tracked_here = false;
+    let controls = auto_fix_controls(&shown, 0).unwrap();
+    assert!(!controls.toggle.enabled && !controls.send.enabled);
+    assert_eq!(controls.toggle.hover, "Not tracked in this window");
+    assert_eq!(controls.send.hover, "Not tracked in this window");
+}
+
+// Given: another thread has auto fix on / Then: this thread shows it is elsewhere, and turning
+// it on here needs the move confirmed (the previous thread is named)
+#[test]
+fn auto_fix_on_in_another_thread_needs_a_confirmed_move() {
+    let state = auto_state(|s| {
+        s.enabled = true;
+        s.destination_thread_id = Some("other".into());
+        s.link_revision = Some(1);
+    });
+    let controls = auto_fix_controls(&with_auto(failing(), state, |_| {}), 0).unwrap();
+    assert!(!controls.on_here);
+    assert_eq!(controls.moves_from.as_deref(), Some("other"));
+    assert_eq!(texts(&controls), ["On in another thread"]);
+    assert!(controls.toggle.enabled);
+}
+
+// Given: a passing, a merged and an unread pull request / Then: nothing is sent, and a merged
+// one cannot be switched on
+#[test]
+fn only_an_open_failing_pull_request_can_be_sent_and_only_an_open_one_switched_on() {
+    let passing_view = with_auto(passing(), auto_state(|_| {}), |_| {});
+    let controls = auto_fix_controls(&passing_view, 0).unwrap();
+    assert!(!controls.send.enabled && controls.toggle.enabled);
+    let merged = with_auto(
+        facts(PullRequestState::Merged, vec![], true),
+        auto_state(|_| {}),
+        |_| {},
+    );
+    let controls = auto_fix_controls(&merged, 0).unwrap();
+    assert!(!controls.toggle.enabled && !controls.send.enabled);
+    assert!(
+        auto_fix_controls(&view(Some(failing())), 0).is_none(),
+        "state not read"
+    );
 }

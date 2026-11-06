@@ -204,6 +204,20 @@ pub(crate) fn notice(conn: &Connection, id: &str) -> Result<Option<PrNotice>, St
         )
         .optional()?)
 }
+/// The one notice (any phase) for a pull request head, if one was ever reserved.
+pub(crate) fn notice_for_head(
+    conn: &Connection,
+    key: &PullRequestKey,
+    head_sha: &str,
+) -> Result<Option<PrNotice>, StorageError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {NOTICE_COLUMNS} FROM pr_notices WHERE pr_key=?1 AND head_sha=?2"),
+            params![key_id(key)?, head_sha.to_ascii_lowercase()],
+            notice_row,
+        )
+        .optional()?)
+}
 fn required(conn: &Connection, id: &str) -> Result<PrNotice, StorageError> {
     notice(conn, id)?.ok_or_else(|| StorageError::PrAutoFix(PrAutoFixRejection::UnknownNotice))
 }

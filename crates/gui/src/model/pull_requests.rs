@@ -9,7 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use runtime::pull_requests::diff::{ChecksVerdict, checks_verdict};
+use runtime::pull_requests::diff::{ChecksVerdict, checks_verdict, is_pending};
+use storage::pull_request_auto_fix::{
+    PR_AUTO_FIX_LIMIT, PrAutoFixState, PrNoticeMode, PrNoticePhase,
+};
 use storage::pull_requests::{
     CandidateState, CheckConclusion, CheckStatus, FetchFailure, LocalHeadObservation,
     PullRequestCandidate, PullRequestDisplay, PullRequestFacts, PullRequestKey, PullRequestLink,
@@ -44,6 +47,29 @@ pub struct ThreadPullRequest {
     pub candidates: Vec<PullRequestCandidate>,
     /// Whether this process holds the thread's lease and so polls its pull request.
     pub tracked_here: bool,
+    /// The PR-wide auto fix as the same read found it; `None` when nothing is linked.
+    pub auto_fix: Option<AutoFixView>,
+}
+
+/// The notice reserved for the pull request's current head, in any phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadNotice {
+    pub notice_id: String,
+    pub phase: PrNoticePhase,
+    pub mode: PrNoticeMode,
+}
+
+/// What the PR-wide auto fix keeps (shared by every thread that shows the pull request), and
+/// what decides whether the controls can act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFixView {
+    pub state: PrAutoFixState,
+    /// The notice for the head in `facts`, if one was ever reserved.
+    pub head_notice: Option<HeadNotice>,
+    /// This thread is stopped (durable Stop): a notice to it needs an explicit Resume.
+    pub this_stopped: bool,
+    /// Notices are held back after repeated wakes without progress.
+    pub suppressed: bool,
 }
 
 impl ThreadPullRequest {
@@ -347,9 +373,258 @@ pub fn chips_by_call(view: &ThreadPullRequest) -> HashMap<(String, String), Vec<
     chips
 }
 
+/// How a chip reads; colour is never the only signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipTone {
+    Muted,
+    Good,
+    Warning,
+}
+
+/// One status of the auto fix, with the hover that says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFixChip {
+    pub text: String,
+    pub tone: ChipTone,
+    pub hover: Option<String>,
+}
+
+/// A button's state: when it cannot act, `hover` says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Control {
+    pub enabled: bool,
+    pub hover: String,
+}
+
+impl Control {
+    fn on(hover: &str) -> Self {
+        Self {
+            enabled: true,
+            hover: hover.to_owned(),
+        }
+    }
+
+    fn off(why: &str) -> Self {
+        Self {
+            enabled: false,
+            hover: why.to_owned(),
+        }
+    }
+}
+
+/// The auto fix controls and statuses of one thread's bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoFixControls {
+    /// Auto fix is on and this thread is the one it notifies.
+    pub on_here: bool,
+    pub toggle: Control,
+    pub send: Control,
+    /// Present only once the limit stopped auto fix.
+    pub reset: Option<Control>,
+    pub chips: Vec<AutoFixChip>,
+    pub link_revision: u64,
+    pub policy_revision: u64,
+    /// The head the "send" acts on (what the bar shows).
+    pub head_sha: Option<String>,
+    /// Turning auto fix on here moves it from this thread, which needs the person's
+    /// confirmation.
+    pub moves_from: Option<String>,
+}
+
+/// The reason stored when the third automatic notice stopped auto fix.
+const LIMIT_REACHED: &str = "limit_reached";
+
+/// Whole minutes left of a cooldown, rounded up.
+fn minutes_left(now_ns: i64, until_ns: i64) -> i64 {
+    let nanos = until_ns.saturating_sub(now_ns).max(0);
+    (nanos + 59 * NANOS_PER_SECOND) / (60 * NANOS_PER_SECOND)
+}
+
+/// The controls and statuses of the auto fix, as words. Pure: it says what the controls can
+/// do; the operations check their own revisions. `None` without a link or a read of the
+/// state.
+#[must_use]
+pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFixControls> {
+    let link = view.link.as_ref()?;
+    let auto = view.auto_fix.as_ref()?;
+    let state = &auto.state;
+    let this = view.thread_id.as_str();
+    let destination = state.destination_thread_id.as_deref();
+    let on_here = state.enabled
+        && destination == Some(this)
+        && state.link_revision == Some(link.link_revision);
+    let moves_from = destination.filter(|d| *d != this).map(str::to_owned);
+    let open = view
+        .facts
+        .as_ref()
+        .is_some_and(|facts| facts.state == PullRequestState::Open);
+    let failing = open && is_failing(view);
+    let limit_reached = state.used >= PR_AUTO_FIX_LIMIT && !state.enabled;
+    let mut chips = Vec::new();
+
+    let toggle = if !view.tracked_here {
+        Control::off("Not tracked in this window")
+    } else if !open {
+        Control::off("The pull request is not open")
+    } else if limit_reached {
+        Control::off("Limit reached; reset the count to turn auto fix on")
+    } else if on_here {
+        Control::on("Stop sending CI failures to the agent automatically")
+    } else if moves_from.is_some() {
+        Control::on("Send CI failures to this thread instead of the one that has it now")
+    } else {
+        Control::on("Send CI failures to the agent automatically")
+    };
+
+    if on_here {
+        let left = PR_AUTO_FIX_LIMIT.saturating_sub(state.used + state.reserved);
+        chips.push(AutoFixChip {
+            text: format!("{left} left"),
+            tone: if left == 0 {
+                ChipTone::Warning
+            } else {
+                ChipTone::Muted
+            },
+            hover: Some(format!(
+                "{} of {PR_AUTO_FIX_LIMIT} automatic sends used",
+                state.used + state.reserved
+            )),
+        });
+    } else if state.enabled && moves_from.is_some() {
+        chips.push(AutoFixChip {
+            text: "On in another thread".to_owned(),
+            tone: ChipTone::Muted,
+            hover: Some("Another thread receives this pull request's CI failures".to_owned()),
+        });
+    }
+    if state.enabled
+        && let Some(until) = state.cooldown_until_ns.filter(|until| *until > now_ns)
+    {
+        chips.push(AutoFixChip {
+            text: format!("cooldown {}m", minutes_left(now_ns, until)),
+            tone: ChipTone::Muted,
+            hover: Some("The next automatic send waits for the cooldown".to_owned()),
+        });
+    }
+    if limit_reached {
+        let hover = (state.stop_reason.as_deref() == Some(LIMIT_REACHED))
+            .then(|| "Auto fix turned itself off".to_owned());
+        chips.push(AutoFixChip {
+            text: format!("Limit reached {}/{PR_AUTO_FIX_LIMIT}", state.used),
+            tone: ChipTone::Warning,
+            hover,
+        });
+    }
+
+    let head_notice = auto.head_notice.as_ref();
+    let sent = head_notice.is_some_and(|n| n.phase == PrNoticePhase::Adopted);
+    let sending = head_notice
+        .is_some_and(|n| matches!(n.phase, PrNoticePhase::Reserved | PrNoticePhase::Ready));
+    if sent {
+        chips.push(AutoFixChip {
+            text: "Sent".to_owned(),
+            tone: ChipTone::Good,
+            hover: Some("This commit's failure was sent to the agent".to_owned()),
+        });
+    } else if sending {
+        chips.push(AutoFixChip {
+            text: "Sending".to_owned(),
+            tone: ChipTone::Muted,
+            hover: Some("Preparing the failure for the agent".to_owned()),
+        });
+    } else if on_here && failing {
+        if is_pending(view.facts.as_ref()) {
+            chips.push(AutoFixChip {
+                text: "Waiting for checks".to_owned(),
+                tone: ChipTone::Muted,
+                hover: Some("Auto fix waits until every check has finished".to_owned()),
+            });
+        } else if !mismatches(view).is_empty() {
+            chips.push(AutoFixChip {
+                text: "External commit".to_owned(),
+                tone: ChipTone::Warning,
+                hover: Some(
+                    "This commit is not the agent's push, so it is not sent automatically"
+                        .to_owned(),
+                ),
+            });
+        }
+    }
+    if auto.this_stopped {
+        chips.push(AutoFixChip {
+            text: "Stopped".to_owned(),
+            tone: ChipTone::Warning,
+            hover: Some("Stopped by you; resume the thread to send again".to_owned()),
+        });
+    } else if auto.suppressed {
+        chips.push(AutoFixChip {
+            text: "Paused".to_owned(),
+            tone: ChipTone::Warning,
+            hover: Some("No progress after repeated sends; a message of yours resumes it".into()),
+        });
+    }
+
+    let send = if !view.tracked_here {
+        Control::off("Not tracked in this window")
+    } else if sent {
+        Control::off("Already sent for this commit")
+    } else if sending {
+        Control::off("Sending to the agent")
+    } else if !failing {
+        Control::off("No failed check to send")
+    } else if auto.this_stopped {
+        Control::off("Stopped; resume the thread first")
+    } else if auto.suppressed {
+        Control::off("Paused after repeated sends; a message of yours resumes it")
+    } else {
+        Control::on("Send this failure to the agent now")
+    };
+
+    let reset = limit_reached.then(|| {
+        if !view.tracked_here {
+            Control::off("Not tracked in this window")
+        } else if moves_from.is_some() {
+            Control::off("Reset it in the thread that turned auto fix on")
+        } else {
+            Control::on("Start the count again and turn auto fix on")
+        }
+    });
+
+    Some(AutoFixControls {
+        on_here,
+        toggle,
+        send,
+        reset,
+        chips,
+        link_revision: link.link_revision,
+        policy_revision: state.policy_revision,
+        head_sha: view.facts.as_ref().map(|facts| facts.head_sha.clone()),
+        moves_from,
+    })
+}
+
 /// The user's operations on the bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PullRequestAction {
+    /// Turn auto fix on for this thread, or off. Turning it on while another thread has it
+    /// opens the confirmation first.
+    ToggleAutoFix {
+        thread_id: String,
+    },
+    /// The confirmation of moving auto fix to this thread.
+    ConfirmAutoFixDestination {
+        thread_id: String,
+    },
+    /// The confirmation was cancelled.
+    CancelAutoFixDestination,
+    /// Start the automatic count again (after the limit).
+    ResetAutoFixBudget {
+        thread_id: String,
+    },
+    /// Send the failing head to the agent now.
+    SendToAgent {
+        thread_id: String,
+    },
     Refresh {
         thread_id: String,
     },
@@ -391,6 +666,12 @@ pub struct BarState {
 }
 
 impl BarState {
+    /// An automatic notice is now working on the failure: the bar gets out of the way until
+    /// the next failure expands it again.
+    pub fn collapse(&mut self) {
+        self.expanded = false;
+    }
+
     /// Takes in a newly loaded view. A move into failure expands the bar once; a failure that
     /// stays (polls that find the same failure, or one that returns after a failed fetch) never
     /// expands it again, so a bar the person closed stays closed. The first view after a link or
@@ -511,4 +792,4 @@ pub fn badge(view: &ThreadPullRequest) -> Option<PullRequestBadge> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

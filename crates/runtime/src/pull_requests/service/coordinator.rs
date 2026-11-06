@@ -4,6 +4,7 @@ use super::policy::eligible_facts;
 use super::{Inner, PullRequestError, PullRequestService, Target};
 use crate::ownership::OwnerPermit;
 use crate::pull_requests::LogRequest;
+use event_bus::{PullRequestAutoFixChange, PullRequestEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::pull_request_auto_fix::*;
@@ -194,6 +195,7 @@ impl PullRequestService {
         inner.enabled()?;
         inner.check_permit(thread, permit).await?;
         let storage = inner.storage.clone();
+        let thread_for_event = thread;
         let thread = thread.to_owned();
         let owned_permit = permit.clone();
         let (result, target) = inner
@@ -244,6 +246,9 @@ impl PullRequestService {
         // An explicit policy action completes its evaluation even when no GUI delta exists.
         let _ = inner.coordinate(&[target]).await;
         inner.wake.notify_one();
+        inner
+            .announce_auto_fix(thread_for_event, PullRequestAutoFixChange::Policy)
+            .await;
         Ok(result)
     }
     /// Reserve a manual notice now, including while other checks are pending. The returned
@@ -291,11 +296,29 @@ impl PullRequestService {
         ));
         inner.spawn_preparation(target, notice.clone());
         inner.wake.notify_one();
+        inner
+            .announce_auto_fix(thread, PullRequestAutoFixChange::Requested)
+            .await;
         Ok(notice)
     }
 }
 
 impl Inner {
+    /// Tells displays that the PR-wide auto fix state changed, after the change committed.
+    /// Carries identities only; a display reads the stored state.
+    async fn announce_auto_fix(&self, thread: &str, reason: PullRequestAutoFixChange) {
+        if let Ok(state) = self.thread_state(thread).await
+            && let Some(link) = state.active_link
+        {
+            self.emit(PullRequestEvent::AutoFixChanged {
+                thread_id: thread.to_owned(),
+                link_revision: link.link_revision,
+                transition_seq: state.transition_seq,
+                pull_request: Self::reference(&link.key),
+                reason,
+            });
+        }
+    }
     fn reserve_notice(
         &self,
         target: &Target,

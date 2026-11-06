@@ -148,16 +148,44 @@ pub enum PullRequestEvent {
         pull_request: PullRequestRef,
         status: PullRequestFetchStatus,
     },
+    /// What the PR-wide auto fix keeps changed (its switch or destination, a notice's
+    /// reservation or adoption, the budget). A reader shows it again from the database; the
+    /// payload decides nothing.
+    AutoFixChanged {
+        thread_id: String,
+        link_revision: u64,
+        transition_seq: u64,
+        pull_request: PullRequestRef,
+        reason: PullRequestAutoFixChange,
+    },
+}
+
+/// Why [`PullRequestEvent::AutoFixChanged`] was published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum PullRequestAutoFixChange {
+    /// The switch, the destination or the budget changed on a person's operation.
+    Policy,
+    /// A notice was reserved by a person's explicit request.
+    Requested,
+    /// A notice was adopted by the conversation (the third automatic one reaches the limit).
+    Adopted {
+        /// Whether the adopted notice came from the automatic path.
+        automatic: bool,
+        /// The budget epoch whose last automatic notice this was, when it reached the limit.
+        limit_epoch: Option<u64>,
+    },
 }
 
 impl PullRequestEvent {
     /// Every variant's tag, for readers that look rows up by the `subkind` column.
-    pub const SUBKINDS: [&'static str; 5] = [
+    pub const SUBKINDS: [&'static str; 6] = [
         "Linked",
         "Unlinked",
         "CandidateChanged",
         "Changed",
         "FetchStatusChanged",
+        "AutoFixChanged",
     ];
 
     /// The thread the event is about.
@@ -168,7 +196,8 @@ impl PullRequestEvent {
             | Self::Unlinked { thread_id, .. }
             | Self::CandidateChanged { thread_id, .. }
             | Self::Changed { thread_id, .. }
-            | Self::FetchStatusChanged { thread_id, .. } => thread_id,
+            | Self::FetchStatusChanged { thread_id, .. }
+            | Self::AutoFixChanged { thread_id, .. } => thread_id,
         }
     }
 
@@ -180,7 +209,8 @@ impl PullRequestEvent {
             | Self::Unlinked { pull_request, .. }
             | Self::CandidateChanged { pull_request, .. }
             | Self::Changed { pull_request, .. }
-            | Self::FetchStatusChanged { pull_request, .. } => pull_request,
+            | Self::FetchStatusChanged { pull_request, .. }
+            | Self::AutoFixChanged { pull_request, .. } => pull_request,
         }
     }
 
@@ -192,7 +222,8 @@ impl PullRequestEvent {
             | Self::Unlinked { link_revision, .. }
             | Self::CandidateChanged { link_revision, .. }
             | Self::Changed { link_revision, .. }
-            | Self::FetchStatusChanged { link_revision, .. } => *link_revision,
+            | Self::FetchStatusChanged { link_revision, .. }
+            | Self::AutoFixChanged { link_revision, .. } => *link_revision,
         }
     }
 
@@ -204,7 +235,8 @@ impl PullRequestEvent {
             | Self::Unlinked { transition_seq, .. }
             | Self::CandidateChanged { transition_seq, .. }
             | Self::Changed { transition_seq, .. }
-            | Self::FetchStatusChanged { transition_seq, .. } => *transition_seq,
+            | Self::FetchStatusChanged { transition_seq, .. }
+            | Self::AutoFixChanged { transition_seq, .. } => *transition_seq,
         }
     }
 
@@ -217,6 +249,7 @@ impl PullRequestEvent {
             Self::CandidateChanged { .. } => "CandidateChanged",
             Self::Changed { .. } => "Changed",
             Self::FetchStatusChanged { .. } => "FetchStatusChanged",
+            Self::AutoFixChanged { .. } => "AutoFixChanged",
         }
     }
 }
@@ -292,6 +325,16 @@ mod tests {
                 transition_seq: 6,
                 pull_request: reference(),
                 status: PullRequestFetchStatus::Recovered,
+            },
+            PullRequestEvent::AutoFixChanged {
+                thread_id: "t".into(),
+                link_revision: 2,
+                transition_seq: 7,
+                pull_request: reference(),
+                reason: PullRequestAutoFixChange::Adopted {
+                    automatic: true,
+                    limit_epoch: Some(1),
+                },
             },
         ];
         for event in events {
