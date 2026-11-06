@@ -320,6 +320,40 @@ fn approval_preview_rejects_stale_revision() {
     );
 }
 #[test]
+fn approving_the_same_fingerprint_preserves_live_permits() {
+    let dir = tempdir().unwrap();
+    let ledger = ApprovalLedger::at_user_config_dir(dir.path().into()).unwrap();
+    let current = inspect(&definition());
+    approve(&ledger, &current);
+    let permit = ledger.check(&current).unwrap();
+    let other = ApprovalLedger::at_user_config_dir(dir.path().into()).unwrap();
+    let other_permit = other.check(&current).unwrap();
+    let mut edited = current.clone();
+    edited.source_revision = SourceRevision::from_sources(None, Some(b"roles changed"));
+    approve(&other, &edited);
+    assert!(!permit.is_revoked());
+    assert!(!other_permit.is_revoked());
+    assert!(!ledger.check(&edited).unwrap().is_revoked());
+}
+
+#[test]
+fn approving_a_different_fingerprint_still_revokes_old_permits() {
+    let dir = tempdir().unwrap();
+    let ledger = ApprovalLedger::at_user_config_dir(dir.path().into()).unwrap();
+    let current = inspect(&definition());
+    approve(&ledger, &current);
+    let permit = ledger.check(&current).unwrap();
+    let mut edited = current.clone();
+    edited.fingerprint = tools::mcp::types::ApprovalFingerprint::from_projection(b"new launch");
+    approve(&ledger, &edited);
+    assert!(permit.is_revoked());
+    assert!(!ledger.check(&edited).unwrap().is_revoked());
+    // Returning to the original grant does not resurrect the old session.
+    approve(&ledger, &current);
+    assert!(permit.is_revoked());
+}
+
+#[test]
 fn revocation_invalidates_live_permit() {
     let dir = tempdir().unwrap();
     let ledger = ApprovalLedger::at_user_config_dir(dir.path().into()).unwrap();

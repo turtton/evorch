@@ -370,8 +370,15 @@ fn invalidate(state: &mut State, scope: &ApprovalScope) {
     invalidate_live(state, scope);
 }
 fn invalidate_live(state: &mut State, scope: &ApprovalScope) {
-    state.live.retain(|(old_scope, _, flag)| {
-        if old_scope == scope {
+    invalidate_live_except(state, scope, None);
+}
+fn invalidate_live_except(
+    state: &mut State,
+    scope: &ApprovalScope,
+    keep: Option<ApprovalFingerprint>,
+) {
+    state.live.retain(|(old_scope, fingerprint, flag)| {
+        if old_scope == scope && Some(*fingerprint) != keep {
             if let Some(flag) = flag.upgrade() {
                 flag.store(true, Ordering::Release);
             }
@@ -463,6 +470,13 @@ impl McpApprovalStore for ApprovalLedger {
         }
         let _lock = self.locked_file()?;
         let mut ledger = self.load().unwrap_or_default();
+        let same_grant = !state.denied.contains(&current.scope)
+            && ledger.entries.iter().any(|record| {
+                record.scope == current.scope
+                    && !record.revoked
+                    && record.fingerprint == current.fingerprint
+                    && record.approved_ips == current.approved_ips
+            });
         ledger
             .entries
             .retain(|record| record.scope != current.scope);
@@ -475,7 +489,12 @@ impl McpApprovalStore for ApprovalLedger {
         });
         self.save(&ledger)?;
         state.denied.retain(|scope| scope != &current.scope);
-        invalidate(&mut state, &current.scope);
+        if same_grant {
+            // Keep only the identical grant, without clearing any revoked flag.
+            invalidate_live_except(&mut state, &current.scope, Some(current.fingerprint));
+        } else {
+            invalidate(&mut state, &current.scope);
+        }
         Ok(())
     }
     fn revoke(&self, scope: &ApprovalScope) -> Result<(), McpErrorKind> {
