@@ -1,7 +1,7 @@
 //! Router construction, the listener and the start/stop API.
 
 use crate::api;
-use crate::assets::{PLACEHOLDER_ASSETS, StaticAsset};
+use crate::assets::{StaticAsset, UI_ASSETS};
 use crate::backend::WorkbenchBackend;
 use crate::config::{ConfigError, WebServerConfig};
 use crate::security::{Shared, guard};
@@ -47,12 +47,12 @@ pub struct WebApp {
 }
 
 impl WebApp {
-    /// Build the application with the placeholder front end.
+    /// Build the application with the web workbench ([`UI_ASSETS`]).
     pub fn new<B: WorkbenchBackend>(
         config: &WebServerConfig,
         backend: Arc<B>,
     ) -> Result<Self, ConfigError> {
-        Self::with_assets(config, backend, PLACEHOLDER_ASSETS)
+        Self::with_assets(config, backend, UI_ASSETS)
     }
 
     pub fn with_assets<B: WorkbenchBackend>(
@@ -110,7 +110,7 @@ pub struct WebServer {
 }
 
 impl WebServer {
-    /// Start serving the placeholder front end.
+    /// Start serving the web workbench ([`UI_ASSETS`]).
     ///
     /// Returns `Ok(None)` without binding anything when `config.enabled` is
     /// false. An enabled configuration is validated first; a bind address that
@@ -119,7 +119,7 @@ impl WebServer {
         config: WebServerConfig,
         backend: Arc<B>,
     ) -> Result<Option<Self>, WebServerError> {
-        Self::start_with_assets(config, backend, PLACEHOLDER_ASSETS).await
+        Self::start_with_assets(config, backend, UI_ASSETS).await
     }
 
     pub async fn start_with_assets<B: WorkbenchBackend>(
