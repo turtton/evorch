@@ -43,6 +43,8 @@ pub enum McpErrorKind {
     NeedsApproval,
     #[error("approval_revoked")]
     ApprovalRevoked,
+    #[error("role_not_allowed")]
+    RoleNotAllowed,
     #[error("stale_preview")]
     StalePreview,
     #[error("secret_unavailable")]
@@ -57,6 +59,8 @@ pub enum McpErrorKind {
     MissingEnvironment(McpValueField),
     #[error("process_limit_reached")]
     ProcessLimitReached,
+    #[error("preparation_limit_reached")]
+    PreparationLimitReached,
     #[error("unavailable")]
     Unavailable,
     #[error("cancelled")]
@@ -94,6 +98,7 @@ impl McpError {
             | McpErrorKind::ConfigConflict
             | McpErrorKind::NeedsApproval
             | McpErrorKind::ApprovalRevoked
+            | McpErrorKind::RoleNotAllowed
             | McpErrorKind::StalePreview
             | McpErrorKind::SecretUnavailable
             | McpErrorKind::SecretLocked
@@ -101,6 +106,7 @@ impl McpError {
             | McpErrorKind::SecretMissing
             | McpErrorKind::MissingEnvironment(_)
             | McpErrorKind::ProcessLimitReached
+            | McpErrorKind::PreparationLimitReached
             | McpErrorKind::Unavailable
             | McpErrorKind::Cancelled
             | McpErrorKind::OutcomeUnknown

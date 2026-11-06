@@ -28,7 +28,7 @@ impl ProjectMcpLimiter {
             &self.http,
             root,
             MAX_HTTP_PREPARATIONS,
-            McpErrorKind::LimitExceeded,
+            McpErrorKind::PreparationLimitReached,
         )
     }
 }
@@ -85,7 +85,7 @@ mod tests {
         ));
         assert!(matches!(
             limiter.try_http_preparation(root),
-            Err(McpErrorKind::LimitExceeded)
+            Err(McpErrorKind::PreparationLimitReached)
         ));
         let other = limiter.try_http_preparation(Path::new("/other")).unwrap();
         drop(other);

@@ -144,13 +144,17 @@ impl ProjectMcpService {
             };
             let (status, reason) = if config.preparation_blocked || !entry.diagnostics.is_empty() {
                 (McpServerStatus::Invalid, Some(McpErrorKind::Configuration))
-            } else if entry.tombstone
-                || entry
-                    .definition
-                    .as_ref()
-                    .is_some_and(|d| !d.enabled || d.roles.is_empty())
-            {
+            } else if entry.tombstone || entry.definition.as_ref().is_some_and(|d| !d.enabled) {
                 (McpServerStatus::Disabled, None)
+            } else if entry
+                .definition
+                .as_ref()
+                .is_some_and(|d| d.roles.is_empty())
+            {
+                (
+                    McpServerStatus::Unavailable,
+                    Some(McpErrorKind::RoleNotAllowed),
+                )
             } else if let Some(definition) = &entry.definition {
                 match self
                     .inner
@@ -161,6 +165,7 @@ impl ProjectMcpService {
                     Ok(_) => previous
                         .iter()
                         .find(|e| e.scope == scope)
+                        .filter(|e| e.status != McpServerStatus::Disabled)
                         .map(|e| (e.status, e.reason))
                         .unwrap_or((McpServerStatus::Unavailable, None)),
                 }

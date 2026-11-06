@@ -582,14 +582,15 @@ impl McpRegistryConnector for RunConnector {
                 McpTransportDefinition::Stdio { .. } => McpToolTransport::Stdio,
                 McpTransportDefinition::Http { .. } => McpToolTransport::Http,
             };
-            if kind != tool.transport
-                || !definition.enabled
-                || !definition
-                    .roles
-                    .iter()
-                    .any(|role| role == self.role.config_key())
-            {
+            if kind != tool.transport || !definition.enabled {
                 return Err(McpErrorKind::ApprovalRevoked);
+            }
+            if !definition
+                .roles
+                .iter()
+                .any(|role| role == self.role.config_key())
+            {
+                return Err(McpErrorKind::RoleNotAllowed);
             }
             let scope = ApprovalScope {
                 canonical_root: self.root.clone(),
@@ -634,13 +635,15 @@ impl McpRegistryConnector for RunConnector {
             .get(&tool.remote.server_id)
             .and_then(|entry| entry.definition.as_ref())
             .ok_or_else(|| error(McpErrorKind::ApprovalRevoked))?;
-        if !definition.enabled
-            || !definition
-                .roles
-                .iter()
-                .any(|role| role == self.role.config_key())
-        {
+        if !definition.enabled {
             return Err(error(McpErrorKind::ApprovalRevoked));
+        }
+        if !definition
+            .roles
+            .iter()
+            .any(|role| role == self.role.config_key())
+        {
+            return Err(error(McpErrorKind::RoleNotAllowed));
         }
         let scope = ApprovalScope {
             canonical_root: self.root.clone(),
@@ -715,12 +718,16 @@ impl McpRunService for ProjectMcpService {
             let (status, reason) =
                 if config.preparation_blocked || entry.definition.is_none() && !entry.tombstone {
                     (McpServerStatus::Invalid, Some(McpErrorKind::Configuration))
-                } else if entry.tombstone
-                    || entry.definition.as_ref().is_some_and(|d| {
-                        !d.enabled || !d.roles.iter().any(|role| role == request.role.config_key())
-                    })
-                {
+                } else if entry.tombstone || entry.definition.as_ref().is_some_and(|d| !d.enabled) {
                     (McpServerStatus::Disabled, None)
+                } else if entry
+                    .definition
+                    .as_ref()
+                    .is_some_and(|d| !d.roles.iter().any(|role| role == request.role.config_key()))
+                {
+                    // Role filtering is local to this run, not a change to the
+                    // project's server state. In particular, do not publish off.
+                    continue;
                 } else {
                     let definition = entry.definition.as_ref().expect("checked definition");
                     let result = self

@@ -79,6 +79,9 @@ pub fn status_reason_text(kind: McpErrorKind) -> String {
         McpErrorKind::ApprovalRevoked => {
             "Approval was revoked; calls to this server are refused.".into()
         }
+        McpErrorKind::RoleNotAllowed => {
+            "This server is not shared with this role; calls to it are refused.".into()
+        }
         McpErrorKind::StalePreview => STALE_PREVIEW_TEXT.into(),
         McpErrorKind::ConfigConflict => {
             "The MCP configuration changed on disk. Reload and try again.".into()
@@ -93,6 +96,9 @@ pub fn status_reason_text(kind: McpErrorKind) -> String {
         McpErrorKind::Configuration => "The server definition is invalid.".into(),
         McpErrorKind::ProcessLimitReached => {
             "Too many local MCP servers are running for this project; it was not started.".into()
+        }
+        McpErrorKind::PreparationLimitReached => {
+            "Too many MCP connections are being prepared for this project; this server is unavailable for this run.".into()
         }
         McpErrorKind::Timeout => "The server did not answer in time.".into(),
         McpErrorKind::Transport => {
@@ -771,4 +777,19 @@ fn secret_input(
             spinner(ui);
         }
     });
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_and_role_reasons_do_not_claim_size_or_approval_failures() {
+        let preparation = status_reason_text(McpErrorKind::PreparationLimitReached);
+        assert!(preparation.contains("prepared") && preparation.contains("this run"));
+        assert!(!preparation.contains("size"));
+        let role = status_reason_text(McpErrorKind::RoleNotAllowed);
+        assert!(role.contains("role"));
+        assert!(!role.contains("revoked") && !role.contains("approval"));
+    }
 }

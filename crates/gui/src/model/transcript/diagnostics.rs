@@ -287,6 +287,7 @@ fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
         "config_conflict" => "the configuration changed on disk".to_owned(),
         "needs_approval" => "startup approval is required".to_owned(),
         "approval_revoked" => "startup approval was revoked".to_owned(),
+        "role_not_allowed" => "the server is not shared with this role".to_owned(),
         "stale_preview" => "the approval preview is stale".to_owned(),
         "secret_unavailable" => "a required secret is unavailable".to_owned(),
         "secret_locked" => "the secret backend is locked".to_owned(),
@@ -296,6 +297,9 @@ fn mcp_failure(class: &str, status: Option<u64>) -> Option<String> {
             "a required environment variable is missing".to_owned()
         }
         "process_limit_reached" => "the project process limit was reached".to_owned(),
+        "preparation_limit_reached" => {
+            "the project connection preparation limit was reached".to_owned()
+        }
         "unavailable" => "the MCP service is unavailable".to_owned(),
         "cancelled" => "the request was cancelled".to_owned(),
         "outcome_unknown" => "the call outcome is unknown".to_owned(),
@@ -463,6 +467,7 @@ mod tests {
             McpErrorKind::ConfigConflict,
             McpErrorKind::NeedsApproval,
             McpErrorKind::ApprovalRevoked,
+            McpErrorKind::RoleNotAllowed,
             McpErrorKind::StalePreview,
             McpErrorKind::SecretUnavailable,
             McpErrorKind::SecretLocked,
@@ -470,6 +475,7 @@ mod tests {
             McpErrorKind::SecretMissing,
             McpErrorKind::MissingEnvironment(McpValueField::Env),
             McpErrorKind::ProcessLimitReached,
+            McpErrorKind::PreparationLimitReached,
             McpErrorKind::Unavailable,
             McpErrorKind::Cancelled,
             McpErrorKind::OutcomeUnknown,
@@ -489,6 +495,7 @@ mod tests {
                 McpErrorKind::ConfigConflict => "the configuration changed on disk",
                 McpErrorKind::NeedsApproval => "startup approval is required",
                 McpErrorKind::ApprovalRevoked => "startup approval was revoked",
+                McpErrorKind::RoleNotAllowed => "the server is not shared with this role",
                 McpErrorKind::StalePreview => "the approval preview is stale",
                 McpErrorKind::SecretUnavailable => "a required secret is unavailable",
                 McpErrorKind::SecretLocked => "the secret backend is locked",
@@ -496,6 +503,9 @@ mod tests {
                 McpErrorKind::SecretMissing => "a required secret was not found",
                 McpErrorKind::MissingEnvironment(_) => "a required environment variable is missing",
                 McpErrorKind::ProcessLimitReached => "the project process limit was reached",
+                McpErrorKind::PreparationLimitReached => {
+                    "the project connection preparation limit was reached"
+                }
                 McpErrorKind::Unavailable => "the MCP service is unavailable",
                 McpErrorKind::Cancelled => "the request was cancelled",
                 McpErrorKind::OutcomeUnknown => "the call outcome is unknown",

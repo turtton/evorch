@@ -391,6 +391,13 @@ async fn worker_is_default_and_other_roles_do_not_connect() {
         .await
         .unwrap();
     assert!(other.snapshot().tools.is_empty());
+    assert!(other.statuses().is_empty());
+    assert!(
+        service
+            .subscribe_status(root.path().canonicalize().unwrap())
+            .borrow()
+            .is_empty()
+    );
     assert_eq!(factory.0.load(Ordering::SeqCst), 0);
     let worker = service
         .prepare_new_run(request(root.path(), Role::Worker))
@@ -1076,11 +1083,14 @@ impl McpTransportFactory for BlockingFactory {
     ) -> Result<Arc<dyn McpTransport>, McpError> {
         assert_eq!(server.fingerprint, permit.fingerprint());
         Ok(Arc::new(BlockingTransport {
-            slot: Mutex::new(Some(
-                limiter
-                    .try_acquire(&server.scope.canonical_root)
-                    .map_err(error)?,
-            )),
+            slot: Mutex::new(match server.transport {
+                ResolvedMcpTransport::Stdio { .. } => Some(
+                    limiter
+                        .try_acquire(&server.scope.canonical_root)
+                        .map_err(error)?,
+                ),
+                ResolvedMcpTransport::Http { .. } => None,
+            }),
             entered: self.entered.clone(),
             shutdowns: self.shutdowns.clone(),
         }))
@@ -1346,10 +1356,148 @@ async fn restored_revoked_or_wrong_role_never_connects() {
             .await
             .unwrap();
         assert!(output.is_error);
+        assert_eq!(
+            output.detail.unwrap()["class"],
+            if role == Role::Worker {
+                "needs_approval"
+            } else {
+                "role_not_allowed"
+            }
+        );
         assert_eq!(factory.0.load(Ordering::SeqCst), 1);
         assert_eq!(restored.snapshot(), &snapshot);
     }
 }
+#[tokio::test]
+async fn role_filtered_run_preserves_project_server_status() {
+    let root = project("");
+    approve(root.path(), &ledger(root.path()));
+    let factory = Arc::new(Factory::default());
+    let service = service(root.path(), factory.clone(), unavailable());
+    let worker = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let previous = service.settings(root.path().to_owned()).await.unwrap();
+    assert_eq!(previous.statuses[0].status, McpServerStatus::Ready);
+    let other = service
+        .prepare_new_run(request(root.path(), Role::Advisor))
+        .await
+        .unwrap();
+    assert!(other.snapshot().tools.is_empty());
+    assert!(other.statuses().is_empty());
+    let current = service.settings(root.path().to_owned()).await.unwrap();
+    assert_eq!(current.statuses[0].status, McpServerStatus::Ready);
+    assert_eq!(current.statuses[0].reason, previous.statuses[0].reason);
+    assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+    worker.shutdown(ShutdownReason::Completed).await;
+}
+
+#[tokio::test]
+async fn enabled_server_without_public_roles_is_not_off_and_calls_are_role_denied() {
+    let root = project("");
+    approve(root.path(), &ledger(root.path()));
+    let factory = Arc::new(Factory::default());
+    let service = service(root.path(), factory.clone(), unavailable());
+    let worker = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    let path = root.path().join(".evorch/mcp.toml");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{raw}\nroles=[]\n")).unwrap();
+    let view = service.settings(root.path().to_owned()).await.unwrap();
+    assert_ne!(view.statuses[0].status, McpServerStatus::Disabled);
+    assert_eq!(view.statuses[0].reason, Some(McpErrorKind::RoleNotAllowed));
+    let output = saved_executor(&worker)
+        .execute(
+            &tool_context(),
+            "mcp__fixture__read",
+            "not-shared",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert!(output.is_error);
+    assert_eq!(output.detail.unwrap()["class"], "role_not_allowed");
+    assert!(factory.1.calls.lock().unwrap().is_empty());
+    assert_eq!(factory.0.load(Ordering::SeqCst), 1);
+    worker.shutdown(ShutdownReason::Completed).await;
+}
+
+#[tokio::test]
+async fn enabled_server_does_not_keep_a_cached_off_status() {
+    let root = project("enabled=false");
+    let factory = Arc::new(Factory::default());
+    let service = service(root.path(), factory.clone(), unavailable());
+    let disabled = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    assert_eq!(disabled.statuses()[0].status, McpServerStatus::Disabled);
+    let path = root.path().join(".evorch/mcp.toml");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, raw.replace("enabled=false", "enabled=true")).unwrap();
+    approve(root.path(), &ledger(root.path()));
+    let other = service
+        .prepare_new_run(request(root.path(), Role::Advisor))
+        .await
+        .unwrap();
+    assert!(other.statuses().is_empty());
+    let view = service.settings(root.path().to_owned()).await.unwrap();
+    assert_eq!(view.statuses[0].status, McpServerStatus::Unavailable);
+    assert_eq!(factory.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn http_preparation_limit_reports_admission_instead_of_response_size() {
+    let root = public_http_project();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let shutdowns = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new(BlockingFactory {
+        entered: entered.clone(),
+        shutdowns: shutdowns.clone(),
+    });
+    let service = Arc::new(
+        ProjectMcpService::new(
+            unavailable(),
+            ledger(root.path()),
+            Arc::new(NetworkGuard::new().unwrap()),
+        )
+        .with_transport_factories(factory.clone(), factory),
+    );
+    let mut tasks = Vec::new();
+    for _ in 0..MAX_HTTP_PREPARATIONS {
+        let request = request(root.path(), Role::Worker);
+        let cancel = request.cancel.clone();
+        let service = service.clone();
+        tasks.push((
+            cancel,
+            tokio::spawn(async move { service.prepare_new_run(request).await }),
+        ));
+        entered.notified().await;
+    }
+    let excluded = service
+        .prepare_new_run(request(root.path(), Role::Worker))
+        .await
+        .unwrap();
+    assert!(excluded.snapshot().tools.is_empty());
+    assert_eq!(
+        excluded.statuses()[0].reason,
+        Some(McpErrorKind::PreparationLimitReached)
+    );
+    let view = service.settings(root.path().to_owned()).await.unwrap();
+    assert_eq!(
+        view.statuses[0].reason,
+        Some(McpErrorKind::PreparationLimitReached)
+    );
+    for (cancel, task) in tasks {
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(shutdowns.load(Ordering::SeqCst), MAX_HTTP_PREPARATIONS);
+}
+
 fn public_http_project() -> tempfile::TempDir {
     let root = project("");
     std::fs::write(
