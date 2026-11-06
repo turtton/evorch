@@ -61,11 +61,44 @@ fn lock(path: &Path) -> Result<File, InstanceError> {
     Ok(f)
 }
 impl Instance {
+    /// An explicitly configured runtime directory must be safe; never silently
+    /// change namespaces on an invalid value. Tests pass paths, not process env.
+    pub fn acquire_with_runtime_dir(
+        config_dir: &Path,
+        runtime_dir: Option<&Path>,
+        fallback: &Path,
+    ) -> Result<Self, InstanceError> {
+        let parent = match runtime_dir {
+            Some(path) => {
+                if !path.is_absolute() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "XDG_RUNTIME_DIR must be absolute",
+                    )
+                    .into());
+                }
+                check(path, true)?;
+                fs::canonicalize(path)?
+            }
+            None => fallback.to_path_buf(),
+        };
+        Self::acquire(config_dir, &parent)
+    }
+
+    pub fn acquire_default(config_dir: &Path) -> Result<Self, InstanceError> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        Self::acquire_with_runtime_dir(config_dir, runtime.as_deref(), Path::new("/tmp"))
+    }
+
     /// Must run before opening storage. Aliases canonicalise to the same identity.
     pub fn acquire(config_dir: &Path, ipc_parent: &Path) -> Result<Self, InstanceError> {
         fs::create_dir_all(config_dir)?;
         let canonical = fs::canonicalize(config_dir)?;
         let identity = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
+        // Locks belong to the database location, not the runtime directory:
+        // different XDG_RUNTIME_DIR settings must not create two owners.
+        let _startup = lock(&canonical.join(".evorch-core.start"))?;
+        let lifetime = lock(&canonical.join(".evorch-core.lock"))?;
         let dir = ipc_parent.join(format!(
             "evorch-core-{}",
             rustix::process::geteuid().as_raw()
@@ -77,8 +110,6 @@ impl Instance {
         }
         check(&dir, true)?;
         let prefix = &identity[..32];
-        let _startup = lock(&dir.join(format!("{prefix}.start")))?;
-        let lifetime = lock(&dir.join(format!("{prefix}.lock")))?;
         let socket = dir.join(format!("{prefix}.sock"));
         if socket.as_os_str().as_bytes().len() >= 104 {
             return Err(

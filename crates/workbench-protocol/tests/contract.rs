@@ -793,3 +793,36 @@ fn one_page<T>(item: T) -> Page<T> {
         snapshot_revision: Revision(1),
     }
 }
+
+#[test]
+fn request_diagnostics_do_not_reflect_client_tokens() {
+    let marker = "sk-proj-secret-client-token-not-a-schema-name";
+    let mut extra = request_json("query", json!({"type":"get_core_status"}));
+    extra[marker] = json!(true);
+    let mut nested = request_json(
+        "command",
+        json!({"type":"stop_chat", "payload":{"thread":"t"}}),
+    );
+    nested["payload"]["payload"][marker] = json!(1);
+    let cases = [
+        extra,
+        nested,
+        request_json("query", json!({"type":marker})),
+        request_json(marker, json!({"type":"get_core_status"})),
+        request_json(
+            "query",
+            json!({"type":"list_projects", "payload":{"limit":marker}}),
+        ),
+    ];
+    for value in cases {
+        let rejection = decode(value).unwrap_err();
+        let wire = serde_json::to_string(&rejection.error).unwrap();
+        assert!(!wire.contains("sk-proj-"), "{wire}");
+        assert_eq!(rejection.request_id, Some(request(9)));
+        assert_eq!(rejection.error.correlation_id, Some(request(9)));
+    }
+    let invalid_json = format!("{{\"{marker}\" x}}");
+    let rejection = decode_request(invalid_json.as_bytes(), &WireLimits::default()).unwrap_err();
+    assert!(!rejection.error.message.contains(marker));
+    assert_eq!(rejection.request_id, None);
+}

@@ -73,3 +73,35 @@ fn canonical_aliases_share_the_lock() {
     ));
     drop(first);
 }
+
+#[test]
+fn runtime_directory_is_validated_and_does_not_change_database_lock_identity() {
+    let dir = dir();
+    let config = dir.path().join("config");
+    let runtime = dir.path().join("runtime");
+    std::fs::create_dir(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let first = Instance::acquire_with_runtime_dir(&config, Some(&runtime), dir.path()).unwrap();
+    assert!(first.socket.starts_with(&runtime));
+    assert!(matches!(
+        Instance::acquire_with_runtime_dir(&config, None, dir.path()),
+        Err(InstanceError::AlreadyRunning)
+    ));
+    drop(first);
+    let fallback = Instance::acquire_with_runtime_dir(&config, None, dir.path()).unwrap();
+    assert!(!fallback.socket.starts_with(&runtime));
+    drop(fallback);
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(Instance::acquire_with_runtime_dir(&config, Some(&runtime), dir.path()).is_err());
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = dir.path().join("runtime-link");
+    symlink(&runtime, &alias).unwrap();
+    let missing = dir.path().join("missing");
+    for path in [
+        alias.as_path(),
+        std::path::Path::new("relative"),
+        missing.as_path(),
+    ] {
+        assert!(Instance::acquire_with_runtime_dir(&config, Some(path), dir.path()).is_err());
+    }
+}

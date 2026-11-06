@@ -3,7 +3,7 @@
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use workbench_host::{CommandHost, projection::Projection};
 use workbench_protocol::{
@@ -17,6 +17,15 @@ pub struct HostBackend {
     hello: ServerHello,
     redactor: Arc<secret_guard::SecretRedactor>,
     closing: AtomicBool,
+    unix_clients: AtomicU32,
+    web_enabled: AtomicBool,
+}
+
+pub(crate) struct ConnectedClient<'a>(&'a HostBackend);
+impl Drop for ConnectedClient<'_> {
+    fn drop(&mut self) {
+        self.0.unix_clients.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 pub fn error(code: ErrorCode, message: &str) -> WorkbenchError {
     WorkbenchError::new(code, message, RetryAdvice::Never)
@@ -48,6 +57,8 @@ impl HostBackend {
             projection,
             redactor: Arc::new(secret_guard::SecretRedactor::from_env()),
             closing: AtomicBool::new(false),
+            unix_clients: AtomicU32::new(0),
+            web_enabled: AtomicBool::new(false),
             hello: ServerHello {
                 protocol_version: ProtocolVersion::CURRENT,
                 capabilities: Capability::ALL
@@ -73,6 +84,35 @@ impl HostBackend {
     pub fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
     }
+    pub fn set_web_enabled(&self, enabled: bool) {
+        self.web_enabled.store(enabled, Ordering::SeqCst);
+    }
+    pub(crate) fn connected(&self) -> ConnectedClient<'_> {
+        self.unix_clients.fetch_add(1, Ordering::SeqCst);
+        ConnectedClient(self)
+    }
+    fn transport_status(&self, mut status: CoreStatus) -> CoreStatus {
+        status.running.clients = self.unix_clients.load(Ordering::SeqCst);
+        for (retain, reason) in [
+            (
+                status.running.clients > 0,
+                RetentionReason::ConnectedClients,
+            ),
+            (
+                self.web_enabled.load(Ordering::SeqCst),
+                RetentionReason::WebServing,
+            ),
+            (status.running.turns > 0, RetentionReason::ActiveTurn),
+        ] {
+            if retain && !status.retention_reasons.contains(&reason) {
+                status.retention_reasons.push(reason);
+            }
+        }
+        if self.closing.load(Ordering::SeqCst) {
+            status.state = CoreState::Draining;
+        }
+        status
+    }
     pub fn hello(&self) -> ServerHello {
         let mut hello = self.hello.clone();
         hello.instance_epoch = self.projection.instance_epoch();
@@ -84,9 +124,7 @@ impl HostBackend {
         {
             hello.status = status;
         }
-        if self.closing.load(Ordering::SeqCst) {
-            hello.status.state = CoreState::Draining;
-        }
+        hello.status = self.transport_status(hello.status);
         hello
     }
     pub fn mask<T: Serialize + DeserializeOwned>(&self, value: T) -> Result<T, WorkbenchError> {
@@ -110,9 +148,18 @@ impl HostBackend {
                     host.handle_request(&request.session_id, &id, command, provenance)
                         .map(ReplyPayload::Command)
                 }
-                RequestBody::Query(query) => host
-                    .handle_query(&request.session_id, &query)
-                    .map(ReplyPayload::Query),
+                RequestBody::Query(query) => {
+                    host.handle_query(&request.session_id, &query).map(|reply| {
+                        ReplyPayload::Query(match reply {
+                            workbench_protocol::queries::QueryReply::CoreStatus(status) => {
+                                workbench_protocol::queries::QueryReply::CoreStatus(
+                                    self.transport_status(status),
+                                )
+                            }
+                            reply => reply,
+                        })
+                    })
+                }
                 RequestBody::Control(Control::Ping { nonce }) => Ok(ReplyPayload::Pong { nonce }),
                 RequestBody::Control(_) => Err(error(
                     ErrorCode::InvalidRequest,
@@ -187,5 +234,79 @@ impl WorkbenchBackend for HostBackend {
     }
     async fn server_hello(&self) -> Result<ServerHello, WorkbenchError> {
         Ok(self.hello())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workbench_host::bootstrap::{BootstrapOptions, BootstrappedHost};
+
+    #[tokio::test]
+    async fn status_tracks_connection_lifetimes_and_web_without_browser_clients() {
+        let dir = tempfile::Builder::new()
+            .prefix("p7-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut boot = BootstrappedHost::open(BootstrapOptions {
+            config_dir: root.clone(),
+            project_root: root.clone(),
+            ownership_root: root.join("owners"),
+        })
+        .await
+        .unwrap();
+        let backend = HostBackend::new(boot.host.clone(), "core-status".into());
+        assert_eq!(backend.hello().status.running.clients, 0);
+        let a = backend.connected();
+        let b = backend.connected();
+        backend.set_web_enabled(true);
+        let status = backend.hello().status;
+        assert_eq!(status.running.clients, 2);
+        assert!(
+            status
+                .retention_reasons
+                .contains(&RetentionReason::ConnectedClients)
+        );
+        assert!(
+            status
+                .retention_reasons
+                .contains(&RetentionReason::WebServing)
+        );
+        let response = backend.request(
+            RequestEnvelope {
+                request_id: RequestId::new("status").unwrap(),
+                session_id: SessionId::new("session").unwrap(),
+                body: RequestBody::Query(workbench_protocol::queries::Query::GetCoreStatus),
+            },
+            Provenance::human(Surface::Cli, ClientId::new("client").unwrap()),
+        );
+        let ReplyResult::Success(ReplyPayload::Query(
+            workbench_protocol::queries::QueryReply::CoreStatus(queried),
+        )) = response.result
+        else {
+            panic!("expected status reply")
+        };
+        assert_eq!(queried, status);
+        drop(a);
+        assert_eq!(backend.hello().status.running.clients, 1);
+        drop(b);
+        let status = backend.hello().status;
+        assert_eq!(status.running.clients, 0);
+        assert!(
+            !status
+                .retention_reasons
+                .contains(&RetentionReason::ConnectedClients)
+        );
+        assert!(
+            status
+                .retention_reasons
+                .contains(&RetentionReason::WebServing)
+        );
+        backend.set_web_enabled(false);
+        assert!(backend.hello().status.retention_reasons.is_empty());
+        backend.close();
+        assert_eq!(backend.hello().status.state, CoreState::Draining);
+        boot.shutdown().await.unwrap();
     }
 }

@@ -4,11 +4,7 @@ use evorch_core::{
     lifecycle::IdleGrace,
     unix,
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use workbench_host::bootstrap::{BootstrapError, BootstrapOptions, BootstrappedHost};
 use workbench_web::{WebServer, WebServerConfig};
 
@@ -53,7 +49,7 @@ async fn run() -> Result<(), BootstrapError> {
         }
     }
     let config_dir = config_dir.ok_or("cannot resolve config directory; pass --config-dir")?;
-    let instance = Instance::acquire(&config_dir, Path::new("/tmp"))?;
+    let instance = Instance::acquire_default(&config_dir)?;
     let config_dir = std::fs::canonicalize(config_dir)?;
     let state_dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -81,6 +77,7 @@ async fn run() -> Result<(), BootstrapError> {
         ..Default::default()
     };
     let web_enabled = web_config.enabled;
+    backend.set_web_enabled(web_enabled);
     let server = match WebServer::start(web_config, backend.clone()).await {
         Ok(s) => s,
         Err(e) => {
