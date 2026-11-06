@@ -273,3 +273,111 @@ async fn wait_returns_when_its_own_question_is_answered() {
     fixture.runtime.cancel(RunId::new(2)).unwrap();
     fixture.runtime.wait(RunId::new(2)).await.unwrap();
 }
+
+/// The child (run-2) sends run-1 a message and then waits for its reply with
+/// the given script tail; every child model request waits on the returned gate.
+async fn waiting_child(
+    tail: Vec<Result<providers::ChatResponse, runtime::RuntimeError>>,
+) -> (Fixture, Arc<Notify>, RunId, RunId) {
+    let gate = Arc::new(Notify::new());
+    let model = Arc::new(ScriptedModel::new([]));
+    model.gate_key("PARENT", Arc::new(Notify::new())).await;
+    model.gate_key("CHILD", gate.clone()).await;
+    let mut script = vec![Ok(tool_response(
+        "ask-parent",
+        "send",
+        json!({"run_id": "run-1", "message": "need a decision"}),
+    ))];
+    script.extend(tail);
+    model.add_keyed("CHILD", script).await;
+    let fixture = fixture(model);
+    let parent = fixture.runtime.delegate_background(
+        Role::Orchestrator,
+        "PARENT".into(),
+        RunConfig::default(),
+    );
+    fixture.model.wait_for_request(0).await;
+    let child = fixture
+        .runtime
+        .delegate_background_as_child(parent, Role::Worker, "CHILD", RunConfig::default())
+        .unwrap();
+    fixture.model.wait_for_request(1).await;
+    gate.notify_one();
+    fixture.model.wait_for_request(2).await;
+    gate.notify_one();
+    until_waiting(&fixture, child).await;
+    (fixture, gate, parent, child)
+}
+
+#[tokio::test]
+async fn cancel_ends_wait_reply_without_waiting_for_the_timeout() {
+    let (fixture, _gate, parent, child) = waiting_child(vec![Ok(tool_response(
+        "wait",
+        "wait_reply",
+        json!({"message_id": "msg-1", "timeout_ms": 600_000}),
+    ))])
+    .await;
+    fixture.runtime.cancel(child).unwrap();
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Error
+    );
+    // The cancelled child made no further model request.
+    assert_eq!(fixture.model.observed().await.len(), 3);
+    fixture.runtime.cancel(parent).unwrap();
+    fixture.runtime.wait(parent).await.unwrap();
+}
+
+#[tokio::test]
+async fn host_input_ends_wait_reply_and_is_injected_once() {
+    let (fixture, gate, parent, child) = waiting_child(vec![
+        Ok(tool_response(
+            "first-wait",
+            "wait_reply",
+            json!({"message_id": "msg-1", "timeout_ms": 600_000}),
+        )),
+        Ok(tool_response(
+            "second-wait",
+            "wait_reply",
+            json!({"message_id": "msg-1", "timeout_ms": 600_000}),
+        )),
+        Ok(text_response("child done", FinishReason::Stop)),
+    ])
+    .await;
+    fixture
+        .runtime
+        .send_message(child, "host says hi".into())
+        .unwrap();
+    let after_input = fixture.model.wait_for_request(3).await;
+    let first = tool_json(&after_input, "first-wait");
+    assert_eq!(first["status"], "user_input_ready");
+    assert_eq!(first["message_id"], "msg-1");
+    assert_eq!(occurrences(&after_input, "host says hi"), 1);
+
+    // The message_id is still waitable and the input is not injected again.
+    gate.notify_one();
+    until_waiting(&fixture, child).await;
+    fixture
+        .runtime
+        .send_agent_message(
+            parent,
+            child,
+            AgentMessageKind::Reply,
+            "late reply",
+            Some("msg-1".to_string()),
+        )
+        .unwrap();
+    let after_reply = fixture.model.wait_for_request(4).await;
+    assert_eq!(
+        tool_json(&after_reply, "second-wait")["content"],
+        "late reply"
+    );
+    assert_eq!(occurrences(&after_reply, "host says hi"), 1);
+    gate.notify_one();
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    fixture.runtime.cancel(parent).unwrap();
+    fixture.runtime.wait(parent).await.unwrap();
+}

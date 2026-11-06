@@ -97,7 +97,7 @@ pub(super) fn send(name: &str) -> ToolSpec {
 pub(super) fn wait_reply(name: &str) -> ToolSpec {
     object_spec(
         name,
-        "Wait for and consume a reply to this run's sent message, leaving unrelated messages queued. A new answer to one of your own questions ends the wait early with {status: answer_ready, question_ids, message_id}, not an error; its text arrives in the next model input and the same message_id can be waited on again. Timeout returns ReplyTimeout; recipient termination returns RunTerminated. Unknown message IDs or invalid ownership fail.",
+        "Wait for and consume a reply to this run's sent message, leaving unrelated messages queued. Your own new answer or host input ends the wait early with {status: answer_ready|user_input_ready, message_id}; the text follows in the next model input and the message_id stays waitable. Timeout returns ReplyTimeout; recipient termination returns RunTerminated. Unknown message IDs or invalid ownership fail.",
         json!({"message_id":{"type":"string", "description":"ID returned by send or send_message."},"timeout_ms":{"type":"integer","minimum":0, "description":"Maximum wait in milliseconds."}}),
         &["message_id", "timeout_ms"],
         false,
