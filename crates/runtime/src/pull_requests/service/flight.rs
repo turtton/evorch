@@ -276,8 +276,15 @@ impl Inner {
         let recovered = recovered && commit.attempt_recorded;
         for interest in live {
             if let Interest::Thread(target) = interest {
-                self.deliver_success(key, target, &facts, &change, recovered)
-                    .await;
+                self.deliver_success(
+                    key,
+                    target,
+                    &facts,
+                    &change,
+                    recovered,
+                    commit.facts_stored.then_some(seq),
+                )
+                .await;
             }
         }
         outcome
@@ -337,9 +344,13 @@ impl Inner {
         facts: &PullRequestFacts,
         change: &FactsChange,
         recovered: bool,
+        adopted_seq: Option<u64>,
     ) {
         let mut fields = change.fields.clone();
-        if self.record_local_head(key, target, facts).await {
+        if self
+            .record_local_head(key, target, facts, adopted_seq)
+            .await
+        {
             fields.push(PullRequestChangedField::LocalHead);
         }
         let status = recovered.then_some(PullRequestFetchStatus::Recovered);
@@ -368,6 +379,7 @@ impl Inner {
         key: &PullRequestKey,
         target: &Target,
         facts: &PullRequestFacts,
+        adopted_seq: Option<u64>,
     ) -> bool {
         let Ok(state) = self.thread_state(&target.thread_id).await else {
             return false;
@@ -415,6 +427,27 @@ impl Inner {
                 Ok(None) | Err(_) => return false,
             }
         };
+        if let Some(seq) = adopted_seq {
+            let local = match &resolution {
+                CheckoutResolution::Found(checkout) => Some(checkout.head_sha.as_str()),
+                CheckoutResolution::Missing(_) => None,
+            };
+            if self
+                .check_permit(&target.thread_id, &target.permit)
+                .await
+                .is_ok()
+            {
+                self.lock().attribution.adopt(
+                    &target.thread_id,
+                    target.permit.lease.generation,
+                    target.link_revision,
+                    seq,
+                    &facts.head_sha,
+                    local,
+                );
+                self.wake.notify_one();
+            }
+        }
         let (storage, thread, revision) = (
             self.storage.clone(),
             target.thread_id.clone(),

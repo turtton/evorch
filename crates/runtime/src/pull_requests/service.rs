@@ -16,7 +16,8 @@
 //! - **Inheritance** — a derived thread (an escalation, later a fork or rewind) takes its
 //!   parent's link only while the pull request is confirmed open.
 //!
-//! Nothing here talks to an agent: no notice, no held message, no wake. Changes leave as
+//! Phase 2 prepares bounded notices in the common durable outbox; it never edits history.
+//! Tracking changes leave as
 //! [`PullRequestEvent`]s on the bus, once per change and after the change is stored; a reader
 //! opens the database again instead of trusting the event.
 //!
@@ -25,8 +26,10 @@
 //! the pull request. A result is delivered to a thread only if the process still owns the
 //! thread (checked at completion) and the thread still has the link the fetch was started for.
 
+mod coordinator;
 mod flight;
 mod observer;
+mod policy;
 mod scheduler;
 
 use std::collections::{HashMap, HashSet};
@@ -75,6 +78,9 @@ pub enum PullRequestError {
     /// `[pull_requests] enabled` is false.
     #[error("pull request tracking is disabled")]
     Disabled,
+    /// The head changed or the checks are not eligible.
+    #[error("the pull request head or checks are not eligible")]
+    Ineligible,
     /// The reference is not a github.com pull request.
     #[error("{0}")]
     Locator(#[from] LocatorError),
@@ -152,6 +158,21 @@ pub enum InheritanceScheduling {
     Scheduled(Box<InheritanceRecord>),
 }
 
+/// Shared-outbox integration. These callbacks are hints, never authority or another queue.
+pub trait PrNoticeDelivery: Send + Sync {
+    /// Kick delivery for a destination after its ready/outbox transaction commits.
+    fn schedule(&self, thread: &str);
+    /// Coalesced hints after durable explicit Resume and guard reset.
+    /// The default has no producer; standalone services still perform their startup scan.
+    fn subscribe_resumes(&self) -> watch::Receiver<u64> {
+        watch::channel(0).1
+    }
+}
+struct NoNoticeDelivery;
+impl PrNoticeDelivery for NoNoticeDelivery {
+    fn schedule(&self, _: &str) {}
+}
+
 /// Everything the service is built from.
 pub struct ServiceParts {
     /// Where the rows live.
@@ -209,14 +230,19 @@ pub(crate) struct State {
     pub(crate) flights: HashMap<PullRequestKey, Arc<Flight>>,
     /// Threads a person or a finished command asked to fetch for now.
     pub(crate) forced: HashSet<String>,
+    /// Head attribution is intentionally process-local (restart means unknown).
+    attribution: policy::Attribution,
+    /// In-flight log preparation; never a second delivery queue.
+    pub(crate) preparing: HashSet<String>,
+    /// Attempts are scoped to the notice, policy, owner and reservation generations.
+    pub(crate) attempted: HashSet<(String, u64, u64, u64)>,
     /// Children whose inheritance is being resolved.
     pub(crate) resolving: HashSet<String>,
     /// When a pending inheritance is tried again.
     pub(crate) inheritance_due: HashMap<String, Instant>,
 }
 
-/// A wait on the blocking pool right before a process is started. A test may interrupt it, which
-/// is how "the world changed while the work was queued" is simulated.
+/// Lifecycle boundaries where tests simulate concurrent changes or await completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Stage {
     /// Numbering a fetch, right before `gh` is started.
@@ -227,11 +253,16 @@ pub(crate) enum Stage {
     Planned,
     /// A write for a thread is about to take the registry guard (after its permit was checked).
     Guarded,
+    /// An asynchronous PR preparation has released its single-flight slot.
+    #[cfg(test)]
+    PrPreparationFinished,
 }
 
 pub(crate) struct Inner {
     pub(crate) storage: StorageHandle,
     pub(crate) source: Arc<dyn PullRequestSource>,
+    pub(crate) logs: Arc<dyn super::PullRequestLogSource>,
+    delivery: Arc<dyn PrNoticeDelivery>,
     pub(crate) ownership: Arc<dyn OwnershipView>,
     pub(crate) env: Arc<dyn ThreadEnvironment>,
     pub(crate) bus: Arc<EventBus>,
@@ -492,6 +523,13 @@ impl Inner {
                 Ok(receipt)
             })
             .await??;
+        if receipt.changed {
+            self.lock().attribution.linked(
+                thread_id,
+                permit.lease.generation,
+                receipt.link.link_revision,
+            );
+        }
         self.force(thread_id);
         Ok(receipt)
     }
@@ -609,12 +647,37 @@ impl PullRequestService {
     /// # Errors
     /// The settings are outside their documented ranges.
     pub fn start(parts: ServiceParts) -> Result<Self, config::ConfigError> {
+        Self::start_with_log_source(parts, Arc::new(super::GhLogSource::new()))
+    }
+
+    /// Starts tracking with an injectable bounded log source.
+    ///
+    /// # Errors
+    /// Invalid settings.
+    pub fn start_with_log_source(
+        parts: ServiceParts,
+        logs: Arc<dyn super::PullRequestLogSource>,
+    ) -> Result<Self, config::ConfigError> {
+        Self::start_with_notice_delivery(parts, logs, Arc::new(NoNoticeDelivery))
+    }
+
+    /// Starts tracking with bounded logs and shared-outbox wake/Resume integration.
+    ///
+    /// # Errors
+    /// Invalid settings.
+    pub fn start_with_notice_delivery(
+        parts: ServiceParts,
+        logs: Arc<dyn super::PullRequestLogSource>,
+        delivery: Arc<dyn PrNoticeDelivery>,
+    ) -> Result<Self, config::ConfigError> {
         parts.settings.validate()?;
         let (settings, _) = watch::channel(parts.settings);
         let (shutdown, _) = watch::channel(false);
         let inner = Arc::new(Inner {
             storage: parts.storage,
             source: parts.source,
+            logs,
+            delivery,
             ownership: parts.ownership,
             env: parts.environment,
             bus: parts.bus,
@@ -627,6 +690,8 @@ impl PullRequestService {
             stage_hooks: Mutex::default(),
         });
         let receiver = inner.bus.subscribe();
+        let resumes = inner.delivery.subscribe_resumes();
+        tokio::spawn(coordinator::observe_resumes(Arc::clone(&inner), resumes));
         tokio::spawn(scheduler::run(Arc::clone(&inner)));
         tokio::spawn(observer::run(Arc::clone(&inner), receiver));
         Ok(Self {
@@ -642,6 +707,12 @@ impl PullRequestService {
     /// The settings are outside their documented ranges (nothing changes).
     pub fn update_settings(&self, settings: PullRequestsConfig) -> Result<(), config::ConfigError> {
         settings.validate()?;
+        let previous = self.inner.config();
+        if (!previous.auto_fix_enabled && settings.auto_fix_enabled)
+            || (!previous.enabled && settings.enabled)
+        {
+            self.inner.lock().attempted.clear();
+        }
         self.inner.settings.send_replace(settings);
         self.inner.wake.notify_one();
         Ok(())

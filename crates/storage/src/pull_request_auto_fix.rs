@@ -72,6 +72,8 @@ pub enum PrNoticePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrNotice {
     pub notice_id: String,
+    /// Increments whenever a cancelled stable SHA ID is reserved again.
+    pub reservation_revision: u64,
     pub key: PullRequestKey,
     pub head_sha: String,
     pub mode: PrNoticeMode,

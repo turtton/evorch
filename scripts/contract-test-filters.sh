@@ -46,7 +46,7 @@ CACHE_CONTRACT_FILTER='
       | binary(=skill_hot_reload_cache)
       | binary(=thread_tools_cache)
       | binary(=pull_request_observer_cache)
-      | binary(=pull_request_review_cache)
+      | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
       | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
   | (package(=tools) & binary(=bounded_output))
