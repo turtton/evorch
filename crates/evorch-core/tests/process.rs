@@ -29,7 +29,10 @@ async fn rejects_input_reflection(
         &ClientHello {
             supported_versions: vec![ProtocolVersion::CURRENT],
             required_capabilities: vec![],
-            optional_capabilities: vec![],
+            optional_capabilities: vec![
+                Capability::SnapshotEvents.into(),
+                Capability::Queries.into(),
+            ],
             client_build: build,
             client_instance_id: ClientId::new("raw-client").unwrap(),
             desired_core: None,
@@ -54,6 +57,9 @@ async fn rejects_input_reflection(
         "payload":{"type":"stop_chat", "payload":{"thread":"t"}}
     });
     nested_field["payload"]["payload"][&secret] = true.into();
+    let mut reflected_id = base.clone();
+    reflected_id["request_id"] = secret.clone().into();
+    reflected_id["payload"]["type"] = "unknown_query".into();
     let mut malformed = base;
     malformed["kind"] = secret.clone().into();
     for (value, code) in [
@@ -61,6 +67,7 @@ async fn rejects_input_reflection(
         (unknown_field, ErrorCode::InvalidRequest),
         (nested_field, ErrorCode::InvalidRequest),
         (malformed, ErrorCode::InvalidRequest),
+        (reflected_id, ErrorCode::UnsupportedCapability),
     ] {
         let response = http
             .post(format!("{root}/api/v1/request"))
@@ -87,6 +94,61 @@ async fn rejects_input_reflection(
         };
         assert_eq!(error.code, code);
     }
+    for (kind, payload) in [
+        (
+            "control",
+            serde_json::json!({"type":"ping", "payload":{"nonce":"7"}}),
+        ),
+        (
+            "control",
+            serde_json::json!({"type":"pong", "payload":{"nonce":"7"}}),
+        ),
+        ("query", serde_json::json!({"type":"get_core_status"})),
+    ] {
+        let value = serde_json::json!({"request_id":secret, "session_id":"raw-session", "kind":kind, "payload":payload});
+        let response = http
+            .post(format!("{root}/api/v1/request"))
+            .header("Origin", root)
+            .json(&value)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("sk-proj-"), "{body}");
+        let reply: ReplyEnvelope = serde_json::from_str(&body).unwrap();
+        assert!(matches!(reply.result, ReplyResult::Success(_)));
+        let body = exchange(&mut stream, &value).await;
+        assert!(!body.to_string().contains("sk-proj-"), "{body}");
+        assert!(matches!(
+            serde_json::from_value::<ServerFrame>(body).unwrap(),
+            ServerFrame::Reply(ReplyEnvelope {
+                result: ReplyResult::Success(_),
+                ..
+            })
+        ));
+    }
+    // The successful Unix Subscribe takes an early reply path, while HTTP
+    // synthesizes an InvalidRequest without entering the backend.
+    let value = serde_json::json!({"request_id":secret, "session_id":"raw-session", "kind":"control", "payload":{"type":"subscribe", "payload":{"scope":{"type":"all"}, "after":null}}});
+    let response = http
+        .post(format!("{root}/api/v1/request"))
+        .header("Origin", root)
+        .json(&value)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error());
+    assert!(!response.text().await.unwrap().contains("sk-proj-"));
+    let body = exchange(&mut stream, &value).await;
+    assert!(!body.to_string().contains("sk-proj-"), "{body}");
+    assert!(matches!(
+        serde_json::from_value::<ServerFrame>(body).unwrap(),
+        ServerFrame::Reply(ReplyEnvelope {
+            result: ReplyResult::Success(ReplyPayload::SubscriptionStarted(_)),
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

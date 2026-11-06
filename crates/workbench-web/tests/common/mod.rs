@@ -41,6 +41,7 @@ struct Inner {
     mismatched_reply: bool,
     subscription: Option<Result<BackendSubscription, WorkbenchError>>,
     status_error: Option<WorkbenchError>,
+    protector: Option<fn(serde_json::Value) -> serde_json::Value>,
 }
 
 struct Gate {
@@ -97,6 +98,10 @@ impl FakeBackend {
         self.inner.lock().unwrap().mismatched_reply = true;
     }
 
+    pub fn protect_with(&self, protector: fn(serde_json::Value) -> serde_json::Value) {
+        self.inner.lock().unwrap().protector = Some(protector);
+    }
+
     pub fn fail_status(&self, error: WorkbenchError) {
         self.inner.lock().unwrap().status_error = Some(error);
     }
@@ -143,6 +148,13 @@ pub fn server_hello() -> ServerHello {
 }
 
 impl WorkbenchBackend for FakeBackend {
+    fn protect_output(&self, output: serde_json::Value) -> serde_json::Value {
+        match self.inner.lock().unwrap().protector {
+            Some(protect) => protect(output),
+            None => output,
+        }
+    }
+
     async fn handle_request(
         &self,
         session: &WebSession,

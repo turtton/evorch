@@ -8,6 +8,7 @@ use tokio::{
     task::JoinSet,
 };
 use workbench_protocol::{envelope::*, errors::ErrorCode, framing::encode_frame, handshake::*};
+use workbench_web::WorkbenchBackend;
 
 async fn payload(read: &mut (impl AsyncRead + Unpin), max: u32) -> io::Result<Vec<u8>> {
     let len = read.read_u32().await?;
@@ -57,7 +58,8 @@ pub async fn connection(
         }
         Err(e) => HandshakeReply::Rejected(e),
     };
-    let frame = encode_frame(&reply, hello.limits.max_frame_bytes).map_err(invalid)?;
+    let wire = backend.protect_output(serde_json::to_value(&reply).map_err(invalid)?);
+    let frame = encode_frame(&wire, hello.limits.max_frame_bytes).map_err(invalid)?;
     tokio::select! { r = write.write_all(&frame) => r?, _ = shutdown.changed() => return Ok(()) }
     if matches!(reply, HandshakeReply::Rejected(_)) {
         return Ok(());
@@ -65,8 +67,12 @@ pub async fn connection(
     let mut tasks = JoinSet::new();
     let (output, mut frames) = mpsc::channel::<ServerFrame>(64);
     let max = hello.limits.max_frame_bytes;
+    let writer_backend = backend.clone();
     tasks.spawn(async move {
         while let Some(frame) = frames.recv().await {
+            // Includes early Subscribe replies and connection-generated errors.
+            let frame =
+                writer_backend.protect_output(serde_json::to_value(frame).map_err(invalid)?);
             let bytes = encode_frame(&frame, max).map_err(invalid)?;
             write.write_all(&bytes).await?;
         }

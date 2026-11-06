@@ -109,20 +109,26 @@ impl Queue {
     }
 }
 
-fn ui_item(envelope: &EventEnvelope, with_id: bool) -> Option<Item> {
+fn ui_item<B: WorkbenchBackend>(
+    backend: &B,
+    envelope: &EventEnvelope,
+    with_id: bool,
+) -> Option<Item> {
     Some(Item {
         id: with_id.then(|| format_cursor(envelope.cursor)),
         name: "ui_event",
-        data: serde_json::to_string(envelope).ok()?,
+        data: crate::output::encode(backend, envelope).ok()?,
     })
 }
 
-fn resync_item(
+fn resync_item<B: WorkbenchBackend>(
+    backend: &B,
     subscription_id: &SubscriptionId,
     last: EventCursor,
     reason: ResyncReason,
 ) -> Option<Item> {
     ui_item(
+        backend,
         &EventEnvelope {
             subscription_id: subscription_id.clone(),
             cursor: last,
@@ -135,7 +141,8 @@ fn resync_item(
 
 /// Moves events from the backend into the bounded queue and never waits for
 /// the browser: a full queue ends the stream with `ResyncRequired`.
-async fn pump(
+async fn pump<B: WorkbenchBackend>(
+    backend: Arc<B>,
     mut events: mpsc::Receiver<EventEnvelope>,
     queue: Queue,
     mut tracker: CursorTracker,
@@ -155,9 +162,12 @@ async fn pump(
         match tracker.observe(envelope.cursor) {
             CursorDecision::Duplicate => continue,
             CursorDecision::EpochMismatch => {
-                if let Some(item) =
-                    resync_item(&subscription_id, tracker.last(), ResyncReason::EpochChanged)
-                {
+                if let Some(item) = resync_item(
+                    backend.as_ref(),
+                    &subscription_id,
+                    tracker.last(),
+                    ResyncReason::EpochChanged,
+                ) {
                     queue.push_terminal(item);
                 }
                 return;
@@ -165,11 +175,12 @@ async fn pump(
             CursorDecision::Deliver => {}
         }
         let terminal = envelope.event.ends_subscription();
-        let Some(item) = ui_item(&envelope, true) else {
+        let Some(item) = ui_item(backend.as_ref(), &envelope, true) else {
             return;
         };
         if !queue.push(item) {
             if let Some(item) = resync_item(
+                backend.as_ref(),
                 &subscription_id,
                 tracker.last(),
                 ResyncReason::SlowSubscriber,
@@ -289,7 +300,7 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         bytes: Arc::clone(&bytes),
         max_bytes: limits.subscription_queue_bytes as usize,
     };
-    let Ok(data) = serde_json::to_string(&started) else {
+    let Ok(data) = crate::output::encode(state.backend.as_ref(), &started) else {
         return error_response(
             WorkbenchError::new(
                 ErrorCode::Internal,
@@ -306,6 +317,7 @@ pub(crate) async fn events<B: WorkbenchBackend>(
         data,
     });
     tokio::spawn(pump(
+        Arc::clone(&state.backend),
         events,
         queue,
         CursorTracker::new(started.high_water),

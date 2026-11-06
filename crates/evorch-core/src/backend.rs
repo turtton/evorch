@@ -31,22 +31,34 @@ pub fn error(code: ErrorCode, message: &str) -> WorkbenchError {
     WorkbenchError::new(code, message, RetryAdvice::Never)
 }
 
-fn protect<T: Serialize + DeserializeOwned>(
+fn protect_value(
     redactor: &secret_guard::SecretRedactor,
-    value: T,
-) -> Result<T, WorkbenchError> {
+    mut value: serde_json::Value,
+) -> serde_json::Value {
     fn walk(v: &mut serde_json::Value, redactor: &secret_guard::SecretRedactor) {
         match v {
             serde_json::Value::String(s) => *s = redactor.redact(s).text,
             serde_json::Value::Array(a) => a.iter_mut().for_each(|v| walk(v, redactor)),
-            serde_json::Value::Object(m) => m.values_mut().for_each(|v| walk(v, redactor)),
+            serde_json::Value::Object(m) => {
+                for (key, mut value) in std::mem::take(m) {
+                    walk(&mut value, redactor);
+                    m.insert(redactor.redact(&key).text, value);
+                }
+            }
             _ => (),
         }
     }
+    walk(&mut value, redactor);
+    value
+}
+
+fn protect<T: Serialize + DeserializeOwned>(
+    redactor: &secret_guard::SecretRedactor,
+    value: T,
+) -> Result<T, WorkbenchError> {
     let internal = |_| error(ErrorCode::Internal, "output protection failed");
-    let mut v = serde_json::to_value(value).map_err(internal)?;
-    walk(&mut v, redactor);
-    serde_json::from_value(v).map_err(internal)
+    let value = serde_json::to_value(value).map_err(internal)?;
+    serde_json::from_value(protect_value(redactor, value)).map_err(internal)
 }
 
 impl HostBackend {
@@ -131,6 +143,14 @@ impl HostBackend {
         protect(&self.redactor, value)
     }
     pub fn request(&self, request: RequestEnvelope, provenance: Provenance) -> ReplyEnvelope {
+        self.mask(self.raw_request(request, provenance))
+            .unwrap_or_else(|error| ReplyEnvelope {
+                request_id: RequestId::new("redacted").unwrap(),
+                result: ReplyResult::Error(error),
+            })
+    }
+    // HTTP checks the original correlation id before its final egress hook.
+    fn raw_request(&self, request: RequestEnvelope, provenance: Provenance) -> ReplyEnvelope {
         let id = request.request_id.clone();
         let outcome = (|| {
             if self.closing.load(Ordering::SeqCst) {
@@ -171,14 +191,10 @@ impl HostBackend {
             Ok(p) => ReplyResult::Success(p),
             Err(e) => ReplyResult::Error(e),
         };
-        self.mask(ReplyEnvelope {
-            request_id: id.clone(),
-            result,
-        })
-        .unwrap_or_else(|e| ReplyEnvelope {
+        ReplyEnvelope {
             request_id: id,
-            result: ReplyResult::Error(e),
-        })
+            result,
+        }
     }
     pub fn subscription(
         &self,
@@ -191,13 +207,17 @@ impl HostBackend {
     }
 }
 impl WorkbenchBackend for HostBackend {
+    fn protect_output(&self, output: serde_json::Value) -> serde_json::Value {
+        protect_value(&self.redactor, output)
+    }
+
     async fn handle_request(
         &self,
         _: &WebSession,
         request: RequestEnvelope,
         provenance: Provenance,
     ) -> ReplyEnvelope {
-        self.request(request, provenance)
+        self.raw_request(request, provenance)
     }
     async fn subscribe(
         &self,
@@ -308,5 +328,20 @@ mod tests {
         backend.close();
         assert_eq!(backend.hello().status.state, CoreState::Draining);
         boot.shutdown().await.unwrap();
+    }
+    #[test]
+    fn output_guard_covers_identifiers_and_object_keys_without_changing_numbers() {
+        let canary = format!("sk-proj-{}", "B".repeat(64));
+        let output = protect_value(
+            &secret_guard::SecretRedactor::from_env(),
+            serde_json::json!({
+                canary.clone(): {"request_id":canary, "correlation_id":canary},
+                "nonce":"7", "count":3, "ordinary_id":"req-1"
+            }),
+        );
+        assert!(!output.to_string().contains("sk-proj-"), "{output}");
+        assert_eq!(output["nonce"], "7");
+        assert_eq!(output["count"], 3);
+        assert_eq!(output["ordinary_id"], "req-1");
     }
 }

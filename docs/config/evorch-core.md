@@ -79,6 +79,10 @@ sidebar の draft・archive 状態は書き換えない。モデルのない設�
 
 Unix/Web は同じ CommandHost と Projection を使う。`HostBackend` が reply、
 subscription snapshot、event を **送信前** に secret-guard で保護する。
+WorkbenchBackend の protect_output を JSON 応答の最終 layer と SSE data の
+シリアライズ時に呼び、adapter 合成のエラー・Ping/Pong・ResyncRequired も保護する。
+request/correlation/subscription id や JSON object key も例外にしない。Unix も
+handshake と最終 writer で同じ保護を適用し、早期 Subscribe reply の迂回を防ぐ。
 backend を通らない decode エラーも入力値を反射しない。未知 type・未知フィールド名・
 不正な値はエラー文に含めず、JSON syntax エラーは固定文言と行・列だけを返す。
 runtime の入力・既送信 prompt は transport が書き換えない。

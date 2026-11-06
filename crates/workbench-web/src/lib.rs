@@ -17,9 +17,10 @@
 //!   it to [`WebServer::start`]. This crate depends on no core crate.
 //! - **Provenance.** The ingress attaches `Human` × `Web`; a request body that
 //!   names a provenance is refused (the protocol rejects unknown fields).
-//! - **Secret masking.** Replies and events are relayed unchanged. Masking
-//!   with `secret-guard` is done by the backend before it returns a value;
-//!   this crate does not depend on `secret-guard` and never inspects text.
+//! - **Secret masking.** The backend owns the masking policy. Every JSON
+//!   response and SSE data item, including adapter-generated output, passes
+//!   through [`WorkbenchBackend::protect_output`] at final serialization.
+//!   This crate does not depend on `secret-guard` or define masking rules.
 //! - **Network.** Only loopback addresses can be bound. Remote access is
 //!   Tailscale Serve in front of the loopback port, whose name must be added
 //!   to [`WebServerConfig::allowed_hosts`]. There is no authentication of
@@ -37,6 +38,7 @@ pub mod assets;
 pub mod backend;
 pub mod config;
 pub mod http_error;
+mod output;
 mod security;
 mod server;
 pub mod shutdown;
