@@ -9,6 +9,7 @@ use reqwest::{
     header::{CONTENT_ENCODING, CONTENT_LENGTH, HeaderMap},
 };
 use serde_json::Value;
+use std::time::Duration;
 
 pub struct CheckedMcpStream {
     response: reqwest::Response,
@@ -45,6 +46,8 @@ pub(crate) fn classify(error: reqwest::Error) -> McpErrorKind {
     }
 }
 impl NetworkGuard {
+    /// Applies the MCP server's deadline to response headers and streamed body,
+    /// independently of the generic web guard's request timeout.
     pub async fn post_mcp_stream(
         &self,
         value: &str,
@@ -52,6 +55,7 @@ impl NetworkGuard {
         permit: &ApprovalPermit,
         headers: HeaderMap,
         body: &Value,
+        request_timeout: Duration,
     ) -> Result<CheckedMcpStream, McpErrorKind> {
         let bytes = serde_json::to_vec(body).map_err(|_| McpErrorKind::Configuration)?;
         if bytes.len() > MAX_REQUEST_BYTES {
@@ -72,7 +76,7 @@ impl NetworkGuard {
             .no_proxy()
             .danger_accept_invalid_certs(false)
             .connect_timeout(self.connect_timeout)
-            .timeout(self.request_timeout)
+            .timeout(request_timeout)
             .no_gzip()
             .no_brotli()
             .no_deflate()

@@ -182,6 +182,7 @@ impl HttpTransport {
                 &self.permit,
                 headers,
                 body,
+                self.timeout,
             )
             .await?;
         let status = stream.status().as_u16();
@@ -285,6 +286,7 @@ impl HttpTransport {
                 &self.permit,
                 headers,
                 body,
+                self.timeout,
             )
             .await?;
         if stream.status().as_u16() != 202 {

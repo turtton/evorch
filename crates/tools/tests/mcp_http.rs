@@ -167,6 +167,15 @@ async fn transport(
     permit: ApprovalPermit,
     cancel: CancelContext,
 ) -> Arc<HttpTransport> {
+    transport_with_timeout(url, guard, permit, cancel, Duration::from_secs(60)).await
+}
+async fn transport_with_timeout(
+    url: &str,
+    guard: Arc<NetworkGuard>,
+    permit: ApprovalPermit,
+    cancel: CancelContext,
+    request_timeout: Duration,
+) -> Arc<HttpTransport> {
     let ips = guard.inspect_mcp_destination(url).await.unwrap().ips;
     let destination = guard
         .approve_mcp_destination(url, &permit, &ips)
@@ -182,7 +191,7 @@ async fn transport(
             destination,
         },
         startup_timeout: Duration::from_secs(10),
-        request_timeout: Duration::from_secs(60),
+        request_timeout,
     };
     HttpTransport::connect(guard, server, permit, cancel).unwrap()
 }
@@ -306,6 +315,77 @@ async fn sse_finishes_on_matching_result_without_eof() {
 async fn http_legacy_golden_headers_and_session() {
     golden_http("legacy-http.json").await;
 }
+
+async fn configured_request_deadline(timeout_seconds: u64, respond: bool) {
+    // Real loopback I/O must not trigger Tokio's automatic jump to the next
+    // deadline. This event-held blocking task leaves advance() as the only clock driver.
+    let (release_clock, hold_clock) = oneshot::channel::<()>();
+    let clock_holder = tokio::task::spawn_blocking(move || {
+        let _ = hold_clock.blocking_recv();
+    });
+    let mut peer = peer().await;
+    let (_dir, permit) = permit(vec!["127.0.0.1".parse().unwrap()]);
+    let transport = transport_with_timeout(
+        &peer.url,
+        guard(),
+        permit,
+        CancelContext::default(),
+        Duration::from_secs(timeout_seconds),
+    )
+    .await;
+    let request = transport.exchange(probe(), CancelContext::default());
+    tokio::pin!(request);
+    let mut incoming = tokio::select! {
+        result = &mut request => panic!("request completed before the fixture responded: {result:?}"),
+        incoming = peer.requests.recv() => incoming.unwrap(),
+    };
+    tokio::time::advance(Duration::from_secs(if respond {
+        70
+    } else {
+        timeout_seconds - 1
+    }))
+    .await;
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(std::future::Future::poll(
+            request.as_mut(),
+            cx
+        )))
+        .await
+        .is_pending(),
+        "the configured deadline must not inherit the guard's 60-second default"
+    );
+    if respond {
+        reply(
+            &mut incoming,
+            200,
+            &[],
+            &json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        )
+        .await;
+        assert_eq!(request.await.unwrap().status, Some(200));
+    } else {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(request.await.unwrap_err().kind, McpErrorKind::Timeout);
+    }
+    let _ = release_clock.send(());
+    clock_holder.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_http_timeout_allows_a_response_after_seventy_seconds() {
+    configured_request_deadline(120, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_http_timeout_rejects_a_response_past_its_deadline() {
+    configured_request_deadline(120, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_http_timeout_can_be_shorter_than_the_guard_default() {
+    configured_request_deadline(5, false).await;
+}
+
 #[tokio::test]
 async fn local_exception_is_destination_bound() {
     let guard = guard();
