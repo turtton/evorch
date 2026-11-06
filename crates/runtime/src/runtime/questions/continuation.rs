@@ -3,6 +3,70 @@ use crate::restore::{RestoredState, RunRestoreDescriptor};
 use crate::{RunConfig, RunRestoreFailure};
 use event_bus::{AgentMessage, AgentMessageKind};
 
+/// Why an answered child could not be continued. Only the caller that can
+/// repair the cause may retry; a deliberate refusal must never be retried.
+#[derive(Debug)]
+pub(crate) enum ChildResumeError {
+    /// Stop, cancel, ownership, identity or corrupt-context decisions. The answer
+    /// is saved and retrying the same continuation cannot change the outcome.
+    Refused(String),
+    /// A storage read or write failed before any child state changed. The same
+    /// continuation can succeed once storage recovers.
+    Retryable(String),
+}
+
+impl std::fmt::Display for ChildResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(message) | Self::Retryable(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for ChildResumeError {
+    fn from(message: String) -> Self {
+        Self::Refused(message)
+    }
+}
+
+impl From<&str> for ChildResumeError {
+    fn from(message: &str) -> Self {
+        Self::Refused(message.to_owned())
+    }
+}
+
+fn storage_is_retryable(error: &storage::StorageError) -> bool {
+    use storage::StorageError as E;
+    matches!(
+        error,
+        E::Sqlite(_) | E::Io(_) | E::WriterClosed | E::StaleMutation
+    )
+}
+
+fn read_failure(error: storage::StorageError) -> ChildResumeError {
+    let message = error.to_string();
+    if storage_is_retryable(&error) {
+        ChildResumeError::Retryable(message)
+    } else {
+        ChildResumeError::Refused(message)
+    }
+}
+
+fn save_failure(error: storage::thread_index::SnapshotApiError) -> ChildResumeError {
+    use storage::thread_index::SnapshotApiError as E;
+    let retryable = match &error {
+        E::RevisionConflict => true,
+        E::Storage(error) => storage_is_retryable(error),
+        _ => false,
+    };
+    let message = crate::restore::provenance::save_failure_reason(error);
+    if retryable {
+        ChildResumeError::Retryable(message)
+    } else {
+        ChildResumeError::Refused(message)
+    }
+}
+
 struct FinalizingChild {
     phase: tokio::sync::watch::Receiver<AgentRunPhase>,
     caller_cancel: tokio::sync::watch::Receiver<crate::RunInterrupt>,
@@ -15,7 +79,7 @@ impl AgentRuntime {
         caller: RunId,
         child: RunId,
         question: &UserQuestion,
-    ) -> Result<(), String> {
+    ) -> Result<(), ChildResumeError> {
         self.deny_deleted_run(&child.to_string())
             .map_err(|deleted| deleted.to_string())?;
         while let Some(mut waiting) = self.try_resume_answered_child(caller, child, question)? {
@@ -42,7 +106,7 @@ impl AgentRuntime {
         caller: RunId,
         child: RunId,
         question: &UserQuestion,
-    ) -> Result<Option<FinalizingChild>, String> {
+    ) -> Result<Option<FinalizingChild>, ChildResumeError> {
         let store = self
             .shared
             .run_store
@@ -108,7 +172,7 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())?;
         let bundle = store
             .restore_bundle(child)
-            .map_err(|error| error.to_string())?
+            .map_err(read_failure)?
             .ok_or("answer saved, but the finished child has no saved context")?;
         let mut record = bundle.record.clone();
         let mut descriptor: RunRestoreDescriptor =
@@ -204,7 +268,7 @@ impl AgentRuntime {
         let saved = store
             .handle
             .save_snapshot_bundle(&write)
-            .map_err(crate::restore::provenance::save_failure_reason)?;
+            .map_err(save_failure)?;
         restored.snapshot_revision.commit(saved.snapshot_revision);
         Self::install_restored_execution(
             child,
@@ -238,6 +302,6 @@ impl AgentRuntime {
     }
 }
 
-fn refused(reason: &RunRestoreFailure) -> String {
-    format!("answer saved, but {reason}")
+fn refused(reason: &RunRestoreFailure) -> ChildResumeError {
+    ChildResumeError::Refused(format!("answer saved, but {reason}"))
 }

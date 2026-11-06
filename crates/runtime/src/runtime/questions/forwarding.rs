@@ -1,4 +1,5 @@
 //! Forwarding changes responder routing, never question ownership or inheritance.
+use super::continuation::ChildResumeError;
 use super::*;
 use crate::lanes::LaneError;
 use event_bus::lane::{LaneNotificationKind, QuestionRouting};
@@ -88,6 +89,9 @@ impl AgentRuntime {
     /// receipt but before this hook must not lose the continuation behind ACK repair.
     /// Caller authority, direct ownership, Stop and snapshot-consumed fences are
     /// rechecked by resume_answered_child; inheritance alone never renews authority.
+    /// A deliberate refusal is only reported, because retrying cannot change it.
+    /// A retryable storage failure is returned after the scan so that the caller
+    /// keeps the delivery un-ACKed and the same receipt drives the continuation again.
     pub(crate) async fn resume_forwarded_lane_answers(
         &self,
         caller: RunId,
@@ -97,10 +101,11 @@ impl AgentRuntime {
             return Ok(());
         };
         let mut after = String::new();
+        let mut retryable = None;
         loop {
             let notices = store.handle.lane_inbox(thread.to_owned(), after.clone())?;
             if notices.is_empty() {
-                return Ok(());
+                return retryable.map_or(Ok(()), Err);
             }
             after = notices
                 .last()
@@ -148,18 +153,26 @@ impl AgentRuntime {
                     };
                     // Root-owned questions need no child continuation; live roots
                     // already consume question_version through flush_user_answers.
-                    if self
+                    if !self
                         .entry(child)
                         .is_ok_and(|entry| entry.parent == Some(caller))
-                        && let Err(error) =
-                            self.resume_answered_child(caller, child, &question).await
                     {
-                        self.lane_state_changed(
-                            thread,
-                            event_bus::DiagnosticSeverity::Warning,
-                            "lane_answer_continuation_unavailable",
-                            &error,
-                        );
+                        continue;
+                    }
+                    match self.resume_answered_child(caller, child, &question).await {
+                        Ok(()) => {}
+                        Err(ChildResumeError::Retryable(error)) => {
+                            retryable
+                                .get_or_insert_with(|| LaneError::new("storage_failed", error));
+                        }
+                        Err(ChildResumeError::Refused(error)) => {
+                            self.lane_state_changed(
+                                thread,
+                                event_bus::DiagnosticSeverity::Warning,
+                                "lane_answer_continuation_unavailable",
+                                &error,
+                            );
+                        }
                     }
                 }
             }

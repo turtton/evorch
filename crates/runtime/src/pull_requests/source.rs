@@ -302,7 +302,7 @@ impl GhSource {
     }
 }
 
-fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
+pub(super) fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
     key.normalized().map_err(|_| {
         if key.host.trim().eq_ignore_ascii_case("github.com") {
             FetchError::InvalidReference("malformed repository or number".into())
@@ -310,6 +310,27 @@ fn checked_key(key: &PullRequestKey) -> Result<PullRequestKey, FetchError> {
             FetchError::InvalidHost(clean_text(&format!("host {:?}", key.host), 64))
         }
     })
+}
+
+/// A `gh` process with the environment every `gh` call here runs in: non-interactive, no
+/// pager or colour, and no variable that could point it at another host. `stdout_limit`
+/// bounds what is read; the stderr limit is [`GH_STDERR_LIMIT`].
+pub(super) fn gh_process_spec(
+    program: &str,
+    args: Vec<String>,
+    stdout_limit: usize,
+) -> ProcessSpec {
+    ProcessSpec {
+        program: program.to_owned(),
+        args,
+        env_remove: ENV_REMOVE.iter().map(|name| (*name).to_owned()).collect(),
+        env_set: ENV_SET
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        stdout_limit,
+        stderr_limit: GH_STDERR_LIMIT,
+    }
 }
 
 /// The argument vector of `gh pr view` for `key` (a normalized key).
@@ -360,7 +381,7 @@ impl PullRequestSource for GhSource {
 }
 
 /// What a failed `gh` run means, from its exit code and (bounded, redacted) stderr.
-fn classify_failure(output: &ProcessOutput) -> FetchError {
+pub(super) fn classify_failure(output: &ProcessOutput) -> FetchError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let lower = stderr.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));

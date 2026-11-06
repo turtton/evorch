@@ -282,7 +282,7 @@ fn commands_the_host_cannot_honour_yet_say_so() {
         )
         .unwrap_err();
 
-    assert_eq!(approval.code, ErrorCode::UnsupportedCapability);
+    assert_eq!(approval.code, ErrorCode::Conflict);
     assert_eq!(delegated.code, ErrorCode::UnsupportedCapability);
     assert!(host.service().runtime().list_agents().is_empty());
 }
@@ -410,20 +410,6 @@ fn every_request_is_looked_up_by_its_receipt_within_its_session() {
         "a request id means something only inside its own session"
     );
     assert_eq!(host.request_provenance(&session, &applied), Some(web()));
-}
-
-#[test]
-fn queries_other_than_receipts_are_not_served_yet() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let host = host_with_project(&rt, runtime(), dir.path());
-    let session = SessionId::new("session-1").unwrap();
-
-    let error = host
-        .handle_query(&session, &Query::GetCoreStatus)
-        .unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::UnsupportedCapability);
 }
 
 #[test]

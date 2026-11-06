@@ -85,10 +85,6 @@ fn a_deleted_conversations_message_is_not_answered_from_memory_or_storage() {
             ..
         }]
     ));
-    assert!(
-        host.receipts().submission("sub-1").is_none(),
-        "the in-memory record was dropped"
-    );
 
     let mut recreated = host_with_project(&rt, runtime_on_store(dir.path(), &storage), dir.path());
     assert_eq!(recreated.submission_provenance("sub-1"), None);

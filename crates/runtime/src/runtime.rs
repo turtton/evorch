@@ -2314,6 +2314,30 @@ impl AgentRuntime {
         }
     }
 
+    /// Core-side read projection access. No bodies are resolved unless the reader asks.
+    pub fn with_storage_reader<T>(
+        &self,
+        read: impl FnOnce(&storage::Database) -> Result<T, storage::StorageError>,
+    ) -> Result<Option<T>, storage::StorageError> {
+        self.shared
+            .run_store
+            .get()
+            .map(|store| store.with_database(read))
+            .transpose()
+    }
+
+    /// Subscribe to local durable event commits without changing persistence.
+    pub fn observe_event_commits(&self, observer: &Arc<dyn Fn() + Send + Sync>) {
+        if let Some(store) = self.shared.run_store.get() {
+            store.handle.observe_event_commits(observer);
+        }
+    }
+
+    /// The core event bus, shared by host projections and the approval registry.
+    pub fn event_bus(&self) -> Arc<EventBus> {
+        Arc::clone(&self.shared.bus)
+    }
+
     /// Whether this runtime persists runs. Without a run store nothing a host records
     /// outlives the process, and nothing is ever deleted by retention.
     pub fn has_run_store(&self) -> bool {

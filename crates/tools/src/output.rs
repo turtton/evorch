@@ -3,13 +3,14 @@
 //! A fixed number of independently locked slots bounds disk use across restarts
 //! and processes. Replacing a slot removes at most one bounded file. Paths carry
 //! unique IDs, so an expired reference never silently reads another command's log.
+//! The ring cursor is stored under the root and locked across processes: a new
+//! process must not start over at slot zero and expire a freshly returned path.
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::ToolResult;
 use secret_guard::SecretRedactor;
@@ -257,14 +258,9 @@ pub fn artifact_reference(text: &str) -> Option<&str> {
     text.ends_with(']').then_some(&text[index + 1..])
 }
 
-struct OutputStore {
-    next: AtomicUsize,
-}
+struct OutputStore;
 fn store() -> &'static OutputStore {
-    static STORE: OnceLock<OutputStore> = OnceLock::new();
-    STORE.get_or_init(|| OutputStore {
-        next: AtomicUsize::new(0),
-    })
+    &OutputStore
 }
 
 fn root_from(base: Option<&OsStr>, euid: u32) -> io::Result<PathBuf> {
@@ -328,6 +324,72 @@ fn locked_slot(root: &Path, index: usize) -> io::Result<(PathBuf, File)> {
     lock.try_lock().map_err(io::Error::other)?;
     Ok((dir, lock))
 }
+
+fn lock_cursor(cursor: &File) -> io::Result<()> {
+    // The sandbox can lock this file through its read-only output mount. Allow
+    // ordinary writers time to finish, but never wait indefinitely for a holder
+    // that refuses to release it, especially while a shell job holds its mutex.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        match cursor.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "temporary output cursor is busy",
+            ));
+        }
+        std::thread::sleep(backoff.min(remaining));
+        backoff = (backoff * 2).min(Duration::from_millis(25));
+    }
+}
+
+fn next_slot(root: &Path) -> io::Result<(PathBuf, File)> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut cursor = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(root.join(".next"))?;
+    let meta = cursor.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != rustix::process::geteuid().as_raw()
+        || meta.mode() & 0o077 != 0
+        || meta.nlink() != 1
+        || meta.len() > 1
+    {
+        return Err(io::Error::other("invalid temporary output cursor file"));
+    }
+    lock_cursor(&cursor)?;
+    let mut next = [0];
+    let first = match cursor.read(&mut next)? {
+        0 => 0,
+        _ => usize::from(next[0]),
+    };
+    if first >= SLOTS {
+        return Err(io::Error::other("invalid temporary output cursor index"));
+    }
+    for offset in 0..SLOTS {
+        let index = (first + offset) % SLOTS;
+        if let Ok((dir, lock)) = locked_slot(root, index) {
+            cursor.rewind()?;
+            cursor.write_all(&[((index + 1) % SLOTS) as u8])?;
+            // Release the allocator before writing bytes, but keep this slot
+            // locked until save_bytes finishes replacing its artifact.
+            return Ok((dir, lock));
+        }
+    }
+    Err(io::Error::other("all temporary output slots are busy"))
+}
+
 /// Store bytes such as an image in a temporary slot; it can expire like logs.
 pub fn save_file(bytes: &[u8], extension: &str) -> io::Result<PathBuf> {
     let root = output_root()?;
@@ -352,29 +414,23 @@ impl OutputStore {
         extension: &str,
     ) -> io::Result<(PathBuf, usize)> {
         use std::os::unix::fs::OpenOptionsExt;
-        let first = self.next.fetch_add(1, Ordering::Relaxed) % SLOTS;
-        for offset in 0..SLOTS {
-            let Ok((dir, _lock)) = locked_slot(root, (first + offset) % SLOTS) else {
-                continue;
-            };
-            // Each slot contains one artifact and its lock; no recursive deletion.
-            for entry in std::fs::read_dir(&dir)?.take(3) {
-                let entry = entry?;
-                if entry.file_name() != ".lock" {
-                    std::fs::remove_file(entry.path())?;
-                }
+        let (dir, _lock) = next_slot(root)?;
+        // Each slot contains one artifact and its lock; no recursive deletion.
+        for entry in std::fs::read_dir(&dir)?.take(3) {
+            let entry = entry?;
+            if entry.file_name() != ".lock" {
+                std::fs::remove_file(entry.path())?;
             }
-            let path = dir.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)?;
-            let end = bytes.len().min(CAPTURE_BYTES);
-            file.write_all(&bytes[..end])?;
-            return Ok((path, end));
         }
-        Err(io::Error::other("all temporary output slots are busy"))
+        let path = dir.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        let end = bytes.len().min(CAPTURE_BYTES);
+        file.write_all(&bytes[..end])?;
+        Ok((path, end))
     }
 }
 fn start_cleanup(root: PathBuf) {
@@ -583,19 +639,224 @@ mod tests {
         assert_eq!(capture.bytes, (CAPTURE_BYTES + 111) as u64);
     }
     #[test]
+    fn independent_processes_retain_artifacts_until_the_shared_ring_wraps() {
+        const CHILD: &str = "EVORCH_OUTPUT_RING_CHILD";
+        const TEST: &str =
+            "output::tests::independent_processes_retain_artifacts_until_the_shared_ring_wraps";
+        if let Some(label) = std::env::var_os(CHILD) {
+            let path = save_file(label.as_encoded_bytes(), "txt").unwrap();
+            let base = PathBuf::from(std::env::var_os("EVORCH_OUTPUT_DIR").unwrap());
+            std::fs::write(base.join(label), path.as_os_str().as_encoded_bytes()).unwrap();
+            return;
+        }
+
+        let base = tempfile::tempdir().unwrap();
+        let save_in_new_process = |label: &str| {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, label)
+                .env("EVORCH_OUTPUT_DIR", base.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "writer {label} failed");
+            PathBuf::from(std::fs::read_to_string(base.path().join(label)).unwrap())
+        };
+
+        // Force save(A) -> save(B) -> read(A), without timing or scheduler
+        // assumptions. A process-local cursor starts at slot zero every time.
+        let first = save_in_new_process("first");
+        let second = save_in_new_process("second");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second");
+        let root = first.parent().unwrap().parent().unwrap();
+        for _ in 2..SLOTS {
+            store().save(root, "filler").unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+        save_in_new_process("wrap");
+        assert!(!first.exists(), "the oldest reference expires at capacity");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second");
+    }
+
+    #[test]
+    fn concurrent_processes_allocate_distinct_slots() {
+        const CHILD: &str = "EVORCH_OUTPUT_CONCURRENT_CHILD";
+        const TEST: &str = "output::tests::concurrent_processes_allocate_distinct_slots";
+        if let Ok(label) = std::env::var(CHILD) {
+            // A pipe gates all writers until the parent has spawned them.
+            std::io::stdin().read_exact(&mut [0]).unwrap();
+            let path = save_file(label.as_bytes(), "txt").unwrap();
+            let base = PathBuf::from(std::env::var_os("EVORCH_OUTPUT_DIR").unwrap());
+            std::fs::write(base.join(label), path.as_os_str().as_encoded_bytes()).unwrap();
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut children = (0..8)
+            .map(|index| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, index.to_string())
+                    .env("EVORCH_OUTPUT_DIR", base.path())
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for child in &mut children {
+            child.stdin.take().unwrap().write_all(b"x").unwrap();
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success(), "writer failed");
+        }
+        let mut slots = std::collections::HashSet::new();
+        for index in 0..8 {
+            let label = index.to_string();
+            let path = PathBuf::from(std::fs::read_to_string(base.path().join(&label)).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), label);
+            assert!(slots.insert(path.parent().unwrap().to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_read_only_cursor_lock_cannot_stall_saves_and_is_released_on_process_death() {
+        use std::io::BufRead;
+        use std::os::unix::process::ExitStatusExt;
+
+        const CHILD: &str = "EVORCH_OUTPUT_CURSOR_HOLDER";
+        const READY: &str = "output cursor locked";
+        const TEST: &str = "output::tests::a_read_only_cursor_lock_cannot_stall_saves_and_is_released_on_process_death";
+        if let Some(root) = std::env::var_os(CHILD) {
+            // A read-only sandbox mount does not prevent flock(LOCK_EX).
+            let cursor = File::open(Path::new(&root).join(".next")).unwrap();
+            cursor.lock().unwrap();
+            println!("\n{READY}");
+            std::io::stdout().flush().unwrap();
+            let _ = std::io::stdin().read_exact(&mut [0]);
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let (first, _) = store().save(root.path(), "first").unwrap();
+        let cursor_path = root.path().join(".next");
+        let before = std::fs::read(&cursor_path).unwrap();
+        let entries = std::fs::read_dir(root.path()).unwrap().count();
+        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, root.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut control = std::io::BufReader::new(holder.stdout.take().unwrap());
+        let ready = (&mut control).lines().any(|line| line.unwrap() == READY);
+        assert!(ready, "holder exited before acquiring the read-only lock");
+
+        // The holder cannot release its lock until this save returns: a blocking
+        // allocator forms a dependency cycle, not a test-time deadline failure.
+        let error = store().save(root.path(), "blocked").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(std::fs::read(&cursor_path).unwrap(), before);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), entries);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+
+        holder.kill().unwrap();
+        assert!(holder.wait().unwrap().signal().is_some());
+        drop(control);
+        let (after, _) = store().save(root.path(), "after process death").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(after).unwrap(),
+            "after process death"
+        );
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
+    }
+
+    #[test]
+    fn allocation_skips_busy_slots_and_fails_without_expiring_them_when_full() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, lock) = locked_slot(root.path(), 0).unwrap();
+        let held = dir.join("held.txt");
+        std::fs::write(&held, "held").unwrap();
+        let (saved, _) = store().save(root.path(), "saved").unwrap();
+        assert_ne!(saved.parent().unwrap(), dir);
+        assert_eq!(std::fs::read_to_string(&held).unwrap(), "held");
+
+        let mut locks = vec![lock];
+        for index in 1..SLOTS {
+            locks.push(locked_slot(root.path(), index).unwrap().1);
+        }
+        assert!(store().save(root.path(), "no room").is_err());
+        assert_eq!(std::fs::read_to_string(&held).unwrap(), "held");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "saved");
+        drop(locks);
+        assert!(store().save(root.path(), "unlocked").is_ok());
+    }
+
+    #[test]
+    fn cursor_rejects_symlinks_hardlinks_public_files_and_invalid_data() {
+        use std::os::unix::fs::PermissionsExt;
+        for case in [
+            "symlink",
+            "hardlink",
+            "directory",
+            "public",
+            "oversized",
+            "index",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let target = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(target.path(), [0]).unwrap();
+            let cursor = root.path().join(".next");
+            match case {
+                "symlink" => std::os::unix::fs::symlink(target.path(), &cursor).unwrap(),
+                "hardlink" => std::fs::hard_link(target.path(), &cursor).unwrap(),
+                "directory" => std::fs::create_dir(&cursor).unwrap(),
+                "public" => {
+                    std::fs::write(&cursor, [0]).unwrap();
+                    std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                _ => {
+                    std::fs::write(
+                        &cursor,
+                        if case == "index" {
+                            vec![SLOTS as u8]
+                        } else {
+                            vec![0; 2]
+                        },
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+            }
+            assert!(store().save(root.path(), "blocked").is_err(), "{case}");
+            assert_eq!(std::fs::read(target.path()).unwrap(), [0], "{case}");
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1, "{case}");
+        }
+    }
+
+    #[test]
     fn rotating_slots_bound_disk_and_expire_unique_paths() {
         let root = tempfile::tempdir().unwrap();
-        let store = OutputStore {
-            next: AtomicUsize::new(0),
-        };
+        let store = OutputStore;
         let (first, _) = store.save(root.path(), "first").unwrap();
         for _ in 0..SLOTS {
             store.save(root.path(), "new").unwrap();
         }
         assert!(!first.exists());
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), SLOTS);
-        for dir in std::fs::read_dir(root.path()).unwrap() {
-            assert_eq!(std::fs::read_dir(dir.unwrap().path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), SLOTS + 1);
+        assert_eq!(
+            std::fs::metadata(root.path().join(".next")).unwrap().len(),
+            1
+        );
+        for index in 0..SLOTS {
+            assert_eq!(
+                std::fs::read_dir(root.path().join(index.to_string()))
+                    .unwrap()
+                    .count(),
+                2
+            );
         }
     }
     #[test]
