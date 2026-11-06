@@ -72,6 +72,7 @@ fn is_managed_header(lower: &str) -> bool {
                 | "content-type"
                 | "content-encoding"
                 | "accept"
+                | "accept-encoding"
                 | "transfer-encoding"
                 | "connection"
                 | "keep-alive"

@@ -649,6 +649,8 @@ fn validation_rejects_bad_definitions() {
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nmcp-method = \"x\"",
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nMcp-Param-Foo = \"x\"",
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nContent-Length = \"1\"",
+        "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nAccept-Encoding = \"gzip\"",
+        "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\naCcEpT-EnCoDiNg = \"identity\"",
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\n\"Bad Name\" = \"x\"",
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nX-A = \"a\\r\\nX-B: b\"",
         "type = \"http\"\nurl = \"https://x.example\"\n[servers.s.headers]\nX-A = \"1\"\nx-a = \"2\"",
