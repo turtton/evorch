@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。Phase 2 は未着手。
+Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。Phase 2 に着手した（2026-11-06）。CI 失敗時の通知の仕様を確定し、本 ADR の Decision に反映した。実装は段階 T → A → (B ∥ C) → D → E の順で進める。
 
 ## Context
 
@@ -67,23 +67,58 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 - 次の契機でも取得する。GUI の更新操作、審査時のオンデマンド取得、agent の push や `gh pr` 系コマンドの完了直後。
 - テストのため trigger / notify 駆動にし、固定 sleep に依存しない（[ADR 0042](0042-event-driven-waits.md) と同じ方針）。
 
-### CI 失敗時の通知（PR ごとの auto fix トグル）
+### CI 失敗時の通知（PR ごとの auto fix）
 
-- PR ごとに GUI 上の **「auto fix」トグル**（既定オフ）を持つ。これは Claude Desktop の auto fix の挙動（利用者から聞いたもの）に倣う。
-- **オンの PR**: CI が失敗するとハーネスが自動で agent に通知する。
-  - 実行中・待機中の run には、既存の `deliver_notice` を流用する。
-  - 終了済みの run には、既存の held → wake の経路に通知用のキューを足して起こす。
-- **オフの PR**: GUI に表示するだけ。人が「agent に送る」操作で手動通知できる。
-- 当初案の「全体設定による自動再開」は、この PR ごとのトグルに統合する。
-- 歯止め:
-  - 同じ (repo, PR, head SHA) への通知は 1 回。
-  - PR ごとの回数上限と cooldown（叩き台は 3 回・10 分。既定値は未決）。
-  - 会話の自動 wake 上限（`AUTO_WAKE_LIMIT`）も適用する。
-  - operator が止めた run は起こさない。
-  - 外部 push と思われる head は自動通知せず、GUI に表示するだけ（判定方法は未決）。
-- 通知の表記は `[harness-notice kind=pr_checks_failed pr=#… head=…]` に、事実と、未信頼の CI ログ抜粋の囲みを続ける。
-- 通知は権限を与えない。審査の実ユーザー証跡にも入れない（通知の本文が `real_user_requests` になってはならない）。
+#### 対象と設定
+
+- PR ごとに GUI 上の **auto fix トグル**（既定オフ）を持つ。これは Claude Desktop の auto fix の挙動（利用者から聞いたもの）に倣う。
+- 全体スイッチ `[pull_requests] auto_fix_enabled` を持つ（既定 true）。自動通知だけを止め、手動通知は止めない。変更は trusted な層でのみ行える。
+- 設定と上限は PR 全体で共有する。
+- 通知先は、auto fix をオンにした thread とする。変更するときは利用者に確認する。継承によっては変わらない。Unlink・archive・削除されたら停止する。
+- **オンの PR**: CI が失敗するとハーネスが自動で agent に通知する。通知は、agent の push と照合できた head に限る（後述）。
+- **オフの PR**: GUI に表示するだけ。人が「agent に送る」操作で手動通知できる。auto がオフのときは transcript にカードを出さない。
+- 通知の対象は CI 失敗だけとし、レビューコメントは含めない。
+- 他の check が pending の間、auto は待つ。手動は即時に送れる。このため、GUI が Failing と表示していても、auto fix がまだ動いていない期間がある。この差は仕様である。
+
+#### 上限と停止
+
+- 同じ (repo, PR, head SHA) への通知は、手動と自動を合わせて 1 回まで。
+- PR ごとの通知は 3 回まで、cooldown は 10 分。回数は採用時に数え、予約も含める。
+- 上限に達したら auto fix を自動でオフにする。再開は明示的なリセットだけで行い、SHA の履歴は消さない。
+- wake の歯止めは、ADR 0044 の「発生元ごとの、進展のない wake 20 回」を使う。held 側の `AUTO_WAKE_LIMIT` は使わない。source key は PR 単位とする。
+  - guard がリセットされるのは、実ユーザーの入力か、明示的な Resume があったときだけ。head の更新、ACK、poll ではリセットしない。
+- operator が Stop した run は、自動で起こさない。Stop は durable Stop を使う。Stop のあとに手動で送るには、明示的な Resume が必要。
+
+#### push 照合
+
+- 自動通知するのは、agent の push と照合できた head だけ。次の両方を満たすとき、その head を agent 由来とみなす。
+  1. 前回採用した head 以降に、同じ thread で publishing の成功完了を観測している。同期 shell では exit_code == 0 を優先して判定する。
+  2. 採用時の local_head が、新しい PR head と一致する。
+- Link 時の緩和: Link する時点で、同じ thread の publishing の成功がすでに観測されていて、かつ local HEAD が PR の head と一致していれば、その head を agent 由来とみなす。Link 前の push（`gh pr create` の直後に候補から Link する流れなど）で、最初の CI 失敗が自動通知されないことを避けるためである。
+- 上記に当てはまらない head は unknown とし、自動通知しない。unknown の head も GUI の表示と手動送信は使える。
+- 再起動後で、まだ予約していない head は unknown として扱う。
+- これは actor の証明ではなく、安全側に倒した推定である。
+
+#### 配送
+
+- Running、Waiting、Done のいずれの run にも、ADR 0044 の durable lane outbox を harness notice 用に一般化したもので配送する。held → wake を拡張する案と、PR 用に `deliver_notice` を流用する案は採らない。
+- 発生源の種別（Lane / PullRequestChecksFailed）を区別する。PR を偽の lane として扱わない。
+- claim は 1 種類の source だけで構成する。
+- notice に安定した ID を持たせる。
+- flush の境界で、snapshot・receipt・PR のカウンタ・guard を 1 つの transaction で採用する。
+- Done の run は、host 側で restore してから起こす。復元できない場合は typed NACK を返す。
+- receipt の provenance は HarnessNotice とし、実ユーザーの証跡には入れない。通知の本文が `real_user_requests` になってはならない。
+- 通知の表記は `[harness-notice kind=pr_checks_failed pr=#… head=…]` に、事実と、未信頼の CI ログ抜粋の囲みを続ける。通知は権限を与えない。
 - キャッシュ契約: 通知は会話の末尾に追記するだけにする。
+
+#### CI ログと表示用タイトル
+
+- CI ログは最大 3 run まで取得する。生出力は 1 MiB まで、抜粋は 8 KiB / 200 行まで、通知全体は 16 KiB まで。取得は 20 秒で打ち切る。
+- SecretGuard は切り詰める前に適用する。
+- `<ci-log-data>` の内側はエスケープする。
+- provider_id はそのまま使わない。run と head の対応を確かめたものだけを使う。
+- PR のタイトルは GUI 専用の display 型に入れる。facts や審査には含めない。SecretGuard を適用し、単一行にして上限をかける。
+- UI 上で不要な注意書きは出さない（「外部データ — 信頼しないこと」、「ユーザー発言ではない」など）。
 
 ### 審査への供給
 
@@ -110,22 +145,28 @@ PR を使うスレッドでは、CI の結果、head SHA、マージ状態、レ
 
 - `[pull_requests] enabled = false`（opt-in）。
 - ほかに、ポーリング間隔、ログ抜粋の上限、審査への供給の有無を設定にする。名前と既定値は実装時に決める。
-- auto fix は全体設定ではなく PR ごとのトグルとする。全体で無効化するスイッチを持つかは未決。
+- auto fix は PR ごとのトグルとする。自動通知だけを止める全体スイッチ `[pull_requests] auto_fix_enabled`（既定 true、trusted な層でのみ変更可）を持つ。
 
 ### 段階
 
 - **Phase 1**: 紐づけ（明示と候補の提示）、取得、GUI 表示、審査への事実の供給。
-- **Phase 2**: CI 失敗の通知。手動送信と、PR ごとの auto fix による自動通知（終了済み run の wake を含む）。旧案の Phase 3（全体設定による自動再開）は Phase 2 に統合した。
+- **Phase 2**: CI 失敗の通知。手動送信と、PR ごとの auto fix による自動通知（終了済み run の wake を含む）。旧案の Phase 3（全体設定による自動再開）は Phase 2 に統合した。PR 構成は次のとおり。
+  - **T**: タイトルの取得と GUI 専用の display 型。
+  - **A**: storage と outbox の一般化（ADR 0044 の durable outbox を harness notice 用に一般化し、PR 単位の guard と receipt を含める）。
+  - **B**: ログの source（CI ログの取得、上限、SecretGuard、エスケープ、run と head の対応）。**C**: 配送（Running・Waiting・Done、host の restore、typed NACK、durable Stop）。B と C は並行して進める（B ∥ C）。
+  - **D**: coordinator（push 照合、auto fix の判定、手動送信、回数上限と cooldown、全体スイッチ、Link 時の緩和）。
+  - **E**: GUI（PR バー、CI 失敗時の展開、auto fix トグル、harness カード、Notifications）。
+  - 順序は T → A → (B ∥ C) → D → E とする。
 
 ### GUI
 
 最新の情報と操作は画面下部に置く。mock で 3 案を比べ、案 A を採る。
 
-- **PR バー**: 会話の入力欄（composer）の直上に置く。折りたたみ時は 1 行で、展開すると上方向に伸びる。上限は会話欄の 40% とし、狭い画面は想定しない。CI 失敗時は展開する。check の一覧、head SHA、マージ状態を表示し、操作行には更新と「Unlink」を置く（「Link…」は置かず、新規・再 Link はスレッド名の右クリック「Link PR…」と候補チップで行う）。「agent に送る」操作と auto fix トグルは Phase 2 の機能のため Phase 1 では表示しない（Phase 2 では CI 失敗時に展開し、auto fix 動作中は畳む）。
+- **PR バー**: 会話の入力欄（composer）の直上に置く。折りたたみ時は 1 行で、展開すると上方向に伸びる。上限は会話欄の 40% とし、狭い画面は想定しない。CI 失敗時は展開する。check の一覧、head SHA、マージ状態を表示し、操作行には更新と「Unlink」を置く（「Link…」は置かず、新規・再 Link はスレッド名の右クリック「Link PR…」と候補チップで行う）。「agent に送る」操作と auto fix トグルは Phase 2 の機能のため Phase 1 では表示しない（Phase 2 では CI 失敗時に展開し、auto fix 動作中は畳む）。PR バーには番号とタイトルを表示し、branch は詳細に回す。
   - PR はスレッド単位なので、subagent の transcript を開いている間も PR バーを表示する。
 - **スレッド一覧**: 行に PR バッジ（#番号と ✓ / ✗ / ● / merged）を出す。
 - **候補 PR**: `gh pr create` の出力の直下にチップ（Link PR / 無視）を出す。手動の「Link PR…」は、スレッド名の右クリックメニューに加える。
-- **ハーネスの通知**: transcript では `harness` タグ付きのカードにし、ユーザーの発言や agent のメッセージと区別する。UI 上に表示する必要のない注意書き（「外部データ — 信頼しないこと」の明記や「ユーザー発言ではない」等の注記）は出さない。未信頼テキストの区別は agent / 審査への入力側（囲み・型）で保つ。
+- **ハーネスの通知**: transcript では `harness` タグ付きのカードにし、ユーザーの発言や agent のメッセージと区別する。UI 上で不要な注意書き（「外部データ — 信頼しないこと」、「ユーザー発言ではない」など）は出さない。未信頼テキストの区別は agent / 審査への入力側（囲み・型）で保つ。
 - **Notifications**: CI failed、Merged、auto fix の上限到達を加える。
 - **テーマ**: merged 用の紫は Graphite `#a371f7`、Tokyo Night `#bb9af7` に決定。
 - 細部（ピクセル等）は実装時に決める。
@@ -146,7 +187,7 @@ Phase 1 の実装を通じて次の仕様を確定した。
 - レビュー情報は reviewDecision のみ（本文と件数は扱わない）。
 - 審査の anchor は lifecycle_revision。
 - web/upload の審査は snapshot だけを使う。
-- PR バーには、タイトルの代わりに head branch を表示する（タイトルは取得していない）。
+- PR バーには head branch を表示していた（タイトルは取得していなかった）。Phase 2（T）でタイトルを取得し、PR バーは番号とタイトルを表示する。branch は詳細に回す。
 
 ## Consequences
 
@@ -154,7 +195,7 @@ Phase 1 の実装を通じて次の仕様を確定した。
 - `gh` の認証状態に依存する。未認証や失敗は Diagnostic にし、事実は stale または不在として扱う。
 - ポーリングの取得頻度は GitHub API の rate limit に影響する。間隔と backoff で抑える。
 - 新テーブルと、runtime の定期取得、審査入力の項目、GUI の画面が増える。
-- 自動通知は agent の実行を増やす。歯止め（SHA 単位の 1 回、回数上限、cooldown、`AUTO_WAKE_LIMIT`）と PR ごとの既定オフで抑える。
+- 自動通知は agent の実行を増やす。歯止め（SHA 単位の 1 回、PR ごとの 3 回上限と 10 分の cooldown、発生元ごとの wake guard 20 回）、PR ごとの既定オフ、全体スイッチで抑える。
 
 ## Alternatives
 
@@ -166,11 +207,7 @@ Phase 1 の実装を通じて次の仕様を確定した。
 
 ## 未決事項
 
-- 通知の回数上限と cooldown の既定値（叩き台は 3 回・10 分）。
-- 外部 push と思われる head の判定方法。
 - 複数ディレクトリがあるときの、PR とチェックアウトの照合方法の詳細。
-- auto fix を全体で無効化するスイッチを持つか。
-- レビューコメントを通知の対象に含めるか。
 
 ## 既知の制限・残課題
 
@@ -210,3 +247,4 @@ Phase 1 の実装を通じて次の仕様を確定した。
 - [ADR 0036](0036-thread-replay-evaluation.md): `deliver_notice` による内部通知の前例。
 - [ADR 0041](0041-thread-context-reference.md): スレッド単位の情報を run の名前規約から辿る制約（紐づけの保存先の判断に関係する）。
 - [ADR 0042](0042-event-driven-waits.md): 固定 sleep ではなく出来事で動かす方針。
+- [ADR 0044](0044-lane-threads.md): durable lane outbox と発生元ごとの wake guard。CI 失敗通知の配送と抑止の基盤。
