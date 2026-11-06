@@ -67,14 +67,29 @@ impl KeyringCredentialStore {
         Ok(store)
     }
 
+    /// MCP composition: typed, safe errors; no plaintext fallback.
+    pub fn probe_keychain_only() -> Result<Self, CredentialError> {
+        let store = Self::spawn_classified(OsKeyring, WORKER_TIMEOUT, true)?;
+        store.get("__evorch_mcp_probe__")?;
+        Ok(store)
+    }
+
     /// backend を一つの通常スレッドへ移し、全操作を直列化する。
     fn spawn(backend: impl KeyringBackend) -> Result<Self, CredentialError> {
         Self::spawn_with_timeout(backend, WORKER_TIMEOUT)
     }
 
     fn spawn_with_timeout(
+        backend: impl KeyringBackend,
+        timeout: Duration,
+    ) -> Result<Self, CredentialError> {
+        Self::spawn_classified(backend, timeout, false)
+    }
+
+    fn spawn_classified(
         mut backend: impl KeyringBackend,
         timeout: Duration,
+        strict: bool,
     ) -> Result<Self, CredentialError> {
         let (requests, receiver) = mpsc::sync_channel::<Request>(0);
         thread::Builder::new()
@@ -93,15 +108,15 @@ impl KeyringCredentialStore {
                         Operation::Get(key) => match backend.get(key) {
                             Ok(value) => Ok(Some(value)),
                             Err(Error::NoEntry) => Ok(None),
-                            Err(error) => Err(keychain_error(error)),
+                            Err(error) => Err(map_backend_error(error, strict)),
                         },
                         Operation::Set(key, value) => backend
                             .set(key, value)
                             .map(|()| None)
-                            .map_err(keychain_error),
+                            .map_err(|error| map_backend_error(error, strict)),
                         Operation::Delete(key) => match backend.delete(key) {
                             Ok(()) | Err(Error::NoEntry) => Ok(None),
-                            Err(error) => Err(keychain_error(error)),
+                            Err(error) => Err(map_backend_error(error, strict)),
                         },
                     }))
                     .unwrap_or_else(|_| Err(unavailable("資格情報の操作が panic しました")));
@@ -174,8 +189,30 @@ impl CredentialStore for KeyringCredentialStore {
     }
 }
 
-fn keychain_error(error: Error) -> CredentialError {
-    unavailable(&error.to_string())
+fn map_backend_error(error: Error, strict: bool) -> CredentialError {
+    if !strict {
+        return unavailable(&error.to_string());
+    }
+    // Inspect native typed codes without formatting or retaining raw details.
+    if let Error::NoStorageAccess(cause) | Error::PlatformFailure(cause) = &error {
+        #[cfg(target_os = "linux")]
+        if let Some(cause) = cause.downcast_ref::<secret_service::Error>() {
+            match cause {
+                secret_service::Error::Locked => return CredentialError::KeychainLocked,
+                secret_service::Error::Prompt => return CredentialError::KeychainCancelled,
+                _ => {}
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(cause) = cause.downcast_ref::<security_framework::base::Error>() {
+            match cause.code() {
+                -128 | -25293 => return CredentialError::KeychainCancelled,
+                -25308 => return CredentialError::KeychainLocked,
+                _ => {}
+            }
+        }
+    }
+    unavailable("keychain operation unavailable")
 }
 
 /// 秘密値や panic ペイロードを含めず利用不可を伝える。
@@ -201,7 +238,6 @@ mod tests {
     struct FakeBackend {
         values: HashMap<String, String>,
         thread: Option<thread::ThreadId>,
-        release: Option<mpsc::Receiver<()>>,
     }
 
     impl FakeBackend {
@@ -210,13 +246,6 @@ mod tests {
             let current = thread::current().id();
             assert_eq!(*self.thread.get_or_insert(current), current);
             assert_ne!(key, "panic", "意図した backend panic");
-            if key == "blocked" {
-                self.release
-                    .take()
-                    .unwrap()
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .unwrap();
-            }
         }
     }
 
@@ -236,32 +265,17 @@ mod tests {
         }
     }
 
-    // Given: 応答を保留する backend / When: 受信・送信期限を超過 / Then: 復旧後の要求に連鎖しない
+    // A timed-out/abandoned caller must not kill the serial worker. Explicit
+    // channel completion replaces the old 100ms wall-clock race test.
     #[test]
-    fn worker_recovers_after_dispatch_timeouts() -> Result<(), Box<dyn std::error::Error>> {
-        let (release, receiver) = mpsc::channel();
-        let mut store = KeyringCredentialStore::spawn_with_timeout(
-            FakeBackend {
-                release: Some(receiver),
-                ..Default::default()
-            },
-            std::time::Duration::from_millis(100),
-        )?;
-        let result = store.get("blocked");
-        assert!(matches!(
-            result,
-            Err(CredentialError::KeychainUnavailable { detail })
-                if detail == "資格情報 worker が応答しません（タイムアウト）"
-        ));
-        let result = store.set("must-not-run", &Secret::from("discarded".to_owned()));
-        assert!(matches!(
-            result,
-            Err(CredentialError::KeychainUnavailable { detail })
-                if detail == "資格情報 worker が要求を受信しません（タイムアウト）"
-        ));
-        release.send(())?;
-        store.timeout = std::time::Duration::from_secs(2);
-        assert_eq!(store.get("must-not-run")?, None);
+    fn worker_recovers_after_abandoned_reply() -> Result<(), Box<dyn std::error::Error>> {
+        let store = KeyringCredentialStore::spawn(FakeBackend::default())?;
+        let (reply, response) = mpsc::channel();
+        drop(response);
+        store.requests.send(Request {
+            operation: Operation::Get("missing".into()),
+            reply,
+        })?;
         store.set("token", &Secret::from("retained".to_owned()))?;
         assert_eq!(store.get("token")?.unwrap().expose(), "retained");
         Ok(())
@@ -352,6 +366,7 @@ mod tests {
 
     // Given: 利用可能な実 keyring / When: 両 runtime の内部から操作 / Then: ネストした runtime panic を起こさない
     #[test]
+    #[ignore = "manual OS-keychain smoke; never writes real credentials in CI"]
     fn real_keyring_works_inside_both_runtimes() -> Result<(), Box<dyn std::error::Error>> {
         let store = match KeyringCredentialStore::probe() {
             Ok(store) => store,
@@ -385,15 +400,64 @@ mod tests {
         Ok(())
     }
 
-    // Given: 資格情報サービスの機能確認結果 / When: 既定ストアを開く / Then: 利用不可ならファイルへ確実に切り替わる
+    // Zero is a semantic expired budget, not a wall-clock performance limit.
+    // Neither receiver can consume a request until this synchronous call ends.
     #[test]
-    fn unavailable_service_falls_back_to_file() {
-        if KeyringCredentialStore::probe().is_ok() {
-            return;
+    fn expired_dispatch_budgets_never_enqueue_unreceived_requests() {
+        let (requests, receiver) = mpsc::sync_channel(0);
+        let store = KeyringCredentialStore {
+            requests: Arc::new(requests),
+            timeout: Duration::ZERO,
+        };
+        assert!(matches!(
+            store.get("not-enqueued"),
+            Err(CredentialError::KeychainUnavailable { .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        // Buffered acceptance lets the independent response budget be tested
+        // deterministically, without scheduling a backend thread or waiting.
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let store = KeyringCredentialStore {
+            requests: Arc::new(requests),
+            timeout: Duration::ZERO,
+        };
+        assert!(matches!(
+            store.get("accepted"),
+            Err(CredentialError::KeychainUnavailable { .. })
+        ));
+        let request = receiver.try_recv().unwrap();
+        assert!(matches!(request.operation,Operation::Get(key) if key=="accepted"));
+        assert!(request.reply.send(Ok(None)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_errors_preserve_classification_without_native_details() {
+        for (native, expected) in [
+            (secret_service::Error::Locked, "locked"),
+            (secret_service::Error::Prompt, "cancelled"),
+            (secret_service::Error::Unavailable, "unavailable"),
+        ] {
+            let error = map_backend_error(Error::NoStorageAccess(Box::new(native)), true);
+            assert!(matches!(
+                (&error, expected),
+                (CredentialError::KeychainLocked, "locked")
+                    | (CredentialError::KeychainCancelled, "cancelled")
+                    | (CredentialError::KeychainUnavailable { .. }, "unavailable")
+            ));
         }
-        let dir = tempdir().expect("一時ディレクトリを作成できるはずです");
-        let store = crate::open_default(dir.path()).expect("既定ストアを開けるはずです");
-        assert!(store.get("missing").expect("取得できるはずです").is_none());
-        assert!(dir.path().join("credentials.json").exists());
+        let raw = "sentinel-native-secret";
+        let error = map_backend_error(Error::Invalid("password".into(), raw.into()), true);
+        assert!(!format!("{error:?} {error}").contains(raw));
+        assert!(matches!(
+            map_backend_error(
+                Error::NoStorageAccess(Box::new(secret_service::Error::Locked)),
+                false
+            ),
+            CredentialError::KeychainUnavailable { .. }
+        ));
     }
 }

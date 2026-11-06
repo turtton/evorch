@@ -119,7 +119,15 @@ pub fn open_default(dir: impl AsRef<Path>) -> Result<Arc<dyn CredentialStore>, C
 
 #[cfg(feature = "keychain")]
 pub fn open_default(dir: impl AsRef<Path>) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-    match crate::KeyringCredentialStore::probe() {
+    open_default_from(dir, crate::KeyringCredentialStore::probe)
+}
+
+#[cfg(any(feature = "keychain", test))]
+fn open_default_from<T: CredentialStore + 'static>(
+    dir: impl AsRef<Path>,
+    open: impl FnOnce() -> Result<T, CredentialError>,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    match open() {
         Ok(store) => Ok(Arc::new(store)),
         Err(error) => {
             tracing::info!(%error, "資格情報サービスを利用できないためファイルへ切り替えます");
@@ -128,12 +136,24 @@ pub fn open_default(dir: impl AsRef<Path>) -> Result<Arc<dyn CredentialStore>, C
     }
 }
 
-/// Explicit keychain-only composition entry. Never calls FileCredentialStore or
-/// open_default. Worker B installs the platform backend; T0 stays inert/fail-closed.
+/// Explicit keychain-only entry. No directory argument and no plaintext fallback.
+#[cfg(feature = "keychain")]
+pub fn open_keychain_only() -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    keychain_only_from(crate::KeyringCredentialStore::probe_keychain_only)
+}
+
+#[cfg(not(feature = "keychain"))]
 pub fn open_keychain_only() -> Result<Arc<dyn CredentialStore>, CredentialError> {
     Err(CredentialError::KeychainUnavailable {
-        detail: "keychain-only backend unavailable".into(),
+        detail: "keychain feature disabled".into(),
     })
+}
+
+#[cfg(any(feature = "keychain", test))]
+fn keychain_only_from<T: CredentialStore + 'static>(
+    open: impl FnOnce() -> Result<T, CredentialError>,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    open().map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
 }
 
 fn io_error(error: std::io::Error) -> CredentialError {
@@ -155,6 +175,22 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn keychain_failure_never_falls_back_to_file() {
+        // The same fake failure triggers legacy fallback, but not MCP's factory.
+        let dir = tempdir().unwrap();
+        let result =
+            keychain_only_from::<FileCredentialStore>(|| Err(CredentialError::KeychainLocked));
+        assert!(matches!(result, Err(CredentialError::KeychainLocked)));
+        assert!(!dir.path().join("credentials.json").exists());
+        let store = open_default_from::<FileCredentialStore>(dir.path(), || {
+            Err(CredentialError::KeychainLocked)
+        })
+        .unwrap();
+        assert!(store.get("missing").unwrap().is_none());
+        assert!(dir.path().join("credentials.json").exists());
+    }
 
     #[test]
     fn failed_set_preserves_memory_and_disk() {
