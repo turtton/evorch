@@ -9,7 +9,7 @@
 //! | `POST /api/v1/request` | a `RequestEnvelope` (command or query) in, a `ReplyEnvelope` out |
 //! | `GET /api/v1/events?scope=..&after=..` | SSE: `subscription_started`, then `ui_event` messages |
 //! | `GET /api/v1/health` | adapter version and the core's `ServerHello` (build, protocol version, capabilities, epoch, status) |
-//! | `GET /` and assets | embedded front end ([`StaticAsset`]) |
+//! | `GET /` and assets | embedded front end: the web workbench ([`UI_ASSETS`]) by default |
 //!
 //! # Boundaries
 //!
@@ -43,7 +43,7 @@ pub mod shutdown;
 pub mod sse;
 mod state;
 
-pub use assets::{PLACEHOLDER_ASSETS, StaticAsset};
+pub use assets::{StaticAsset, UI_ASSETS};
 pub use backend::{BackendSubscription, WebSession, WorkbenchBackend};
 pub use config::{ConfigError, DEFAULT_PORT, LOOPBACK_HOSTS, WebServerConfig};
 pub use server::{WebApp, WebServer, WebServerError};

@@ -666,13 +666,12 @@ async fn static_assets_come_from_the_embedded_table() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 
-    // The default build ships a placeholder page.
-    let placeholder = send(&app(&backend), get("/").body(Body::empty()).unwrap()).await;
-    assert_eq!(placeholder.status(), StatusCode::OK);
-    assert!(
-        String::from_utf8(body_bytes(placeholder).await)
-            .unwrap()
-            .contains("evorch")
+    // Without a table of its own the server serves the web workbench.
+    let default_index = send(&app(&backend), get("/").body(Body::empty()).unwrap()).await;
+    assert_eq!(default_index.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(default_index).await,
+        workbench_web::UI_ASSETS[0].body
     );
 }
 
