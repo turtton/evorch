@@ -1848,22 +1848,34 @@ fn a_title_is_redacted_single_line_and_bounded() {
     assert!(!controls.as_str().contains('\u{202e}'));
     assert!(!controls.as_str().contains('\u{200b}'));
 
-    // A credential is masked before the text is cut, even when it straddles the limit, and
-    // an invisible character cannot split it.
+    // A credential is masked before the text is cut, even when it straddles the limit.
     let token = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
     let straddling = format!(
         "{} {token} trailing",
         "n".repeat(PULL_REQUEST_TITLE_MAX_CHARS - 8)
     );
-    let split = format!("see {}\u{200b}{}", &token[..10], &token[10..]);
-    // An invisible character right before the prefix hides, once it is removed, that a
-    // letter is not part of the credential: the original must be redacted first.
-    let after_invisible = format!("x\u{200b}{token} and y\u{202e}{token}");
-    for text in [straddling, split, after_invisible] {
-        let title = DisplayTitle::from_untrusted(&text).unwrap();
-        assert!(!title.as_str().contains("ghp_"), "{}", title.as_str());
-        assert!(!title.as_str().contains("A1b2C3d4E5"), "{}", title.as_str());
+    let title = DisplayTitle::from_untrusted(&straddling).unwrap();
+    assert!(!title.as_str().contains("ghp_"), "{}", title.as_str());
+    assert!(!title.as_str().contains("A1b2C3d4E5"), "{}", title.as_str());
+
+    // With invisible characters in the text, any credential found (in the original or once
+    // they are gone) drops the whole title: before the prefix, inside the credential, and
+    // past the point where the original already matched in part.
+    let mut hostile = vec![
+        format!("x\u{200b}{token}"),
+        format!("see x\u{202e}{token} tail"),
+    ];
+    for cut in [10, 20, 30, 34, 35, 38] {
+        hostile.push(format!("see {}\u{200b}{}", &token[..cut], &token[cut..]));
     }
+    for text in &hostile {
+        assert_eq!(DisplayTitle::from_untrusted(text), None, "{text:?}");
+    }
+
+    // Invisible characters alone are not a reason: a title without a credential is kept,
+    // minus them.
+    let plain = DisplayTitle::from_untrusted("Fix caf\u{e9}\u{200b} bug \u{202e}now").unwrap();
+    assert_eq!(plain.as_str(), "Fix caf\u{e9} bug now");
 
     // The length is bounded in characters, not bytes, and cleaning twice changes nothing.
     let long = DisplayTitle::from_untrusted(&"長".repeat(10_000)).unwrap();
