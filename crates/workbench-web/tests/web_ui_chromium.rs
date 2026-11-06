@@ -55,6 +55,8 @@ const QUESTION_TITLE: &str = "本番 DB のマイグレーションも実行し�
 const LANE_QUESTION_TITLE: &str = "テストのタイムアウト値はいくつにしますか？";
 const FREE_QUESTION_TITLE: &str = "回帰テストの対象ブラウザを教えてください。";
 const SENT_TEXT: &str = "修正案 A で進めてください。テストも追加して。";
+const UNKNOWN_TEXT: &str = "結果が分からない送信";
+const DROPPED_TEXT: &str = "読まれずに終わった送信";
 
 fn body_text() -> String {
     format!(
@@ -104,6 +106,11 @@ struct World {
     /// is refused with `conflict`, as an expired host cursor is.
     expired_cursors: Vec<String>,
     conflicts: usize,
+    /// The next this many SendChat requests fail with `internal` (outcome
+    /// unknown to the client).
+    failing_sends: usize,
+    /// The next SendChat is accepted, then dropped (its run ended unread).
+    drop_next_send: bool,
 }
 
 impl World {
@@ -164,6 +171,8 @@ impl World {
             commands: Vec::new(),
             expired_cursors: vec!["t1".to_owned()],
             conflicts: 0,
+            failing_sends: 0,
+            drop_next_send: false,
         }
     }
 
@@ -239,6 +248,18 @@ impl UiBackend {
         }
     }
 
+    /// Payloads and request ids of the recorded commands of `kind` whose
+    /// `text` is `text`.
+    fn sends(&self, text: &str) -> Vec<(Value, Value)> {
+        let world = self.world.lock().unwrap();
+        world
+            .commands
+            .iter()
+            .filter(|c| c["type"] == "send_chat" && c["payload"]["text"] == text)
+            .map(|c| (c["payload"].clone(), c["request_id"].clone()))
+            .collect()
+    }
+
     fn count(&self, kind: &str) -> usize {
         let world = self.world.lock().unwrap();
         world.commands.iter().filter(|c| c["type"] == kind).count()
@@ -264,10 +285,24 @@ impl UiBackend {
         let command = p.clone();
         let kind = request["payload"]["type"].as_str().unwrap().to_owned();
         let reply = match kind.as_str() {
+            "send_chat" if world.failing_sends > 0 => {
+                world.failing_sends -= 1;
+                refused("internal", "never")
+            }
             "send_chat" => {
                 let index = world.history.len().to_string();
                 let receipt = |state: &str| json!({"submission_id": p["submission_id"], "thread": p["thread"], "run": "run-root", "state": state, "revision": if state == "accepted" { "1" } else { "2" }, "sent_by": serde_json::to_value(provenance).unwrap()});
                 world.publish(json!({"type": "input_receipt_changed", "payload": {"receipt": receipt("accepted")}}));
+                if std::mem::take(&mut world.drop_next_send) {
+                    world.publish(json!({"type": "input_receipt_changed", "payload": {"receipt": receipt("dropped")}}));
+                    let mut reply = accepted();
+                    reply["payload"]["payload"]["submission_id"] = p["submission_id"].clone();
+                    world.commands.push(json!({"type": kind, "payload": command, "request_id": request["request_id"]}));
+                    let count = world.commands.len();
+                    drop(world);
+                    self.commands.send_replace(count);
+                    return reply;
+                }
                 let message = json!({"thread": p["thread"], "run": "run-root", "index": index, "role": "user", "content": {"type": "inline", "payload": {"text": p["text"]}}});
                 world.history.push(message.clone());
                 world
@@ -370,18 +405,21 @@ impl UiBackend {
                 ),
                 None => refused("not_found", "never"),
             },
-            "list_runs" => query_reply(
-                "runs",
-                page(
-                    world
-                        .runs
-                        .iter()
-                        .filter(|r| r["thread"] == p["thread"])
-                        .cloned()
-                        .collect(),
-                    None,
-                ),
-            ),
+            "list_runs" => {
+                // One run per page: the thread view must read every page.
+                let runs: Vec<Value> = world
+                    .runs
+                    .iter()
+                    .filter(|r| r["thread"] == p["thread"])
+                    .cloned()
+                    .collect();
+                let start = p["page"]["cursor"]
+                    .as_str()
+                    .map_or(0, |c| c.trim_start_matches('r').parse::<usize>().unwrap());
+                let end = (start + 1).min(runs.len());
+                let next = (end < runs.len()).then(|| format!("r{end}"));
+                query_reply("runs", page(runs[start..end].to_vec(), next))
+            }
             "list_questions" => query_reply(
                 "questions",
                 page(
@@ -440,7 +478,7 @@ impl UiBackend {
     }
 
     /// The first snapshot page. Like the host's (one default-size page), it
-    /// does not hold everything: the lane thread, the questions and the
+    /// does not hold everything: the lane thread, the runs, the questions and the
     /// approvals are only reachable with list queries.
     fn snapshot_items(world: &World) -> Vec<Value> {
         let mut items = vec![
@@ -458,12 +496,6 @@ impl UiBackend {
                 .iter()
                 .filter(|t| t["lead_thread"].is_null())
                 .map(|t| json!({"type": "thread", "payload": t})),
-        );
-        items.extend(
-            world
-                .runs
-                .iter()
-                .map(|r| json!({"type": "run", "payload": r})),
         );
         items
     }
@@ -781,6 +813,10 @@ async fn web_workbench_main_flows_in_chromium() {
         r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。")"##,
     )
     .await;
+    // Every page of the thread's runs is read before the list claims to be
+    // complete; the root run also decides the composer role.
+    ui.wait(r##"() => document.querySelector(".runs-details summary")?.textContent === "実行中の run (2)""##)
+        .await;
     let shown = ui
         .eval(r##"document.querySelectorAll(".messages .msg").length"##)
         .await;
@@ -887,6 +923,57 @@ async fn web_workbench_main_flows_in_chromium() {
         "the composer is cleared after sending"
     );
 
+    // ---- outcome unknown: checked, then resent with the same ids ----
+    backend.world.lock().unwrap().failing_sends = 3;
+    ui.insert_text(".composer-input", UNKNOWN_TEXT).await;
+    ui.click("button.send").await;
+    ui.wait(r##"() => document.querySelector('.outbox button[data-action="confirm"]')"##)
+        .await;
+    assert_eq!(
+        ui.eval(r##"document.querySelectorAll('.outbox button[data-action="restore"]').length"##)
+            .await,
+        0,
+        "an unknown outcome cannot go back to the composer under a new id"
+    );
+    ui.click(r##".outbox button[data-action="confirm"]"##).await;
+    ui.wait(&format!(
+        r##"() => document.querySelector(".outbox").children.length === 0
+            && document.querySelector(".messages").textContent.includes({UNKNOWN_TEXT:?})"##
+    ))
+    .await;
+    let sends = backend.sends(UNKNOWN_TEXT);
+    assert_eq!(sends.len(), 4, "three lost attempts, then one that arrived");
+    assert!(
+        sends
+            .iter()
+            .all(
+                |(payload, request)| payload["submission_id"] == sends[0].0["submission_id"]
+                    && *request == sends[0].1
+            ),
+        "the same request id and submission id every time: {sends:?}"
+    );
+
+    // ---- dropped: resent as a new submission ----
+    backend.world.lock().unwrap().drop_next_send = true;
+    ui.insert_text(".composer-input", DROPPED_TEXT).await;
+    ui.click("button.send").await;
+    ui.wait(r##"() => document.querySelector('.outbox button[data-action="resubmit"]')"##)
+        .await;
+    ui.click(r##".outbox button[data-action="resubmit"]"##)
+        .await;
+    ui.wait(&format!(
+        r##"() => document.querySelector(".outbox").children.length === 0
+            && document.querySelector(".messages").textContent.includes({DROPPED_TEXT:?})"##
+    ))
+    .await;
+    let sends = backend.sends(DROPPED_TEXT);
+    assert_eq!(sends.len(), 2);
+    assert_ne!(
+        sends[0].0["submission_id"], sends[1].0["submission_id"],
+        "the dropped submission id is not reused"
+    );
+    assert_ne!(sends[0].1, sends[1].1);
+
     // ---- answer the thread's question with an option ----
     ui.click(r##"button[aria-label="「はい」と回答"]"##).await;
     let answer = backend.command("answer_user_question").await;
@@ -923,13 +1010,17 @@ async fn web_workbench_main_flows_in_chromium() {
                 const card = document.querySelector(".card.approval");
                 return { approve: card.querySelector('button[aria-label="このツール実行を承認"]').disabled,
                          deny: card.querySelector('button[aria-label="このツール実行を拒否"]').disabled,
-                         hint: card.querySelector(".card-hint").textContent };
+                         hint: card.querySelector(".card-hint").textContent,
+                         expand: card.querySelector("button.link").textContent };
             })()"##,
         )
         .await;
     assert_eq!(
         approval,
-        json!({"approve": true, "deny": false, "hint": "全文を確認できないため Web からは承認できません（拒否はできます）。"})
+        json!({
+            "approve": true, "deny": false, "expand": "要約を展開",
+            "hint": "要約しか表示できず実行内容の全文を確認できないため、Web からは承認できません（拒否はできます）。",
+        })
     );
     ui.click(".card.approval button.link").await;
     ui.screenshot("06-inbox-approval-expanded").await;
@@ -1004,6 +1095,14 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     ui.wait(r##"() => document.querySelector('#conn[data-state="live"]')"##)
         .await;
+    ui.wait(r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。") && !document.querySelector(".history-status").textContent"##)
+        .await;
+    assert_eq!(
+        ui.eval(r##"document.querySelector(".composer-role").value"##)
+            .await,
+        "orchestrator",
+        "rebuilding after the snapshot keeps the composer role"
+    );
     let visible = ui
         .eval(r##"(() => { const r = document.querySelector("#banner").getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.height > 0; })()"##)
         .await;

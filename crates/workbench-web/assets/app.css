@@ -674,6 +674,16 @@ a.chip {
   gap: 6px;
 }
 
+.runs-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .runs-details {
   border: 1px solid var(--border);
   border-radius: var(--radius);

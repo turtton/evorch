@@ -20,6 +20,8 @@ import {
 } from "./format.js";
 import { HistoryWindow, messageKey, WALK_PAGE_SIZE } from "./history.js";
 import { renderMarkdown } from "./markdown.js";
+import { fetchAllPages } from "./paging.js";
+import { composerRoleFor } from "./store.js";
 import { command, describeError, formatBytes, pageRequest, randomUuid } from "./wire.js";
 
 const LIST_PAGE_SIZE = 50;
@@ -409,10 +411,13 @@ export function threadView(ctx, threadId) {
   const roleSelect = h(
     "select",
     { class: "composer-role", id: `composer-role-${threadId}` },
+    h("option", { value: "", text: "判定中…", disabled: true }),
     h("option", { value: "worker", text: "Worker" }),
     h("option", { value: "orchestrator", text: "Orchestrator" }),
   );
   const send = h("button", { type: "button", class: "button primary send", text: "送信" });
+  // Nothing is selected until the role is known (see renderHead).
+  roleSelect.value = "";
   const composerStatus = h("p", { class: "composer-status", attrs: { role: "status", "aria-live": "polite" } });
   const composer = h(
     "div",
@@ -455,7 +460,11 @@ export function threadView(ctx, threadId) {
   let history = null;
   let building = null;
   let runsSignature = null;
+  /** Reading this thread's runs: "loading", "complete" or a failure. */
+  let runsLoad = { state: "loading" };
+  /** The role was chosen by the person or determined from the root run. */
   let roleTouched = false;
+  let roleDetermined = false;
   let destroyed = false;
   const observer =
     "IntersectionObserver" in globalThis
@@ -493,19 +502,41 @@ export function threadView(ctx, threadId) {
     stop.hidden = !running;
     // Keep the run list open across live updates if the user opened it, and
     // rebuild it only when the runs change so an armed stop button survives.
-    const signature = active.map((run) => `${run.id}:${run.phase}`).join(",");
+    // Until every page of the thread's runs is read, the list may miss runs
+    // that can be stopped individually; say so instead of looking complete.
+    const signature =
+      `${runsLoad.state}|` + active.map((run) => `${run.id}:${run.phase}`).join(",");
+    const note =
+      runsLoad.state === "loading"
+        ? h("p", { class: "runs-note", attrs: { role: "status" }, text: "run の一覧を読み込み中…" })
+        : runsLoad.state === "failed"
+          ? h(
+              "p",
+              { class: "runs-note", attrs: { role: "status" } },
+              `run の一覧を最後まで読み込めませんでした（${describeError(runsLoad.error)}）。個別に停止できる run が欠けている可能性があります。`,
+              h("button", {
+                type: "button",
+                class: "button small",
+                text: "再読み込み",
+                on: { click: () => loadRuns() },
+              }),
+            )
+          : null;
     if (signature !== runsSignature && active.length === 0) {
       runsSignature = signature;
-      replaceChildren(runsBox);
+      replaceChildren(runsBox, note);
     } else if (signature !== runsSignature) {
       runsSignature = signature;
       const open = runsBox.querySelector("details")?.open ?? false;
       replaceChildren(
         runsBox,
+        note,
         h(
           "details",
           { class: "runs-details", open },
-          h("summary", { text: `実行中の run (${active.length})` }),
+          h("summary", {
+            text: `実行中の run (${active.length}${runsLoad.state === "complete" ? "" : "・一部"})`,
+          }),
           h(
             "ul",
             { class: "run-list" },
@@ -528,10 +559,19 @@ export function threadView(ctx, threadId) {
         ),
       );
     }
-    if (!roleTouched) {
-      const root = view?.root_run ? ctx.store.state.runs.get(view.root_run) : null;
-      roleSelect.value = root?.role === "orchestrator" ? "orchestrator" : "worker";
+    // The role is set once from the root run. While the thread view or the
+    // root run is unknown (first load, or rebuilt after a snapshot) the
+    // current choice stays; nothing is sent before one is made.
+    if (!roleTouched && !roleDetermined) {
+      const role = composerRoleFor(view, ctx.store.state.runs);
+      if (role === "orchestrator" || role === "worker") {
+        roleSelect.value = role;
+        roleDetermined = true;
+      } else if (role === "choose") {
+        roleSelect.options[0].textContent = "選択してください";
+      }
     }
+    send.disabled = roleSelect.value === "";
     renderAttention(ctx, questionBox, approvalBox, threadId, leadBox);
   }
 
@@ -776,23 +816,29 @@ export function threadView(ctx, threadId) {
           text = current.error ? describeError(current.error) : "送信できませんでした。";
       }
       state.textContent = text;
-      const button = (label, onClick) =>
-        h("button", { type: "button", class: "button small", text: label, on: { click: onClick } });
+      const button = (label, action, onClick) =>
+        h("button", {
+          type: "button",
+          class: "button small",
+          text: label,
+          dataset: { action },
+          on: { click: onClick },
+        });
       const buttons = [];
       if (current.state === "unknown") {
-        buttons.push(button("確認して再送", () => deliver(current, "confirm")));
+        buttons.push(button("確認して再送", "confirm", () => deliver(current, "confirm")));
       }
       if (current.state === "failed") {
-        buttons.push(button("再送", () => deliver(current, "retry")));
+        buttons.push(button("再送", "retry", () => deliver(current, "retry")));
       }
       if (dropped) {
-        buttons.push(button("新しいメッセージとして再送", () => deliver(current, "resubmit")));
+        buttons.push(button("新しいメッセージとして再送", "resubmit", () => deliver(current, "resubmit")));
       }
       // Moving the text back to the composer would send it under a new
       // submission id, so it is offered only once the old one cannot arrive.
       if (current.state === "failed" || dropped) {
         buttons.push(
-          button("入力欄に戻す", () => {
+          button("入力欄に戻す", "restore", () => {
             input.value = input.value ? `${input.value}\n${current.text}` : current.text;
             saveDraft(threadId, input.value);
             autosize();
@@ -851,6 +897,11 @@ export function threadView(ctx, threadId) {
       composerStatus.textContent = "スレッドの情報を読み込めていないため送信できません。";
       return;
     }
+    if (roleSelect.value === "") {
+      composerStatus.textContent = "送信先（Worker / Orchestrator）を選んでから送信してください。";
+      roleSelect.focus();
+      return;
+    }
     const item = {
       submissionId: `sub-${randomUuid()}`,
       requestId: ctx.api.newRequestId(),
@@ -874,6 +925,8 @@ export function threadView(ctx, threadId) {
   input.addEventListener("input", () => saveDraft(threadId, input.value));
   roleSelect.addEventListener("change", () => {
     roleTouched = true;
+    send.disabled = roleSelect.value === "";
+    composerStatus.textContent = "";
   });
 
   // ---- store changes ----------------------------------------------------
@@ -905,8 +958,20 @@ export function threadView(ctx, threadId) {
     } else {
       historyStatus.textContent = describeError(result.error);
     }
-    await ctx.queryInto("runs", "list_runs", { thread: threadId, page: pageRequest(null, 200) });
+    await loadRuns();
     return true;
+  }
+
+  /** Read every page of this thread's runs (expired cursors restart). */
+  async function loadRuns() {
+    runsLoad = { state: "loading" };
+    renderHead();
+    const result = await fetchAllPages((cursor) =>
+      ctx.queryInto("runs", "list_runs", { thread: threadId, page: pageRequest(cursor, 200) }),
+    );
+    if (destroyed) return;
+    runsLoad = result.ok ? { state: "complete" } : { state: "failed", error: result.error };
+    renderHead();
   }
 
   const view = {

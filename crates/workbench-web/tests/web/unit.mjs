@@ -10,7 +10,7 @@ import { Api } from "../../assets/js/api.js";
 import { HistoryWindow, messageKey } from "../../assets/js/history.js";
 import { parseInline, parseMarkdown, renderMarkdown, safeHref } from "../../assets/js/markdown.js";
 import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.js";
-import { createStore } from "../../assets/js/store.js";
+import { composerRoleFor, createStore } from "../../assets/js/store.js";
 import { fetchAllPages } from "../../assets/js/paging.js";
 import { coreChanged } from "../../assets/js/format.js";
 import {
@@ -233,6 +233,18 @@ test("lead-routed questions are the lead's, not the user's", () => {
   store.applyEvent({ type: "question_changed", payload: { question: { ...routed, target: { type: "user" } } } });
   eq(store.threadAttention("lane").questions, 1);
   eq(store.leadRoutedQuestions(), []);
+});
+
+test("the composer role comes from the root run, never from a guess", () => {
+  const runs = new Map([
+    ["root", { id: "root", role: "orchestrator" }],
+    ["w", { id: "w", role: "worker" }],
+  ]);
+  eq(composerRoleFor(undefined, runs), null, "thread view not read yet");
+  eq(composerRoleFor({ root_run: "missing" }, runs), null, "root run not read yet");
+  eq(composerRoleFor({ root_run: "root" }, runs), "orchestrator");
+  eq(composerRoleFor({ root_run: "w" }, runs), "worker");
+  eq(composerRoleFor({}, runs), "choose", "no root run: the person picks");
 });
 
 // ---- paging -------------------------------------------------------------------

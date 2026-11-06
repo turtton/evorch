@@ -17,6 +17,20 @@ export function isLeadRouted(question) {
   return question.target?.type === "lead";
 }
 
+/**
+ * The composer role a thread's messages go to, from its root run:
+ * `"orchestrator"` or `"worker"` when known, `"choose"` when the thread has no
+ * root run (the person picks), and `null` while the thread view or the root
+ * run has not been read yet. Callers must not guess while it is `null`.
+ */
+export function composerRoleFor(view, runs) {
+  if (!view) return null;
+  if (!view.root_run) return "choose";
+  const root = runs.get(view.root_run);
+  if (!root) return null;
+  return root.role === "orchestrator" ? "orchestrator" : "worker";
+}
+
 export function createStore() {
   const state = {
     coreStatus: null,

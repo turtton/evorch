@@ -327,7 +327,7 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     "article",
     { class: "card approval", attrs: { "aria-label": "ツール実行の承認要求" } },
     head,
-    h("p", { class: "card-label", text: "実行内容" }),
+    h("p", { class: "card-label", text: "実行内容（要約）" }),
     summary,
     expand,
     hint,
@@ -348,11 +348,11 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     const foldable = folds(a.summary);
     summary.classList.toggle("folded", foldable && !expanded);
     expand.hidden = !foldable;
-    expand.textContent = expanded ? "折りたたむ" : "全文を確認";
+    expand.textContent = expanded ? "要約を折りたたむ" : "要約を展開";
     expand.setAttribute("aria-expanded", String(expanded));
     const allowed = canApproveFromWeb(a);
     hint.hidden = allowed;
-    hint.textContent = "全文を確認できないため Web からは承認できません（拒否はできます）。";
+    hint.textContent = "要約しか表示できず実行内容の全文を確認できないため、Web からは承認できません（拒否はできます）。";
     const decided = a.state !== "pending";
     approve.disabled = busy || decided || !allowed;
     deny.disabled = busy || decided;
