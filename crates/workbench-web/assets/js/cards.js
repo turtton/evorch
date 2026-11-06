@@ -6,6 +6,17 @@ import { h, replaceChildren } from "./dom.js";
 import { label, SURFACE, shortId } from "./format.js";
 import { command, describeError } from "./wire.js";
 
+/**
+ * Whether the Web may approve a tool call. ApprovalView carries only a
+ * bounded `summary`, which the core may have cut short, so the person cannot
+ * see the full input the tool would run with. Until the protocol can serve
+ * the full input, approving is left to the desktop GUI; denying is safe and
+ * stays available.
+ */
+export function canApproveFromWeb(_approval) {
+  return false;
+}
+
 /** Lines or characters above which a summary is folded until expanded. */
 const FOLD_LINES = 6;
 const FOLD_CHARS = 400;
@@ -148,15 +159,6 @@ export function questionCard(ctx, question, { showThread = false } = {}) {
   function render() {
     const chips = [h("span", { class: "chip", text: "質問" })];
     if (q.blocking) chips.push(h("span", { class: "chip warn", text: "実行を停止中" }));
-    if (q.target?.type === "lead") {
-      chips.push(
-        h("span", {
-          class: "chip info",
-          text: "Lead 宛て",
-          title: `lead スレッド ${q.target.payload.lead_thread} が管理中。ここから回答することもできます。`,
-        }),
-      );
-    }
     replaceChildren(head, chips, showThread ? threadLink(ctx, q.requester.thread) : null);
     title.textContent = q.title;
     replaceChildren(
@@ -194,6 +196,44 @@ export function questionCard(ctx, question, { showThread = false } = {}) {
   return el;
 }
 
+/**
+ * A lane question routed to its lead (ADR 0044). The lead answers it or
+ * passes it to the user, as in the desktop GUI, so it is shown read-only and
+ * never counted as waiting for the user. If the lead passes it on, it comes
+ * back as an ordinary question card.
+ */
+export function leadRoutedCard(ctx, question) {
+  let q = question;
+  const head = h("div", { class: "card-head" });
+  const title = h("p", { class: "card-title selectable" });
+  const options = h("ul", { class: "lead-options" });
+  const el = h(
+    "article",
+    { class: "card lead-routed", attrs: { "aria-label": "Lead が対応中の質問" } },
+    head,
+    title,
+    options,
+    h("p", { class: "card-hint", text: "Lead が回答するか、ユーザーへの回答に切り替えるまで待っています。" }),
+  );
+  function render() {
+    replaceChildren(
+      head,
+      h("span", { class: "chip info", text: "Lead が対応中" }),
+      q.blocking ? h("span", { class: "chip warn", text: "実行を停止中" }) : null,
+      threadLink(ctx, q.requester.thread),
+    );
+    title.textContent = q.title;
+    replaceChildren(options, q.options.map((option) => h("li", { text: option })));
+    options.hidden = q.options.length === 0;
+  }
+  el.refresh = (next) => {
+    q = next;
+    render();
+  };
+  render();
+  return el;
+}
+
 function folds(text) {
   return text.length > FOLD_CHARS || text.split("\n").length > FOLD_LINES;
 }
@@ -211,7 +251,7 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
   const head = h("div", { class: "card-head" });
   const summary = h("pre", { class: "approval-summary selectable" });
   const expand = h("button", { type: "button", class: "button link", attrs: { "aria-expanded": "false" } });
-  const hint = h("p", { class: "card-hint" });
+  const hint = h("p", { class: "card-hint", attrs: { role: "note" } });
   const status = h("p", { class: "card-status", attrs: { role: "status", "aria-live": "polite" } });
   const recheck = h("button", { type: "button", class: "button", text: "届いたか確認して再送", hidden: true });
 
@@ -310,11 +350,11 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     expand.hidden = !foldable;
     expand.textContent = expanded ? "折りたたむ" : "全文を確認";
     expand.setAttribute("aria-expanded", String(expanded));
-    const mustRead = foldable && !expanded;
-    hint.hidden = !mustRead;
-    hint.textContent = "全文を確認すると承認できます。";
+    const allowed = canApproveFromWeb(a);
+    hint.hidden = allowed;
+    hint.textContent = "全文を確認できないため Web からは承認できません（拒否はできます）。";
     const decided = a.state !== "pending";
-    approve.disabled = busy || decided || mustRead;
+    approve.disabled = busy || decided || !allowed;
     deny.disabled = busy || decided;
     if (decided && !status.textContent) {
       status.textContent = a.state === "approved" ? "承認済み" : a.state === "denied" ? "拒否済み" : "期限切れ";

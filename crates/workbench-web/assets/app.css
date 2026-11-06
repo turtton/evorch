@@ -622,6 +622,42 @@ a.chip {
   max-width: 14em;
 }
 
+.card.lead-routed {
+  border-left-color: var(--info);
+  background: var(--surface-2);
+}
+
+.lead-options {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.lead-section summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap);
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.lead-section .cards {
+  margin-top: 6px;
+}
+
+.partial-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 0.9rem;
+}
+
 /* ---- thread ---- */
 
 .thread-head {

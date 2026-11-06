@@ -5,7 +5,7 @@
 // Views update in place (see dom.reconcile) so typed text, focus and text
 // selections survive live updates.
 
-import { approvalCard, confirmButton, questionCard, submitShortcut } from "./cards.js";
+import { approvalCard, confirmButton, leadRoutedCard, questionCard, submitShortcut } from "./cards.js";
 import { h, reconcile, replaceChildren } from "./dom.js";
 import {
   absoluteTime,
@@ -55,7 +55,11 @@ function emptyNote(text) {
   return h("p", { class: "empty", text });
 }
 
-/** "さらに読み込む" for a paged listing. */
+/**
+ * "さらに読み込む" for a paged listing. A cursor the core no longer knows
+ * (`conflict`: expired, or cut from an older state) is dropped and the list is
+ * read again from its first page; merging is idempotent.
+ */
 function pager(load) {
   let cursor = null;
   let done = false;
@@ -65,7 +69,11 @@ function pager(load) {
     if (done && !first) return;
     more.disabled = true;
     status.textContent = "読み込み中…";
-    const result = await load(first ? null : cursor);
+    let result = await load(first ? null : cursor);
+    if (!result.ok && result.error.code === "conflict" && !first) {
+      status.textContent = "一覧が更新されたため最初から読み直しています…";
+      result = await load(null);
+    }
     more.disabled = false;
     if (!result.ok) {
       status.textContent = describeError(result.error);
@@ -85,12 +93,17 @@ function pager(load) {
 
 function attentionSummary(ctx) {
   const total = ctx.store.totalAttention();
-  if (total.questions + total.approvals === 0) return null;
+  const partial = ctx.store.state.partial;
+  if (total.questions + total.approvals === 0 && !partial) return null;
   return h(
     "a",
     { class: "attention-summary", href: "#/inbox" },
     h("strong", { text: "要対応" }),
-    h("span", { text: `未回答の質問 ${total.questions} 件・承認待ち ${total.approvals} 件` }),
+    h("span", {
+      text:
+        `未回答の質問 ${total.questions} 件・承認待ち ${total.approvals} 件` +
+        (partial ? "（一部のみ表示・読み込み中）" : ""),
+    }),
     h("span", { class: "chevron", attrs: { "aria-hidden": "true" }, text: "›" }),
   );
 }
@@ -101,11 +114,9 @@ export function homeView(ctx) {
   const summary = h("div", { class: "summary-slot" });
   const list = h("ul", { class: "rows", attrs: { "aria-label": "プロジェクト" } });
   const empty = emptyNote("プロジェクトはまだありません。");
-  const paging = pager(async (cursor) => {
-    const result = await ctx.api.query("list_projects", pageRequest(cursor, LIST_PAGE_SIZE));
-    if (result.ok) ctx.store.mergePage("projects", result.value.items);
-    return result;
-  });
+  const paging = pager((cursor) =>
+    ctx.queryInto("projects", "list_projects", pageRequest(cursor, LIST_PAGE_SIZE)),
+  );
   const el = h(
     "section",
     { class: "screen", attrs: { "aria-labelledby": "projects-heading" } },
@@ -157,14 +168,12 @@ export function projectView(ctx, projectId) {
   const summary = h("div", { class: "summary-slot" });
   const list = h("ul", { class: "rows", attrs: { "aria-label": "スレッド" } });
   const empty = emptyNote("スレッドはまだありません。");
-  const paging = pager(async (cursor) => {
-    const result = await ctx.api.query("list_threads", {
+  const paging = pager((cursor) =>
+    ctx.queryInto("threads", "list_threads", {
       project: projectId,
       page: pageRequest(cursor, LIST_PAGE_SIZE),
-    });
-    if (result.ok) ctx.store.mergePage("threads", result.value.items);
-    return result;
-  });
+    }),
+  );
   const el = h("section", { class: "screen" }, summary, list, empty, paging.el);
 
   function fill(li, thread) {
@@ -236,25 +245,35 @@ export function inboxView(ctx) {
   const aCount = h("span", { class: "count" });
   const qEmpty = emptyNote("未回答の質問はありません。");
   const aEmpty = emptyNote("承認待ちはありません。");
-  const qPaging = pager(async (cursor) => {
-    const result = await ctx.api.query("list_questions", {
+  const qPaging = pager((cursor) =>
+    ctx.queryInto("questions", "list_questions", {
       pending_only: true,
       page: pageRequest(cursor, LIST_PAGE_SIZE),
-    });
-    if (result.ok) ctx.store.mergePage("questions", result.value.items);
-    return result;
-  });
-  const aPaging = pager(async (cursor) => {
-    const result = await ctx.api.query("list_approvals", {
+    }),
+  );
+  const aPaging = pager((cursor) =>
+    ctx.queryInto("approvals", "list_approvals", {
       pending_only: true,
       page: pageRequest(cursor, LIST_PAGE_SIZE),
-    });
-    if (result.ok) ctx.store.mergePage("approvals", result.value.items);
-    return result;
+    }),
+  );
+  const partial = h("p", {
+    class: "partial-note",
+    attrs: { role: "status" },
+    text: "コアの一覧が多いため一部のみ表示しています。残りを読み込み中です。",
   });
+  const lead = h("div", { class: "cards", attrs: { "aria-label": "Lead が対応中の質問" } });
+  const leadCount = h("span", { class: "count" });
+  const leadSection = h(
+    "details",
+    { class: "lead-section" },
+    h("summary", {}, "Lead が対応中の質問 ", leadCount),
+    lead,
+  );
   const el = h(
     "section",
     { class: "screen" },
+    partial,
     h("h2", { class: "section-title" }, "未回答の質問 ", qCount),
     questions,
     qEmpty,
@@ -263,14 +282,19 @@ export function inboxView(ctx) {
     approvals,
     aEmpty,
     aPaging.el,
+    leadSection,
   );
   function render() {
-    renderAttention(ctx, questions, approvals, null);
+    renderAttention(ctx, questions, approvals, null, lead);
     const total = ctx.store.totalAttention();
     qCount.textContent = `(${total.questions})`;
     aCount.textContent = `(${total.approvals})`;
     qEmpty.hidden = total.questions > 0;
     aEmpty.hidden = total.approvals > 0;
+    const routed = ctx.store.leadRoutedQuestions().length;
+    leadCount.textContent = `(${routed})`;
+    leadSection.hidden = routed === 0;
+    partial.hidden = !ctx.store.state.partial;
   }
   render();
   qPaging.start();
@@ -278,8 +302,12 @@ export function inboxView(ctx) {
   return { el, title: "要対応", back: "#/", onChange: render, destroy() {} };
 }
 
-/** Pending questions first by blocking, then approvals; `threadId` filters. */
-function renderAttention(ctx, questionBox, approvalBox, threadId) {
+/**
+ * Pending questions first by blocking, then approvals; `threadId` filters.
+ * `leadBox` receives the read-only questions routed to a lead: all of them in
+ * the inbox, those this thread leads in a thread view.
+ */
+function renderAttention(ctx, questionBox, approvalBox, threadId, leadBox) {
   const showThread = !threadId;
   const questions = ctx.store
     .pendingQuestions(threadId)
@@ -299,6 +327,15 @@ function renderAttention(ctx, questionBox, approvalBox, threadId) {
     (a) => approvalCard(ctx, a, { showThread }),
     (el, a) => el.refresh(a),
   );
+  if (leadBox) {
+    reconcile(
+      leadBox,
+      ctx.store.leadRoutedQuestions(threadId).sort((a, b) => a.id.localeCompare(b.id)),
+      (q) => q.id,
+      (q) => leadRoutedCard(ctx, q),
+      (el, q) => el.refresh(q),
+    );
+  }
 }
 
 // ---- thread ---------------------------------------------------------------
@@ -353,6 +390,8 @@ export function threadView(ctx, threadId) {
   const approvalBox = h("div", { class: "cards", attrs: { "aria-label": "このスレッドの承認待ち" } });
   const older = h("button", { type: "button", class: "button older", text: "以前のメッセージを読み込む", hidden: true });
   const historyStatus = h("p", { class: "history-status", attrs: { role: "status" } });
+  const reload = h("button", { type: "button", class: "button small", text: "履歴を読み込み直す", hidden: true });
+  const leadBox = h("div", { class: "cards", attrs: { "aria-label": "Lead が対応中の質問" } });
   const list = h("div", { class: "messages", attrs: { role: "log", "aria-label": "メッセージ" } });
   const sending = h("div", { class: "outbox", attrs: { "aria-label": "送信中のメッセージ" } });
 
@@ -403,18 +442,19 @@ export function threadView(ctx, threadId) {
     runsBox,
     questionBox,
     approvalBox,
+    leadBox,
     older,
     historyStatus,
+    reload,
     list,
     sending,
     composer,
   );
 
+  /** The history window on screen, and the one being built to replace it. */
   let history = null;
+  let building = null;
   let runsSignature = null;
-  /** Messages that arrive before the first walk ends. */
-  const pendingMessages = [];
-  let generation = 0;
   let roleTouched = false;
   let destroyed = false;
   const observer =
@@ -492,7 +532,7 @@ export function threadView(ctx, threadId) {
       const root = view?.root_run ? ctx.store.state.runs.get(view.root_run) : null;
       roleSelect.value = root?.role === "orchestrator" ? "orchestrator" : "worker";
     }
-    renderAttention(ctx, questionBox, approvalBox, threadId);
+    renderAttention(ctx, questionBox, approvalBox, threadId, leadBox);
   }
 
   async function stopChat() {
@@ -622,29 +662,36 @@ export function threadView(ctx, threadId) {
     older.hidden = !history.hasOlder;
   }
 
-  async function openHistory() {
-    const mine = (generation += 1);
+  // Rebuild the history from scratch (first open, or after a snapshot: the
+  // stream had a gap, so the messages on screen may be incomplete). Events
+  // that arrive while the walk runs are kept by the new window itself and
+  // applied after the walk; the old window's live messages are dropped.
+  async function rebuildHistory() {
     const next = new HistoryWindow((cursor) =>
       ctx.api.query("read_committed_history", {
         thread: threadId,
         page: pageRequest(cursor, WALK_PAGE_SIZE),
       }),
     );
+    building = next;
     historyStatus.textContent = "履歴を読み込み中…";
+    reload.hidden = true;
     const result = await next.open();
-    if (destroyed || mine !== generation) return;
+    if (destroyed || building !== next) return;
+    building = null;
     if (!result.ok) {
       historyStatus.textContent = describeError(result.error);
+      reload.hidden = false;
       return;
     }
     historyStatus.textContent = "";
-    // Events that arrived while the old window was open belong to it.
-    if (history) for (const m of history.live) next.append(m);
     history = next;
     list.replaceChildren();
     renderMessages();
     scrollToBottom();
   }
+
+  reload.addEventListener("click", () => rebuildHistory());
 
   older.addEventListener("click", async () => {
     if (!history) return;
@@ -656,7 +703,7 @@ export function threadView(ctx, threadId) {
     if (!result.ok) {
       if (result.error.code === "conflict") {
         historyStatus.textContent = "履歴が更新されたため読み込み直します。";
-        await openHistory();
+        await rebuildHistory();
       } else {
         historyStatus.textContent = describeError(result.error);
       }
@@ -667,6 +714,16 @@ export function threadView(ctx, threadId) {
   });
 
   // ---- sending ----------------------------------------------------------
+  //
+  // Each outgoing message keeps its submission id and request id:
+  // - outcome unknown: ask the core (GetCommandReceipt) and resend with the
+  //   same request id and submission id, so the core can deduplicate;
+  // - refused (a decided error): resend with a new request id and the same
+  //   submission id, which the core never accepted;
+  // - dropped (its run ended before reading it): the core already took that
+  //   submission id, so a resend is a new submission with a new id.
+  // The bubble goes away when the input receipt of its submission id says the
+  // message was delivered or withdrawn.
 
   function pendingSends() {
     if (!outbox.has(threadId)) outbox.set(threadId, []);
@@ -675,6 +732,12 @@ export function threadView(ctx, threadId) {
 
   function renderOutbox() {
     const items = pendingSends();
+    for (const item of [...items]) {
+      const receipt = ctx.store.state.receipts.get(item.submissionId);
+      if (receipt && (receipt.state === "delivered" || receipt.state === "withdrawn")) {
+        items.splice(items.indexOf(item), 1);
+      }
+    }
     reconcile(
       sending,
       items,
@@ -697,6 +760,7 @@ export function threadView(ctx, threadId) {
     );
     el.refresh = (current) => {
       const receipt = ctx.store.state.receipts.get(current.submissionId);
+      const dropped = current.state === "accepted" && receipt?.state === "dropped";
       let text;
       switch (current.state) {
         case "sending":
@@ -706,48 +770,34 @@ export function threadView(ctx, threadId) {
           text = receipt ? label(RECEIPT_STATE, receipt.state) : "受付済み";
           break;
         case "unknown":
-          text = "届いたか確認できませんでした。";
+          text = "届いたか確認できませんでした。確認してから再送します。";
           break;
         default:
           text = current.error ? describeError(current.error) : "送信できませんでした。";
       }
       state.textContent = text;
+      const button = (label, onClick) =>
+        h("button", { type: "button", class: "button small", text: label, on: { click: onClick } });
       const buttons = [];
       if (current.state === "unknown") {
-        buttons.push(
-          h("button", {
-            type: "button",
-            class: "button small",
-            text: "確認して再送",
-            on: { click: () => deliver(current, { confirmFirst: true }) },
-          }),
-        );
+        buttons.push(button("確認して再送", () => deliver(current, "confirm")));
       }
-      if (current.state === "failed" || receipt?.state === "dropped") {
-        buttons.push(
-          h("button", {
-            type: "button",
-            class: "button small",
-            text: "再送",
-            on: { click: () => deliver(current, { fresh: true }) },
-          }),
-        );
+      if (current.state === "failed") {
+        buttons.push(button("再送", () => deliver(current, "retry")));
       }
-      if (current.state === "failed" || current.state === "unknown" || receipt?.state === "dropped") {
+      if (dropped) {
+        buttons.push(button("新しいメッセージとして再送", () => deliver(current, "resubmit")));
+      }
+      // Moving the text back to the composer would send it under a new
+      // submission id, so it is offered only once the old one cannot arrive.
+      if (current.state === "failed" || dropped) {
         buttons.push(
-          h("button", {
-            type: "button",
-            class: "button small",
-            text: "入力欄に戻す",
-            on: {
-              click: () => {
-                input.value = input.value ? `${input.value}\n${current.text}` : current.text;
-                saveDraft(threadId, input.value);
-                autosize();
-                removeOutgoing(current.submissionId);
-                input.focus();
-              },
-            },
+          button("入力欄に戻す", () => {
+            input.value = input.value ? `${input.value}\n${current.text}` : current.text;
+            saveDraft(threadId, input.value);
+            autosize();
+            removeOutgoing(current.submissionId);
+            input.focus();
           }),
         );
       }
@@ -764,23 +814,23 @@ export function threadView(ctx, threadId) {
     renderOutbox();
   }
 
-  async function deliver(item, { confirmFirst = false, fresh = false } = {}) {
-    if (fresh) item.requestId = ctx.api.newRequestId();
+  /** `mode`: "send" (first time), "confirm", "retry" or "resubmit" (see above). */
+  async function deliver(item, mode = "send") {
+    if (mode === "retry" || mode === "resubmit") item.requestId = ctx.api.newRequestId();
+    if (mode === "resubmit") item.submissionId = `sub-${randomUuid()}`;
     item.state = "sending";
     item.error = null;
     renderOutbox();
-    const t = thread();
     const result = await ctx.api.sendCommand(
       command("send_chat", {
-        project: item.project ?? t?.project,
+        project: item.project,
         thread: threadId,
         submission_id: item.submissionId,
         composer_role: item.role,
         text: item.text,
       }),
-      { requestId: item.requestId, confirmFirst },
+      { requestId: item.requestId, confirmFirst: mode === "confirm" },
     );
-    item.requestId = result.requestId;
     if (result.ok) {
       item.state = "accepted";
     } else if (result.unknown) {
@@ -830,26 +880,33 @@ export function threadView(ctx, threadId) {
 
   function onMessage(message) {
     if (message.thread !== threadId) return;
-    // The committed copy of a message we sent replaces its outgoing bubble,
-    // whatever the bubble's state: the commit proves the message arrived.
-    if (message.role === "user" && message.content.type === "inline") {
-      const items = pendingSends();
-      const index = items.findIndex((item) => item.text === message.content.payload.text);
-      if (index >= 0) {
-        items.splice(index, 1);
-        renderOutbox();
-      }
-    }
-    if (!history) {
-      // The first walk has not finished; it is applied afterwards.
-      pendingMessages.push(message);
+    if (building) {
+      // The window being built holds it until its walk ends.
+      building.append(message);
       return;
     }
+    if (!history) return;
     const follow = nearBottom();
     if (history.append(message)) {
       renderMessages();
       if (follow) scrollToBottom();
     }
+  }
+
+  async function loadThread() {
+    const issued = ctx.store.mark();
+    const result = await ctx.api.query("get_thread", { thread: threadId });
+    if (destroyed) return false;
+    if (result.ok) {
+      ctx.store.setThreadView(result.value, issued);
+    } else if (result.error.code === "not_found") {
+      replaceChildren(el, emptyNote("このスレッドは見つかりません。"));
+      return false;
+    } else {
+      historyStatus.textContent = describeError(result.error);
+    }
+    await ctx.queryInto("runs", "list_runs", { thread: threadId, page: pageRequest(null, 200) });
+    return true;
   }
 
   const view = {
@@ -862,17 +919,13 @@ export function threadView(ctx, threadId) {
           onMessage(change.message);
           return;
         case "snapshot":
-          // Messages committed while disconnected are not in a snapshot.
-          openHistory();
+          // A snapshot follows a gap in the stream: messages committed in the
+          // gap are not in it, and the thread view was dropped with the state.
+          rebuildHistory();
+          loadThread();
           break;
         case "receipt":
-          if (change.receipt.thread === threadId) {
-            if (change.receipt.state === "delivered" || change.receipt.state === "withdrawn") {
-              removeOutgoing(change.receipt.submission_id);
-            } else {
-              renderOutbox();
-            }
-          }
+          if (change.receipt.thread === threadId) renderOutbox();
           break;
         default:
           break;
@@ -892,26 +945,9 @@ export function threadView(ctx, threadId) {
     },
   };
 
-  async function start() {
-    const result = await ctx.api.query("get_thread", { thread: threadId });
-    if (destroyed) return;
-    if (result.ok) {
-      ctx.store.setThreadView(result.value);
-    } else if (result.error.code === "not_found") {
-      replaceChildren(el, emptyNote("このスレッドは見つかりません。"));
-      return;
-    } else {
-      historyStatus.textContent = describeError(result.error);
-    }
-    const runs = await ctx.api.query("list_runs", { thread: threadId, page: pageRequest(null, 200) });
-    if (runs.ok && !destroyed) ctx.store.mergePage("runs", runs.value.items);
-    await openHistory();
-    if (destroyed) return;
-    for (const message of pendingMessages.splice(0)) onMessage(message);
-  }
-
   renderHead();
   renderOutbox();
-  start();
+  rebuildHistory();
+  loadThread();
   return view;
 }

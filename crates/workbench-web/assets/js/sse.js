@@ -17,6 +17,11 @@ export const MAX_BACKOFF_MS = 30_000;
 const BASE_BACKOFF_MS = 1_000;
 /** After this many failed attempts the next one asks for a fresh snapshot. */
 const FAILURES_BEFORE_SNAPSHOT = 3;
+/**
+ * A stream must stay up this long before the backoff starts over. A core
+ * that accepts the subscription and drops it at once keeps the delay growing.
+ */
+export const STABLE_AFTER_MS = 10_000;
 
 /** Delay before attempt `attempt` (0-based): exponential, capped, half jittered. */
 export function backoffDelay(attempt, random = Math.random) {
@@ -38,7 +43,7 @@ export class EventStream {
    * @param {(envelope: object) => void} options.onEvent an event to apply
    * @param {(status: {state: string, retryInMs?: number, reason?: string}) => void} options.onStatus
    * @param {typeof EventSource} [options.EventSourceImpl]
-   * @param {(fn: () => void, ms: number) => unknown} [options.schedule]
+   * @param {(fn: () => void, ms: number, label: string) => unknown} [options.schedule]
    * @param {(handle: unknown) => void} [options.cancel]
    * @param {() => number} [options.random]
    */
@@ -53,6 +58,7 @@ export class EventStream {
     this.random = options.random ?? Math.random;
     this.source = null;
     this.timer = null;
+    this.stableTimer = null;
     /** The last cursor applied, or null before the first snapshot. */
     this.last = null;
     this.subscribed = false;
@@ -83,6 +89,8 @@ export class EventStream {
 
   close() {
     this.subscribed = false;
+    if (this.stableTimer !== null) this.cancel(this.stableTimer);
+    this.stableTimer = null;
     if (this.source) {
       this.source.close();
       this.source = null;
@@ -106,7 +114,14 @@ export class EventStream {
       }
       this.last = started.high_water;
       this.subscribed = true;
-      this.failures = 0;
+      this.stableTimer = this.schedule(
+        () => {
+          this.stableTimer = null;
+          this.failures = 0;
+        },
+        STABLE_AFTER_MS,
+        "stable",
+      );
       this.onStatus({ state: "live" });
       this.onStarted(started);
     });
@@ -162,10 +177,14 @@ export class EventStream {
     const delay = backoffDelay(this.failures, this.random);
     this.failures += 1;
     this.onStatus({ state: "waiting", retryInMs: delay, reason });
-    this.timer = this.schedule(() => {
-      this.timer = null;
-      if (this.stopped) return;
-      this.connect(this.failures >= FAILURES_BEFORE_SNAPSHOT ? null : this.last);
-    }, delay);
+    this.timer = this.schedule(
+      () => {
+        this.timer = null;
+        if (this.stopped) return;
+        this.connect(this.failures >= FAILURES_BEFORE_SNAPSHOT ? null : this.last);
+      },
+      delay,
+      "retry",
+    );
   }
 }

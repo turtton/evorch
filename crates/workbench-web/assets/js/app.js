@@ -6,6 +6,7 @@ import { coreChanged } from "./format.js";
 import { EventStream } from "./sse.js";
 import { createStore } from "./store.js";
 import { homeView, inboxView, projectView, threadView } from "./views.js";
+import { fetchAllPages } from "./paging.js";
 import { describeError, pageRequest } from "./wire.js";
 
 const DEFAULT_BODY_CHUNK = 64 * 1024;
@@ -82,24 +83,76 @@ const ctx = {
   maxBodyChunk() {
     return hello?.limits?.max_body_chunk_bytes ?? DEFAULT_BODY_CHUNK;
   },
-  /** Re-read one thread's questions, answered ones included, after acting on one. */
-  async refreshQuestions(threadId) {
-    const result = await api.query("list_questions", {
-      thread: threadId,
-      pending_only: false,
-      page: pageRequest(null, 200),
-    });
-    if (result.ok) store.mergePage("questions", result.value.items);
+  /**
+   * Run a listing query and merge its page into the store as of the moment
+   * it was sent, so it cannot overwrite what a later event wrote.
+   */
+  async queryInto(kind, type, payload) {
+    const issued = store.mark();
+    const result = await api.query(type, payload);
+    if (result.ok) store.mergePage(kind, result.value.items, issued);
+    return result;
   },
-  async refreshApprovals(threadId) {
-    const result = await api.query("list_approvals", {
-      thread: threadId,
-      pending_only: false,
-      page: pageRequest(null, 200),
-    });
-    if (result.ok) store.mergePage("approvals", result.value.items);
+  /** Re-read one thread's questions, answered ones included, after acting on one. */
+  refreshQuestions(threadId) {
+    return fetchAllPages((cursor) =>
+      ctx.queryInto("questions", "list_questions", {
+        thread: threadId,
+        pending_only: false,
+        page: pageRequest(cursor, 200),
+      }),
+    );
+  },
+  refreshApprovals(threadId) {
+    return fetchAllPages((cursor) =>
+      ctx.queryInto("approvals", "list_approvals", {
+        thread: threadId,
+        pending_only: false,
+        page: pageRequest(cursor, 200),
+      }),
+    );
   },
 };
+
+/**
+ * A snapshot page cut short leaves lists incomplete. Read projects, their
+ * threads and every pending question and approval with queries, all pages,
+ * then clear the "partial" mark. A newer snapshot starts its own completion.
+ */
+let completion = 0;
+async function completeSnapshot() {
+  const mine = (completion += 1);
+  const all = (kind, type, payload) =>
+    fetchAllPages((cursor) => ctx.queryInto(kind, type, payload(cursor)));
+  const results = await Promise.all([
+    all("projects", "list_projects", (cursor) => pageRequest(cursor, 200)).then(async (result) => {
+      if (!result.ok) return result;
+      const projects = [...store.state.projects.keys()];
+      const threads = await Promise.all(
+        projects.map((project) =>
+          all("threads", "list_threads", (cursor) => ({ project, page: pageRequest(cursor, 200) })),
+        ),
+      );
+      return threads.find((r) => !r.ok) ?? result;
+    }),
+    all("questions", "list_questions", (cursor) => ({ pending_only: true, page: pageRequest(cursor, 200) })),
+    all("approvals", "list_approvals", (cursor) => ({ pending_only: true, page: pageRequest(cursor, 200) })),
+  ]);
+  if (mine !== completion) return;
+  const failed = results.find((result) => !result.ok);
+  if (failed) {
+    showBanner("partial", `一覧の一部を読み込めませんでした（${describeError(failed.error)}）。`, {
+      label: "再試行",
+      run: () => {
+        clearBanner("partial");
+        completeSnapshot();
+      },
+    });
+    return;
+  }
+  clearBanner("partial");
+  store.completeSnapshot();
+}
 
 // ---- navigation -----------------------------------------------------------
 
@@ -147,11 +200,13 @@ window.addEventListener("hashchange", navigate);
 function renderBadge() {
   const total = store.totalAttention();
   const count = total.questions + total.approvals;
-  els.inboxBadge.textContent = String(count);
-  els.inboxBadge.hidden = count === 0;
+  const partial = store.state.partial;
+  els.inboxBadge.textContent = partial ? `${count}+` : String(count);
+  els.inboxBadge.hidden = count === 0 && !partial;
   els.inbox.setAttribute(
     "aria-label",
-    count === 0 ? "要対応（なし）" : `要対応: 質問 ${total.questions} 件、承認 ${total.approvals} 件`,
+    (count === 0 ? "要対応（なし）" : `要対応: 質問 ${total.questions} 件、承認 ${total.approvals} 件`) +
+      (partial ? "（一部のみ表示・読み込み中）" : ""),
   );
 }
 
@@ -202,7 +257,7 @@ const CONNECTION_LABELS = {
 const stream = new EventStream({
   scope: "all",
   onStarted(started) {
-    store.applySubscriptionStarted(started);
+    if (store.applySubscriptionStarted(started) && store.state.partial) completeSnapshot();
   },
   onEvent(envelope) {
     store.applyEvent(envelope.event);

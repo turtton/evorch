@@ -11,6 +11,7 @@ import { HistoryWindow, messageKey } from "../../assets/js/history.js";
 import { parseInline, parseMarkdown, renderMarkdown, safeHref } from "../../assets/js/markdown.js";
 import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.js";
 import { createStore } from "../../assets/js/store.js";
+import { fetchAllPages } from "../../assets/js/paging.js";
 import { coreChanged } from "../../assets/js/format.js";
 import {
   classifyCursor,
@@ -134,41 +135,72 @@ const question = (id, threadId, revision, answer) => ({
   ...(answer ? { answer: { text: answer } } : {}),
 });
 
+const snapshot = (id, items, nextCursor) => ({
+  subscription_id: id,
+  snapshot_id: `snap-${id}`,
+  high_water: { core_epoch: "1", sequence: "5" },
+  initial_page: {
+    items,
+    snapshot_revision: "1",
+    ...(nextCursor ? { next_cursor: nextCursor } : {}),
+  },
+});
+
 test("a snapshot replaces state and a replay keeps it", () => {
   const store = createStore();
-  store.applySubscriptionStarted({
-    subscription_id: "1",
-    snapshot_id: "s1",
-    high_water: { core_epoch: "1", sequence: "5" },
-    initial_page: { items: [{ type: "thread", payload: thread("t1", "1") }], snapshot_revision: "1" },
-  });
+  store.applySubscriptionStarted(snapshot("1", [{ type: "thread", payload: thread("t1", "1") }]));
   assert(store.state.threads.has("t1"));
   store.applySubscriptionStarted({ subscription_id: "2", high_water: { core_epoch: "1", sequence: "5" } });
   assert(store.state.threads.has("t1"), "replay keeps state");
-  store.applySubscriptionStarted({
-    subscription_id: "3",
-    snapshot_id: "s2",
-    high_water: { core_epoch: "2", sequence: "0" },
-    initial_page: { items: [{ type: "thread", payload: thread("t2", "1") }], snapshot_revision: "1" },
-  });
+  store.applySubscriptionStarted(snapshot("3", [{ type: "thread", payload: thread("t2", "1") }]));
   assert(!store.state.threads.has("t1") && store.state.threads.has("t2"), "snapshot replaces");
+  assert(!store.state.partial);
 });
 
-test("events apply by revision and are idempotent", () => {
+test("a cut-short snapshot stays partial until completed", () => {
+  const store = createStore();
+  store.applySubscriptionStarted(snapshot("1", [{ type: "thread", payload: thread("t1", "1") }], "more"));
+  assert(store.state.partial);
+  store.completeSnapshot();
+  assert(!store.state.partial);
+});
+
+test("events apply in stream order whatever their revisions", () => {
   const store = createStore();
   const changes = [];
   store.subscribe((c) => changes.push(c.type));
-  assert(store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "5", "running") } }));
-  assert(store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "5", "running") } }), "same revision applies again");
-  eq(store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "4", "idle") } }), null, "older is ignored");
-  eq(store.state.threads.get("t1").state, "running");
+  // Revisions are opaque hashes: a later state may carry a smaller one.
+  store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "900", "running") } });
+  store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "17", "idle") } });
+  eq(store.state.threads.get("t1").state, "idle", "the later event wins");
   eq(store.applyEvent({ type: "future_event", payload: {} }), null, "unknown events are ignored");
   eq(changes, ["thread", "thread"]);
 });
 
+test("a query answer never overwrites a later event", () => {
+  const store = createStore();
+  const issued = store.mark();
+  // While the query is in flight, an event updates the thread.
+  store.applyEvent({ type: "thread_changed", payload: { thread: thread("t1", "17", "running") } });
+  store.mergePage("threads", [thread("t1", "900", "idle"), thread("t2", "5")], issued);
+  eq(store.state.threads.get("t1").state, "running", "the event is newer than the query");
+  assert(store.state.threads.has("t2"), "entities the event did not touch are taken");
+  // A query sent after the event may replace it.
+  store.mergePage("threads", [thread("t1", "3", "failed")], store.mark());
+  eq(store.state.threads.get("t1").state, "failed");
+});
+
+test("a query sent before a snapshot reset is ignored", () => {
+  const store = createStore();
+  const issued = store.mark();
+  store.applySubscriptionStarted(snapshot("1", [{ type: "thread", payload: thread("t1", "1") }]));
+  store.mergePage("threads", [thread("gone", "1")], issued);
+  assert(!store.state.threads.has("gone"));
+});
+
 test("attention counts follow questions and approvals", () => {
   const store = createStore();
-  store.mergePage("threads", [thread("t1", "1"), thread("t2", "1", "idle", "p2")]);
+  store.mergePage("threads", [thread("t1", "1"), thread("t2", "1", "idle", "p2")], store.mark());
   store.applyEvent({ type: "question_changed", payload: { question: question("q1", "t1", "1") } });
   store.applyEvent({
     type: "approval_changed",
@@ -179,10 +211,51 @@ test("attention counts follow questions and approvals", () => {
   eq(store.threadAttention("t1"), { questions: 1, approvals: 0 });
   eq(store.projectAttention("p2"), { questions: 0, approvals: 1 });
   eq(store.totalAttention(), { questions: 1, approvals: 1 });
-  store.applyEvent({ type: "question_changed", payload: { question: question("q1", "t1", "2", "yes") } });
+  const before = store.mark();
+  store.applyEvent({ type: "question_changed", payload: { question: question("q1", "t1", "0", "yes") } });
   eq(store.totalAttention(), { questions: 0, approvals: 1 }, "an answered question no longer counts");
-  store.mergePage("questions", [question("q1", "t1", "1")]);
-  eq(store.totalAttention().questions, 0, "a stale page does not bring it back");
+  store.mergePage("questions", [question("q1", "t1", "99")], before);
+  eq(store.totalAttention().questions, 0, "an older page does not bring it back");
+});
+
+test("lead-routed questions are the lead's, not the user's", () => {
+  const store = createStore();
+  const routed = {
+    ...question("q2", "lane", "1"),
+    target: { type: "lead", payload: { lead_thread: "lead", lead_run: "r" } },
+  };
+  store.applyEvent({ type: "question_changed", payload: { question: routed } });
+  eq(store.totalAttention().questions, 0);
+  eq(store.threadAttention("lane").questions, 0);
+  eq(store.leadRoutedQuestions("lead").map((q) => q.id), ["q2"]);
+  eq(store.leadRoutedQuestions("other"), []);
+  // The lead passes it to the user: the same question comes back user-targeted.
+  store.applyEvent({ type: "question_changed", payload: { question: { ...routed, target: { type: "user" } } } });
+  eq(store.threadAttention("lane").questions, 1);
+  eq(store.leadRoutedQuestions(), []);
+});
+
+// ---- paging -------------------------------------------------------------------
+
+test("all pages are read and an expired cursor restarts from the first page", async () => {
+  const seen = [];
+  let expired = true;
+  const load = async (cursor) => {
+    seen.push(cursor);
+    if (cursor === "c2" && expired) {
+      expired = false;
+      return { ok: false, error: { code: "conflict" } };
+    }
+    const next = { null: "c1", c1: "c2", c2: undefined }[String(cursor)];
+    return { ok: true, value: { items: [], next_cursor: next } };
+  };
+  const result = await fetchAllPages(load);
+  eq(result, { ok: true, restarts: 1 });
+  eq(seen, [null, "c1", "c2", null, "c1", "c2"]);
+  const failing = await fetchAllPages(async () => ({ ok: false, error: { code: "busy" } }));
+  eq(failing.error.code, "busy");
+  const endless = await fetchAllPages(async () => ({ ok: true, value: { items: [], next_cursor: "x" } }), { maxPages: 3 });
+  eq(endless.error.code, "limit_exceeded");
 });
 
 // ---- history ----------------------------------------------------------------
@@ -239,6 +312,14 @@ test("history appends live messages once", async () => {
 test("a history error is reported, not thrown", async () => {
   const window = new HistoryWindow(async () => ({ ok: false, error: { code: "not_found" } }));
   eq((await window.open()).error.code, "not_found");
+});
+
+test("a walk that hits its page limit is an error, not the newest messages", async () => {
+  const { fetchPage } = pagedHistory(10, 3);
+  const window = new HistoryWindow(fetchPage, { maxPages: 2 });
+  const result = await window.open();
+  eq([result.ok, result.error?.code], [false, "limit_exceeded"]);
+  eq(window.messages(), [], "nothing is shown as if it were the latest");
 });
 
 // ---- markdown -----------------------------------------------------------------
@@ -357,23 +438,31 @@ class FakeEventSource {
 
 function harness() {
   FakeEventSource.instances = [];
-  const log = { started: [], events: [], statuses: [], timers: [] };
+  const log = { started: [], events: [], statuses: [], timers: new Map() };
+  let ids = 0;
   const stream = new EventStream({
     scope: "all",
     EventSourceImpl: FakeEventSource,
-    schedule: (fn, ms) => {
-      log.timers.push({ fn, ms });
-      return log.timers.length;
+    schedule: (fn, ms, label) => {
+      ids += 1;
+      log.timers.set(ids, { fn, ms, label });
+      return ids;
     },
-    cancel: () => {},
+    cancel: (id) => log.timers.delete(id),
     random: () => 0,
     onStarted: (s) => log.started.push(s),
     onEvent: (e) => log.events.push(e),
     onStatus: (s) => log.statuses.push(s.state),
   });
   const last = () => FakeEventSource.instances.at(-1);
-  const fire = () => log.timers.shift().fn();
-  return { stream, log, last, fire };
+  const pending = (label) => [...log.timers].filter(([, t]) => t.label === label);
+  /** Run the oldest pending timer with `label`. */
+  const fire = (label = "retry") => {
+    const [id, timer] = pending(label)[0];
+    log.timers.delete(id);
+    timer.fn();
+  };
+  return { stream, log, last, fire, pending };
 }
 
 const ui = (sequence, type = "thread_changed", epoch = "7", payload = {}) => ({
@@ -395,7 +484,7 @@ test("the stream applies new events and skips duplicates", () => {
 });
 
 test("a disconnect waits, then resumes after the last cursor", () => {
-  const { stream, log, last, fire } = harness();
+  const { stream, log, last, fire, pending } = harness();
   stream.start();
   last().emit("subscription_started", { subscription_id: "1", high_water: { core_epoch: "7", sequence: "40" } });
   last().emit("ui_event", ui(41));
@@ -403,21 +492,42 @@ test("a disconnect waits, then resumes after the last cursor", () => {
   first.emit("error");
   assert(first.closed);
   eq(log.statuses.at(-1), "waiting");
-  eq(log.timers[0].ms, 500);
+  eq(pending("retry").map(([, t]) => t.ms), [500]);
+  eq(pending("stable").length, 0, "the stability timer is cancelled with the stream");
   fire();
   eq(last().url, "/api/v1/events?scope=all&after=7%3A41");
 });
 
 test("repeated failures fall back to a fresh snapshot", () => {
-  const { stream, log, last, fire } = harness();
+  const { stream, last, fire, pending } = harness();
   stream.start();
   last().emit("subscription_started", { subscription_id: "1", high_water: { core_epoch: "7", sequence: "40" } });
   for (let i = 0; i < 3; i += 1) {
     last().emit("error");
     fire();
   }
-  eq(log.timers.length, 0);
+  eq(pending("retry").length, 0);
   eq(last().url, "/api/v1/events?scope=all", "no after: the core answers with a snapshot");
+});
+
+test("the backoff starts over only after a stream stayed up", () => {
+  const { stream, last, fire, pending } = harness();
+  const started = (seq) =>
+    last().emit("subscription_started", { subscription_id: "1", high_water: { core_epoch: "7", sequence: String(seq) } });
+  const delay = () => pending("retry").at(-1)[1].ms;
+  stream.start();
+  started(1);
+  last().emit("error");
+  eq(delay(), 500);
+  fire();
+  started(1);
+  last().emit("error");
+  eq(delay(), 1000, "accepted then dropped at once still counts as a failure");
+  fire();
+  started(1);
+  fire("stable");
+  last().emit("error");
+  eq(delay(), 500, "a stream that stayed up resets the backoff");
 });
 
 test("resync and epoch change reconnect for a snapshot", () => {

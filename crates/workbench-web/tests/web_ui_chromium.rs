@@ -1,10 +1,14 @@
 //! Browser end-to-end test of the embedded web workbench (ADR 0045 P6).
 //!
-//! A scripted backend serves one project with two threads, a long committed
-//! history, a question, a lane question routed to its lead and a tool
-//! approval. Headless Chromium then drives the real front end through the
-//! real adapter: list -> thread (history paging, Markdown, a long body) ->
-//! send (IME guard, receipts) -> answer -> approve -> core restart prompt.
+//! A scripted backend shaped like the host serves one project with two
+//! threads, a long committed history, questions (one routed to a lead) and a
+//! tool approval. Like the host it answers a subscription with one cut-short
+//! snapshot page, uses opaque revisions that can go down and forgets a list
+//! cursor. Headless Chromium then drives the real front end through the real
+//! adapter: list (snapshot completed by queries, expired cursor) -> thread
+//! (history paging, Markdown, a long body, read-only lead question) -> send
+//! (IME guard, receipts) -> answer -> deny (approving needs the full input,
+//! which the protocol does not carry yet) -> core restart prompt.
 //! The JavaScript unit tests (tests/web/unit.mjs) run in the same browser.
 //!
 //! Ignored by default because it needs Chrome or Chromium (`CHROME` names the
@@ -49,6 +53,7 @@ const JS: &str = "text/javascript; charset=utf-8";
 const HISTORY_LEN: usize = 230;
 const QUESTION_TITLE: &str = "本番 DB のマイグレーションも実行してよいですか？";
 const LANE_QUESTION_TITLE: &str = "テストのタイムアウト値はいくつにしますか？";
+const FREE_QUESTION_TITLE: &str = "回帰テストの対象ブラウザを教えてください。";
 const SENT_TEXT: &str = "修正案 A で進めてください。テストも追加して。";
 
 fn body_text() -> String {
@@ -95,6 +100,10 @@ struct World {
     subscribers: Vec<(String, mpsc::Sender<EventEnvelope>)>,
     subscriptions: u64,
     commands: Vec<Value>,
+    /// Thread-list cursors the core has "forgotten": the first use of each
+    /// is refused with `conflict`, as an expired host cursor is.
+    expired_cursors: Vec<String>,
+    conflicts: usize,
 }
 
 impl World {
@@ -109,8 +118,8 @@ impl World {
                 json!({"id": "proj-2", "display_name": "intent-cli", "thread_count": 0, "revision": "1"}),
             ],
             threads: vec![
-                json!({"id": "thr-1", "project": "proj-1", "title": "ログイン画面のリダイレクトを直す", "state": "waiting_for_user", "revision": "5", "updated_at": now}),
-                json!({"id": "thr-2", "project": "proj-1", "title": "レーン: 回帰テストを追加", "state": "running", "lead_thread": "thr-1", "revision": "2", "updated_at": now}),
+                json!({"id": "thr-1", "project": "proj-1", "title": "ログイン画面のリダイレクトを直す", "state": "waiting_for_user", "revision": "15802293917013211136", "updated_at": now}),
+                json!({"id": "thr-2", "project": "proj-1", "title": "レーン: 回帰テストを追加", "state": "running", "lead_thread": "thr-1", "revision": "77", "updated_at": now}),
             ],
             runs: vec![
                 json!({"id": "run-root", "thread": "thr-1", "role": "orchestrator", "phase": "waiting_for_user", "revision": "1"}),
@@ -124,7 +133,7 @@ impl World {
                     "target": {"type": "user"},
                     "management_revision": "1", "routing_revision": "1",
                     "blocking": true, "title": QUESTION_TITLE, "options": ["はい", "いいえ"],
-                    "revision": "3", "raised_by": agent("run-root"),
+                    "revision": "9000", "raised_by": agent("run-root"),
                 }),
                 json!({
                     "id": "q-2",
@@ -134,9 +143,17 @@ impl World {
                     "blocking": false, "title": LANE_QUESTION_TITLE, "options": [],
                     "revision": "1", "raised_by": agent("run-l1"),
                 }),
+                json!({
+                    "id": "q-3",
+                    "requester": {"run": "run-l1", "thread": "thr-2", "root_run": "run-l1"},
+                    "target": {"type": "user"},
+                    "management_revision": "1", "routing_revision": "1",
+                    "blocking": true, "title": FREE_QUESTION_TITLE, "options": [],
+                    "revision": "31337", "raised_by": agent("run-l1"),
+                }),
             ],
             approvals: vec![json!({
-                "id": "ap-1", "core_epoch": "7", "revision": "2", "thread": "thr-1", "run": "run-w1",
+                "id": "ap-1", "core_epoch": "7", "revision": "77777", "thread": "thr-1", "run": "run-w1",
                 "tool_name": "shell",
                 "summary": "$ cargo nextest run -p workbench-web\n$ git add crates/auth/src/login.rs\n$ git commit -S -m 'fix(auth): validate redirect target'\n$ git push origin fix/login-redirect\n# 4 commands in /home/user/src/evorch\n# network: github.com:443\n# writes: crates/auth/src/login.rs\n# timeout: 10 minutes",
                 "state": "pending",
@@ -145,6 +162,8 @@ impl World {
             subscribers: Vec::new(),
             subscriptions: 0,
             commands: Vec::new(),
+            expired_cursors: vec!["t1".to_owned()],
+            conflicts: 0,
         }
     }
 
@@ -268,13 +287,9 @@ impl UiBackend {
                     refused("already_resolved", "never")
                 } else {
                     question["answer"] = json!({"text": p["answer"], "answered_by": answered_by});
-                    let next = question["revision"]
-                        .as_str()
-                        .unwrap()
-                        .parse::<u64>()
-                        .unwrap()
-                        + 1;
-                    question["revision"] = json!(next.to_string());
+                    // Revisions are content hashes in the host: the new one
+                    // may well be smaller, as here.
+                    question["revision"] = json!("12");
                     let question = question.clone();
                     world.publish(
                         json!({"type": "question_changed", "payload": {"question": question}}),
@@ -297,7 +312,7 @@ impl UiBackend {
                     } else {
                         "denied"
                     });
-                    approval["revision"] = json!("3");
+                    approval["revision"] = json!("5");
                     approval["decided_by"] = decided_by;
                     let approval = approval.clone();
                     world.publish(
@@ -318,7 +333,7 @@ impl UiBackend {
     }
 
     fn query(&self, request: &Value) -> Value {
-        let world = self.world.lock().unwrap();
+        let mut world = self.world.lock().unwrap();
         let kind = request["payload"]["type"].as_str().unwrap();
         let p = &request["payload"]["payload"];
         let thread_filter = |item: &Value, key: &str| {
@@ -326,18 +341,28 @@ impl UiBackend {
         };
         match kind {
             "list_projects" => query_reply("projects", page(world.projects.clone(), None)),
-            "list_threads" => query_reply(
-                "threads",
-                page(
-                    world
-                        .threads
-                        .iter()
-                        .filter(|t| t["project"] == p["project"])
-                        .cloned()
-                        .collect(),
-                    None,
-                ),
-            ),
+            "list_threads" => {
+                // One thread per page, so listings need their cursors.
+                let threads: Vec<Value> = world
+                    .threads
+                    .iter()
+                    .filter(|t| t["project"] == p["project"])
+                    .cloned()
+                    .collect();
+                let cursor = p["page"]["cursor"].as_str().map(str::to_owned);
+                if let Some(cursor) = &cursor
+                    && let Some(at) = world.expired_cursors.iter().position(|c| c == cursor)
+                {
+                    world.expired_cursors.remove(at);
+                    world.conflicts += 1;
+                    return refused("conflict", "after_resync");
+                }
+                let start =
+                    cursor.map_or(0, |c| c.trim_start_matches('t').parse::<usize>().unwrap());
+                let end = (start + 1).min(threads.len());
+                let next = (end < threads.len()).then(|| format!("t{end}"));
+                query_reply("threads", page(threads[start..end].to_vec(), next))
+            }
             "get_thread" => match world.threads.iter().find(|t| t["id"] == p["thread"]) {
                 Some(summary) => query_reply(
                     "thread",
@@ -414,6 +439,9 @@ impl UiBackend {
         }
     }
 
+    /// The first snapshot page. Like the host's (one default-size page), it
+    /// does not hold everything: the lane thread, the questions and the
+    /// approvals are only reachable with list queries.
     fn snapshot_items(world: &World) -> Vec<Value> {
         let mut items = vec![
             json!({"type": "core_status", "payload": serde_json::to_value(common::core_status()).unwrap()}),
@@ -428,6 +456,7 @@ impl UiBackend {
             world
                 .threads
                 .iter()
+                .filter(|t| t["lead_thread"].is_null())
                 .map(|t| json!({"type": "thread", "payload": t})),
         );
         items.extend(
@@ -435,20 +464,6 @@ impl UiBackend {
                 .runs
                 .iter()
                 .map(|r| json!({"type": "run", "payload": r})),
-        );
-        items.extend(
-            world
-                .questions
-                .iter()
-                .filter(|q| q["answer"].is_null())
-                .map(|q| json!({"type": "question", "payload": q})),
-        );
-        items.extend(
-            world
-                .approvals
-                .iter()
-                .filter(|a| a["state"] == "pending")
-                .map(|a| json!({"type": "approval", "payload": a})),
         );
         items
     }
@@ -485,7 +500,11 @@ impl WorkbenchBackend for UiBackend {
             "subscription_id": id,
             "snapshot_id": format!("snap-{id}"),
             "high_water": {"core_epoch": world.epoch.to_string(), "sequence": world.sequence.to_string()},
-            "initial_page": {"items": Self::snapshot_items(&world), "snapshot_revision": "1"},
+            "initial_page": {
+                "items": Self::snapshot_items(&world),
+                "next_cursor": format!("snap-{id}-2"),
+                "snapshot_revision": "1",
+            },
         });
         Ok(BackendSubscription {
             started: serde_json::from_value(started).unwrap(),
@@ -723,11 +742,21 @@ async fn web_workbench_main_flows_in_chromium() {
         .await;
     ui.wait(r##"() => document.querySelector('a.row[href="#/p/proj-1"]')?.textContent.includes("evorch")"##)
         .await;
+    // The snapshot is one cut-short page: the badge says "partial" until the
+    // lists were completed with queries (one of them with an expired cursor).
+    ui.wait(r##"() => document.querySelector("#inbox-badge").textContent === "3""##)
+        .await;
     assert_eq!(
-        ui.wait(r##"() => !document.querySelector("#inbox-badge").hidden && document.querySelector("#inbox-badge").textContent"##)
-            .await,
-        "3",
-        "two questions and one approval need attention"
+        ui.eval(
+            r##"document.querySelector(".attention-summary").textContent.includes("一部のみ")"##
+        )
+        .await,
+        false
+    );
+    assert_eq!(
+        backend.world.lock().unwrap().conflicts,
+        1,
+        "the expired thread cursor was hit and the listing started over"
     );
     ui.screenshot("01-projects").await;
 
@@ -736,9 +765,14 @@ async fn web_workbench_main_flows_in_chromium() {
     let badges = ui
         .wait(r##"() => document.querySelector('a.row[href="#/t/thr-1"] .row-badges')?.textContent || false"##)
         .await;
-    assert_eq!(badges, "質問 1承認 1");
-    ui.wait(r##"() => document.querySelector('a.row[href="#/t/thr-2"]')?.textContent.includes("レーン")"##)
+    assert_eq!(
+        badges, "質問 1承認 1",
+        "the lead-routed question is not counted"
+    );
+    let lane = ui
+        .wait(r##"() => document.querySelector('a.row[href="#/t/thr-2"] .row-badges')?.textContent || false"##)
         .await;
+    assert_eq!(lane, "質問 1");
     ui.screenshot("02-threads").await;
 
     // ---- thread: newest history, Markdown, long body ----
@@ -783,6 +817,26 @@ async fn web_workbench_main_flows_in_chromium() {
         r##"() => document.querySelector(".thread .card.question")?.textContent.includes({QUESTION_TITLE:?})"##
     ))
     .await;
+    let routed = ui
+        .eval(
+            r##"(() => {
+                const card = document.querySelector(".thread .card.lead-routed");
+                return card && {
+                    text: card.textContent,
+                    inputs: card.querySelectorAll("textarea, button").length,
+                };
+            })()"##,
+        )
+        .await;
+    assert!(
+        routed["text"]
+            .as_str()
+            .unwrap()
+            .contains(LANE_QUESTION_TITLE)
+            && routed["text"].as_str().unwrap().contains("Lead が対応中"),
+        "{routed}"
+    );
+    assert_eq!(routed["inputs"], 0, "a lead-routed question is read-only");
     ui.screenshot("04-thread-top").await;
     ui.click("button.older").await;
     ui.wait(r##"() => document.querySelectorAll(".messages .msg").length === 230"##)
@@ -838,57 +892,63 @@ async fn web_workbench_main_flows_in_chromium() {
     let answer = backend.command("answer_user_question").await;
     assert_eq!(
         answer["payload"],
-        json!({"thread": "thr-1", "question_id": "q-1", "answer": "はい", "question_revision": "3"})
+        json!({"thread": "thr-1", "question_id": "q-1", "answer": "はい", "question_revision": "9000"})
     );
     ui.wait(r##"() => !document.querySelector(".thread .card.question")"##)
         .await;
 
-    // ---- inbox: lane question routed to the lead, and the approval ----
+    // ---- inbox: the approval, a free-text question, the lead's question ----
     ui.go("#/inbox").await;
-    ui.wait(r##"() => document.querySelector(".card.approval") && document.querySelector(".card.question")"##)
+    ui.wait(r##"() => document.querySelector(".card.approval") && document.querySelector(".cards .card.question")"##)
+        .await;
+    let lead = ui
+        .eval(
+            r##"(() => {
+                const section = document.querySelector(".lead-section");
+                return { hidden: section.hidden, count: section.querySelector("summary").textContent,
+                         answerable: section.querySelectorAll("textarea, .card button").length };
+            })()"##,
+        )
         .await;
     assert_eq!(
-        ui.eval(r##"document.querySelector(".card.question .chip.info")?.textContent"##)
-            .await,
-        "Lead 宛て"
+        lead,
+        json!({"hidden": false, "count": "Lead が対応中の質問 (1)", "answerable": 0})
     );
     ui.screenshot("05-inbox").await;
-    assert_eq!(
-        ui.eval(
-            r##"document.querySelector('button[aria-label="このツール実行を承認"]').disabled"##
+    // ApprovalView only has a bounded summary, so the Web cannot show the
+    // full input and does not approve; denying stays possible.
+    let approval = ui
+        .eval(
+            r##"(() => {
+                const card = document.querySelector(".card.approval");
+                return { approve: card.querySelector('button[aria-label="このツール実行を承認"]').disabled,
+                         deny: card.querySelector('button[aria-label="このツール実行を拒否"]').disabled,
+                         hint: card.querySelector(".card-hint").textContent };
+            })()"##,
         )
-        .await,
-        true,
-        "approval waits until the full input was shown"
-    );
-    ui.click(".card.approval button.link").await;
-    ui.wait(
-        r##"() => !document.querySelector('button[aria-label="このツール実行を承認"]').disabled"##,
-    )
-    .await;
-    ui.screenshot("06-inbox-approval-expanded").await;
-    ui.click(r##"button[aria-label="このツール実行を承認"]"##)
         .await;
     assert_eq!(
-        backend.count("decide_tool_approval"),
-        0,
-        "the first press only arms"
+        approval,
+        json!({"approve": true, "deny": false, "hint": "全文を確認できないため Web からは承認できません（拒否はできます）。"})
     );
-    ui.click(r##"button[aria-label="このツール実行を承認"]"##)
+    ui.click(".card.approval button.link").await;
+    ui.screenshot("06-inbox-approval-expanded").await;
+    ui.click(r##"button[aria-label="このツール実行を拒否"]"##)
         .await;
     let decision = backend.command("decide_tool_approval").await;
     assert_eq!(
         decision["payload"],
-        json!({"approval_id": "ap-1", "core_epoch": "7", "approval_revision": "2", "decision": "approve"})
+        json!({"approval_id": "ap-1", "core_epoch": "7", "approval_revision": "77777", "decision": "deny"})
     );
     ui.wait(r##"() => !document.querySelector(".card.approval")"##)
         .await;
 
-    // ---- free-text answer to the lane question ----
-    ui.insert_text(".card.question .answer-input", "30 秒にしてください")
+    // ---- free-text answer ----
+    ui.insert_text(".cards .card.question .answer-input", "Chromium と Firefox")
         .await;
-    ui.click(".card.question .answer-row button.primary").await;
-    ui.wait(r##"() => !document.querySelector(".card.question")"##)
+    ui.click(".cards .card.question .answer-row button.primary")
+        .await;
+    ui.wait(r##"() => !document.querySelector(".cards .card.question")"##)
         .await;
     let answers: Vec<Value> = backend
         .world
@@ -901,7 +961,7 @@ async fn web_workbench_main_flows_in_chromium() {
         .collect();
     assert_eq!(
         answers[1],
-        json!({"thread": "thr-2", "question_id": "q-2", "answer": "30 秒にしてください", "question_revision": "1"})
+        json!({"thread": "thr-2", "question_id": "q-3", "answer": "Chromium と Firefox", "question_revision": "31337"})
     );
     assert_eq!(
         ui.wait(r##"() => document.querySelector("#inbox-badge").hidden"##)

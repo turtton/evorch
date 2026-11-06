@@ -14,7 +14,8 @@
 
 export const WALK_PAGE_SIZE = 100;
 const KEEP_PAGES = 2;
-const MAX_WALK_PAGES = 5000;
+/** Pages walked at most before giving up (a bound on requests per open). */
+export const MAX_WALK_PAGES = 2000;
 
 export function messageKey(message) {
   return `${message.run}#${message.index}`;
@@ -25,8 +26,9 @@ export class HistoryWindow {
    * @param {(cursor: string|null) => Promise<{ok: boolean, value?: object, error?: object}>} fetchPage
    *   reads one page of the thread's committed history.
    */
-  constructor(fetchPage) {
+  constructor(fetchPage, { maxPages = MAX_WALK_PAGES } = {}) {
     this.fetchPage = fetchPage;
+    this.maxPages = maxPages;
     /** One entry per page: the cursor that reads it and, if loaded, its items. */
     this.pages = [];
     /** First page whose items are on screen; every later page is too. */
@@ -39,15 +41,35 @@ export class HistoryWindow {
   /** Walk to the end. Resolves `{ok}` or `{ok: false, error}`. */
   async open() {
     let cursor = null;
-    for (let n = 0; n < MAX_WALK_PAGES; n += 1) {
+    let complete = false;
+    for (let n = 0; n < this.maxPages; n += 1) {
       const result = await this.fetchPage(cursor);
-      if (!result.ok) return result;
+      if (!result.ok) {
+        this.pages = [];
+        return result;
+      }
       const page = result.value;
       this.pages.push({ cursor, items: page.items });
       const old = this.pages.length - 1 - KEEP_PAGES;
       if (old >= 0) this.pages[old].items = null;
-      if (!page.next_cursor) break;
+      if (!page.next_cursor) {
+        complete = true;
+        break;
+      }
       cursor = page.next_cursor;
+    }
+    if (!complete) {
+      this.pages = [];
+      // Without reaching the end the newest messages are unknown; showing the
+      // pages read so far would present old messages as the latest.
+      return {
+        ok: false,
+        error: {
+          code: "limit_exceeded",
+          message: `履歴が ${this.maxPages} ページを超えるため最新部分まで読めませんでした`,
+          retry: "never",
+        },
+      };
     }
     // The last KEEP_PAGES pages are on screen, so a short last page does not
     // leave it nearly empty.

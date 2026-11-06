@@ -1,31 +1,21 @@
-// Client-side read model: what the core told us, kept idempotent.
+// Client-side read model: what the core told us, in the order it happened.
 //
-// Snapshot items, query results and UI events all go through upsert(), which
-// keeps an entity only if its revision is not older than the one already
-// held. Replaying an event twice, or applying a query page cut before an
-// event that already arrived, therefore changes nothing.
-
-import { compareDecimal } from "./wire.js";
+// Revisions are opaque (the core may use content hashes, which can go down),
+// so they are never compared for order. Order comes from the event stream:
+// every snapshot and every event is applied in cursor order and advances a
+// local logical clock, and each entity remembers the clock value at which it
+// was written. A query result is stamped with the clock value at which the
+// query was issued (`mark()`); it may only write an entity that no snapshot
+// or event has written since then. A query answer therefore never overwrites
+// a newer event, and a query issued before a snapshot reset is ignored.
 
 const ACTIVE_PHASES = new Set(["pending", "running", "waiting_for_user", "waiting_for_approval"]);
+const KINDS = ["projects", "threads", "runs", "questions", "approvals", "receipts"];
 
-/** Compare entity versions: revision first, then any tie breakers. */
-function compareVersions(a, b, keys) {
-  for (const key of keys) {
-    const order = compareDecimal(a[key] ?? "0", b[key] ?? "0");
-    if (order !== 0) return order;
-  }
-  return 0;
+/** Questions a lane routed to its lead: the lead answers them, not the user. */
+export function isLeadRouted(question) {
+  return question.target?.type === "lead";
 }
-
-const VERSION_KEYS = {
-  projects: ["revision"],
-  threads: ["revision"],
-  runs: ["revision"],
-  questions: ["revision", "management_revision", "routing_revision"],
-  approvals: ["revision"],
-  receipts: ["revision"],
-};
 
 export function createStore() {
   const state = {
@@ -37,41 +27,44 @@ export function createStore() {
     approvals: new Map(),
     receipts: new Map(),
     threadViews: new Map(),
+    /** The last snapshot was cut short; lists are being completed by queries. */
+    partial: false,
   };
+  /** Clock value at which each entity was last written, per kind. */
+  const written = Object.fromEntries(KINDS.map((kind) => [kind, new Map()]));
+  let clock = 0;
+  let resetAt = 0;
   const listeners = new Set();
 
   function notify(change) {
     for (const listener of listeners) listener(change);
   }
 
-  /** Returns true when the item was stored (newer or equal revision). */
-  function upsert(kind, key, item) {
-    const map = state[kind];
-    const held = map.get(key);
-    if (held && compareVersions(item, held, VERSION_KEYS[kind]) < 0) return false;
-    map.set(key, item);
+  function write(kind, key, item, at) {
+    state[kind].set(key, item);
+    written[kind].set(key, at);
+  }
+
+  /** Write a query result unless something newer already wrote the entity. */
+  function writeQueried(kind, key, item, issued) {
+    if (issued < resetAt) return false;
+    const at = written[kind].get(key);
+    if (at !== undefined && at > issued) return false;
+    write(kind, key, item, issued);
     return true;
   }
 
-  function applyItem(type, item) {
-    switch (type) {
-      case "core_status":
-        state.coreStatus = item;
-        return true;
-      case "project":
-        return upsert("projects", item.id, item);
-      case "thread":
-        return upsert("threads", item.id, item);
-      case "run":
-        return upsert("runs", item.id, item);
-      case "question":
-        return upsert("questions", item.id, item);
-      case "approval":
-        return upsert("approvals", item.id, item);
-      default:
-        return false;
-    }
+  function keyOf(kind, item) {
+    return kind === "receipts" ? item.submission_id : item.id;
   }
+
+  const ITEM_KINDS = {
+    project: "projects",
+    thread: "threads",
+    run: "runs",
+    question: "questions",
+    approval: "approvals",
+  };
 
   return {
     state,
@@ -81,26 +74,49 @@ export function createStore() {
       return () => listeners.delete(listener);
     },
 
+    /** The logical time to stamp on a query that is about to be sent. */
+    mark() {
+      return clock;
+    },
+
     /**
      * A `subscription_started` answer. With a `snapshot_id` the snapshot
-     * replaces what was held (items absent from it are gone); without one the
-     * core is replaying and the current state stays.
+     * replaces what was held; without one the core is replaying and the
+     * current state stays. A snapshot page with a `next_cursor` is partial:
+     * `state.partial` stays set until `completeSnapshot()`.
      */
     applySubscriptionStarted(started) {
       const reset = Boolean(started.snapshot_id);
       if (reset) {
-        state.projects.clear();
-        state.threads.clear();
-        state.runs.clear();
-        state.questions.clear();
-        state.approvals.clear();
+        clock += 1;
+        resetAt = clock;
+        for (const kind of KINDS) {
+          if (kind === "receipts") continue;
+          state[kind].clear();
+          written[kind].clear();
+        }
+        state.threadViews.clear();
+        state.partial = Boolean(started.initial_page?.next_cursor);
+        for (const item of started.initial_page?.items ?? []) {
+          if (item.type === "core_status") {
+            state.coreStatus = item.payload;
+          } else if (ITEM_KINDS[item.type]) {
+            const kind = ITEM_KINDS[item.type];
+            write(kind, keyOf(kind, item.payload), item.payload, clock);
+          }
+        }
       }
-      for (const item of started.initial_page?.items ?? []) applyItem(item.type, item.payload);
-      notify({ type: reset ? "snapshot" : "replay" });
+      notify({ type: reset ? "snapshot" : "replay", partial: state.partial });
       return reset;
     },
 
-    /** Apply one UiEvent. Returns the change, or null if nothing changed. */
+    /** The lists a partial snapshot left out have been read with queries. */
+    completeSnapshot() {
+      state.partial = false;
+      notify({ type: "page", kind: "snapshot" });
+    },
+
+    /** Apply one UiEvent (already in cursor order). Returns the change or null. */
     applyEvent(event) {
       const p = event.payload ?? {};
       let change = null;
@@ -109,32 +125,33 @@ export function createStore() {
           state.coreStatus = p.status;
           change = { type: "core_status" };
           break;
-        case "thread_changed":
-          if (upsert("threads", p.thread.id, p.thread)) {
-            const view = state.threadViews.get(p.thread.id);
-            if (view && compareDecimal(p.thread.revision, view.summary.revision) >= 0) {
-              view.summary = p.thread;
-            }
-            change = { type: "thread", thread: p.thread.id, project: p.thread.project };
-          }
+        case "thread_changed": {
+          clock += 1;
+          write("threads", p.thread.id, p.thread, clock);
+          const view = state.threadViews.get(p.thread.id);
+          if (view) view.summary = p.thread;
+          change = { type: "thread", thread: p.thread.id, project: p.thread.project };
           break;
+        }
         case "run_changed":
-          if (upsert("runs", p.run.id, p.run)) change = { type: "run", thread: p.run.thread };
+          clock += 1;
+          write("runs", p.run.id, p.run, clock);
+          change = { type: "run", thread: p.run.thread };
           break;
         case "question_changed":
-          if (upsert("questions", p.question.id, p.question)) {
-            change = { type: "question", id: p.question.id, thread: p.question.requester.thread };
-          }
+          clock += 1;
+          write("questions", p.question.id, p.question, clock);
+          change = { type: "question", id: p.question.id, thread: p.question.requester.thread };
           break;
         case "approval_changed":
-          if (upsert("approvals", p.approval.id, p.approval)) {
-            change = { type: "approval", id: p.approval.id, thread: p.approval.thread };
-          }
+          clock += 1;
+          write("approvals", p.approval.id, p.approval, clock);
+          change = { type: "approval", id: p.approval.id, thread: p.approval.thread };
           break;
         case "input_receipt_changed":
-          if (upsert("receipts", p.receipt.submission_id, p.receipt)) {
-            change = { type: "receipt", receipt: p.receipt };
-          }
+          clock += 1;
+          write("receipts", p.receipt.submission_id, p.receipt, clock);
+          change = { type: "receipt", receipt: p.receipt };
           break;
         case "message_committed":
           change = { type: "message", message: p.message };
@@ -142,32 +159,47 @@ export function createStore() {
         default:
           return null;
       }
-      if (change) notify(change);
+      notify(change);
       return change;
     },
 
-    /** Merge items from a query page (`kind` is a key of VERSION_KEYS). */
-    mergePage(kind, items) {
+    /**
+     * Merge items from a query page issued at `issued` (from `mark()`).
+     * `kind` is one of projects, threads, runs, questions, approvals, receipts.
+     */
+    mergePage(kind, items, issued) {
       let changed = false;
-      for (const item of items) {
-        const key = kind === "receipts" ? item.submission_id : item.id;
-        changed = upsert(kind, key, item) || changed;
-      }
+      for (const item of items) changed = writeQueried(kind, keyOf(kind, item), item, issued) || changed;
       if (changed) notify({ type: "page", kind });
       return changed;
     },
 
-    setThreadView(view) {
-      state.threadViews.set(view.summary.id, view);
-      upsert("threads", view.summary.id, view.summary);
-      notify({ type: "thread", thread: view.summary.id, project: view.summary.project });
+    /** A GetThread answer issued at `issued`. */
+    setThreadView(view, issued) {
+      if (issued < resetAt) return;
+      const id = view.summary.id;
+      const current = state.threads.get(id);
+      const fresh = writeQueried("threads", id, view.summary, issued);
+      state.threadViews.set(id, { ...view, summary: fresh ? view.summary : (current ?? view.summary) });
+      notify({ type: "thread", thread: id, project: view.summary.project });
     },
 
     // ---- selectors ------------------------------------------------------
 
+    /** Questions waiting for the user (lead-routed ones are the lead's). */
     pendingQuestions(threadId) {
       return [...state.questions.values()].filter(
-        (q) => !q.answer && (!threadId || q.requester.thread === threadId),
+        (q) => !q.answer && !isLeadRouted(q) && (!threadId || q.requester.thread === threadId),
+      );
+    },
+
+    /** Unanswered questions routed to the lead `leadThreadId` (all leads if absent). */
+    leadRoutedQuestions(leadThreadId) {
+      return [...state.questions.values()].filter(
+        (q) =>
+          !q.answer &&
+          isLeadRouted(q) &&
+          (!leadThreadId || q.target.payload?.lead_thread === leadThreadId),
       );
     },
 
@@ -177,7 +209,7 @@ export function createStore() {
       );
     },
 
-    /** Questions and approvals waiting for someone in this thread. */
+    /** Questions and approvals waiting for the user in this thread. */
     threadAttention(threadId) {
       return {
         questions: this.pendingQuestions(threadId).length,
@@ -205,19 +237,16 @@ export function createStore() {
     },
 
     threadsOf(projectId) {
+      const time = (t) => Number(t.updated_at) || 0;
       return [...state.threads.values()]
         .filter((t) => t.project === projectId)
-        .sort((a, b) => compareDecimal(b.updated_at, a.updated_at));
+        .sort((a, b) => time(b) - time(a));
     },
 
     activeRuns(threadId) {
       return [...state.runs.values()].filter(
         (r) => r.thread === threadId && ACTIVE_PHASES.has(r.phase),
       );
-    },
-
-    runsOf(threadId) {
-      return [...state.runs.values()].filter((r) => r.thread === threadId);
     },
   };
 }
