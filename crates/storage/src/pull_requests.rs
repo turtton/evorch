@@ -652,17 +652,23 @@ pub struct PullRequestFacts {
 pub struct DisplayTitle(String);
 
 impl DisplayTitle {
-    /// Cleans `raw`. Invisible format characters (zero-width and bidirectional controls)
-    /// are dropped first, so none can split a credential or reorder what is drawn; then the
-    /// whole text is redacted (a credential that crosses the limit is masked before anything
-    /// is cut), and only then made single-line and bounded by
-    /// [`PULL_REQUEST_TITLE_MAX_CHARS`]. `None` when nothing is left. Idempotent.
+    /// Cleans `raw`. The original text is redacted first, so a credential that an invisible
+    /// character separates from a letter before it (which hides its boundary from the
+    /// detector once the character is gone) is still masked. Invisible format characters
+    /// (zero-width and bidirectional controls) are then dropped, so none can split a
+    /// credential or reorder what is drawn, and the text is redacted again for the
+    /// credentials that were split. Only then is it made single-line and bounded by
+    /// [`PULL_REQUEST_TITLE_MAX_CHARS`] (so a credential that crosses the limit is masked
+    /// before anything is cut). `None` when nothing is left. Idempotent.
     #[must_use]
     pub fn from_untrusted(raw: &str) -> Option<Self> {
-        let visible: String = raw.chars().filter(|ch| !is_invisible_format(*ch)).collect();
-        let redacted = secret_guard::SecretRedactor::from_env()
-            .redact(&visible)
-            .text;
+        let redactor = secret_guard::SecretRedactor::from_env();
+        let first = redactor.redact(raw).text;
+        let visible: String = first
+            .chars()
+            .filter(|ch| !is_invisible_format(*ch))
+            .collect();
+        let redacted = redactor.redact(&visible).text;
         let text = sanitize_single_line(&redacted, PULL_REQUEST_TITLE_MAX_CHARS);
         (!text.is_empty()).then_some(Self(text))
     }

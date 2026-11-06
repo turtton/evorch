@@ -1856,7 +1856,10 @@ fn a_title_is_redacted_single_line_and_bounded() {
         "n".repeat(PULL_REQUEST_TITLE_MAX_CHARS - 8)
     );
     let split = format!("see {}\u{200b}{}", &token[..10], &token[10..]);
-    for text in [straddling, split] {
+    // An invisible character right before the prefix hides, once it is removed, that a
+    // letter is not part of the credential: the original must be redacted first.
+    let after_invisible = format!("x\u{200b}{token} and y\u{202e}{token}");
+    for text in [straddling, split, after_invisible] {
         let title = DisplayTitle::from_untrusted(&text).unwrap();
         assert!(!title.as_str().contains("ghp_"), "{}", title.as_str());
         assert!(!title.as_str().contains("A1b2C3d4E5"), "{}", title.as_str());

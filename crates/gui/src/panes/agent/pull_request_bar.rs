@@ -239,10 +239,10 @@ fn summary_row(
                 }
             }
             // Last, so the title takes the room that is left and is cut at the end. It is
-            // plain text from a third party; the hover shows the whole cleaned text.
+            // plain text from a third party. egui shows the whole text of a label it had to
+            // cut when the pointer rests on it (a second hover text would stack on that one).
             if let Some(title) = view.display.title.as_ref() {
-                ui.add(egui::Label::new(title.as_str()).truncate())
-                    .on_hover_text(title.as_str());
+                ui.add(egui::Label::new(title.as_str()).truncate());
             } else if let Some(facts) = &view.facts {
                 // No title was fetched (yet): the branch says which pull request this is.
                 ui.add(egui::Label::new(muted(facts.head_branch.as_str())).truncate())

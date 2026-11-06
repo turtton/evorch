@@ -315,6 +315,34 @@ fn a_collapsed_bar_shows_the_title_and_leaves_the_branch_to_the_details() {
     );
 }
 
+// Given: a title too long for the line / When: the pointer rests on it / Then: a tooltip
+// with the whole cleaned text appears
+#[test]
+fn hovering_a_cut_title_shows_all_of_it() {
+    let title = "a rather long pull request title "
+        .repeat(7)
+        .trim()
+        .to_owned();
+    let (mut h, _) = harness(Bar {
+        view: titled(view(Some(failing())), &title),
+        expanded: false,
+        subagent: false,
+    });
+    h.run_steps(4);
+    let shown = |h: &Harness<'_>| labels(h).iter().filter(|label| **label == title).count();
+    let before = shown(&h);
+
+    h.get_by_label_contains("a rather long").hover();
+    h.run_steps(6);
+
+    assert_eq!(
+        shown(&h),
+        before + 1,
+        "exactly one tooltip adds the whole title: {:?}",
+        labels(&h)
+    );
+}
+
 // Given: a pull request whose title is not known / When: the bar is collapsed / Then: the
 // branch stands in, and the bar says nothing more
 #[test]
