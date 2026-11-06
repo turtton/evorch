@@ -140,7 +140,10 @@ pub(super) async fn wait_reply(
     let delivered = state.delivered_answer_ids();
     let caller = state.caller_run_id();
     let mut cancel = state.channels.cancel_rx.clone();
-    let outcome = if state.has_pending_user_messages() {
+    let outcome = if let Err(runtime_error) = runtime.check_reply_wait(caller, &args.message_id) {
+        // An unknown or foreign message_id fails whatever input is pending.
+        WaitOutcome::Finished(Err(runtime_error))
+    } else if state.has_pending_user_messages() {
         // Another wait in this same tool batch may already have received input.
         WaitOutcome::UserInput
     } else {
@@ -168,6 +171,13 @@ pub(super) async fn wait_reply(
             }
         }
     };
+    if !matches!(outcome, WaitOutcome::Cancelled) {
+        // Input that arrived as the wait ended is kept for the normal injection
+        // after this tool batch, as `wait` does.
+        while let Ok(message) = state.channels.inbox_rx.try_recv() {
+            state.queue_user_message(message);
+        }
+    }
     if state.transition(AgentRunPhase::Running, None).is_err() {
         return error("parent run could not resume Running");
     }

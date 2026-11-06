@@ -241,6 +241,13 @@ pub(crate) enum HostProvenance {
     PersistedHostSubmission { run_id: RunId },
 }
 
+/// The waiter's mailbox, the replier's phase and the waiter's mailbox version.
+type ReplyWaitParts = (
+    Arc<RunMailbox>,
+    watch::Receiver<AgentRunPhase>,
+    watch::Receiver<u64>,
+);
+
 /// How a reply wait that also watches the caller's own answers ended.
 #[derive(Debug)]
 pub(crate) enum ReplyOutcome {
@@ -3241,6 +3248,53 @@ impl AgentRuntime {
         }
     }
 
+    /// Checks that `run_id` sent `message_id` and that its recipient is still
+    /// registered, as a reply wait requires.
+    ///
+    /// # Errors
+    /// [`RuntimeError::UnknownMessage`] for an unknown or foreign message,
+    /// [`RuntimeError::RunTerminated`] once the recipient is gone.
+    pub(crate) fn check_reply_wait(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+    ) -> Result<(), RuntimeError> {
+        self.reply_wait_parts(run_id, message_id).map(|_| ())
+    }
+
+    fn reply_wait_parts(
+        &self,
+        run_id: RunId,
+        message_id: &str,
+    ) -> Result<ReplyWaitParts, RuntimeError> {
+        let runs = lock_runs(&self.shared.runs);
+        let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
+        let sent = self
+            .shared
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = sent
+            .get(message_id)
+            .ok_or_else(|| RuntimeError::UnknownMessage {
+                message_id: message_id.to_string(),
+            })?;
+        if record.sender != run_id {
+            return Err(RuntimeError::UnknownMessage {
+                message_id: message_id.to_string(),
+            });
+        }
+        let replier_entry =
+            runs.get(&record.recipient)
+                .ok_or_else(|| RuntimeError::RunTerminated {
+                    run_id: record.recipient.to_string(),
+                })?;
+        let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
+        let replier_phase_rx = replier_entry.phase_rx.clone();
+        let version_rx = waiter_entry.mailbox.subscribe_version();
+        Ok((waiter_mailbox, replier_phase_rx, version_rx))
+    }
+
     /// [`Self::wait_reply`] that also ends when a question of `run_id` gets an
     /// answer outside `delivered` (the answers already in its history).
     ///
@@ -3255,34 +3309,8 @@ impl AgentRuntime {
         timeout: Duration,
         delivered: Option<&HashSet<String>>,
     ) -> Result<ReplyOutcome, RuntimeError> {
-        let (waiter_mailbox, mut replier_phase_rx, version_rx) = {
-            let runs = lock_runs(&self.shared.runs);
-            let waiter_entry = runs.get(&run_id).ok_or_else(|| unknown_run(run_id))?;
-            let sent = self
-                .shared
-                .sent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let record = sent
-                .get(message_id)
-                .ok_or_else(|| RuntimeError::UnknownMessage {
-                    message_id: message_id.to_string(),
-                })?;
-            if record.sender != run_id {
-                return Err(RuntimeError::UnknownMessage {
-                    message_id: message_id.to_string(),
-                });
-            }
-            let replier_entry =
-                runs.get(&record.recipient)
-                    .ok_or_else(|| RuntimeError::RunTerminated {
-                        run_id: record.recipient.to_string(),
-                    })?;
-            let waiter_mailbox = Arc::clone(&waiter_entry.mailbox);
-            let replier_phase_rx = replier_entry.phase_rx.clone();
-            let version_rx = waiter_entry.mailbox.subscribe_version();
-            (waiter_mailbox, replier_phase_rx, version_rx)
-        };
+        let (waiter_mailbox, mut replier_phase_rx, version_rx) =
+            self.reply_wait_parts(run_id, message_id)?;
 
         let mut version_rx = version_rx;
         // Subscribe before the first answer check so an answer cannot slip

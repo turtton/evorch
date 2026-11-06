@@ -12,7 +12,7 @@ use providers::{ContentBlock, FinishReason, Message, ToolResultContent};
 use runtime::{AgentRuntime, Role, RunConfig, RunId, RunStore};
 use serde_json::{Value, json};
 use storage::{Storage, StorageConfig};
-use support::{ScriptedModel, text_response, tool_response};
+use support::{ScriptedModel, text_response, tool_response, tool_responses};
 use tokio::sync::Notify;
 use tools::ToolExecutor;
 
@@ -373,6 +373,46 @@ async fn host_input_ends_wait_reply_and_is_injected_once() {
         "late reply"
     );
     assert_eq!(occurrences(&after_reply, "host says hi"), 1);
+    gate.notify_one();
+    assert_eq!(
+        fixture.runtime.wait(child).await.unwrap(),
+        AgentRunPhase::Done
+    );
+    fixture.runtime.cancel(parent).unwrap();
+    fixture.runtime.wait(parent).await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_host_input_does_not_hide_an_unknown_message_id_in_the_same_batch() {
+    let (fixture, gate, parent, child) = waiting_child(vec![
+        Ok(tool_responses([
+            (
+                "first-wait",
+                "wait_reply",
+                json!({"message_id": "msg-1", "timeout_ms": 600_000}),
+            ),
+            (
+                "bad-wait",
+                "wait_reply",
+                json!({"message_id": "msg-999", "timeout_ms": 600_000}),
+            ),
+        ])),
+        Ok(text_response("child done", FinishReason::Stop)),
+    ])
+    .await;
+    fixture
+        .runtime
+        .send_message(child, "host says hi".into())
+        .unwrap();
+    let after_batch = fixture.model.wait_for_request(3).await;
+    assert_eq!(
+        tool_json(&after_batch, "first-wait")["status"],
+        "user_input_ready"
+    );
+    let (text, is_error) = tool_result(&after_batch, "bad-wait").expect("second result");
+    assert!(is_error, "{text}");
+    assert!(text.contains("msg-999"), "{text}");
+    assert_eq!(occurrences(&after_batch, "host says hi"), 1);
     gate.notify_one();
     assert_eq!(
         fixture.runtime.wait(child).await.unwrap(),

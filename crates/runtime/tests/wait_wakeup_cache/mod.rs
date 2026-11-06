@@ -36,6 +36,34 @@ fn question_id(harness: &Harness, run: RunId, title: &str) -> String {
         .id
 }
 
+/// Conversation items of a request, in order; tool descriptions are excluded.
+fn items(request: &Value) -> Vec<String> {
+    request
+        .get("messages")
+        .or_else(|| request.get("input"))
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(Value::to_string)
+        .collect()
+}
+
+/// The wake-up text is the newest item, directly after the tool result of
+/// `call_id`, so it is appended after the already-sent prefix.
+fn assert_appended_after_result(request: &Value, call_id: &str, text: &str) {
+    let items = items(request);
+    let result = items
+        .iter()
+        .position(|item| {
+            item.contains(call_id)
+                && (item.contains(r#""role":"tool""#) || item.contains("function_call_output"))
+        })
+        .unwrap_or_else(|| panic!("missing tool result {call_id}"));
+    assert_eq!(result + 2, items.len(), "{call_id} is not the last result");
+    assert!(items[result + 1].contains(text), "{}", items[result + 1]);
+}
+
 /// The conversation part of a request; tool descriptions are excluded.
 fn history(request: &Value) -> String {
     request
@@ -162,6 +190,9 @@ async fn answer_and_host_input_wakeups_of_waits_preserve_the_wire_prefix() {
         assert!(after_second.contains("answer_ready"));
         assert_eq!(after_second.matches("Use A").count(), 1);
         assert_eq!(after_second.matches("Use B").count(), 1);
+        assert_appended_after_result(&requests[3], "reply-wait", "Use A");
+        assert_appended_after_result(&requests[5], "child-wait", "Use B");
+        assert_appended_after_result(&requests[6], "reply-wait-again", "host says hi");
         let last = history(&requests[6]);
         assert!(last.contains("user_input_ready"));
         assert_eq!(last.matches("host says hi").count(), 1);
