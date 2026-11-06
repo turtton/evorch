@@ -86,6 +86,7 @@ pub struct CommandService {
     automatic_resume: bool,
     ownership: Option<Arc<runtime::ownership::OwnerHost>>,
     compaction_jobs: BTreeMap<String, compaction::CompactionJob>,
+    background_work: Arc<tokio::sync::Notify>,
     /// What the lane delivery host reads; republished after every change of the bindings.
     lane_bindings: BindingTable,
 }
@@ -104,6 +105,7 @@ impl CommandService {
             automatic_resume: false,
             ownership: None,
             compaction_jobs: BTreeMap::new(),
+            background_work: Arc::new(tokio::sync::Notify::new()),
             lane_bindings: BindingTable::default(),
         }
     }
@@ -217,12 +219,18 @@ impl CommandService {
         !self.compaction_jobs.is_empty()
     }
 
-    /// The compaction task of `thread`, for tests that must await it.
-    #[doc(hidden)]
-    pub fn compaction_task(&mut self, thread: &str) -> Option<&mut tokio::task::JoinHandle<()>> {
-        self.compaction_jobs
-            .get_mut(thread)
-            .map(|job| &mut job.task)
+    /// After ingress closes, await saved-chat compaction before flushing
+    /// checkpoints and releasing ownership.
+    pub(crate) fn take_background_tasks(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(&mut self.compaction_jobs)
+            .into_values()
+            .map(|job| job.task)
+            .collect()
+    }
+
+    /// Wake an event-driven host when [`Self::poll`] can collect a completion.
+    pub fn background_work_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.background_work.clone()
     }
 
     /// A background run that belongs to no thread.

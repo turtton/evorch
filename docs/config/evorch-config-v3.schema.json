@@ -86,6 +86,12 @@
         "threshold": 0.75
       }
     },
+    "core": {
+      "$ref": "#/$defs/CoreConfig",
+      "default": {
+        "idle_grace_secs": 60
+      }
+    },
     "diagnostics": {
       "description": "診断 (ログ) 設定。",
       "$ref": "#/$defs/DiagnosticsConfig",
@@ -276,6 +282,15 @@
       "format": "uint32",
       "default": 3,
       "minimum": 0
+    },
+    "web": {
+      "$ref": "#/$defs/WebConfig",
+      "default": {
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "enabled": false,
+        "port": 7878
+      }
     }
   },
   "additionalProperties": false,
@@ -725,6 +740,19 @@
           "type": "integer",
           "format": "uint64",
           "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "CoreConfig": {
+      "type": "object",
+      "properties": {
+        "idle_grace_secs": {
+          "description": "Idle grace in seconds. Web delivery disables idle shutdown entirely.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
           "minimum": 0
         }
       },
@@ -1935,6 +1963,39 @@
               "worker:high-reasoning"
             ]
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WebConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_hosts": {
+          "description": "Extra hosts without scheme or port, e.g. evorch.tailnet-name.ts.net.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_origins": {
+          "description": "Extra cross-origin frontends (scheme://host[:port]); not needed for same-origin Serve.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 7878,
+          "maximum": 65535,
+          "minimum": 0
         }
       },
       "additionalProperties": false

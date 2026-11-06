@@ -66,6 +66,29 @@ enum Executed {
 }
 
 impl CommandHost {
+    /// Reserve an absent thread for a new chat, after resolving its project.
+    /// This never claims or hands off an existing owner row, even a released one.
+    pub fn reserve_new_chat_thread(&self, send: &SendChat) -> Result<(), WorkbenchError> {
+        self.project_root(&send.project)?;
+        if let Some(owner) = self.service.ownership() {
+            match owner.attach(send.thread.as_str()) {
+                Ok(_) => (),
+                Err(runtime::ownership::RegistryError::Absent) => {
+                    owner.start(send.thread.as_str()).map_err(|_| {
+                        reject_error(RejectKind::Fenced, "thread could not be reserved")
+                    })?;
+                }
+                Err(_) => {
+                    return Err(reject_error(
+                        RejectKind::Fenced,
+                        "thread ownership unavailable",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(service: CommandService) -> Self {
         let projection = crate::projection::Projection::new(
             service.runtime().clone(),

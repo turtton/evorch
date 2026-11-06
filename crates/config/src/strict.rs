@@ -9,6 +9,8 @@ use crate::types::EditToolConfig;
 
 const ROOT_KEYS: &[&str] = &[
     "version",
+    "core",
+    "web",
     "providers",
     "model_presets",
     "routing",
@@ -265,6 +267,12 @@ pub(crate) fn validate_strict(merged: &toml::Value) -> Result<(), ConfigError> {
     validate_section(root, "comment_checker", COMMENT_CHECKER_KEYS)?;
     validate_section(root, "tools", TOOLS_KEYS)?;
     validate_section(root, "pull_requests", PULL_REQUESTS_KEYS)?;
+    validate_section(root, "core", &["idle_grace_secs"])?;
+    validate_section(
+        root,
+        "web",
+        &["enabled", "port", "allowed_hosts", "allowed_origins"],
+    )?;
     if let Some(tools) = root.get("tools").and_then(toml::Value::as_table)
         && let Some(browser) = tools.get("browser").and_then(toml::Value::as_table)
     {
@@ -474,6 +482,11 @@ pub(crate) fn remove_unknown_fields(merged: &mut toml::Value) -> Result<Vec<Stri
         ("eval", EVAL_KEYS),
         ("storage", STORAGE_KEYS),
         ("pull_requests", PULL_REQUESTS_KEYS),
+        ("core", &["idle_grace_secs"]),
+        (
+            "web",
+            &["enabled", "port", "allowed_hosts", "allowed_origins"],
+        ),
     ];
     for &(name, allowed) in sections {
         if let Some(table) = root.get_mut(name).and_then(toml::Value::as_table_mut) {
