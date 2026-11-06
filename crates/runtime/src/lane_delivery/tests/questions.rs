@@ -231,11 +231,20 @@ async fn active_turn_delivery_is_not_a_completed_root_wake_or_finish_gate() {
     f.finish(lead).await;
 }
 
-#[tokio::test]
-async fn answer_read_failure_after_receipt_keeps_ack_pending_and_retries_child_continuation() {
-    let mut f = Fixture::new();
+/// A lane child whose forwarded question was answered by the lead, with the
+/// lane host installed so that the next drive delivers the answer notice.
+async fn answered_forwarded_child(
+    f: &mut Fixture,
+    name: &str,
+) -> (
+    crate::lanes::LaneOpened,
+    RunId,
+    RunId,
+    event_bus::UserQuestion,
+    event_bus::UserQuestion,
+) {
     let (lead, old) = f.lead().await;
-    let lane = f.lane(lead, "retry-child").await;
+    let lane = f.lane(lead, name).await;
     let child = f
         .runtime
         .spawn_reserved_child(
@@ -281,6 +290,13 @@ async fn answer_read_failure_after_receipt_keeps_ack_pending_and_retries_child_c
         restores: Mutex::new(HashMap::new()),
     });
     *f.runtime.shared.lanes.delivery.host.lock().unwrap() = Some(hosts);
+    (lane, lead, child, q, answered)
+}
+
+#[tokio::test]
+async fn answer_read_failure_after_receipt_keeps_ack_pending_and_retries_child_continuation() {
+    let mut f = Fixture::new();
+    let (lane, lead, child, q, answered) = answered_forwarded_child(&mut f, "retry-child").await;
     let conn = rusqlite::Connection::open(&f.config.db_path).unwrap();
     let payload: String = conn
         .query_row(
@@ -347,6 +363,77 @@ async fn answer_read_failure_after_receipt_keeps_ack_pending_and_retries_child_c
         1,
         "ACK repair must not append the answer twice"
     );
+    assert!(
+        !f.storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .contains(&lane.thread_id)
+    );
+    for run in [lane.root_run_id, lead] {
+        f.runtime.cancel(run).unwrap();
+        f.runtime.wait(run).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn child_restore_storage_failure_after_receipt_keeps_ack_pending_and_retries_same_receipt() {
+    let mut f = Fixture::new();
+    let (lane, lead, child, _, answered) = answered_forwarded_child(&mut f, "retry-save").await;
+    let path = f.config.db_path.clone();
+    let child_id = child.to_string();
+    let inject: Box<dyn FnOnce()> = Box::new(move || {
+        // A real SQLite failure while the continuation consumes the child's saved
+        // snapshot, strictly after durable input acceptance. Provider history stays intact.
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER inject_snapshot_failure BEFORE UPDATE ON run_context_provenance \
+                 WHEN NEW.run_id='{child_id}' BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;"
+            ))
+            .unwrap();
+    });
+    let outcome = AFTER_RECEIPT
+        .scope(
+            std::cell::RefCell::new(Some(inject)),
+            f.runtime.drive_lane_deliveries(&lane.thread_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        LaneDeliveryOutcome::Nacked(LaneDeliveryNack::StorageFailed),
+        "a retryable restore failure must not be ACKed"
+    );
+    assert_eq!(f.receipts(), 1);
+    assert!(
+        f.storage
+            .handle()
+            .pending_lane_delivery_destinations(String::new())
+            .unwrap()
+            .contains(&lane.thread_id)
+    );
+    rusqlite::Connection::open(&f.config.db_path)
+        .unwrap()
+        .execute_batch("DROP TRIGGER inject_snapshot_failure;")
+        .unwrap();
+    f.runtime
+        .drive_lane_deliveries(&lane.thread_id)
+        .await
+        .unwrap();
+    f.runtime.wait(child).await.unwrap();
+    let record = f
+        .runtime
+        .shared
+        .run_store
+        .get()
+        .unwrap()
+        .restore_record(child)
+        .unwrap()
+        .unwrap();
+    let messages: Vec<Message> = serde_json::from_str(&record.messages_json).unwrap();
+    assert!(AgentRuntime::answer_is_in_history(&messages, &answered));
+    assert_eq!(f.receipts(), 1, "recovery reuses the same receipt");
     assert!(
         !f.storage
             .handle()

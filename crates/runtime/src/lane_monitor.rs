@@ -158,9 +158,12 @@ impl AgentRuntime {
                     || self.lane_compaction_busy(child)
                     || match self.inspect_agent(child).ok().map(|r| r.phase) {
                         None | Some(AgentRunPhase::Pending) => true,
-                        Some(AgentRunPhase::Running) => {
-                            monitor.execution.get(&child).is_none_or(Execution::busy)
-                        }
+                        // Unknown activity is not a finished wait: after bind/lag only
+                        // a whole-run activity boundary re-establishes observability.
+                        Some(AgentRunPhase::Running) => monitor
+                            .execution
+                            .get(&child)
+                            .is_none_or(|e| e.activity.is_none() || e.busy()),
                         _ => false,
                     }
             })

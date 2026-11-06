@@ -290,7 +290,9 @@ impl AgentRuntime {
         answer: &str,
     ) -> Result<UserQuestion, String> {
         let (child, question) = self.persist_subagent_answer(caller, id, answer)?;
-        self.resume_answered_child(caller, child, &question).await?;
+        self.resume_answered_child(caller, child, &question)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(question)
     }
 
