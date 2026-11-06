@@ -28,8 +28,8 @@ use runtime::mcp::{ApprovalScope, CancelContext};
 use tokio::sync::watch;
 
 use crate::mcp::{
-    ConfirmMcpApproval, McpApprovalPreview, McpErrorKind, McpGuiService, McpServerStatus,
-    McpSettingsView, McpStatusEvent, SaveMcpSecret,
+    ConfirmMcpApproval, DeleteMcpSecret, DeleteMcpSecretOutcome, McpApprovalPreview, McpErrorKind,
+    McpGuiService, McpServerStatus, McpSettingsView, McpStatusEvent, SaveMcpSecret,
 };
 
 pub use draft::{
@@ -42,9 +42,10 @@ pub use pane::{
     SAVE_SERVER_LABEL, mcp_settings_modal, mcp_settings_section,
 };
 pub use review::{
-    APPROVE_LABEL, NEXT_RUN_NOTICE, OUTSIDE_SANDBOX_WARNING, REVIEW_AGAIN_LABEL,
-    STALE_PREVIEW_TEXT, STORE_SECRET_LABEL, TEST_REFUSED_TEXT, UNVERIFIED_CONTENT_NOTE,
-    secret_error_text, status_reason_text,
+    APPROVE_LABEL, NEXT_RUN_NOTICE, OTHER_CHANGES_TEXT, OTHER_MAYBE_CHANGED_TEXT,
+    OUTSIDE_SANDBOX_WARNING, REVIEW_AGAIN_LABEL, STALE_PREVIEW_TEXT, STORE_SECRET_LABEL,
+    TEST_REFUSED_TEXT, UNVERIFIED_CONTENT_NOTE, secret_delete_failed_text,
+    secret_delete_partial_text, secret_deleted_text, secret_error_text, status_reason_text,
 };
 
 /// Asks the UI to draw another frame once background work finishes.
@@ -83,6 +84,10 @@ pub enum McpSettingsAction {
     CancelSecret,
     /// Store the typed value in the keychain and save the editor with only the reference.
     SaveSecret,
+    /// Drop every reference to the keychain entry `target` names. An entry
+    /// the saved server already uses is also deleted from the keychain, which
+    /// saves the editor; otherwise only the form changes.
+    DeleteSecret(SecretTarget),
     /// Leave the MCP dialog; late results of running tasks are ignored.
     Close,
 }
@@ -93,6 +98,14 @@ pub enum McpNotice {
     Saved,
     /// A secret went to the OS keychain and `mcp.toml` got only its name.
     SecretStored,
+    /// The references are gone from `mcp.toml` and the keychain entry is deleted.
+    SecretDeleted(String),
+    /// The references are gone from `mcp.toml`, but deleting the keychain
+    /// entry failed: its value may still be stored.
+    SecretDeletePartial {
+        name: String,
+        reason: McpErrorKind,
+    },
     /// The files changed on disk since they were loaded; nothing was written.
     Conflict,
     Failed(String),
@@ -246,6 +259,10 @@ enum TaskResult {
     SecretSaved {
         logical_name: String,
         result: Result<McpSettingsView, McpErrorKind>,
+    },
+    SecretDeleted {
+        logical_name: String,
+        result: Result<Box<DeleteMcpSecretOutcome>, McpErrorKind>,
     },
     Previewed {
         server_id: String,
@@ -480,20 +497,8 @@ impl McpSettingsModel {
             .and_then(|draft| draft.existing_id.clone())
             .and_then(|id| self.status(&id));
         let session = self.session.as_mut()?;
+        let saved = saved_references(session);
         let draft = session.editor.as_mut()?;
-        let saved = draft
-            .existing_id
-            .as_ref()
-            .and_then(|id| session.view.as_ref()?.config.servers.get(id))
-            .map(|entry| McpServerDraft::from_entry("", entry))
-            .map(|saved| {
-                saved
-                    .keychain_references()
-                    .into_iter()
-                    .map(|(_, name)| name)
-                    .collect()
-            })
-            .unwrap_or_default();
         Some(EditorParts {
             draft,
             secret: &mut session.secret,
@@ -755,6 +760,7 @@ impl McpSettingsModel {
             }
             McpSettingsAction::CancelSecret => session.secret = None,
             McpSettingsAction::SaveSecret => self.save_secret(),
+            McpSettingsAction::DeleteSecret(target) => self.delete_secret(&target),
         }
     }
 
@@ -872,6 +878,78 @@ impl McpSettingsModel {
         self.spawn(async move {
             let result = service.save_secret(request).await;
             reply.send(TaskResult::SecretSaved {
+                logical_name,
+                result,
+            });
+        });
+    }
+
+    fn delete_secret(&mut self, target: &SecretTarget) {
+        let generation = self.generation;
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.in_flight {
+            return;
+        }
+        let saved = saved_references(session);
+        let Some(editor) = session.editor.as_ref() else {
+            return;
+        };
+        let Some(logical_name) = editor.keychain_name(target) else {
+            return;
+        };
+        let mut without = editor.clone();
+        for (other, name) in editor.keychain_references() {
+            if name == logical_name {
+                without.remove_secret(&other);
+            }
+        }
+        let stored = editor.existing_id.is_some()
+            && (saved.contains(&logical_name) || session.stored_secrets.contains(&logical_name));
+        if !stored {
+            // Nothing in the keychain belongs to this reference yet.
+            if session
+                .secret
+                .as_ref()
+                .is_some_and(|input| without.keychain_name(&input.target).is_none())
+            {
+                session.secret = None;
+            }
+            session.editor = Some(without);
+            return;
+        }
+        let Some(service) = self.service.clone() else {
+            return;
+        };
+        let Some((server_id, definition)) = without.check(&taken_ids(session)).into_definition()
+        else {
+            return;
+        };
+        let Some((scope, expected_revision)) = session.scope(&server_id) else {
+            return;
+        };
+        session.in_flight = true;
+        session.notice = None;
+        let request = DeleteMcpSecret {
+            scope,
+            logical_name: logical_name.clone(),
+            expected_revision,
+            mutation: McpOverrideMutation::Upsert {
+                server_id,
+                definition,
+            },
+        };
+        let reply = self.reply(
+            generation,
+            TaskResult::SecretDeleted {
+                logical_name: logical_name.clone(),
+                result: Err(McpErrorKind::Unavailable),
+            },
+        );
+        self.spawn(async move {
+            let result = service.delete_secret(request).await.map(Box::new);
+            reply.send(TaskResult::SecretDeleted {
                 logical_name,
                 result,
             });
@@ -1121,6 +1199,37 @@ impl McpSettingsModel {
                     other => McpNotice::Failed(secret_error_text(other)),
                 });
             }
+            // Settings were saved: the form is done, whatever the keychain said.
+            TaskResult::SecretDeleted {
+                logical_name,
+                result: Ok(outcome),
+            } => {
+                session.in_flight = false;
+                session.view = Some(outcome.view);
+                session.load = McpLoadState::Loaded;
+                session.editor = None;
+                session.secret = None;
+                session.notice = Some(match outcome.keychain_error {
+                    None => {
+                        session.stored_secrets.remove(&logical_name);
+                        McpNotice::SecretDeleted(logical_name)
+                    }
+                    Some(reason) => McpNotice::SecretDeletePartial {
+                        name: logical_name,
+                        reason,
+                    },
+                });
+            }
+            // Nothing was saved or deleted; the edit stays open.
+            TaskResult::SecretDeleted {
+                result: Err(kind), ..
+            } => {
+                session.in_flight = false;
+                session.notice = Some(match kind {
+                    McpErrorKind::ConfigConflict => McpNotice::Conflict,
+                    other => McpNotice::Failed(secret_delete_failed_text(other)),
+                });
+            }
             TaskResult::Previewed { server_id, result } => {
                 let Some(review) = session.approval.as_mut() else {
                     return;
@@ -1183,6 +1292,23 @@ impl McpSettingsModel {
             self.review(id);
         }
     }
+}
+
+/// Keychain names the saved definition of the edited server references.
+fn saved_references(session: &Session) -> BTreeSet<String> {
+    session
+        .editor
+        .as_ref()
+        .and_then(|draft| draft.existing_id.as_ref())
+        .and_then(|id| session.view.as_ref()?.config.servers.get(id))
+        .map(|entry| {
+            McpServerDraft::from_entry("", entry)
+                .keychain_references()
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn taken_ids(session: &Session) -> BTreeSet<String> {

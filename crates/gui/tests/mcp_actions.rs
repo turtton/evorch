@@ -17,14 +17,16 @@ use config::mcp::{McpOverrideMutation, McpTransportDefinition, SourceRevision};
 use gui::fixture::DemoSource;
 use gui::headless::HeadlessWorkbench;
 use gui::mcp::{
-    ConfirmMcpApproval, McpApprovalPreview, McpGuiService, McpServerStatus, McpSettingsView,
-    McpStatusEvent, SaveMcpSecret,
+    ConfirmMcpApproval, DeleteMcpSecret, DeleteMcpSecretOutcome, McpApprovalPreview, McpGuiService,
+    McpServerStatus, McpSettingsView, McpStatusEvent, SaveMcpSecret,
 };
 use gui::mcp_settings::{
     APPROVE_LABEL, DraftTransport, DraftValue, MCP_SERVERS_BUTTON_LABEL, McpApprovalState,
     McpNotice, McpRowNote, McpServerDraft, McpSettingsAction, NEXT_RUN_NOTICE, NOTICE_REVIEW_LABEL,
-    OUTSIDE_SANDBOX_WARNING, REVIEW_AGAIN_LABEL, STALE_PREVIEW_TEXT, STORE_SECRET_LABEL,
-    SecretTarget, TEST_REFUSED_TEXT, UNVERIFIED_CONTENT_NOTE, secret_error_text,
+    OTHER_CHANGES_TEXT, OTHER_MAYBE_CHANGED_TEXT, OUTSIDE_SANDBOX_WARNING, REVIEW_AGAIN_LABEL,
+    STALE_PREVIEW_TEXT, STORE_SECRET_LABEL, SecretTarget, TEST_REFUSED_TEXT,
+    UNVERIFIED_CONTENT_NOTE, secret_delete_failed_text, secret_delete_partial_text,
+    secret_deleted_text, secret_error_text,
 };
 use gui::model::commands::{CommandSink, LoopEvent, WorkbenchCommand};
 use gui::{app::WorkbenchState, model::project_dialog::ProjectDialog};
@@ -52,6 +54,9 @@ enum Call {
     SaveSecret {
         logical_name: String,
     },
+    DeleteSecret {
+        logical_name: String,
+    },
 }
 
 #[derive(Default)]
@@ -59,6 +64,8 @@ struct Ledger {
     /// Last preview handed out per server: (id, revision, fingerprint).
     previews: BTreeMap<String, (ApprovalPreviewId, SourceRevision, ApprovalFingerprint)>,
     approved: BTreeMap<String, ApprovalFingerprint>,
+    /// What was recorded about each server at its last approval.
+    summaries: BTreeMap<String, McpApprovalSummary>,
     next_preview: u8,
 }
 
@@ -68,6 +75,8 @@ struct FakeService {
     ledger: Mutex<Ledger>,
     keychain: Mutex<BTreeMap<String, String>>,
     keychain_error: Mutex<Option<McpErrorKind>>,
+    /// A deletion that fails before anything is saved.
+    delete_error: Mutex<Option<McpErrorKind>>,
 }
 
 impl FakeService {
@@ -78,6 +87,7 @@ impl FakeService {
             ledger: Mutex::default(),
             keychain: Mutex::default(),
             keychain_error: Mutex::default(),
+            delete_error: Mutex::default(),
         })
     }
 
@@ -121,6 +131,16 @@ impl FakeService {
 
     fn current_revision(&self, root: &Path) -> SourceRevision {
         config::mcp::load_project(root).expect("load").revision
+    }
+}
+
+fn stdio_env_keys(scope: &ApprovalScope) -> Vec<String> {
+    let definition = config::mcp::load_project(&scope.canonical_root)
+        .ok()
+        .and_then(|config| config.servers.get(&scope.server_id)?.definition.clone());
+    match definition.map(|definition| definition.transport) {
+        Some(McpTransportDefinition::Stdio { env, .. }) => env.into_keys().collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -207,7 +227,7 @@ impl McpGuiService for FakeService {
                     executable: Some(PathBuf::from("/usr/bin/node")),
                     canonical_cwd: Some(scope.canonical_root.clone()),
                     destination: None,
-                    environment_keys: Vec::new(),
+                    environment_keys: stdio_env_keys(&scope),
                     secret_references: Vec::new(),
                 },
                 Vec::new(),
@@ -220,6 +240,7 @@ impl McpGuiService for FakeService {
             fingerprint,
             warnings,
             previous_fingerprint: ledger.approved.get(&scope.server_id).copied(),
+            previous_summary: ledger.summaries.get(&scope.server_id).cloned(),
             summary,
             approved_ips,
         })
@@ -301,6 +322,38 @@ impl McpGuiService for FakeService {
         )
         .map_err(runtime::mcp::mcp_config_error_kind)?;
         self.view(&request.scope.canonical_root)
+    }
+
+    /// Settings first; the key is deleted only once they are saved, and a
+    /// keychain failure after that is a partial success.
+    async fn delete_secret(
+        &self,
+        request: DeleteMcpSecret,
+    ) -> Result<DeleteMcpSecretOutcome, McpErrorKind> {
+        self.record(Call::DeleteSecret {
+            logical_name: request.logical_name.clone(),
+        });
+        if let Some(kind) = *self.delete_error.lock().unwrap() {
+            return Err(kind);
+        }
+        config::mcp::save_override(
+            &request.scope.canonical_root,
+            request.expected_revision,
+            request.mutation,
+        )
+        .map_err(runtime::mcp::mcp_config_error_kind)?;
+        let view = self.view(&request.scope.canonical_root)?;
+        let keychain_error = *self.keychain_error.lock().unwrap();
+        if keychain_error.is_none() {
+            self.keychain.lock().unwrap().remove(&format!(
+                "{}/{}",
+                request.scope.server_id, request.logical_name
+            ));
+        }
+        Ok(DeleteMcpSecretOutcome {
+            view,
+            keychain_error,
+        })
     }
 }
 
@@ -874,4 +927,197 @@ X-Tenant = "tenant-visible"
             .has_label(&format!("Authorization = {AUTH}"))
     );
     assert!(fixture.harness.has_label("X-Tenant = tenant-visible"));
+}
+
+#[test]
+fn approval_preview_shows_itemized_diff() {
+    // Given: a server approved earlier with another program, environment and
+    // secret reference than its settings have now.
+    let toml = format!("{STDIO}[servers.files.env]\nNEW_KEY = \"x\"\n");
+    let mut fixture = Fixture::new(&toml);
+    let canonical = std::fs::canonicalize(&fixture.root).expect("canonical");
+    {
+        let mut ledger = fixture.service.ledger.lock().unwrap();
+        ledger
+            .approved
+            .insert("files".into(), ApprovalFingerprint([7; 32]));
+        ledger.summaries.insert(
+            "files".into(),
+            McpApprovalSummary {
+                executable: Some(PathBuf::from("/usr/local/bin/node")),
+                canonical_cwd: Some(canonical.clone()),
+                destination: None,
+                environment_keys: vec!["OLD_KEY".into()],
+                secret_references: vec!["old-token".into()],
+            },
+        );
+    }
+    fixture.open_settings();
+    // When: reviewing the approval again.
+    fixture.click("Review approval files");
+    // Then: each recorded item that differs is listed, and other launch
+    // settings are flagged as not comparable.
+    for line in [
+        "Changed: program /usr/local/bin/node \u{2192} /usr/bin/node",
+        "Added: environment variable NEW_KEY",
+        "Removed: environment variable OLD_KEY",
+        "Removed: secret reference old-token",
+        OTHER_MAYBE_CHANGED_TEXT,
+    ] {
+        assert!(fixture.harness.has_label(line), "{line}");
+    }
+    assert!(!fixture.harness.has_label(OTHER_CHANGES_TEXT));
+    // When: the recorded items all match but the fingerprint differs.
+    let current = match fixture.approval_state() {
+        Some(McpApprovalState::Ready(preview)) => preview.summary.clone(),
+        other => panic!("preview: {other:?}"),
+    };
+    fixture
+        .service
+        .ledger
+        .lock()
+        .unwrap()
+        .summaries
+        .insert("files".into(), current);
+    fixture
+        .harness
+        .state_mut()
+        .mcp_settings_mut()
+        .apply_action(McpSettingsAction::CancelApproval);
+    fixture.harness.run();
+    fixture.click("Review approval files");
+    // Then: only the not-comparable change is reported.
+    assert!(fixture.harness.has_label(OTHER_CHANGES_TEXT));
+    assert!(
+        !fixture
+            .harness
+            .has_label("Added: environment variable NEW_KEY")
+    );
+}
+
+const KEYCHAIN_HTTP: &str = r#"version = 1
+[servers.remote]
+type = "http"
+url = "https://mcp.example.com/mcp"
+token = { keychain = "remote-token" }
+"#;
+
+/// A server whose bearer token is stored in the (fake) keychain, open for editing.
+fn keychain_fixture() -> Fixture {
+    let mut fixture = Fixture::new(KEYCHAIN_HTTP);
+    fixture
+        .service
+        .keychain
+        .lock()
+        .unwrap()
+        .insert("remote/remote-token".into(), "stored-value".into());
+    fixture.open_settings();
+    fixture.click("Edit remote");
+    fixture
+}
+
+fn keychain_has_token(fixture: &Fixture) -> bool {
+    fixture
+        .service
+        .keychain
+        .lock()
+        .unwrap()
+        .contains_key("remote/remote-token")
+}
+
+#[test]
+fn deleting_secret_removes_reference_then_key() {
+    let mut fixture = keychain_fixture();
+    // When: deleting the stored bearer token.
+    fixture.click("Delete secret Bearer token");
+    // Then: the saved server no longer references it and the key is gone.
+    assert_eq!(
+        fixture.service.calls().last(),
+        Some(&Call::DeleteSecret {
+            logical_name: "remote-token".into()
+        })
+    );
+    let remote = fixture.server_table("remote");
+    assert!(!remote.contains_key("token"), "{remote:?}");
+    assert_eq!(remote["url"].as_str(), Some("https://mcp.example.com/mcp"));
+    assert!(!keychain_has_token(&fixture));
+    let state = fixture.harness.state().mcp_settings();
+    assert_eq!(
+        state.notice(),
+        Some(&McpNotice::SecretDeleted("remote-token".into()))
+    );
+    assert!(state.editor().is_none());
+    assert!(
+        fixture
+            .harness
+            .has_label(&secret_deleted_text("remote-token"))
+    );
+}
+
+#[test]
+fn partial_secret_deletion_reports_value_may_remain() {
+    let mut fixture = keychain_fixture();
+    *fixture.service.keychain_error.lock().unwrap() = Some(McpErrorKind::SecretLocked);
+    // When: the settings save but the keychain refuses to delete the key.
+    fixture.click("Delete secret Bearer token");
+    // Then: the reference is gone, the key may remain, and it is not shown
+    // as deleted.
+    assert!(!fixture.server_table("remote").contains_key("token"));
+    assert!(keychain_has_token(&fixture));
+    assert_eq!(
+        fixture.harness.state().mcp_settings().notice(),
+        Some(&McpNotice::SecretDeletePartial {
+            name: "remote-token".into(),
+            reason: McpErrorKind::SecretLocked,
+        })
+    );
+    assert!(fixture.harness.has_label(&secret_delete_partial_text(
+        "remote-token",
+        McpErrorKind::SecretLocked
+    )));
+    assert!(
+        !fixture
+            .harness
+            .has_label(&secret_deleted_text("remote-token"))
+    );
+}
+
+#[test]
+fn failed_secret_deletion_changes_nothing() {
+    let mut fixture = keychain_fixture();
+    let before = fixture.toml();
+    *fixture.service.delete_error.lock().unwrap() = Some(McpErrorKind::Unavailable);
+    // When: the service refuses the deletion outright.
+    fixture.click("Delete secret Bearer token");
+    // Then: settings and keychain are untouched and the edit stays open.
+    assert_eq!(fixture.toml(), before);
+    assert!(keychain_has_token(&fixture));
+    assert_eq!(
+        fixture.harness.state().mcp_settings().notice(),
+        Some(&McpNotice::Failed(secret_delete_failed_text(
+            McpErrorKind::Unavailable
+        )))
+    );
+    let draft = fixture
+        .harness
+        .state()
+        .mcp_settings()
+        .editor()
+        .expect("editor stays open");
+    assert_eq!(
+        draft.keychain_name(&SecretTarget::Token).as_deref(),
+        Some("remote-token")
+    );
+    // When: the files changed on disk before the next attempt.
+    *fixture.service.delete_error.lock().unwrap() = None;
+    let external = KEYCHAIN_HTTP.replace("/mcp\"", "/v2/mcp\"");
+    std::fs::write(fixture.root.join(".evorch/mcp.toml"), &external).expect("external edit");
+    fixture.click("Delete secret Bearer token");
+    // Then: it is reported like any other save conflict; nothing is deleted.
+    assert_eq!(
+        fixture.harness.state().mcp_settings().notice(),
+        Some(&McpNotice::Conflict)
+    );
+    assert_eq!(fixture.toml(), external);
+    assert!(keychain_has_token(&fixture));
 }

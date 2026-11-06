@@ -4,12 +4,12 @@
 //! revocation, connection tests and secret storage are returned as actions
 //! that the model runs off the render thread.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{RichText, Ui};
 
 use config::mcp::{McpServerEntry, McpTransportDefinition, TemplatePart, ValueSource};
-use runtime::mcp::ApprovalWarning;
+use runtime::mcp::{ApprovalWarning, McpApprovalSummary, McpDestinationSummary};
 
 use super::draft::{DraftCheck, looks_secret, template_text};
 use super::{
@@ -27,6 +27,8 @@ pub const NEXT_RUN_NOTICE: &str = "Approved. It is used from the next new run; c
 pub const OUTSIDE_SANDBOX_WARNING: &str = "This starts a program on this computer outside the sandbox. It can run any command with your user permissions.";
 pub const UNVERIFIED_CONTENT_NOTE: &str = "Approval allows exactly the settings below. It does not check what the program, its scripts or the server actually do.";
 pub const STALE_PREVIEW_TEXT: &str = "The MCP configuration changed after this preview, so nothing was approved. Review the current settings again.";
+pub const OTHER_CHANGES_TEXT: &str = "Other approved settings changed, such as the command, arguments, URL, plain values or the network approval (allowed addresses). Their previous values are not kept, so check everything below.";
+pub const OTHER_MAYBE_CHANGED_TEXT: &str = "Other approved settings may also have changed, such as the command, arguments, URL, plain values or the network approval (allowed addresses); their previous values are not kept.";
 pub const TEST_REFUSED_TEXT: &str =
     "Not tested: approve this server first. Nothing was started or contacted.";
 const REVOKED_TEXT: &str = "Approval revoked. Conversations already running keep their tool list, but calls to this server are refused.";
@@ -113,6 +115,34 @@ pub fn status_reason_text(kind: McpErrorKind) -> String {
             "The server's tool definitions changed since this conversation started.".into()
         }
     }
+}
+
+pub fn secret_deleted_text(name: &str) -> String {
+    format!(
+        "Deleted. The keychain entry \"{name}\" is removed from the OS keychain and from this server's settings."
+    )
+}
+
+/// The settings no longer reference the entry, but its value may remain.
+pub fn secret_delete_partial_text(name: &str, reason: McpErrorKind) -> String {
+    let cause = match reason {
+        McpErrorKind::SecretUnavailable => "the OS keychain is not available",
+        McpErrorKind::SecretLocked => "the OS keychain is locked",
+        McpErrorKind::SecretDenied => "access to the OS keychain was denied or cancelled",
+        McpErrorKind::ConfigConflict => "the MCP configuration changed on disk meanwhile",
+        _ => "the OS keychain reported an error",
+    };
+    format!(
+        "Saved without the reference to \"{name}\", but the keychain entry was not deleted because {cause}. Its value may still be stored in the OS keychain; delete it there or try again later."
+    )
+}
+
+/// Nothing was saved or deleted.
+pub fn secret_delete_failed_text(kind: McpErrorKind) -> String {
+    format!(
+        "Nothing was changed: the settings were not saved and the keychain entry was not deleted. {}",
+        status_reason_text(kind)
+    )
 }
 
 /// Why a keychain secret could not be read or stored. evorch never falls
@@ -399,22 +429,104 @@ fn preview_body(ui: &mut Ui, preview: &McpApprovalPreview, entry: Option<&McpSer
 }
 
 fn change_line(ui: &mut Ui, preview: &McpApprovalPreview) {
-    match preview.previous_fingerprint {
-        None => {
+    match (preview.previous_fingerprint, &preview.previous_summary) {
+        (None, _) => {
             ui.label(muted("This server has not been approved before."));
         }
-        Some(previous) if previous == preview.fingerprint => {
+        (Some(previous), _) if previous == preview.fingerprint => {
             ui.label(muted(
                 "Already approved with exactly these settings. Approving again changes nothing.",
             ));
         }
-        Some(_) => {
+        (Some(_), None) => {
             ui.colored_label(
                 palette().WARNING_FG,
                 semibold("Changed since your last approval: the command, arguments, working directory, environment, destination or secret references differ. Check everything below."),
             );
         }
+        (Some(_), Some(previous)) => {
+            ui.colored_label(
+                palette().WARNING_FG,
+                semibold("Changed since your last approval:"),
+            );
+            let changes = summary_changes(previous, &preview.summary);
+            for change in &changes {
+                ui.colored_label(palette().WARNING_FG, change);
+            }
+            // Only the summary above is recorded at approval; everything else
+            // (command, arguments, URL, plain values, allowed addresses) is
+            // compared by fingerprint alone.
+            let other = if changes.is_empty() {
+                OTHER_CHANGES_TEXT
+            } else {
+                OTHER_MAYBE_CHANGED_TEXT
+            };
+            ui.colored_label(palette().WARNING_FG, other);
+        }
     }
+}
+
+/// One line per item of the recorded approval summary that differs.
+fn summary_changes(previous: &McpApprovalSummary, current: &McpApprovalSummary) -> Vec<String> {
+    let mut changes = Vec::new();
+    let path =
+        |path: &Option<std::path::PathBuf>| path.as_ref().map(|path| path.display().to_string());
+    let destination = |destination: &Option<McpDestinationSummary>| {
+        destination.as_ref().map(|destination| {
+            format!(
+                "{}://{}:{}",
+                destination.scheme, destination.host, destination.port
+            )
+        })
+    };
+    for (item, before, after) in [
+        (
+            "program",
+            path(&previous.executable),
+            path(&current.executable),
+        ),
+        (
+            "working directory",
+            path(&previous.canonical_cwd),
+            path(&current.canonical_cwd),
+        ),
+        (
+            "destination",
+            destination(&previous.destination),
+            destination(&current.destination),
+        ),
+    ] {
+        match (before, after) {
+            (Some(before), Some(after)) if before != after => {
+                changes.push(format!("Changed: {item} {before} \u{2192} {after}"));
+            }
+            (None, Some(after)) => changes.push(format!("Added: {item} {after}")),
+            (Some(before), None) => changes.push(format!("Removed: {item} {before}")),
+            _ => {}
+        }
+    }
+    for (item, before, after) in [
+        (
+            "environment variable",
+            &previous.environment_keys,
+            &current.environment_keys,
+        ),
+        (
+            "secret reference",
+            &previous.secret_references,
+            &current.secret_references,
+        ),
+    ] {
+        let before: BTreeSet<&String> = before.iter().collect();
+        let after: BTreeSet<&String> = after.iter().collect();
+        for name in after.difference(&before) {
+            changes.push(format!("Added: {item} {name}"));
+        }
+        for name in before.difference(&after) {
+            changes.push(format!("Removed: {item} {name}"));
+        }
+    }
+    changes
 }
 
 fn warning_text(warning: ApprovalWarning, preview: &McpApprovalPreview) -> (String, egui::Color32) {
@@ -494,9 +606,10 @@ fn value_text(value: &ValueSource, secret: bool) -> String {
             .iter()
             .map(|part| match part {
                 TemplatePart::Literal { value } if value.is_empty() => String::new(),
-                TemplatePart::Literal { value } => {
-                    format!("[hidden text, {} characters]", value.chars().count())
-                }
+                TemplatePart::Literal { value } => match value.chars().count() {
+                    1 => "[hidden text, 1 character]".to_owned(),
+                    count => format!("[hidden text, {count} characters]"),
+                },
                 TemplatePart::Env {
                     name,
                     default: None,
@@ -556,6 +669,7 @@ pub(super) fn secret_section(
         ui.colored_label(palette().WARNING_FG, secret_error_text(reason));
     }
     let mut remove = None;
+    let existing = draft.existing_id.is_some();
     for (target, name) in &references {
         ui.push_id(("secret", target.label()), |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -583,11 +697,27 @@ pub(super) fn secret_section(
                         *action = Some(McpSettingsAction::EditSecret(target.clone()));
                     }
                 }
-                let drop = ui.add_enabled(!busy, egui::Button::new("Remove").small());
-                accessible(&drop, &format!("Remove secret {}", target.label()));
-                drop.clone().on_hover_text(
-                    "Removes the reference from this server. The keychain entry itself is left in place.",
-                );
+                // An entry the saved server uses is deleted from the keychain
+                // too; that also saves the form. Otherwise only the form changes.
+                let deletes = existing && (stored.contains(name) || saved.contains(name));
+                let (text, hover) = if deletes {
+                    (
+                        "Delete",
+                        "Removes every reference to this entry, saves the server, then deletes the value from the OS keychain.",
+                    )
+                } else {
+                    ("Remove", "Removes the reference from this form.")
+                };
+                let ready = !busy && (!deletes || check.is_valid());
+                let drop = ui.add_enabled(ready, egui::Button::new(text).small());
+                accessible(&drop, &format!("{text} secret {}", target.label()));
+                let drop = if deletes && !check.is_valid() {
+                    drop.on_disabled_hover_text(
+                        "Fix the errors above first: deleting also saves this server.",
+                    )
+                } else {
+                    drop.on_hover_text(hover)
+                };
                 if drop.clicked() {
                     remove = Some(target.clone());
                 }
@@ -598,10 +728,7 @@ pub(super) fn secret_section(
         });
     }
     if let Some(target) = remove {
-        if secret.as_ref().is_some_and(|input| input.target == target) {
-            *secret = None;
-        }
-        draft.remove_secret(&target);
+        *action = Some(McpSettingsAction::DeleteSecret(target));
     }
 }
 

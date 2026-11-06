@@ -185,6 +185,15 @@ fn notice(
                 "Saved. The secret is in the OS keychain; .evorch/mcp.toml holds only its entry name. It applies from the next new run.",
             );
         }
+        Some(McpNotice::SecretDeleted(name)) => {
+            ui.colored_label(palette().SUCCESS, super::secret_deleted_text(name));
+        }
+        Some(McpNotice::SecretDeletePartial { name, reason }) => {
+            ui.colored_label(
+                palette().WARNING_FG,
+                super::secret_delete_partial_text(name, *reason),
+            );
+        }
         Some(McpNotice::Conflict) => {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(
