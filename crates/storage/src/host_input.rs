@@ -65,6 +65,25 @@ pub struct HostInputReceipt {
     pub evidence_id: Option<String>,
 }
 
+/// Human input delivery metadata without selecting text, images or evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostInputReceiptHeader {
+    pub prompt_id: String,
+    pub run_id: String,
+    pub status: HostInputStatus,
+}
+
+/// A committed human submission without eagerly selecting a large text body.
+/// Texts larger than 16 KiB are read by ID through the ordinary receipt API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredHostInput {
+    pub prompt_id: String,
+    pub run_id: String,
+    pub text: Option<String>,
+    pub text_bytes: u64,
+    pub accepted_at_ns: i64,
+}
+
 /// What the runtime recorded for a submission: the host's own words and the
 /// skills it attached to them.
 #[derive(Debug, Clone, PartialEq, Eq)]

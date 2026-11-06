@@ -298,7 +298,7 @@ impl CommandHost {
                 })?;
             }
         }
-        registry
+        let decided = registry
             .resolve(
                 &id,
                 decide.approval_revision.get(),
@@ -319,7 +319,7 @@ impl CommandHost {
                 },
             )
             .map_err(approval_error)?;
-        if let Err(error) = self.projection.refresh() {
+        if let Err(error) = self.projection.approval_changed(&decided.id) {
             tracing::warn!(code = ?error.code, "approval resolved; projection refresh failed");
         }
         Ok(CommandReply {

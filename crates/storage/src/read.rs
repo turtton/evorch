@@ -325,6 +325,28 @@ impl Database {
         crate::repo::host_input_receipt::for_run(&self.conn, run_id)
     }
 
+    /// Human input receipt metadata, without selecting the text column.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn host_input_receipt_headers(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::host_input::HostInputReceiptHeader>, StorageError> {
+        crate::repo::host_input_receipt::headers_for_run(&self.conn, run_id)
+    }
+
+    /// Committed human inputs in acceptance order, without loading large text.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite access or row decoding fails.
+    pub fn delivered_host_input_history(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::host_input::DeliveredHostInput>, StorageError> {
+        crate::repo::host_input_receipt::delivered_history(&self.conn, run_id)
+    }
+
     /// Read one consistent, bounded snapshot of a root and its persisted descendants.
     /// Limits fail closed rather than silently omitting potential evidence.
     pub fn learning_source_contexts(

@@ -37,7 +37,6 @@ struct State {
     epoch: u64,
     sequence: u64,
     next_subscription: u64,
-    log_cursor: i64,
     scanner: queries::CommitScanner,
     initialized: bool,
     projects: Vec<(ProjectId, PathBuf)>,
@@ -156,7 +155,6 @@ impl Projection {
                     >> 1,
                 sequence: 0,
                 next_subscription: 0,
-                log_cursor: 0,
                 scanner: queries::CommitScanner::default(),
                 initialized: false,
                 projects: vec![],
@@ -181,7 +179,8 @@ impl Projection {
                         if matches!(event.kind, EventKind::Message(event_bus::MessageEvent::MessageDelta { .. } | event_bus::MessageEvent::ReasoningDelta { .. } | event_bus::MessageEvent::ToolCallDelta { .. })) { continue; }
                         if this.refresh().is_err() { this.invalidate(); }
                     }
-                    Change::Commit | Change::Approval(Ok(_)) => { if this.refresh().is_err() { this.invalidate(); } }
+                    Change::Commit => { if this.refresh().is_err() { this.invalidate(); } }
+                    Change::Approval(Ok(approval)) => { if this.approval_changed(&approval.id).is_err() { this.invalidate(); } }
                     Change::Event(Err(RecvError::Lagged(_))) | Change::Approval(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                         // Lost input means the projection cannot vouch for ANY old cursor.
                         this.invalidate();
@@ -207,7 +206,21 @@ impl Projection {
         let mut state = self.state.lock().unwrap();
         self.refresh_locked(&mut state)
     }
+    pub(crate) fn approval_changed(
+        &self,
+        id: &sandbox::approval::ApprovalId,
+    ) -> Result<(), WorkbenchError> {
+        let mut state = self.state.lock().unwrap();
+        self.refresh_after_approval(&mut state, Some(id))
+    }
     fn refresh_locked(&self, state: &mut State) -> Result<(), WorkbenchError> {
+        self.refresh_after_approval(state, None)
+    }
+    fn refresh_after_approval(
+        &self,
+        state: &mut State,
+        observed: Option<&sandbox::approval::ApprovalId>,
+    ) -> Result<(), WorkbenchError> {
         let mut next =
             queries::collect(&self.runtime, &state.projects).map_err(queries::storage_error)?;
         for (id, provenance) in &state.answer_provenance {
@@ -230,12 +243,19 @@ impl Projection {
             }
             after = pending.last().map(|a| a.attempt);
         }
-        // Retain terminal decisions so a pending -> decided transition is observable.
-        for old in state.models.approvals.values() {
-            let id = sandbox::approval::ApprovalId {
+        // A request can be registered and decided before a refresh sees Pending.
+        // Re-read the notified identity from the canonical registry, not a stale
+        // payload; retain terminal decisions for subsequent diffs as well.
+        for id in state
+            .models
+            .approvals
+            .values()
+            .map(|old| sandbox::approval::ApprovalId {
                 core_epoch: old.core_epoch.get(),
                 value: old.id.as_str().to_owned(),
-            };
+            })
+            .chain(observed.cloned())
+        {
             if let Some(a) = self
                 .registry
                 .get(&id)
@@ -341,18 +361,17 @@ impl Projection {
             state.publish(event, self.limits);
         }
         let mut scanner = std::mem::take(&mut state.scanner);
-        let mut cursor = state.log_cursor;
+        let runs: Vec<_> = state.models.runs.keys().cloned().collect();
         let initialized = state.initialized;
         let result = self
             .bodies
-            .changes(&self.runtime, &mut scanner, &mut cursor, |message| {
+            .changes(&self.runtime, &mut scanner, &runs, |message| {
                 if initialized && state.models.threads.contains_key(message.thread.as_str()) {
                     state.publish(UiEvent::MessageCommitted { message }, self.limits);
                 }
             });
         state.scanner = scanner;
-        state.log_cursor = cursor;
-        if result.is_err() {
+        if !result.as_ref().is_ok_and(|rewritten| !*rewritten) {
             state.invalidate(self.limits);
         }
         result?;

@@ -18,7 +18,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        Self::with_runtime(tokio::runtime::Runtime::new().unwrap())
+    }
+    fn with_runtime(rt: tokio::runtime::Runtime) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, store) = common::runtime_with_store(dir.path());
         let host = common::host_with_project(&rt, runtime.clone(), dir.path());
@@ -786,4 +788,497 @@ fn input_receipt_query_and_changed_event_share_provenance_and_hide_tombstones() 
         panic!()
     };
     assert!(deleted.items.is_empty());
+}
+
+fn saved_event(f: &Fixture, at: u64, kind: impl Into<event_bus::EventKind>) -> i64 {
+    let mut event = Event::new(kind);
+    event.meta.wall_clock = std::time::UNIX_EPOCH + Duration::from_nanos(at);
+    f.store.handle().append_event(None, &event).unwrap();
+    f.runtime
+        .with_storage_reader(|db| db.last_event_id())
+        .unwrap()
+        .unwrap()
+}
+fn input(f: &Fixture, id: &str, text: &str, at: i64, status: storage::HostInputStatus) {
+    f.store
+        .handle()
+        .append_host_input_accepted(
+            &[],
+            &[],
+            None,
+            &storage::HostInputReceipt {
+                provenance: storage::HostInputProvenance::User,
+                prompt_id: id.into(),
+                run_id: "run-1".into(),
+                root_run_id: "run-1".into(),
+                text: text.into(),
+                image_count: 0,
+                status,
+                reason: None,
+                accepted_at_ns: at,
+                status_at_ns: at,
+                evidence_id: None,
+            },
+        )
+        .unwrap();
+}
+fn messages(f: &Fixture) -> Vec<CommittedMessage> {
+    let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
+        cursor: None,
+        limit: 200,
+    })) else {
+        panic!()
+    };
+    assert!(page.next_cursor.is_none());
+    page.items
+}
+fn next_message(
+    f: &Fixture,
+    sub: &mut workbench_host::subscriptions::Subscription,
+) -> CommittedMessage {
+    f.rt.block_on(async {
+        loop {
+            match sub.recv().await.expect("open subscription").event {
+                UiEvent::MessageCommitted { message } => break message,
+                UiEvent::ResyncRequired { reason } => panic!("unexpected resync: {reason:?}"),
+                _ => {}
+            }
+        }
+    })
+}
+#[test]
+fn finish_is_committed_once_and_history_matches_stream_indices() {
+    let f = Fixture::new();
+    let mut sub = f.subscribe();
+    saved_event(
+        &f,
+        5,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: String::new(),
+        },
+    );
+    saved_event(
+        &f,
+        10,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "answer".into(),
+        },
+    );
+    f.host.projection().refresh().unwrap();
+    let first = next_message(&f, &mut sub);
+    saved_event(
+        &f,
+        20,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: "answer".into(),
+        },
+    );
+    saved_event(
+        &f,
+        30,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: String::new(),
+        },
+    );
+    saved_event(
+        &f,
+        40,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: "finish only".into(),
+        },
+    );
+    f.host.projection().refresh().unwrap();
+    let finish = next_message(&f, &mut sub);
+    assert_eq!(finish.role, MessageRole::Assistant);
+    assert_eq!(finish.index, Sequence(1));
+    assert_eq!(
+        finish.content,
+        MessageContent::Inline {
+            text: "finish only".into()
+        }
+    );
+    assert_eq!(messages(&f), vec![first, finish]);
+}
+#[test]
+fn delivered_followups_merge_by_acceptance_order_and_deduplicate_initial_prompt() {
+    let f = Fixture::new();
+    let mut sub = f.subscribe();
+    input(
+        &f,
+        "initial",
+        "hello",
+        10,
+        storage::HostInputStatus::Delivered,
+    );
+    saved_event(
+        &f,
+        20,
+        event_bus::LifecycleEvent::TaskPromptPublished {
+            run_id: "run-1".into(),
+            agent_name: "Worker".into(),
+            role: "Worker".into(),
+            parent_run_id: None,
+            prompt: "expanded".into(),
+            user_text: Some("hello".into()),
+            skills: vec![],
+        },
+    );
+    saved_event(
+        &f,
+        30,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "first answer".into(),
+        },
+    );
+    f.host.projection().refresh().unwrap();
+    let first = next_message(&f, &mut sub);
+    let answer = next_message(&f, &mut sub);
+    input(
+        &f,
+        "second",
+        "followup",
+        40,
+        storage::HostInputStatus::Delivered,
+    );
+    input(
+        &f,
+        "third",
+        "hello",
+        50,
+        storage::HostInputStatus::Delivered,
+    );
+    for (id, status) in [
+        ("pending", storage::HostInputStatus::Accepted),
+        ("cancelled", storage::HostInputStatus::Withdrawn),
+        ("dropped", storage::HostInputStatus::Dropped),
+        ("unknown", storage::HostInputStatus::Unknown),
+    ] {
+        input(&f, id, id, 60, status);
+    }
+    // A durable Delivered receipt is enough, even without a saved bus notification.
+    // The body-free notification wakes projection; its payload is not the body.
+    f.runtime
+        .event_bus()
+        .emit(Event::new(event_bus::LifecycleEvent::HostInputDelivered {
+            run_id: "run-1".into(),
+            prompt_id: "second".into(),
+        }));
+    let second = next_message(&f, &mut sub);
+    let third = next_message(&f, &mut sub);
+    assert_eq!(
+        [first.index, answer.index, second.index, third.index],
+        [Sequence(0), Sequence(1), Sequence(2), Sequence(3)]
+    );
+    assert_eq!(
+        second.content,
+        MessageContent::Inline {
+            text: "followup".into()
+        }
+    );
+    assert_eq!(
+        third.content,
+        MessageContent::Inline {
+            text: "hello".into()
+        }
+    );
+    assert_eq!(messages(&f), vec![first, answer, second, third]);
+}
+#[test]
+fn late_delivery_resynchronizes_instead_of_silently_reindexing_history() {
+    let f = Fixture::new();
+    input(
+        &f,
+        "late",
+        "followup",
+        10,
+        storage::HostInputStatus::Accepted,
+    );
+    saved_event(
+        &f,
+        20,
+        MessageEvent::MessageCompleted {
+            run_id: "run-1".into(),
+            text: "answer".into(),
+        },
+    );
+    let mut sub = f.subscribe();
+    let epoch = sub.started.high_water.core_epoch;
+    f.store
+        .handle()
+        .transition_host_inputs(&[storage::HostInputTransition {
+            prompt_id: "late".into(),
+            status: storage::HostInputStatus::Delivered,
+            reason: None,
+        }])
+        .unwrap();
+    f.host.projection().refresh().unwrap();
+    let resync = f.rt.block_on(async {
+        loop {
+            let e = sub.recv().await.unwrap();
+            if matches!(e.event, UiEvent::ResyncRequired { .. }) {
+                break e;
+            }
+        }
+    });
+    assert!(resync.cursor.core_epoch > epoch);
+    assert!(f.rt.block_on(sub.recv()).is_none());
+    let history = messages(&f);
+    assert_eq!(history[0].role, MessageRole::User);
+    assert_eq!(history[1].index, Sequence(1));
+}
+#[test]
+fn history_cursor_rejects_retained_row_removal_or_deleted_run() {
+    for delete_run in [false, true] {
+        let f = Fixture::new();
+        let first_id = saved_event(
+            &f,
+            10,
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: "first".into(),
+            },
+        );
+        saved_event(
+            &f,
+            20,
+            MessageEvent::MessageCompleted {
+                run_id: "run-1".into(),
+                text: "second".into(),
+            },
+        );
+        if delete_run {
+            f.thread("thread-1", "run-2", "First");
+            saved_event(
+                &f,
+                30,
+                MessageEvent::MessageCompleted {
+                    run_id: "run-2".into(),
+                    text: "third".into(),
+                },
+            );
+        }
+        let QueryReply::CommittedHistory(page) = f.query(history(PageRequest {
+            cursor: None,
+            limit: 1,
+        })) else {
+            panic!()
+        };
+        let db = rusqlite::Connection::open(f.dir.path().join("host.db")).unwrap();
+        if delete_run {
+            db.execute("INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES ('run-1','thread-1','family')", []).unwrap();
+        } else {
+            db.execute("DELETE FROM events WHERE id=?1", [first_id])
+                .unwrap();
+        }
+        let err = f
+            .host
+            .handle_query(
+                &SessionId::new("session").unwrap(),
+                &history(PageRequest {
+                    cursor: page.next_cursor,
+                    limit: 1,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
+    }
+}
+
+#[test]
+fn large_delivered_input_is_deferred_and_initial_prompt_still_deduplicates() {
+    let f = Fixture::new();
+    let body = "😀".repeat(20_000);
+    input(
+        &f,
+        "initial-large",
+        &body,
+        10,
+        storage::HostInputStatus::Delivered,
+    );
+    saved_event(
+        &f,
+        20,
+        event_bus::LifecycleEvent::TaskPromptPublished {
+            run_id: "run-1".into(),
+            agent_name: "Worker".into(),
+            role: "Worker".into(),
+            parent_run_id: None,
+            prompt: body.clone(),
+            user_text: Some(body.clone()),
+            skills: vec![],
+        },
+    );
+    input(
+        &f,
+        "inline-boundary",
+        &"a".repeat(16384),
+        30,
+        storage::HostInputStatus::Delivered,
+    );
+    input(
+        &f,
+        "deferred-boundary",
+        &"b".repeat(16385),
+        40,
+        storage::HostInputStatus::Delivered,
+    );
+    let headers = f
+        .runtime
+        .with_storage_reader(|db| db.delivered_host_input_history("run-1"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(headers.len(), 3);
+    assert_eq!(headers[1].text.as_ref().map(String::len), Some(16384));
+    assert!(headers[2].text.is_none());
+    assert!(headers[0].text.is_none());
+    assert_eq!(headers[0].text_bytes, body.len() as u64);
+    let items = messages(&f);
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].role, MessageRole::User);
+    assert!(matches!(&items[1].content, MessageContent::Inline { text } if text.len() == 16384));
+    assert!(matches!(&items[2].content, MessageContent::Body(_)));
+    let MessageContent::Body(reference) = &items[0].content else {
+        panic!("large receipt is deferred")
+    };
+    let QueryReply::Body(chunk) = f.query(Query::ReadBody(ReadBody {
+        body_id: reference.body_id.clone(),
+        offset: ByteOffset(0),
+        max_bytes: 65536,
+    })) else {
+        panic!()
+    };
+    assert_eq!(chunk.text, body[..65536]);
+    assert_eq!(chunk.next_offset, Some(ByteOffset(65536)));
+    f.tombstone();
+    let err = f
+        .host
+        .projection()
+        .query(&Query::ReadBody(ReadBody {
+            body_id: reference.body_id.clone(),
+            offset: ByteOffset(0),
+            max_bytes: 65536,
+        }))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn approval_registered_and_decided_between_refreshes_still_emits_changed() {
+    for web in [true, false] {
+        // The current-thread executor cannot consume registration notifications
+        // until recv() is awaited: both canonical mutations precede any refresh.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut f = Fixture::with_runtime(rt);
+        let mut sub = f.subscribe();
+        let registry = ApprovalRegistry::for_bus(&f.runtime.event_bus());
+        let approval = registry.register(
+            ApprovalRequest {
+                run_id: "run-1",
+                thread_id: Some("thread-1"),
+                tool_name: "shell",
+                call_id: "immediate",
+                input: None,
+            },
+            Duration::from_secs(3600),
+        );
+        let pending = registry.get(approval.id()).unwrap();
+        if web {
+            f.host
+                .handle_request(
+                    &SessionId::new("immediate-session").unwrap(),
+                    &RequestId::new("immediate-request").unwrap(),
+                    Command::DecideToolApproval(DecideToolApproval {
+                        approval_id: ApprovalId::new(&pending.id.value).unwrap(),
+                        core_epoch: InstanceEpoch(pending.id.core_epoch),
+                        approval_revision: Revision(pending.revision),
+                        decision: ApprovalDecision::Approve,
+                    }),
+                    common::web(),
+                )
+                .unwrap();
+        } else {
+            registry
+                .resolve(
+                    approval.id(),
+                    pending.revision,
+                    sandbox::approval::ApprovalDecision::Approve,
+                    sandbox::approval::ApprovalProvenance::DESKTOP,
+                )
+                .unwrap();
+        }
+        let changed = f.rt.block_on(async {
+            loop {
+                let e = sub.recv().await.unwrap();
+                if let UiEvent::ApprovalChanged { approval } = e.event
+                    && approval.state == workbench_protocol::views::ApprovalState::Approved
+                {
+                    break approval;
+                }
+            }
+        });
+        assert_eq!(changed.id.as_str(), pending.id.value);
+        assert_eq!(
+            changed.decided_by.unwrap().surface,
+            if web {
+                workbench_protocol::envelope::Surface::Web
+            } else {
+                workbench_protocol::envelope::Surface::Desktop
+            }
+        );
+        assert_eq!(f.rt.block_on(approval.wait()), ApprovalState::Approved);
+    }
+}
+
+#[test]
+fn deferred_multipart_finish_deduplicates_logical_text_not_descriptor_shape() {
+    let f = Fixture::new();
+    let mut sub = f.subscribe();
+    let part = "片".repeat(10_000);
+    for index in 0..2 {
+        saved_event(
+            &f,
+            10 + index as u64,
+            MessageEvent::MessagePart {
+                run_id: "run-1".into(),
+                response_id: "large-response".into(),
+                text: part.clone(),
+                index,
+                total: 2,
+            },
+        );
+    }
+    let committed = next_message(&f, &mut sub);
+    saved_event(
+        &f,
+        12,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: part.repeat(2),
+        },
+    );
+    let page = messages(&f);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].run, committed.run);
+    assert_eq!(page[0].index, committed.index);
+    assert_eq!(page[0].role, committed.role);
+    saved_event(
+        &f,
+        13,
+        MessageEvent::FinalResultPublished {
+            run_id: "run-1".into(),
+            text: "別".repeat(20_000),
+        },
+    );
+    let distinct = next_message(&f, &mut sub);
+    assert_eq!(distinct.index.get(), 1);
+    assert_eq!(messages(&f).len(), 2);
 }

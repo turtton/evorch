@@ -131,14 +131,10 @@ pub(crate) fn collect(
                                 m.questions.insert(question.id, view);
                             }
                         }
-                        let receipts = db.host_input_receipts_for_run(&run.run_id)?;
+                        let receipts = db.host_input_receipt_headers(&run.run_id)?;
                         let ids: Vec<_> = receipts.iter().map(|r| r.prompt_id.clone()).collect();
                         let submissions = db.host_chat_submissions(&ids)?;
                         for receipt in receipts {
-                            // Internal lane notifications are not human input.
-                            if receipt.provenance != storage::HostInputProvenance::User {
-                                continue;
-                            }
                             let Some(sent_by) = submissions.iter().find_map(|s| match s {
                                 storage::HostChatSubmissionState::Live(s)
                                     if s.submission_id == receipt.prompt_id =>
