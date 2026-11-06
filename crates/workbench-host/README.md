@@ -33,8 +33,9 @@ Default bounds: replay 4096 events / 8 MiB, each subscriber 256 / 1 MiB, at most
 1024 registered subscribers. A reserved terminal slot replaces an overflowing
 queue with ResyncRequired(SlowSubscriber), then the stream ends. Shutdown and
 unsubscribe similarly deliver a final SubscriptionClosed. Snapshot storage holds
-four snapshots of at most 8 MiB each; continuation uses snapshot_page, not a new
-live query. Larger snapshots fail Busy. Pages contain at most 200 items and
+four snapshots of at most 8 MiB each for five minutes; continuation uses
+ReadSnapshot (or snapshot_page), not a fresh live query. Larger snapshots fail
+Busy. Pages contain at most 200 items and
 768 KiB of encoded item data (headroom below the protocol's 1 MiB frame).
 Opaque server-side page cursors bind query + revision; live collection changes
 require restarting pagination. History cursors instead freeze their durable event
@@ -102,3 +103,49 @@ cards, tool call/status cards, artifact cards, reasoning and peer-addressed agen
 messages. These are not disguised as human/assistant dialogue. Compaction and
 agent-message transcript projection, including sender/recipient and checkpoint
 metadata, remains a follow-up; run/delegation phase metadata still uses RunChanged.
+
+## HTTP-friendly query additions
+
+- `GetApprovalInput` / `QueryReply::ApprovalInput`: read complete canonical JSON
+  (or the empty string for no input), secret-masked **before** UTF-8 slicing.
+  Every request binds `approval_id + core_epoch + approval_revision` and checks
+  the singleton registry again, using the same tombstone/ownership gate as the
+  desktop helper. Inputs are at most 1 MiB and chunks 4..=65,536 bytes; offset 0
+  starts a read, `next_offset` continues, EOF returns empty text/no next offset.
+  A wrong epoch/revision returns `StaleEpoch` / `StaleRevision`; approved,
+  denied, expired or cancelled entries return `AlreadyResolved`. No input-body
+  capability survives resolution. As with other host queries, the transport is
+  responsible for authenticating its human reader before calling handle_query.
+  `ApprovalView.summary_truncated` describes registry/projection bounding;
+  `input_bytes` counts original serialized input bytes before redaction,
+  whereas the chunk's `total_bytes` describes the secret-masked representation.
+  If masking expands that representation past 1 MiB, return LimitExceeded
+  rather than silently truncating the complete input.
+- `ReadSnapshot` / `QueryReply::Snapshot`: `snapshot_id + page` addresses
+  the frozen cut after a subscription/connection closes. Every reply returns the
+  same ID and original `high_water`, not the current live cursor. Continue with
+  `page.next_cursor`, buffering later SSE events until all pages are applied.
+  Retention is at most four snapshots (8 MiB each), with a five-minute absolute
+  TTL, lazily pruned on snapshot creation/read. Reading does not renew the TTL.
+  Count eviction, age expiry, epoch invalidation and revoked/mismatched cursors
+  return `ResyncRequired`; acquire a new snapshot rather than mixing cuts.
+- `ReadCommittedHistory.direction` defaults to `forward` when omitted.
+  `backward` without a cursor reads the latest page; its next cursor reads the
+  preceding page. Each page remains chronological (oldest first), ready to
+  prepend unchanged. Cursors bind the direction, thread/run membership, frozen
+  committed event cut and retained deferred descriptors. Neither direction
+  resolves deferred bodies before returning pages; only explicit ReadBody does.
+- Entity `Revision` values are **equality tokens**, not counters. Project,
+  thread, run and receipt revisions may be content hashes: a smaller value is
+  not an older state. Order updates using `EventCursor.core_epoch + sequence`.
+
+Payload examples (wire u64 values are decimal strings):
+
+```json
+{"type":"get_approval_input","payload":{"approval_id":"approval-1","core_epoch":"7","approval_revision":"1","offset":"0","max_bytes":65536}}
+{"type":"approval_input","payload":{"approval_id":"approval-1","core_epoch":"7","approval_revision":"1","offset":"0","text":"null","total_bytes":"4"}}
+{"type":"read_snapshot","payload":{"snapshot_id":"snapshot-1","page":{"cursor":"opaque-next","limit":50}}}
+{"type":"snapshot","payload":{"snapshot_id":"snapshot-1","high_water":{"core_epoch":"7","sequence":"40"},"page":{"items":[],"snapshot_revision":"40"}}}
+{"type":"read_committed_history","payload":{"thread":"thread-1","direction":"backward","page":{"limit":25}}}
+{"id":"approval-1","core_epoch":"7","revision":"1","thread":"thread-1","run":"run-1","tool_name":"shell","summary":"null","summary_truncated":false,"input_bytes":"4","state":"pending"}
+```
