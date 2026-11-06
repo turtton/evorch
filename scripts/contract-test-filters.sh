@@ -32,6 +32,7 @@ CACHE_CONTRACT_FILTER='
   | (package(=runtime) & (
       binary(=cache_preservation_e2e)
       | binary(=claude_cache_e2e)
+      | binary(=mcp_cache_e2e)
       | binary(=claude_compaction_cache)
       | binary(=request_turn_context)
       | binary(=benchmark_wire)
