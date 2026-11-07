@@ -111,6 +111,35 @@ pub fn view_pr_notice_payload(payload: &str) -> PrNoticeView {
     view
 }
 impl AgentRuntime {
+    /// Tells displays that what limits the thread's pull request notices changed (a durable
+    /// Stop, an explicit Resume, a reset wake guard). A thread with no pull request has
+    /// nothing to refresh; the event carries identities only.
+    pub(crate) fn announce_pr_delivery_state(&self, thread: &str) {
+        use event_bus::{Event, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef};
+        let Some(store) = self.shared.run_store.get() else {
+            return;
+        };
+        let Ok(state) = store.handle.pull_request_thread_state(thread) else {
+            return;
+        };
+        let Some(link) = state.active_link else {
+            return;
+        };
+        self.shared
+            .bus
+            .emit(Event::new(PullRequestEvent::AutoFixChanged {
+                thread_id: thread.to_owned(),
+                link_revision: link.link_revision,
+                transition_seq: state.transition_seq,
+                pull_request: PullRequestRef {
+                    provider: link.key.provider.as_str().to_owned(),
+                    host: link.key.host.clone(),
+                    repository: link.key.repository.clone(),
+                    number: link.key.number,
+                },
+                reason: PullRequestAutoFixChange::Delivery,
+            }));
+    }
     pub(super) fn pr_user_progress(
         &self,
         thread: &str,
@@ -132,7 +161,10 @@ impl AgentRuntime {
                 guard.revision,
                 signal.clone(),
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    self.announce_pr_delivery_state(thread);
+                    return Ok(());
+                }
                 Err(storage::StorageError::StaleRevision {
                     kind: "wake_guard", ..
                 }) if attempt < 3 => continue,

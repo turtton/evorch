@@ -1019,6 +1019,7 @@ impl AgentRuntime {
             "lane_delivery_stopped",
             "operator stop",
         );
+        self.announce_pr_delivery_state(&thread);
         Ok(())
     }
     /// The thread a root run belongs to: the live goal binding, else the saved chat identity
@@ -1148,6 +1149,7 @@ impl AgentRuntime {
             "lane_delivery_resumed",
             "explicit user resume",
         );
+        self.announce_pr_delivery_state(&thread);
         Ok(())
     }
     /// Harness failures use one stable episode per execution/recovery attempt,

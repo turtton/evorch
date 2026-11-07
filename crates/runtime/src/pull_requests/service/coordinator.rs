@@ -17,6 +17,16 @@ mod tests;
 
 type Result<T> = std::result::Result<T, PullRequestError>;
 
+/// What the coordinator knows about where the shown head came from. Only a head the thread's
+/// own agent published (a publishing success seen here, and the checkout at that head) is
+/// `Agent`; everything else, including anything this process cannot tell, is `Unknown` and is
+/// never sent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadAttribution {
+    Agent,
+    Unknown,
+}
+
 pub(super) async fn observe_resumes(
     inner: Arc<Inner>,
     mut resumes: tokio::sync::watch::Receiver<u64>,
@@ -114,6 +124,43 @@ impl PullRequestService {
                 Ok(storage.pr_auto_fix_state(link.key)?)
             })
             .await?
+    }
+
+    /// The coordinator's own classification of the thread's current head, for display. It
+    /// reads what auto eligibility reads and decides nothing. Attribution lives in the owning
+    /// process only, so a thread this process does not own, a restart that lost it and a head
+    /// not yet classified all read `Unknown`. Blocks briefly (the ownership registry and the
+    /// database): call it off the async executor and off the UI thread.
+    #[must_use]
+    pub fn head_attribution(&self, thread: &str) -> HeadAttribution {
+        let inner = &self.inner;
+        let Some(permit) = inner.ownership.owned_permit(thread) else {
+            return HeadAttribution::Unknown;
+        };
+        let Ok(state) = inner.storage.pull_request_thread_state(thread) else {
+            return HeadAttribution::Unknown;
+        };
+        let Some(link) = state.active_link else {
+            return HeadAttribution::Unknown;
+        };
+        let Ok(Some(snapshot)) = inner.storage.pull_request_snapshot(&link.key) else {
+            return HeadAttribution::Unknown;
+        };
+        let Some(facts) = snapshot.facts else {
+            return HeadAttribution::Unknown;
+        };
+        let agent = inner.lock().attribution.agent(
+            thread,
+            permit.lease.generation,
+            link.link_revision,
+            snapshot.success_seq,
+            &facts.head_sha,
+        );
+        if agent {
+            HeadAttribution::Agent
+        } else {
+            HeadAttribution::Unknown
+        }
     }
 
     /// Opt in/out without changing another thread's confirmed destination.

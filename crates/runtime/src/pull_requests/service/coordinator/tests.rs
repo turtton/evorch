@@ -708,3 +708,45 @@ async fn explicit_resume_hint_rescans_links_and_ready_commit_kicks_the_destinati
     settle().await;
     assert_eq!(hints.scheduled.lock().unwrap().len(), 1);
 }
+
+// Given: a thread whose head the coordinator attributed to the agent, then a new head it did
+// not / Then: the read-only classification says Agent for the first and Unknown for the second,
+// and a process that does not own the thread, or a thread without a link, can only say Unknown
+#[tokio::test(start_paused = true)]
+async fn the_head_attribution_a_display_reads_is_the_one_eligibility_uses() {
+    let w = World::new();
+    let p = w.process_with_logs(enabled(), Arc::new(FakePullRequestLogSource::new()));
+    p.link_directly("t", 1);
+    let t = target(&p);
+    assert_eq!(
+        p.service.head_attribution("t"),
+        HeadAttribution::Unknown,
+        "no snapshot yet"
+    );
+
+    let seq = snapshot(&p, 'a', false);
+    assert_eq!(
+        p.service.head_attribution("t"),
+        HeadAttribution::Unknown,
+        "no publishing seen"
+    );
+    attribute(&p, &t, seq, 'a');
+    assert_eq!(p.service.head_attribution("t"), HeadAttribution::Agent);
+
+    snapshot(&p, 'b', false);
+    assert_eq!(
+        p.service.head_attribution("t"),
+        HeadAttribution::Unknown,
+        "a new head is not the old head's classification"
+    );
+
+    let viewer = w.process_with_logs(enabled(), Arc::new(FakePullRequestLogSource::new()));
+    assert_eq!(
+        viewer.service.head_attribution("t"),
+        HeadAttribution::Unknown
+    );
+    assert_eq!(
+        p.service.head_attribution("unlinked"),
+        HeadAttribution::Unknown
+    );
+}

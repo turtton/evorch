@@ -168,6 +168,9 @@ pub enum PullRequestAutoFixChange {
     Policy,
     /// A notice was reserved by a person's explicit request.
     Requested,
+    /// The delivery state of the thread changed: a durable Stop or an explicit Resume, or the
+    /// wake guard was reset by a person's input.
+    Delivery,
     /// A notice was adopted by the conversation (the third automatic one reaches the limit).
     Adopted {
         /// Whether the adopted notice came from the automatic path.

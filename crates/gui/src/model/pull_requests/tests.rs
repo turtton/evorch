@@ -356,6 +356,8 @@ pub(crate) fn with_auto(
         head_notice: None,
         this_stopped: false,
         suppressed: false,
+        head_origin: HeadAttribution::Agent,
+        global_enabled: true,
     };
     shape(&mut auto);
     shown.auto_fix = Some(auto);
@@ -479,14 +481,33 @@ fn a_failure_with_checks_still_running_makes_auto_fix_wait_but_not_the_person() 
     assert!(controls.send.enabled);
 }
 
-// Given: a failing head that is not the thread's own checkout / Then: auto fix says the commit
-// is external and is not sent by itself, while the person may send it
+// Given: a failing head the coordinator cannot attribute to the agent / Then: auto fix says the
+// commit is external and is not sent by itself, while the person may send it
 #[test]
 fn an_external_head_is_labelled_and_can_still_be_sent_by_hand() {
-    let mut shown = with_auto(failing(), auto_state(on_here), |_| {});
-    shown.local_head = None;
+    let shown = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
     let controls = auto_fix_controls(&shown, 0).unwrap();
     assert!(texts(&controls).contains(&"External commit"));
+    assert!(controls.send.enabled);
+
+    // A checkout that matches the PR head is no evidence of an agent push: only the
+    // coordinator's classification is.
+    let matching = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
+    assert_eq!(matching.local_head.as_ref().unwrap().head_sha, SHA_A);
+    assert!(texts(&auto_fix_controls(&matching, 0).unwrap()).contains(&"External commit"));
+    let agent = with_auto(failing(), auto_state(on_here), |_| {});
+    assert!(!texts(&auto_fix_controls(&agent, 0).unwrap()).contains(&"External commit"));
+
+    // The global switch is shown, and a manual send does not depend on it.
+    let off = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.global_enabled = false;
+    });
+    let controls = auto_fix_controls(&off, 0).unwrap();
+    assert!(texts(&controls).contains(&"Off by settings"));
     assert!(controls.send.enabled);
 }
 

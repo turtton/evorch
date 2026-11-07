@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use event_bus::{Event, EventKind, PullRequestAutoFixChange, PullRequestEvent, PullRequestRef};
+use runtime::pull_requests::HeadAttribution;
 use storage::Database;
 use storage::pull_requests::{PullRequestDisplay, PullRequestKey};
 
@@ -61,12 +62,36 @@ pub trait PullRequestReader: Send + Sync + 'static {
 /// Reads through a read-only connection to the shared database.
 pub struct StoragePullRequestReader {
     db_path: PathBuf,
+    probe: Option<AutoFixProbe>,
 }
+
+/// What only the process that owns a thread's pull request knows, read for display: where the
+/// shown head came from and whether automatic sends are switched on globally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoFixFacts {
+    pub head: HeadAttribution,
+    pub global_enabled: bool,
+}
+
+/// Asks the runtime for [`AutoFixFacts`] of a thread. Blocking: it runs on the reader's worker.
+pub type AutoFixProbe = Arc<dyn Fn(&str) -> AutoFixFacts + Send + Sync>;
 
 impl StoragePullRequestReader {
     #[must_use]
     pub const fn new(db_path: PathBuf) -> Self {
-        Self { db_path }
+        Self {
+            db_path,
+            probe: None,
+        }
+    }
+
+    /// Reads the coordinator's classification of the head and the global switch through
+    /// `probe`. Without one a head reads as unknown, which only ever withholds an automatic
+    /// send.
+    #[must_use]
+    pub fn with_auto_fix_probe(mut self, probe: AutoFixProbe) -> Self {
+        self.probe = Some(probe);
+        self
     }
 
     fn open(&self) -> Result<Database, String> {
@@ -93,7 +118,10 @@ impl PullRequestReader for StoragePullRequestReader {
         };
         let candidates = db.pull_request_candidates(thread_id, None).map_err(fail)?;
         let auto_fix = match &state.active_link {
-            Some(link) => Some(read_auto_fix(&db, thread_id, &link.key, &facts).map_err(fail)?),
+            Some(link) => {
+                let known = self.probe.as_ref().map(|probe| probe(thread_id));
+                Some(read_auto_fix(&db, thread_id, &link.key, &facts, known).map_err(fail)?)
+            }
             None => None,
         };
         Ok(ThreadPullRequest {
@@ -147,6 +175,7 @@ fn read_auto_fix(
     thread_id: &str,
     key: &PullRequestKey,
     facts: &Option<storage::pull_requests::PullRequestFacts>,
+    known: Option<AutoFixFacts>,
 ) -> Result<AutoFixView, storage::StorageError> {
     let state = db.pr_auto_fix_state(key)?;
     let head_notice = match facts {
@@ -166,6 +195,8 @@ fn read_auto_fix(
             .lane_delivery_destination(thread_id)?
             .is_some_and(|destination| destination.stopped),
         suppressed: db.pr_wake_guard(key)?.suppressed,
+        head_origin: known.map_or(HeadAttribution::Unknown, |known| known.head),
+        global_enabled: known.is_none_or(|known| known.global_enabled),
     })
 }
 
@@ -245,6 +276,9 @@ pub(super) struct PullRequestState {
     issued: BTreeSet<(String, IssuedOp)>,
     /// The automatic-limit notifications the runtime claimed, held like `pending_notices`.
     pending_limits: Vec<PendingLimit>,
+    /// Threads whose bar folds once a read made after an automatic adoption was shown: the
+    /// read may itself expand the bar (a move into failure), and the fold must come after.
+    pending_collapses: Vec<(String, u64)>,
     /// `(pull request, budget epoch)` already notified.
     limit_notified: std::collections::VecDeque<(String, u64)>,
     /// A transcript may show a notice whose card is not read yet.
@@ -293,6 +327,7 @@ impl Default for PullRequestState {
             destination_dialog: None,
             issued: BTreeSet::new(),
             pending_limits: Vec::new(),
+            pending_collapses: Vec::new(),
             limit_notified: std::collections::VecDeque::new(),
             cards_dirty: false,
             cards_in_flight: BTreeSet::new(),
@@ -532,6 +567,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             self.settle_pending_notices(&view, epoch);
                         }
                         self.pull_requests.model.set(*view);
+                        if !overtaken {
+                            self.apply_pending_collapses(&thread, epoch);
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -611,8 +649,11 @@ impl<S: AgentRunSource> WorkbenchState<S> {
             } = reason
             {
                 if *automatic {
-                    // The notice is working on the failure now: the bar gets out of the way.
-                    self.pull_requests.model.bar_mut(thread_id).collapse();
+                    // The notice is working on the failure now: the bar gets out of the way,
+                    // once the read that follows is shown (see `pending_collapses`).
+                    self.pull_requests
+                        .pending_collapses
+                        .push((thread_id.clone(), self.pull_requests.epoch));
                 }
                 if let Some(epoch) = limit_epoch {
                     self.pull_requests.pending_limits.push(PendingLimit {
@@ -696,6 +737,19 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     &notice.kind,
                 );
             }
+        }
+    }
+
+    /// Folds the bar of `thread` for each automatic adoption a read that started at `started`
+    /// has seen. Runs after the view was shown, so a failure transition in that same read
+    /// (which expands the bar) cannot undo the fold.
+    fn apply_pending_collapses(&mut self, thread: &str, started: u64) {
+        let before = self.pull_requests.pending_collapses.len();
+        self.pull_requests
+            .pending_collapses
+            .retain(|(waiting, arrived)| waiting != thread || *arrived > started);
+        if self.pull_requests.pending_collapses.len() != before {
+            self.pull_requests.model.bar_mut(thread).collapse();
         }
     }
 

@@ -41,8 +41,9 @@ use runtime::{
 use serde_json::Value;
 use storage::pull_request_auto_fix::PrNotice;
 
-use crate::pull_request_world::{enabled, failing, key, window};
+use crate::pull_request_world::{enabled, failing, key, window_with_reader};
 use crate::short_private_directory::ShortPrivateDirectory;
+use gui::app::pull_requests::{AutoFixFacts, StoragePullRequestReader};
 
 pub const THREAD: &str = "p2-thread";
 pub const NUMBER: u64 = 42;
@@ -244,12 +245,18 @@ threshold=0.95
             other => panic!("the first turn was not accepted: {other:?}"),
         };
         let sink = sink.with_lane_delivery();
-        let window = window(
-            &dir.path().join("phase2.db"),
+        let probe_service = service.clone();
+        let reader = StoragePullRequestReader::new(dir.path().join("phase2.db"))
+            .with_auto_fix_probe(Arc::new(move |thread: &str| AutoFixFacts {
+                head: probe_service.head_attribution(thread),
+                global_enabled: probe_service.settings().auto_fix_enabled,
+            }));
+        let window = window_with_reader(
             dir.path(),
             &owner,
             Box::new(sink),
             &[THREAD],
+            Arc::new(reader),
         );
         let mut world = Self {
             dir,

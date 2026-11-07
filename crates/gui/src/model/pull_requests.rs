@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use runtime::pull_requests::HeadAttribution;
 use runtime::pull_requests::diff::{ChecksVerdict, checks_verdict, is_pending};
 use storage::pull_request_auto_fix::{
     PR_AUTO_FIX_LIMIT, PrAutoFixState, PrNoticeMode, PrNoticePhase,
@@ -70,6 +71,11 @@ pub struct AutoFixView {
     pub this_stopped: bool,
     /// Notices are held back after repeated wakes without progress.
     pub suppressed: bool,
+    /// What the coordinator knows about the shown head's origin. `Unknown` also when nothing
+    /// could be asked (another window owns the thread, no service behind the reader).
+    pub head_origin: HeadAttribution,
+    /// The trusted global switch for automatic sends; manual sends do not depend on it.
+    pub global_enabled: bool,
 }
 
 impl ThreadPullRequest {
@@ -497,6 +503,16 @@ pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFi
             hover: Some("Another thread receives this pull request's CI failures".to_owned()),
         });
     }
+    if on_here && !auto.global_enabled {
+        chips.push(AutoFixChip {
+            text: "Off by settings".to_owned(),
+            tone: ChipTone::Warning,
+            hover: Some(
+                "Automatic sends are turned off in the settings; Send to agent still works"
+                    .to_owned(),
+            ),
+        });
+    }
     if state.enabled
         && let Some(until) = state.cooldown_until_ns.filter(|until| *until > now_ns)
     {
@@ -539,13 +555,12 @@ pub fn auto_fix_controls(view: &ThreadPullRequest, now_ns: i64) -> Option<AutoFi
                 tone: ChipTone::Muted,
                 hover: Some("Auto fix waits until every check has finished".to_owned()),
             });
-        } else if !mismatches(view).is_empty() {
+        } else if auto.head_origin == HeadAttribution::Unknown {
             chips.push(AutoFixChip {
                 text: "External commit".to_owned(),
                 tone: ChipTone::Warning,
                 hover: Some(
-                    "This commit is not the agent's push, so it is not sent automatically"
-                        .to_owned(),
+                    "Not confirmed as the agent's push, so it is not sent automatically".to_owned(),
                 ),
             });
         }

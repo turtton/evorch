@@ -506,6 +506,23 @@ pub fn window(
     sink: Box<dyn CommandSink>,
     threads: &[&str],
 ) -> WorkbenchState<DemoSource> {
+    window_with_reader(
+        project_dir,
+        host,
+        sink,
+        threads,
+        Arc::new(StoragePullRequestReader::new(db_path.to_path_buf())),
+    )
+}
+
+/// [`window`] reading through `reader` (one that asks a service about the head's origin).
+pub fn window_with_reader(
+    project_dir: &Path,
+    host: &Arc<OwnerHost>,
+    sink: Box<dyn CommandSink>,
+    threads: &[&str],
+    reader: Arc<dyn gui::app::pull_requests::PullRequestReader>,
+) -> WorkbenchState<DemoSource> {
     let mut sidebar = SidebarState::default();
     let project = ProjectId::new("project");
     sidebar
@@ -527,7 +544,7 @@ pub fn window(
         .with_ownership(host.clone())
         .with_command_sink(sink)
         .with_pull_requests(
-            Arc::new(StoragePullRequestReader::new(db_path.to_path_buf())),
+            reader,
             Some(Arc::new(move |thread: &str| {
                 probe_host.owned_permit(thread).is_ok()
             })),

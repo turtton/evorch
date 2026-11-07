@@ -341,3 +341,116 @@ async fn moving_auto_fix_between_threads_is_confirmed_and_can_be_cancelled() {
     assert_eq!(state.destination_thread_id.as_deref(), Some(THREAD));
     world.shutdown();
 }
+
+fn delivery_changed(change: &event_bus::PullRequestEvent) -> bool {
+    matches!(
+        change,
+        event_bus::PullRequestEvent::AutoFixChanged {
+            reason: event_bus::PullRequestAutoFixChange::Delivery,
+            ..
+        }
+    )
+}
+
+// Given: a thread with a pull request whose bar is shown / When: the operator stops the thread
+// and later resumes it explicitly / Then: each change reaches the bar by itself (a durable Stop
+// and Resume announce themselves for a thread that leads no lane), the Stopped state shows and
+// the send is off with the reason, and the Resume brings both back
+#[tokio::test]
+async fn a_stop_and_a_resume_reach_the_bar_without_any_other_event() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    assert!(chips(&world).is_empty());
+
+    world
+        .runtime
+        .stop(world.run.parse().unwrap(), runtime::StopScope::SelfOnly)
+        .unwrap();
+    world.until_pr(delivery_changed).await;
+    world.show();
+    assert_eq!(chips(&world), ["Stopped"]);
+    let controls = auto_fix_controls(
+        world.window.pull_request_model().linked(THREAD).unwrap(),
+        gui::model::pull_requests::now_ns(),
+    )
+    .unwrap();
+    assert!(!controls.send.enabled && controls.send.hover.contains("resume"));
+
+    world
+        .runtime
+        .explicitly_resume_lane_delivery(world.run.parse().unwrap(), None)
+        .unwrap();
+    world.until_pr(delivery_changed).await;
+    world.show();
+    assert!(chips(&world).is_empty(), "{:?}", chips(&world));
+    world.shutdown();
+}
+
+// Given: a failing head nobody attributed to the agent, although the pull request's head is the
+// one shown / When: auto fix is on / Then: the bar says the commit is external, from the
+// coordinator's classification; and the global switch being off is shown, without taking the
+// manual send away
+#[tokio::test]
+async fn the_bar_shows_the_coordinators_unknown_head_and_the_global_switch() {
+    let mut world = World::recorded().await;
+    let failing = world.failing('a');
+    world.link(failing).await;
+    world.click(toggle());
+    world
+        .until_pr(|change| {
+            matches!(
+                change,
+                event_bus::PullRequestEvent::AutoFixChanged {
+                    reason: event_bus::PullRequestAutoFixChange::Policy,
+                    ..
+                }
+            )
+        })
+        .await;
+    world.show();
+    assert!(
+        chips(&world).contains(&"External commit".to_owned()),
+        "{:?}",
+        chips(&world)
+    );
+    assert_eq!(
+        world.service.head_attribution(THREAD),
+        runtime::pull_requests::HeadAttribution::Unknown
+    );
+
+    let shown = chips(&world);
+    assert!(!shown.contains(&"Off by settings".to_owned()), "{shown:?}");
+
+    // The global switch changes no event; the read after the next operation shows it.
+    let policy = |change: &event_bus::PullRequestEvent| {
+        matches!(
+            change,
+            event_bus::PullRequestEvent::AutoFixChanged {
+                reason: event_bus::PullRequestAutoFixChange::Policy,
+                ..
+            }
+        )
+    };
+    world.click(toggle());
+    world.until_pr(policy).await;
+    world.show();
+    let mut settings = world.service.settings();
+    settings.auto_fix_enabled = false;
+    world.service.update_settings(settings).unwrap();
+    world.click(toggle());
+    world.until_pr(policy).await;
+    world.show();
+    let shown = chips(&world);
+    assert!(shown.contains(&"Off by settings".to_owned()), "{shown:?}");
+    let controls = auto_fix_controls(
+        world.window.pull_request_model().linked(THREAD).unwrap(),
+        gui::model::pull_requests::now_ns(),
+    )
+    .unwrap();
+    assert!(
+        controls.send.enabled,
+        "the manual send does not depend on the global switch"
+    );
+    world.shutdown();
+}

@@ -137,7 +137,9 @@ use crate::model::harness_card::HarnessCard;
 use crate::model::notifications::NotificationKind;
 use crate::model::pull_requests::PullRequestAction;
 use crate::model::pull_requests::ThreadPullRequest;
-use crate::model::pull_requests::tests::{SHA_A, auto_state, failing, notice, on_here, with_auto};
+use crate::model::pull_requests::tests::{
+    SHA_A, auto_state, failing, notice, on_here, passing, with_auto,
+};
 
 const THREAD: &str = "parent";
 
@@ -543,9 +545,72 @@ fn an_automatic_adoption_folds_the_bar_and_a_manual_one_does_not() {
     assert!(window.pull_request_model().bar(THREAD).unwrap().expanded);
 
     window.apply_events([adopted(false, None)]);
+    for _ in 0..3 {
+        window.pump_pull_requests();
+    }
     assert!(window.pull_request_model().bar(THREAD).unwrap().expanded);
     window.apply_events([adopted(true, None)]);
+    for _ in 0..3 {
+        window.pump_pull_requests();
+    }
     assert!(!window.pull_request_model().bar(THREAD).unwrap().expanded);
+}
+
+// Given: a bar that has seen the checks pass / When: the failure arrives with the read that
+// follows an automatic adoption, and later reads come / Then: the failure transition does not
+// unfold the bar the adoption folded, and it stays folded; the next failure expands it again
+#[test]
+fn the_fold_of_an_adoption_survives_the_read_that_shows_the_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut window, reader) = window(
+        directory.path(),
+        shown_with(passing(), auto_state(on_here_state)),
+    );
+    let bar = |window: &WorkbenchState<DemoSource>| {
+        window.pull_request_model().bar(THREAD).unwrap().expanded
+    };
+    assert!(!bar(&window));
+
+    *reader.view.lock().unwrap() = Some(shown_with(failing(), auto_state(on_here_state)));
+    window.apply_events([adopted(true, None)]);
+    for _ in 0..4 {
+        window.pump_pull_requests();
+    }
+    assert!(
+        !bar(&window),
+        "the failure transition expanded the bar after the fold"
+    );
+
+    window.apply_events([adopted_policy()]);
+    for _ in 0..4 {
+        window.pump_pull_requests();
+    }
+    assert!(!bar(&window), "a later read does not unfold it");
+
+    // A new failure is a new transition: it expands the bar once more.
+    *reader.view.lock().unwrap() = Some(shown_with(passing(), auto_state(on_here_state)));
+    window.apply_events([adopted_policy()]);
+    for _ in 0..4 {
+        window.pump_pull_requests();
+    }
+    *reader.view.lock().unwrap() = Some(shown_with(failing(), auto_state(on_here_state)));
+    window.apply_events([adopted_policy()]);
+    for _ in 0..4 {
+        window.pump_pull_requests();
+    }
+    assert!(bar(&window));
+}
+
+fn shown_with(
+    facts: storage::pull_requests::PullRequestFacts,
+    state: PrAutoFixState,
+) -> ThreadPullRequest {
+    let mut shown = with_auto(facts, state, |_| {});
+    shown.thread_id = THREAD.into();
+    if let Some(link) = &mut shown.link {
+        link.thread_id = THREAD.into();
+    }
+    shown
 }
 
 fn card(id: &str) -> HarnessCard {

@@ -19,6 +19,7 @@ use gui::panes::agent::{
     AgentIdentity, AgentPaneAction, ConversationContext, PullRequestBarContext, agent_pane,
 };
 use gui::theme::style::{ThemePreset, install_preset};
+use runtime::pull_requests::HeadAttribution;
 use storage::pull_request_auto_fix::{PrAutoFixState, PrNoticeMode, PrNoticePhase};
 use storage::pull_requests::{
     CheckConclusion, CheckKind, CheckStatus, DisplayTitle, FetchErrorKind, FetchFailure,
@@ -830,6 +831,8 @@ fn with_auto(
         head_notice: None,
         this_stopped: false,
         suppressed: false,
+        head_origin: HeadAttribution::Agent,
+        global_enabled: true,
     };
     shape(&mut auto);
     shown.auto_fix = Some(auto);
@@ -923,8 +926,9 @@ fn the_bar_reports_remaining_cooldown_sent_pending_external_stopped_and_limit() 
         "the failure stays shown while auto waits: {waiting:?}"
     );
 
-    let mut external = with_auto(failing(), auto_state(on_here), |_| {});
-    external.local_head = None;
+    let external = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
     assert!(has(&words(external), "External commit"));
 
     let stopped = words(with_auto(failing(), auto_state(|_| {}), |auto| {
@@ -1060,8 +1064,9 @@ fn auto_fix_states_render_for_evidence() {
         ],
         true,
     );
-    let mut external = with_auto(failing(), auto_state(on_here), |_| {});
-    external.local_head = None;
+    let external = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
     let states = [
         (
             "auto-on",
