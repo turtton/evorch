@@ -61,6 +61,7 @@ pub fn notifications_pane(
                     ("CI failed", palette().ERROR_FG)
                 }
                 NotificationKind::PullRequestMerged { .. } => ("Merged", palette().MERGED_FG),
+                NotificationKind::PullRequestAutoFixLimit { .. } => ("Auto fix", attention_color()),
             };
             let row = ui
                 .push_id(notification.id, |ui| {
@@ -88,6 +89,7 @@ pub fn notifications_pane(
                         }));
                         let pull_request_thread = match &notification.kind {
                             NotificationKind::PullRequestChecksFailed { thread_id }
+                            | NotificationKind::PullRequestAutoFixLimit { thread_id }
                             | NotificationKind::PullRequestMerged { thread_id } => {
                                 Some(thread_id.clone())
                             }

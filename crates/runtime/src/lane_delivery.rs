@@ -8,7 +8,7 @@ use crate::{AgentRuntime, RunConfig, RunId, lanes::LaneError};
 use event_bus::lane::{LaneDeliveryBinding, LaneNotificationKind};
 use event_bus::{AgentRunPhase, LaneReport, LaneStatus};
 use futures_util::{StreamExt, stream::FuturesUnordered};
-pub use harness::prepare_pr_notice_payload;
+pub use harness::{PrNoticeLog, PrNoticeView, prepare_pr_notice_payload, view_pr_notice_payload};
 use outbox::DeliveryClaim;
 use std::{
     collections::{HashMap, HashSet},
@@ -1019,6 +1019,7 @@ impl AgentRuntime {
             "lane_delivery_stopped",
             "operator stop",
         );
+        self.announce_pr_delivery_state(&thread);
         Ok(())
     }
     /// The thread a root run belongs to: the live goal binding, else the saved chat identity
@@ -1148,6 +1149,7 @@ impl AgentRuntime {
             "lane_delivery_resumed",
             "explicit user resume",
         );
+        self.announce_pr_delivery_state(&thread);
         Ok(())
     }
     /// Harness failures use one stable episode per execution/recovery attempt,

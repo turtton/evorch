@@ -12,8 +12,8 @@ use storage::pull_requests::{CheckConclusion, CheckStatus, PullRequestState, Rev
 
 use crate::format;
 use crate::model::pull_requests::{
-    PrGlyph, PullRequestAction, Status, ThreadPullRequest, check_is_failed, ci_summary, glyph,
-    mismatches, state_word, statuses,
+    ChipTone, Control, PrGlyph, PullRequestAction, Status, ThreadPullRequest, auto_fix_controls,
+    check_is_failed, ci_summary, glyph, mismatches, state_word, statuses,
 };
 use crate::theme::icons;
 use crate::theme::text::{medium, muted};
@@ -39,6 +39,9 @@ pub fn max_bar_height(conversation_height: f32) -> f32 {
 
 pub const REFRESH_LABEL: &str = "Refresh";
 pub const UNLINK_LABEL: &str = "Unlink";
+pub const AUTO_FIX_LABEL: &str = "Auto fix";
+pub const SEND_LABEL: &str = "Send to agent";
+pub const RESET_LABEL: &str = "Reset count";
 
 /// The colour, icon and word of a glyph class. Colour is never the only signal.
 #[must_use]
@@ -66,8 +69,6 @@ pub(super) fn show(
     conversation_height: f32,
     action: &mut Option<super::AgentPaneAction>,
 ) {
-    let view = bar.view;
-    let thread_id = view.thread_id.clone();
     let mut asked = None;
     let frame = egui::Frame::new()
         .fill(palette().SURFACE)
@@ -91,23 +92,8 @@ pub(super) fn show(
             }
             summary_row(ui, bar, &mut asked);
         });
-    match asked {
-        Some(PullRequestAction::Refresh { .. }) => {
-            *action = Some(super::AgentPaneAction::PullRequest(
-                PullRequestAction::Refresh { thread_id },
-            ));
-        }
-        Some(PullRequestAction::Unlink { .. }) => {
-            *action = Some(super::AgentPaneAction::PullRequest(
-                PullRequestAction::Unlink { thread_id },
-            ));
-        }
-        Some(PullRequestAction::ToggleExpanded { .. }) => {
-            *action = Some(super::AgentPaneAction::PullRequest(
-                PullRequestAction::ToggleExpanded { thread_id },
-            ));
-        }
-        _ => {}
+    if let Some(asked) = asked {
+        *action = Some(super::AgentPaneAction::PullRequest(asked));
     }
 }
 
@@ -161,6 +147,7 @@ fn summary_row(
 ) {
     let view = bar.view;
     let thread_id = view.thread_id.clone();
+    let auto_fix = auto_fix_controls(view, bar.now_ns);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
         let unlink = ui.add(ghost(RichText::new(icons::with_icon(
@@ -192,6 +179,38 @@ fn summary_row(
             *asked = Some(PullRequestAction::Refresh {
                 thread_id: thread_id.clone(),
             });
+        }
+        if let Some(controls) = &auto_fix {
+            if let Some(reset) = &controls.reset
+                && control_button(ui, RESET_LABEL, reset).clicked()
+            {
+                *asked = Some(PullRequestAction::ResetAutoFixBudget {
+                    thread_id: thread_id.clone(),
+                });
+            }
+            if control_button(ui, SEND_LABEL, &controls.send).clicked() {
+                *asked = Some(PullRequestAction::SendToAgent {
+                    thread_id: thread_id.clone(),
+                });
+            }
+            let mut on = controls.on_here;
+            let toggle = ui.add_enabled(
+                controls.toggle.enabled,
+                egui::Checkbox::new(&mut on, AUTO_FIX_LABEL),
+            );
+            toggle.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    controls.toggle.enabled,
+                    controls.on_here,
+                    AUTO_FIX_LABEL,
+                )
+            });
+            if hover(toggle, &controls.toggle.hover).clicked() {
+                *asked = Some(PullRequestAction::ToggleAutoFix {
+                    thread_id: thread_id.clone(),
+                });
+            }
         }
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = SP_2;
@@ -238,6 +257,19 @@ fn summary_row(
                     label.on_hover_text(hover);
                 }
             }
+            if let Some(controls) = &auto_fix {
+                for chip in &controls.chips {
+                    let color = match chip.tone {
+                        ChipTone::Muted => palette().TEXT_MUTED,
+                        ChipTone::Good => palette().SUCCESS,
+                        ChipTone::Warning => palette().WARNING_FG,
+                    };
+                    let label = ui.label(RichText::new(&chip.text).size(FONT_SMALL).color(color));
+                    if let Some(text) = &chip.hover {
+                        label.on_hover_text(text);
+                    }
+                }
+            }
             // Last, so the title takes the room that is left and is cut at the end. It is
             // plain text from a third party. egui shows the whole text of a label it had to
             // cut when the pointer rests on it (a second hover text would stack on that one).
@@ -250,6 +282,22 @@ fn summary_row(
             }
         });
     });
+}
+
+/// A button whose hover says why it cannot act while it cannot.
+fn control_button(ui: &mut egui::Ui, label: &str, control: &Control) -> egui::Response {
+    let button = ui.add_enabled(control.enabled, ghost(RichText::new(label)));
+    button.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, control.enabled, label)
+    });
+    hover(button, &control.hover)
+}
+
+/// The hover of a control, shown also while it is disabled (egui keeps the two apart).
+fn hover(response: egui::Response, text: &str) -> egui::Response {
+    response
+        .on_hover_text(text.to_owned())
+        .on_disabled_hover_text(text.to_owned())
 }
 
 fn details(ui: &mut egui::Ui, bar: &PullRequestBarContext<'_>) {

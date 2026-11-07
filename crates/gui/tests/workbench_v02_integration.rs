@@ -295,6 +295,7 @@ fn assert_run_transcript(
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }
+            | TranscriptEntry::HarnessNotice { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -315,6 +316,7 @@ fn assert_run_transcript(
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }
+            | TranscriptEntry::HarnessNotice { .. }
             | TranscriptEntry::Branch { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -558,6 +560,10 @@ fn v02_end_to_end_chained_scenario() {
             | WorkbenchCommand::LinkPullRequest { .. }
             | WorkbenchCommand::UnlinkPullRequest { .. }
             | WorkbenchCommand::RefreshPullRequest { .. }
+            | WorkbenchCommand::SetPullRequestAutoFix { .. }
+            | WorkbenchCommand::ResetPullRequestAutoFixBudget { .. }
+            | WorkbenchCommand::ChangePullRequestAutoFixDestination { .. }
+            | WorkbenchCommand::SendPullRequestNotice { .. }
             | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
             | WorkbenchCommand::DismissPullRequestCandidate { .. }
             | WorkbenchCommand::InheritPullRequest { .. } => None,

@@ -4,6 +4,7 @@ use super::policy::eligible_facts;
 use super::{Inner, PullRequestError, PullRequestService, Target};
 use crate::ownership::OwnerPermit;
 use crate::pull_requests::LogRequest;
+use event_bus::{PullRequestAutoFixChange, PullRequestEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::pull_request_auto_fix::*;
@@ -15,6 +16,16 @@ use tokio::time::Instant;
 mod tests;
 
 type Result<T> = std::result::Result<T, PullRequestError>;
+
+/// What the coordinator knows about where the shown head came from. Only a head the thread's
+/// own agent published (a publishing success seen here, and the checkout at that head) is
+/// `Agent`; everything else, including anything this process cannot tell, is `Unknown` and is
+/// never sent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadAttribution {
+    Agent,
+    Unknown,
+}
 
 pub(super) async fn observe_resumes(
     inner: Arc<Inner>,
@@ -115,6 +126,43 @@ impl PullRequestService {
             .await?
     }
 
+    /// The coordinator's own classification of the thread's current head, for display. It
+    /// reads what auto eligibility reads and decides nothing. Attribution lives in the owning
+    /// process only, so a thread this process does not own, a restart that lost it and a head
+    /// not yet classified all read `Unknown`. Blocks briefly (the ownership registry and the
+    /// database): call it off the async executor and off the UI thread.
+    #[must_use]
+    pub fn head_attribution(&self, thread: &str) -> HeadAttribution {
+        let inner = &self.inner;
+        let Some(permit) = inner.ownership.owned_permit(thread) else {
+            return HeadAttribution::Unknown;
+        };
+        let Ok(state) = inner.storage.pull_request_thread_state(thread) else {
+            return HeadAttribution::Unknown;
+        };
+        let Some(link) = state.active_link else {
+            return HeadAttribution::Unknown;
+        };
+        let Ok(Some(snapshot)) = inner.storage.pull_request_snapshot(&link.key) else {
+            return HeadAttribution::Unknown;
+        };
+        let Some(facts) = snapshot.facts else {
+            return HeadAttribution::Unknown;
+        };
+        let agent = inner.lock().attribution.agent(
+            thread,
+            permit.lease.generation,
+            link.link_revision,
+            snapshot.success_seq,
+            &facts.head_sha,
+        );
+        if agent {
+            HeadAttribution::Agent
+        } else {
+            HeadAttribution::Unknown
+        }
+    }
+
     /// Opt in/out without changing another thread's confirmed destination.
     /// Link and policy revisions are independent CAS values.
     ///
@@ -194,6 +242,7 @@ impl PullRequestService {
         inner.enabled()?;
         inner.check_permit(thread, permit).await?;
         let storage = inner.storage.clone();
+        let thread_for_event = thread;
         let thread = thread.to_owned();
         let owned_permit = permit.clone();
         let (result, target) = inner
@@ -244,6 +293,9 @@ impl PullRequestService {
         // An explicit policy action completes its evaluation even when no GUI delta exists.
         let _ = inner.coordinate(&[target]).await;
         inner.wake.notify_one();
+        inner
+            .announce_auto_fix(thread_for_event, PullRequestAutoFixChange::Policy)
+            .await;
         Ok(result)
     }
     /// Reserve a manual notice now, including while other checks are pending. The returned
@@ -291,11 +343,29 @@ impl PullRequestService {
         ));
         inner.spawn_preparation(target, notice.clone());
         inner.wake.notify_one();
+        inner
+            .announce_auto_fix(thread, PullRequestAutoFixChange::Requested)
+            .await;
         Ok(notice)
     }
 }
 
 impl Inner {
+    /// Tells displays that the PR-wide auto fix state changed, after the change committed.
+    /// Carries identities only; a display reads the stored state.
+    async fn announce_auto_fix(&self, thread: &str, reason: PullRequestAutoFixChange) {
+        if let Ok(state) = self.thread_state(thread).await
+            && let Some(link) = state.active_link
+        {
+            self.emit(PullRequestEvent::AutoFixChanged {
+                thread_id: thread.to_owned(),
+                link_revision: link.link_revision,
+                transition_seq: state.transition_seq,
+                pull_request: Self::reference(&link.key),
+                reason,
+            });
+        }
+    }
     fn reserve_notice(
         &self,
         target: &Target,

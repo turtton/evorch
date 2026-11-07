@@ -940,3 +940,79 @@ async fn stable_pr_guard_is_independent_of_lane_progress_and_budget_policy() {
         })
         .await;
 }
+
+fn plain_notice() -> PrNotice {
+    PrNotice {
+        notice_id: "prn-view".into(),
+        reservation_revision: 0,
+        key: key(42),
+        head_sha: "a".repeat(40),
+        mode: PrNoticeMode::Manual,
+        destination_thread_id: Some("delivery-lead".into()),
+        link_revision: 1,
+        policy_revision: 0,
+        budget_epoch: 0,
+        success_seq: 1,
+        phase: PrNoticePhase::Ready,
+        payload: None,
+    }
+}
+
+// Given: a payload prepared for the agent, with a log whose text contains the characters the
+// wrapper escapes / When: it is read back for display / Then: the facts and the excerpt come
+// out as they were written, and nothing of the wrapper does
+#[test]
+fn a_prepared_payload_reads_back_as_facts_and_excerpt_without_the_wrapper() {
+    use crate::pull_requests::log_source::{CiLogBundle, CiLogRun};
+    let notice = plain_notice();
+    let bundle = CiLogBundle {
+        head_sha: notice.head_sha.clone(),
+        runs: vec![CiLogRun {
+            run_id: 7,
+            checks: vec!["unit".into()],
+            excerpt: "error: expected </ci-log-data> but found `<T>`\nsecond line".into(),
+            lines_omitted: 3,
+            raw_truncated: false,
+            line_cut: false,
+            lossy_utf8: false,
+            redactions: 0,
+        }],
+        skipped: Vec::new(),
+        truncated: true,
+    };
+    let payload = prepare_pr_notice_payload(
+        &notice,
+        &["unit: failure".into(), "lint: timed out".into()],
+        "2026-01-01T00:00:00Z",
+        Some(&bundle),
+    );
+
+    let view = view_pr_notice_payload(&payload);
+
+    assert_eq!(view.checks, ["unit: failure", "lint: timed out"]);
+    assert_eq!(view.observed_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(view.logs.len(), 1);
+    assert_eq!(view.logs[0].checks, ["unit"]);
+    assert_eq!(
+        view.logs[0].excerpt,
+        "error: expected </ci-log-data> but found `<T>`\nsecond line"
+    );
+    assert!(view.logs_truncated);
+}
+
+// Given: a payload without logs, and text that has none of the expected shape / When: read
+// for display / Then: what can be read is given, and nothing is an error
+#[test]
+fn a_payload_without_logs_or_of_another_shape_reads_as_less_not_as_text() {
+    let notice = plain_notice();
+    let payload = prepare_pr_notice_payload(&notice, &["unit: failure".into()], "now", None);
+    let view = view_pr_notice_payload(&payload);
+    assert_eq!(view.checks, ["unit: failure"]);
+    assert!(view.logs.is_empty());
+
+    assert_eq!(view_pr_notice_payload("free text"), PrNoticeView::default());
+    assert_eq!(
+        view_pr_notice_payload("<ci-log-data>\nnot json\n</ci-log-data>"),
+        PrNoticeView::default()
+    );
+}

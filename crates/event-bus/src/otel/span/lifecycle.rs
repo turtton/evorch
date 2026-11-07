@@ -69,6 +69,7 @@ impl SpanMapper {
             | LifecycleEvent::HostInputDelivered { .. }
             | LifecycleEvent::HostInputDropped { .. }
             | LifecycleEvent::HostInputUnknown { .. }
+            | LifecycleEvent::HarnessNoticeDelivered { .. }
             | LifecycleEvent::TaskPromptPublished { .. }
             | LifecycleEvent::TurnCompleted { .. }
             | LifecycleEvent::BackgroundTaskCompleted { .. }

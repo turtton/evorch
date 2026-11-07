@@ -109,6 +109,10 @@ pub(super) fn host_command(command: WorkbenchCommand) -> HostCommand {
         WorkbenchCommand::LinkPullRequest { .. }
         | WorkbenchCommand::UnlinkPullRequest { .. }
         | WorkbenchCommand::RefreshPullRequest { .. }
+        | WorkbenchCommand::SetPullRequestAutoFix { .. }
+        | WorkbenchCommand::ResetPullRequestAutoFixBudget { .. }
+        | WorkbenchCommand::ChangePullRequestAutoFixDestination { .. }
+        | WorkbenchCommand::SendPullRequestNotice { .. }
         | WorkbenchCommand::ConfirmPullRequestCandidate { .. }
         | WorkbenchCommand::DismissPullRequestCandidate { .. }
         | WorkbenchCommand::InheritPullRequest { .. } => {

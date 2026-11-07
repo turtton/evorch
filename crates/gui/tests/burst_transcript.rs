@@ -119,6 +119,7 @@ fn transcript_text(model: &TranscriptModel) -> String {
             | TranscriptEntry::TurnEnd { .. }
             | TranscriptEntry::Artifacts { .. }
             | TranscriptEntry::Unreadable { .. }
+            | TranscriptEntry::HarnessNotice { .. }
             | TranscriptEntry::Branch { .. } => panic!("unexpected transcript entry"),
         })
         .collect()

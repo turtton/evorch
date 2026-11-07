@@ -40,7 +40,7 @@ pub use review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
 };
 pub use service::{
-    DerivedThreadKind, InheritanceScheduling, PrNoticeDelivery, PullRequestError,
+    DerivedThreadKind, HeadAttribution, InheritanceScheduling, PrNoticeDelivery, PullRequestError,
     PullRequestService, ServiceParts, SystemWallClock, WallClock,
 };
 pub use source::{GhSource, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec};

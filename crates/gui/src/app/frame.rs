@@ -303,6 +303,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                         | TranscriptEntry::TurnEnd { .. }
                         | TranscriptEntry::Artifacts { .. }
                         | TranscriptEntry::Unreadable { .. }
+                        | TranscriptEntry::HarnessNotice { .. }
                         | TranscriptEntry::Branch { .. } => None,
                     })
                     .flatten()

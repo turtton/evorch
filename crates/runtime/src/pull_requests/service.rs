@@ -27,6 +27,7 @@
 //! thread (checked at completion) and the thread still has the link the fetch was started for.
 
 mod coordinator;
+pub use coordinator::HeadAttribution;
 mod flight;
 mod observer;
 mod policy;
