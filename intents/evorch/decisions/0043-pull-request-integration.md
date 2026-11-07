@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。Phase 2 に着手した（2026-11-06）。CI 失敗時の通知の仕様を確定し、本 ADR の Decision に反映した。実装は段階 T → A → (B ∥ C) → D → E の順で進める。
+Accepted（2026-10-28）。利用者との相談で、下の「Decision」の方針（GUI は案 A）に合意した。2026-11-05 に Phase 1 の実装を完了（#481: storage と設定、#485: gh source と checkout 照合、#489: runtime の追跡サービス・ownership・候補・継承・event、#492: 審査の harness_facts と manifest、#493: GUI、#495: 統合 e2e）。2026-11-07 に Phase 2 の実装を完了（#509: PR バーのタイトル表示、#507: CI ログ source、#510: storage と outbox の一般化、#518: harness notice の配送、#517: coordinator・auto の適格判定・帰属、#519: GUI の操作・harness カード・上限の通知）。
 
 ## Context
 
@@ -189,6 +189,15 @@ Phase 1 の実装を通じて次の仕様を確定した。
 - web/upload の審査は snapshot だけを使う。
 - PR バーには head branch を表示していた（タイトルは取得していなかった）。Phase 2（T）でタイトルを取得し、PR バーは番号とタイトルを表示する。branch は詳細に回す。
 
+### Phase 2 の実装で確定した仕様
+
+Phase 2 の実装を通じて次の仕様を確定した。
+
+- 帰属判定に使う成功シグナルは、`git push` と `gh pr create` の成功完了だけとする。read-only の gh や dry-run（省略形を含む）は対象外。Phase 1 の refresh 契機とは別の分類にする。
+- 予約に対する ready/cancel は、reservation_revision の CAS で ABA を防ぐ（migration v52）。
+- GUI の「External commit」表示は、coordinator の attribution（Unknown）に基づいて出す。local HEAD との一致だけでは agent 由来とみなさない。
+- 全体スイッチがオフのときは、GUI に「Off by settings」と表示する。手動送信は可能。
+
 ## Consequences
 
 - 紐づけがあるスレッドの審査は、PR・CI・ローカル HEAD の状態を根拠にできる。その分、拒否の一部（状態が見えないことによる拒否）が減ると期待する。実際の減少は未計測。
@@ -220,6 +229,10 @@ Phase 1 の実装を通じて次の仕様を確定した。
 - 実際の routing fallback と、実際の CAS 拒否を通す統合テストがない。
 - live run への誤配送を検出するテストがない。
 - 主モデルと fallback モデルでの審査効果の評価は、まだ行っていない。
+- 全体設定の変更が即座に表示へ反映されない。
+- 採用 commit から表示 event までの間に異常終了すると、カードが欠ける。
+- 別の thread から Reset するための導線がない。
+- B（CI ログ source）の minimal_ci_log_data が 1 byte ずれる。
 
 ## 外部の参考
 
@@ -233,7 +246,7 @@ Phase 1 の実装を通じて次の仕様を確定した。
 
 ## Validation and limits
 
-- 各 PR の cache 契約テストを `scripts/contract-test-filters.sh` の `CACHE_CONTRACT_FILTER` に登録し、回帰テストで検証した。通知が末尾追記のみであることの検証は Phase 2 の実装時に行う。
+- 各 PR の cache 契約テストを `scripts/contract-test-filters.sh` の `CACHE_CONTRACT_FILTER` に登録し、回帰テストで検証した。Phase 2 では、通知が末尾追記のみであることを `pull_request_auto_fix_cache` と `harness_notice_delivery_cache` で検証し、同じフィルタに登録した。
 - 審査の指示文と `harness_facts` が、実際のモデルの判断（拒否の減少、誤承認の増加がないこと）に与える影響は未評価。主モデルと fallback モデルで比較する。
 - 「約 10%」「33 件」は利用者から示された分類である。ADR 作成時に store で再集計していない。
 
