@@ -204,6 +204,8 @@ pub enum StorageError {
     /// The pull request request was refused (ADR 0043): malformed input or a state the
     /// call cannot apply to. A stale revision is [`Self::StaleRevision`].
     PullRequest(crate::pull_requests::PullRequestRejection),
+    /// Durable PR notice/policy transition was refused.
+    PrAutoFix(crate::pull_request_auto_fix::PrAutoFixRejection),
     /// 入出力操作が失敗しました。
     Io(String),
     /// 永続化 ingress の heuristic secret guard が credential らしき値を検出し、
@@ -332,6 +334,7 @@ impl fmt::Display for StorageError {
                 LaneCursorError::Malformed => write!(formatter, "the cursor is not valid"),
             },
             Self::PullRequest(reason) => write!(formatter, "{reason}"),
+            Self::PrAutoFix(reason) => write!(formatter, "{reason}"),
             Self::Io(message) => write!(formatter, "I/O error: {message}"),
             Self::SecretDetected {
                 entity,
@@ -424,6 +427,7 @@ impl std::error::Error for StorageError {
             | Self::StaleRevision { .. }
             | Self::LaneConflict(_)
             | Self::LaneCursor(_)
+            | Self::PrAutoFix(_)
             | Self::PullRequest(_)
             | Self::SecretDetected { .. } => None,
         }

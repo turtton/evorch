@@ -68,6 +68,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v49.sql"),
     include_str!("migrations/v50.sql"),
     include_str!("migrations/v51.sql"),
+    include_str!("migrations/v52.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -245,16 +246,14 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
     }
 }
 
-/// The v51 lane-management undo runs before the older schema undos.
-/// Reverts migrations v50, v49, v48, v47 and v46 (see `undo/undo_v46.sql`); apply it before [`UNDO_V45`].
+/// Reverts migrations v51, v50, v49, v48, v47 and v46 (see `undo/undo_v46.sql`); apply it before [`UNDO_V45`].
 #[cfg(test)]
 pub(crate) const UNDO_V46: &str = concat!(
     concat!(
-        concat!(
-            include_str!("../undo/undo_v51.sql"),
-            include_str!("../undo/undo_v50.sql"),
-            include_str!("../undo/undo_v49.sql")
-        ),
+        include_str!("../undo/undo_v52.sql"),
+        include_str!("../undo/undo_v51.sql"),
+        include_str!("../undo/undo_v50.sql"),
+        include_str!("../undo/undo_v49.sql"),
         include_str!("../undo/undo_v48.sql"),
         include_str!("../undo/undo_v47.sql")
     ),
@@ -351,4 +350,4 @@ mod v48_tests;
 mod v50_tests;
 
 #[cfg(test)]
-mod v51_tests;
+mod v52_tests;

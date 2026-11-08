@@ -61,12 +61,14 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","runtime","storage","config","gui","test-support"]'
-EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","runtime","storage","config","gui","test-support"]'
+EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
       {"from":"gui","to":"workbench-client"},
-      {"from":"workbench-host","to":"workbench-protocol"},{"from":"workbench-host","to":"runtime"},{"from":"workbench-host","to":"tokio"},{"from":"gui","to":"workbench-host"},{"from":"runtime","to":"storage"},{"from":"runtime","to":"serde"}'
+      {"from":"workbench-host","to":"workbench-protocol"},{"from":"workbench-host","to":"runtime"},{"from":"workbench-host","to":"tokio"},{"from":"gui","to":"workbench-host"},
+      {"from":"workbench-web","to":"workbench-protocol"},{"from":"workbench-web","to":"axum"},{"from":"workbench-web","to":"http"},{"from":"workbench-web","to":"http-body-util"},{"from":"workbench-web","to":"hyper"},{"from":"workbench-web","to":"hyper-util"},{"from":"workbench-web","to":"futures-core"},{"from":"workbench-web","to":"serde"},{"from":"workbench-web","to":"serde_json"},{"from":"workbench-web","to":"thiserror"},{"from":"workbench-web","to":"tokio"},
+      {"from":"runtime","to":"storage"},{"from":"runtime","to":"serde"}'
 
 run_case clean_graph ok "boundary check passed" <<SPEC
 {$WS, $EXT, "deps": [$GOOD]}
@@ -211,6 +213,55 @@ SPEC
 
 run_case host_package_missing fail "workspace member 'workbench-host' not found" <<SPEC
 {"workspace": ["workbench-protocol","workbench-client","runtime"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"}]}
+SPEC
+
+# workbench-web: protocol adapter that must not know the core or any GUI.
+run_case web_depends_on_runtime fail "workbench-web must not depend on workspace crate runtime: workbench-web -> runtime" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"runtime"}]}
+SPEC
+
+run_case web_depends_on_host fail "workbench-web must not depend on workspace crate workbench-host" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"workbench-host"}]}
+SPEC
+
+run_case web_reaches_storage_through_config fail "workbench-web -> config [normal; resolved] -> storage" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"config"},{"from":"config","to":"storage"}]}
+SPEC
+
+run_case web_dev_dependency_on_workspace_crate fail "workbench-web -> test-support [dev;" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"test-support","kind":"dev"}]}
+SPEC
+
+run_case web_depends_on_gui fail "workbench-web must not depend on GUI or client crate gui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"gui"}]}
+SPEC
+
+run_case web_depends_on_client fail "workbench-web must not depend on workspace crate workbench-client" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"workbench-client"}]}
+SPEC
+
+run_case web_reaches_egui_through_a_dependency fail "workbench-web must not depend on GUI or client crate egui@1.0.0" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"regex"},{"from":"regex","to":"egui"}]}
+SPEC
+
+run_case web_declares_an_optional_rendering_crate fail "workbench-web declares GUI or client dependency wgpu" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"wgpu","optional":true,"resolved":false}]}
+SPEC
+
+run_case web_third_party_outside_allowlist fail "workbench-web declares third-party dependency regex" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"regex"}]}
+SPEC
+
+run_case web_dev_dependency_on_a_third_party_crate_is_allowed ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"workbench-web","to":"regex","kind":"dev"}]}
+SPEC
+
+run_case core_crate_depending_on_web fail "core crate runtime must not depend on workbench-web" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"runtime","to":"workbench-web"}]}
+SPEC
+
+run_case web_package_missing fail "workspace member 'workbench-web' not found" <<SPEC
+{"workspace": ["workbench-protocol","workbench-client","workbench-host","runtime"], $EXT, "deps": [{"from":"workbench-protocol","to":"serde"},{"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-host","to":"workbench-protocol"}]}
 SPEC
 
 echo "$pass passed, $fail failed"

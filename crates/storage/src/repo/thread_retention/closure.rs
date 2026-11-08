@@ -145,12 +145,12 @@ const RUN_STEPS: &[Step] = &[
     ),
     Step::Paged(
         "SELECT rowid, run_id FROM usage_requests \
-         WHERE parent_run_id = ?1 AND run_id IS NOT NULL AND run_id NOT IN (SELECT root_run_id FROM lanes WHERE root_run_id IS NOT NULL UNION SELECT tr.run_id FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+         WHERE parent_run_id = ?1 AND run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.root_run_id=usage_requests.run_id) AND NOT EXISTS (SELECT 1 FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id WHERE tr.run_id=usage_requests.run_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
         Yields::Run,
     ),
     Step::Paged(
         "SELECT rowid, parent_run_id FROM usage_requests \
-         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND run_id NOT IN (SELECT root_run_id FROM lanes WHERE root_run_id IS NOT NULL UNION SELECT tr.run_id FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.root_run_id=usage_requests.run_id) AND NOT EXISTS (SELECT 1 FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id WHERE tr.run_id=usage_requests.run_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
         Yields::Run,
     ),
 ];
@@ -674,3 +674,7 @@ pub(super) fn staged_sets(
         members(conn, family_key, "run")?.into_iter().collect(),
     ))
 }
+
+#[cfg(test)]
+#[path = "closure_usage_tests.rs"]
+mod usage_tests;

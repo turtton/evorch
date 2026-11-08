@@ -112,6 +112,10 @@ impl HostInputReceipt {
         if let HostInputProvenance::LaneNotification {
             notification_id,
             destination_thread_id,
+        }
+        | HostInputProvenance::HarnessNotice {
+            notification_id,
+            destination_thread_id,
         } = &self.provenance
             && (notification_id.is_empty()
                 || destination_thread_id.is_empty()
@@ -120,7 +124,7 @@ impl HostInputReceipt {
                 || self.image_count != 0)
         {
             return Err(StorageError::Serialization(
-                "lane receipt cannot carry human text, images or approval evidence".into(),
+                "non-user receipt cannot carry human text, images or approval evidence".into(),
             ));
         }
         for (field, text) in [
@@ -187,12 +191,16 @@ impl HostInputWrite {
     }
 }
 
-/// Lane notifications are durable input but never human intent or approval.
+/// Lane and harness notifications are durable input, never human intent or approval.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostInputProvenance {
     #[default]
     User,
+    HarnessNotice {
+        notification_id: String,
+        destination_thread_id: String,
+    },
     LaneNotification {
         notification_id: String,
         destination_thread_id: String,

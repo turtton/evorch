@@ -11,9 +11,12 @@ use storage::{Database, StorageConfig, StorageError};
 use tempfile::TempDir;
 use undo_v35::{undo_v35, undo_v36, undo_v38, undo_v42};
 
-const LATEST_SCHEMA: u32 = 51;
+const LATEST_SCHEMA: u32 = 52;
 
-const EXPECTED_TABLES: [&str; 92] = [
+const EXPECTED_TABLES: [&str; 95] = [
+    "pr_auto_fix_state",
+    "pr_notices",
+    "pr_auto_fix_limit_events",
     "thread_pull_request_state",
     "thread_pull_requests",
     "pull_request_snapshots",
@@ -108,17 +111,20 @@ const EXPECTED_TABLES: [&str; 92] = [
     "host_chat_submissions",
 ];
 
-const EXPECTED_INDICES: [&str; 86] = [
+const EXPECTED_INDICES: [&str; 89] = [
+    "pr_notices_destination",
+    "pr_notices_budget",
+    "lane_management_receipts_lane",
     "lane_verifications_lane",
     "lane_closes_lane",
     "lane_forward_receipts_lane",
-    "lane_management_receipts_lane",
     "idx_thread_pull_requests_active",
     "idx_thread_pull_requests_key",
     "idx_thread_pull_request_inheritance_pending",
     "idx_content_blob_refs_event_blob",
     "idx_lanes_lead_activity",
     "idx_lanes_origin",
+    "idx_lanes_retention_root",
     "idx_lanes_unstarted",
     "idx_lane_list_snapshots_lead",
     "idx_content_blob_refs_header_blob",
@@ -1182,6 +1188,7 @@ fn v42_adds_the_favorite_flag_without_moving_any_lesson() {
     connection
         .execute_batch(concat!(
             concat!(
+                include_str!("../undo/undo_v52.sql"),
                 include_str!("../undo/undo_v51.sql"),
                 include_str!("../undo/undo_v50.sql"),
                 include_str!("../undo/undo_v49.sql"),

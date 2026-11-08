@@ -74,12 +74,16 @@ const C_GC: u64 = 24;
 /// pull request tables, their indexes and fences; 126 and 181 frames with v46 added), whatever
 /// v47 (delivery schema), and v48 (four Phase 2 tables, their indexes, three empty
 /// lane header columns and fences: 255 frames with 100,000 rows), and v49 (the host chat submission
-/// table with its index and fence: 270 frames with 100,000 rows), v50 (pull request
-/// title), and v51 (management receipts, fences and five header columns: 198 frames
-/// with 10 rows, 293 with 100,000; both execute 87,930 VM steps). The row-independent
-/// ceiling includes these schema
-/// pages; the VM-step comparison below still forbids scans.
-const MIGRATION_FRAMES: u64 = 300;
+/// table with its index and fence: 270 frames with 100,000 rows). The row-independent
+/// ceiling includes these schema pages; the VM-step comparison below still forbids scans.
+// Full v38 -> latest open includes v50 (display title) and v51: three PR tables, their indexes and
+// the outbox rebuild. Allow 40 additional fixed schema frames (observed 308
+// total with 100,000 pre-existing rows). The independent VM-step scaling
+// assertion below still forbids work proportional to those existing rows.
+// v52 adds the management receipt table/indexes, four header columns and
+// authority fences. These fixed schema objects add 24 frames (332 total with
+// 100,000 rows); reserve 32 frames without relaxing the VM-step scaling check.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -295,7 +299,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v49) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest (v52) to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -316,6 +320,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v52.sql"),
                     include_str!("../undo/undo_v51.sql"),
                     include_str!("../undo/undo_v50.sql"),
                     include_str!("../undo/undo_v49.sql"),
@@ -340,7 +345,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v51 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v52 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -357,8 +362,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     (frames, scanned)
 }
 
-/// The migration creates two tables and converts nothing: its writes do not follow the
-/// number of rows already in the database.
+/// The full upgrade creates the blob tables and later schema objects: its writes
+/// must not scale with unrelated thread/run rows already in the database.
 fn migration_does_not_scale_with_existing_rows() {
     let (small, small_steps) = migration_cost(10);
     let (large, large_steps) = migration_cost(100_000);

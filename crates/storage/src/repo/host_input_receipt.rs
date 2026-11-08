@@ -49,6 +49,7 @@ pub(crate) fn insert(conn: &Connection, receipt: &HostInputReceipt) -> Result<()
     // The writer transaction also owns evidence/reference consumption and, on
     // restore, the snapshot. An outbox failure rolls all of them back.
     crate::repo::lane_delivery::notify_user_input(conn, receipt)?;
+    crate::repo::pull_request_auto_fix::notify_user_input(conn, receipt)?;
     Ok(())
 }
 

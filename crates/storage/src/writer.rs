@@ -19,6 +19,7 @@ mod lane_control;
 mod lane_delivery;
 mod lane_management;
 mod lanes;
+mod pull_request_auto_fix;
 mod pull_requests;
 use crate::thread_index::{
     IndexCapacityStatus, IndexLease, IndexOwner, IndexSettingsReceipt, IndexStepResult,

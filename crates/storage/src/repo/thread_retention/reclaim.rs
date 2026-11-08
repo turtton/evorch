@@ -1149,7 +1149,7 @@ fn take_lane_rows(tx: &Transaction<'_>, thread: &str) -> Result<Work, StorageErr
             ),
             (
                 "lane_notifications",
-                "(source_thread_id=?1 AND event_kind<>'answer') OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
+                "(source_thread_id=?1 AND NOT (source_kind='lane' AND event_kind='answer')) OR destination_thread_id=?1 OR lane_id IN (SELECT lane_id FROM lanes WHERE thread_id=?1)",
                 "OCTET_LENGTH(payload)",
             ),
             (

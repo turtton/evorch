@@ -1,6 +1,6 @@
 //! Destination single flight, lease fencing and durable receipt/ACK repair.
 use super::*;
-const LIVE_NOTICE: &str = "(n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
+pub(crate) const LIVE_NOTICE: &str = "n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
 pub(crate) fn inbox(
     conn: &Connection,
     destination: &str,
@@ -69,10 +69,10 @@ pub(crate) fn bind_destination(
     tx.commit()?;
     Ok(epoch)
 }
-pub(crate) fn claim(
+pub(crate) fn claim<N: OutboxNotice>(
     conn: &Connection,
     request: LaneClaimRequest,
-) -> Result<LaneClaimResult, StorageError> {
+) -> Result<LaneClaimResult<N>, StorageError> {
     live_thread(conn, &request.destination_thread_id)?;
     id(&request.token)?;
     id(&request.owner.root_run_id)?;
@@ -121,31 +121,21 @@ pub(crate) fn claim(
             "UPDATE lane_notifications SET state='acked' WHERE notification_id IN (
          SELECT n.notification_id FROM lane_notifications n
          JOIN host_input_receipts r ON r.prompt_id=n.receipt_prompt_id
-         WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE}
-           AND r.prompt_id='lane-notification:'||n.notification_id AND r.status='delivered'
-           AND json_extract(r.provenance_json,'$.kind')='lane_notification'
+         WHERE n.destination_thread_id=?1 AND n.state='pending' AND {live_notice}
+           AND r.prompt_id='{receipt_prefix}'||n.notification_id AND r.status='delivered'
+           AND json_extract(r.provenance_json,'$.kind')='{provenance_kind}'
            AND json_extract(r.provenance_json,'$.notification_id')=n.notification_id
            AND json_extract(r.provenance_json,'$.destination_thread_id')=n.destination_thread_id
            AND r.run_id NOT IN (SELECT run_id FROM run_tombstones)
            AND r.root_run_id NOT IN (SELECT run_id FROM run_tombstones)
-         ORDER BY n.notification_id LIMIT 20)"
+         ORDER BY n.notification_id LIMIT 20)",
+            live_notice = N::LIVE_NOTICE,
+            receipt_prefix = N::RECEIPT_PREFIX,
+            provenance_kind = N::PROVENANCE_KIND
         ),
         [&request.destination_thread_id],
     )?;
-    // A waking notice admits deferred updates into the same bounded turn.
-    // Prioritize the waking member so old milestones cannot fill its page.
-    let mut statement = tx.prepare(&format!(
-        "WITH eligible AS NOT MATERIALIZED (
-           SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
-           JOIN lanes l ON l.lane_id=n.lane_id
-           WHERE n.destination_thread_id=?1 AND n.state='pending' AND {LIVE_NOTICE}
-             AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
-         )
-         SELECT payload FROM eligible
-         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer','nudge'))
-         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer','nudge') THEN 0 ELSE 1 END,
-                  notification_id LIMIT 20"
-    ))?;
+    let mut statement = tx.prepare(N::ELIGIBLE_QUERY)?;
     let values = statement
         .query_map(
             params![request.destination_thread_id, request.allow_non_waking],
@@ -155,7 +145,7 @@ pub(crate) fn claim(
     drop(statement);
     let mut notifications = Vec::new();
     for value in values {
-        let notice: LaneNotification = parse(&value)?;
+        let notice: N = parse(&value)?;
         if json(&(&notifications, &notice))?.len() > LANE_DELIVERY_PAGE_BYTES - 1024 {
             break;
         }
@@ -174,7 +164,7 @@ pub(crate) fn claim(
     for notice in &notifications {
         tx.execute(
             "UPDATE lane_notifications SET claim_epoch=?2 WHERE notification_id=?1",
-            params![notice.notification_id, claim_epoch],
+            params![notice.notification_id(), claim_epoch],
         )?;
     }
     tx.commit()?;
@@ -189,9 +179,9 @@ pub(crate) fn claim(
         notifications,
     }))
 }
-fn check_claim(
+fn check_claim<N: OutboxNotice>(
     conn: &Connection,
-    claim: &LaneDeliveryClaim,
+    claim: &LaneDeliveryClaim<N>,
     now_ns: i64,
 ) -> Result<(), StorageError> {
     live_thread(conn, &claim.destination_thread_id)?;
@@ -203,36 +193,17 @@ fn check_claim(
         return Err(conflict("invalid_claim_members"));
     }
     for notice in &claim.notifications {
-        // Eligibility gates new input, not ACK repair of an already saved
-        // prefix. Progress/Error after receipt must not strand its ACK.
-        if !received(conn, notice)? {
-            crate::repo::lane_control::check_nudge(conn, notice)?;
-        }
-        // An accepted answer is owned by its live requester, not by the
-        // lifetime of the answering lead (source remains immutable provenance).
-        if !matches!(notice.kind, LaneNotificationKind::Answer { .. }) {
-            live_thread(conn, &notice.source_thread_id)?;
-        }
-        let current = lane(conn, &notice.lane_id)?;
-        if matches!(notice.kind, LaneNotificationKind::Nudge { .. })
-            && (current.root_run_id.as_deref() != Some(&claim.owner.root_run_id)
-                || current.generation != claim.owner.generation)
-        {
-            return Err(crate::StorageError::LaneOperation(
-                event_bus::lane::LaneOperationError::OwnershipLost,
-            ));
-        }
-        management(current.management_revision, notice.management_revision)?;
-        let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM lane_notifications WHERE notification_id=?1 AND claim_epoch=?2 AND destination_thread_id=?3 AND payload=?4 AND state='pending')",params![notice.notification_id,claim.claim_epoch,claim.destination_thread_id,json(notice)?],|r|r.get(0))?;
+        notice.validate(conn, claim, received(conn, notice)?)?;
+        let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM lane_notifications WHERE notification_id=?1 AND claim_epoch=?2 AND destination_thread_id=?3 AND payload=?4 AND state='pending')",params![notice.notification_id(),claim.claim_epoch,claim.destination_thread_id,json(notice)?],|r|r.get(0))?;
         if !valid {
             return Err(conflict("stale_notification"));
         }
     }
     Ok(())
 }
-pub(crate) fn nack(
+pub(crate) fn nack<N: OutboxNotice>(
     conn: &Connection,
-    claim: &LaneDeliveryClaim,
+    claim: &LaneDeliveryClaim<N>,
     reason: LaneDeliveryNack,
     now_ns: i64,
 ) -> Result<(), StorageError> {
@@ -245,27 +216,24 @@ pub(crate) fn nack(
     tx.commit()?;
     Ok(())
 }
-fn receipt_id(notice: &LaneNotification) -> String {
-    format!("lane-notification:{}", notice.notification_id)
+fn receipt_id<N: OutboxNotice>(notice: &N) -> String {
+    format!("{}{}", N::RECEIPT_PREFIX, notice.notification_id())
 }
-fn received(conn: &Connection, notice: &LaneNotification) -> Result<bool, StorageError> {
+fn received<N: OutboxNotice>(conn: &Connection, notice: &N) -> Result<bool, StorageError> {
     let receipts = crate::repo::host_input_receipt::for_ids(conn, &[receipt_id(notice)])?;
     Ok(receipts.iter().any(|receipt| {
         receipt.status == crate::HostInputStatus::Delivered
-            && receipt.provenance
-                == crate::HostInputProvenance::LaneNotification {
-                    notification_id: notice.notification_id.clone(),
-                    destination_thread_id: notice.destination_thread_id.clone(),
-                }
+            && receipt.provenance == notice.provenance()
     }))
 }
 /// Host snapshot contains only the IDs missing from receipt_ids(). Fully received
 /// retries do not overwrite a snapshot. Notifications are never host_inputs_json.
-pub(crate) fn accept_delivery(
+pub(crate) fn accept_delivery<N: OutboxNotice>(
     conn: &Connection,
-    claim: &LaneDeliveryClaim,
+    claim: &LaneDeliveryClaim<N>,
     write: crate::thread_index::SnapshotWrite,
     now_ns: i64,
+    auto_fix_enabled: bool,
 ) -> Result<Option<crate::thread_index::SnapshotReceipt>, StorageError> {
     let tx = transaction(conn)?;
     check_claim(&tx, claim, now_ns)?;
@@ -284,7 +252,7 @@ pub(crate) fn accept_delivery(
     }
     let snapshot = crate::repo::thread_index::stage_snapshot(&tx, &write)
         .map_err(crate::repo::thread_index::into_storage_error)?;
-    let mut wake_sources = std::collections::HashSet::new();
+    let mut wake_sources = std::collections::HashSet::<String>::new();
     for notice in missing {
         let receipt = crate::HostInputReceipt {
             prompt_id: receipt_id(notice),
@@ -297,62 +265,27 @@ pub(crate) fn accept_delivery(
             accepted_at_ns: now_ns,
             status_at_ns: now_ns,
             evidence_id: None,
-            provenance: crate::HostInputProvenance::LaneNotification {
-                notification_id: notice.notification_id.clone(),
-                destination_thread_id: notice.destination_thread_id.clone(),
-            },
+            provenance: notice.provenance(),
         };
         crate::repo::host_input_receipt::insert(&tx, &receipt)?;
-        crate::repo::lane_control::accept_nudge(&tx, notice)?;
-        let source = lane(&tx, &notice.lane_id)?;
-        if source.thread_id == notice.destination_thread_id {
-            crate::repo::lane_control::input_progress(
-                &tx,
-                &notice.lane_id,
-                true,
-                matches!(
-                    notice.kind,
-                    LaneNotificationKind::Intervention { .. } | LaneNotificationKind::Answer { .. }
-                ),
-                now_ns,
-            )?;
-        }
         tx.execute(
             "UPDATE lane_notifications SET receipt_prompt_id=?2 WHERE notification_id=?1",
-            params![notice.notification_id, receipt.prompt_id],
+            params![notice.notification_id(), receipt.prompt_id],
         )?;
-        // No post-commit callback: receipt-only crash recovery must retain the
-        // same causal wake count even when the sender never reaches ACK.
-        if claim.completed_root_wake
-            && !matches!(
-                notice.kind,
-                LaneNotificationKind::Answer { .. } | LaneNotificationKind::Nudge { .. }
-            )
-            && wake_sources.insert(&notice.lane_id)
-        {
-            let expected = guard(&tx, &notice.lane_id)?.revision;
-            guards::update_guard_in_transaction(
-                &tx,
-                &notice.lane_id,
-                expected,
-                LaneGuardSignal::WakeBatch {
-                    batch_id: format!("lane-batch:{}", notice.notification_id),
-                },
-            )?;
-        }
+        notice.adopt(&tx, claim, now_ns, auto_fix_enabled, &mut wake_sources)?;
     }
     tx.commit()?;
     Ok(Some(snapshot))
 }
-pub(crate) fn ack(
+pub(crate) fn ack<N: OutboxNotice>(
     conn: &Connection,
-    claim: &LaneDeliveryClaim,
+    claim: &LaneDeliveryClaim<N>,
     now_ns: i64,
 ) -> Result<(), StorageError> {
     let tx = transaction(conn)?;
     let mut all_acked = !claim.notifications.is_empty();
     for notice in &claim.notifications {
-        let acked:Option<bool>=tx.query_row("SELECT state='acked' AND destination_thread_id=?2 AND payload=?3 FROM lane_notifications WHERE notification_id=?1",params![notice.notification_id,claim.destination_thread_id,json(notice)?],|r|r.get(0)).optional()?;
+        let acked:Option<bool>=tx.query_row("SELECT state='acked' AND destination_thread_id=?2 AND payload=?3 FROM lane_notifications WHERE notification_id=?1",params![notice.notification_id(),claim.destination_thread_id,json(notice)?],|r|r.get(0)).optional()?;
         all_acked &= acked == Some(true);
     }
     if all_acked {
@@ -365,7 +298,7 @@ pub(crate) fn ack(
         }
         tx.execute(
             "UPDATE lane_notifications SET state='acked' WHERE notification_id=?1",
-            [&notice.notification_id],
+            [notice.notification_id()],
         )?;
     }
     tx.execute("UPDATE lane_delivery_destinations SET lease_token=NULL,lease_until_ns=NULL WHERE thread_id=?1",[&claim.destination_thread_id])?;
@@ -395,15 +328,130 @@ pub(crate) fn pending_destinations(
         .query_map([after], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }
-pub(crate) fn receipt_ids(
+pub(crate) fn receipt_ids<N: OutboxNotice>(
     conn: &Connection,
-    claim: &LaneDeliveryClaim,
+    claim: &LaneDeliveryClaim<N>,
 ) -> Result<Vec<String>, StorageError> {
     let mut ids = Vec::new();
     for notice in &claim.notifications {
         if received(conn, notice)? {
-            ids.push(notice.notification_id.clone());
+            ids.push(notice.notification_id().to_owned());
         }
     }
     Ok(ids)
+}
+
+/// One source per claim: the concrete notice type fixes all SQL selection and
+/// receipt identity. Destination lease, fencing, snapshot adoption and ACK are shared.
+pub(crate) trait OutboxNotice: Serialize + DeserializeOwned + Sized {
+    const LIVE_NOTICE: &'static str;
+    const ELIGIBLE_QUERY: &'static str;
+    const RECEIPT_PREFIX: &'static str;
+    const PROVENANCE_KIND: &'static str;
+    fn notification_id(&self) -> &str;
+    fn provenance(&self) -> crate::HostInputProvenance;
+    fn validate(
+        &self,
+        conn: &Connection,
+        claim: &LaneDeliveryClaim<Self>,
+        received: bool,
+    ) -> Result<(), StorageError>;
+    fn adopt(
+        &self,
+        conn: &Connection,
+        claim: &LaneDeliveryClaim<Self>,
+        now_ns: i64,
+        auto_fix_enabled: bool,
+        wake_sources: &mut std::collections::HashSet<String>,
+    ) -> Result<(), StorageError>;
+}
+impl OutboxNotice for LaneNotification {
+    const LIVE_NOTICE: &'static str = LIVE_NOTICE;
+    const RECEIPT_PREFIX: &'static str = "lane-notification:";
+    const PROVENANCE_KIND: &'static str = "lane_notification";
+    const ELIGIBLE_QUERY: &'static str = "WITH eligible AS NOT MATERIALIZED (
+           SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
+           JOIN lanes l ON l.lane_id=n.lane_id
+           WHERE n.destination_thread_id=?1 AND n.state='pending' AND n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))
+             AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
+         )
+         SELECT payload FROM eligible
+         WHERE ?2 OR EXISTS(SELECT 1 FROM eligible WHERE event_kind IN ('question','ready','failed','answer','nudge'))
+         ORDER BY CASE WHEN ?2 OR event_kind IN ('question','ready','failed','answer','nudge') THEN 0 ELSE 1 END,
+                  notification_id LIMIT 20";
+    fn notification_id(&self) -> &str {
+        &self.notification_id
+    }
+    fn provenance(&self) -> crate::HostInputProvenance {
+        crate::HostInputProvenance::LaneNotification {
+            notification_id: self.notification_id.clone(),
+            destination_thread_id: self.destination_thread_id.clone(),
+        }
+    }
+    fn validate(
+        &self,
+        conn: &Connection,
+        claim: &LaneDeliveryClaim,
+        received: bool,
+    ) -> Result<(), StorageError> {
+        if !received {
+            crate::repo::lane_control::check_nudge(conn, self)?;
+        }
+        // Accepted Answer provenance may outlive the old lead; the requester
+        // and current lane/destination/claim remain authoritative.
+        if !matches!(self.kind, LaneNotificationKind::Answer { .. }) {
+            live_thread(conn, &self.source_thread_id)?;
+        }
+        let current = lane(conn, &self.lane_id)?;
+        if matches!(self.kind, LaneNotificationKind::Nudge { .. })
+            && (current.root_run_id.as_deref() != Some(&claim.owner.root_run_id)
+                || current.generation != claim.owner.generation)
+        {
+            return Err(StorageError::LaneOperation(
+                event_bus::lane::LaneOperationError::OwnershipLost,
+            ));
+        }
+        management(current.management_revision, self.management_revision)
+    }
+    fn adopt(
+        &self,
+        conn: &Connection,
+        claim: &LaneDeliveryClaim,
+        now_ns: i64,
+        _auto_fix_enabled: bool,
+        wake_sources: &mut std::collections::HashSet<String>,
+    ) -> Result<(), StorageError> {
+        crate::repo::lane_control::accept_nudge(conn, self)?;
+        let source = lane(conn, &self.lane_id)?;
+        if source.thread_id == self.destination_thread_id {
+            crate::repo::lane_control::input_progress(
+                conn,
+                &self.lane_id,
+                true,
+                matches!(
+                    self.kind,
+                    LaneNotificationKind::Intervention { .. } | LaneNotificationKind::Answer { .. }
+                ),
+                now_ns,
+            )?;
+        }
+        if claim.completed_root_wake
+            && !matches!(
+                self.kind,
+                LaneNotificationKind::Answer { .. } | LaneNotificationKind::Nudge { .. }
+            )
+            && wake_sources.insert(self.lane_id.clone())
+        {
+            let expected = guard(conn, &self.lane_id)?.revision;
+            guards::update_guard_in_transaction(
+                conn,
+                &self.lane_id,
+                expected,
+                LaneGuardSignal::WakeBatch {
+                    batch_id: format!("lane-batch:{}", self.notification_id),
+                },
+            )?;
+        }
+        Ok(())
+    }
 }
