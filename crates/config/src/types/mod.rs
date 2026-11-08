@@ -4,6 +4,7 @@ pub mod agents;
 pub mod budget;
 pub mod comment_checker;
 pub mod compaction;
+pub mod core;
 pub mod cursor_model;
 pub mod edit_tool;
 pub mod eval;
@@ -34,6 +35,7 @@ pub use agents::{
 pub use budget::BudgetConfig;
 pub use comment_checker::CommentCheckerConfig;
 pub use compaction::{CompactionConfig, SummarizerKind};
+pub use core::{CoreConfig, WebConfig};
 pub use edit_tool::{EditToolConfig, EditToolSelection, gpt_generation};
 pub use eval::{EvalBudgetConfig, EvalConfig};
 pub use misc::{
@@ -82,6 +84,8 @@ pub const CURRENT_VERSION: u32 = 3;
 pub struct Config {
     /// 設定スキーマのバージョン。
     pub version: u32,
+    pub core: CoreConfig,
+    pub web: WebConfig,
     /// プロバイダプロファイル (マップキーがプロファイル名)。
     pub providers: BTreeMap<String, ProviderProfileConfig>,
     #[serde(default)]
@@ -133,6 +137,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CURRENT_VERSION,
+            core: CoreConfig::default(),
+            web: WebConfig::default(),
             providers: BTreeMap::new(),
             model_presets: BTreeMap::new(),
             agents: AgentsConfig::default(),

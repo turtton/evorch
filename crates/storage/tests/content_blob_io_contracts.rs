@@ -80,7 +80,10 @@ const C_GC: u64 = 24;
 // the outbox rebuild. Allow 40 additional fixed schema frames (observed 308
 // total with 100,000 pre-existing rows). The independent VM-step scaling
 // assertion below still forbids work proportional to those existing rows.
-const MIGRATION_FRAMES: u64 = 280 + 40;
+// v52 adds the management receipt table/indexes, four header columns and
+// authority fences. These fixed schema objects add 24 frames (332 total with
+// 100,000 rows); reserve 32 frames without relaxing the VM-step scaling check.
+const MIGRATION_FRAMES: u64 = 280 + 40 + 32;
 
 const REF_TABLE: &str = "
     CREATE TABLE io_owner (id TEXT PRIMARY KEY);
@@ -296,7 +299,7 @@ fn tick_work_ignores_the_size_of_the_reference_table() {
     );
 }
 
-/// WAL frames of applying migrations v39 to the latest (v51) to a database at v38 holding `rows` rows.
+/// WAL frames of applying migrations v39 to the latest (v52) to a database at v38 holding `rows` rows.
 fn migration_cost(rows: i64) -> (u64, u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("io.db");
@@ -317,6 +320,8 @@ fn migration_cost(rows: i64) -> (u64, u64) {
              PRAGMA wal_checkpoint(TRUNCATE);",
             undo_v46 = concat!(
                 concat!(
+                    include_str!("../undo/undo_v53.sql"),
+                    include_str!("../undo/undo_v52.sql"),
                     include_str!("../undo/undo_v51.sql"),
                     include_str!("../undo/undo_v50.sql"),
                     include_str!("../undo/undo_v49.sql"),
@@ -341,7 +346,7 @@ fn migration_cost(rows: i64) -> (u64, u64) {
     drop(Database::open_unchecked(&config(&path)).unwrap());
     let frames = (wal_bytes(&path) - before) / (page + PAGE_OVERHEAD);
     let scanned = VM_STEPS.load(Ordering::Relaxed);
-    println!("migrations v39 to v49 with {rows} rows: {frames} frames, {scanned} VM steps");
+    println!("migrations v39 to v52 with {rows} rows: {frames} frames, {scanned} VM steps");
     observer.execute_batch("COMMIT").unwrap();
     let version: i64 = observer
         .pragma_query_value(None, "user_version", |row| row.get(0))

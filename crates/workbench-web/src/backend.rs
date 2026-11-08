@@ -3,14 +3,16 @@
 //! The adapter never depends on the core. The core binary implements
 //! [`WorkbenchBackend`] on top of `workbench-host` and hands it to
 //! [`WebServer::start`](crate::WebServer::start). The trait only uses
-//! `workbench-protocol` types, so a fake backend is enough to test the adapter.
+//! `workbench-protocol` types plus JSON output values, so a fake backend is
+//! enough to test the adapter.
 //!
 //! # Secret masking
 //!
 //! Secret masking (`secret-guard`, ADR 0045 §5) belongs to the backend. Every
-//! reply and event a backend returns must already be masked: this crate does
-//! not depend on `secret-guard`, relays protocol values unchanged and never
-//! inspects their text.
+//! serialized reply and event is protected by the backend policy: this crate does
+//! not depend on `secret-guard`. Immediately before JSON/SSE serialization it
+//! also passes adapter-generated output through [`WorkbenchBackend::protect_output`],
+//! so correlation ids and locally synthesized events cannot bypass protection.
 
 use std::future::Future;
 use tokio::sync::mpsc;
@@ -60,6 +62,15 @@ pub struct BackendSubscription {
 ///
 /// Futures must be `Send` because the adapter runs on a multi-threaded runtime.
 pub trait WorkbenchBackend: Send + Sync + 'static {
+    /// Final egress protection, including output synthesized by the adapter.
+    ///
+    /// Production backends apply secret masking to string values and object
+    /// keys. Preserve the message structure and numeric fields; this must be
+    /// idempotent because backend replies/events may already be protected.
+    /// In particular, request/correlation/subscription ids are not exempt.
+    /// A test backend may return the value unchanged. Never change model input.
+    fn protect_output(&self, output: serde_json::Value) -> serde_json::Value;
+
     /// Execute one command or query.
     ///
     /// `provenance` is always human on the web surface; it comes from the

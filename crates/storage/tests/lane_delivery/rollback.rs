@@ -123,7 +123,7 @@ fn report_outbox_failure_rolls_back_report_sequence_and_semantic_key() {
     f.lane(1, LanePolicy::Attached);
     let first = f
         .h()
-        .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Ready), 2)
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Ready), 2)
         .unwrap();
     let before_keys = f.count("lane_delivery_keys");
     let before_inbox = f.h().lane_inbox("lead".into(), String::new()).unwrap();
@@ -132,7 +132,7 @@ fn report_outbox_failure_rolls_back_report_sequence_and_semantic_key() {
     f.sql().execute_batch("CREATE TRIGGER fail_notice BEFORE INSERT ON lane_notifications BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(matches!(
         f.h()
-            .append_lane_report_with_delivery("lane-1".into(), changed.clone(), 3),
+            .append_lane_report_with_delivery("lane-1".into(), 1, changed.clone(), 3),
         Err(StorageError::Sqlite(_))
     ));
     assert_eq!(f.count("lane_reports"), 1);
@@ -144,13 +144,13 @@ fn report_outbox_failure_rolls_back_report_sequence_and_semantic_key() {
     f.sql().execute_batch("DROP TRIGGER fail_notice").unwrap();
     let next = f
         .h()
-        .append_lane_report_with_delivery("lane-1".into(), changed.clone(), 4)
+        .append_lane_report_with_delivery("lane-1".into(), 1, changed.clone(), 4)
         .unwrap();
     assert_eq!(next.report.report_seq, first.report.report_seq + 1);
     assert_eq!(f.count("lane_notifications"), 2);
     let keys = f.count("lane_delivery_keys");
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), changed, 5)
+        .append_lane_report_with_delivery("lane-1".into(), 1, changed, 5)
         .unwrap();
     assert_eq!(f.count("lane_notifications"), 2);
     assert_eq!(f.count("lane_delivery_keys"), keys);

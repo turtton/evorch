@@ -2403,6 +2403,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "evorch-core"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "event-bus",
+ "mock-openai",
+ "recorder",
+ "reqwest 0.12.28",
+ "routing",
+ "runtime",
+ "rustix 1.1.4",
+ "sandbox",
+ "secret-guard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "storage",
+ "tempfile",
+ "test-support",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "uuid",
+ "workbench-client",
+ "workbench-host",
+ "workbench-protocol",
+ "workbench-web",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8328,7 +8358,10 @@ dependencies = [
  "async-trait",
  "config",
  "event-bus",
+ "model",
  "providers",
+ "recorder",
+ "routing",
  "runtime",
  "rusqlite",
  "sandbox",
@@ -8338,6 +8371,7 @@ dependencies = [
  "sha2 0.10.9",
  "storage",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tools",
  "tracing",

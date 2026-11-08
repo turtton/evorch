@@ -265,15 +265,24 @@ fn tombstoned_identity(
             }));
         }
     }
-    for run_id in [&thread.root_run_id, &thread.escalation_source_run_id]
-        .into_iter()
-        .flatten()
-    {
+    for (provenance, run_id) in [
+        (false, thread.root_run_id.as_ref()),
+        (true, thread.escalation_source_run_id.as_ref()),
+    ] {
+        let Some(run_id) = run_id else { continue };
         let hit: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_tombstones WHERE run_id = ?1)",
             [run_id],
             |row| row.get(0),
         )?;
+        // A mirror may explicitly repeat an existing lane's historical source.
+        // Root/owner/parent fences above remain strict; a new source is never adopted.
+        if hit && provenance && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads t JOIN lanes l ON l.thread_id=t.thread_id WHERE t.thread_id=?1 AND t.escalation_source_run_id=?2)",
+            params![thread.thread_id, run_id], |row| row.get::<_, bool>(0),
+        )? {
+            continue;
+        }
         if hit {
             return Ok(Some(StorageError::Tombstoned {
                 run_id: Some(run_id.clone()),

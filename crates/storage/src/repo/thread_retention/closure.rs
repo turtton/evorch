@@ -124,7 +124,7 @@ const RUN_STEPS: &[Step] = &[
         Yields::Thread,
     ),
     Step::Paged(
-        "SELECT rowid, thread_id FROM threads WHERE escalation_source_run_id = ?1 AND rowid > ?2 \
+        "SELECT rowid, thread_id FROM threads WHERE escalation_source_run_id = ?1 AND thread_id NOT IN (SELECT thread_id FROM lanes) AND rowid > ?2 \
          ORDER BY rowid LIMIT ?3",
         Yields::Thread,
     ),
@@ -145,12 +145,12 @@ const RUN_STEPS: &[Step] = &[
     ),
     Step::Paged(
         "SELECT rowid, run_id FROM usage_requests \
-         WHERE parent_run_id = ?1 AND run_id IS NOT NULL AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+         WHERE parent_run_id = ?1 AND run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.root_run_id=usage_requests.run_id) AND NOT EXISTS (SELECT 1 FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id WHERE tr.run_id=usage_requests.run_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
         Yields::Run,
     ),
     Step::Paged(
         "SELECT rowid, parent_run_id FROM usage_requests \
-         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+         WHERE run_id = ?1 AND parent_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lanes l WHERE l.root_run_id=usage_requests.run_id) AND NOT EXISTS (SELECT 1 FROM thread_runs tr JOIN lanes l ON l.thread_id=tr.thread_id WHERE tr.run_id=usage_requests.run_id) AND rowid > ?2 ORDER BY rowid LIMIT ?3",
         Yields::Run,
     ),
 ];
@@ -244,7 +244,7 @@ pub(super) fn expand_node(
                 *edges += 1;
                 let own = conn
                     .query_row(
-                        "SELECT parent_thread_id, root_run_id, escalation_source_run_id \
+                        "SELECT parent_thread_id, root_run_id, CASE WHEN thread_id IN (SELECT thread_id FROM lanes) THEN NULL ELSE escalation_source_run_id END \
                          FROM threads WHERE thread_id = ?1",
                         [id],
                         |row| {
@@ -674,3 +674,7 @@ pub(super) fn staged_sets(
         members(conn, family_key, "run")?.into_iter().collect(),
     ))
 }
+
+#[cfg(test)]
+#[path = "closure_usage_tests.rs"]
+mod usage_tests;

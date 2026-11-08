@@ -1,6 +1,6 @@
 //! Destination single flight, lease fencing and durable receipt/ACK repair.
 use super::*;
-pub(crate) const LIVE_NOTICE: &str = "n.source_kind='lane' AND n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
+pub(crate) const LIVE_NOTICE: &str = "n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))";
 pub(crate) fn inbox(
     conn: &Connection,
     destination: &str,
@@ -372,7 +372,7 @@ impl OutboxNotice for LaneNotification {
     const ELIGIBLE_QUERY: &'static str = "WITH eligible AS NOT MATERIALIZED (
            SELECT n.payload,n.notification_id,n.event_kind FROM lane_notifications n
            JOIN lanes l ON l.lane_id=n.lane_id
-           WHERE n.destination_thread_id=?1 AND n.state='pending' AND n.source_kind='lane' AND n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))
+           WHERE n.destination_thread_id=?1 AND n.state='pending' AND n.source_kind='lane' AND (n.event_kind='answer' OR n.source_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)) AND n.destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) AND EXISTS(SELECT 1 FROM lanes l WHERE l.lane_id=n.lane_id AND l.management_revision=n.management_revision AND l.thread_id NOT IN (SELECT thread_id FROM thread_tombstones))
              AND (n.event_kind='answer' OR COALESCE(json_extract(l.wake_guard_json,'$.suppressed'),0)=0)
          )
          SELECT payload FROM eligible
@@ -397,7 +397,11 @@ impl OutboxNotice for LaneNotification {
         if !received {
             crate::repo::lane_control::check_nudge(conn, self)?;
         }
-        live_thread(conn, &self.source_thread_id)?;
+        // Accepted Answer provenance may outlive the old lead; the requester
+        // and current lane/destination/claim remain authoritative.
+        if !matches!(self.kind, LaneNotificationKind::Answer { .. }) {
+            live_thread(conn, &self.source_thread_id)?;
+        }
         let current = lane(conn, &self.lane_id)?;
         if matches!(self.kind, LaneNotificationKind::Nudge { .. })
             && (current.root_run_id.as_deref() != Some(&claim.owner.root_run_id)

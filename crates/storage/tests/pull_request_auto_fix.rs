@@ -775,6 +775,7 @@ fn make_lane(f: &Fixture) {
     f.h()
         .append_lane_report_with_delivery(
             "source-lane".into(),
+            1,
             report(storage::lanes::LaneStatus::Ready),
             2,
         )
@@ -804,6 +805,10 @@ fn v50_outbox_upgrade_preserves_lane_wire_ids_and_title() {
     let undo = std::fs::read_to_string(root.join("undo/undo_v51.sql")).unwrap();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
+    let management_undo = std::fs::read_to_string(root.join("undo/undo_v53.sql")).unwrap();
+    conn.execute_batch(&management_undo).unwrap();
+    let preparation_undo = std::fs::read_to_string(root.join("undo/undo_v52.sql")).unwrap();
+    conn.execute_batch(&preparation_undo).unwrap();
     conn.execute_batch(&undo).unwrap();
     conn.execute_batch(
         "INSERT INTO pull_request_snapshots(provider,host,repository,number,state,
@@ -1003,6 +1008,9 @@ fn pr_storage_writes_obey_capacity_suspension_while_reads_remain_available() {
     assert_eq!(f.count("lane_notifications"), 0);
 }
 
+#[path = "pull_request_auto_fix/lane_management.rs"]
+mod lane_management;
+
 #[test]
 fn stale_preparation_cannot_ready_or_cancel_another_destinations_replacement() {
     let f = Fixture::new();
@@ -1100,7 +1108,10 @@ fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generatio
         .ready_pr_notice(reserved.notice_id, "durable facts".into())
         .unwrap();
     f.sql()
-        .execute_batch(include_str!("../undo/undo_v52.sql"))
+        .execute_batch(concat!(
+            include_str!("../undo/undo_v53.sql"),
+            include_str!("../undo/undo_v52.sql")
+        ))
         .unwrap();
     f.sql().pragma_update(None, "user_version", 51).unwrap();
     let upgraded = Storage::open(f.config.clone()).unwrap();

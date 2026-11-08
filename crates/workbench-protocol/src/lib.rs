@@ -23,6 +23,7 @@ pub mod framing;
 pub mod handshake;
 pub mod ids;
 pub mod lane_attention;
+pub mod lane_management;
 pub mod limits;
 pub mod queries;
 pub mod validation;

@@ -175,6 +175,8 @@ pub enum RetentionReason {
     PendingApproval,
     PendingQuestion,
     ConnectedClients,
+    /// Web delivery is enabled even when no browser is connected.
+    WebServing,
 }
 
 /// How much work is running.

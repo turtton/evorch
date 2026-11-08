@@ -64,6 +64,7 @@ fn record(n: u32, lead: Option<&str>, policy: LedgerPolicy, revision: u64) -> La
         lead_thread_id: lead.map(str::to_owned),
         policy,
         management_revision: revision,
+        detached_since_management_revision: (policy == LedgerPolicy::Detached).then_some(revision),
         brief: LaneBrief {
             verification_requirements: Default::default(),
             objective: format!("Objective {n}\nsecond line"),

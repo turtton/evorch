@@ -69,6 +69,7 @@ impl WebApp {
             sse_slots: Arc::new(Semaphore::new(config.max_sse_streams)),
             shutdown: shutdown.clone(),
         });
+        let output_backend = Arc::clone(&backend);
         let state = Arc::new(AppState::new(backend, Arc::clone(&shared), config, assets));
         let router = Router::new()
             .route(
@@ -85,7 +86,11 @@ impl WebApp {
             )
             .fallback(api::fallback::<B>)
             .with_state(state)
-            .layer(from_fn_with_state(shared, guard));
+            .layer(from_fn_with_state(shared, guard))
+            .layer(from_fn_with_state(
+                output_backend,
+                crate::output::protect_response::<B>,
+            ));
         Ok(Self { router, shutdown })
     }
 

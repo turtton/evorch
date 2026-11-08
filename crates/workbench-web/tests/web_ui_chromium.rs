@@ -693,6 +693,11 @@ impl UiBackend {
 }
 
 impl WorkbenchBackend for UiBackend {
+    /// No secrets in this fake world; the output passes unchanged.
+    fn protect_output(&self, output: Value) -> Value {
+        output
+    }
+
     async fn handle_request(
         &self,
         _session: &WebSession,

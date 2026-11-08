@@ -9,9 +9,9 @@ use crate::error::{LaneConflictReason, LaneCursorError};
 use crate::lanes::{
     LANE_ID_MAX_BYTES, LANE_LIST_SNAPSHOTS_MAX, LANE_LIST_SNAPSHOTS_PER_LEAD,
     LANE_OBJECTIVE_PREVIEW_MAX_BYTES, LANE_REPORTS_PAGE_MAX, LANE_START_SEED_MAX_BYTES, LaneBrief,
-    LaneCreation, LaneListItem, LaneListPage, LaneListRequest, LaneManagementChange, LanePolicy,
-    LaneRecord, LaneReport, LaneReportAppended, LaneReportInput, LaneReportProducer, LaneScope,
-    LaneStatus, LaneUpdate, NewLane,
+    LaneCreation, LaneListItem, LaneListPage, LaneListRequest, LanePolicy, LaneRecord, LaneReport,
+    LaneReportAppended, LaneReportInput, LaneReportProducer, LaneScope, LaneStatus, LaneUpdate,
+    NewLane,
 };
 use event_bus::{
     LANE_LIST_PAGE_MAX, LANE_LIST_PAGE_MAX_BYTES, LaneValidationError, LaneValidationKind,
@@ -22,7 +22,7 @@ const LIVE: &str = "thread_id NOT IN (SELECT thread_id FROM thread_tombstones)";
 
 const COLUMNS: &str = "lane_id, thread_id, origin_thread_id, origin_run_id, creation_key, scope, \
     lead_thread_id, policy, management_revision, brief_json, brief_revision, start_seed, \
-    root_run_id, generation, latest_report_seq, created_at_ns, updated_at_ns, last_activity_at_ns, start_blocked_reason";
+    root_run_id, generation, latest_report_seq, created_at_ns, updated_at_ns, last_activity_at_ns, start_blocked_reason, detached_since_management_revision";
 
 const REPORT_COLUMNS: &str = "lane_id, report_seq, status, summary, artifact_refs_json, \
     needs_human, question_refs_json, reason_code, producer, management_revision, brief_revision, \
@@ -148,6 +148,7 @@ fn record_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<LaneRecord> {
         updated_at_ns: row.get(at(16))?,
         last_activity_at_ns: row.get(at(17))?,
         start_blocked_reason: row.get(at(18))?,
+        detached_since_management_revision: row.get(at(19))?,
     })
 }
 
@@ -539,11 +540,13 @@ pub(crate) fn resume_start(
 pub(crate) fn append_report(
     conn: &Connection,
     lane_id: &str,
+    expected_management_revision: u64,
     input: &LaneReportInput,
     at_ns: i64,
 ) -> Result<LaneReportAppended, StorageError> {
     let tx = immediate(conn)?;
-    let result = append_report_in_transaction(&tx, lane_id, input, at_ns)?;
+    let result =
+        append_report_in_transaction(&tx, lane_id, expected_management_revision, input, at_ns)?;
     tx.commit()?;
     Ok(result)
 }
@@ -552,6 +555,7 @@ pub(crate) fn append_report(
 pub(crate) fn append_report_in_transaction(
     tx: &Transaction<'_>,
     lane_id: &str,
+    expected_management_revision: u64,
     input: &LaneReportInput,
     at_ns: i64,
 ) -> Result<LaneReportAppended, StorageError> {
@@ -562,6 +566,16 @@ pub(crate) fn append_report_in_transaction(
     let question_refs = serde_json::to_string(&input.question_refs)
         .map_err(|error| StorageError::Serialization(error.to_string()))?;
     let lane = require(tx, lane_id)?;
+    if lane.management_revision != expected_management_revision {
+        return Err(StorageError::LaneManagement(
+            crate::lane_management::LaneManagementError::StaleManagementRevision,
+        ));
+    }
+    if !lane.policy.is_managed() {
+        return Err(StorageError::LaneManagement(
+            crate::lane_management::LaneManagementError::InvalidPolicyTransition,
+        ));
+    }
     let seq = lane.latest_report_seq + 1;
     let seq_param = to_i64(seq, "report sequence")?;
     // The limit is on the report as stored and returned, identity and counters included.
@@ -626,68 +640,6 @@ pub(crate) fn append_report_in_transaction(
     )?;
     let lane = require(tx, lane_id)?;
     Ok(LaneReportAppended { lane, report })
-}
-
-/// Moves the management relation from the revision the caller read. The origin is
-/// untouched; this is the data step of a policy change, a detach or a re-attach.
-pub(crate) fn change_management(
-    conn: &Connection,
-    lane_id: &str,
-    expected_revision: u64,
-    change: &LaneManagementChange,
-    at_ns: i64,
-) -> Result<LaneUpdate, StorageError> {
-    match (&change.lead_thread_id, change.policy.is_managed()) {
-        (Some(lead), true) => check_id("lead_thread_id", lead)?,
-        (None, false) => {}
-        (Some(_), false) => {
-            return Err(invalid(
-                "lead_thread_id",
-                LaneValidationKind::Invalid("a detached lane has no lead"),
-            ));
-        }
-        (None, true) => {
-            return Err(invalid("lead_thread_id", LaneValidationKind::Empty));
-        }
-    }
-    let tx = immediate(conn)?;
-    let lane = require(&tx, lane_id)?;
-    if lane.management_revision != expected_revision {
-        return Err(StorageError::StaleRevision {
-            kind: "management",
-            expected: expected_revision,
-            current: lane.management_revision,
-        });
-    }
-    if lane.lead_thread_id == change.lead_thread_id && lane.policy == change.policy {
-        return Ok(LaneUpdate {
-            lane,
-            changed: false,
-        });
-    }
-    if let Some(lead) = &change.lead_thread_id {
-        // Only the lead it moves to: a deleted origin does not block a later management
-        // change, since the origin is history and not part of the relation.
-        tombstone_threads(&tx, &[lead])?;
-    }
-    tx.execute(
-        "UPDATE lanes SET lead_thread_id = ?2, policy = ?3, \
-            management_revision = management_revision + 1, \
-            updated_at_ns = max(updated_at_ns, ?4) WHERE lane_id = ?1",
-        params![
-            lane_id,
-            change.lead_thread_id,
-            change.policy.as_str(),
-            at_ns
-        ],
-    )?;
-    bump_revision(&tx)?;
-    let lane = require(&tx, lane_id)?;
-    tx.commit()?;
-    Ok(LaneUpdate {
-        lane,
-        changed: true,
-    })
 }
 
 pub(crate) fn revise_brief(
@@ -948,8 +900,8 @@ pub(crate) fn list(
             let Some(as_of) = as_of else {
                 return Err(StorageError::LaneCursor(LaneCursorError::Stale));
             };
-            // The listing's members and order are frozen; each page still shows the
-            // lane as it is now and drops one this lead no longer manages.
+            // Membership/order are frozen. Management edits invalidate the snapshot
+            // transactionally, so a later page cannot bypass the original policy filter.
             let mut statement = tx.prepare(&format!(
                 "SELECT r.position, {} FROM lane_list_snapshot_rows r \
                  JOIN lanes l ON l.lane_id = r.lane_id \
@@ -1090,6 +1042,7 @@ mod tests {
             lead_thread_id: Some("lead".into()),
             policy: LanePolicy::Attached,
             management_revision: 1,
+            detached_since_management_revision: None,
             brief: LaneBrief {
                 verification_requirements: Default::default(),
                 objective: "o".into(),

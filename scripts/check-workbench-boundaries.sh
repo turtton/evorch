@@ -92,7 +92,7 @@ jq -r -f "$work/edges.jq" "$work/metadata.json" > "$work/edges.tsv"
 violations="$work/violations.txt"
 : > "$violations"
 
-for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB"; do
+for crate in "$PROTOCOL" "$CLIENT" "$HOST" "$WEB" evorch-core; do
   if ! awk -F'\t' -v c="$crate" '$1 == "W" && $2 == c { found = 1 } END { exit !found }' "$work/edges.tsv"; then
     echo "boundary check: workspace member '$crate' not found; the check would pass vacuously" >> "$violations"
   fi
@@ -247,6 +247,9 @@ core_reach_violations() {
 closure_violations "$PROTOCOL" "" >> "$violations"
 closure_violations "$CLIENT" "$PROTOCOL" >> "$violations"
 gui_free_violations "$HOST" "$HOST_FORBIDDEN_WORKSPACE" >> "$violations"
+# evorch-core is a composition root, not a runtime implementation crate. Its
+# integration tests may use workbench-client, but no rendering/GUI dependency.
+gui_free_violations "evorch-core" "gui workspace-ui browser-cef evorch" >> "$violations"
 gui_free_violations "$WEB" "$WEB_FORBIDDEN_WORKSPACE" >> "$violations"
 external_violations "$PROTOCOL" "$PROTOCOL_EXTERNAL_ALLOW" >> "$violations"
 external_violations "$CLIENT" "$CLIENT_EXTERNAL_ALLOW" >> "$violations"

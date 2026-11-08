@@ -51,6 +51,7 @@ impl CommandService {
             let runtime = self.runtime.clone();
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let thread = thread_id.clone();
+            let completion = self.background_work.clone();
             let task = self.handle.spawn(async move {
                 let event = match runtime.compact_saved_chat(run, authority).await {
                     Ok(()) => HostEvent::applied_notice(
@@ -63,6 +64,7 @@ impl CommandService {
                     ),
                 };
                 let _ = sender.send(event);
+                completion.notify_one();
             });
             self.compaction_jobs.insert(
                 thread_id.clone(),
@@ -81,11 +83,8 @@ impl CommandService {
 
     pub(super) fn poll_compactions(&mut self) -> Vec<HostEvent> {
         let mut events = Vec::new();
-        self.compaction_jobs.retain(|thread, job| {
-            if !job.task.is_finished() {
-                return true;
-            }
-            match job.result.try_recv() {
+        self.compaction_jobs
+            .retain(|thread, job| match job.result.try_recv() {
                 Ok(event) => {
                     events.push(event);
                     false
@@ -98,8 +97,7 @@ impl CommandService {
                     ));
                     false
                 }
-            }
-        });
+            });
         events
     }
 }
