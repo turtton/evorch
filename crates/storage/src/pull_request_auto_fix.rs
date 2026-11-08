@@ -72,6 +72,8 @@ pub enum PrNoticePhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrNotice {
     pub notice_id: String,
+    /// Increments whenever a cancelled stable SHA ID is reserved again.
+    pub reservation_revision: u64,
     pub key: PullRequestKey,
     pub head_sha: String,
     pub mode: PrNoticeMode,
@@ -159,4 +161,51 @@ pub struct PrAutoFixLimitEvent {
     pub budget_epoch: u64,
     pub notice_id: String,
     pub at_ns: i64,
+}
+
+/// Read-only access for a display that follows the shared database. The writes (policy,
+/// reservation, adoption) stay with the single writer.
+impl crate::Database {
+    /// The PR-wide auto fix state; absent state reads as opted out.
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid key.
+    pub fn pr_auto_fix_state(
+        &self,
+        key: &PullRequestKey,
+    ) -> Result<PrAutoFixState, crate::StorageError> {
+        crate::repo::pull_request_auto_fix::state(&self.conn, key)
+    }
+
+    /// One notice by its durable ID, in any phase.
+    ///
+    /// # Errors
+    /// SQLite failure or an undecodable row.
+    pub fn pr_notice(&self, id: &str) -> Result<Option<PrNotice>, crate::StorageError> {
+        crate::repo::pull_request_auto_fix::notice(&self.conn, id)
+    }
+
+    /// The notice reserved for this pull request head, in any phase. Manual and automatic
+    /// notices share it: a head is told at most once.
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid key.
+    pub fn pr_notice_for_head(
+        &self,
+        key: &PullRequestKey,
+        head_sha: &str,
+    ) -> Result<Option<PrNotice>, crate::StorageError> {
+        crate::repo::pull_request_auto_fix::notice_for_head(&self.conn, key, head_sha)
+    }
+
+    /// The pull request's wake guard (whether notices are suppressed).
+    ///
+    /// # Errors
+    /// SQLite failure or an invalid key.
+    pub fn pr_wake_guard(
+        &self,
+        key: &PullRequestKey,
+    ) -> Result<LaneWakeGuard, crate::StorageError> {
+        crate::repo::pull_request_auto_fix::guard(&self.conn, key)
+    }
 }

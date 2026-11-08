@@ -1405,9 +1405,20 @@ fn build_workbench(
             ),
         ))
         .with_pull_requests(
-            Arc::new(gui::app::pull_requests::StoragePullRequestReader::new(
-                storage_config.db_path.clone(),
-            )),
+            Arc::new({
+                let reader = gui::app::pull_requests::StoragePullRequestReader::new(
+                    storage_config.db_path.clone(),
+                );
+                match runtime.pull_requests() {
+                    Some(service) => reader.with_auto_fix_probe(Arc::new(move |thread: &str| {
+                        gui::app::pull_requests::AutoFixFacts {
+                            head: service.head_attribution(thread),
+                            global_enabled: service.settings().auto_fix_enabled,
+                        }
+                    })),
+                    None => reader,
+                }
+            }),
             Some(owner_probe),
         )
         .with_tombstones(prelude.tombstones.clone());

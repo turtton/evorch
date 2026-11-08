@@ -191,7 +191,7 @@ impl Inner {
             return None;
         }
         let now = Instant::now();
-        let mut earliest = None;
+        let mut earliest = self.coordinate(&plan.targets).await;
         let mut groups: HashMap<PullRequestKey, Vec<Target>> = HashMap::new();
         for target in plan.targets {
             groups.entry(target.key.clone()).or_default().push(target);

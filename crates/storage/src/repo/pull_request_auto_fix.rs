@@ -155,7 +155,7 @@ fn auto_allowed(
     }
     Ok(())
 }
-const NOTICE_COLUMNS: &str = "notice_id,pr_key,head_sha,mode,destination_thread_id,link_revision,policy_revision,budget_epoch,success_seq,phase,payload";
+const NOTICE_COLUMNS: &str = "notice_id,pr_key,head_sha,mode,destination_thread_id,link_revision,policy_revision,budget_epoch,success_seq,phase,payload,reservation_revision";
 fn notice_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PrNotice> {
     let key: String = r.get(1)?;
     let (provider, host, repository, number): (String, String, String, u64) =
@@ -192,6 +192,7 @@ fn notice_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PrNotice> {
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
         payload: r.get(10)?,
+        reservation_revision: r.get(11)?,
     })
 }
 pub(crate) fn notice(conn: &Connection, id: &str) -> Result<Option<PrNotice>, StorageError> {
@@ -199,6 +200,20 @@ pub(crate) fn notice(conn: &Connection, id: &str) -> Result<Option<PrNotice>, St
         .query_row(
             &format!("SELECT {NOTICE_COLUMNS} FROM pr_notices WHERE notice_id=?1"),
             [id],
+            notice_row,
+        )
+        .optional()?)
+}
+/// The one notice (any phase) for a pull request head, if one was ever reserved.
+pub(crate) fn notice_for_head(
+    conn: &Connection,
+    key: &PullRequestKey,
+    head_sha: &str,
+) -> Result<Option<PrNotice>, StorageError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {NOTICE_COLUMNS} FROM pr_notices WHERE pr_key=?1 AND head_sha=?2"),
+            params![key_id(key)?, head_sha.to_ascii_lowercase()],
             notice_row,
         )
         .optional()?)
@@ -258,20 +273,41 @@ pub(crate) fn reserve(
             return Err(StorageError::PrAutoFix(PrAutoFixRejection::BudgetReserved));
         }
     }
-    tx.execute("INSERT INTO pr_notices(notice_id,pr_key,head_sha,mode,destination_thread_id,link_revision,policy_revision,budget_epoch,success_seq,phase) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved') ON CONFLICT(pr_key,head_sha) DO UPDATE SET mode=excluded.mode,destination_thread_id=excluded.destination_thread_id,link_revision=excluded.link_revision,policy_revision=excluded.policy_revision,budget_epoch=excluded.budget_epoch,success_seq=excluded.success_seq,phase='reserved',payload=NULL",params![id,key_id(&key)?,sha,match request.mode{PrNoticeMode::Manual=>"manual",PrNoticeMode::Auto=>"auto"},request.destination_thread_id,request.link_revision,current.policy_revision,current.budget_epoch,request.success_seq])?;
+    tx.execute("INSERT INTO pr_notices(notice_id,pr_key,head_sha,mode,destination_thread_id,link_revision,policy_revision,budget_epoch,success_seq,phase) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved') ON CONFLICT(pr_key,head_sha) DO UPDATE SET mode=excluded.mode,destination_thread_id=excluded.destination_thread_id,link_revision=excluded.link_revision,policy_revision=excluded.policy_revision,budget_epoch=excluded.budget_epoch,success_seq=excluded.success_seq,phase='reserved',payload=NULL,reservation_revision=pr_notices.reservation_revision+1",params![id,key_id(&key)?,sha,match request.mode{PrNoticeMode::Manual=>"manual",PrNoticeMode::Auto=>"auto"},request.destination_thread_id,request.link_revision,current.policy_revision,current.budget_epoch,request.success_seq])?;
     let result = required(&tx, &id)?;
     tx.commit()?;
     Ok(result)
 }
 pub(crate) fn ready(conn: &Connection, id: &str, payload: &str) -> Result<PrNotice, StorageError> {
+    ready_checked(conn, id, payload, None)?
+        .ok_or_else(|| StorageError::PrAutoFix(PrAutoFixRejection::UnknownNotice))
+}
+pub(crate) fn ready_if_current(
+    conn: &Connection,
+    expected: &PrNotice,
+    payload: &str,
+) -> Result<Option<PrNotice>, StorageError> {
+    ready_checked(conn, &expected.notice_id, payload, Some(expected))
+}
+fn ready_checked(
+    conn: &Connection,
+    id: &str,
+    payload: &str,
+    expected: Option<&PrNotice>,
+) -> Result<Option<PrNotice>, StorageError> {
     if payload.len() > PR_NOTICE_PAYLOAD_MAX {
         return Err(StorageError::PrAutoFix(PrAutoFixRejection::PayloadTooLarge));
     }
     crate::entity::SecretGuard::from_env().check_text("pr_notice", "payload", payload)?;
     let tx = immediate(conn)?;
+    if let Some(expected) = expected
+        && notice(&tx, id)?.as_ref() != Some(expected)
+    {
+        return Ok(None);
+    }
     let current = required(&tx, id)?;
     if current.phase == PrNoticePhase::Ready && current.payload.as_deref() == Some(payload) {
-        return Ok(current);
+        return Ok(Some(current));
     }
     if current.phase != PrNoticePhase::Reserved {
         return Err(StorageError::PrAutoFix(PrAutoFixRejection::NotReserved));
@@ -292,10 +328,28 @@ pub(crate) fn ready(conn: &Connection, id: &str, payload: &str) -> Result<PrNoti
     tx.execute("INSERT INTO lane_notifications(notification_id,source_kind,pr_key,management_revision,event_kind,semantic_key,source_thread_id,destination_thread_id,payload) VALUES (?1,'pull_request_checks_failed',?2,1,'pr_checks_failed',?3,?4,?4,?5) ON CONFLICT(notification_id) DO UPDATE SET state='pending',claim_epoch=NULL,source_thread_id=excluded.source_thread_id,destination_thread_id=excluded.destination_thread_id,payload=excluded.payload",params![id,key_id(&current.key)?,current.head_sha,thread,json(&reference)?])?;
     let result = required(&tx, id)?;
     tx.commit()?;
-    Ok(result)
+    Ok(Some(result))
 }
 pub(crate) fn cancel(conn: &Connection, id: &str) -> Result<(), StorageError> {
+    cancel_checked(conn, id, None).map(|_| ())
+}
+pub(crate) fn cancel_if_current(
+    conn: &Connection,
+    expected: &PrNotice,
+) -> Result<bool, StorageError> {
+    cancel_checked(conn, &expected.notice_id, Some(expected))
+}
+fn cancel_checked(
+    conn: &Connection,
+    id: &str,
+    expected: Option<&PrNotice>,
+) -> Result<bool, StorageError> {
     let tx = immediate(conn)?;
+    if let Some(expected) = expected
+        && notice(&tx, id)?.as_ref() != Some(expected)
+    {
+        return Ok(false);
+    }
     let current = required(&tx, id)?;
     if current.phase == PrNoticePhase::Adopted {
         return Err(StorageError::PrAutoFix(PrAutoFixRejection::AlreadyAdopted));
@@ -306,7 +360,7 @@ pub(crate) fn cancel(conn: &Connection, id: &str) -> Result<(), StorageError> {
         [id],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 pub(crate) fn guard(
     conn: &Connection,
@@ -392,7 +446,22 @@ pub(crate) fn pending_destinations(
     conn: &Connection,
     after: &str,
 ) -> Result<Vec<String>, StorageError> {
-    let mut q=conn.prepare("SELECT DISTINCT destination_thread_id FROM lane_notifications WHERE source_kind='pull_request_checks_failed' AND state='pending' AND destination_thread_id>?1 AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones) ORDER BY destination_thread_id LIMIT 20")?;
+    let mut q = conn.prepare(
+        "SELECT thread_id FROM (
+           SELECT destination_thread_id AS thread_id FROM lane_notifications
+           WHERE source_kind='pull_request_checks_failed' AND state='pending'
+             AND destination_thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+           UNION
+           SELECT d.thread_id FROM lane_delivery_destinations d
+           JOIN run_contexts c ON c.run_id=json_extract(d.owner_json,'$.root_run_id')
+           WHERE d.stopped=0 AND c.parent_run_id IS NULL
+             AND c.terminal_phase IN ('Checkpoint','Error','Done')
+             AND c.run_id NOT IN (SELECT run_id FROM run_tombstones)
+             AND d.thread_id NOT IN (SELECT thread_id FROM thread_tombstones)
+             AND CASE WHEN json_valid(c.config_json)
+               THEN json_extract(c.config_json,'$.harness_notice_pending')=1 ELSE 0 END
+         ) WHERE thread_id>?1 ORDER BY thread_id LIMIT 20",
+    )?;
     Ok(q.query_map([after], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }

@@ -310,9 +310,17 @@ fn private_dir(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+/// Slot directory below `root`. The name is zero-padded to a fixed width: the saved path is
+/// part of the text a model receives, so its length must not depend on which slot a result
+/// lands in. Otherwise two equal conversations send requests of different byte sizes whenever
+/// their slots differ in digit count (9 vs 10, 63 vs 0), which breaks any size comparison.
+fn slot_dir(root: &Path, index: usize) -> PathBuf {
+    root.join(format!("{index:02}"))
+}
+
 fn locked_slot(root: &Path, index: usize) -> io::Result<(PathBuf, File)> {
     use std::os::unix::fs::OpenOptionsExt;
-    let dir = root.join(index.to_string());
+    let dir = slot_dir(root, index);
     private_dir(&dir)?;
     let lock = OpenOptions::new()
         .write(true)
@@ -443,7 +451,7 @@ fn start_cleanup(root: PathBuf) {
                 loop {
                     std::thread::sleep(Duration::from_secs(60));
                     // One already-existing slot per minute, outside UI/runtime threads.
-                    if root.join(slot.to_string()).is_dir()
+                    if slot_dir(&root, slot).is_dir()
                         && let Ok((dir, _lock)) = locked_slot(&root, slot)
                         && let Ok(entries) = std::fs::read_dir(dir)
                     {
@@ -852,13 +860,35 @@ mod tests {
         );
         for index in 0..SLOTS {
             assert_eq!(
-                std::fs::read_dir(root.path().join(index.to_string()))
+                std::fs::read_dir(slot_dir(root.path(), index))
                     .unwrap()
                     .count(),
                 2
             );
         }
     }
+    #[test]
+    fn every_slot_directory_name_has_the_same_width() {
+        let root = tempfile::tempdir().unwrap();
+        let widths = (0..SLOTS)
+            .map(|index| slot_dir(root.path(), index).file_name().unwrap().len())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(widths, std::collections::HashSet::from([2]));
+        // Results landing in slots 9 -> 10 and 63 -> 0 report equally long paths.
+        for first in [9, 63] {
+            std::fs::write(root.path().join(".next"), [first]).unwrap();
+            std::fs::set_permissions(
+                root.path().join(".next"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            )
+            .unwrap();
+            let (a, _) = store().save(root.path(), "a").unwrap();
+            let (b, _) = store().save(root.path(), "b").unwrap();
+            assert_ne!(a.parent(), b.parent());
+            assert_eq!(a.as_os_str().len(), b.as_os_str().len(), "slot {first}");
+        }
+    }
+
     #[test]
     fn preview_respects_unicode_and_line_limits() {
         let text = "日本語\n".repeat(5000);

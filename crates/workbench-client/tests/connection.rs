@@ -653,6 +653,7 @@ async fn replies_within_their_bounds_are_delivered() {
     assert!(result.is_ok(), "{result:?}");
     let (_, result) = ask(
         Query::ReadCommittedHistory(ReadCommittedHistory {
+            direction: Default::default(),
             thread: thread(),
             run: None,
             page: PageRequest::default(),
@@ -663,6 +664,7 @@ async fn replies_within_their_bounds_are_delivered() {
     assert!(result.is_ok(), "{result:?}");
     let (_, result) = ask(
         Query::ReadCommittedHistory(ReadCommittedHistory {
+            direction: Default::default(),
             thread: thread(),
             run: None,
             page: PageRequest::default(),
@@ -677,6 +679,7 @@ async fn replies_within_their_bounds_are_delivered() {
 async fn a_reply_that_breaks_its_bounds_is_refused_and_closes_the_connection() {
     let history = || {
         Query::ReadCommittedHistory(ReadCommittedHistory {
+            direction: Default::default(),
             thread: thread(),
             run: None,
             page: PageRequest::default(),

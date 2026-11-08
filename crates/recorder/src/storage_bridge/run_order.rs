@@ -29,7 +29,8 @@ pub(super) fn event_runs(event: &Event) -> Vec<&str> {
             | LifecycleEvent::AutoContinuationPaused { run_id, .. }
             | LifecycleEvent::HostInputDelivered { run_id, .. }
             | LifecycleEvent::HostInputDropped { run_id, .. }
-            | LifecycleEvent::HostInputUnknown { run_id, .. } => runs.push(run_id),
+            | LifecycleEvent::HostInputUnknown { run_id, .. }
+            | LifecycleEvent::HarnessNoticeDelivered { run_id, .. } => runs.push(run_id),
             LifecycleEvent::BackgroundTaskStarted { task_id }
             | LifecycleEvent::BackgroundTaskCompleted { task_id }
             | LifecycleEvent::BackgroundTaskCancelled { task_id } => runs.push(task_id),

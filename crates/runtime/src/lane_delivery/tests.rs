@@ -8,6 +8,7 @@ tokio::task_local! {
     pub(super) static AFTER_RECEIPT_BARRIER: Arc<tokio::sync::Barrier>;
     pub(super) static AFTER_RECEIPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 }
+mod harness;
 pub(super) mod integration;
 mod lease;
 mod monitor;
@@ -55,6 +56,9 @@ async fn delayed_report_hook_cannot_reset_newer_progress_or_wake_count() {
 struct Model {
     finish: AtomicBool,
     fail_next: AtomicBool,
+    admission_required: AtomicBool,
+    fail_admission_next: AtomicBool,
+    fail_after: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     block_next: AtomicBool,
     blocked: tokio::sync::Notify,
     requests: Mutex<Vec<Vec<Message>>>,
@@ -62,6 +66,18 @@ struct Model {
 }
 #[async_trait::async_trait]
 impl AgentModel for Model {
+    fn requires_admission(&self) -> bool {
+        self.admission_required.load(Ordering::SeqCst)
+    }
+    async fn admit(&self, _: &AgentInvocationContext, _: Role) -> Result<(), RuntimeError> {
+        if self.fail_admission_next.swap(false, Ordering::SeqCst) {
+            Err(RuntimeError::Model {
+                reason: "injected transient restore admission failure".into(),
+            })
+        } else {
+            Ok(())
+        }
+    }
     fn selected_model(&self, _: Role, _: Option<&str>) -> String {
         "test".into()
     }
@@ -77,6 +93,10 @@ impl AgentModel for Model {
             std::future::pending::<()>().await;
         }
         if self.fail_next.swap(false, Ordering::SeqCst) {
+            let release = self.fail_after.lock().unwrap().take();
+            if let Some(release) = release {
+                release.await.expect("fault injection release");
+            }
             return Err(RuntimeError::Model {
                 reason: "injected pre-send provider rejection".into(),
             });

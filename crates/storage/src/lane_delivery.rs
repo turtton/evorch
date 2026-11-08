@@ -86,6 +86,8 @@ pub enum LaneDeliveryNack {
     Stopped,
     RestoreFailed,
     StorageFailed,
+    /// The referenced PR body is absent or cannot fit the immutable input batch.
+    PayloadUnavailable,
 }
 
 /// Rebinding ownership/root never implicitly resumes a stopped destination.

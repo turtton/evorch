@@ -1,4 +1,14 @@
 {
+  "get_approval_input": {
+    "payload": {
+      "approval_id": "ap-1",
+      "approval_revision": "2",
+      "core_epoch": "7",
+      "max_bytes": 65536,
+      "offset": "0"
+    },
+    "type": "get_approval_input"
+  },
   "get_command_receipt": {
     "payload": {
       "request_id": "req-3"
@@ -82,6 +92,7 @@
   },
   "read_committed_history": {
     "payload": {
+      "direction": "forward",
       "page": {
         "cursor": "cur-1",
         "limit": 25
@@ -90,5 +101,15 @@
       "thread": "thr-1"
     },
     "type": "read_committed_history"
+  },
+  "read_snapshot": {
+    "payload": {
+      "page": {
+        "cursor": "cur-1",
+        "limit": 25
+      },
+      "snapshot_id": "snap-1"
+    },
+    "type": "read_snapshot"
   }
 }

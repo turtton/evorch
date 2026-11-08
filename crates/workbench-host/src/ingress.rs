@@ -208,6 +208,18 @@ impl CommandHost {
             Query::GetCommandReceipt { request_id } => Ok(QueryReply::CommandReceipt(
                 self.command_receipt(session, request_id)?,
             )),
+            Query::GetApprovalInput(q) => {
+                query.validate(&Default::default())?;
+                let input = self.approval_input_value(
+                    &q.approval_id,
+                    q.core_epoch,
+                    q.approval_revision,
+                    crate::queries::approval::registry_error,
+                )?;
+                Ok(QueryReply::ApprovalInput(crate::queries::approval::chunk(
+                    q, input,
+                )?))
+            }
             other => self.projection.query(other),
         }
     }
@@ -228,6 +240,16 @@ impl CommandHost {
                 "approval input requires human ingress",
             ));
         }
+        self.approval_input_value(approval_id, epoch, revision, approval_error)
+    }
+
+    fn approval_input_value(
+        &self,
+        approval_id: &workbench_protocol::ids::ApprovalId,
+        epoch: workbench_protocol::wire::InstanceEpoch,
+        revision: workbench_protocol::wire::Revision,
+        map_error: fn(sandbox::approval::ApprovalError) -> WorkbenchError,
+    ) -> Result<Option<std::sync::Arc<serde_json::Value>>, WorkbenchError> {
         let registry = self.projection.approval_registry();
         let id = sandbox::approval::ApprovalId {
             core_epoch: epoch.get(),
@@ -253,9 +275,7 @@ impl CommandHost {
                 })?;
             }
         }
-        registry
-            .full_input(&id, revision.get())
-            .map_err(approval_error)
+        registry.full_input(&id, revision.get()).map_err(map_error)
     }
 
     fn decide_approval(

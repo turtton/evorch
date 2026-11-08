@@ -805,8 +805,10 @@ fn v50_outbox_upgrade_preserves_lane_wire_ids_and_title() {
     let undo = std::fs::read_to_string(root.join("undo/undo_v51.sql")).unwrap();
     let conn = Connection::open(&config.db_path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    let management_undo = std::fs::read_to_string(root.join("undo/undo_v52.sql")).unwrap();
+    let management_undo = std::fs::read_to_string(root.join("undo/undo_v53.sql")).unwrap();
     conn.execute_batch(&management_undo).unwrap();
+    let preparation_undo = std::fs::read_to_string(root.join("undo/undo_v52.sql")).unwrap();
+    conn.execute_batch(&preparation_undo).unwrap();
     conn.execute_batch(&undo).unwrap();
     conn.execute_batch(
         "INSERT INTO pull_request_snapshots(provider,host,repository,number,state,
@@ -1008,3 +1010,127 @@ fn pr_storage_writes_obey_capacity_suspension_while_reads_remain_available() {
 
 #[path = "pull_request_auto_fix/lane_management.rs"]
 mod lane_management;
+
+#[test]
+fn stale_preparation_cannot_ready_or_cancel_another_destinations_replacement() {
+    let f = Fixture::new();
+    f.link("other");
+    f.policy(PrPolicyAction::SetEnabled(true));
+    let old = f.reserve(1, PrNoticeMode::Auto, 1);
+    // A second Storage owns a distinct SQLite writer connection. The old preparer
+    // already read its reservation; deliberately commit the adverse interleaving first.
+    let other = Storage::open(f.config.clone()).unwrap();
+    let h = other.handle();
+    assert!(h.cancel_pr_notice_if_current(old.clone()).unwrap());
+    let mut request = f.reservation(1, PrNoticeMode::Manual, 2);
+    request.destination_thread_id = "other".into();
+    let replacement = h.reserve_pr_notice(request).unwrap();
+    assert_eq!(old.notice_id, replacement.notice_id);
+    assert!(
+        f.h()
+            .ready_pr_notice_if_current(old.clone(), "old facts".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(!f.h().cancel_pr_notice_if_current(old.clone()).unwrap());
+    assert_eq!(
+        h.pr_notice(old.notice_id.clone()).unwrap().unwrap(),
+        replacement
+    );
+    assert_eq!(f.count("lane_notifications"), 0);
+    let ready = h
+        .ready_pr_notice_if_current(replacement, "new facts".into())
+        .unwrap()
+        .unwrap();
+    assert!(!f.h().cancel_pr_notice_if_current(old).unwrap());
+    assert_eq!(
+        h.pr_notice(ready.notice_id.clone()).unwrap().unwrap(),
+        ready
+    );
+    assert_eq!(f.count("lane_notifications"), 1);
+    assert_eq!(f.h().pr_auto_fix_state(key()).unwrap().reserved, 0);
+    assert!(h.cancel_pr_notice_if_current(ready).unwrap());
+    let state: String = f
+        .sql()
+        .query_row("SELECT state FROM lane_notifications", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "obsolete");
+}
+
+#[test]
+fn identical_cancelled_reservations_have_distinct_preparation_generations() {
+    let f = Fixture::new();
+    let other = Storage::open(f.config.clone()).unwrap();
+    let old = f.reserve(1, PrNoticeMode::Manual, 1);
+    assert!(
+        other
+            .handle()
+            .cancel_pr_notice_if_current(old.clone())
+            .unwrap()
+    );
+    let request = f.reservation(1, PrNoticeMode::Manual, 1);
+    let current = other.handle().reserve_pr_notice(request.clone()).unwrap();
+    assert_eq!(current.reservation_revision, old.reservation_revision + 1);
+    let mut same_contents = current.clone();
+    same_contents.reservation_revision = old.reservation_revision;
+    assert_eq!(
+        same_contents, old,
+        "the generation is the only ABA discriminator"
+    );
+    assert!(
+        f.h()
+            .ready_pr_notice_if_current(old.clone(), "stale".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(!f.h().cancel_pr_notice_if_current(old).unwrap());
+    assert_eq!(
+        other.handle().reserve_pr_notice(request).unwrap(),
+        current,
+        "an idempotent reserve does not advance the generation"
+    );
+    assert!(
+        other
+            .handle()
+            .ready_pr_notice_if_current(current, "fresh".into())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(f.count("lane_notifications"), 1);
+}
+
+#[test]
+fn v51_upgrade_preserves_a_ready_notice_and_its_outbox_with_an_initial_generation() {
+    let f = Fixture::new();
+    let reserved = f.reserve(1, PrNoticeMode::Manual, 1);
+    let ready = f
+        .h()
+        .ready_pr_notice(reserved.notice_id, "durable facts".into())
+        .unwrap();
+    f.sql()
+        .execute_batch(concat!(
+            include_str!("../undo/undo_v53.sql"),
+            include_str!("../undo/undo_v52.sql")
+        ))
+        .unwrap();
+    f.sql().pragma_update(None, "user_version", 51).unwrap();
+    let upgraded = Storage::open(f.config.clone()).unwrap();
+    let restored = upgraded
+        .handle()
+        .pr_notice(ready.notice_id.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored, ready);
+    assert_eq!(restored.reservation_revision, 1);
+    assert_eq!(f.count("lane_notifications"), 1);
+    assert!(
+        upgraded
+            .handle()
+            .cancel_pr_notice_if_current(restored)
+            .unwrap()
+    );
+    assert_eq!(
+        f.reserve(1, PrNoticeMode::Manual, 1).reservation_revision,
+        2
+    );
+}

@@ -81,6 +81,10 @@ pub struct ForkBoundary {
 #[serde(tag = "origin", rename_all = "snake_case")]
 pub enum BlockOrigin {
     Native,
+    /// Durable internal input identity, never native human text.
+    HarnessNotice {
+        notification_id: String,
+    },
     ContinuityCopy {
         source: CopySource,
     },

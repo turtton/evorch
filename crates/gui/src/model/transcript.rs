@@ -164,6 +164,13 @@ pub enum TranscriptEntry {
         run_id: String,
         context_len: u64,
     },
+    /// A harness notice that became part of the conversation here, by its durable notice
+    /// ID. The card is read from the stored notice after the entry exists, so a replay or a
+    /// second delivery of the same event never adds a second card.
+    HarnessNotice {
+        notice_id: String,
+        card: Option<Box<super::harness_card::HarnessCard>>,
+    },
     /// Where a forked or rewound conversation leaves its inherited history.
     Branch {
         kind: workspace_ui::LineageKind,
@@ -494,6 +501,9 @@ impl TranscriptModel {
                     }
                 }
             }
+            event_bus::EventKind::Lifecycle(event_bus::LifecycleEvent::HarnessNoticeDelivered {
+                notification_id, ..
+            }) => self.push_harness_notice(notification_id),
             event_bus::EventKind::Compaction(_) => {},
             event_bus::EventKind::Tool(event_bus::ToolEvent::ArtifactsPresented {
                 presentation, ..
@@ -768,6 +778,7 @@ impl TranscriptModel {
                     | TranscriptEntry::TurnEnd { .. }
                     | TranscriptEntry::Artifacts { .. }
                     | TranscriptEntry::Unreadable { .. }
+                    | TranscriptEntry::HarnessNotice { .. }
                     | TranscriptEntry::Branch { .. } => {}
                 }
             }
@@ -1004,6 +1015,47 @@ impl TranscriptModel {
     ) -> Option<&mut TranscriptEntry> {
         let index = self.scoped_tool_index(call_id, run)?;
         self.entry_mut(index)
+    }
+
+    /// One entry per durable notice ID, wherever the event comes from (live, replayed, or
+    /// seen through another window).
+    fn push_harness_notice(&mut self, notice_id: &str) {
+        if self.entries.iter().any(|entry| {
+            matches!(entry, TranscriptEntry::HarnessNotice { notice_id: id, .. } if id == notice_id)
+        }) {
+            return;
+        }
+        self.push(TranscriptEntry::HarnessNotice {
+            notice_id: notice_id.to_owned(),
+            card: None,
+        });
+    }
+
+    /// The notice IDs shown without their card yet.
+    pub(crate) fn unfilled_harness_notices(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::HarnessNotice {
+                    notice_id,
+                    card: None,
+                } => Some(notice_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Fills the card of `notice_id`, when it is shown. Returns whether it was.
+    pub(crate) fn fill_harness_card(&mut self, card: &super::harness_card::HarnessCard) -> bool {
+        let Some(index) = self.entries.iter().position(|entry| {
+            matches!(entry, TranscriptEntry::HarnessNotice { notice_id, .. } if *notice_id == card.notice_id)
+        }) else {
+            return false;
+        };
+        if let Some(TranscriptEntry::HarnessNotice { card: slot, .. }) = self.entry_mut(index) {
+            *slot = Some(Box::new(card.clone()));
+        }
+        true
     }
 
     pub(crate) fn push_host_input(&mut self, id: &str, text: String, skills: Vec<String>) {

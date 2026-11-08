@@ -411,6 +411,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         }
         self.render_project_dialog(ui.ctx());
         self.render_link_dialog(ui.ctx());
+        self.render_destination_dialog(ui.ctx());
         self.render_thread_search(ui.ctx());
         self.render_theme_settings(ui.ctx());
         self.render_sandbox_settings(ui.ctx());

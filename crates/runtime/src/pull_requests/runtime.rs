@@ -7,14 +7,28 @@ use std::sync::Arc;
 use config::PullRequestsConfig;
 
 use super::{
-    DerivedThreadKind, OwnershipView, PullRequestService, PullRequestSource, ServiceParts,
-    SystemWallClock, ThreadEnvironment,
+    DerivedThreadKind, OwnershipView, PrNoticeDelivery, PullRequestService, PullRequestSource,
+    ServiceParts, SystemWallClock, ThreadEnvironment,
 };
 use crate::{AgentRuntime, WeakAgentRuntime};
 
 /// Reads thread facts from the runtime without keeping it alive.
 struct RuntimeEnvironment {
     runtime: WeakAgentRuntime,
+}
+
+impl PrNoticeDelivery for RuntimeEnvironment {
+    fn schedule(&self, thread: &str) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.schedule_lane_deliveries(thread);
+        }
+    }
+    fn subscribe_resumes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.runtime.upgrade().map_or_else(
+            || tokio::sync::watch::channel(0).1,
+            |runtime| runtime.subscribe_harness_delivery_resumes(),
+        )
+    }
 }
 
 impl ThreadEnvironment for RuntimeEnvironment {
@@ -91,6 +105,26 @@ impl AgentRuntime {
         source: Arc<dyn PullRequestSource>,
         settings: PullRequestsConfig,
     ) -> Result<PullRequestService, String> {
+        self.start_pull_requests_with_log_source(
+            ownership,
+            source,
+            settings,
+            Arc::new(super::GhLogSource::new()),
+        )
+    }
+
+    /// [`Self::start_pull_requests`] with the source of the CI failure logs a notice carries
+    /// (the `gh` CLI in production; a script in tests that must not reach a network).
+    ///
+    /// # Errors
+    /// As [`Self::start_pull_requests`].
+    pub fn start_pull_requests_with_log_source(
+        &self,
+        ownership: Arc<dyn OwnershipView>,
+        source: Arc<dyn PullRequestSource>,
+        settings: PullRequestsConfig,
+        logs: Arc<dyn super::PullRequestLogSource>,
+    ) -> Result<PullRequestService, String> {
         if let Some(existing) = self.shared.pull_requests.get() {
             return Ok(existing.clone());
         }
@@ -101,17 +135,23 @@ impl AgentRuntime {
             .ok_or_else(|| "pull request tracking needs the run store".to_owned())?
             .handle
             .clone();
-        let service = PullRequestService::start(ServiceParts {
-            storage,
-            source,
-            ownership,
-            environment: Arc::new(RuntimeEnvironment {
+        let service = PullRequestService::start_with_notice_delivery(
+            ServiceParts {
+                storage,
+                source,
+                ownership,
+                environment: Arc::new(RuntimeEnvironment {
+                    runtime: self.downgrade(),
+                }),
+                bus: Arc::clone(&self.shared.bus),
+                settings,
+                clock: Arc::new(SystemWallClock),
+            },
+            logs,
+            Arc::new(RuntimeEnvironment {
                 runtime: self.downgrade(),
             }),
-            bus: Arc::clone(&self.shared.bus),
-            settings,
-            clock: Arc::new(SystemWallClock),
-        })
+        )
         .map_err(|error| error.to_string())?;
         Ok(self.shared.pull_requests.get_or_init(|| service).clone())
     }

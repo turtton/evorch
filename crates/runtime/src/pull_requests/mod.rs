@@ -1,13 +1,12 @@
-//! Fetching the state of a GitHub pull request for the harness (ADR 0043 Phase 1, PR2).
+//! GitHub PR tracking and bounded CI-notice preparation (ADR 0043).
 //!
-//! This module is the *adapter* layer only: how a pull request's facts are obtained
-//! ([`PullRequestSource`], with [`source::GhSource`] running the `gh` CLI), how a pull
-//! request is found in a local checkout ([`checkout`]), and a scriptable [`fake`] for the
-//! services that come later. Nothing here schedules, stores, publishes or shows anything.
+//! Structured facts come from [`PullRequestSource`]; [`service`] schedules owned links
+//! and prepares eligible failure notices in the shared durable outbox. Delivery belongs
+//! to the common runtime driver, never to a second PR queue or direct history editing.
 //!
-//! What crosses the boundary is structured: the [`storage::pull_requests`] DTOs. A pull
-//! request's body, comments, review texts, CI logs and any counts are never requested; the
-//! title is, for display only.
+//! PR bodies, comments and review texts are never requested. Titles remain display-only.
+//! CI logs are fetched separately, only after reservation, and remain bounded data rather
+//! than instructions or review evidence.
 
 pub mod candidates;
 pub mod checkout;
@@ -41,8 +40,8 @@ pub use review::{
     Freshness, ReviewLookup, ReviewPullRequest, ReviewRefresh, ReviewSupply, StaleReason,
 };
 pub use service::{
-    DerivedThreadKind, InheritanceScheduling, PullRequestError, PullRequestService, ServiceParts,
-    SystemWallClock, WallClock,
+    DerivedThreadKind, HeadAttribution, InheritanceScheduling, PrNoticeDelivery, PullRequestError,
+    PullRequestService, ServiceParts, SystemWallClock, WallClock,
 };
 pub use source::{GhSource, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec};
 

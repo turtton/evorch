@@ -20,6 +20,7 @@ pub use goal::GoalAction;
 mod branch;
 pub use branch::BranchContext;
 mod composer_panel;
+mod harness_card;
 mod header;
 mod pull_request_bar;
 pub use pull_request_bar::{
@@ -514,6 +515,14 @@ fn run_detail_body(
                         );
                         return;
                     }
+                    if let TranscriptEntry::HarnessNotice { notice_id, card } = entry {
+                        harness_card::show(
+                            ui,
+                            pane_id.with(("harness", notice_id)),
+                            card.as_deref(),
+                        );
+                        return;
+                    }
                     if let TranscriptEntry::UserMessage { text, skills } = entry {
                         user_bubble(ui, text, skills);
                         if let Some(branch) = branch {
@@ -583,6 +592,7 @@ fn run_detail_body(
                             | TranscriptEntry::TurnEnd { .. }
                             | TranscriptEntry::Artifacts { .. }
                             | TranscriptEntry::Unreadable { .. }
+                            | TranscriptEntry::HarnessNotice { .. }
                             | TranscriptEntry::Branch { .. } => {}
                         }
                         if let TranscriptEntry::Message { text, .. } = entry {
@@ -757,6 +767,7 @@ fn event_icon(entry: &TranscriptEntry) -> Option<(&'static str, Color32)> {
         | TranscriptEntry::TurnEnd { .. }
         | TranscriptEntry::Artifacts { .. }
         | TranscriptEntry::Unreadable { .. }
+        | TranscriptEntry::HarnessNotice { .. }
         | TranscriptEntry::Branch { .. } => None,
     }
 }
@@ -893,6 +904,10 @@ fn entry_label(entry: &TranscriptEntry) -> String {
         TranscriptEntry::Artifacts { presentation } => {
             crate::panes::artifact_card::summary(presentation)
         }
+        TranscriptEntry::HarnessNotice { card, .. } => card.as_ref().map_or_else(
+            || harness_card::TAG.to_owned(),
+            |card| format!("{} {}", harness_card::TAG, harness_card::headline(card)),
+        ),
     }
 }
 

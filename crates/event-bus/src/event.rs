@@ -107,6 +107,7 @@ impl EventKind {
                 LifecycleEvent::HostInputDelivered { .. } => "HostInputDelivered",
                 LifecycleEvent::HostInputDropped { .. } => "HostInputDropped",
                 LifecycleEvent::HostInputUnknown { .. } => "HostInputUnknown",
+                LifecycleEvent::HarnessNoticeDelivered { .. } => "HarnessNoticeDelivered",
             },
             Self::Message(event) => match event {
                 MessageEvent::MessageCompleted { .. } => "MessageCompleted",
@@ -187,7 +188,8 @@ impl EventKind {
                 | LifecycleEvent::AutoContinuationPaused { run_id, .. }
                 | LifecycleEvent::HostInputDelivered { run_id, .. }
                 | LifecycleEvent::HostInputDropped { run_id, .. }
-                | LifecycleEvent::HostInputUnknown { run_id, .. } => Some(run_id),
+                | LifecycleEvent::HostInputUnknown { run_id, .. }
+                | LifecycleEvent::HarnessNoticeDelivered { run_id, .. } => Some(run_id),
                 LifecycleEvent::Started { .. }
                 | LifecycleEvent::Delegated { .. }
                 | LifecycleEvent::BackgroundTaskStarted { .. }
@@ -890,6 +892,14 @@ pub enum LifecycleEvent {
         prompt_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+    },
+    /// A harness notice (not the user's words) was committed into this run's context at this
+    /// point of the conversation. Notification only: the stored notice is authoritative and
+    /// its text is never part of the event. One event per durable notice ID.
+    HarnessNoticeDelivered {
+        run_id: String,
+        /// The durable notice identity that the receipt and the provenance carry.
+        notification_id: String,
     },
 }
 
@@ -1934,6 +1944,14 @@ mod tests {
                     run_id: "run-1".into(),
                     prompt_id: "prompt-3".into(),
                     reason: None,
+                }
+                .into(),
+            ),
+            (
+                "Lifecycle",
+                LifecycleEvent::HarnessNoticeDelivered {
+                    run_id: "run-1".into(),
+                    notification_id: "pr-notice-1".into(),
                 }
                 .into(),
             ),
