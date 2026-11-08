@@ -13,6 +13,7 @@ import { parseInline, parseMarkdown, renderMarkdown, safeHref } from "../../asse
 import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.js";
 import { composerRoleFor, createStore } from "../../assets/js/store.js";
 import { fetchAllPages } from "../../assets/js/paging.js";
+import { RereadScheduler } from "../../assets/js/reread.js";
 import { coreChanged } from "../../assets/js/format.js";
 import {
   classifyCursor,
@@ -557,6 +558,104 @@ test(
   },
   { dom: true },
 );
+
+// ---- reread ----------------------------------------------------------------
+
+/** A clock and timers the test advances by hand. */
+function manualTime() {
+  let now = 0;
+  let timers = [];
+  return {
+    now: () => now,
+    setTimer: (fn, ms) => {
+      const timer = { at: now + ms, fn };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (timer) => {
+      timers = timers.filter((t) => t !== timer);
+    },
+    advance(ms) {
+      now += ms;
+      for (;;) {
+        const due = timers.filter((t) => t.at <= now).sort((a, b) => a.at - b.at)[0];
+        if (!due) return;
+        timers = timers.filter((t) => t !== due);
+        due.fn();
+      }
+    },
+    pending: () => timers.length,
+  };
+}
+
+function scheduler(time, log) {
+  return new RereadScheduler({
+    run: () => log.push(`read@${time.now()}`),
+    onPaused: (wait) => log.push(`paused ${wait}`),
+    debounceMs: 300,
+    max: 2,
+    windowMs: 10_000,
+    now: time.now,
+    setTimer: time.setTimer,
+    clearTimer: time.clearTimer,
+  });
+}
+
+test("a burst of unplaced events causes one re-read after the quiet time", () => {
+  const time = manualTime();
+  const log = [];
+  const s = scheduler(time, log);
+  s.request();
+  time.advance(100);
+  s.request();
+  s.request();
+  time.advance(199);
+  eq(log, []);
+  time.advance(1);
+  eq(log, ["read@300"]);
+});
+
+test("over budget the re-read waits and then runs by itself", () => {
+  const time = manualTime();
+  const log = [];
+  const s = scheduler(time, log);
+  s.request();
+  time.advance(300);
+  s.request();
+  time.advance(300);
+  eq(log, ["read@300", "read@600"]);
+  // A third burst within the window: paused until the first read leaves it.
+  s.request();
+  time.advance(300);
+  eq(log.at(-1), "paused 9400", "waits until 300 + 10000");
+  assert(s.paused);
+  s.request();
+  eq(time.pending(), 1, "requests while paused join the waiting read");
+  time.advance(9399);
+  eq(log.length, 3);
+  time.advance(1);
+  eq(log.at(-1), "read@10300", "the budget came back: the pending read runs");
+  assert(!s.paused);
+});
+
+test("a manual reload clears the budget and the waiting read", () => {
+  const time = manualTime();
+  const log = [];
+  const s = scheduler(time, log);
+  for (let i = 0; i < 3; i += 1) {
+    s.request();
+    time.advance(300);
+  }
+  assert(s.paused);
+  s.reset();
+  eq(time.pending(), 0);
+  s.request();
+  time.advance(300);
+  eq(log.at(-1), "read@1200");
+  s.dispose();
+  s.request();
+  eq(time.pending(), 0, "nothing after the view is gone");
+});
 
 // ---- sse ----------------------------------------------------------------------
 

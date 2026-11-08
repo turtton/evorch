@@ -49,6 +49,7 @@ pub const UI_ASSETS: &[StaticAsset] = &[
     asset!("js/history.js", JS),
     asset!("js/markdown.js", JS),
     asset!("js/paging.js", JS),
+    asset!("js/reread.js", JS),
     asset!("js/sse.js", JS),
     asset!("js/store.js", JS),
     asset!("js/views.js", JS),

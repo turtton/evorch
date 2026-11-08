@@ -61,6 +61,24 @@ const DROPPED_TEXT: &str = "読まれずに終わった送信";
 const RESUMED_TEXT: &str = "再接続のあとに届いた新しいメッセージ";
 const LATE_INPUT_TEXT: &str = "遅れて届いた古い run への入力";
 const FRESH_REPLY_TEXT: &str = "ページのあとに届いた返信";
+const LATE_ABOVE_TEXT: &str = "大きな本文より前に入る遅れた入力";
+const LATE_WHILE_READING_TEXT: &str = "読み直し中に上へスクロールした時の入力";
+
+/// A body larger than one 64 KiB chunk, read in three.
+fn big_body_text() -> String {
+    format!(
+        "大きな本文の先頭です。\n\n{}\n\n大きな本文の終わり。",
+        "abcdefghij ".repeat(14_000)
+    )
+}
+
+fn body_source(base: &str) -> String {
+    match base {
+        "body-1" => body_text(),
+        "body-2" => big_body_text(),
+        other => panic!("unknown body {other}"),
+    }
+}
 
 fn body_text() -> String {
     format!(
@@ -99,6 +117,7 @@ fn history() -> Vec<Value> {
                 226 => ("user", json!({"type": "inline", "payload": {"text": "ログイン後のリダイレクト先が壊れています。直してください。"}})),
                 227 => ("assistant", json!({"type": "inline", "payload": {"text": markdown}})),
                 228 => ("tool", json!({"type": "inline", "payload": {"text": "running 12 tests\ntest result: ok. 12 passed; 0 failed"}})),
+                225 => ("assistant", json!({"type": "body", "payload": {"body_id": "body-2", "total_bytes": big_body_text().len().to_string()}})),
                 229 => ("assistant", json!({"type": "body", "payload": {"body_id": "body-1", "total_bytes": body_text().len().to_string()}})),
                 i if i % 3 == 0 => ("user", json!({"type": "inline", "payload": {"text": format!("メッセージ {i}")}})),
                 i => ("assistant", json!({"type": "inline", "payload": {"text": format!("メッセージ {i}")}})),
@@ -140,6 +159,11 @@ struct World {
     /// Approvals whose input read is interrupted by a new revision.
     stale_inputs: Vec<String>,
     history_reads: usize,
+    /// Reads of the newest page; body ids carry it, as the host issues new
+    /// ids on every read.
+    newest_reads: usize,
+    /// Every body id read, in order.
+    body_reads: Vec<String>,
     snapshot_reads: usize,
     /// The next resumed subscription replays old messages (already on screen
     /// or older than the page) before one new one, as a host replay can.
@@ -222,6 +246,8 @@ impl World {
             expire_snapshot_once: true,
             stale_inputs: vec!["ap-2".to_owned()],
             history_reads: 0,
+            newest_reads: 0,
+            body_reads: Vec::new(),
             snapshot_reads: 0,
             replay_on_resume: false,
         }
@@ -382,9 +408,14 @@ impl UiBackend {
     /// A user input of the old run, accepted before the last `before`
     /// messages but delivered only now: the core puts it at its acceptance
     /// time, not after the newest message.
-    fn deliver_late(&self, before: usize) {
+    fn deliver_late(&self, before: usize, text: &str) {
         let mut world = self.world.lock().unwrap();
-        let message = json!({"thread": "thr-1", "run": "run-old", "index": OLD_RUN_LEN.to_string(), "role": "user", "content": {"type": "inline", "payload": {"text": LATE_INPUT_TEXT}}});
+        let index = world
+            .history
+            .iter()
+            .filter(|m| m["run"] == "run-old")
+            .count();
+        let message = json!({"thread": "thr-1", "run": "run-old", "index": index.to_string(), "role": "user", "content": {"type": "inline", "payload": {"text": text}}});
         let at = world.history.len() - before;
         world.history.insert(at, message.clone());
         world.publish(json!({"type": "message_committed", "payload": {"message": message}}));
@@ -591,10 +622,26 @@ impl UiBackend {
                 let limit = p["page"]["limit"].as_u64().unwrap() as usize;
                 let start = end.saturating_sub(limit);
                 let next = (start > 0).then(|| format!("b{start}"));
-                query_reply(
-                    "committed_history",
-                    page(world.history[start..end].to_vec(), next),
-                )
+                if p["page"]["cursor"].is_null() {
+                    world.newest_reads += 1;
+                }
+                let generation = world.newest_reads;
+                let items = world.history[start..end]
+                    .iter()
+                    .cloned()
+                    .map(|mut message| {
+                        if message["content"]["type"] == "body" {
+                            let base = message["content"]["payload"]["body_id"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                            message["content"]["payload"]["body_id"] =
+                                json!(format!("{base}-g{generation}"));
+                        }
+                        message
+                    })
+                    .collect();
+                query_reply("committed_history", page(items, next))
             }
             "get_approval_input" => {
                 let id = p["approval_id"].as_str().unwrap().to_owned();
@@ -655,9 +702,12 @@ impl UiBackend {
             }
             "read_body" => {
                 let offset = p["offset"].as_str().unwrap().parse().unwrap();
+                let id = p["body_id"].as_str().unwrap().to_owned();
+                world.body_reads.push(id.clone());
+                let base = id.split("-g").next().unwrap();
                 let chunk = BodyChunk::slice(
-                    BodyId::new("body-1").unwrap(),
-                    &body_text(),
+                    BodyId::new(id.clone()).unwrap(),
+                    &body_source(base),
                     ByteOffset(offset),
                     p["max_bytes"].as_u64().unwrap() as u32,
                 )
@@ -1204,7 +1254,7 @@ async fn web_workbench_main_flows_in_chromium() {
     ))
     .await;
     let reads_before = backend.world.lock().unwrap().history_reads;
-    backend.deliver_late(3);
+    backend.deliver_late(3, LATE_INPUT_TEXT);
     let late = ui
         .wait(&format!(
             r##"() => {{ const bodies = [...document.querySelectorAll(".messages .msg .msg-body")].map((b) => b.textContent);
@@ -1224,7 +1274,115 @@ async fn web_workbench_main_flows_in_chromium() {
         "the late input made the view read the newest page again"
     );
 
-    for expected in [100, 150, 200, 233] {
+    eprintln!("step: a re-read keeps a partly read body and the place on screen");
+    // Read the first chunk of the large body, with its message near the top
+    // of the screen.
+    const BIG: &str = r##"document.querySelector('.messages .msg[data-key="run-root#225"]')"##;
+    ui.eval(&format!(
+        r##"{BIG}.querySelector(".msg-body button.small:not([hidden])").click()"##
+    ))
+    .await;
+    let partial = ui
+        .wait(&format!(
+            r##"() => {{ const m = {BIG}; const more = [...m.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む"));
+                return more && m.querySelector(".body-text").textContent.length; }}"##
+        ))
+        .await;
+    let first_id = backend
+        .world
+        .lock()
+        .unwrap()
+        .body_reads
+        .last()
+        .cloned()
+        .unwrap();
+    let before = ui
+        .eval(&format!(
+            r##"(() => {{ const m = {BIG}; m.scrollIntoView({{ block: "start" }}); window.scrollBy(0, -120);
+                return Math.round(m.getBoundingClientRect().top); }})()"##
+        ))
+        .await;
+    // A late input that belongs above it makes the view read the page again.
+    let reads_before = backend.world.lock().unwrap().history_reads;
+    let position = backend
+        .world
+        .lock()
+        .unwrap()
+        .history
+        .iter()
+        .position(|m| m["content"]["payload"]["body_id"] == "body-2")
+        .unwrap();
+    let len = backend.world.lock().unwrap().history.len();
+    backend.deliver_late(len - (position - 2), LATE_ABOVE_TEXT);
+    let kept = ui
+        .wait(&format!(
+            r##"() => {{ if (!document.querySelector(".messages").textContent.includes({LATE_ABOVE_TEXT:?})) return false;
+                if (document.querySelector(".history-status").textContent) return false;
+                const m = {BIG};
+                const buttons = [...m.querySelectorAll("button")].filter((b) => !b.hidden).map((b) => b.textContent.replace(/（.*/, ""));
+                return {{ text: m.querySelector(".body-text").textContent.length, buttons,
+                          top: Math.round(m.getBoundingClientRect().top) }}; }}"##
+        ))
+        .await;
+    assert!(
+        backend.world.lock().unwrap().history_reads > reads_before,
+        "the late input caused a re-read"
+    );
+    assert_eq!(
+        kept,
+        json!({"text": partial, "buttons": ["続きを読み込む"], "top": before}),
+        "the partly read body and its place on screen survive the re-read"
+    );
+    ui.eval(&format!(
+        r##"[...{BIG}.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む")).click()"##
+    ))
+    .await;
+    ui.wait(&format!(
+        r##"() => {{ const m = {BIG}; return m.querySelector(".body-text").textContent.length > {partial}; }}"##
+    ))
+    .await;
+    let second_id = backend
+        .world
+        .lock()
+        .unwrap()
+        .body_reads
+        .last()
+        .cloned()
+        .unwrap();
+    assert_ne!(
+        second_id, first_id,
+        "the next chunk is read with the body id of the newest read"
+    );
+    assert!(second_id.starts_with("body-2-g"));
+
+    eprintln!("step: scrolling up while a re-read runs keeps the place");
+    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+        .await;
+    let held_history = backend.hold("read_committed_history");
+    backend.deliver_late(1, LATE_WHILE_READING_TEXT);
+    held_history.entered().await;
+    let up = ui
+        .eval(&format!(
+            r##"(() => {{ const m = {BIG}; m.scrollIntoView({{ block: "start" }}); window.scrollBy(0, -120);
+                return Math.round(m.getBoundingClientRect().top); }})()"##
+        ))
+        .await;
+    backend.unhold("read_committed_history");
+    let after = ui
+        .wait(&format!(
+            r##"() => document.querySelector(".messages").textContent.includes({LATE_WHILE_READING_TEXT:?})
+                && !document.querySelector(".history-status").textContent
+                && {{ top: Math.round({BIG}.getBoundingClientRect().top),
+                      bottom: document.scrollingElement.scrollHeight - document.scrollingElement.scrollTop - document.scrollingElement.clientHeight < 160 }}"##
+        ))
+        .await;
+    assert_eq!(
+        after,
+        json!({"top": up, "bottom": false}),
+        "the view did not jump back to the bottom"
+    );
+
+    for expected in [100, 150, 200, 235] {
         ui.click("button.older").await;
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
