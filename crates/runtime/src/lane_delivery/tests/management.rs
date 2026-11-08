@@ -332,6 +332,137 @@ async fn simultaneous_detach_and_double_reattach_have_one_winner_and_default_sum
     shutdown(&f, &[lead, lane.root_run_id]).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_detach_and_reattach_commit_only_the_action_valid_for_the_revision() {
+    let mut f = Fixture::new();
+    let (lead, _) = f.lead().await;
+    let lane = f.lane(lead, "mixed-management-cas").await;
+    project(&f);
+    for (revision, attached) in [(1, true), (2, false)] {
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = vec![];
+        for attaching in [false, true] {
+            let runtime = f.runtime.clone();
+            let barrier = barrier.clone();
+            let request = if attaching {
+                attach_request(
+                    &lane,
+                    &format!("mixed-attach-{revision}"),
+                    revision,
+                    lead,
+                    "delivery-lead",
+                )
+            } else {
+                request(
+                    &lane,
+                    &format!("mixed-detach-{revision}"),
+                    revision,
+                    LaneManagementAction::Detach,
+                )
+            };
+            tasks.push((
+                attaching,
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    if attaching {
+                        runtime.reattach_lane(
+                            LaneHumanContext,
+                            request,
+                            LaneAttachGuard {
+                                pinned: false,
+                                archived: false,
+                            },
+                        )
+                    } else {
+                        runtime.detach_lane(user(), request)
+                    }
+                }),
+            ));
+        }
+        barrier.wait().await;
+        for (attaching, task) in tasks {
+            let result = task.await.unwrap();
+            if attaching == attached {
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(
+                        error.code,
+                        "invalid_policy_transition" | "stale_management_revision"
+                    ),
+                    "{error:?}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().operation.lane.management_revision,
+                    revision + 1
+                );
+            }
+        }
+        let current = f.storage.handle().lane(&lane.lane_id).unwrap().unwrap();
+        assert_eq!(current.management_revision, revision + 1);
+        assert_eq!(
+            current.policy,
+            if attached {
+                event_bus::LanePolicy::Detached
+            } else {
+                event_bus::LanePolicy::Summary
+            }
+        );
+    }
+    shutdown(&f, &[lead, lane.root_run_id]).await;
+}
+
+#[tokio::test]
+async fn detached_report_claim_does_not_restore_a_done_or_unfinished_error_lead() {
+    for failed_lead in [false, true] {
+        for status in [LaneStatus::Ready, LaneStatus::Failed] {
+            let mut f = Fixture::new();
+            let (lead, host) = f.lead().await;
+            let lane = f.lane(lead, "fenced-wake").await;
+            let phase = if failed_lead {
+                f.model.fail_next.store(true, Ordering::SeqCst);
+                f.runtime
+                    .send_message(lead, "unfinished saved turn".into())
+                    .unwrap();
+                f.runtime.wait(lead).await.unwrap();
+                AgentRunPhase::Error
+            } else {
+                f.finish(lead).await;
+                AgentRunPhase::Done
+            };
+            assert_eq!(f.runtime.inspect_agent(lead).unwrap().phase, phase);
+            let mut input = report();
+            input.status = status;
+            input.failure_episode = (status == LaneStatus::Failed).then(|| "failure-1".into());
+            f.storage
+                .handle()
+                .append_lane_report_with_delivery(lane.lane_id.clone(), 1, input, 100)
+                .unwrap();
+            let requests = f.model.requests.lock().unwrap().len();
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let gate = barrier.clone();
+            let runtime = f.runtime.clone();
+            let delivery = tokio::spawn(BEFORE_QUEUE.scope(gate, async move {
+                runtime.drive_lane_deliveries("delivery-lead").await
+            }));
+            // The claim exists and targets a terminal lead; no restore has happened.
+            barrier.wait().await;
+            assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+            detach(&f, &lane, 1);
+            barrier.wait().await;
+            assert!(matches!(
+                delivery.await.unwrap().unwrap(),
+                LaneDeliveryOutcome::Nacked(_)
+            ));
+            assert_eq!(host.restores.load(Ordering::SeqCst), 0);
+            assert_eq!(f.model.requests.lock().unwrap().len(), requests);
+            assert_eq!(f.runtime.inspect_agent(lead).unwrap().phase, phase);
+            assert_eq!(f.receipts(), 0);
+            shutdown(&f, &[lead, lane.root_run_id]).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn claim_detach_accept_rejects_old_report_but_preserves_accepted_prefix_before_ack() {
     for received_first in [false, true] {
@@ -374,6 +505,107 @@ async fn claim_detach_accept_rejects_old_report_but_preserves_accepted_prefix_be
             .await
             .unwrap();
         assert_eq!(f.receipts(), receipts);
+        shutdown(&f, &[lead, lane.root_run_id]).await;
+    }
+}
+
+#[tokio::test]
+async fn wake_gate_rechecks_management_and_claim_after_the_host_callback_starts() {
+    struct InterleavingHost {
+        inner: Arc<Host>,
+        detach: Mutex<Option<LaneManagementRequest>>,
+        callbacks: AtomicUsize,
+    }
+    impl LaneDeliveryHost for InterleavingHost {
+        fn resolve(&self, thread: &str) -> Result<LaneDeliveryTarget, LaneDeliveryNack> {
+            self.inner.resolve(thread)
+        }
+        fn now_ns(&self) -> i64 {
+            self.inner.now_ns()
+        }
+        fn restore_root(
+            &self,
+            runtime: &AgentRuntime,
+            target: &LaneDeliveryTarget,
+        ) -> Result<(), LaneDeliveryNack> {
+            self.callbacks.fetch_add(1, Ordering::SeqCst);
+            // The advisory preflight already passed. Fence at the last host
+            // boundary to prove that only validation inside wake_chat is enough.
+            if let Some(request) = self.detach.lock().unwrap().take() {
+                runtime.detach_lane(user(), request).unwrap();
+            } else {
+                let claim = runtime
+                    .shared
+                    .lanes
+                    .delivery
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .get(&target.root_run_id)
+                    .unwrap()
+                    .claim
+                    .lane()
+                    .unwrap()
+                    .clone();
+                runtime
+                    .delivery_store()
+                    .unwrap()
+                    .handle
+                    .nack_lane_delivery(claim, LaneDeliveryNack::OwnershipLost, self.now_ns())
+                    .unwrap();
+            }
+            assert!(matches!(
+                runtime.wake_chat(target.root_run_id, target.authority.clone()),
+                Err(crate::RuntimeError::RunRestoreFailed {
+                    reason: crate::RunRestoreFailure::LaneDeliveryFenced(
+                        LaneDeliveryNack::OwnershipLost
+                    ),
+                    ..
+                })
+            ));
+            Err(LaneDeliveryNack::OwnershipLost)
+        }
+    }
+    for management_changes in [false, true] {
+        let mut f = Fixture::new();
+        let (lead, inner) = f.lead().await;
+        let lane = f.lane(lead, "host-interleaving").await;
+        f.finish(lead).await;
+        f.report(&lane, Some(1), LaneStatus::Ready);
+        let requests = f.model.requests.lock().unwrap().len();
+        let host = Arc::new(InterleavingHost {
+            inner,
+            detach: Mutex::new(
+                management_changes
+                    .then(|| request(&lane, "host-detach", 1, LaneManagementAction::Detach)),
+            ),
+            callbacks: AtomicUsize::new(0),
+        });
+        *f.runtime.shared.lanes.delivery.host.lock().unwrap() = Some(host.clone());
+        assert_eq!(
+            f.runtime
+                .drive_lane_deliveries("delivery-lead")
+                .await
+                .unwrap(),
+            LaneDeliveryOutcome::Nacked(LaneDeliveryNack::OwnershipLost)
+        );
+        assert_eq!(host.callbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            f.runtime.inspect_agent(lead).unwrap().phase,
+            AgentRunPhase::Done
+        );
+        assert_eq!(f.model.requests.lock().unwrap().len(), requests);
+        assert_eq!(f.receipts(), 0);
+        assert!(
+            f.runtime
+                .shared
+                .lanes
+                .delivery
+                .pending
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
         shutdown(&f, &[lead, lane.root_run_id]).await;
     }
 }

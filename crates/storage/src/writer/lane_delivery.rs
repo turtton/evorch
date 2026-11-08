@@ -123,6 +123,18 @@ impl StorageHandle {
             crate::repo::lane_delivery::claim(conn, request)
         })
     }
+    /// Read-only fencing check for wake admission: owner/Stop, claim token/lease,
+    /// membership, and each notification's current management revision.
+    /// Runtime must serialize the check and restore with management transitions.
+    pub fn validate_lane_delivery_claim(
+        &self,
+        claim: LaneDeliveryClaim,
+        now_ns: i64,
+    ) -> Result<(), StorageError> {
+        self.lane_job(false, move |conn| {
+            crate::repo::lane_delivery::validate_claim(conn, &claim, now_ns)
+        })
+    }
     /// Releases a current claim without losing pending notices. Stale epochs/tokens cannot release newer work.
     pub fn nack_lane_delivery(
         &self,

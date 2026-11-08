@@ -167,6 +167,8 @@ pub enum RuntimeError {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RunRestoreFailure {
+    #[error("lane delivery wake was fenced: {0:?}")]
+    LaneDeliveryFenced(storage::lane_delivery::LaneDeliveryNack),
     #[error("run storage が設定されていません")]
     StorageNotConfigured,
     #[error("復元用コンテキストの消費を保存できません: {0}")]
