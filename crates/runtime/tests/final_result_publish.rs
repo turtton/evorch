@@ -13,7 +13,6 @@ use runtime::{
 use sandbox::DirectSandbox;
 use serde_json::json;
 use storage::{Storage, StorageConfig, memory::Lesson};
-use tokio::time::{Duration, timeout};
 use tools::ToolExecutor;
 
 use support::{ScriptedModel, drain_events, text_response, tool_response};
@@ -38,10 +37,7 @@ fn storage_fixture() -> (tempfile::TempDir, StorageConfig, Storage) {
 }
 
 async fn done(runtime: &AgentRuntime, run: RunId) {
-    assert_eq!(
-        timeout(Duration::from_secs(5), runtime.wait(run)).await,
-        Ok(Ok(AgentRunPhase::Done))
-    );
+    assert_eq!(runtime.wait(run).await, Ok(AgentRunPhase::Done));
 }
 
 fn first_prompt(messages: &[Message]) -> &str {
@@ -422,26 +418,36 @@ async fn escalation_publishes_no_terminal_text_or_duplicate_source_prompt() {
         Ok(text_response("handoff done", FinishReason::Stop)),
     ]));
     let (runtime, bus) = runtime_with(model.clone());
+    let (_dir, config, storage) = storage_fixture();
+    let runtime = runtime.with_run_store(RunStore::open(&config, storage.handle()).unwrap());
     let mut receiver = bus.subscribe();
     let source =
         runtime.delegate_background(Role::Worker, "source task".into(), RunConfig::default());
     done(&runtime, source).await;
-    let handoff = timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(agent) = runtime
-                .list_agents()
-                .into_iter()
-                .find(|agent| runtime.escalation_source(agent.run_id) == Ok(Some(source)))
-            {
-                break agent.run_id;
+    let mut events = Vec::new();
+    let handoff = loop {
+        let event = receiver.recv().await.unwrap();
+        let target = match &event.kind {
+            EventKind::Lifecycle(LifecycleEvent::EscalationRequested { new_run_id, .. }) => {
+                Some(new_run_id.parse::<RunId>().unwrap())
             }
-            tokio::task::yield_now().await;
+            _ => None,
+        };
+        events.push(event);
+        if let Some(target) = target {
+            break target;
         }
-    })
-    .await
-    .expect("handoff registration");
+    };
+    loop {
+        let event = receiver.recv().await.unwrap();
+        let started = matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStarted { run_id, .. }) if run_id == &handoff.to_string());
+        events.push(event);
+        if started {
+            break;
+        }
+    }
     done(&runtime, handoff).await;
-    let events = drain_events(&mut receiver).await;
+    events.extend(drain_events(&mut receiver).await);
 
     assert!(final_results(&events).is_empty());
     assert_eq!(runtime.run_result(source), Ok(None));

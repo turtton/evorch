@@ -21,6 +21,8 @@ pub(crate) mod questions;
 mod saved_compaction;
 pub use project::{ProjectModelResolver, ProjectSlugResolver};
 pub use questions::{AnswerOutcome, RunWait};
+#[cfg(test)]
+mod handoff_tests;
 mod restore_delivery;
 mod run_panic;
 mod shell_handle_restore;
@@ -1296,18 +1298,9 @@ impl AgentRuntime {
             self.fail_admission(run_id, parent, &config, error);
             return run_id;
         }
-        let escalated_from = match &continuation {
-            RunContinuation::Handoff(handoff) => Some(handoff.source_run_id),
-            RunContinuation::Resume {
-                handoff: Some(handoff),
-                ..
-            } => Some(handoff.source_run_id),
-            _ => None,
-        };
         if let Some(store) = self.shared.run_store.get() {
             let edges = parent
                 .into_iter()
-                .chain(escalated_from)
                 .filter(|id| *id != run_id)
                 .map(|source| storage::LineageEdge {
                     child_run_id: run_id.to_string(),
@@ -1545,11 +1538,9 @@ impl AgentRuntime {
                 .map(|project| project.root.clone()),
         );
         let escalated_from = handoff.as_ref().map(|handoff| handoff.source_run_id);
-        if parent.is_some() && escalated_from.is_some() {
-            tracing::debug!(%run_id, ?parent, ?escalated_from,
-                "review context has two live parents; parent takes precedence until rematerialization");
-        }
-        let inherited_review = parent.or(escalated_from).and_then(|source| {
+        // Handoff provenance is not a review parent. Only delegated children
+        // share evidence; a detached handoff materializes its own durable seed.
+        let inherited_review = parent.and_then(|source| {
             self.shared
                 .review_runs
                 .lock()
@@ -1885,6 +1876,123 @@ impl AgentRuntime {
         Ok(())
     }
 
+    pub(crate) fn reserve_handoff_admission(
+        &self,
+        source: RunId,
+        target: RunId,
+    ) -> Arc<ExecutionControl> {
+        #[cfg(test)]
+        {
+            let execution = lock_runs(&self.shared.runs)
+                .get(&source)
+                .map(|run| Arc::clone(&run.execution));
+            if let Some(execution) = execution {
+                self.execution_hook(cancellation::HookPoint::HandoffBeforeReserve, &execution);
+            }
+        }
+        let _ = source;
+        {
+            let mut intents = self
+                .shared
+                .spawn_intents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut admissions = self
+                .shared
+                .admissions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if admissions
+                .get(&target)
+                .is_some_and(|admission| admission.snapshot().result.is_some())
+            {
+                let execution = ExecutionControl::new(false);
+                AgentRuntime::install_restored_execution(
+                    target,
+                    None,
+                    &mut intents,
+                    &mut admissions,
+                    &execution,
+                );
+            }
+        }
+        self.reserve_admission(target, None, None)
+    }
+
+    pub(crate) fn spawn_prepared_handoff(
+        &self,
+        target: RunId,
+        ownership: Option<crate::ownership::OwnerPermit>,
+    ) -> Result<(), String> {
+        if self.inspect_agent(target).is_ok() {
+            return Ok(());
+        }
+        self.restore_committed_handoff(target)?;
+        let store = self
+            .shared
+            .run_store
+            .get()
+            .ok_or("handoff storage is unavailable")?;
+        let bundle = store
+            .restore_bundle(target)
+            .map_err(|e| e.to_string())?
+            .ok_or("handoff seed is missing")?;
+        let descriptor: crate::restore::RunRestoreDescriptor =
+            serde_json::from_str(&bundle.record.config_json).map_err(|e| e.to_string())?;
+        let pending = descriptor.pending_escalation.ok_or("not a handoff seed")?;
+        if pending.requires_ownership && ownership.is_none() {
+            return Err("prepared handoff ownership is missing".into());
+        }
+        let messages: Vec<providers::Message> =
+            serde_json::from_str(&bundle.record.messages_json).map_err(|e| e.to_string())?;
+        let prompt = messages
+            .first()
+            .and_then(|m| m.content.first())
+            .and_then(|b| {
+                if let providers::ContentBlock::Text { text } = b {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or("invalid handoff prompt")?;
+        let thread = event_bus::escalation_thread_id(&target.to_string());
+        self.bind_thread_root(&thread, target)?;
+        let config = RunConfig {
+            ownership,
+            budget: pending.budget.clone(),
+            lane_scope: descriptor.lane_scope,
+            interactive: descriptor.interactive,
+            keep_alive: descriptor.keep_alive,
+            conversation: true,
+            project_root: descriptor.project_root,
+            name: descriptor.name,
+            ..RunConfig::default()
+        };
+        self.spawn_run_with_handoff(
+            target,
+            None,
+            Role::Orchestrator,
+            prompt,
+            config,
+            RunContinuation::Handoff(RunHandoff {
+                continuity: descriptor.continuity,
+                pending_reference_id: descriptor.pending_reference_id,
+                source_run_id: pending.source_run_id,
+                restored: None,
+                seed_revision: bundle.snapshot_revision,
+            }),
+            Some(ReviewSeed {
+                provenance: HostProvenance::PersistedHostSubmission { run_id: target },
+                context: self
+                    .chat_review_context(store, target)
+                    .map_err(|e| e.to_string())?,
+            }),
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn spawn_escalated_root(
         &self,
         memo: EscalationMemo,
@@ -1892,120 +2000,16 @@ impl AgentRuntime {
         continuity: crate::continuity::Continuity,
         before_spawn: impl FnOnce(),
     ) -> Result<RunId, String> {
-        let carries_thread_goal = self.goal_for_root(memo.source_run_id).is_some();
-        let conversation = source_config.conversation
-            && source_config.purpose == crate::RunPurpose::General
-            && self.goal_thread(memo.source_run_id).is_some();
-        let mut config = RunConfig {
-            budget: source_config.budget.clone(),
-            conversation,
-            interactive: (carries_thread_goal || conversation) && source_config.interactive,
-            keep_alive: (carries_thread_goal || conversation) && source_config.keep_alive,
-            name: Some("escalation-orchestrator".to_string()),
-            category: None,
-            load_skills: Vec::new(),
-            project_root: source_config.project_root.clone(),
-            ..RunConfig::default()
-        };
-        let source_run_id = memo.source_run_id;
-        let parent_thread_id = crate::thread_lineage::source_thread(self, source_run_id);
-        let run_id = self.shared.run_ids.next();
-        // Escalation starts from the memo, not the source conversation. Every
-        // source question/answer therefore still needs delivery to this root.
-        // Persist the explicit recipient before any provider admission or spawn.
-        self.inherit_user_questions(source_run_id, run_id, &[])?;
-        let questions = self
-            .shared
-            .run_store
-            .get()
-            .map(|store| store.user_questions(run_id))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
-        // Publish durable routing without changing the ID or requester provenance.
-        for question in &questions {
-            self.shared
-                .bus
-                .emit(Event::new(event_bus::ToolEvent::UserQuestionUpdated {
-                    question: question.clone(),
-                }));
-        }
-        let summary = memo.summary();
-        let prompt = crate::escalation::prompt::render_escalation_prompt(&memo, &questions);
-        let pending_reference_id = self
-            .persist_pending_reference(source_run_id)
-            .map_err(|error| error.to_string())?
-            .map(|pending| pending.reference_id);
-        let seed_revision = crate::restore::persist_escalation_seed(
-            self,
-            run_id,
-            source_run_id,
-            &prompt,
-            &config,
-            source_config.ownership.is_some(),
-            &continuity,
-            pending_reference_id.clone(),
-        )
-        .map_err(|error| error.to_string())?;
-        // Reserve before Q: the handoff callback may publish terminal under R,
-        // but must never acquire I or wait for a gate while Q is held.
-        #[cfg(test)]
-        {
-            let source_execution = lock_runs(&self.shared.runs)
-                .get(&source_run_id)
-                .map(|entry| Arc::clone(&entry.execution));
-            if let Some(source) = source_execution {
-                self.execution_hook(cancellation::HookPoint::HandoffBeforeReserve, &source);
-            }
-        }
-        let execution = self.reserve_admission(run_id, None, None);
-        let handoff = self.handoff_thread_goal(
-            source_run_id,
-            run_id,
-            source_config.ownership.as_ref(),
-            |owner| {
-                self.update_admission_owner(run_id, &execution, owner.clone());
-                before_spawn();
-                self.shared
-                    .bus
-                    .emit(Event::new(LifecycleEvent::EscalationRequested {
-                        source_run_id: source_run_id.to_string(),
-                        new_run_id: run_id.to_string(),
-                        summary,
-                    }));
-            },
-        );
-        config.ownership = match handoff {
-            Ok(owner) => owner,
-            Err(reason) => {
-                self.fail_reserved_admission(run_id, &execution, reason.clone());
-                return Err(reason);
-            }
-        };
-        let escalation_thread = event_bus::escalation_thread_id(&run_id.to_string());
-        crate::thread_lineage::record_escalation(
-            self,
-            run_id,
-            source_run_id,
-            parent_thread_id.clone(),
-            &config,
-        );
-        self.inherit_pull_request(parent_thread_id, &escalation_thread);
-        Ok(self.spawn_run_with_handoff(
-            run_id,
-            None,
-            Role::Orchestrator,
-            prompt,
-            config,
-            RunContinuation::Handoff(RunHandoff {
-                continuity,
-                pending_reference_id,
-                source_run_id,
-                restored: None,
-                seed_revision,
-            }),
-            None,
-        ))
+        let publication = cancellation::ExecutionControl::new(false).publication();
+        let target =
+            self.prepare_handoff_to_lane(&memo, source_config, continuity, &publication)?;
+        before_spawn();
+        self.start_committed_handoff(
+            memo.source_run_id,
+            &publication.incarnation(),
+            source_config,
+        )?;
+        Ok(target)
     }
 
     /// エスカレーションで生成された run の移譲元を返す。

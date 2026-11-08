@@ -66,8 +66,13 @@ pub(crate) fn record_escalation(
         Role::Orchestrator,
         config,
     );
-    row.parent_thread_id = parent_thread_id;
-    row.lineage_kind = Some(ThreadLineageKind::Escalation);
+    row.parent_thread_id = None;
+    let _ = parent_thread_id;
+    row.lineage_kind = Some(if config.lane_scope.is_some() {
+        ThreadLineageKind::Lane
+    } else {
+        ThreadLineageKind::Escalation
+    });
     row.escalation_source_run_id = Some(source_run_id.to_string());
     record(runtime, row);
 }

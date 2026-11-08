@@ -196,6 +196,25 @@ impl AgentRuntime {
                 })
             })
             .collect();
+        // A source run ID can receive a new human incarnation after handing its
+        // old goal to a detached lane. Its empty per-thread sequence must not
+        // recreate that other lane's goal ID (including after process restore).
+        let handoff_incarnation = if let Some(store) = self.shared.run_store.get()
+            && store
+                .handle
+                .handoff_for_source(run_id.to_string())
+                .map_err(|e| e.to_string())?
+                .is_some_and(|receipt| receipt.state.is_committed())
+        {
+            Some(
+                self.execution_snapshot(run_id)
+                    .map_err(|e| e.to_string())?
+                    .publication()
+                    .incarnation(),
+            )
+        } else {
+            None
+        };
         let mut goals = self.goal_lock();
         if goals.roots.get(&run_id).map(String::as_str) != Some(thread_id) {
             return Err("run is not the registered thread root".into());
@@ -213,7 +232,10 @@ impl AgentRuntime {
             .get(thread_id)
             .map_or(0, |entry| entry.snapshot.epoch.saturating_add(1));
         let snapshot = ThreadGoalSnapshot {
-            goal_id: format!("thread-goal-{run_id}-{sequence}"),
+            goal_id: handoff_incarnation.map_or_else(
+                || format!("thread-goal-{run_id}-{sequence}"),
+                |incarnation| format!("thread-goal-{run_id}-{incarnation}-{sequence}"),
+            ),
             thread_id: thread_id.into(),
             root_run_id: run_id.to_string(),
             related_root_run_ids,
@@ -280,13 +302,31 @@ impl AgentRuntime {
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
         self.deny_deleted_thread(&snapshot.thread_id)
             .and_then(|()| self.deny_deleted_run(&snapshot.root_run_id))
-            .and_then(|()| {
-                snapshot
-                    .related_root_run_ids
-                    .iter()
-                    .try_for_each(|related| self.deny_deleted_run(related))
-            })
             .map_err(|deleted| deleted.to_string())?;
+        let handoff = self
+            .shared
+            .run_store
+            .get()
+            .map(|store| {
+                store
+                    .handle
+                    .handoff_for_target(snapshot.root_run_id.clone())
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .flatten();
+        for related in &snapshot.related_root_run_ids {
+            // A receipt proves this one reference is historical provenance,
+            // not a live authority edge. All other references keep their fence.
+            if handoff.as_ref().is_some_and(|receipt| {
+                receipt.state.is_committed()
+                    && receipt.source_run_id == *related
+                    && snapshot.thread_id == event_bus::escalation_thread_id(&receipt.target_run_id)
+            }) {
+                continue;
+            }
+            self.deny_deleted_run(related).map_err(|e| e.to_string())?;
+        }
         validate_text(&snapshot.objective)?;
         validate_text(&snapshot.original_request)?;
         validate_criteria(&snapshot.criteria)?;
@@ -486,6 +526,7 @@ impl AgentRuntime {
     /// Commit the trusted handoff with no fallible work after public terminal
     /// state. Holding the goal lock also keeps old descendants' usage events
     /// behind the child-thread creation event emitted by `before_transfer`.
+    #[cfg(test)]
     pub(crate) fn handoff_thread_goal(
         &self,
         source: RunId,
@@ -493,9 +534,20 @@ impl AgentRuntime {
         source_owner: Option<&crate::ownership::OwnerPermit>,
         before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
     ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
+        self.handoff_thread_goal_prepared(source, target, source_owner, None, before_transfer)
+    }
+
+    pub(crate) fn handoff_thread_goal_prepared(
+        &self,
+        source: RunId,
+        target: RunId,
+        source_owner: Option<&crate::ownership::OwnerPermit>,
+        incarnation: Option<&str>,
+        before_transfer: impl FnOnce(&Option<crate::ownership::OwnerPermit>),
+    ) -> Result<Option<crate::ownership::OwnerPermit>, String> {
         let descendants = self.live_descendants(source);
         let child_thread = event_bus::escalation_thread_id(&target.to_string());
-        let prepare = || {
+        let prepare = || -> Result<_, String> {
             let goals = self.goal_lock();
             if goals.roots.contains_key(&target)
                 || goals.goals.contains_key(&child_thread)
@@ -528,14 +580,37 @@ impl AgentRuntime {
         };
         // Acquire ownership before the goal mutex, matching GUI controls. The
         // registry commits its exclusive transaction before any event is emitted.
+        let prepared_owner = if incarnation.is_some() {
+            source_owner
+                .map(|permit| permit.prepare_lane(&child_thread))
+                .transpose()?
+        } else {
+            None
+        };
+        let _authority = if incarnation.is_some() {
+            source_owner
+                .map(|permit| permit.mutation_guard())
+                .transpose()
+                .map_err(|e| e.to_string())?
+        } else {
+            None
+        };
         let (owner, mut goals) = match source_owner {
-            Some(permit) => {
+            Some(permit) if incarnation.is_none() => {
                 let (owner, goals) = permit.prepare_child(&child_thread, prepare)?;
                 (Some(owner), goals)
             }
+            Some(_) => (prepared_owner, prepare()?),
             None => (None, prepare()?),
         };
         let source_thread = goals.roots.get(&source).cloned();
+        self.commit_handoff_receipt(
+            source,
+            target,
+            source_thread.as_deref(),
+            &goals,
+            incarnation,
+        )?;
         if let Some(thread) = &source_thread {
             // Copied before the child is announced, so a host mirroring it never races
             // this copy. Lock order: goal, then thread read dirs.
@@ -577,9 +652,7 @@ impl AgentRuntime {
                 entry.snapshot.related_root_run_ids.push(source.to_string());
             }
             let reviewer = entry.reviewer.take();
-            if entry.snapshot.phase != ThreadGoalPhase::Complete {
-                invalidate(&mut entry);
-            }
+            invalidate(&mut entry);
             self.publish_thread_goal(&entry.snapshot);
             goals.goals.insert(child_thread, entry);
             drop(goals);
@@ -592,6 +665,162 @@ impl AgentRuntime {
     fn transfer_thread_goal_root(&self, source: RunId, target: RunId) -> Result<(), String> {
         self.handoff_thread_goal(source, target, None, |_| {})
             .map(|_| ())
+    }
+
+    // Called with Q held, after ownership has been prepared. The durable commit
+    // precedes all in-memory transfer and every public source terminal event.
+    pub(crate) fn commit_handoff_receipt(
+        &self,
+        source: RunId,
+        target: RunId,
+        source_thread: Option<&str>,
+        goals: &ThreadGoals,
+        incarnation: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(incarnation) = incarnation else {
+            return Ok(());
+        };
+        let Some(store) = self.shared.run_store.get() else {
+            return Err("handoff storage is unavailable".into());
+        };
+        let Some(receipt) = store
+            .handle
+            .handoff_operation(source.to_string(), incarnation.into())
+            .map_err(|e| e.to_string())?
+        else {
+            return Err("handoff receipt is missing".into());
+        };
+        if receipt.source_incarnation != incarnation
+            || receipt.target_run_id != target.to_string()
+            || receipt.state.is_committed()
+        {
+            return Err("handoff target already committed".into());
+        }
+        let thread = event_bus::escalation_thread_id(&target.to_string());
+        let goal = source_thread.and_then(|t| goals.goals.get(t)).map(|entry| {
+            let mut snapshot = entry.snapshot.clone();
+            snapshot.thread_id = thread.clone();
+            snapshot.root_run_id = target.to_string();
+            if !snapshot.related_root_run_ids.contains(&source.to_string()) {
+                snapshot.related_root_run_ids.push(source.to_string());
+            }
+            snapshot.epoch = snapshot.epoch.saturating_add(1);
+            if snapshot.phase != ThreadGoalPhase::Blocked {
+                snapshot.phase = ThreadGoalPhase::Working;
+            }
+            snapshot.checks.clear();
+            snapshot
+        });
+        let todo = source_thread
+            .and_then(|t| goals.todos.get(t))
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.thread_id = thread;
+                snapshot.revision += 1;
+                snapshot
+            });
+        use storage::handoffs::HandoffState;
+        if receipt.state == HandoffState::Preparing {
+            store
+                .handle
+                .advance_handoff(
+                    source.to_string(),
+                    receipt.source_incarnation.clone(),
+                    HandoffState::Preparing,
+                    HandoffState::Prepared,
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        let encode = |value| serde_json::to_string(&value).map_err(|e| e.to_string());
+        store
+            .handle
+            .advance_handoff(
+                source.to_string(),
+                receipt.source_incarnation,
+                HandoffState::Prepared,
+                HandoffState::Committed,
+                goal.as_ref().map(encode).transpose()?,
+                todo.as_ref()
+                    .map(|s| serde_json::to_string(s).map_err(|e| e.to_string()))
+                    .transpose()?,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_committed_handoff(&self, target: RunId) -> Result<(), String> {
+        let Some(store) = self.shared.run_store.get() else {
+            return Ok(());
+        };
+        let Some(receipt) = store
+            .handle
+            .handoff_for_target(target.to_string())
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(());
+        };
+        if !receipt.state.is_committed() {
+            return Err("uncommitted handoff cannot start".into());
+        }
+        if let Ok(source) = receipt.source_run_id.parse::<RunId>()
+            && self.inspect_agent(source).is_ok_and(|source| {
+                matches!(
+                    source.phase,
+                    AgentRunPhase::Pending | AgentRunPhase::Running | AgentRunPhase::Waiting
+                )
+            })
+            && self.execution_snapshot(source).is_ok_and(|execution| {
+                execution.publication().incarnation() == receipt.source_incarnation
+            })
+        {
+            return Err("handoff source has not published its terminal boundary".into());
+        }
+        // Initial snapshots are a recovery seed, never the current state of an
+        // already-started lane. The host rehydrates that state from goal events.
+        if receipt.state == storage::handoffs::HandoffState::Started {
+            return Ok(());
+        }
+        let mut goals = self.goal_lock();
+        let thread = event_bus::escalation_thread_id(&target.to_string());
+        if !goals.goals.contains_key(&thread)
+            && let Some(json) = receipt.goal_json
+        {
+            let snapshot: ThreadGoalSnapshot =
+                serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            if snapshot.thread_id != thread || snapshot.root_run_id != target.to_string() {
+                return Err("handoff goal belongs to a different target".into());
+            }
+            // Historical source IDs are provenance, not live authority. They may
+            // already have been reclaimed; never revive or rebind those runs.
+            goals
+                .goals
+                .retain(|_, e| e.snapshot.goal_id != snapshot.goal_id);
+            self.publish_thread_goal(&snapshot);
+            goals.goals.insert(
+                thread.clone(),
+                GoalEntry {
+                    input_revision: std::sync::Arc::new(()),
+                    snapshot,
+                    reviewer: None,
+                    review_result: None,
+                },
+            );
+        }
+        if !goals.todos.contains_key(&thread)
+            && let Some(json) = receipt.todo_json
+        {
+            let snapshot: event_bus::ThreadTodoSnapshot =
+                serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            if snapshot.thread_id != thread {
+                return Err("handoff procedure belongs to a different target".into());
+            }
+            self.publish_thread_todo(&snapshot);
+            goals.todos.insert(thread.clone(), snapshot);
+        }
+        goals.roots.insert(target, thread);
+        Ok(())
     }
 
     pub(crate) fn goal_owner_for_run(&self, run: RunId) -> Option<RunId> {

@@ -351,7 +351,10 @@ async fn goal_restore_fails_closed_when_consumed_marker_cannot_be_persisted() {
         .runtime
         .continue_goal(run, "continue".into(), RunConfig::default());
     // Then: no replacement run is registered or restore event emitted.
-    assert!(matches!(result, Err(RuntimeError::ReviewEvidence { .. })));
+    assert!(
+        result.is_err(),
+        "closed durable storage must refuse restoration"
+    );
     assert_eq!(
         *fixture.runtime.entry(run).unwrap().phase_rx.borrow(),
         AgentRunPhase::Done

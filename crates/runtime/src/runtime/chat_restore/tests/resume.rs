@@ -352,10 +352,7 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
     runtime.wait_admission(target).await.unwrap();
     wait_for_waiting(runtime, target).await;
     let review = runtime.shared.review_runs.lock().unwrap()[&target].clone();
-    assert_eq!(
-        review.lineage_run_ids,
-        vec![source.to_string(), target.to_string()]
-    );
+    assert_eq!(review.lineage_run_ids, vec![target.to_string()]);
     assert!(review.delegation_chain.is_empty());
     runtime
         .continue_goal(target, "real followup".into(), RunConfig::default())
@@ -370,7 +367,7 @@ async fn pending_escalation_resume_preserves_seed_and_later_human_evidence() {
     assert_eq!(
         evidence,
         serde_json::json!([
-            {"target_run_id": source.to_string(), "text": "trusted original"},
+            {"target_run_id": target.to_string(), "text": "trusted original"},
             {"target_run_id": target.to_string(), "text": "real followup",
                 "reference_context": {"text": "done", "source_run_id": target.to_string(), "turn_end": 2}},
             {"target_run_id": target.to_string(), "text": "yes, publish",

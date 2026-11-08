@@ -70,6 +70,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/v51.sql"),
     include_str!("migrations/v52.sql"),
     include_str!("migrations/v53.sql"),
+    include_str!("migrations/v54.sql"),
 ];
 
 /// Migration v40 without its last step: the new tables, the header columns and the
@@ -251,6 +252,7 @@ fn migration_error(version: u32, error: rusqlite::Error) -> StorageError {
 #[cfg(test)]
 pub(crate) const UNDO_V46: &str = concat!(
     concat!(
+        include_str!("../undo/undo_v54.sql"),
         include_str!("../undo/undo_v53.sql"),
         include_str!("../undo/undo_v52.sql"),
         include_str!("../undo/undo_v51.sql"),

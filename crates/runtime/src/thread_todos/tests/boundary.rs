@@ -515,8 +515,9 @@ async fn a_successful_escalation_moves_the_list_without_marking_or_a_second_even
 }
 
 #[tokio::test]
-async fn a_failed_escalation_still_marks_the_source_list() {
+async fn a_failed_escalation_keeps_the_list_live_until_operator_stop() {
     let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let (continued, finish) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let (runtime, model, mut events) = harness(vec![
         write(running_item()),
         ask(true),
@@ -528,20 +529,29 @@ async fn a_failed_escalation_still_marks_the_source_list() {
                 json!({"original_request":"Research","escalation_reason":"Parallel investigation"}),
             )],
         ),
+        Step::Hold(continued.clone(), finish.clone()),
     ]);
     let source = start(&runtime, Role::Worker, config(), true);
     entered.notified().await;
-    // As in the question-inheritance failure: the handoff cannot complete.
+    // Fail only the target binding: reads and the source remain usable.
     rusqlite::Connection::open(model._dir.path().join("review.db"))
         .unwrap()
-        .execute_batch("DROP TABLE user_question_links")
+        .execute_batch(&format!("CREATE TRIGGER fail_handoff_question BEFORE INSERT ON user_question_links WHEN NEW.run_id!='{source}' BEGIN SELECT RAISE(ABORT, 'injected handoff question failure'); END;"))
         .unwrap();
     release.notify_one();
+    continued.notified().await;
+    assert_eq!(
+        runtime.inspect_agent(source).unwrap().phase,
+        AgentRunPhase::Running
+    );
+    assert_eq!(
+        statuses(&runtime.thread_todo("thread").unwrap().items),
+        [InProgress, Pending, Completed]
+    );
+    runtime.stop(source, crate::StopScope::SelfOnly).unwrap();
     let seen = until(&mut events, source, terminal).await;
-    let failure = Seen::Diagnostic("EscalationHandoffFailed".into());
     let marked_at = position(&seen, &todo_seen("thread", 2, &marked()));
-    assert!(position(&seen, &failure) < position(&seen, &Seen::Phase(AgentRunPhase::Done)));
-    assert!(marked_at < position(&seen, &Seen::Phase(AgentRunPhase::Done)));
+    assert!(marked_at < position(&seen, &Seen::Phase(AgentRunPhase::Stopped)));
     assert_eq!(runtime.list_agents().len(), 1);
     assert_eq!(
         statuses(&runtime.thread_todo("thread").unwrap().items),

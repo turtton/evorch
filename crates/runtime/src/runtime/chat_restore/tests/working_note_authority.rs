@@ -258,7 +258,7 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
             break new_run_id.parse::<RunId>().unwrap();
         }
     };
-    let received = model.wait_for_request(6).await;
+    model.wait_for_request(6).await;
     assert_eq!(
         fixture.runtime.wait(source).await.unwrap(),
         AgentRunPhase::Done
@@ -283,26 +283,13 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
     let frozen = &descriptor.continuity.sources[0];
     assert_eq!(frozen.source, source_handle);
     assert!(frozen.records_json.contains(FAKE_NOTE));
-    let memo_prompt = received
-        .iter()
-        .find(|message| message.role == providers::Role::User)
-        .unwrap()
-        .content
-        .iter()
-        .find_map(|block| {
-            if let ContentBlock::Text { text } = block {
-                Some(text)
-            } else {
-                None
-            }
-        })
-        .unwrap();
+    let mut expected_handoff = expected.clone();
+    for request in expected_handoff.as_array_mut().unwrap() {
+        request["target_run_id"] = json!(receiver.to_string());
+    }
     let receiver_payload = review_payload(&fixture.runtime, receiver).await;
-    assert_authority(&receiver_payload, source, &expected);
-    assert_eq!(
-        receiver_payload["context"]["delegation_chain"],
-        json!([crate::escalation_review::bounded(memo_prompt, 1500)])
-    );
+    assert_authority(&receiver_payload, receiver, &expected_handoff);
+    assert_eq!(receiver_payload["context"]["delegation_chain"], json!([]));
     for (next_request, call_id) in [(7, "inherited-note"), (8, "source-history")] {
         gate.notify_one();
         let messages = model.wait_for_request(next_request).await;
@@ -317,9 +304,11 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
         );
     }
     gate.notify_one();
+    waiting(&fixture.runtime, receiver).await;
+    fixture.runtime.stop(receiver, StopScope::SelfOnly).unwrap();
     assert_eq!(
         fixture.runtime.wait(receiver).await.unwrap(),
-        AgentRunPhase::Done
+        AgentRunPhase::Stopped
     );
 
     let Fixture {
@@ -358,7 +347,7 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
     runtime.resume_chat(receiver, RunConfig::default()).unwrap();
     waiting(&runtime, receiver).await;
     let restored_payload = review_payload(&runtime, receiver).await;
-    assert_authority(&restored_payload, source, &expected);
+    assert_authority(&restored_payload, receiver, &expected_handoff);
     assert_eq!(restored_payload["context"]["delegation_chain"], json!([]));
     runtime
         .send_internal_message(receiver, "Continue the stored investigation".into())

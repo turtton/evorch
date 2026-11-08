@@ -7,9 +7,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+mod coordinator;
 pub(crate) mod detector;
 pub(crate) mod handoff;
 pub(crate) mod prompt;
+mod questions;
 
 /// Direct run から Orchestrator root run へ渡す固定スキーマの引継ぎメモ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

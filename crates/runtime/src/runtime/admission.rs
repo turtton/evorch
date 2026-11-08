@@ -73,7 +73,7 @@ impl AgentRuntime {
 
     /// Reserve before publishing a handoff, so cancellation already has a
     /// generation-bound channel before provider admission or RunEntry exists.
-    pub(super) fn reserve_admission(
+    pub(crate) fn reserve_admission(
         &self,
         run_id: RunId,
         parent: Option<RunId>,
@@ -133,7 +133,7 @@ impl AgentRuntime {
 
     /// Handoff already reserved this execution before taking Q. Only A is
     /// needed here; never reacquire I from the handoff callback.
-    pub(super) fn update_admission_owner(
+    pub(crate) fn update_admission_owner(
         &self,
         run: RunId,
         execution: &Arc<ExecutionControl>,
@@ -151,7 +151,7 @@ impl AgentRuntime {
         }
     }
 
-    pub(super) fn fail_reserved_admission(
+    pub(crate) fn fail_reserved_admission(
         &self,
         run: RunId,
         execution: &Arc<ExecutionControl>,
@@ -166,6 +166,13 @@ impl AgentRuntime {
             && Arc::ptr_eq(&admission.execution, execution)
             && let Some(completion) = admission.completion.take()
         {
+            if let Some(store) = self.shared.run_store.get()
+                && let Err(error) = store
+                    .handle
+                    .note_handoff_start_failure(run.to_string(), reason.clone())
+            {
+                tracing::warn!(%run,%error,"handoff admission failure receipt was not saved");
+            }
             completion.send_replace(Some(Err(RuntimeError::Model { reason })));
         }
     }
@@ -379,6 +386,13 @@ impl AgentRuntime {
             if let Some(error) = failure
                 && !matches!(error, RuntimeError::RunTerminated { .. })
             {
+                if let Some(store) = runtime.shared.run_store.get()
+                    && let Err(write) = store
+                        .handle
+                        .note_handoff_start_failure(run_id.to_string(), error.to_string())
+                {
+                    tracing::warn!(%run_id,%write,"handoff admission failure receipt was not saved");
+                }
                 runtime
                     .shared
                     .bus

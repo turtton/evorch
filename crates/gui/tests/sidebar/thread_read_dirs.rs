@@ -296,7 +296,7 @@ fn an_escalation_thread_copies_its_parent_directories() {
     ]);
 
     let child = thread(&workbench, "escalation-run-2");
-    assert_eq!(child.parent_thread_id.as_ref(), Some(&id));
+    assert_eq!(child.parent_thread_id, None);
     assert_eq!(child.extra_read_dirs, fixture.dirs());
     assert!(
         thread(&workbench, "escalation-run-4")

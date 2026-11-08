@@ -1,3 +1,5 @@
+#[path = "escalation_handoff/lanes.rs"]
+mod lanes;
 mod support;
 
 use std::sync::Arc;
@@ -31,15 +33,32 @@ fn escalation_response() -> providers::ChatResponse {
     )
 }
 
-fn runtime_with(model: Arc<ScriptedModel>) -> (AgentRuntime, Arc<EventBus>) {
+fn runtime_with(
+    model: Arc<ScriptedModel>,
+) -> (
+    AgentRuntime,
+    Arc<EventBus>,
+    storage::Storage,
+    tempfile::TempDir,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: directory.path().join("handoff.db"),
+        ..Default::default()
+    };
+    let storage = storage::Storage::open(config.clone()).unwrap();
     let bus = Arc::new(EventBus::new(128));
     let executor = Arc::new(ToolExecutor::with_standard_tools(
         Arc::clone(&bus),
         Arc::new(DirectSandbox::new_unchecked()),
     ));
     (
-        AgentRuntime::new(Arc::clone(&bus), executor, model).with_sequential_run_ids(),
+        AgentRuntime::new(Arc::clone(&bus), executor, model)
+            .with_sequential_run_ids()
+            .with_run_store(runtime::RunStore::open(&config, storage.handle()).unwrap()),
         bus,
+        storage,
+        directory,
     )
 }
 
@@ -50,6 +69,12 @@ async fn events_through_escalation(
     let mut events = Vec::new();
     let new_run_id = loop {
         let event = receiver.recv().await.expect("event bus remains open");
+        if matches!(&event.kind, EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
+            run_id, to: AgentRunPhase::Done, reason, ..
+        }) if run_id == &source_run_id.to_string() && reason.as_deref() != Some("escalated"))
+        {
+            panic!("source completed without a handoff: {events:#?}\n{event:#?}");
+        }
         if let EventKind::Lifecycle(LifecycleEvent::AgentRunStateChanged {
             run_id,
             to: AgentRunPhase::Error | AgentRunPhase::Stopped,
@@ -146,7 +171,7 @@ async fn escalate_spawns_orchestrator_root_run_with_memo_prompt() {
         Ok(escalation_response()),
         Ok(text_response("引継ぎ完了", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(Arc::clone(&model));
+    let (runtime, bus, _storage, _directory) = runtime_with(Arc::clone(&model));
     let mut receiver = bus.subscribe();
 
     // When: Worker root run がエスカレーションし、新 run も終端する
@@ -225,7 +250,7 @@ async fn escalation_keeps_the_source_project_after_the_active_project_changes() 
         .gate_key("[evorch escalation", target_gate.clone())
         .await;
     let second_model = Arc::new(ScriptedModel::new([]));
-    let (runtime, bus) = runtime_with(first_model.clone());
+    let (runtime, bus, _storage, _directory) = runtime_with(first_model.clone());
     let first_path = first.path().to_path_buf();
     let first_for_resolver = first_path.clone();
     let first_for_model = first_model.clone();
@@ -335,12 +360,19 @@ async fn escalation_publishes_child_and_goal_before_admission_and_can_stop_while
             release: Notify::new(),
             failure: std::sync::atomic::AtomicU8::new(0),
         });
+        let directory = tempfile::tempdir().unwrap();
+        let storage_config = storage::StorageConfig {
+            db_path: directory.path().join("pending.db"),
+            ..Default::default()
+        };
+        let storage = storage::Storage::open(storage_config.clone()).unwrap();
         let bus = Arc::new(EventBus::new(128));
         let runtime = AgentRuntime::new(
             bus.clone(),
             Arc::new(ToolExecutor::new(bus.clone())),
             model.clone(),
-        );
+        )
+        .with_run_store(runtime::RunStore::open(&storage_config, storage.handle()).unwrap());
         let mut events = bus.subscribe();
         let source = runtime.reserve_run_id();
         runtime.bind_thread_root("source-thread", source).unwrap();
@@ -361,9 +393,9 @@ async fn escalation_publishes_child_and_goal_before_admission_and_can_stop_while
         let child = event_bus::escalation_thread_id(&target.to_string());
         assert!(runtime.thread_goal("source-thread").is_none());
         assert_eq!(runtime.thread_goal(&child).unwrap().goal_id, goal.goal_id);
-        assert!(matches!(events.recv().await.unwrap().kind,
+        assert!(before.iter().any(|e| matches!(&e.kind,
             EventKind::Orchestrator(event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot })
-                if snapshot.thread_id == child));
+                if snapshot.thread_id == child)));
         assert!(!runtime.list_agents().iter().any(|run| run.run_id == target));
         assert!(source_done_event_index(&before, source) < before.len() - 1);
         let waiter = tokio::spawn({
@@ -408,7 +440,7 @@ async fn child_worker_cannot_escalate_into_a_new_root() {
             ],
         )
         .await;
-    let (runtime, bus) = runtime_with(model);
+    let (runtime, bus, _storage, _directory) = runtime_with(model);
     let mut receiver = bus.subscribe();
     let parent = runtime.delegate_background(
         Role::Orchestrator,
@@ -469,7 +501,7 @@ async fn batch_edit_then_escalate_skips_remaining_tools_and_orders_terminal_befo
         ])),
         Ok(text_response("引継ぎ完了", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(model);
+    let (runtime, bus, _storage, _directory) = runtime_with(model);
     let mut receiver = bus.subscribe();
 
     // When: Worker root run が edit → escalate → edit の batch を実行する
@@ -510,7 +542,7 @@ async fn escalation_memo_summary_matches_recorded_memo() {
         Ok(escalation_response()),
         Ok(text_response("引継ぎ完了", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(Arc::clone(&model));
+    let (runtime, bus, _storage, _directory) = runtime_with(Arc::clone(&model));
     let mut receiver = bus.subscribe();
 
     // When: Worker root run がエスカレーションする
@@ -564,7 +596,7 @@ async fn escalated_run_has_no_run_result() {
         Ok(escalation_response()),
         Ok(text_response("引継ぎ完了", FinishReason::Stop)),
     ]));
-    let (runtime, bus) = runtime_with(model);
+    let (runtime, bus, _storage, _directory) = runtime_with(model);
     let mut receiver = bus.subscribe();
 
     // When: Worker root run がエスカレーションする

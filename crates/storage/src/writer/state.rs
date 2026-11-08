@@ -237,6 +237,38 @@ pub(super) fn run_writer_with_index(
                 record_event_failure(&mut state, &result);
                 let _ = reply.send(result);
             }
+            Ok(Command::AdvanceHandoff(change, reply)) => {
+                let started = Instant::now();
+                let result = if state.writes_suspended {
+                    Err(StorageError::Serialization(
+                        "handoff writes suspended by storage limit".into(),
+                    ))
+                } else {
+                    crate::handoffs::advance(
+                        &state.conn,
+                        change,
+                        &state.config.hard_limits,
+                        &mut state.accounting,
+                    )
+                };
+                let result = result.map(|(receipt, count, bytes)| {
+                    if count > 0 {
+                        let elapsed =
+                            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                        state.statistics.append_total_micros =
+                            state.statistics.append_total_micros.saturating_add(elapsed);
+                        state.statistics.max_append_micros =
+                            state.statistics.max_append_micros.max(elapsed);
+                    }
+                    state.statistics.events_written =
+                        state.statistics.events_written.saturating_add(count);
+                    state.statistics.event_payload_bytes =
+                        state.statistics.event_payload_bytes.saturating_add(bytes);
+                    receipt
+                });
+                record_event_failure(&mut state, &result);
+                let _ = reply.send(result);
+            }
             Ok(Command::RecordCatalogUpdate(record, reply)) => {
                 let _ = reply.send(catalog::record(&state.conn, &record));
             }
@@ -1003,9 +1035,9 @@ fn append_event_to_conn(
     result
 }
 
-fn record_event_failure(state: &mut WriterState, result: &Result<(), StorageError>) {
+fn record_event_failure<T>(state: &mut WriterState, result: &Result<T, StorageError>) {
     match result {
-        Ok(()) => {}
+        Ok(_) => {}
         // A deleted run's late event is refused on purpose; it is not a write failure.
         Err(StorageError::Tombstoned { .. }) => {
             state.statistics.events_rejected_tombstoned = state
