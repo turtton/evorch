@@ -167,13 +167,22 @@ async fn transport(
     permit: ApprovalPermit,
     cancel: CancelContext,
 ) -> Arc<HttpTransport> {
-    transport_with_timeout(url, guard, permit, cancel, Duration::from_secs(60)).await
+    transport_with_timeouts(
+        url,
+        guard,
+        permit,
+        cancel,
+        Duration::from_secs(10),
+        Duration::from_secs(60),
+    )
+    .await
 }
-async fn transport_with_timeout(
+async fn transport_with_timeouts(
     url: &str,
     guard: Arc<NetworkGuard>,
     permit: ApprovalPermit,
     cancel: CancelContext,
+    startup_timeout: Duration,
     request_timeout: Duration,
 ) -> Arc<HttpTransport> {
     let ips = guard.inspect_mcp_destination(url).await.unwrap().ips;
@@ -190,7 +199,7 @@ async fn transport_with_timeout(
             token: None,
             destination,
         },
-        startup_timeout: Duration::from_secs(10),
+        startup_timeout,
         request_timeout,
     };
     HttpTransport::connect(guard, server, permit, cancel).unwrap()
@@ -316,24 +325,32 @@ async fn http_legacy_golden_headers_and_session() {
     golden_http("legacy-http.json").await;
 }
 
-async fn configured_request_deadline(timeout_seconds: u64, respond: bool) {
+fn hold_virtual_clock() -> (oneshot::Sender<()>, JoinHandle<()>) {
     // Real loopback I/O must not trigger Tokio's automatic jump to the next
     // deadline. This event-held blocking task leaves advance() as the only clock driver.
     let (release_clock, hold_clock) = oneshot::channel::<()>();
     let clock_holder = tokio::task::spawn_blocking(move || {
         let _ = hold_clock.blocking_recv();
     });
+    (release_clock, clock_holder)
+}
+
+async fn configured_request_deadline(timeout_seconds: u64, respond: bool) {
+    let (release_clock, clock_holder) = hold_virtual_clock();
     let mut peer = peer().await;
     let (_dir, permit) = permit(vec!["127.0.0.1".parse().unwrap()]);
-    let transport = transport_with_timeout(
+    let transport = transport_with_timeouts(
         &peer.url,
         guard(),
         permit,
         CancelContext::default(),
+        Duration::from_secs(10),
         Duration::from_secs(timeout_seconds),
     )
     .await;
-    let request = transport.exchange(probe(), CancelContext::default());
+    let mut rpc = probe();
+    rpc.method = "tools/list".into();
+    let request = transport.exchange(rpc, CancelContext::default());
     tokio::pin!(request);
     let mut incoming = tokio::select! {
         result = &mut request => panic!("request completed before the fixture responded: {result:?}"),
@@ -359,7 +376,7 @@ async fn configured_request_deadline(timeout_seconds: u64, respond: bool) {
             &mut incoming,
             200,
             &[],
-            &json!({"jsonrpc":"2.0","id":1,"result":{}}),
+            &json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","tools":[]}}),
         )
         .await;
         assert_eq!(request.await.unwrap().status, Some(200));
@@ -384,6 +401,136 @@ async fn configured_http_timeout_rejects_a_response_past_its_deadline() {
 #[tokio::test(start_paused = true)]
 async fn configured_http_timeout_can_be_shorter_than_the_guard_default() {
     configured_request_deadline(5, false).await;
+}
+
+async fn negotiation_uses_its_startup_deadline(legacy: bool) {
+    let (release_clock, clock_holder) = hold_virtual_clock();
+    let mut peer = peer().await;
+    let (_dir, permit) = permit(vec!["127.0.0.1".parse().unwrap()]);
+    let startup = Duration::from_secs(10);
+    let request_timeout = Duration::from_secs(1);
+    let transport = transport_with_timeouts(
+        &peer.url,
+        guard(),
+        permit,
+        CancelContext::default(),
+        startup,
+        request_timeout,
+    )
+    .await;
+    let connecting = McpClient::connect_transport_with_timeouts(
+        transport,
+        "fixture".into(),
+        TransportKind::Http,
+        info(),
+        startup,
+        request_timeout,
+        CancelContext::default(),
+    );
+    tokio::pin!(connecting);
+    let mut incoming = tokio::select! {
+        _ = &mut connecting => panic!("negotiation completed before a response"),
+        incoming = peer.requests.recv() => incoming.unwrap(),
+    };
+    assert_eq!(incoming.body["method"], "server/discover");
+    if legacy {
+        let unsupported = json!({"jsonrpc":"2.0","id":incoming.body["id"],"error":{"code":-32601,"message":"unknown method"}});
+        reply(&mut incoming, 400, &[], &unsupported).await;
+        incoming = tokio::select! {
+            _ = &mut connecting => panic!("negotiation completed before initialize"),
+            incoming = peer.requests.recv() => incoming.unwrap(),
+        };
+        assert_eq!(incoming.body["method"], "initialize");
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(std::future::Future::poll(
+            connecting.as_mut(),
+            cx
+        )))
+        .await
+        .is_pending(),
+        "startup=10s must not inherit request=1s"
+    );
+    let result = if legacy {
+        json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+    } else {
+        json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"})
+    };
+    let response = json!({"jsonrpc":"2.0","id":incoming.body["id"],"result":result});
+    reply(&mut incoming, 200, &[], &response).await;
+    if legacy {
+        incoming = tokio::select! {
+            _ = &mut connecting => panic!("negotiation completed before initialized acknowledgement"),
+            incoming = peer.requests.recv() => incoming.unwrap(),
+        };
+        assert_eq!(incoming.body["method"], "notifications/initialized");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(std::future::Future::poll(
+                connecting.as_mut(),
+                cx
+            )))
+            .await
+            .is_pending()
+        );
+        reply(&mut incoming, 202, &[], &Value::Null).await;
+    }
+    let mut client = connecting.await.unwrap();
+    let listing = client.list_tools();
+    tokio::pin!(listing);
+    let list_request = tokio::select! {
+        _ = &mut listing => panic!("tools/list completed before a response"),
+        incoming = peer.requests.recv() => incoming.unwrap(),
+    };
+    assert_eq!(list_request.body["method"], "tools/list");
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(listing.await.unwrap_err().kind, McpErrorKind::Timeout);
+    let _ = release_clock.send(());
+    clock_holder.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn modern_http_negotiation_uses_startup_not_request_timeout() {
+    negotiation_uses_its_startup_deadline(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_http_negotiation_uses_startup_not_request_timeout() {
+    negotiation_uses_its_startup_deadline(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn http_startup_deadline_can_be_shorter_than_request_timeout() {
+    let (release_clock, clock_holder) = hold_virtual_clock();
+    let mut peer = peer().await;
+    let (_dir, permit) = permit(vec!["127.0.0.1".parse().unwrap()]);
+    let transport = transport_with_timeouts(
+        &peer.url,
+        guard(),
+        permit,
+        CancelContext::default(),
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    )
+    .await;
+    let request = transport.exchange(probe(), CancelContext::default());
+    tokio::pin!(request);
+    let _incoming = tokio::select! {
+        _ = &mut request => panic!("probe completed before a response"),
+        incoming = peer.requests.recv() => incoming.unwrap(),
+    };
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let outcome = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(request.as_mut(), cx))
+    })
+    .await;
+    assert!(
+        matches!(outcome, std::task::Poll::Ready(Err(error)) if error.kind == McpErrorKind::Timeout),
+        "startup=1s must not inherit request=10s"
+    );
+    let _ = release_clock.send(());
+    clock_holder.await.unwrap();
 }
 
 #[tokio::test]

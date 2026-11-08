@@ -36,7 +36,8 @@ pub struct HttpTransport {
     state: Arc<Mutex<State>>,
     closed: CancelContext,
     owner_cancel: CancelContext,
-    timeout: Duration,
+    startup_timeout: Duration,
+    request_timeout: Duration,
 }
 struct Active {
     state: Arc<Mutex<State>>,
@@ -118,7 +119,8 @@ impl HttpTransport {
             })),
             closed: CancelContext::default(),
             owner_cancel: cancel,
-            timeout: server.request_timeout,
+            startup_timeout: server.startup_timeout,
+            request_timeout: server.request_timeout,
         }))
     }
     fn error(&self, method: &'static str, id: Option<&RpcId>, kind: McpErrorKind) -> McpError {
@@ -168,6 +170,16 @@ impl HttpTransport {
         }
         Ok(out)
     }
+    fn timeout_for(&self, body: &Value) -> Duration {
+        // Legacy negotiation also includes the initialized acknowledgement.
+        // Normal requests and cancellation keep their separate request deadline.
+        match body.get("method").and_then(Value::as_str) {
+            Some("server/discover" | "initialize" | "notifications/initialized") => {
+                self.startup_timeout
+            }
+            _ => self.request_timeout,
+        }
+    }
     async fn post(
         &self,
         body: &Value,
@@ -182,7 +194,7 @@ impl HttpTransport {
                 &self.permit,
                 headers,
                 body,
-                self.timeout,
+                self.timeout_for(body),
             )
             .await?;
         let status = stream.status().as_u16();
@@ -286,7 +298,7 @@ impl HttpTransport {
                 &self.permit,
                 headers,
                 body,
-                self.timeout,
+                self.timeout_for(body),
             )
             .await?;
         if stream.status().as_u16() != 202 {
@@ -395,7 +407,7 @@ impl McpTransport for HttpTransport {
     async fn notify(&self, notification: RpcNotification) -> Result<(), McpError> {
         let body = serde_json::to_value(notification)
             .map_err(|_| self.error("notification", None, McpErrorKind::Configuration))?;
-        tokio::time::timeout(self.timeout, self.send_one_way(&body))
+        tokio::time::timeout(self.timeout_for(&body), self.send_one_way(&body))
             .await
             .map_err(|_| self.error("notification", None, McpErrorKind::Timeout))?
             .map_err(|kind| self.error("notification", None, kind))
