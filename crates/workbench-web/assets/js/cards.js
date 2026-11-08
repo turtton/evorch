@@ -293,15 +293,30 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
         render();
       } else {
         loaded.complete = true;
+        // The whole input is shown unfolded, so nothing the tool would run
+        // with is hidden behind "すべて表示" when approving becomes possible.
+        expanded = true;
       }
     }
     loaded.loading = false;
     render();
   }
 
+  /** The text that is the whole input, or null while only a part is known. */
+  function wholeInput() {
+    if (!a.summary_truncated) return a.summary;
+    return loaded.complete ? loaded.text : null;
+  }
+
+  /** The whole input is on screen: known, and not folded. */
+  function wholeInputVisible() {
+    const text = wholeInput();
+    return text !== null && (!folds(text) || expanded);
+  }
+
   async function decide(decision, { confirmFirst = false } = {}) {
     if (busy) return;
-    if (decision === "approve" && !approvalReady(a, loaded)) return;
+    if (decision === "approve" && !approvalReady(a, loaded, { visible: wholeInputVisible() })) return;
     busy = true;
     render();
     recheck.hidden = true;
@@ -395,7 +410,9 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     );
     const truncated = Boolean(a.summary_truncated);
     const full = truncated && loaded.complete;
-    const shown = full ? prettyInput(loaded.text) : a.summary;
+    // Shown exactly as received: re-encoding the JSON could change it (large
+    // integers lose precision in JavaScript numbers).
+    const shown = full ? loaded.text : a.summary;
     caption.textContent = !truncated
       ? "実行内容"
       : full
@@ -418,11 +435,13 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
         : "";
 
     const decided = a.state !== "pending";
-    const ready = approvalReady(a, loaded);
+    const ready = approvalReady(a, loaded, { visible: wholeInputVisible() });
     hint.hidden = ready || decided;
     hint.textContent = loaded.blocked
       ? "この承認要求は更新されたか既に解決済みのため、ここからは承認できません。"
-      : "要約は一部だけです。全文を読み込んで確認すると承認できます（拒否はいつでもできます）。";
+      : wholeInput() === null
+        ? "要約は一部だけです。全文を読み込んで確認すると承認できます（拒否はいつでもできます）。"
+        : "「すべて表示」で内容全体を表示すると承認できます（拒否はいつでもできます）。";
     approve.disabled = busy || decided || !ready;
     deny.disabled = busy || decided;
     if (decided && !status.textContent) {
@@ -449,21 +468,13 @@ function emptyInput(approval) {
 }
 
 /**
- * Whether the person has seen everything the tool would run with: the summary
+ * Whether the person can see everything the tool would run with: the summary
  * when it is the whole input, otherwise the full input read for exactly this
- * approval, epoch and revision. Denying never needs this.
+ * approval, epoch and revision; and in either case shown unfolded
+ * (`visible`). Denying never needs this.
  */
-export function approvalReady(approval, loaded) {
-  if (approval.state !== "pending") return false;
+export function approvalReady(approval, loaded, { visible = false } = {}) {
+  if (approval.state !== "pending" || !visible) return false;
   if (!approval.summary_truncated) return true;
   return Boolean(loaded && loaded.key === inputKey(approval) && loaded.complete && !loaded.blocked);
-}
-
-/** The input is masked JSON; indent it when it parses, else show it as is. */
-function prettyInput(text) {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
 }

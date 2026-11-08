@@ -58,6 +58,7 @@ const FREE_QUESTION_TITLE: &str = "回帰テストの対象ブラウザを教え
 const SENT_TEXT: &str = "修正案 A で進めてください。テストも追加して。";
 const UNKNOWN_TEXT: &str = "結果が分からない送信";
 const DROPPED_TEXT: &str = "読まれずに終わった送信";
+const RESUMED_TEXT: &str = "再接続のあとに届いた新しいメッセージ";
 
 fn body_text() -> String {
     format!(
@@ -72,8 +73,10 @@ fn approval_input(id: &str) -> String {
     let lines: Vec<String> = (0..2400)
         .map(|i| format!("echo '{id} step {i}: 回帰テストを実行します'"))
         .collect();
-    json!({"command": "bash", "args": ["-c", lines.join("\n")], "cwd": "/home/user/src/evorch", "tail": "最後の行"})
-        .to_string()
+    // A u64 beyond 2^53: a client that re-encodes the JSON would change it.
+    json!({"command": "bash", "args": ["-c", lines.join("\n")], "cwd": "/home/user/src/evorch",
+           "limit": 9_007_199_254_740_993_u64, "tail": "最後の行"})
+    .to_string()
 }
 
 fn now_millis() -> String {
@@ -130,6 +133,9 @@ struct World {
     stale_inputs: Vec<String>,
     history_reads: usize,
     snapshot_reads: usize,
+    /// The next resumed subscription replays old messages (already on screen
+    /// or older than the page) before one new one, as a host replay can.
+    replay_on_resume: bool,
 }
 
 impl World {
@@ -209,6 +215,7 @@ impl World {
             stale_inputs: vec!["ap-2".to_owned()],
             history_reads: 0,
             snapshot_reads: 0,
+            replay_on_resume: false,
         }
     }
 
@@ -354,6 +361,12 @@ impl UiBackend {
     fn count(&self, kind: &str) -> usize {
         let world = self.world.lock().unwrap();
         world.commands.iter().filter(|c| c["type"] == kind).count()
+    }
+
+    /// Drop every event stream without a terminal event, as a lost
+    /// connection does; the browser comes back with its last cursor.
+    fn drop_streams(&self) {
+        self.world.lock().unwrap().subscribers.clear();
     }
 
     /// The core restarts: a new epoch, and open subscriptions are closed.
@@ -706,13 +719,35 @@ impl WorkbenchBackend for UiBackend {
     async fn subscribe(
         &self,
         _client: ClientId,
-        _subscribe: Subscribe,
+        subscribe: Subscribe,
     ) -> Result<BackendSubscription, WorkbenchError> {
         let mut world = self.world.lock().unwrap();
         world.subscriptions += 1;
         let id = world.subscriptions.to_string();
         let (tx, rx) = mpsc::channel(256);
         world.subscribers.push((id.clone(), tx));
+        if let Some(after) = subscribe.after
+            && std::mem::take(&mut world.replay_on_resume)
+        {
+            // Resume without a snapshot, then replay messages 170..229 (the
+            // page shows 180..229) and commit one new message.
+            let replayed: Vec<Value> = world.history[170..230].to_vec();
+            for message in replayed {
+                world
+                    .publish(json!({"type": "message_committed", "payload": {"message": message}}));
+            }
+            let message = json!({"thread": "thr-1", "run": "run-root", "index": world.history.len().to_string(), "role": "assistant", "content": {"type": "inline", "payload": {"text": RESUMED_TEXT}}});
+            world.history.push(message.clone());
+            world.publish(json!({"type": "message_committed", "payload": {"message": message}}));
+            let started = json!({
+                "subscription_id": id,
+                "high_water": serde_json::to_value(after).unwrap(),
+            });
+            return Ok(BackendSubscription {
+                started: serde_json::from_value(started).unwrap(),
+                events: rx,
+            });
+        }
         // Always a fresh snapshot: a core may answer any resume this way.
         let snapshot_id = format!("snap-{id}");
         let high_water =
@@ -1086,7 +1121,28 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     assert_eq!(routed["inputs"], 0, "a lead-routed question is read-only");
     ui.screenshot("04-thread-top").await;
-    for expected in [100, 150, 200, 230] {
+    eprintln!("step: replay after a reconnect");
+    // A reconnect resumes after the last cursor; the core replays messages
+    // that are already on screen or older than the page. Only the one new
+    // message may appear, after the newest.
+    backend.world.lock().unwrap().replay_on_resume = true;
+    backend.drop_streams();
+    ui.wait(&format!(
+        r##"() => document.querySelector(".messages .msg:last-child")?.textContent.includes({RESUMED_TEXT:?})"##
+    ))
+    .await;
+    let after_replay = ui
+        .eval(
+            r##"(() => { const bodies = [...document.querySelectorAll(".messages .msg .msg-body")].map((b) => b.textContent);
+                return { count: bodies.length, first: bodies[0], beforeLast: bodies.at(-2).includes("本文の終わり。") }; })()"##,
+        )
+        .await;
+    assert_eq!(
+        after_replay,
+        json!({"count": 51, "first": "メッセージ 180", "beforeLast": true}),
+        "replayed old messages were dropped"
+    );
+    for expected in [101, 151, 201, 231] {
         ui.click("button.older").await;
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
@@ -1277,21 +1333,45 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     ui.screenshot("06-approval-loading").await;
     backend.unhold("get_approval_input");
+    // Approving becomes possible only with the whole input on screen: shown
+    // as received, unfolded, and scrollable to its last line.
     let full = ui
         .wait(&format!(
             r##"() => {{ const c = document.querySelector('{AP1}');
-                return c.querySelector(".card-label").textContent === "実行内容（全文）" && {{
+                if (c.querySelector(".card-label").textContent !== "実行内容（全文）") return false;
+                const pre = c.querySelector(".approval-summary");
+                const style = getComputedStyle(pre);
+                pre.scrollTop = pre.scrollHeight;
+                return {{
                     approve: c.querySelector('button[aria-label="このツール実行を承認"]').disabled,
-                    tail: c.querySelector(".approval-summary").textContent.includes("最後の行") }}; }}"##
+                    folded: pre.classList.contains("folded"),
+                    mask: style.maskImage === "none" || style.maskImage === "",
+                    scrollable: style.overflowY === "auto",
+                    reachedEnd: pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 1,
+                    exact: pre.textContent === {input:?},
+                    bigInteger: pre.textContent.includes("9007199254740993"),
+                }}; }}"##,
+            input = approval_input("ap-1"),
         ))
         .await;
     assert_eq!(
         full,
-        json!({"approve": false, "tail": true}),
-        "the whole input is shown"
+        json!({"approve": false, "folded": false, "mask": true, "scrollable": true,
+               "reachedEnd": true, "exact": true, "bigInteger": true}),
+        "the whole input is visible, byte for byte"
+    );
+    ui.screenshot("07-approval-full").await;
+    // Folding it again hides part of the input, so approving is off again.
+    ui.click(&format!("{AP1} button.link")).await;
+    assert_eq!(
+        ui.eval(&format!(
+            r##"document.querySelector('{AP1} button[aria-label="このツール実行を承認"]').disabled"##
+        ))
+        .await,
+        true,
+        "a folded input cannot be approved"
     );
     ui.click(&format!("{AP1} button.link")).await;
-    ui.screenshot("07-approval-full").await;
     ui.click(&format!(
         r##"{AP1} button[aria-label="このツール実行を承認"]"##
     ))

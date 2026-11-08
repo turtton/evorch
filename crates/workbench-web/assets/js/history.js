@@ -7,9 +7,16 @@
 // cut the first page was read at; if the core forgets one (`conflict`), the
 // caller opens a new window.
 //
-// Messages that arrive as `message_committed` events are appended after the
-// first page. A message is identified by `run` and `index`, so the same
-// message from a page and an event is shown once.
+// Messages that arrive as `message_committed` events (live or replayed after
+// a reconnect) are placed by their position, not by arrival: `index` counts
+// the messages of one run. The newest page holds every run's latest messages
+// at the cut it was read at, so an event at or below its run's highest index
+// is already on screen or older than the page and is dropped; only a higher
+// index is new and goes after the page. An event of a run the page does not
+// know is the first message of a new run when its index is 0; any other
+// index cannot be placed, and the caller re-reads the history.
+
+import { compareDecimal } from "./wire.js";
 
 export const HISTORY_PAGE_SIZE = 50;
 
@@ -31,6 +38,15 @@ export class HistoryWindow {
     this.live = [];
     this.pending = [];
     this.opened = false;
+    /** Highest index on screen per run: the boundary new messages must pass. */
+    this.latest = new Map();
+  }
+
+  note(message) {
+    const held = this.latest.get(message.run);
+    if (held === undefined || compareDecimal(message.index, held) > 0) {
+      this.latest.set(message.run, message.index);
+    }
   }
 
   /** Read the newest page. Resolves `{ok}` or `{ok: false, error}`. */
@@ -39,10 +55,13 @@ export class HistoryWindow {
     if (!result.ok) return result;
     this.pages = [result.value.items];
     this.olderCursor = result.value.next_cursor ?? null;
+    for (const message of result.value.items) this.note(message);
     this.opened = true;
     const buffered = this.pending;
     this.pending = [];
-    for (const message of buffered) this.append(message);
+    for (const message of buffered) {
+      if (this.append(message) === "resync") return { ok: true, resync: true };
+    }
     return { ok: true };
   }
 
@@ -60,23 +79,26 @@ export class HistoryWindow {
     return { ok: true, added: result.value.items.length };
   }
 
-  /** A committed message from an event. Returns true if it is new. */
+  /**
+   * A committed message from an event. Returns "added" when it is newer
+   * than everything on screen for its run, "ignored" when it is on screen
+   * or older than the page, and "resync" when its place cannot be known.
+   * Before the first page arrives events are held and placed afterwards.
+   */
   append(message) {
     if (!this.opened) {
       this.pending.push(message);
-      return false;
+      return "held";
     }
-    const key = messageKey(message);
-    if (this.has(key)) return false;
+    const held = this.latest.get(message.run);
+    if (held === undefined) {
+      if (message.index !== "0") return "resync";
+    } else if (compareDecimal(message.index, held) <= 0) {
+      return "ignored";
+    }
     this.live.push(message);
-    return true;
-  }
-
-  has(key) {
-    return (
-      this.pages.some((page) => page.some((m) => messageKey(m) === key)) ||
-      this.live.some((m) => messageKey(m) === key)
-    );
+    this.note(message);
+    return "added";
   }
 
   /** Everything on screen, oldest first, without duplicates. */

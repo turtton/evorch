@@ -707,7 +707,7 @@ export function threadView(ctx, threadId) {
   // stream had a gap, so the messages on screen may be incomplete). Events
   // that arrive while the walk runs are kept by the new window itself and
   // applied after the walk; the old window's live messages are dropped.
-  async function rebuildHistory() {
+  async function rebuildHistory({ resyncs = 0 } = {}) {
     const next = new HistoryWindow((cursor) =>
       ctx.api.query("read_committed_history", {
         direction: "backward",
@@ -723,6 +723,17 @@ export function threadView(ctx, threadId) {
     building = null;
     if (!result.ok) {
       historyStatus.textContent = describeError(result.error);
+      reload.hidden = false;
+      return;
+    }
+    if (result.resync) {
+      // An event arrived during the read that cannot be placed; read again,
+      // a few times at most.
+      if (resyncs < 3) {
+        rebuildHistory({ resyncs: resyncs + 1 });
+        return;
+      }
+      historyStatus.textContent = "新しいメッセージの位置を判定できませんでした。履歴を読み込み直してください。";
       reload.hidden = false;
       return;
     }
@@ -942,9 +953,12 @@ export function threadView(ctx, threadId) {
     }
     if (!history) return;
     const follow = nearBottom();
-    if (history.append(message)) {
+    const placed = history.append(message);
+    if (placed === "added") {
       renderMessages();
       if (follow) scrollToBottom();
+    } else if (placed === "resync") {
+      rebuildHistory();
     }
   }
 
@@ -993,6 +1007,9 @@ export function threadView(ctx, threadId) {
         case "snapshot":
           // A snapshot follows a gap in the stream: messages committed in the
           // gap are not in it, and the thread view was dropped with the state.
+          // The run list is stale from now on, not only once it is re-read.
+          runsGeneration += 1;
+          runsLoad = { state: "loading" };
           rebuildHistory();
           loadThread();
           break;

@@ -7,7 +7,7 @@
 // Tests that need a DOM are skipped where there is none.
 
 import { Api } from "../../assets/js/api.js";
-import { approvalReady } from "../../assets/js/cards.js";
+import { approvalCard, approvalReady } from "../../assets/js/cards.js";
 import { HistoryWindow, messageKey } from "../../assets/js/history.js";
 import { parseInline, parseMarkdown, renderMarkdown, safeHref } from "../../assets/js/markdown.js";
 import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.js";
@@ -272,18 +272,22 @@ test("the composer role comes from the root run, never from a guess", () => {
   eq(composerRoleFor({}, runs), "choose", "no root run: the person picks");
 });
 
-test("approving needs the whole input for exactly this approval revision", () => {
+test("approving needs the whole input, unfolded, for exactly this approval revision", () => {
+  const visible = { visible: true };
   const view = { id: "ap", core_epoch: "7", revision: "9", state: "pending", summary_truncated: false };
-  assert(approvalReady(view, null), "an untruncated summary is the whole input");
+  assert(approvalReady(view, null, visible), "an untruncated summary is the whole input");
+  assert(!approvalReady(view, null, { visible: false }), "folded: part of it is hidden");
+  assert(!approvalReady(view, null), "not known to be visible");
   const truncated = { ...view, summary_truncated: true };
   const loaded = (over) => ({ key: "ap:7:9", complete: true, blocked: false, ...over });
-  assert(!approvalReady(truncated, null), "nothing read yet");
-  assert(!approvalReady(truncated, loaded({ complete: false })), "partly read");
-  assert(approvalReady(truncated, loaded()), "read to the end");
-  assert(!approvalReady({ ...truncated, revision: "10" }, loaded()), "read for another revision");
-  assert(!approvalReady({ ...truncated, core_epoch: "8" }, loaded()), "read in another epoch");
-  assert(!approvalReady(truncated, loaded({ blocked: true })), "the core refused the read");
-  assert(!approvalReady({ ...view, state: "approved" }, null), "already decided");
+  assert(!approvalReady(truncated, null, visible), "nothing read yet");
+  assert(!approvalReady(truncated, loaded({ complete: false }), visible), "partly read");
+  assert(approvalReady(truncated, loaded(), visible), "read to the end and shown");
+  assert(!approvalReady(truncated, loaded(), { visible: false }), "read but folded");
+  assert(!approvalReady({ ...truncated, revision: "10" }, loaded(), visible), "read for another revision");
+  assert(!approvalReady({ ...truncated, core_epoch: "8" }, loaded(), visible), "read in another epoch");
+  assert(!approvalReady(truncated, loaded({ blocked: true }), visible), "the core refused the read");
+  assert(!approvalReady({ ...view, state: "approved" }, null, visible), "already decided");
 });
 
 // ---- paging -------------------------------------------------------------------
@@ -355,12 +359,46 @@ test("history opens on the newest page and follows cursors to older ones", async
 test("history appends live messages once", async () => {
   const { fetchPage } = pagedHistory(4, 10);
   const window = new HistoryWindow(fetchPage);
-  window.append(message("r1", 3));
+  eq(window.append(message("r1", 3)), "held");
   window.append(message("r1", 4));
   await window.open();
-  assert(!window.append(message("r1", 4)), "a duplicate event is dropped");
-  assert(window.append(message("r2", 0)));
+  eq(window.append(message("r1", 4)), "ignored", "a duplicate event is dropped");
+  eq(window.append(message("r2", 0)), "added", "the first message of a new run");
   eq(window.messages().map(messageKey), ["r1#0", "r1#1", "r1#2", "r1#3", "r1#4", "r2#0"]);
+});
+
+test("replayed messages older than the page never land after it", async () => {
+  // The page holds messages 180..229 (the newest 50 of 230); a reconnect
+  // replays 170..229 and then one new message.
+  const { fetchPage } = pagedHistory(230, 50);
+  const window = new HistoryWindow(fetchPage);
+  await window.open();
+  for (let i = 170; i < 230; i += 1) eq(window.append(message("r1", i)), "ignored", `#${i}`);
+  eq(window.messages().map((m) => m.index)[0], "180");
+  eq(window.messages().length, 50, "nothing older was appended");
+  eq(window.append(message("r1", 230)), "added");
+  eq(window.messages().at(-1).index, "230");
+});
+
+test("each run has its own boundary, and an unplaceable message asks for a re-read", async () => {
+  // Two runs interleaved: the page has a0..a2 and b0..b1.
+  const items = [message("a", 0), message("b", 0), message("a", 1), message("b", 1), message("a", 2)];
+  const window = new HistoryWindow(async () => ({ ok: true, value: { items, snapshot_revision: "1" } }));
+  await window.open();
+  eq(window.append(message("b", 1)), "ignored");
+  eq(window.append(message("a", 1)), "ignored");
+  eq(window.append(message("b", 2)), "added", "newer for b even though a is further along");
+  eq(window.append(message("a", 3)), "added");
+  eq(window.append(message("c", 0)), "added", "a new run starts at 0");
+  eq(window.append(message("d", 7)), "resync", "a run the page does not know, not at its start");
+  eq(window.messages().map(messageKey), ["a#0", "b#0", "a#1", "b#1", "a#2", "b#2", "a#3", "c#0"]);
+});
+
+test("an unplaceable message during the first read makes the read report it", async () => {
+  const { fetchPage } = pagedHistory(10, 5);
+  const window = new HistoryWindow(fetchPage);
+  window.append(message("other", 4));
+  eq(await window.open(), { ok: true, resync: true });
 });
 
 test("a history error is reported, not thrown", async () => {
@@ -450,6 +488,30 @@ test(
     }
     assert(host.textContent.includes("<img src=x onerror=alert(1)>"));
     eq(host.querySelector("pre code").textContent, "<b>x</b>");
+  },
+  { dom: true },
+);
+
+test(
+  "a long summary that is the whole input cannot be approved while folded",
+  () => {
+    const summary = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") + "\nlast line";
+    const ctx = { api: {}, store: {}, toast() {}, threadTitle: () => "t", refreshApprovals() {}, maxBodyChunk: () => "65536" };
+    const card = approvalCard(ctx, {
+      id: "ap", core_epoch: "1", revision: "1", thread: "t", run: "r", state: "pending",
+      tool_name: "shell", summary, summary_truncated: false, input_bytes: String(summary.length),
+    });
+    const pre = card.querySelector(".approval-summary");
+    const approve = card.querySelector('button[aria-label="このツール実行を承認"]');
+    const toggle = card.querySelector("button.link");
+    assert(pre.classList.contains("folded"), "folded at first");
+    assert(approve.disabled, "approving is off while folded");
+    toggle.click();
+    assert(!pre.classList.contains("folded"));
+    eq(pre.textContent, summary);
+    assert(!approve.disabled, "approving is on once unfolded");
+    toggle.click();
+    assert(approve.disabled, "folding again turns it off");
   },
   { dom: true },
 );
