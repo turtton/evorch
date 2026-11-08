@@ -129,7 +129,7 @@ pub(crate) const CATALOG: &[(&str, Treatment, &str)] = &[
     (
         "lane_handoffs",
         ReclaimThread,
-        "deleted by the target lane delete trigger, never by source provenance",
+        "retained while source or target survives; source tombstone and target lane delete triggers collect it only after both are gone",
     ),
     (
         "lane_management_receipts",

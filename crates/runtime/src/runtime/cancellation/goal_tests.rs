@@ -56,9 +56,11 @@ async fn ac15_handoff_failure_completes_only_reserved_execution_and_allows_retry
             .is_err()
     );
     runtime.goal_lock().roots.remove(&target);
+    let mut retry_memo = memo(source);
+    retry_memo.original_request = "same operation, reworded request".into();
     let retry = runtime
         .prepare_handoff_to_lane(
-            &memo(source),
+            &retry_memo,
             &RunConfig::default(),
             Default::default(),
             &publication,

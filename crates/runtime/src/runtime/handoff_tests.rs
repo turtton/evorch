@@ -617,3 +617,356 @@ async fn waiting(runtime: &AgentRuntime, run: RunId) {
         rx.changed().await.unwrap();
     }
 }
+
+fn runtime_for_handoff_restart(
+    config: &storage::StorageConfig,
+    db: &storage::Storage,
+    model: Arc<RepeatedHandoffModel>,
+) -> AgentRuntime {
+    let bus = Arc::new(EventBus::new(256));
+    AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model)
+        .with_run_store(crate::RunStore::open(config, db.handle()).unwrap())
+}
+
+async fn started_handoff_for_retention() -> (
+    tempfile::TempDir,
+    storage::StorageConfig,
+    storage::Storage,
+    Arc<RepeatedHandoffModel>,
+    AgentRuntime,
+    RunId,
+    RunId,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("handoff-retention.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let model = Arc::new(RepeatedHandoffModel {
+        entered: Notify::new(),
+        release: Notify::new(),
+        worker_calls: Default::default(),
+    });
+    let runtime = runtime_for_handoff_restart(&config, &db, model.clone());
+    let source = runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            "Original request; do not publish without approval".into(),
+            RunConfig {
+                interactive: true,
+                keep_alive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    model.entered.notified().await;
+    let mut goal = runtime
+        .create_thread_goal(
+            "source",
+            source,
+            "original goal".into(),
+            vec!["evidence".into()],
+        )
+        .unwrap();
+    goal.checks_paused = true;
+    runtime.restore_thread_goal(goal).unwrap();
+    model.release.notify_one();
+    assert_eq!(runtime.wait(source).await.unwrap(), AgentRunPhase::Done);
+    let receipt = db
+        .handle()
+        .handoff_for_source(source.to_string())
+        .unwrap()
+        .unwrap();
+    let target = receipt.target_run_id.parse().unwrap();
+    waiting(&runtime, target).await;
+    runtime.stop(target, StopScope::SelfOnly).unwrap();
+    runtime.wait(target).await.unwrap();
+    (dir, config, db, model, runtime, source, target)
+}
+
+fn reclaim_handoff_thread(
+    config: &storage::StorageConfig,
+    db: &storage::Storage,
+    source: RunId,
+    target: RunId,
+    delete_source: bool,
+) {
+    use storage::thread_retention::*;
+    let target_thread = event_bus::escalation_thread_id(&target.to_string());
+    let deleted = if delete_source {
+        "source"
+    } else {
+        &target_thread
+    };
+    db.handle()
+        .upsert_threads_host(&[storage::threads::ThreadUpsert {
+            thread_id: deleted.into(),
+            archived: Some(true),
+            archived_at_ns: Some(1),
+            archive_revision: 1,
+            ..Default::default()
+        }])
+        .unwrap();
+    let input = RetentionInput {
+        threads: ["source", target_thread.as_str()]
+            .into_iter()
+            .map(|id| SidebarThread {
+                thread_id: id.into(),
+                archived: id == deleted,
+                pinned: false,
+                archived_at_s: (id == deleted).then_some(0),
+                created_at_s: 1,
+                updated_at_s: 1,
+                archive_revision: Some(u64::from(id == deleted)),
+                pin_revision: Some(0),
+            })
+            .collect(),
+        sidebar_path: "/handoff-retention/sidebar.json".into(),
+        ownership_root: "/handoff-retention/owners".into(),
+        now_ns: i64::MAX / 2,
+    };
+    let database = storage::Database::open(config).unwrap();
+    let policy = ThreadRetentionPolicy::default();
+    for _ in 0..1000 {
+        let states = database
+            .retention_explore(
+                &input,
+                &policy,
+                ExploreBudget {
+                    max_edges: 1_000_000,
+                },
+            )
+            .unwrap();
+        if states
+            .iter()
+            .all(|(_, s)| !matches!(s, FamilyState::Exploring { .. }))
+        {
+            break;
+        }
+    }
+    let outcome = database
+        .retention_finalize(
+            deleted,
+            &input,
+            &policy,
+            &Default::default(),
+            &BindingInput {
+                ownership_root: input.ownership_root.clone(),
+                sidebar_path: input.sidebar_path.clone(),
+            },
+            FinalizeBudget {
+                max_edges: 1_000_000,
+            },
+        )
+        .unwrap();
+    let FinalizeOutcome::Confirmed(family) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(family.threads, [deleted]);
+    assert_eq!(
+        family.runs,
+        [if delete_source { source } else { target }.to_string()]
+    );
+    for _ in 0..100 {
+        let progress = db.handle().reclaim_step(ReclaimBudget::default()).unwrap();
+        assert_eq!(progress.last_error, None);
+        if progress.jobs_db_pending == 0 {
+            break;
+        }
+    }
+    assert_eq!(database.reclaim_summary().unwrap().jobs_db_pending, 0);
+}
+
+#[tokio::test]
+async fn started_target_restores_latest_goal_after_source_reclaim_without_replaying_seed() {
+    let (_dir, config, db, model, runtime, source, target) = started_handoff_for_retention().await;
+    let thread = event_bus::escalation_thread_id(&target.to_string());
+    let mut latest = runtime.thread_goal(&thread).unwrap();
+    latest.phase = event_bus::ThreadGoalPhase::Blocked;
+    latest.reason = Some("new blocker found after target started".into());
+    latest.checks_paused = false;
+    latest.usage.input_tokens = 9123;
+    latest.usage.output_tokens = 4567;
+    latest.max_tokens = Some(123_456);
+    runtime.restore_thread_goal(latest.clone()).unwrap();
+    db.handle()
+        .append_event(
+            None,
+            &Event::new(event_bus::OrchestratorEvent::ThreadGoalUpdated {
+                snapshot: latest.clone(),
+            }),
+        )
+        .unwrap();
+    reclaim_handoff_thread(&config, &db, source, target, true);
+    drop(runtime);
+
+    let runtime = runtime_for_handoff_restart(&config, &db, model);
+    runtime.restore_committed_handoff(target).unwrap();
+    assert!(
+        runtime.thread_goal(&thread).is_none(),
+        "Started receipt is not a current goal snapshot"
+    );
+    let saved = storage::Database::open(&config)
+        .unwrap()
+        .orchestrator_events_ordered()
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| match row.event.kind {
+            event_bus::EventKind::Orchestrator(
+                event_bus::OrchestratorEvent::ThreadGoalUpdated { snapshot },
+            ) if snapshot.thread_id == thread => Some(snapshot),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    let mut invalid = saved.clone();
+    invalid
+        .related_root_run_ids
+        .push("run-unproven-deleted".into());
+    assert!(
+        runtime
+            .set_tombstone_guard(crate::thread_retention::tombstones_for_tests(
+                &["source"],
+                &[&source.to_string(), "run-unproven-deleted"],
+            ))
+            .is_ok()
+    );
+    assert!(
+        runtime.restore_thread_goal(invalid).is_err(),
+        "only receipt-proven provenance may outlive its source"
+    );
+    runtime.restore_thread_goal(saved).unwrap();
+    runtime.resume_chat(target, RunConfig::default()).unwrap();
+    waiting(&runtime, target).await;
+    let restored = runtime.thread_goal(&thread).unwrap();
+    assert_eq!(restored.phase, latest.phase);
+    assert_eq!(restored.reason, latest.reason);
+    assert_eq!(restored.checks_paused, latest.checks_paused);
+    assert_eq!(restored.usage, latest.usage);
+    assert_eq!(restored.max_tokens, latest.max_tokens);
+    assert_eq!(restored.original_request, latest.original_request);
+    runtime.stop(target, StopScope::SelfOnly).unwrap();
+    runtime.wait(target).await.unwrap();
+}
+
+#[tokio::test]
+async fn reclaimed_target_keeps_source_transfer_fence_but_allows_explicit_human_followup() {
+    let (_dir, config, db, model, runtime, source, target) = started_handoff_for_retention().await;
+    reclaim_handoff_thread(&config, &db, source, target, false);
+    assert!(
+        db.handle()
+            .lane_by_thread(&event_bus::escalation_thread_id(&target.to_string()))
+            .unwrap()
+            .is_none()
+    );
+    let receipt = db
+        .handle()
+        .handoff_for_source(source.to_string())
+        .unwrap()
+        .unwrap();
+    assert!(receipt.state.is_committed());
+    drop(runtime);
+    let runtime = runtime_for_handoff_restart(&config, &db, model.clone());
+    assert!(runtime.wake_chat(source, RunConfig::default()).is_err());
+    assert!(runtime.resume_chat(source, RunConfig::default()).is_err());
+    assert!(runtime.inspect_agent(source).is_err());
+    runtime
+        .continue_goal(
+            source,
+            "A new explicit human request".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    model.entered.notified().await;
+    assert_ne!(
+        runtime
+            .execution_snapshot(source)
+            .unwrap()
+            .publication()
+            .incarnation(),
+        receipt.source_incarnation
+    );
+    runtime.stop(source, StopScope::SelfOnly).unwrap();
+    runtime.wait(source).await.unwrap();
+}
+
+#[tokio::test]
+async fn handoff_copies_authentic_question_answers_without_sharing_review_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = storage::StorageConfig {
+        db_path: dir.path().join("handoff-evidence.db"),
+        ..Default::default()
+    };
+    let db = storage::Storage::open(config.clone()).unwrap();
+    let model = Arc::new(Model {
+        worker_entered: Notify::new(),
+        target_calls: Default::default(),
+    });
+    let bus = Arc::new(EventBus::new(256));
+    let runtime = AgentRuntime::new(bus.clone(), Arc::new(ToolExecutor::new(bus)), model.clone())
+        .with_run_store(crate::RunStore::open(&config, db.handle()).unwrap());
+    let source = runtime
+        .delegate_chat(
+            "source",
+            Role::Worker,
+            "Investigate only; do not publish".into(),
+            RunConfig::default(),
+        )
+        .unwrap();
+    model.worker_entered.notified().await;
+    let question = runtime
+        .request_user_question(source, "May I inspect the output?".into(), vec![], false)
+        .unwrap();
+    runtime
+        .answer_user_question(&question.id, "Read only the failing output")
+        .unwrap();
+    let store = runtime.shared.run_store.get().unwrap();
+    let before = store
+        .review_evidence_for_lineage(&[source.to_string()])
+        .unwrap();
+    assert!(
+        before
+            .iter()
+            .any(|r| r.text == "Investigate only; do not publish")
+    );
+    assert!(before.iter().any(
+        |r| r.in_reply_to_question_id.as_deref() == Some(&question.id)
+            && r.text == "Read only the failing output"
+    ));
+    let publication = runtime.execution_snapshot(source).unwrap().publication();
+    let target = runtime
+        .prepare_handoff_to_lane(
+            &memo(source),
+            &RunConfig::default(),
+            Default::default(),
+            &publication,
+        )
+        .unwrap();
+    let copied = store
+        .review_evidence_for_lineage(&[target.to_string()])
+        .unwrap();
+    let expected: Vec<_> = before
+        .into_iter()
+        .map(|mut row| {
+            row.id = format!("handoff-evidence-{target}-{}", row.id);
+            row.root_run_id = target.to_string();
+            row.target_run_id = target.to_string();
+            row
+        })
+        .collect();
+    assert_eq!(
+        copied, expected,
+        "preserve kind, text, answer identity/title, references, attachments and ordering"
+    );
+    let context = crate::run_store::materialize_review_context(store, target).unwrap();
+    assert_eq!(context.lineage_run_ids, [target.to_string()]);
+    assert!(context.delegation_chain.is_empty());
+    assert!(!Arc::ptr_eq(
+        &context.user_requests,
+        &runtime.shared.review_runs.lock().unwrap()[&source].user_requests
+    ));
+    runtime.stop(source, StopScope::SelfOnly).unwrap();
+    runtime.wait(source).await.unwrap();
+}

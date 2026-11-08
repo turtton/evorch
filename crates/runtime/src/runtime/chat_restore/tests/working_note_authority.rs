@@ -244,7 +244,6 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
         original_payload
     );
 
-    let trusted_handoff_request = fixture.runtime.trusted_thread_request(source).unwrap();
     let mut events = fixture.runtime.shared.bus.subscribe();
     gate.notify_one();
     let receiver = loop {
@@ -284,8 +283,10 @@ async fn working_notes_and_frozen_history_never_change_reviewer_authority_across
     let frozen = &descriptor.continuity.sources[0];
     assert_eq!(frozen.source, source_handle);
     assert!(frozen.records_json.contains(FAKE_NOTE));
-    let expected_handoff =
-        json!([{ "target_run_id": receiver.to_string(), "text": trusted_handoff_request }]);
+    let mut expected_handoff = expected.clone();
+    for request in expected_handoff.as_array_mut().unwrap() {
+        request["target_run_id"] = json!(receiver.to_string());
+    }
     let receiver_payload = review_payload(&fixture.runtime, receiver).await;
     assert_authority(&receiver_payload, receiver, &expected_handoff);
     assert_eq!(receiver_payload["context"]["delegation_chain"], json!([]));

@@ -22,6 +22,13 @@ CREATE TABLE lane_handoff_questions (
 );
 CREATE INDEX lane_handoff_questions_operation
     ON lane_handoff_questions(source_run_id,source_incarnation);
+-- A live source needs its incarnation's transfer marker even if its target
+-- was reclaimed first. A live target needs provenance even if source went first.
 CREATE TRIGGER lane_handoff_reclaim AFTER DELETE ON lanes BEGIN
-    DELETE FROM lane_handoffs WHERE lane_id=OLD.lane_id;
+    DELETE FROM lane_handoffs WHERE lane_id=OLD.lane_id
+      AND source_run_id IN (SELECT run_id FROM run_tombstones);
+END;
+CREATE TRIGGER lane_handoff_source_reclaim AFTER INSERT ON run_tombstones BEGIN
+    DELETE FROM lane_handoffs WHERE source_run_id=NEW.run_id
+      AND NOT EXISTS (SELECT 1 FROM lanes WHERE lanes.lane_id=lane_handoffs.lane_id);
 END;

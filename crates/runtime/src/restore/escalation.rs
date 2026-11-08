@@ -130,17 +130,30 @@ pub(crate) fn persist_escalation_seed(
         .handle
         .save_snapshot_bundle(&write)
         .map_err(super::provenance::storage_error)?;
-    // Copy trusted host input as evidence owned by the new root. In particular,
-    // legacy pending seeds must remain resumable without a live source review edge.
-    if let Some(request) = runtime.trusted_thread_request(source_run_id) {
-        store
-            .handle
-            .record_review_evidence(&[crate::run_store::evidence_row(
-                &run_id.to_string(),
-                &run_id.to_string(),
-                "host_chat",
-                &request,
-            )])?;
+    // Materialize authentic inputs, not old review decisions or a shared Arc.
+    // Keep answer/reference context and ordering, but make every row belong to
+    // the target so source retention cannot remove its authority evidence.
+    let source = source_run_id.to_string();
+    let target = run_id.to_string();
+    let mut lineage = store.review_lineage_ancestors(&source)?;
+    lineage.push(source);
+    let mut evidence = store.review_evidence_for_lineage(&lineage)?;
+    for row in &mut evidence {
+        row.id = format!("handoff-evidence-{target}-{}", row.id);
+        row.root_run_id.clone_from(&target);
+        row.target_run_id.clone_from(&target);
     }
+    // Legacy host seeds may predate the durable evidence ledger entirely.
+    if evidence.is_empty()
+        && let Some(request) = runtime.trusted_thread_request(source_run_id)
+    {
+        evidence.push(crate::run_store::evidence_row(
+            &target,
+            &target,
+            "host_chat",
+            &request,
+        ));
+    }
+    store.handle.record_review_evidence(&evidence)?;
     Ok(saved.snapshot_revision)
 }

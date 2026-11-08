@@ -302,13 +302,31 @@ impl AgentRuntime {
     pub fn restore_thread_goal(&self, mut snapshot: ThreadGoalSnapshot) -> Result<(), String> {
         self.deny_deleted_thread(&snapshot.thread_id)
             .and_then(|()| self.deny_deleted_run(&snapshot.root_run_id))
-            .and_then(|()| {
-                snapshot
-                    .related_root_run_ids
-                    .iter()
-                    .try_for_each(|related| self.deny_deleted_run(related))
-            })
             .map_err(|deleted| deleted.to_string())?;
+        let handoff = self
+            .shared
+            .run_store
+            .get()
+            .map(|store| {
+                store
+                    .handle
+                    .handoff_for_target(snapshot.root_run_id.clone())
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .flatten();
+        for related in &snapshot.related_root_run_ids {
+            // A receipt proves this one reference is historical provenance,
+            // not a live authority edge. All other references keep their fence.
+            if handoff.as_ref().is_some_and(|receipt| {
+                receipt.state.is_committed()
+                    && receipt.source_run_id == *related
+                    && snapshot.thread_id == event_bus::escalation_thread_id(&receipt.target_run_id)
+            }) {
+                continue;
+            }
+            self.deny_deleted_run(related).map_err(|e| e.to_string())?;
+        }
         validate_text(&snapshot.objective)?;
         validate_text(&snapshot.original_request)?;
         validate_criteria(&snapshot.criteria)?;
@@ -758,6 +776,11 @@ impl AgentRuntime {
             })
         {
             return Err("handoff source has not published its terminal boundary".into());
+        }
+        // Initial snapshots are a recovery seed, never the current state of an
+        // already-started lane. The host rehydrates that state from goal events.
+        if receipt.state == storage::handoffs::HandoffState::Started {
+            return Ok(());
         }
         let mut goals = self.goal_lock();
         let thread = event_bus::escalation_thread_id(&target.to_string());

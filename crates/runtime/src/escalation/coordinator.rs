@@ -54,7 +54,16 @@ impl AgentRuntime {
         };
         // The receipt exists first, so neither a partial seed nor a Prepared lane
         // can be mistaken for a normal recoverable lane_open intent.
-        let lane = store.handle.create_lane(storage::lanes::NewLane {
+        // The first created brief is immutable for this operation. Retry may
+        // refresh the memo/seed, but must not reuse the creation key with a new hash.
+        let lane = if let Some(lane) = store
+            .handle
+            .lane(&receipt.lane_id)
+            .map_err(|e| e.to_string())?
+        {
+            lane
+        } else {
+            store.handle.create_lane(storage::lanes::NewLane {
             lane_id: receipt.lane_id.clone(), thread_id: thread.clone(),
             origin_thread_id: origin.clone(), origin_run_id: source.to_string(),
             creation_key: format!("handoff:{source}:{target}"),
@@ -66,7 +75,8 @@ impl AgentRuntime {
             start_seed: serde_json::json!({"run_id":target,"project_root":source_config.project_root,"requires_ownership":source_config.ownership.is_some()}).to_string(),
             project_id: None, project_root: source_config.project_root.as_ref().map(|p|p.to_string_lossy().into_owned()),
             title: Some("Handoff · Orchestrator".into()), at_ns: crate::run_store::review_time_ns(),
-        }).map_err(|e|e.to_string())?.lane;
+        }).map_err(|e|e.to_string())?.lane
+        };
         store
             .handle
             .upsert_thread_runtime(&storage::threads::ThreadUpsert {

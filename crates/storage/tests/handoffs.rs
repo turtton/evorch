@@ -161,3 +161,76 @@ fn incomplete_intents_never_start_and_committed_receipts_keep_the_same_target() 
     );
     assert!(h.unstarted_lanes(100).unwrap().is_empty());
 }
+
+#[test]
+fn transfer_receipt_outlives_either_side_and_is_collected_after_both_are_gone() {
+    for source_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            db_path: dir.path().join("receipt-retention.db"),
+            ..Default::default()
+        };
+        let db = Storage::open(config.clone()).unwrap();
+        let h = db.handle();
+        let receipt = h
+            .reserve_handoff(reservation("incarnation-a", "target"))
+            .unwrap();
+        h.create_lane(NewLane {
+            lane_id: receipt.lane_id,
+            thread_id: "target-thread".into(),
+            origin_thread_id: "source-thread".into(),
+            origin_run_id: "source".into(),
+            creation_key: "retention-operation".into(),
+            brief: LaneBrief {
+                objective: "objective".into(),
+                inputs: vec![],
+                deliverables: vec![],
+                acceptance_criteria: vec!["evidence".into()],
+                constraints: vec![],
+                workspace: Default::default(),
+                verification_requirements: Default::default(),
+                report_policy: LanePolicy::Detached,
+            },
+            start_seed: "seed".into(),
+            project_id: None,
+            project_root: None,
+            title: None,
+            at_ns: 1,
+        })
+        .unwrap();
+        for (before, after) in [
+            (HandoffState::Preparing, HandoffState::Prepared),
+            (HandoffState::Prepared, HandoffState::Committed),
+        ] {
+            h.advance_handoff(
+                "source".into(),
+                "incarnation-a".into(),
+                before,
+                after,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+        let source_delete = "INSERT INTO run_tombstones(run_id,thread_id,family_key) VALUES('source','source-thread','source-thread')";
+        let target_delete = "DELETE FROM lanes WHERE lane_id='lane-target'";
+        let (first, second) = if source_first {
+            (source_delete, target_delete)
+        } else {
+            (target_delete, source_delete)
+        };
+        conn.execute_batch(first).unwrap();
+        assert!(
+            h.handoff_operation("source".into(), "incarnation-a".into())
+                .unwrap()
+                .is_some()
+        );
+        conn.execute_batch(second).unwrap();
+        assert!(
+            h.handoff_operation("source".into(), "incarnation-a".into())
+                .unwrap()
+                .is_none()
+        );
+    }
+}
