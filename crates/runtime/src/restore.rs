@@ -22,6 +22,7 @@ pub use fork_seed::ChatForkSeed;
 
 pub(crate) struct RestoredState {
     pub(crate) mcp_snapshot: Option<tools::mcp::types::FrozenMcpSnapshot>,
+    pub(crate) harness_notice_pending: bool,
     pub(crate) provenance: provenance::ConversationProvenance,
     /// Revision of the snapshot this state was read from, or last saved. A
     /// state built from a bare record has none and cannot be saved.
@@ -99,6 +100,7 @@ impl RestoredState {
             });
         Ok(Self {
             mcp_snapshot: descriptor.mcp_snapshot,
+            harness_notice_pending: descriptor.harness_notice_pending,
             provenance: provenance::ConversationProvenance::unknown(),
             snapshot_revision: revision::SnapshotRevision::unknown(),
             admission_reservation: None,
@@ -170,6 +172,9 @@ pub struct RunRestoreDescriptor {
     pub lane_scope: Option<event_bus::LaneScope>,
     #[serde(default)]
     pub spawn_credits: crate::budget_tracker::SpawnCredits,
+    /// Recovery marker only, never Lane progress or user authority.
+    #[serde(default)]
+    pub harness_notice_pending: bool,
     /// Explicit input provenance, never reconstructed by counting canonical history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<providers::RequestTurnContext>,
@@ -409,7 +414,29 @@ pub(crate) fn persist_lane_delivery(
         "Checkpoint",
         context.messages.len(),
         &[],
-        Some((claim, now)),
+        Some((
+            &crate::lane_delivery::outbox::DeliveryClaim::Lane(claim.clone()),
+            now,
+        )),
+    )
+}
+
+pub(crate) fn persist_pr_delivery(
+    state: &LoopState,
+    context: &crate::AgentContext,
+    claim: &storage::pull_request_auto_fix::PrDeliveryClaim,
+    now: i64,
+) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
+    write_snapshot_with_context(
+        state,
+        context,
+        "Checkpoint",
+        context.messages.len(),
+        &[],
+        Some((
+            &crate::lane_delivery::outbox::DeliveryClaim::PullRequest(claim.clone()),
+            now,
+        )),
     )
 }
 
@@ -429,7 +456,7 @@ fn write_snapshot_with_context(
     terminal_phase: &str,
     end: usize,
     settled: &[storage::HostInputTransition],
-    lane: Option<(&storage::lane_delivery::LaneDeliveryClaim, i64)>,
+    lane: Option<(&crate::lane_delivery::outbox::DeliveryClaim, i64)>,
 ) -> Result<crate::ownership::SnapshotReference, SnapshotError> {
     context
         .responses_replay
@@ -551,6 +578,7 @@ fn write_snapshot_with_context(
         thread_id: state.thread_id.clone(),
         lane_scope: config.lane_scope,
         spawn_credits: state.budget.spawn_credits.clone(),
+        harness_notice_pending: context.harness_notice_pending,
         turn: Some(state.turn.clone()),
         boundary_pending: state.boundary_pending,
         continuity: state.continuity.clone(),
@@ -641,10 +669,24 @@ fn write_snapshot_with_context(
         .ok_or(SnapshotError::RevisionUnknown)?;
     let write = context.provenance.write(record, expected)?;
     let (saved, applied) = if let Some((claim, now)) = lane {
-        let saved = store
-            .handle
-            .accept_lane_delivery(claim.clone(), write, now)?
-            .ok_or(SnapshotError::RevisionUnknown)?;
+        use crate::lane_delivery::outbox::DeliveryClaim;
+        let saved = match claim {
+            DeliveryClaim::Lane(claim) => {
+                store
+                    .handle
+                    .accept_lane_delivery(claim.clone(), write, now)?
+            }
+            DeliveryClaim::PullRequest(claim) => store.handle.accept_pr_delivery(
+                claim.clone(),
+                write,
+                now,
+                runtime.pull_requests().map_or(
+                    config::PullRequestsConfig::default().auto_fix_enabled,
+                    |s| s.settings().auto_fix_enabled,
+                ),
+            )?,
+        }
+        .ok_or(SnapshotError::RevisionUnknown)?;
         (saved, Vec::new())
     } else {
         store
@@ -751,6 +793,43 @@ fn cancelled_tool_calls(messages: &[providers::Message]) -> Vec<InterruptedToolC
 mod tests {
     use super::safe_context_end;
     use providers::{ContentBlock, Message, Role, ToolResultContent};
+
+    #[test]
+    fn restored_state_preserves_mcp_snapshot_and_pending_harness_notice() {
+        let snapshot = tools::mcp::types::FrozenMcpSnapshot::default();
+        let config = serde_json::json!({
+            "role": "worker", "name": null, "parent_run_id": null,
+            "interactive": false, "keep_alive": false, "category": null,
+            "load_skills": [], "model_preference": null,
+            "restorable": true, "non_restorable_reason": null,
+            "mcp_snapshot": snapshot, "harness_notice_pending": true,
+        });
+        let messages = [Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "continue".into(),
+            }],
+        }];
+        let record = storage::RunContextRecord {
+            run_id: "mixed-restore".into(),
+            role: "worker".into(),
+            name: "worker".into(),
+            parent_run_id: None,
+            config_json: config.to_string(),
+            messages_json: serde_json::to_string(&messages).unwrap(),
+            checkpoints_json: "[]".into(),
+            terminal_phase: "Running".into(),
+            restorable: true,
+            updated_at_ns: 1,
+            host_inputs_json: "[]".into(),
+        };
+        let restored = super::RestoredState::from_record(&record).unwrap();
+        assert_eq!(
+            restored.mcp_snapshot,
+            Some(tools::mcp::types::FrozenMcpSnapshot::default())
+        );
+        assert!(restored.harness_notice_pending);
+    }
 
     #[test]
     fn incomplete_tool_batches_are_not_checkpoint_boundaries() {

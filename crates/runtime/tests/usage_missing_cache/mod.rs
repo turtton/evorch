@@ -205,6 +205,49 @@ async fn usage_reported_then_missing_then_reported_keeps_the_wire_prefix_and_cac
     assert_no_cache_regression(&events);
 }
 
+// Given: the shared artifact cursor sits where two consecutive conversations straddle a change
+// in slot-name digits (9 -> 10, 63 -> 0), so their artifact paths would differ in length
+// When: the comparison above runs in an isolated process with that cursor
+// Then: it still passes; the tool result's saved path has a fixed width, so equal conversations
+// send equal-sized requests whichever slot each one lands in
+#[test]
+fn control_comparison_holds_when_artifact_slot_names_change_digits() {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+
+    const TEST: &str = "usage_missing_cache::usage_reported_then_missing_then_reported_keeps_the_wire_prefix_and_cache";
+    for cursor in [9u8, 63] {
+        let base = tempfile::tempdir().unwrap();
+        // `<base>/evorch-output-<euid>` is the store layout `tools::output` creates.
+        let euid = std::fs::metadata(base.path()).unwrap().uid();
+        let root = base.path().join(format!("evorch-output-{euid}"));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join(".next"))
+            .unwrap()
+            .write_all(&[cursor])
+            .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("EVORCH_OUTPUT_DIR", base.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cursor {cursor}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+}
+
 // Given: Codex official compaction whose terminal response omits usage
 // When: a manual compaction succeeds and the conversation continues
 // Then: the history is replaced exactly once with the returned state, the compaction request

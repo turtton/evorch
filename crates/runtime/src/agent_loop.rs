@@ -439,6 +439,7 @@ pub(crate) async fn run_agent(shared: Weak<Shared>, mut task: RunTask, channels:
                     restored.snapshot_revision,
                 );
                 context.provenance = restored.provenance;
+                context.harness_notice_pending = restored.harness_notice_pending;
                 match restored.trigger {
                     Some(trigger) => context.push_user(&messages::format_agent_message(&trigger)),
                     None if !history_only => {
@@ -1258,6 +1259,7 @@ impl LoopState {
                     if self.budget.observe_lane_presentations(&visible_messages) {
                         self.boundary_pending = true;
                     }
+                    self.context.harness_notice_pending = false;
                     self.model_switches = 0;
                     response
                 }

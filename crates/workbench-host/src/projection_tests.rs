@@ -314,3 +314,66 @@ fn control_rich_question_preview_fits_the_wire_budget_without_breaking_utf8() {
     assert!(serde_json::to_vec(&preview).unwrap().len() <= 512 * 1024);
     assert_eq!(queries::text("日本語\nformat?", 1024), "日本語\nformat?");
 }
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_age_and_epoch_expiry_require_resync_without_wall_clock_waits() {
+    let (p, _) = make(&tokio::runtime::Handle::current(), 64, Default::default());
+    let sub = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let q = ReadSnapshot {
+        snapshot_id: sub.started.snapshot_id.unwrap(),
+        page: PageRequest::default(),
+    };
+    tokio::time::advance(SNAPSHOT_TTL - std::time::Duration::from_nanos(1)).await;
+    assert_eq!(
+        p.read_snapshot(&q).unwrap().high_water,
+        sub.started.high_water
+    );
+    tokio::time::advance(std::time::Duration::from_nanos(1)).await;
+    assert_eq!(
+        p.read_snapshot(&q).unwrap_err().code,
+        ErrorCode::ResyncRequired
+    );
+    let next = p.subscribe_with_snapshot(&all(None)).unwrap();
+    let q = ReadSnapshot {
+        snapshot_id: next.started.snapshot_id.unwrap(),
+        page: PageRequest::default(),
+    };
+    p.state.lock().unwrap().invalidate(p.limits);
+    assert_eq!(
+        p.read_snapshot(&q).unwrap_err().code,
+        ErrorCode::ResyncRequired
+    );
+}
+
+#[test]
+fn backward_pages_respect_encoded_byte_and_item_limits_without_gaps() {
+    let pager = Pager::default();
+    let values: Vec<_> = (0..201)
+        .map(|i| format!("{i}:{}", "\0".repeat(8192)))
+        .collect();
+    let mut request = PageRequest {
+        limit: 200,
+        cursor: None,
+    };
+    let mut pages = vec![];
+    loop {
+        let page = pager
+            .page_backward("backward-budget", &values, &request, Revision(7))
+            .unwrap();
+        assert!(!page.items.is_empty());
+        assert!(page.items.len() <= 200);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= queries::PAGE_BYTES);
+        request.cursor = page.next_cursor;
+        pages.push(page.items);
+        if request.cursor.is_none() {
+            break;
+        }
+    }
+    let all: Vec<_> = pages.into_iter().rev().flatten().collect();
+    assert_eq!(all, values);
+    let empty = pager
+        .page_backward::<String>("empty", &[], &PageRequest::default(), Revision(1))
+        .unwrap();
+    assert!(empty.items.is_empty());
+    assert!(empty.next_cursor.is_none());
+}

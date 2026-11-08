@@ -166,6 +166,7 @@
       "description": "スレッドに紐づいた PR の追跡（ADR 0043、既定で無効。信頼済みセクション）。",
       "$ref": "#/$defs/PullRequestsConfig",
       "default": {
+        "auto_fix_enabled": true,
         "backoff_max_seconds": 1800,
         "enabled": false,
         "fetch_timeout_seconds": 20,
@@ -1480,6 +1481,11 @@
       "description": "PR 追跡の利用者設定。",
       "type": "object",
       "properties": {
+        "auto_fix_enabled": {
+          "description": "自動修正通知の全体スイッチ。既定 true。PR ごとの opt-in は別に必要。",
+          "type": "boolean",
+          "default": true
+        },
         "backoff_max_seconds": {
           "description": "取得失敗時の指数 backoff の上限（秒）。30..=86400、既定 1800。\n`stable_poll_seconds` 以上でなければならない。",
           "type": "integer",

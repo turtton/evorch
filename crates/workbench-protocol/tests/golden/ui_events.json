@@ -9,10 +9,12 @@
           "surface": "web"
         },
         "id": "ap-1",
+        "input_bytes": "22",
         "revision": "2",
         "run": "run-1",
         "state": "pending",
         "summary": "rm -rf build",
+        "summary_truncated": false,
         "thread": "thr-1",
         "tool_name": "shell"
       }

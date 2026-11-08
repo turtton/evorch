@@ -93,6 +93,7 @@ mod tests {
     fn compaction_summaries_outside_raw_messages_are_reserved_too() {
         let restored = crate::restore::RestoredState {
             mcp_snapshot: None,
+            harness_notice_pending: false,
             provenance: Default::default(),
             snapshot_revision: crate::restore::revision::SnapshotRevision::fresh(),
             responses_replay: Default::default(),

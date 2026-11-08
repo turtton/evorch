@@ -136,7 +136,7 @@ impl StorageHandle {
         now_ns: i64,
     ) -> Result<Option<crate::thread_index::SnapshotReceipt>, StorageError> {
         self.lane_job(true, move |conn| {
-            crate::repo::lane_delivery::accept_delivery(conn, &claim, write, now_ns)
+            crate::repo::lane_delivery::accept_delivery(conn, &claim, write, now_ns, true)
         })
     }
     /// Requires durable receipts; retry repairs ACK without re-appending input.

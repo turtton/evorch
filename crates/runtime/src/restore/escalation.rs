@@ -36,6 +36,7 @@ pub(crate) fn persist_escalation_seed(
     };
     let descriptor = RunRestoreDescriptor {
         mcp_snapshot: None,
+        harness_notice_pending: false,
         lane_scope: config.lane_scope,
         spawn_credits: config.spawn_credits.clone(),
         responses_replay: None,

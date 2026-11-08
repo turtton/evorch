@@ -47,15 +47,17 @@ CACHE_CONTRACT_FILTER='
       | binary(=skill_hot_reload_cache)
       | binary(=thread_tools_cache)
       | binary(=pull_request_observer_cache)
-      | binary(=pull_request_review_cache)
+      | binary(=pull_request_review_cache) | binary(=pull_request_auto_fix_cache)
+      | binary(=harness_notice_delivery_cache)
       | binary(=pull_request_e2e)))
   | (package(=tools) & binary(=bounded_output))
-  | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache)
+  | (package(=gui) & (binary(=artifact_pages_cache) | binary(=pull_requests_cache) | binary(=pull_request_phase2_gui_cache)
       | (binary(=lane_delivery_host) & test(attention_query_and_display))))
 '
 IO_CONTRACT_FILTER='
-  (package(=storage) & (binary(=lane_delivery) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))
+  (package(=storage) & (binary(=lane_delivery) | binary(=pull_request_auto_fix) | binary(=io_contracts) | binary(=retention_io_contracts) | binary(=archive_index_io_contracts) | binary(=content_blob_io_contracts) | binary(=run_messages_io_contracts) | binary(=event_body_io_contracts) | (kind(lib) & (test(maintenance::convert_bodies::tests::one_run_writes_a_log) | test(maintenance::convert_bodies::tests::one_map_writes_a_log)))))
   | (package(=runtime) & kind(lib) & test(ownership::tests))
+  | (package(=runtime) & kind(lib) & test(lane_delivery::tests::harness::))
   | (package(=runtime) & binary(=pull_request_log_source_io))
   | (package(=gui) & (
       (kind(lib) & test(storage_bridge))

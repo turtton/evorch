@@ -249,6 +249,7 @@ mod review_tests {
                     (run, None, Role::Worker, RunConfig::default(), run),
                     RestoredState {
                         mcp_snapshot: None,
+                        harness_notice_pending: false,
                         provenance: Default::default(),
                         snapshot_revision: crate::restore::revision::SnapshotRevision::fresh(),
                         responses_replay: Default::default(),

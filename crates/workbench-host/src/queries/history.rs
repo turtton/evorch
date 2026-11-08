@@ -224,7 +224,8 @@ impl Bodies {
         // Bind the frozen event cut to its live run membership too: deletion
         // must revoke a cursor rather than shift the remaining message offsets.
         let key = format!(
-            "history:{}:{:?}:{}",
+            "history:{:?}:{}:{:?}:{}",
+            q.direction,
             q.thread.as_str(),
             q.run,
             super::revision(&runs).get()
@@ -240,7 +241,14 @@ impl Bodies {
         // descriptors as well, without ever loading the referenced blobs.
         let key = format!("{key}#{}", super::revision(&raw).get());
         // Page the tokenized records before resolving or registering any bodies.
-        let page = pager.page(&key, &raw, &q.page, Revision(high_water as u64))?;
+        let page = match q.direction {
+            workbench_protocol::queries::HistoryDirection::Forward => {
+                pager.page(&key, &raw, &q.page, Revision(high_water as u64))?
+            }
+            workbench_protocol::queries::HistoryDirection::Backward => {
+                pager.page_backward(&key, &raw, &q.page, Revision(high_water as u64))?
+            }
+        };
         Ok(Page {
             items: page
                 .items

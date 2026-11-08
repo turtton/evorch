@@ -11,12 +11,16 @@ use egui::epaint::Shape;
 use egui_kittest::{Harness, kittest::Queryable};
 use gui::model::composer::ComposerModel;
 use gui::model::model_picker::ModelPickerState;
-use gui::model::pull_requests::{PrGlyph, PullRequestAction, ThreadPullRequest};
+use gui::model::pull_requests::{
+    AutoFixView, HeadNotice, PrGlyph, PullRequestAction, ThreadPullRequest,
+};
 use gui::model::transcript::TranscriptModel;
 use gui::panes::agent::{
     AgentIdentity, AgentPaneAction, ConversationContext, PullRequestBarContext, agent_pane,
 };
 use gui::theme::style::{ThemePreset, install_preset};
+use runtime::pull_requests::HeadAttribution;
+use storage::pull_request_auto_fix::{PrAutoFixState, PrNoticeMode, PrNoticePhase};
 use storage::pull_requests::{
     CheckConclusion, CheckKind, CheckStatus, DisplayTitle, FetchErrorKind, FetchFailure,
     LinkOrigin, LocalHeadObservation, PullRequestCheck, PullRequestDisplay, PullRequestFacts,
@@ -81,6 +85,7 @@ fn view(facts: Option<PullRequestFacts>) -> ThreadPullRequest {
         failure: None,
         candidates: Vec::new(),
         tracked_here: true,
+        auto_fix: None,
     }
 }
 
@@ -192,8 +197,9 @@ fn labels(harness: &Harness<'_>) -> Vec<String> {
         .collect()
 }
 
-// Given: an expanded bar of a failing pull request / When: it is drawn / Then: the operations
-// are Refresh and Unlink, and nothing of Phase 2 or of a trust-boundary notice is there
+// Given: an expanded bar of a failing pull request whose auto fix state was not read / When: it
+// is drawn / Then: the operations are Refresh and Unlink, and no auto fix control or
+// trust-boundary notice is there
 #[test]
 fn the_bar_offers_refresh_and_unlink_and_nothing_else() {
     let (mut h, _) = harness(Bar {
@@ -784,4 +790,352 @@ fn passed_checks_are_not_drawn_as_success_when_the_facts_cannot_vouch_for_it() {
             .iter()
             .any(|label| label == &format!("{} 1 passed", gui::theme::icons::CHECK))
     );
+}
+
+// --- auto fix on the bar (ADR 0043 Phase 2, PR E) ---
+
+const MINUTE_NS: i64 = 60_000_000_000;
+
+fn auto_state(shape: impl FnOnce(&mut PrAutoFixState)) -> PrAutoFixState {
+    let mut state = PrAutoFixState {
+        key: PullRequestKey::github("turtton/evorch", 12).unwrap(),
+        enabled: false,
+        destination_thread_id: None,
+        link_revision: None,
+        policy_revision: 4,
+        budget_epoch: 0,
+        used: 0,
+        reserved: 0,
+        cooldown_until_ns: None,
+        stop_reason: None,
+        limit_reached_epoch: None,
+    };
+    shape(&mut state);
+    state
+}
+
+fn on_here(state: &mut PrAutoFixState) {
+    state.enabled = true;
+    state.destination_thread_id = Some("thread".into());
+    state.link_revision = Some(1);
+}
+
+fn with_auto(
+    facts: PullRequestFacts,
+    state: PrAutoFixState,
+    shape: impl FnOnce(&mut AutoFixView),
+) -> ThreadPullRequest {
+    let mut shown = view(Some(facts));
+    let mut auto = AutoFixView {
+        state,
+        head_notice: None,
+        this_stopped: false,
+        suppressed: false,
+        head_origin: HeadAttribution::Agent,
+        global_enabled: true,
+    };
+    shape(&mut auto);
+    shown.auto_fix = Some(auto);
+    shown
+}
+
+fn bar_of(view: ThreadPullRequest) -> (Harness<'static>, Clicked) {
+    harness(Bar {
+        view,
+        expanded: false,
+        subagent: false,
+    })
+}
+
+// Given: a failing pull request with auto fix off / When: the bar is drawn and each control
+// clicked / Then: the toggle and "Send to agent" are there and each reports its thread
+#[test]
+fn the_bar_offers_the_auto_fix_toggle_and_send_to_the_agent() {
+    for (control, expected) in [
+        (
+            "Auto fix",
+            PullRequestAction::ToggleAutoFix {
+                thread_id: "thread".into(),
+            },
+        ),
+        (
+            "Send to agent",
+            PullRequestAction::SendToAgent {
+                thread_id: "thread".into(),
+            },
+        ),
+    ] {
+        let (mut h, clicked) = bar_of(with_auto(failing(), auto_state(|_| {}), |_| {}));
+        h.run_steps(4);
+        h.get_by_label("Refresh");
+        h.get_by_label("Unlink");
+        h.get_by_label(control).click();
+        h.run_steps(3);
+        assert_eq!(clicked.borrow().as_ref(), Some(&expected), "{control}");
+    }
+}
+
+// Given: auto fix in each state the bar reports / Then: the chips say it in words
+#[test]
+fn the_bar_reports_remaining_cooldown_sent_pending_external_stopped_and_limit() {
+    let now = gui::model::pull_requests::now_ns();
+    let words = |shown: ThreadPullRequest| {
+        let (mut h, _) = bar_of(shown);
+        h.run_steps(4);
+        labels(&h)
+    };
+    let has = |all: &[String], text: &str| all.iter().any(|label| label == text);
+
+    let active = words(with_auto(
+        failing(),
+        auto_state(|s| {
+            on_here(s);
+            s.used = 1;
+            s.cooldown_until_ns = Some(now + 7 * MINUTE_NS);
+        }),
+        |_| {},
+    ));
+    assert!(has(&active, "2 left"), "{active:?}");
+    assert!(has(&active, "cooldown 7m"), "{active:?}");
+
+    let sent = words(with_auto(failing(), auto_state(|_| {}), |auto| {
+        auto.head_notice = Some(HeadNotice {
+            notice_id: "prn-1".into(),
+            phase: PrNoticePhase::Adopted,
+            mode: PrNoticeMode::Manual,
+        });
+    }));
+    assert!(has(&sent, "Sent"), "{sent:?}");
+
+    let pending = facts(
+        PullRequestState::Open,
+        vec![
+            check(
+                "lint",
+                CheckStatus::Completed,
+                Some(CheckConclusion::Failure),
+            ),
+            check("build", CheckStatus::InProgress, None),
+        ],
+        true,
+    );
+    let waiting = words(with_auto(pending, auto_state(on_here), |_| {}));
+    assert!(has(&waiting, "Waiting for checks"), "{waiting:?}");
+    assert!(
+        waiting.iter().any(|label| label.starts_with("CI failing")),
+        "the failure stays shown while auto waits: {waiting:?}"
+    );
+
+    let external = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
+    assert!(has(&words(external), "External commit"));
+
+    let stopped = words(with_auto(failing(), auto_state(|_| {}), |auto| {
+        auto.this_stopped = true;
+    }));
+    assert!(has(&stopped, "Stopped"), "{stopped:?}");
+
+    let limit = words(with_auto(
+        failing(),
+        auto_state(|s| {
+            s.used = 3;
+            s.destination_thread_id = Some("thread".into());
+            s.link_revision = Some(1);
+            s.stop_reason = Some("limit_reached".into());
+        }),
+        |_| {},
+    ));
+    assert!(has(&limit, "Limit reached 3/3"), "{limit:?}");
+    assert!(has(&limit, "Reset count"), "{limit:?}");
+}
+
+// Given: a head that was sent / When: "Send to agent" is clicked and hovered / Then: nothing is
+// reported and a short hover gives the reason
+#[test]
+fn a_disabled_send_reports_nothing_and_says_why_on_hover() {
+    let (mut h, clicked) = bar_of(with_auto(failing(), auto_state(|_| {}), |auto| {
+        auto.head_notice = Some(HeadNotice {
+            notice_id: "prn-1".into(),
+            phase: PrNoticePhase::Adopted,
+            mode: PrNoticeMode::Manual,
+        });
+    }));
+    h.run_steps(4);
+    h.get_by_label("Send to agent").click();
+    h.run_steps(3);
+    assert!(clicked.borrow().is_none());
+
+    h.get_by_label("Send to agent").hover();
+    h.run_steps(6);
+    h.get_by_label("Already sent for this commit");
+}
+
+// Given: a window that does not hold the thread / Then: both controls are disabled with the
+// reason, and nothing is reported
+#[test]
+fn a_bar_that_is_only_shown_has_disabled_controls() {
+    let mut shown = with_auto(failing(), auto_state(|_| {}), |_| {});
+    shown.tracked_here = false;
+    let (mut h, clicked) = bar_of(shown);
+    h.run_steps(4);
+    h.get_by_label("Auto fix").click();
+    h.get_by_label("Send to agent").click();
+    h.run_steps(3);
+    assert!(clicked.borrow().is_none());
+    let said = |h: &Harness<'_>| {
+        labels(h)
+            .iter()
+            .filter(|label| *label == "Not tracked in this window")
+            .count()
+    };
+    let before = said(&h);
+    h.get_by_label("Send to agent").hover();
+    h.run_steps(6);
+    assert_eq!(said(&h), before + 1, "the hover gives the reason");
+}
+
+// Given: a subagent's transcript / Then: the thread's bar is there with its controls
+#[test]
+fn a_subagent_transcript_shows_the_threads_auto_fix_controls() {
+    let (mut h, clicked) = harness(Bar {
+        view: with_auto(failing(), auto_state(|_| {}), |_| {}),
+        expanded: false,
+        subagent: true,
+    });
+    h.run_steps(4);
+    h.get_by_label("Send to agent").click();
+    h.run_steps(3);
+    assert_eq!(
+        clicked.borrow().as_ref(),
+        Some(&PullRequestAction::SendToAgent {
+            thread_id: "thread".into()
+        })
+    );
+}
+
+// Given: a bar with auto fix state and a very long title / Then: the row does not move and the
+// controls stay inside the window; none of the trust-boundary notices is drawn
+#[test]
+fn a_long_title_cuts_itself_and_leaves_the_controls_in_reach_without_notices() {
+    let shown = titled(
+        with_auto(failing(), auto_state(on_here), |_| {}),
+        &"very long title ".repeat(40),
+    );
+    let (mut h, _) = bar_of(shown);
+    h.run_steps(4);
+    assert!(h.get_by_label("Send to agent").rect().right() <= 900.0);
+    assert!(h.get_by_label("Unlink").rect().right() <= 900.0);
+    for label in labels(&h) {
+        let lower = label.to_lowercase();
+        for forbidden in [
+            "untrusted",
+            "external data",
+            "not from the user",
+            "data_not_instructions",
+            "[harness-notice",
+            "<ci-log-data>",
+            "信頼",
+            "ユーザー発言",
+        ] {
+            assert!(!lower.contains(forbidden), "{forbidden:?} in {label:?}");
+        }
+    }
+}
+
+// Writes one PNG per auto fix state when `EVORCH_PR_BAR_CAPTURE_DIR` names a directory.
+#[test]
+fn auto_fix_states_render_for_evidence() {
+    let Some(directory) = std::env::var_os("EVORCH_PR_BAR_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let now = gui::model::pull_requests::now_ns();
+    let pending = facts(
+        PullRequestState::Open,
+        vec![
+            check(
+                "lint",
+                CheckStatus::Completed,
+                Some(CheckConclusion::Failure),
+            ),
+            check("build", CheckStatus::InProgress, None),
+        ],
+        true,
+    );
+    let external = with_auto(failing(), auto_state(on_here), |auto| {
+        auto.head_origin = HeadAttribution::Unknown;
+    });
+    let states = [
+        (
+            "auto-on",
+            with_auto(
+                failing(),
+                auto_state(|s| {
+                    on_here(s);
+                    s.used = 1;
+                }),
+                |_| {},
+            ),
+        ),
+        (
+            "cooldown",
+            with_auto(
+                failing(),
+                auto_state(|s| {
+                    on_here(s);
+                    s.used = 1;
+                    s.cooldown_until_ns = Some(now + 7 * MINUTE_NS);
+                }),
+                |_| {},
+            ),
+        ),
+        (
+            "limit-reached",
+            with_auto(
+                failing(),
+                auto_state(|s| {
+                    s.used = 3;
+                    s.destination_thread_id = Some("thread".into());
+                    s.link_revision = Some(1);
+                    s.stop_reason = Some("limit_reached".into());
+                }),
+                |_| {},
+            ),
+        ),
+        (
+            "sent",
+            with_auto(failing(), auto_state(|_| {}), |auto| {
+                auto.head_notice = Some(HeadNotice {
+                    notice_id: "prn-1".into(),
+                    phase: PrNoticePhase::Adopted,
+                    mode: PrNoticeMode::Manual,
+                });
+            }),
+        ),
+        (
+            "waiting-for-checks",
+            with_auto(pending, auto_state(on_here), |_| {}),
+        ),
+        (
+            "stopped",
+            with_auto(failing(), auto_state(on_here), |auto| {
+                auto.this_stopped = true
+            }),
+        ),
+        ("external-commit", external),
+    ];
+    for (name, state) in states {
+        let (mut h, _) = harness(Bar {
+            view: titled(state, "feat(gui): auto fix from the pull request bar"),
+            expanded: false,
+            subagent: false,
+        });
+        h.run_steps(5);
+        h.render()
+            .unwrap()
+            .save(directory.join(format!("pull-request-bar-auto-fix-{name}.png")))
+            .unwrap();
+    }
 }

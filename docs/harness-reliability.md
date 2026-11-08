@@ -415,7 +415,9 @@ Timeout is an error result containing the captured partial output.
 There are 64 slots shared across processes and restarts, with at most 8 MiB
 per artifact (512 MiB total, excluding small lock/directory metadata). New
 artifacts replace one slot at a time under a file lock. Paths contain unique
-IDs so an expired reference cannot point to an unrelated output. A background
+IDs so an expired reference cannot point to an unrelated output. Slot directories
+are named `00`–`63`, zero-padded, so the saved path (which the model sees) has the
+same length whichever slot a result lands in. A background
 worker checks one slot per minute for files older than seven days; there is no
 startup scan or bulk deletion on the UI thread. Expired files are optional
 history aids, never a requirement for conversation restoration.

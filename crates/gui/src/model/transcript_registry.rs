@@ -97,6 +97,32 @@ impl TranscriptRegistry {
         );
     }
 
+    fn all_models(&self) -> impl Iterator<Item = &TranscriptModel> {
+        std::iter::once(&self.thread)
+            .chain(self.threads.values())
+            .chain(self.runs.values())
+    }
+
+    /// Notice IDs some transcript shows without their card.
+    pub(crate) fn unfilled_harness_notices(&self) -> BTreeSet<String> {
+        self.all_models()
+            .flat_map(TranscriptModel::unfilled_harness_notices)
+            .collect()
+    }
+
+    /// Fills the card in every transcript that shows its notice (the thread's and the
+    /// run's). Returns whether any did.
+    pub(crate) fn fill_harness_card(
+        &mut self,
+        card: &crate::model::harness_card::HarnessCard,
+    ) -> bool {
+        let mut filled = self.thread.fill_harness_card(card);
+        for model in self.threads.values_mut().chain(self.runs.values_mut()) {
+            filled |= model.fill_harness_card(card);
+        }
+        filled
+    }
+
     pub(crate) fn finish_history(&mut self) {
         self.thread.finish_history();
         for model in self.threads.values_mut().chain(self.runs.values_mut()) {
@@ -173,7 +199,10 @@ impl TranscriptRegistry {
                     route
                 }
             }
-            EventKind::Lifecycle(event_bus::LifecycleEvent::RunProgress { run_id, .. })
+            EventKind::Lifecycle(
+                event_bus::LifecycleEvent::RunProgress { run_id, .. }
+                | event_bus::LifecycleEvent::HarnessNoticeDelivered { run_id, .. },
+            )
             | EventKind::Compaction(
                 event_bus::CompactionEvent::Compacted { run_id, .. }
                 | event_bus::CompactionEvent::Progress { run_id, .. }

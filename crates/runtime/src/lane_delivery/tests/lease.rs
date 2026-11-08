@@ -1,8 +1,8 @@
 use super::*;
 
-struct Hosts {
-    targets: HashMap<String, LaneDeliveryTarget>,
-    now: AtomicI64,
+pub(super) struct Hosts {
+    pub(super) targets: HashMap<String, LaneDeliveryTarget>,
+    pub(super) now: AtomicI64,
 }
 impl LaneDeliveryHost for Hosts {
     fn resolve(&self, thread: &str) -> Result<LaneDeliveryTarget, LaneDeliveryNack> {
@@ -69,6 +69,8 @@ async fn occupied_root_does_not_block_other_destinations_and_releases_expired_fl
         .get(&lead)
         .expect("occupied destination is waiting for receipt")
         .claim
+        .lane()
+        .expect("Lane source")
         .clone();
     host.now.store(old.lease_until_ns, Ordering::SeqCst);
     tokio::time::advance(Duration::from_nanos(LEASE_NS.cast_unsigned())).await;
