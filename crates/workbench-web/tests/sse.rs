@@ -439,3 +439,29 @@ async fn event_stream_needs_the_same_browser_checks() {
     );
     assert!(backend.subscribes().is_empty());
 }
+
+#[tokio::test]
+async fn adapter_synthesized_resync_uses_backend_output_protection() {
+    let backend = Arc::new(FakeBackend::new());
+    // A policy probe, not a second implementation of secret-guard. The fake
+    // normally returns output unchanged; replace one id to prove both the
+    // initial answer and the adapter-created terminal event pass the hook.
+    backend.protect_with(|mut value| {
+        value["subscription_id"] = serde_json::json!("protected-id");
+        value
+    });
+    let (subscription, events) = subscription(cursor(7, 10));
+    backend.script_subscription(Ok(subscription));
+    let mut sse = SseReader::new(open(&router(&backend), "/api/v1/events").await);
+    let started = sse.next_event().await.unwrap();
+    assert_eq!(started.json()["subscription_id"], "protected-id");
+    events.send(status_event(cursor(8, 1))).await.unwrap();
+    let terminal = sse.next_event().await.unwrap();
+    assert_eq!(terminal.json()["event"]["type"], "resync_required");
+    assert_eq!(terminal.json()["subscription_id"], "protected-id");
+    assert!(
+        terminal.id.is_none(),
+        "synthesized resync must not move cursor"
+    );
+    assert!(sse.next_event().await.is_none());
+}

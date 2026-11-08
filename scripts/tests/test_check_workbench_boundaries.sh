@@ -61,7 +61,7 @@ run_case() {
   fi
 }
 
-WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","runtime","storage","config","gui","test-support"]'
+WS='"workspace": ["workbench-protocol","workbench-client","workbench-host","workbench-web","evorch-core","runtime","storage","config","gui","test-support"]'
 EXT='"external": ["serde","serde_json","thiserror","tokio","regex","egui","wgpu","axum","http","futures-core","http-body-util","hyper","hyper-util"]'
 GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","to":"serde_json"},{"from":"workbench-protocol","to":"thiserror"},
       {"from":"workbench-client","to":"workbench-protocol"},{"from":"workbench-client","to":"tokio"},{"from":"workbench-client","to":"thiserror"},
@@ -72,6 +72,22 @@ GOOD='{"from":"workbench-protocol","to":"serde"},{"from":"workbench-protocol","t
 
 run_case clean_graph ok "boundary check passed" <<SPEC
 {$WS, $EXT, "deps": [$GOOD]}
+SPEC
+
+run_case core_binary_is_a_gui_free_composition_root ok "boundary check passed" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch-core","to":"runtime"},{"from":"evorch-core","to":"workbench-host"},{"from":"evorch-core","to":"workbench-web"},{"from":"evorch-core","to":"workbench-client","kind":"dev"}]}
+SPEC
+
+run_case core_binary_cannot_reach_gui fail "evorch-core -> gui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch-core","to":"gui"}]}
+SPEC
+
+run_case core_binary_cannot_reach_optional_rendering fail "evorch-core declares GUI or client dependency egui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch-core","to":"egui","optional":true,"resolved":false}]}
+SPEC
+
+run_case core_binary_cannot_reach_rendering_transitively fail "evorch-core -> test-support [dev; resolved] -> egui" <<SPEC
+{$WS, $EXT, "deps": [$GOOD, {"from":"evorch-core","to":"test-support","kind":"dev"},{"from":"test-support","to":"egui"}]}
 SPEC
 
 run_case clean_graph_with_dev_deps_on_third_parties ok "" <<SPEC
