@@ -310,6 +310,10 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 }
             }
         }
+        let mut repaired = parse(output.as_deref().unwrap_or(&local))?;
+        self.repair_sidebar_membership(&mut repaired.sidebar)?;
+        let repaired = serde_json::to_vec_pretty(&repaired)?;
+        output = (repaired != local).then_some(repaired);
         write_atomically(path, output.as_deref().unwrap_or(&local))?;
         // What the file holds now is the committed state, merged-in changes included.
         if let Ok(written) = parse(output.as_deref().unwrap_or(&local)) {
@@ -339,6 +343,15 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         &mut self,
         op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        self.shared_sidebar_transact_host(|latest| op(latest).map_err(Into::into))
+    }
+
+    /// Host operations may commit SQL before the projection is saved. Callers
+    /// distinguish that outcome from validation failures and repair on retry.
+    pub(super) fn shared_sidebar_transact_host<T>(
+        &mut self,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
         let (output, commit) = self.commit_shared_sidebar(op)?;
         let Some(commit) = commit else {
             return Ok(output);
@@ -366,7 +379,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     /// nothing; `Commit::written` is `None` without a shared file.
     fn commit_shared_sidebar<T>(
         &self,
-        op: impl FnOnce(&mut HistorySidebar) -> Result<T, workspace_ui::ThreadError>,
+        op: impl FnOnce(&mut HistorySidebar) -> Result<T, Box<dyn std::error::Error>>,
     ) -> Result<(T, Option<Commit>), Box<dyn std::error::Error>> {
         let local = HistorySidebar {
             sidebar: self.sidebar.clone(),
@@ -376,7 +389,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
         let Some(path) = self.sidebar_path.clone() else {
             // No shared file (a test or a temporary state): there is nothing to merge.
             let mut latest = local.clone();
+            self.repair_sidebar_membership(&mut latest.sidebar)?;
             let output = op(&mut latest)?;
+            self.repair_sidebar_membership(&mut latest.sidebar)?;
             super::thread_retention::prune_tombstoned(&mut latest, &self.tombstones);
             let own = all_thread_ids(&latest);
             let commit = Commit {
@@ -417,7 +432,9 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                 .collect();
         }
         let merged = latest.clone();
+        self.repair_sidebar_membership(&mut latest.sidebar)?;
         let output = op(&mut latest)?;
+        self.repair_sidebar_membership(&mut latest.sidebar)?;
         if latest.sidebar == merged.sidebar
             && latest.user_messages == merged.user_messages
             && latest.composer_drafts == merged.composer_drafts

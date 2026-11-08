@@ -276,6 +276,7 @@ fn equal_revisions_with_different_content_keep_the_protective_side() {
     let base = family(&dir);
     let mut a = base.clone();
     a.families.push(workspace_ui::FamilyState {
+        membership_epoch: 0,
         key: id("root"),
         archived: true,
         archived_at: Some(40),
@@ -285,6 +286,7 @@ fn equal_revisions_with_different_content_keep_the_protective_side() {
     });
     let mut b = base.clone();
     b.families.push(workspace_ui::FamilyState {
+        membership_epoch: 0,
         key: id("root"),
         archived: false,
         archived_at: None,
@@ -466,6 +468,7 @@ fn equal_revisions_with_two_archive_times_keep_the_later_one_on_either_side() {
     let side = |at: i64| {
         let mut sidebar = base.clone();
         sidebar.families.push(workspace_ui::FamilyState {
+            membership_epoch: 0,
             key: id("root"),
             archived: true,
             archived_at: Some(at),
@@ -557,6 +560,7 @@ fn merging_family_states_is_commutative_idempotent_and_never_lowers_a_revision()
     let with = |revision: u64, archived: bool, at: Option<i64>, pinned: bool| {
         let mut sidebar = base.clone();
         sidebar.families.push(workspace_ui::FamilyState {
+            membership_epoch: 0,
             key: id("root"),
             archived,
             archived_at: at.filter(|_| archived),

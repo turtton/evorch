@@ -171,3 +171,58 @@ fn source_reclaim_keeps_live_recipient_question_and_answer_then_last_recipient_c
         storage.close();
     }
 }
+
+#[test]
+fn topology_change_after_staging_discards_old_closure_and_reseeds_separate_ages() {
+    for finalize_before_explore in [true, false] {
+        let f = Fixture::new();
+        f.thread("lead", None, Some("rl"), None);
+        f.thread("lane", None, Some("ra"), None);
+        f.run("rl", None, Some("lead"), "chat:Orchestrator:lead");
+        f.run("ra", None, Some("lane"), "chat:Orchestrator:lane");
+        f.managed_lane("managed", "lane", Some("lead"));
+        let db = f.database();
+        let input = sidebar(&["lead", "lane"], &[]);
+        assert_eq!(
+            explored_threads(&settle(&db, &input, &policy(), BIG)),
+            vec![vec!["lane".to_owned(), "lead".to_owned()]]
+        );
+        // The durable management commit is simulated here; no sleeps, all order
+        // boundaries are explicit. A new topology must shrink, not union staging.
+        f.sql("UPDATE lanes SET lead_thread_id=NULL, policy='detached', management_revision=2, detached_since_management_revision=2 WHERE lane_id='managed'; UPDATE lane_state SET family_topology_revision=family_topology_revision+1;");
+        if finalize_before_explore {
+            assert!(matches!(
+                finalize(&db, "lane", &input),
+                FinalizeOutcome::Blocked(BlockReason::Exploring)
+            ));
+            assert_eq!(f.count("SELECT COUNT(*) FROM thread_tombstones"), 0);
+        }
+        // Until the file + mirror ACK, even an otherwise due family is held.
+        assert!(explored_threads(&settle(&db, &input, &policy(), BIG)).is_empty());
+        f.sql("UPDATE lanes SET management_projection_revision=management_revision WHERE lane_id='managed'");
+        let mut independent = sidebar(&["lead", "lane"], &[]);
+        independent
+            .threads
+            .iter_mut()
+            .find(|t| t.thread_id == "lane")
+            .unwrap()
+            .archived_at_s = Some(NOW_NS / 1_000_000_000);
+        let states = settle(&db, &independent, &policy(), BIG);
+        assert_eq!(explored_threads(&states), vec![vec!["lead".to_owned()]]);
+        assert!(matches!(
+            finalize(&db, "lead", &independent),
+            FinalizeOutcome::Confirmed(_)
+        ));
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM thread_tombstones WHERE thread_id='lane'"),
+            0
+        );
+        independent.now_ns += 100 * 86_400 * 1_000_000_000;
+        let states = settle(&db, &independent, &policy(), BIG);
+        assert!(explored_threads(&states).contains(&vec!["lane".to_owned()]));
+        assert!(matches!(
+            finalize(&db, "lane", &independent),
+            FinalizeOutcome::Confirmed(_)
+        ));
+    }
+}

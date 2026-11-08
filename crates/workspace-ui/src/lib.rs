@@ -6,6 +6,7 @@
 mod errors;
 mod family;
 mod lane;
+pub mod lane_management;
 mod lineage;
 mod merge;
 mod migrate;

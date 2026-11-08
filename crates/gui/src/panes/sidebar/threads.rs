@@ -262,7 +262,7 @@ fn attention_note(own: Attention, hidden: Attention) -> Option<&'static str> {
 
 /// What a thread row shows besides its title: its own states, what its
 /// collapsed descendants hide, and the title color its state calls for.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct RowMarks {
     attention: Attention,
     hidden: Hidden,
@@ -270,6 +270,7 @@ struct RowMarks {
     pull_request: Option<crate::model::pull_requests::PullRequestBadge>,
     /// Offer "Link PR…" in the title's menu.
     link_pr: bool,
+    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
 }
 
 /// What a collapsed row hides, so collapsing a family never hides work that
@@ -424,7 +425,18 @@ fn render_tree(
                 }
                 if archived {
                     let retention = indicators.retention.get(&thread.id);
-                    archived_row(ui, thread, display_root, hidden.count, retention, action);
+                    archived_row(
+                        ui,
+                        thread,
+                        display_root,
+                        hidden.count,
+                        retention,
+                        thread
+                            .lane
+                            .as_ref()
+                            .and_then(|_| sidebar.lane_drag_intent(&thread.id)),
+                        action,
+                    );
                 } else {
                     let state = thread.state(indicators.phases);
                     let family_running = display_root
@@ -446,12 +458,27 @@ fn render_tree(
                                 .and_then(|badges| badges.get(&thread.id))
                                 .copied(),
                             link_pr: indicators.pull_requests.enabled,
+                            drag_intent: thread
+                                .lane
+                                .as_ref()
+                                .and_then(|_| sidebar.lane_drag_intent(&thread.id)),
                         },
                         family_running,
                         action,
                     );
                 }
             });
+            if let Some(source) =
+                row.dnd_release_payload::<workspace_ui::lane_management::LaneDragIntent>()
+            {
+                *action = Some(SidebarAction::ReattachLane(
+                    workspace_ui::lane_management::LaneDropIntent {
+                        source: (*source).clone(),
+                        target_thread_id: thread.id.clone(),
+                        expected_lead_root_run_id: thread.root_run_id.clone(),
+                    },
+                ));
+            }
             if let Some(note) = attention_note(own, hidden.attention).filter(|_| !archived) {
                 let label = format!("Thread attention: {note}");
                 row.widget_info(|| {
@@ -662,6 +689,7 @@ fn active_row(
         title_color,
         pull_request,
         link_pr,
+        drag_intent,
     } = marks;
     let note = attention_note(attention, hidden.attention);
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -750,6 +778,7 @@ fn active_row(
             thread,
             !display_root,
             (note, title_color, link_pr),
+            drag_intent,
             action,
         );
     });
@@ -761,6 +790,7 @@ fn archived_row(
     display_root: bool,
     hidden_count: usize,
     retention: Option<&RetentionStatus>,
+    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
     action: &mut Option<SidebarAction>,
 ) {
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -775,6 +805,7 @@ fn archived_row(
             thread,
             !display_root,
             (note.as_deref(), None, false),
+            drag_intent,
             action,
         );
     });
@@ -899,6 +930,7 @@ fn thread_title(
     thread: &ThreadRecord,
     child: bool,
     (note, color, link_pr): (Option<&str>, Option<egui::Color32>, bool),
+    drag_intent: Option<workspace_ui::lane_management::LaneDragIntent>,
     action: &mut Option<SidebarAction>,
 ) {
     // Indentation and the caret already show nesting; "↳" stays in the
@@ -906,6 +938,15 @@ fn thread_title(
     let title = match color {
         Some(color) => row_title(ui, egui::RichText::new(thread.title.as_str()).color(color)),
         None => row_title(ui, thread.title.as_str()),
+    };
+    // Use the title's existing widget ID so selection and right-click menus
+    // keep their pointer ownership. A separate full-row drag overlay steals it.
+    let title = if let Some(intent) = drag_intent {
+        let title = title.interact(Sense::click_and_drag());
+        title.dnd_set_drag_payload(intent);
+        title
+    } else {
+        title
     };
     if child {
         let label = format!("↳ {}", thread.title);
@@ -921,6 +962,37 @@ fn thread_title(
         None => format!("{lane}thread ID: {}", thread.id),
     });
     title.context_menu(|ui| {
+        if let Some(lane) = thread.lane.as_ref().filter(|lane| lane.policy.is_managed()) {
+            use storage::lane_management::{
+                LaneManagementAction, LaneManagementRequest, ManagedLanePolicy,
+            };
+            for (label, change) in [
+                (
+                    "Report milestones (attached)",
+                    LaneManagementAction::SetPolicy {
+                        policy: ManagedLanePolicy::Attached,
+                    },
+                ),
+                (
+                    "Report completion only (summary)",
+                    LaneManagementAction::SetPolicy {
+                        policy: ManagedLanePolicy::Summary,
+                    },
+                ),
+                ("Detach lane", LaneManagementAction::Detach),
+            ] {
+                if ui.button(label).clicked() {
+                    *action = Some(SidebarAction::ManageLane(LaneManagementRequest {
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        lane_id: lane.lane_id.clone(),
+                        expected_management_revision: lane.management_revision,
+                        action: change,
+                    }));
+                    ui.close();
+                }
+            }
+            ui.separator();
+        }
         if ui.button("Copy thread ID").clicked() {
             ui.ctx().copy_text(thread.id.to_string());
             ui.close();

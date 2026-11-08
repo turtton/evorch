@@ -55,6 +55,8 @@ pub enum SidebarAction {
     SwitchThread(ThreadId),
     TogglePin(ThreadId),
     ToggleArchive(ThreadId),
+    ManageLane(storage::lane_management::LaneManagementRequest),
+    ReattachLane(workspace_ui::lane_management::LaneDropIntent),
     /// Open the "Link PR…" dialog for a thread.
     LinkPullRequest(ThreadId),
 }

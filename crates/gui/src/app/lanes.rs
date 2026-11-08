@@ -203,6 +203,7 @@ enum ScanPhase {
 /// The lane side of the Workbench: what the ledger last said and the reads under way.
 pub(super) struct LaneState {
     reader: Option<Arc<dyn LaneLedgerReader>>,
+    pub(super) management_host: Option<Arc<dyn super::lane_management::LaneManagementHost>>,
     spawner: Spawner,
     waker: Waker,
     waker_installed: bool,
@@ -230,6 +231,7 @@ impl Default for LaneState {
         let (sender, results) = channel();
         Self {
             reader: None,
+            management_host: None,
             spawner: thread_spawner(),
             waker: Arc::new(|| {}),
             waker_installed: false,
@@ -292,13 +294,14 @@ const fn policy_of(policy: LedgerPolicy) -> LanePolicy {
     }
 }
 
-fn link_of(record: &LaneRecord) -> LaneLink {
+pub(super) fn link_of(record: &LaneRecord) -> LaneLink {
     LaneLink {
         lane_id: record.lane_id.clone(),
         origin_thread_id: ThreadId::new(record.origin_thread_id.clone()),
         lead_thread_id: record.lead_thread_id.clone().map(ThreadId::new),
         policy: policy_of(record.policy),
         management_revision: record.management_revision,
+        detached_since_management_revision: record.detached_since_management_revision,
     }
 }
 
@@ -444,7 +447,7 @@ impl<S: AgentRunSource> WorkbenchState<S> {
     }
 
     /// Asks for a read of `thread` when it is a lane, and of every lane it leads.
-    fn request_delivery_reads(&mut self, thread: &str) {
+    pub(super) fn request_delivery_reads(&mut self, thread: &str) {
         let wanted: Vec<String> = self
             .sidebar
             .threads
@@ -599,6 +602,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                     lead_thread_id: lead_thread_id.clone().map(ThreadId::new),
                     policy: policy_of(*policy),
                     management_revision: *management_revision,
+                    detached_since_management_revision: (*policy == LedgerPolicy::Detached)
+                        .then_some(*management_revision),
                 };
                 let project = self.project_of_thread(&link.origin_thread_id);
                 let created = project.is_some_and(|project| {
@@ -647,6 +652,8 @@ impl<S: AgentRunSource> WorkbenchState<S> {
                             lead_thread_id: lead_thread_id.clone().map(ThreadId::new),
                             policy: policy_of(*policy),
                             management_revision: *management_revision,
+                            detached_since_management_revision: (*policy == LedgerPolicy::Detached)
+                                .then_some(*management_revision),
                         },
                     )
                 })

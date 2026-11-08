@@ -44,6 +44,19 @@ pub(crate) fn finalize(
     if !staged || !frontier_empty(&tx, family_key)? {
         return Ok(FinalizeOutcome::Blocked(BlockReason::Exploring));
     }
+    let staged_topology: u64 = tx.query_row(
+        "SELECT family_topology_revision FROM retention_staging_state WHERE family_key=?1",
+        [family_key],
+        |row| row.get(0),
+    )?;
+    if staged_topology != crate::repo::lane_management::topology_revision(&tx)? {
+        tx.execute(
+            "DELETE FROM retention_staging_state WHERE family_key=?1",
+            [family_key],
+        )?;
+        tx.commit()?;
+        return Ok(FinalizeOutcome::Blocked(BlockReason::Exploring));
+    }
     let (threads, runs) = staged_sets(&tx, family_key)?;
     let members = (threads.len() + runs.len()) as u64;
 

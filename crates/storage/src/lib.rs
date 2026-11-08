@@ -83,6 +83,7 @@ mod read;
 mod repo;
 mod review;
 mod run;
+pub mod sidebar_projection;
 pub mod task_queue;
 pub mod team;
 pub mod thread_index;

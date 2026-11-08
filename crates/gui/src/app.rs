@@ -32,6 +32,7 @@ mod input;
 pub mod lane_attention;
 #[cfg(test)]
 mod lane_attention_tests;
+pub mod lane_management;
 pub mod lanes;
 #[cfg(test)]
 mod lanes_tests;
@@ -97,6 +98,8 @@ pub enum WorkbenchError {
     Branch(&'static str),
     #[error("Could not save the sidebar (another window may be saving it). Try again: {0}")]
     SidebarBusy(String),
+    #[error("{0}")]
+    LaneManagement(String),
 }
 
 impl WorkbenchError {

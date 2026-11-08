@@ -58,6 +58,10 @@ pub struct LaneLink {
     pub policy: LanePolicy,
     /// The ledger's management revision this projection was made at.
     pub management_revision: u64,
+    /// Membership epoch from the ledger: the revision at which this independent
+    /// period began, or None while managed. Never infer it from pin/archive edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_since_management_revision: Option<u64>,
 }
 
 impl LaneLink {

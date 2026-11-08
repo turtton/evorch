@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+#[path = "sidebar/lane_management.rs"]
+mod lane_management;
 #[path = "sidebar/project_add.rs"]
 mod project_add;
 #[path = "sidebar/project_toolbar.rs"]
