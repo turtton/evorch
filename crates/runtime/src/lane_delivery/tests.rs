@@ -299,6 +299,7 @@ impl Fixture {
             .handle()
             .append_lane_report_with_delivery(
                 lane.lane_id.clone(),
+                1,
                 event_bus::LaneReportInput {
                     status,
                     summary: "artifact details".repeat(60),

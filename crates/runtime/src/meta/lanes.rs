@@ -195,6 +195,7 @@ pub(super) fn report(
     }
     match store.handle.append_lane_report_with_delivery(
         lane.lane_id,
+        lane.management_revision,
         report,
         crate::run_store::review_time_ns(),
     ) {

@@ -3,6 +3,8 @@
 use super::*;
 #[path = "forward_return.rs"]
 mod forward_return;
+#[path = "management.rs"]
+mod management;
 use storage::lane_control::*;
 fn rejected<T: std::fmt::Debug>(r: Result<T, StorageError>, reason: LaneOperationError) {
     assert!(
@@ -182,7 +184,7 @@ fn differently_worded_working_reports_and_generations_never_renew_nudge_slot() {
     let f = Fixture::new();
     let owner = started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Working), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Working), 3)
         .unwrap();
     let r = observation(&f, &owner);
     let e = f.h().observe_lane_stall(r.clone()).unwrap();
@@ -195,7 +197,9 @@ fn differently_worded_working_reports_and_generations_never_renew_nudge_slot() {
     for n in 0..3 {
         let mut report = report(LaneStatus::Working);
         report.summary = format!("different report text {n}");
-        f.h().append_lane_report("lane-1", report, 12 + n).unwrap();
+        f.h()
+            .append_lane_report("lane-1", 1, report, 12 + n)
+            .unwrap();
         let mut observed = r.clone();
         observed.classification = LaneStallClassification::WorkStalled;
         let again = f.h().observe_lane_stall(observed.clone()).unwrap();
@@ -232,7 +236,7 @@ fn genuine_artifact_status_and_user_input_resolve_episodes_but_retry_does_not() 
         let e = f.h().observe_lane_stall(r).unwrap();
         let mut report = report(status);
         report.artifact_revision = Some(ArtifactRevision::CommitSha(sha.to_string().repeat(40)));
-        f.h().append_lane_report("lane-1", report, 20).unwrap();
+        f.h().append_lane_report("lane-1", 1, report, 20).unwrap();
         assert!(
             f.h()
                 .lane_stall_episode(e.episode_id)
@@ -309,7 +313,7 @@ fn nudge_done_wake_receipt_is_retryable_and_consumes_no_guard() {
     f.h().ack_lane_delivery(claim.clone(), 14).unwrap();
     f.h().ack_lane_delivery(claim, 15).unwrap();
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Ready), 16)
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Ready), 16)
         .unwrap();
     assert!(matches!(
         f.h().claim_lane_deliveries(super::request(17)).unwrap(),
@@ -532,7 +536,7 @@ fn verification_submit_is_bound_to_reserved_run_and_is_one_shot() {
     let f = Fixture::new();
     started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = begin(&f, 1);
     let v = f.h().begin_lane_verification(r.clone()).unwrap();
@@ -596,7 +600,7 @@ fn done_without_submit_and_incomplete_or_rejected_checks_cannot_close() {
     let f = Fixture::new();
     started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = begin(&f, 1);
     f.h().begin_lane_verification(r.clone()).unwrap();
@@ -633,7 +637,7 @@ fn target_changes_reject_submit_and_close_and_reopen_only_current_projection() {
         let f = Fixture::new();
         started(&f);
         f.h()
-            .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+            .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
             .unwrap();
         let r = verified(&f, 1);
         let closed = f.h().close_lane(close_request(&r)).unwrap();
@@ -655,7 +659,7 @@ fn target_changes_reject_submit_and_close_and_reopen_only_current_projection() {
                 if change == "artifact" {
                     report.artifact_revision = Some(ArtifactRevision::CommitSha("b".repeat(40)));
                 }
-                f.h().append_lane_report("lane-1", report, 40).unwrap();
+                f.h().append_lane_report("lane-1", 1, report, 40).unwrap();
             }
         }
         assert!(
@@ -697,7 +701,7 @@ fn verification_and_close_fail_atomically_and_can_retry() {
     let f = Fixture::new();
     started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = verified(&f, 1);
     f.sql().execute_batch("CREATE TRIGGER fail_close BEFORE INSERT ON lane_notifications WHEN NEW.event_kind='closed' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
@@ -725,7 +729,7 @@ fn attention_pages_are_bounded_stable_restartable_and_bound_to_filter_and_revisi
         let mut report = report(LaneStatus::Blocked);
         report.summary = "\"😀".repeat(100);
         f.h()
-            .append_lane_report(&format!("lane-{n}"), report, i64::from(n))
+            .append_lane_report(&format!("lane-{n}"), 1, report, i64::from(n))
             .unwrap();
     }
     let first = f.h().lane_attention(filter(), None, 100).unwrap();
@@ -759,7 +763,7 @@ fn attention_pages_are_bounded_stable_restartable_and_bound_to_filter_and_revisi
         LaneOperationError::StaleCursor,
     );
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Working), 40)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Working), 40)
         .unwrap();
     rejected(
         f.h().lane_attention(filter(), Some(cursor), 1),
@@ -773,7 +777,7 @@ fn attention_excludes_detached_and_old_management_and_resolves_reports_and_quest
     let request = child_question(&f);
     f.h().forward_lane_question(request.clone()).unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Blocked), 4)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Blocked), 4)
         .unwrap();
     assert_eq!(
         f.h()
@@ -794,7 +798,7 @@ fn attention_excludes_detached_and_old_management_and_resolves_reports_and_quest
         )
         .unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Working), 5)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Working), 5)
         .unwrap();
     assert!(
         f.h()
@@ -804,7 +808,7 @@ fn attention_excludes_detached_and_old_management_and_resolves_reports_and_quest
             .is_empty()
     );
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 6)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 6)
         .unwrap();
     let r = verified(&f, 1);
     f.h().close_lane(close_request(&r)).unwrap();
@@ -816,13 +820,15 @@ fn attention_excludes_detached_and_old_management_and_resolves_reports_and_quest
             .is_empty()
     );
     f.h()
-        .change_lane_management(
-            "lane-1",
-            1,
-            LaneManagementChange {
-                lead_thread_id: None,
-                policy: LanePolicy::Detached,
+        .apply_lane_management_transition(
+            storage::lane_management::LaneManagementRequest {
+                operation_id: format!("transition:{}", 40),
+                lane_id: ("lane-1").to_string(),
+                expected_management_revision: 1,
+                action: storage::lane_management::LaneManagementAction::Detach,
             },
+            storage::lane_management::LaneManagementActor::User,
+            None,
             40,
         )
         .unwrap();
@@ -918,7 +924,7 @@ fn nudge_enqueue_failure_rolls_back_slot_and_report_failure_rolls_back_revision(
     f.sql().execute_batch("DROP TRIGGER abort_nudge; CREATE TRIGGER abort_report BEFORE UPDATE OF request_revision ON lanes BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(
         f.h()
-            .append_lane_report("lane-1", report(LaneStatus::Ready), 4)
+            .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 4)
             .is_err()
     );
     assert_eq!(f.count("lane_reports"), 0);
@@ -935,7 +941,7 @@ fn verification_submit_is_serialized_across_two_writers() {
     let f = Fixture::new();
     started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = begin(&f, 1);
     f.h().begin_lane_verification(r.clone()).unwrap();
@@ -965,7 +971,7 @@ fn lead_only_real_input_resolves_stall_without_invalidating_lane_verification() 
     let f = Fixture::new();
     let owner = started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = begin(&f, 1);
     f.h().begin_lane_verification(r.clone()).unwrap();
@@ -1031,7 +1037,7 @@ fn attention_derives_delivery_failure_stop_capacity_guard_and_stall_and_resolves
     let mut failed = report(LaneStatus::Failed);
     failed.failure_episode = Some("failure-episode".into());
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), failed, 3)
+        .append_lane_report_with_delivery("lane-1".into(), 1, failed, 3)
         .unwrap();
     let c = claim(&f.h(), 10);
     f.h()
@@ -1121,7 +1127,7 @@ fn attention_derives_delivery_failure_stop_capacity_guard_and_stall_and_resolves
         )
         .unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Working), 50)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Working), 50)
         .unwrap();
     let mut cursor = None;
     let mut all = vec![];
@@ -1178,7 +1184,7 @@ fn pr_facts_versions_head_and_link_are_bound_without_fetching_in_close() {
         .record_pull_request_local_head("thread-1", 1, &"a".repeat(40), 6)
         .unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 7)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 7)
         .unwrap();
     let mut r = begin(&f, 1);
     r.pr_evidence = f.h().lane_pr_evidence("thread-1".into()).unwrap();
@@ -1256,7 +1262,7 @@ fn late_writes_are_fenced_by_lane_and_reviewer_tombstones() {
     let req = child_question(&f);
     f.h().forward_lane_question(req).unwrap();
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     let r = verified(&f, 1);
     f.h().close_lane(close_request(&r)).unwrap();
@@ -1292,7 +1298,7 @@ fn lead_answer_acceptance_atomically_advances_target_and_progress_only_once() {
     let f = Fixture::new();
     let owner = started(&f);
     f.h()
-        .append_lane_report("lane-1", report(LaneStatus::Ready), 3)
+        .append_lane_report("lane-1", 1, report(LaneStatus::Ready), 3)
         .unwrap();
     f.create(1, 0, LaneDeliveryBinding::Bound);
     let r = begin(&f, 1);
@@ -1434,7 +1440,7 @@ fn first_report_without_artifact_resolves_no_report_only_for_non_working_status(
             f.sql().execute_batch("CREATE TRIGGER fail_first_resolution BEFORE UPDATE ON lane_stall_episodes BEGIN SELECT RAISE(ABORT,'injected resolution failure'); END;").unwrap();
             assert!(
                 f.h()
-                    .append_lane_report("lane-1", first.clone(), 11)
+                    .append_lane_report("lane-1", 1, first.clone(), 11)
                     .is_err()
             );
             assert_eq!(f.count("lane_reports"), 0);
@@ -1453,7 +1459,7 @@ fn first_report_without_artifact_resolves_no_report_only_for_non_working_status(
                 .execute_batch("DROP TRIGGER fail_first_resolution")
                 .unwrap();
         }
-        f.h().append_lane_report("lane-1", first, 12).unwrap();
+        f.h().append_lane_report("lane-1", 1, first, 12).unwrap();
         let resolved = status != LaneStatus::Working;
         let current = f
             .h()

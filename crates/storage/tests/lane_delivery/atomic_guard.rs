@@ -87,7 +87,7 @@ fn terminal_progress_reset_and_report_outbox_commit_or_rollback_together() {
     fail_guard(&f);
     assert!(
         f.h()
-            .append_lane_report_with_delivery("lane-1".into(), input.clone(), 2)
+            .append_lane_report_with_delivery("lane-1".into(), 1, input.clone(), 2)
             .is_err()
     );
     assert_eq!(f.count("lane_reports"), 0);
@@ -95,7 +95,7 @@ fn terminal_progress_reset_and_report_outbox_commit_or_rollback_together() {
     assert_eq!(f.h().lane_wake_guard("lane-1".into()).unwrap(), guard);
     f.sql().execute_batch("DROP TRIGGER fail_guard").unwrap();
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), input.clone(), 3)
+        .append_lane_report_with_delivery("lane-1".into(), 1, input.clone(), 3)
         .unwrap();
     // Restart immediately after the source commit, without the runtime reset hook.
     let f = f.reopen();

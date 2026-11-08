@@ -1,5 +1,7 @@
 //! Cross-lane scale and lifecycle regression using the real execution/storage paths.
 use super::*;
+#[path = "accepted_answer_retention.rs"]
+mod accepted_answer_retention;
 use crate::runtime::questions::routing::LaneAnswerRequest;
 use event_bus::lane::{LaneAttentionFilter, LaneAttentionItem, LaneAttentionKind};
 

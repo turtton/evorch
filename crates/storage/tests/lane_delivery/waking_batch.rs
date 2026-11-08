@@ -8,6 +8,7 @@ fn important_notice_admits_bounded_deferred_updates_but_working_alone_never_wake
         f.h()
             .append_lane_report_with_delivery(
                 format!("lane-{n}"),
+                1,
                 report(LaneStatus::Working),
                 i64::from(n),
             )
@@ -21,7 +22,7 @@ fn important_notice_admits_bounded_deferred_updates_but_working_alone_never_wake
     );
     f.lane(26, LanePolicy::Attached);
     f.h()
-        .append_lane_report_with_delivery("lane-26".into(), report(LaneStatus::Ready), 101)
+        .append_lane_report_with_delivery("lane-26".into(), 1, report(LaneStatus::Ready), 101)
         .unwrap();
     let LaneClaimResult::Claimed(batch) = f.h().claim_lane_deliveries(req).unwrap() else {
         panic!("important notice must admit its deferred batch")
@@ -40,10 +41,10 @@ fn suppressed_important_notice_cannot_wake_deferred_updates() {
     f.lane(1, LanePolicy::Attached);
     f.lane(2, LanePolicy::Attached);
     f.h()
-        .append_lane_report_with_delivery("lane-1".into(), report(LaneStatus::Working), 1)
+        .append_lane_report_with_delivery("lane-1".into(), 1, report(LaneStatus::Working), 1)
         .unwrap();
     f.h()
-        .append_lane_report_with_delivery("lane-2".into(), report(LaneStatus::Ready), 2)
+        .append_lane_report_with_delivery("lane-2".into(), 1, report(LaneStatus::Ready), 2)
         .unwrap();
     let mut guard = f.h().lane_wake_guard("lane-2".into()).unwrap();
     for n in 0..20 {

@@ -49,11 +49,18 @@ impl StorageHandle {
     pub fn append_lane_report_with_delivery(
         &self,
         lane_id: String,
+        expected_management_revision: u64,
         report: crate::lanes::LaneReportInput,
         at_ns: i64,
     ) -> Result<crate::lanes::LaneReportAppended, StorageError> {
         self.lane_job(true, move |conn| {
-            crate::repo::lane_delivery::append_report(conn, &lane_id, report, at_ns)
+            crate::repo::lane_delivery::append_report(
+                conn,
+                &lane_id,
+                expected_management_revision,
+                report,
+                at_ns,
+            )
         })
     }
     /// Atomically records actual user input acceptance and a reference-only intervention notice.

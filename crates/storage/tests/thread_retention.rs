@@ -18,6 +18,8 @@ use storage::thread_retention::{
 use storage::thread_search::{ConversationFilter, ConversationQuery, ConversationScan, ScanLimits};
 use storage::{Database, Storage, StorageConfig, StorageError};
 use tempfile::TempDir;
+#[path = "retention_phase3/mod.rs"]
+mod phase3;
 
 const NOW_NS: i64 = 100 * 86_400 * 1_000_000_000;
 const BIG: ExploreBudget = ExploreBudget {
