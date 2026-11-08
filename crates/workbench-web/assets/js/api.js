@@ -130,4 +130,6 @@ const QUERY_REPLY = {
   get_command_receipt: "command_receipt",
   read_committed_history: "committed_history",
   read_body: "body",
+  get_approval_input: "approval_input",
+  read_snapshot: "snapshot",
 };

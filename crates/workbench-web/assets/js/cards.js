@@ -4,18 +4,7 @@
 
 import { h, replaceChildren } from "./dom.js";
 import { label, SURFACE, shortId } from "./format.js";
-import { command, describeError } from "./wire.js";
-
-/**
- * Whether the Web may approve a tool call. ApprovalView carries only a
- * bounded `summary`, which the core may have cut short, so the person cannot
- * see the full input the tool would run with. Until the protocol can serve
- * the full input, approving is left to the desktop GUI; denying is safe and
- * stays available.
- */
-export function canApproveFromWeb(_approval) {
-  return false;
-}
+import { command, describeError, formatBytes } from "./wire.js";
 
 /** Lines or characters above which a summary is folded until expanded. */
 const FOLD_LINES = 6;
@@ -239,7 +228,7 @@ function folds(text) {
 }
 
 /**
- * @param {object} ctx `{api, store, toast, threadTitle, refreshApprovals}`
+ * @param {object} ctx `{api, store, toast, threadTitle, refreshApprovals, maxBodyChunk}`
  * @param {object} approval an ApprovalView
  */
 export function approvalCard(ctx, approval, { showThread = false } = {}) {
@@ -247,16 +236,72 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
   let busy = false;
   let expanded = false;
   let unknownRequest = null;
+  /** The full input read for the current epoch and revision (see approvalReady). */
+  let loaded = emptyInput(a);
 
   const head = h("div", { class: "card-head" });
+  const caption = h("p", { class: "card-label" });
   const summary = h("pre", { class: "approval-summary selectable" });
   const expand = h("button", { type: "button", class: "button link", attrs: { "aria-expanded": "false" } });
+  const fetchFull = h("button", { type: "button", class: "button small", dataset: { action: "load-input" } });
+  const progress = h("p", { class: "card-status", attrs: { role: "status", "aria-live": "polite" } });
   const hint = h("p", { class: "card-hint", attrs: { role: "note" } });
   const status = h("p", { class: "card-status", attrs: { role: "status", "aria-live": "polite" } });
   const recheck = h("button", { type: "button", class: "button", text: "届いたか確認して再送", hidden: true });
 
+  // Read the complete input chunk by chunk. Every chunk is bound to the epoch
+  // and revision shown, so a replaced or settled request fails the read
+  // instead of mixing two inputs; a refresh to another revision abandons it.
+  async function loadInput() {
+    const key = inputKey(a);
+    if (loaded.loading || loaded.complete || loaded.blocked) return;
+    loaded.loading = true;
+    loaded.error = null;
+    render();
+    while (!loaded.complete) {
+      const result = await ctx.api.query("get_approval_input", {
+        approval_id: a.id,
+        core_epoch: a.core_epoch,
+        approval_revision: a.revision,
+        offset: loaded.next,
+        max_bytes: ctx.maxBodyChunk(),
+      });
+      if (inputKey(a) !== key || loaded.key !== key) return;
+      if (!result.ok) {
+        loaded.loading = false;
+        const code = result.error.code;
+        if (code === "stale_epoch" || code === "stale_revision" || code === "already_resolved" || code === "not_found") {
+          loaded.blocked = true;
+          ctx.refreshApprovals(a.thread);
+        } else {
+          loaded.error = result.error;
+        }
+        render();
+        return;
+      }
+      const chunk = result.value;
+      if (chunk.core_epoch !== a.core_epoch || chunk.approval_revision !== a.revision || chunk.offset !== loaded.next) {
+        loaded.loading = false;
+        loaded.error = { code: "internal", message: "取得した入力が要求と一致しません" };
+        render();
+        return;
+      }
+      loaded.text += chunk.text;
+      loaded.total = chunk.total_bytes;
+      if (chunk.next_offset) {
+        loaded.next = chunk.next_offset;
+        render();
+      } else {
+        loaded.complete = true;
+      }
+    }
+    loaded.loading = false;
+    render();
+  }
+
   async function decide(decision, { confirmFirst = false } = {}) {
     if (busy) return;
+    if (decision === "approve" && !approvalReady(a, loaded)) return;
     busy = true;
     render();
     recheck.hidden = true;
@@ -319,6 +364,7 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     expanded = !expanded;
     render();
   });
+  fetchFull.addEventListener("click", () => loadInput());
   recheck.addEventListener("click", () => {
     if (unknownRequest) decide(unknownRequest.decision, { confirmFirst: true });
   });
@@ -327,9 +373,11 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
     "article",
     { class: "card approval", attrs: { "aria-label": "ツール実行の承認要求" } },
     head,
-    h("p", { class: "card-label", text: "実行内容（要約）" }),
+    caption,
     summary,
     expand,
+    fetchFull,
+    progress,
     hint,
     h("div", { class: "decide-row" }, deny, approve),
     status,
@@ -337,6 +385,7 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
   );
 
   function render() {
+    el.dataset.revision = a.revision;
     replaceChildren(
       head,
       h("span", { class: "chip", text: "承認待ち" }),
@@ -344,17 +393,37 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
       h("span", { class: "chip muted", text: `run ${shortId(a.run)}` }),
       showThread ? threadLink(ctx, a.thread) : null,
     );
-    summary.textContent = a.summary;
-    const foldable = folds(a.summary);
+    const truncated = Boolean(a.summary_truncated);
+    const full = truncated && loaded.complete;
+    const shown = full ? prettyInput(loaded.text) : a.summary;
+    caption.textContent = !truncated
+      ? "実行内容"
+      : full
+        ? "実行内容（全文）"
+        : `実行内容（要約。全体は ${formatBytes(a.input_bytes)}）`;
+    summary.textContent = shown;
+    const foldable = folds(shown);
     summary.classList.toggle("folded", foldable && !expanded);
     expand.hidden = !foldable;
-    expand.textContent = expanded ? "要約を折りたたむ" : "要約を展開";
+    expand.textContent = expanded ? "折りたたむ" : "すべて表示";
     expand.setAttribute("aria-expanded", String(expanded));
-    const allowed = canApproveFromWeb(a);
-    hint.hidden = allowed;
-    hint.textContent = "要約しか表示できず実行内容の全文を確認できないため、Web からは承認できません（拒否はできます）。";
+
+    fetchFull.hidden = !truncated || loaded.complete || loaded.blocked;
+    fetchFull.disabled = loaded.loading;
+    fetchFull.textContent = loaded.error ? "全文の読み込みを再試行" : `全文を読み込む（${formatBytes(a.input_bytes)}）`;
+    progress.textContent = loaded.loading
+      ? `全文を読み込み中… ${formatBytes(String(loaded.text.length ? loaded.next : 0))} / ${formatBytes(loaded.total ?? a.input_bytes)}`
+      : loaded.error
+        ? describeError(loaded.error)
+        : "";
+
     const decided = a.state !== "pending";
-    approve.disabled = busy || decided || !allowed;
+    const ready = approvalReady(a, loaded);
+    hint.hidden = ready || decided;
+    hint.textContent = loaded.blocked
+      ? "この承認要求は更新されたか既に解決済みのため、ここからは承認できません。"
+      : "要約は一部だけです。全文を読み込んで確認すると承認できます（拒否はいつでもできます）。";
+    approve.disabled = busy || decided || !ready;
     deny.disabled = busy || decided;
     if (decided && !status.textContent) {
       status.textContent = a.state === "approved" ? "承認済み" : a.state === "denied" ? "拒否済み" : "期限切れ";
@@ -362,10 +431,39 @@ export function approvalCard(ctx, approval, { showThread = false } = {}) {
   }
 
   el.refresh = (next) => {
-    const same = next.revision === a.revision && next.state === a.state;
+    const same = next.revision === a.revision && next.state === a.state && next.core_epoch === a.core_epoch;
     a = next;
+    if (loaded.key !== inputKey(a)) loaded = emptyInput(a);
     if (!same) render();
   };
   render();
   return el;
+}
+
+function inputKey(approval) {
+  return `${approval.id}:${approval.core_epoch}:${approval.revision}`;
+}
+
+function emptyInput(approval) {
+  return { key: inputKey(approval), text: "", next: "0", total: null, loading: false, complete: false, blocked: false, error: null };
+}
+
+/**
+ * Whether the person has seen everything the tool would run with: the summary
+ * when it is the whole input, otherwise the full input read for exactly this
+ * approval, epoch and revision. Denying never needs this.
+ */
+export function approvalReady(approval, loaded) {
+  if (approval.state !== "pending") return false;
+  if (!approval.summary_truncated) return true;
+  return Boolean(loaded && loaded.key === inputKey(approval) && loaded.complete && !loaded.blocked);
+}
+
+/** The input is masked JSON; indent it when it parses, else show it as is. */
+function prettyInput(text) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
 }

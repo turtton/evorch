@@ -18,7 +18,7 @@ import {
   shortId,
   THREAD_STATE,
 } from "./format.js";
-import { HistoryWindow, messageKey, WALK_PAGE_SIZE } from "./history.js";
+import { HISTORY_PAGE_SIZE, HistoryWindow, messageKey } from "./history.js";
 import { renderMarkdown } from "./markdown.js";
 import { fetchAllPages } from "./paging.js";
 import { composerRoleFor } from "./store.js";
@@ -462,6 +462,7 @@ export function threadView(ctx, threadId) {
   let runsSignature = null;
   /** Reading this thread's runs: "loading", "complete" or a failure. */
   let runsLoad = { state: "loading" };
+  let runsGeneration = 0;
   /** The role was chosen by the person or determined from the root run. */
   let roleTouched = false;
   let roleDetermined = false;
@@ -709,8 +710,9 @@ export function threadView(ctx, threadId) {
   async function rebuildHistory() {
     const next = new HistoryWindow((cursor) =>
       ctx.api.query("read_committed_history", {
+        direction: "backward",
         thread: threadId,
-        page: pageRequest(cursor, WALK_PAGE_SIZE),
+        page: pageRequest(cursor, HISTORY_PAGE_SIZE),
       }),
     );
     building = next;
@@ -962,14 +964,19 @@ export function threadView(ctx, threadId) {
     return true;
   }
 
-  /** Read every page of this thread's runs (expired cursors restart). */
+  /**
+   * Read every page of this thread's runs (expired cursors restart). A newer
+   * read (after a snapshot, or a manual reload) supersedes an older one, so a
+   * slow earlier read cannot report "complete" for the newer state.
+   */
   async function loadRuns() {
+    const mine = (runsGeneration += 1);
     runsLoad = { state: "loading" };
     renderHead();
     const result = await fetchAllPages((cursor) =>
       ctx.queryInto("runs", "list_runs", { thread: threadId, page: pageRequest(cursor, 200) }),
     );
-    if (destroyed) return;
+    if (destroyed || mine !== runsGeneration) return;
     runsLoad = result.ok ? { state: "complete" } : { state: "failed", error: result.error };
     renderHead();
   }

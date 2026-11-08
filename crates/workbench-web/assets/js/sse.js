@@ -87,6 +87,16 @@ export class EventStream {
     this.connect(this.failures >= FAILURES_BEFORE_SNAPSHOT ? null : this.last);
   }
 
+  /**
+   * Start over with a fresh snapshot (after a backoff delay): the current one
+   * can no longer be read to its end, for example because it expired.
+   */
+  resubscribe(reason = "snapshot_expired") {
+    if (this.stopped) return;
+    this.last = null;
+    this.retry(reason);
+  }
+
   close() {
     this.subscribed = false;
     if (this.stableTimer !== null) this.cancel(this.stableTimer);

@@ -7,6 +7,7 @@
 // Tests that need a DOM are skipped where there is none.
 
 import { Api } from "../../assets/js/api.js";
+import { approvalReady } from "../../assets/js/cards.js";
 import { HistoryWindow, messageKey } from "../../assets/js/history.js";
 import { parseInline, parseMarkdown, renderMarkdown, safeHref } from "../../assets/js/markdown.js";
 import { backoffDelay, EventStream, MAX_BACKOFF_MS } from "../../assets/js/sse.js";
@@ -165,6 +166,30 @@ test("a cut-short snapshot stays partial until completed", () => {
   assert(!store.state.partial);
 });
 
+test("later snapshot pages fill in without overwriting newer events", () => {
+  const store = createStore();
+  store.applySubscriptionStarted(snapshot("1", [{ type: "thread", payload: thread("t1", "1") }], "more"));
+  const stamp = store.snapshotMark();
+  // An event after the snapshot's cut updates t2 before page 2 arrives.
+  store.applyEvent({ type: "thread_changed", payload: { thread: thread("t2", "8", "running") } });
+  store.applySnapshotPage(
+    [
+      { type: "thread", payload: thread("t2", "3", "idle") },
+      { type: "thread", payload: thread("t3", "4") },
+    ],
+    stamp,
+  );
+  eq(store.state.threads.get("t2").state, "running", "the event is newer than the snapshot");
+  assert(store.state.threads.has("t3"));
+  assert(store.state.partial, "partial until completed");
+  store.completeSnapshot();
+  assert(!store.state.partial);
+  // A page of a snapshot that was replaced since is dropped.
+  store.applySubscriptionStarted(snapshot("2", [], "more"));
+  eq(store.applySnapshotPage([{ type: "thread", payload: thread("old", "1") }], stamp), false);
+  assert(!store.state.threads.has("old"));
+});
+
 test("events apply in stream order whatever their revisions", () => {
   const store = createStore();
   const changes = [];
@@ -247,6 +272,20 @@ test("the composer role comes from the root run, never from a guess", () => {
   eq(composerRoleFor({}, runs), "choose", "no root run: the person picks");
 });
 
+test("approving needs the whole input for exactly this approval revision", () => {
+  const view = { id: "ap", core_epoch: "7", revision: "9", state: "pending", summary_truncated: false };
+  assert(approvalReady(view, null), "an untruncated summary is the whole input");
+  const truncated = { ...view, summary_truncated: true };
+  const loaded = (over) => ({ key: "ap:7:9", complete: true, blocked: false, ...over });
+  assert(!approvalReady(truncated, null), "nothing read yet");
+  assert(!approvalReady(truncated, loaded({ complete: false })), "partly read");
+  assert(approvalReady(truncated, loaded()), "read to the end");
+  assert(!approvalReady({ ...truncated, revision: "10" }, loaded()), "read for another revision");
+  assert(!approvalReady({ ...truncated, core_epoch: "8" }, loaded()), "read in another epoch");
+  assert(!approvalReady(truncated, loaded({ blocked: true })), "the core refused the read");
+  assert(!approvalReady({ ...view, state: "approved" }, null), "already decided");
+});
+
 // ---- paging -------------------------------------------------------------------
 
 test("all pages are read and an expired cursor restarts from the first page", async () => {
@@ -276,18 +315,19 @@ function message(run, index, text = `${run}:${index}`) {
   return { thread: "t1", run, index: String(index), role: "assistant", content: { type: "inline", payload: { text } } };
 }
 
+/** A backward pager like ReadCommittedHistory{direction: "backward"}. */
 function pagedHistory(total, size) {
   const all = Array.from({ length: total }, (_, i) => message("r1", i));
   const requests = [];
   const fetchPage = async (cursor) => {
     requests.push(cursor);
-    const start = cursor ? Number(cursor.slice(1)) : 0;
-    const end = Math.min(total, start + size);
+    const end = cursor ? Number(cursor.slice(1)) : total;
+    const start = Math.max(0, end - size);
     return {
       ok: true,
       value: {
         items: all.slice(start, end),
-        next_cursor: end < total ? `c${end}` : undefined,
+        next_cursor: start > 0 ? `c${start}` : undefined,
         snapshot_revision: "1",
       },
     };
@@ -295,19 +335,21 @@ function pagedHistory(total, size) {
   return { fetchPage, requests };
 }
 
-test("history shows the newest pages and loads older ones with their cursors", async () => {
+test("history opens on the newest page and follows cursors to older ones", async () => {
   const { fetchPage, requests } = pagedHistory(10, 3);
   const window = new HistoryWindow(fetchPage);
   assert((await window.open()).ok);
-  eq(requests, [null, "c3", "c6", "c9"]);
-  eq(window.messages().map((m) => m.index), ["6", "7", "8", "9"]);
+  eq(requests, [null], "one request, not a walk over the whole history");
+  eq(window.messages().map((m) => m.index), ["7", "8", "9"]);
   assert(window.hasOlder);
   assert((await window.loadOlder()).ok);
-  eq(requests.at(-1), "c3", "the page before is read again with its own cursor");
-  eq(window.messages().map((m) => m.index), ["3", "4", "5", "6", "7", "8", "9"]);
+  eq(requests.at(-1), "c7");
+  eq(window.messages().map((m) => m.index), ["4", "5", "6", "7", "8", "9"]);
   await window.loadOlder();
-  eq(window.messages()[0].index, "0");
+  await window.loadOlder();
+  eq(window.messages().map((m) => m.index), ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
   assert(!window.hasOlder);
+  eq((await window.loadOlder()).added, 0);
 });
 
 test("history appends live messages once", async () => {
@@ -324,14 +366,7 @@ test("history appends live messages once", async () => {
 test("a history error is reported, not thrown", async () => {
   const window = new HistoryWindow(async () => ({ ok: false, error: { code: "not_found" } }));
   eq((await window.open()).error.code, "not_found");
-});
-
-test("a walk that hits its page limit is an error, not the newest messages", async () => {
-  const { fetchPage } = pagedHistory(10, 3);
-  const window = new HistoryWindow(fetchPage, { maxPages: 2 });
-  const result = await window.open();
-  eq([result.ok, result.error?.code], [false, "limit_exceeded"]);
-  eq(window.messages(), [], "nothing is shown as if it were the latest");
+  eq(window.messages(), []);
 });
 
 // ---- markdown -----------------------------------------------------------------
@@ -520,6 +555,15 @@ test("repeated failures fall back to a fresh snapshot", () => {
   }
   eq(pending("retry").length, 0);
   eq(last().url, "/api/v1/events?scope=all", "no after: the core answers with a snapshot");
+});
+
+test("an expired snapshot starts the subscription over without a cursor", () => {
+  const { stream, last, fire } = harness();
+  stream.start();
+  last().emit("subscription_started", { subscription_id: "1", high_water: { core_epoch: "7", sequence: "40" } });
+  stream.resubscribe();
+  fire();
+  eq(last().url, "/api/v1/events?scope=all", "a fresh snapshot, not a replay");
 });
 
 test("the backoff starts over only after a stream stayed up", () => {

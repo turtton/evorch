@@ -42,6 +42,7 @@ use workbench_protocol::errors::WorkbenchError;
 use workbench_protocol::events::{EventEnvelope, Subscribe};
 use workbench_protocol::handshake::ServerHello;
 use workbench_protocol::ids::{BodyId, ClientId};
+use workbench_protocol::queries::{ApprovalInputChunk, GetApprovalInput};
 use workbench_protocol::views::BodyChunk;
 use workbench_protocol::wire::{ByteOffset, InstanceEpoch};
 use workbench_web::{
@@ -63,6 +64,16 @@ fn body_text() -> String {
         "長い本文の先頭です。\n\n{}\n\n本文の終わり。",
         "lorem ipsum ".repeat(300)
     )
+}
+
+/// The secret-masked JSON input of an approval, larger than one 64 KiB chunk
+/// so it has to be read in several.
+fn approval_input(id: &str) -> String {
+    let lines: Vec<String> = (0..2400)
+        .map(|i| format!("echo '{id} step {i}: 回帰テストを実行します'"))
+        .collect();
+    json!({"command": "bash", "args": ["-c", lines.join("\n")], "cwd": "/home/user/src/evorch", "tail": "最後の行"})
+        .to_string()
 }
 
 fn now_millis() -> String {
@@ -111,6 +122,14 @@ struct World {
     failing_sends: usize,
     /// The next SendChat is accepted, then dropped (its run ended unread).
     drop_next_send: bool,
+    /// Snapshot pages beyond the first, by snapshot id, with their cut.
+    frozen: std::collections::HashMap<String, (Value, Vec<Value>)>,
+    /// The next ReadSnapshot fails as if the snapshot had expired.
+    expire_snapshot_once: bool,
+    /// Approvals whose input read is interrupted by a new revision.
+    stale_inputs: Vec<String>,
+    history_reads: usize,
+    snapshot_reads: usize,
 }
 
 impl World {
@@ -159,12 +178,24 @@ impl World {
                     "revision": "31337", "raised_by": agent("run-l1"),
                 }),
             ],
-            approvals: vec![json!({
-                "id": "ap-1", "core_epoch": "7", "revision": "77777", "thread": "thr-1", "run": "run-w1",
-                "tool_name": "shell",
-                "summary": "$ cargo nextest run -p workbench-web\n$ git add crates/auth/src/login.rs\n$ git commit -S -m 'fix(auth): validate redirect target'\n$ git push origin fix/login-redirect\n# 4 commands in /home/user/src/evorch\n# network: github.com:443\n# writes: crates/auth/src/login.rs\n# timeout: 10 minutes",
-                "state": "pending",
-            })],
+            approvals: vec![
+                json!({
+                    "id": "ap-1", "core_epoch": "7", "revision": "77777", "thread": "thr-1", "run": "run-w1",
+                    "tool_name": "shell",
+                    "summary": "$ cargo nextest run -p workbench-web\n$ git add crates/auth/src/login.rs\n$ git commit -S -m 'fix(auth): validate redirect target'\n$ git push origin fix/login-redirect\n# 4 commands in /home/user/src/evorch\n# network: github.com:443\n# writes: crates/auth/src/login.rs\n# timeout: 10 minutes",
+                    "summary_truncated": true,
+                    "input_bytes": approval_input("ap-1").len().to_string(),
+                    "state": "pending",
+                }),
+                json!({
+                    "id": "ap-2", "core_epoch": "7", "revision": "222", "thread": "thr-2", "run": "run-l1",
+                    "tool_name": "write_file",
+                    "summary": "write tests/regression.rs",
+                    "summary_truncated": true,
+                    "input_bytes": approval_input("ap-2").len().to_string(),
+                    "state": "pending",
+                }),
+            ],
             history: history(),
             subscribers: Vec::new(),
             subscriptions: 0,
@@ -173,6 +204,11 @@ impl World {
             conflicts: 0,
             failing_sends: 0,
             drop_next_send: false,
+            frozen: std::collections::HashMap::new(),
+            expire_snapshot_once: true,
+            stale_inputs: vec!["ap-2".to_owned()],
+            history_reads: 0,
+            snapshot_reads: 0,
         }
     }
 
@@ -215,10 +251,32 @@ fn refused(code: &str, retry: &str) -> Value {
     json!({"status": "error", "payload": {"code": code, "message": "scripted refusal", "retry": retry}})
 }
 
+/// Holds queries of one type inside the backend until the test releases
+/// them, so the page can be inspected while an answer is outstanding.
+struct Hold {
+    permits: tokio::sync::Semaphore,
+    entered: tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>,
+    enter: mpsc::UnboundedSender<()>,
+}
+
+impl Hold {
+    /// Wait until one more held query has arrived.
+    async fn entered(&self) {
+        self.entered.lock().await.recv().await.unwrap();
+    }
+
+    fn release(&self, count: usize) {
+        self.permits.add_permits(count);
+    }
+}
+
 /// A backend with just enough state to serve the screens and apply commands.
 struct UiBackend {
     world: Mutex<World>,
     commands: watch::Sender<usize>,
+    /// Bumped after every request, for `until`.
+    changes: watch::Sender<u64>,
+    holds: Mutex<std::collections::HashMap<String, Arc<Hold>>>,
 }
 
 impl UiBackend {
@@ -226,6 +284,30 @@ impl UiBackend {
         Self {
             world: Mutex::new(World::new()),
             commands: watch::channel(0).0,
+            changes: watch::channel(0).0,
+            holds: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Hold every later query of `kind` until released.
+    fn hold(&self, kind: &str) -> Arc<Hold> {
+        let (enter, entered) = mpsc::unbounded_channel();
+        let hold = Arc::new(Hold {
+            permits: tokio::sync::Semaphore::new(0),
+            entered: tokio::sync::Mutex::new(entered),
+            enter,
+        });
+        self.holds
+            .lock()
+            .unwrap()
+            .insert(kind.to_owned(), Arc::clone(&hold));
+        hold
+    }
+
+    /// Stop holding `kind` and let the held queries through.
+    fn unhold(&self, kind: &str) {
+        if let Some(hold) = self.holds.lock().unwrap().remove(kind) {
+            hold.release(tokio::sync::Semaphore::MAX_PERMITS / 2);
         }
     }
 
@@ -258,6 +340,15 @@ impl UiBackend {
             .filter(|c| c["type"] == "send_chat" && c["payload"]["text"] == text)
             .map(|c| (c["payload"].clone(), c["request_id"].clone()))
             .collect()
+    }
+
+    /// Wait until `done` holds for the backend state, re-checking after
+    /// every request the backend answers.
+    async fn until(&self, done: impl Fn(&World) -> bool) {
+        let mut changes = self.changes.subscribe();
+        while !done(&self.world.lock().unwrap()) {
+            changes.changed().await.unwrap();
+        }
     }
 
     fn count(&self, kind: &str) -> usize {
@@ -447,15 +538,79 @@ impl UiBackend {
                 ),
             ),
             "read_committed_history" => {
-                let start = p["page"]["cursor"]
+                // Backward, as the host pages it: the first page is the
+                // newest, each page is chronological and its cursor points
+                // at the messages before it.
+                assert_eq!(p["direction"], "backward", "the UI reads from the tail");
+                world.history_reads += 1;
+                let end = p["page"]["cursor"]
                     .as_str()
-                    .map_or(0, |c| c.trim_start_matches('h').parse::<usize>().unwrap());
+                    .map_or(world.history.len(), |c| {
+                        c.trim_start_matches('b').parse::<usize>().unwrap()
+                    });
                 let limit = p["page"]["limit"].as_u64().unwrap() as usize;
-                let end = (start + limit).min(world.history.len());
-                let next = (end < world.history.len()).then(|| format!("h{end}"));
+                let start = end.saturating_sub(limit);
+                let next = (start > 0).then(|| format!("b{start}"));
                 query_reply(
                     "committed_history",
                     page(world.history[start..end].to_vec(), next),
+                )
+            }
+            "get_approval_input" => {
+                let id = p["approval_id"].as_str().unwrap().to_owned();
+                let epoch = world.epoch.to_string();
+                let offset = p["offset"].as_str().unwrap().to_owned();
+                let stale_once = world.stale_inputs.iter().position(|a| *a == id);
+                match world.approvals.iter_mut().find(|a| a["id"] == id.as_str()) {
+                    None => refused("not_found", "never"),
+                    Some(approval) if approval["state"] != "pending" => {
+                        refused("already_resolved", "never")
+                    }
+                    Some(_) if p["core_epoch"] != epoch.as_str() => {
+                        refused("stale_epoch", "after_reconnect")
+                    }
+                    Some(approval) if offset != "0" && stale_once.is_some() => {
+                        // The request is replaced while its input is read.
+                        approval["revision"] = json!("333");
+                        world.stale_inputs.remove(stale_once.unwrap());
+                        refused("stale_revision", "after_resync")
+                    }
+                    Some(approval) if approval["revision"] != p["approval_revision"] => {
+                        refused("stale_revision", "after_resync")
+                    }
+                    Some(_) => {
+                        let request: GetApprovalInput = serde_json::from_value(p.clone()).unwrap();
+                        let input = approval_input(&id);
+                        query_reply(
+                            "approval_input",
+                            serde_json::to_value(
+                                ApprovalInputChunk::slice(&request, &input).unwrap(),
+                            )
+                            .unwrap(),
+                        )
+                    }
+                }
+            }
+            "read_snapshot" => {
+                let id = p["snapshot_id"].as_str().unwrap().to_owned();
+                world.snapshot_reads += 1;
+                if world.expire_snapshot_once {
+                    world.expire_snapshot_once = false;
+                    return refused("resync_required", "after_resync");
+                }
+                let Some((high_water, items)) = world.frozen.get(&id).cloned() else {
+                    return refused("resync_required", "after_resync");
+                };
+                let start = p["page"]["cursor"]
+                    .as_str()
+                    .and_then(|c| c.rsplit('@').next())
+                    .map_or(0, |n| n.parse::<usize>().unwrap());
+                // Two items per page, so a client must follow the cursors.
+                let end = (start + 2).min(items.len());
+                let next = (end < items.len()).then(|| format!("{id}@{end}"));
+                query_reply(
+                    "snapshot",
+                    json!({"snapshot_id": id, "high_water": high_water, "page": page(items[start..end].to_vec(), next)}),
                 )
             }
             "read_body" => {
@@ -477,27 +632,50 @@ impl UiBackend {
         }
     }
 
-    /// The first snapshot page. Like the host's (one default-size page), it
-    /// does not hold everything: the lane thread, the runs, the questions and the
-    /// approvals are only reachable with list queries.
-    fn snapshot_items(world: &World) -> Vec<Value> {
-        let mut items = vec![
+    /// A snapshot split like the host's: the first page goes with the
+    /// subscription and the rest is only reachable with ReadSnapshot. The
+    /// lane thread, the runs, the questions and the approvals are all in the
+    /// rest, so a client that stops at the first page shows none of them.
+    fn snapshot_items(world: &World) -> (Vec<Value>, Vec<Value>) {
+        let mut first = vec![
             json!({"type": "core_status", "payload": serde_json::to_value(common::core_status()).unwrap()}),
         ];
-        items.extend(
+        first.extend(
             world
                 .projects
                 .iter()
                 .map(|p| json!({"type": "project", "payload": p})),
         );
-        items.extend(
+        let mut rest = Vec::new();
+        for thread in &world.threads {
+            let item = json!({"type": "thread", "payload": thread});
+            if thread["lead_thread"].is_null() {
+                first.push(item);
+            } else {
+                rest.push(item);
+            }
+        }
+        rest.extend(
             world
-                .threads
+                .runs
                 .iter()
-                .filter(|t| t["lead_thread"].is_null())
-                .map(|t| json!({"type": "thread", "payload": t})),
+                .map(|r| json!({"type": "run", "payload": r})),
         );
-        items
+        rest.extend(
+            world
+                .questions
+                .iter()
+                .filter(|q| q["answer"].is_null())
+                .map(|q| json!({"type": "question", "payload": q})),
+        );
+        rest.extend(
+            world
+                .approvals
+                .iter()
+                .filter(|a| a["state"] == "pending")
+                .map(|a| json!({"type": "approval", "payload": a})),
+        );
+        (first, rest)
     }
 }
 
@@ -509,11 +687,19 @@ impl WorkbenchBackend for UiBackend {
         provenance: Provenance,
     ) -> ReplyEnvelope {
         let value = serde_json::to_value(&request).unwrap();
+        let held = value["payload"]["type"]
+            .as_str()
+            .and_then(|kind| self.holds.lock().unwrap().get(kind).cloned());
+        if let Some(hold) = held {
+            let _ = hold.enter.send(());
+            hold.permits.acquire().await.unwrap().forget();
+        }
         let mut reply = match value["kind"].as_str() {
             Some("command") => self.answer(&value, &provenance),
             _ => self.query(&value),
         };
         reply["request_id"] = value["request_id"].clone();
+        self.changes.send_modify(|n| *n += 1);
         serde_json::from_value(reply).unwrap()
     }
 
@@ -528,13 +714,20 @@ impl WorkbenchBackend for UiBackend {
         let (tx, rx) = mpsc::channel(256);
         world.subscribers.push((id.clone(), tx));
         // Always a fresh snapshot: a core may answer any resume this way.
+        let snapshot_id = format!("snap-{id}");
+        let high_water =
+            json!({"core_epoch": world.epoch.to_string(), "sequence": world.sequence.to_string()});
+        let (first, rest) = Self::snapshot_items(&world);
+        world
+            .frozen
+            .insert(snapshot_id.clone(), (high_water.clone(), rest));
         let started = json!({
             "subscription_id": id,
-            "snapshot_id": format!("snap-{id}"),
-            "high_water": {"core_epoch": world.epoch.to_string(), "sequence": world.sequence.to_string()},
+            "snapshot_id": snapshot_id,
+            "high_water": high_water,
             "initial_page": {
-                "items": Self::snapshot_items(&world),
-                "next_cursor": format!("snap-{id}-2"),
+                "items": first,
+                "next_cursor": format!("{snapshot_id}@0"),
                 "snapshot_revision": "1",
             },
         });
@@ -751,6 +944,7 @@ async fn web_workbench_main_flows_in_chromium() {
     }
 
     // ---- JavaScript unit tests, DOM included ----
+    eprintln!("step: JavaScript unit tests, DOM included");
     let unit = Driver {
         page: browser
             .new_page(format!("{base}/tests/web/unit.html"))
@@ -766,6 +960,7 @@ async fn web_workbench_main_flows_in_chromium() {
     unit.page.close().await.unwrap();
 
     // ---- project list ----
+    eprintln!("step: project list");
     let page = browser.new_page("about:blank").await.unwrap();
     page.evaluate_on_new_document(PROBE).await.unwrap();
     let ui = Driver { page, screenshots };
@@ -774,9 +969,10 @@ async fn web_workbench_main_flows_in_chromium() {
         .await;
     ui.wait(r##"() => document.querySelector('a.row[href="#/p/proj-1"]')?.textContent.includes("evorch")"##)
         .await;
-    // The snapshot is one cut-short page: the badge says "partial" until the
-    // lists were completed with queries (one of them with an expired cursor).
-    ui.wait(r##"() => document.querySelector("#inbox-badge").textContent === "3""##)
+    // The snapshot's first page has no questions or approvals: the badge says
+    // "partial" until ReadSnapshot read the rest. The first snapshot expired
+    // before its second page, so the client subscribed again for a new one.
+    ui.wait(r##"() => document.querySelector("#inbox-badge").textContent === "4""##)
         .await;
     assert_eq!(
         ui.eval(
@@ -785,14 +981,15 @@ async fn web_workbench_main_flows_in_chromium() {
         .await,
         false
     );
-    assert_eq!(
-        backend.world.lock().unwrap().conflicts,
-        1,
-        "the expired thread cursor was hit and the listing started over"
-    );
+    {
+        let world = backend.world.lock().unwrap();
+        assert_eq!(world.subscriptions, 2, "an expired snapshot is taken again");
+        assert!(world.snapshot_reads >= 2, "the rest came from ReadSnapshot");
+    }
     ui.screenshot("01-projects").await;
 
     // ---- thread list ----
+    eprintln!("step: thread list");
     ui.click(r##"a.row[href="#/p/proj-1"]"##).await;
     let badges = ui
         .wait(r##"() => document.querySelector('a.row[href="#/t/thr-1"] .row-badges')?.textContent || false"##)
@@ -804,10 +1001,20 @@ async fn web_workbench_main_flows_in_chromium() {
     let lane = ui
         .wait(r##"() => document.querySelector('a.row[href="#/t/thr-2"] .row-badges')?.textContent || false"##)
         .await;
-    assert_eq!(lane, "質問 1");
+    assert_eq!(lane, "質問 1承認 1");
     ui.screenshot("02-threads").await;
+    // The thread listing's second cursor has expired: "more" starts over from
+    // the first page, and the next "more" goes on from there.
+    ui.click("button.more").await;
+    backend.until(|w| w.conflicts == 1).await;
+    ui.wait(r##"() => { const b = document.querySelector("button.more"); return b && !b.hidden && !b.disabled && !document.querySelector(".list-status").textContent; }"##)
+        .await;
+    ui.click("button.more").await;
+    ui.wait(r##"() => document.querySelector("button.more").hidden"##)
+        .await;
 
     // ---- thread: newest history, Markdown, long body ----
+    eprintln!("step: thread: newest history, Markdown, long body");
     ui.click(r##"a.row[href="#/t/thr-1"]"##).await;
     ui.wait(
         r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。")"##,
@@ -820,7 +1027,12 @@ async fn web_workbench_main_flows_in_chromium() {
     let shown = ui
         .eval(r##"document.querySelectorAll(".messages .msg").length"##)
         .await;
-    assert_eq!(shown, 130, "the last two pages of 100 are on screen");
+    assert_eq!(shown, 50, "one backward page: the newest 50 messages");
+    assert_eq!(
+        backend.world.lock().unwrap().history_reads,
+        1,
+        "opening reads one page, not the whole history"
+    );
     let markdown = ui
         .eval(
             r##"(() => {
@@ -874,9 +1086,19 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     assert_eq!(routed["inputs"], 0, "a lead-routed question is read-only");
     ui.screenshot("04-thread-top").await;
-    ui.click("button.older").await;
-    ui.wait(r##"() => document.querySelectorAll(".messages .msg").length === 230"##)
+    for expected in [100, 150, 200, 230] {
+        ui.click("button.older").await;
+        ui.wait(&format!(
+            r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
+        ))
         .await;
+    }
+    assert_eq!(
+        ui.eval(r##"document.querySelector("button.older").hidden"##)
+            .await,
+        true,
+        "the start of the history was reached"
+    );
     assert_eq!(
         ui.eval(r##"document.querySelector(".messages .msg .msg-body").textContent"##)
             .await,
@@ -884,6 +1106,7 @@ async fn web_workbench_main_flows_in_chromium() {
     );
 
     // ---- send: an open IME composition never sends ----
+    eprintln!("step: send: an open IME composition never sends");
     ui.insert_text(".composer-input", SENT_TEXT).await;
     ui.eval(
         r##"document.querySelector(".composer-input").dispatchEvent(new KeyboardEvent("keydown", {
@@ -924,6 +1147,7 @@ async fn web_workbench_main_flows_in_chromium() {
     );
 
     // ---- outcome unknown: checked, then resent with the same ids ----
+    eprintln!("step: outcome unknown: checked, then resent with the same ids");
     backend.world.lock().unwrap().failing_sends = 3;
     ui.insert_text(".composer-input", UNKNOWN_TEXT).await;
     ui.click("button.send").await;
@@ -954,6 +1178,7 @@ async fn web_workbench_main_flows_in_chromium() {
     );
 
     // ---- dropped: resent as a new submission ----
+    eprintln!("step: dropped: resent as a new submission");
     backend.world.lock().unwrap().drop_next_send = true;
     ui.insert_text(".composer-input", DROPPED_TEXT).await;
     ui.click("button.send").await;
@@ -975,6 +1200,7 @@ async fn web_workbench_main_flows_in_chromium() {
     assert_ne!(sends[0].1, sends[1].1);
 
     // ---- answer the thread's question with an option ----
+    eprintln!("step: answer the thread's question with an option");
     ui.click(r##"button[aria-label="「はい」と回答"]"##).await;
     let answer = backend.command("answer_user_question").await;
     assert_eq!(
@@ -985,6 +1211,7 @@ async fn web_workbench_main_flows_in_chromium() {
         .await;
 
     // ---- inbox: the approval, a free-text question, the lead's question ----
+    eprintln!("step: inbox: the approval, a free-text question, the lead's question");
     ui.go("#/inbox").await;
     ui.wait(r##"() => document.querySelector(".card.approval") && document.querySelector(".cards .card.question")"##)
         .await;
@@ -1002,39 +1229,137 @@ async fn web_workbench_main_flows_in_chromium() {
         json!({"hidden": false, "count": "Lead が対応中の質問 (1)", "answerable": 0})
     );
     ui.screenshot("05-inbox").await;
-    // ApprovalView only has a bounded summary, so the Web cannot show the
-    // full input and does not approve; denying stays possible.
-    let approval = ui
-        .eval(
-            r##"(() => {
-                const card = document.querySelector(".card.approval");
-                return { approve: card.querySelector('button[aria-label="このツール実行を承認"]').disabled,
-                         deny: card.querySelector('button[aria-label="このツール実行を拒否"]').disabled,
-                         hint: card.querySelector(".card-hint").textContent,
-                         expand: card.querySelector("button.link").textContent };
-            })()"##,
-        )
+    // ---- approval: the full input must be read before approving ----
+    eprintln!("step: approval: the full input must be read before approving");
+    const AP1: &str = r##".card.approval[data-key="ap-1"]"##;
+    let card = |selector: &str| format!("document.querySelector('{AP1} {selector}')");
+    assert_eq!(
+        ui.eval(&format!(
+            "{}.disabled",
+            card(r##"button[aria-label="このツール実行を承認"]"##)
+        ))
+        .await,
+        true,
+        "a truncated summary cannot be approved"
+    );
+    assert_eq!(
+        ui.eval(&format!(
+            "{}.disabled",
+            card(r##"button[aria-label="このツール実行を拒否"]"##)
+        ))
+        .await,
+        false,
+        "denying never needs the full input"
+    );
+    // Hold the second of three chunks to look at the card mid-read.
+    let hold = backend.hold("get_approval_input");
+    ui.click(&format!(r##"{AP1} button[data-action="load-input"]"##))
+        .await;
+    hold.entered().await;
+    hold.release(1);
+    hold.entered().await;
+    let midway = ui
+        .wait(&format!(
+            r##"() => {{ const c = document.querySelector('{AP1}');
+                const p = [...c.querySelectorAll(".card-status")].map((e) => e.textContent).join("");
+                return p.includes("全文を読み込み中") && {{
+                    approve: c.querySelector('button[aria-label="このツール実行を承認"]').disabled,
+                    caption: c.querySelector(".card-label").textContent }}; }}"##
+        ))
         .await;
     assert_eq!(
-        approval,
-        json!({
-            "approve": true, "deny": false, "expand": "要約を展開",
-            "hint": "要約しか表示できず実行内容の全文を確認できないため、Web からは承認できません（拒否はできます）。",
-        })
+        midway["approve"], true,
+        "no approving while the input is partly read"
     );
-    ui.click(".card.approval button.link").await;
-    ui.screenshot("06-inbox-approval-expanded").await;
-    ui.click(r##"button[aria-label="このツール実行を拒否"]"##)
+    assert!(
+        midway["caption"].as_str().unwrap().contains("要約"),
+        "{midway}"
+    );
+    ui.screenshot("06-approval-loading").await;
+    backend.unhold("get_approval_input");
+    let full = ui
+        .wait(&format!(
+            r##"() => {{ const c = document.querySelector('{AP1}');
+                return c.querySelector(".card-label").textContent === "実行内容（全文）" && {{
+                    approve: c.querySelector('button[aria-label="このツール実行を承認"]').disabled,
+                    tail: c.querySelector(".approval-summary").textContent.includes("最後の行") }}; }}"##
+        ))
         .await;
+    assert_eq!(
+        full,
+        json!({"approve": false, "tail": true}),
+        "the whole input is shown"
+    );
+    ui.click(&format!("{AP1} button.link")).await;
+    ui.screenshot("07-approval-full").await;
+    ui.click(&format!(
+        r##"{AP1} button[aria-label="このツール実行を承認"]"##
+    ))
+    .await;
+    assert_eq!(
+        backend.count("decide_tool_approval"),
+        0,
+        "the first press only arms"
+    );
+    ui.click(&format!(
+        r##"{AP1} button[aria-label="このツール実行を承認"]"##
+    ))
+    .await;
     let decision = backend.command("decide_tool_approval").await;
     assert_eq!(
         decision["payload"],
-        json!({"approval_id": "ap-1", "core_epoch": "7", "approval_revision": "77777", "decision": "deny"})
+        json!({"approval_id": "ap-1", "core_epoch": "7", "approval_revision": "77777", "decision": "approve"})
     );
-    ui.wait(r##"() => !document.querySelector(".card.approval")"##)
+    ui.wait(&format!("() => !document.querySelector('{AP1}')"))
+        .await;
+
+    // ---- approval replaced while its input is read: no approving ----
+    eprintln!("step: approval replaced while its input is read: no approving");
+    const AP2: &str = r##".card.approval[data-key="ap-2"]"##;
+    ui.click(&format!(r##"{AP2} button[data-action="load-input"]"##))
+        .await;
+    let replaced = ui
+        .wait(&format!(
+            r##"() => {{ const c = document.querySelector('{AP2}');
+                return c.dataset.revision === "333" && {{
+                    approve: c.querySelector('button[aria-label="このツール実行を承認"]').disabled,
+                    reload: !c.querySelector('button[data-action="load-input"]').hidden }}; }}"##
+        ))
+        .await;
+    assert_eq!(
+        replaced,
+        json!({"approve": true, "reload": true}),
+        "the card shows the new revision and must be read again"
+    );
+    ui.click(&format!(
+        r##"{AP2} button[aria-label="このツール実行を拒否"]"##
+    ))
+    .await;
+    backend
+        .until(|w| {
+            w.commands
+                .iter()
+                .any(|c| c["payload"]["approval_id"] == "ap-2")
+        })
+        .await;
+    let denied = backend
+        .world
+        .lock()
+        .unwrap()
+        .commands
+        .iter()
+        .find(|c| c["payload"]["approval_id"] == "ap-2")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        denied["payload"],
+        json!({"approval_id": "ap-2", "core_epoch": "7", "approval_revision": "333", "decision": "deny"})
+    );
+    ui.wait(&format!("() => !document.querySelector('{AP2}')"))
         .await;
 
     // ---- free-text answer ----
+    eprintln!("step: free-text answer");
     ui.insert_text(".cards .card.question .answer-input", "Chromium と Firefox")
         .await;
     ui.click(".cards .card.question .answer-row button.primary")
@@ -1061,17 +1386,18 @@ async fn web_workbench_main_flows_in_chromium() {
     );
 
     // ---- other renderings for the record ----
+    eprintln!("step: other renderings for the record");
     ui.go("#/t/thr-1").await;
     ui.wait(
         r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。")"##,
     )
     .await;
     ui.color_scheme("dark").await;
-    ui.screenshot("07-thread-dark").await;
+    ui.screenshot("08-thread-dark").await;
     ui.go("#/").await;
     ui.wait(r##"() => document.querySelector('a.row[href="#/p/proj-1"]')"##)
         .await;
-    ui.screenshot("08-projects-dark").await;
+    ui.screenshot("09-projects-dark").await;
     ui.color_scheme("light").await;
     ui.page
         .execute(SetDeviceMetricsOverrideParams::new(1280, 800, 1.0, false))
@@ -1082,10 +1408,33 @@ async fn web_workbench_main_flows_in_chromium() {
         r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。")"##,
     )
     .await;
-    ui.screenshot("09-thread-desktop").await;
+    ui.screenshot("10-thread-desktop").await;
 
     // ---- a core restart: reconnect, then prompt to reload ----
+    eprintln!("step: a core restart: reconnect, then prompt to reload");
+    // The history read that rebuilds the thread after the new snapshot is
+    // held, to look at the page while it is being rebuilt.
+    let held_history = backend.hold("read_committed_history");
     backend.restart();
+    held_history.entered().await;
+    let rebuilding = ui
+        .wait(r##"() => document.querySelector(".history-status").textContent === "履歴を読み込み中…" && {
+            messages: document.querySelectorAll(".messages .msg").length,
+            role: document.querySelector(".composer-role").value,
+            send: document.querySelector("button.send").disabled,
+            reload: document.querySelector(".thread button.small[hidden]") !== null }"##)
+        .await;
+    assert!(
+        rebuilding["messages"].as_u64().unwrap() > 0,
+        "the old messages stay until the new history is read: {rebuilding}"
+    );
+    assert_eq!(
+        rebuilding["role"], "orchestrator",
+        "a rebuild does not reset the role"
+    );
+    assert_eq!(rebuilding["send"], false);
+    ui.screenshot("11-rebuilding").await;
+    backend.unhold("read_committed_history");
     let banner = ui
         .wait(r##"() => !document.querySelector("#banner").hidden && document.querySelector("#banner").textContent"##)
         .await;
@@ -1107,7 +1456,7 @@ async fn web_workbench_main_flows_in_chromium() {
         .eval(r##"(() => { const r = document.querySelector("#banner").getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.height > 0; })()"##)
         .await;
     assert_eq!(visible, true, "the banner stays in view on a scrolled page");
-    ui.screenshot("10-restarted").await;
+    ui.screenshot("12-restarted").await;
 
     assert_eq!(
         ui.eval("window.__problems").await,

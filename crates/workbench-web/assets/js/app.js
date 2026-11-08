@@ -115,42 +115,40 @@ const ctx = {
 };
 
 /**
- * A snapshot page cut short leaves lists incomplete. Read projects, their
- * threads and every pending question and approval with queries, all pages,
- * then clear the "partial" mark. A newer snapshot starts its own completion.
+ * A snapshot whose first page was cut short is read to its end with
+ * ReadSnapshot. The later pages are the same cut, applied under the snapshot's
+ * stamp so they never overwrite what an event has written since. If the core
+ * no longer holds the snapshot (expired, or a new epoch), the subscription
+ * starts over for a fresh one. Another failure leaves "partial" on screen with
+ * a retry that continues from the page that failed. A newer snapshot cancels
+ * this reading.
  */
-let completion = 0;
-async function completeSnapshot() {
-  const mine = (completion += 1);
-  const all = (kind, type, payload) =>
-    fetchAllPages((cursor) => ctx.queryInto(kind, type, payload(cursor)));
-  const results = await Promise.all([
-    all("projects", "list_projects", (cursor) => pageRequest(cursor, 200)).then(async (result) => {
-      if (!result.ok) return result;
-      const projects = [...store.state.projects.keys()];
-      const threads = await Promise.all(
-        projects.map((project) =>
-          all("threads", "list_threads", (cursor) => ({ project, page: pageRequest(cursor, 200) })),
-        ),
-      );
-      return threads.find((r) => !r.ok) ?? result;
-    }),
-    all("questions", "list_questions", (cursor) => ({ pending_only: true, page: pageRequest(cursor, 200) })),
-    all("approvals", "list_approvals", (cursor) => ({ pending_only: true, page: pageRequest(cursor, 200) })),
-  ]);
-  if (mine !== completion) return;
-  const failed = results.find((result) => !result.ok);
-  if (failed) {
-    showBanner("partial", `一覧の一部を読み込めませんでした（${describeError(failed.error)}）。`, {
-      label: "再試行",
-      run: () => {
-        clearBanner("partial");
-        completeSnapshot();
-      },
-    });
-    return;
-  }
+let continuation = 0;
+async function continueSnapshot(snapshotId, stamp, cursor) {
+  const mine = (continuation += 1);
   clearBanner("partial");
+  let next = cursor;
+  while (next) {
+    const result = await api.query("read_snapshot", {
+      snapshot_id: snapshotId,
+      page: pageRequest(next, 200),
+    });
+    if (mine !== continuation || store.snapshotMark() !== stamp) return;
+    if (!result.ok || result.value.snapshot_id !== snapshotId) {
+      const code = result.ok ? "resync_required" : result.error.code;
+      if (code === "resync_required" || code === "conflict" || code === "not_found") {
+        stream.resubscribe("snapshot_expired");
+        return;
+      }
+      showBanner("partial", `一覧の一部を読み込めませんでした（${describeError(result.error)}）。`, {
+        label: "再試行",
+        run: () => continueSnapshot(snapshotId, stamp, next),
+      });
+      return;
+    }
+    store.applySnapshotPage(result.value.page.items, stamp);
+    next = result.value.page.next_cursor ?? null;
+  }
   store.completeSnapshot();
 }
 
@@ -257,7 +255,9 @@ const CONNECTION_LABELS = {
 const stream = new EventStream({
   scope: "all",
   onStarted(started) {
-    if (store.applySubscriptionStarted(started) && store.state.partial) completeSnapshot();
+    if (store.applySubscriptionStarted(started) && store.state.partial) {
+      continueSnapshot(started.snapshot_id, store.snapshotMark(), started.initial_page.next_cursor);
+    }
   },
   onEvent(envelope) {
     store.applyEvent(envelope.event);

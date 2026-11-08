@@ -48,6 +48,7 @@ export function createStore() {
   const written = Object.fromEntries(KINDS.map((kind) => [kind, new Map()]));
   let clock = 0;
   let resetAt = 0;
+  let coreStatusAt = 0;
   const listeners = new Set();
 
   function notify(change) {
@@ -97,7 +98,8 @@ export function createStore() {
      * A `subscription_started` answer. With a `snapshot_id` the snapshot
      * replaces what was held; without one the core is replaying and the
      * current state stays. A snapshot page with a `next_cursor` is partial:
-     * `state.partial` stays set until `completeSnapshot()`.
+     * `state.partial` stays set until the rest was read (`applySnapshotPage`)
+     * and `completeSnapshot()` was called.
      */
     applySubscriptionStarted(started) {
       const reset = Boolean(started.snapshot_id);
@@ -114,6 +116,7 @@ export function createStore() {
         for (const item of started.initial_page?.items ?? []) {
           if (item.type === "core_status") {
             state.coreStatus = item.payload;
+            coreStatusAt = clock;
           } else if (ITEM_KINDS[item.type]) {
             const kind = ITEM_KINDS[item.type];
             write(kind, keyOf(kind, item.payload), item.payload, clock);
@@ -124,7 +127,35 @@ export function createStore() {
       return reset;
     },
 
-    /** The lists a partial snapshot left out have been read with queries. */
+    /** The clock value of the current snapshot, to stamp its later pages. */
+    snapshotMark() {
+      return resetAt;
+    },
+
+    /**
+     * A later page of the snapshot taken at `stamp` (ReadSnapshot). It is the
+     * same cut as the first page, so an entity an event wrote since then
+     * keeps the event's value, and a page of a replaced snapshot is ignored.
+     */
+    applySnapshotPage(items, stamp) {
+      if (stamp !== resetAt) return false;
+      let changed = false;
+      for (const item of items) {
+        if (item.type === "core_status") {
+          if (coreStatusAt <= stamp) {
+            state.coreStatus = item.payload;
+            changed = true;
+          }
+        } else if (ITEM_KINDS[item.type]) {
+          const kind = ITEM_KINDS[item.type];
+          changed = writeQueried(kind, keyOf(kind, item.payload), item.payload, stamp) || changed;
+        }
+      }
+      if (changed) notify({ type: "page", kind: "snapshot" });
+      return true;
+    },
+
+    /** Every page of a partial snapshot has been applied. */
     completeSnapshot() {
       state.partial = false;
       notify({ type: "page", kind: "snapshot" });
@@ -136,6 +167,8 @@ export function createStore() {
       let change = null;
       switch (event.type) {
         case "core_status_changed":
+          clock += 1;
+          coreStatusAt = clock;
           state.coreStatus = p.status;
           change = { type: "core_status" };
           break;
