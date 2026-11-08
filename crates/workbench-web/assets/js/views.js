@@ -356,10 +356,20 @@ function renderAttention(ctx, questionBox, approvalBox, threadId, leadBox) {
 /**
  * Bodies already read, by message (`<thread>/<run>#<index>`, stable across
  * history reads, unlike body ids, which the core issues per read):
- * `{text, next, total}`. A cached body is used for a later BodyRef only when
- * its byte length matches. Shared by views.
+ * `{text, next, total, generation}`. A cached body is used for a later
+ * BodyRef only when its byte length matches and it was read since the last
+ * snapshot (`store.snapshotMark()`): a snapshot follows a gap, a resync or a
+ * new core epoch, after which the same run and index may name another
+ * message. Shared by views.
  */
 const bodies = new Map();
+
+/** Drop bodies read before the snapshot `generation`. */
+function forgetOldBodies(generation) {
+  for (const [key, body] of bodies) {
+    if (body.generation !== generation) bodies.delete(key);
+  }
+}
 
 function bodyKey(message) {
   return `${message.thread}/${messageKey(message)}`;
@@ -411,6 +421,14 @@ export function threadView(ctx, threadId) {
   const questionBox = h("div", { class: "cards", attrs: { "aria-label": "このスレッドの未回答の質問" } });
   const approvalBox = h("div", { class: "cards", attrs: { "aria-label": "このスレッドの承認待ち" } });
   const older = h("button", { type: "button", class: "button older", text: "以前のメッセージを読み込む", hidden: true });
+  // Shown instead of re-reading while the person reads further up.
+  const newMessages = h("button", {
+    type: "button",
+    class: "button new-messages",
+    text: "新しいメッセージがあります",
+    hidden: true,
+    attrs: { "aria-label": "新しいメッセージがあります。末尾へ移動して表示します" },
+  });
   const historyStatus = h("p", { class: "history-status", attrs: { role: "status" } });
   const reload = h("button", { type: "button", class: "button small", text: "履歴を読み込み直す", hidden: true });
   const leadBox = h("div", { class: "cards", attrs: { "aria-label": "Lead が対応中の質問" } });
@@ -442,6 +460,7 @@ export function threadView(ctx, threadId) {
   const composer = h(
     "div",
     { class: "composer", attrs: { role: "group", "aria-label": "メッセージの送信" } },
+    newMessages,
     composerStatus,
     h(
       "div",
@@ -478,10 +497,20 @@ export function threadView(ctx, threadId) {
 
   /** The history window on screen, and the one being built to replace it. */
   let history = null;
+  /** The person is at the end of the history (see onScroll). */
+  let following = true;
+
+  function toBottom() {
+    following = true;
+    scrollToBottom();
+  }
   let building = null;
   /** Re-reads of the newest page for events without a place on screen. */
   const rereads = new RereadScheduler({
-    run: () => rebuildHistory({ reread: true }),
+    run: () => {
+      if (following) rebuildHistory({ reread: true });
+      else deferReread();
+    },
     onPaused: (waitMs) => {
       historyStatus.textContent = `履歴の更新が続いているため、自動の読み直しを一時停止しています（約 ${Math.ceil(waitMs / 1000)} 秒後に再開）。`;
       reload.hidden = false;
@@ -675,6 +704,8 @@ export function threadView(ctx, threadId) {
   // current id.
   function bodyPlaceholder(container, role, firstRef, key) {
     let ref = firstRef;
+    /** The snapshot the current BodyRef came from; an older one may name another body. */
+    let refGeneration = ctx.store.snapshotMark();
     const status = h("p", { class: "body-status", attrs: { role: "status" } });
     const load = h("button", {
       type: "button",
@@ -685,10 +716,10 @@ export function threadView(ctx, threadId) {
     const more = h("button", { type: "button", class: "button small", text: "続きを読み込む", hidden: true });
     replaceChildren(container, rendered, status, load, more);
 
-    /** The cached body, if it is this body (same length). */
+    /** The cached body, if it is this body (same length, same snapshot). */
     function cachedBody() {
       const cached = bodies.get(key);
-      if (cached && cached.total !== ref.total_bytes) {
+      if (cached && (cached.total !== ref.total_bytes || cached.generation !== ctx.store.snapshotMark())) {
         bodies.delete(key);
         return undefined;
       }
@@ -708,6 +739,11 @@ export function threadView(ctx, threadId) {
     }
 
     async function read() {
+      const generation = ctx.store.snapshotMark();
+      if (refGeneration !== generation) {
+        status.textContent = "履歴を読み込み直しています…";
+        return;
+      }
       const cached = cachedBody();
       const offset = cached ? cached.next : "0";
       if (offset === null) return;
@@ -726,6 +762,13 @@ export function threadView(ctx, threadId) {
         return;
       }
       status.textContent = "";
+      if (generation !== ctx.store.snapshotMark()) {
+        // Asked for before a snapshot: it may be another message's body now.
+        // Nothing is kept from this answer; a body read on sight is watched
+        // again so that it is read anew if this element stays.
+        if (container.autoLoad) observer?.observe(container);
+        return;
+      }
       const chunk = result.value;
       if (chunk.total_bytes !== ref.total_bytes || (cached && bodies.get(key) !== cached)) {
         // Not the body that was being read: start again from its beginning.
@@ -740,6 +783,7 @@ export function threadView(ctx, threadId) {
         text: (cached?.text ?? "") + chunk.text,
         next: chunk.next_offset ?? null,
         total: chunk.total_bytes,
+        generation,
       });
       show();
     }
@@ -756,6 +800,7 @@ export function threadView(ctx, threadId) {
     return (next) => {
       const changed = next.total_bytes !== ref.total_bytes;
       ref = next;
+      refGeneration = ctx.store.snapshotMark();
       if (changed) {
         bodies.delete(key);
         replaceChildren(rendered);
@@ -801,7 +846,13 @@ export function threadView(ctx, threadId) {
   // (with what their bodies showed) and as many pages as were loaded. Unless
   // the view is at the bottom when the result is shown, the message at the
   // top of the screen stays where it was.
-  async function rebuildHistory({ reread = false } = {}) {
+  async function rebuildHistory({ reread = false, asked = false } = {}) {
+    if (reread && !asked && building && !building.reread) {
+      // A rebuild after a snapshot is running; it reads the newest page
+      // anyway, and must not be replaced by a re-read that may wait.
+      building.unplaced = true;
+      return;
+    }
     const keepPages = reread && history ? history.pages.length : 1;
     const next = new HistoryWindow((cursor) =>
       ctx.api.query("read_committed_history", {
@@ -810,8 +861,11 @@ export function threadView(ctx, threadId) {
         page: pageRequest(cursor, HISTORY_PAGE_SIZE),
       }),
     );
+    next.reread = reread;
     building = next;
-    historyStatus.textContent = reread ? "履歴を更新中…" : "履歴を読み込み中…";
+    // A re-read shows no status line: it sits above the list, and adding or
+    // removing it would move what is on screen.
+    if (!reread) historyStatus.textContent = "履歴を読み込み中…";
     reload.hidden = true;
     let result = await next.open();
     if (result.resync) next.unplaced = true;
@@ -825,27 +879,69 @@ export function threadView(ctx, threadId) {
       reload.hidden = false;
       return;
     }
+    if (reread && !asked && !following) {
+      // The person scrolled up while it was read: replacing the list now
+      // could drop what they read. Wait until they are back at the bottom.
+      deferReread();
+      return;
+    }
     historyStatus.textContent = "";
+    if (reread) {
+      rereadDeferred = false;
+      newMessages.hidden = true;
+    }
     const first = history === null;
-    const follow = first || nearBottom();
+    const follow = first || following;
     const anchor = follow ? null : scrollAnchor();
     history = next;
     if (!reread) list.replaceChildren();
     renderMessages();
-    if (follow) scrollToBottom();
+    if (follow) toBottom();
     else restoreAnchor(anchor);
     // The page is right for its cut; an event held during the read that had
     // no place only means another read is due.
     if (next.unplaced) requestReread();
   }
 
+  // Re-read the newest page for events without a place, but only at the
+  // bottom of the history. Further up the person is reading: the list stays
+  // as it is and "新しいメッセージがあります" offers to go to the end.
+  let rereadDeferred = false;
+
   function requestReread() {
-    if (!destroyed) rereads.request();
+    if (destroyed) return;
+    if (following) rereads.request();
+    else deferReread();
   }
+
+  function deferReread() {
+    rereadDeferred = true;
+    newMessages.hidden = false;
+  }
+
+  function resumeReread() {
+    if (!rereadDeferred || destroyed) return;
+    rereadDeferred = false;
+    newMessages.hidden = true;
+    rereads.request();
+  }
+
+  newMessages.addEventListener("click", () => {
+    toBottom();
+    resumeReread();
+  });
+  // Whether the person follows the end of the history. It changes only when
+  // the page scrolls (by the person or by toBottom), not when content above
+  // grows, so a body loading in does not count as scrolling away.
+  const onScroll = () => {
+    following = nearBottom();
+    if (rereadDeferred && following) resumeReread();
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
 
   reload.addEventListener("click", () => {
     rereads.reset();
-    rebuildHistory({ reread: history !== null });
+    rebuildHistory({ reread: history !== null, asked: true });
   });
 
   older.addEventListener("click", async () => {
@@ -1032,7 +1128,7 @@ export function threadView(ctx, threadId) {
     saveDraft(threadId, "");
     composerStatus.textContent = "";
     deliver(item);
-    scrollToBottom();
+    toBottom();
   }
 
   send.addEventListener("click", submit);
@@ -1055,11 +1151,10 @@ export function threadView(ctx, threadId) {
       return;
     }
     if (!history) return;
-    const follow = nearBottom();
     const placed = history.append(message);
     if (placed === "added") {
       renderMessages();
-      if (follow) scrollToBottom();
+      if (following) toBottom();
     } else if (placed === "resync") {
       requestReread();
     }
@@ -1113,6 +1208,7 @@ export function threadView(ctx, threadId) {
           // The run list is stale from now on, not only once it is re-read.
           runsGeneration += 1;
           runsLoad = { state: "loading" };
+          forgetOldBodies(ctx.store.snapshotMark());
           rebuildHistory();
           loadThread();
           break;
@@ -1134,6 +1230,7 @@ export function threadView(ctx, threadId) {
     destroy() {
       destroyed = true;
       rereads.dispose();
+      window.removeEventListener("scroll", onScroll);
       observer?.disconnect();
     },
   };

@@ -905,6 +905,20 @@ a.chip {
   border-top: 1px solid var(--border);
 }
 
+/* Offered instead of re-reading while the history is read further up. */
+.new-messages {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+  white-space: nowrap;
+}
+
 .composer-row {
   display: flex;
   gap: 8px;

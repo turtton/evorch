@@ -62,7 +62,9 @@ const RESUMED_TEXT: &str = "再接続のあとに届いた新しいメッセー�
 const LATE_INPUT_TEXT: &str = "遅れて届いた古い run への入力";
 const FRESH_REPLY_TEXT: &str = "ページのあとに届いた返信";
 const LATE_ABOVE_TEXT: &str = "大きな本文より前に入る遅れた入力";
-const LATE_WHILE_READING_TEXT: &str = "読み直し中に上へスクロールした時の入力";
+const LATE_WHILE_READING_TEXT: &str = "上を読んでいる間に届いた入力";
+const LATE_OFFER_TEXT: &str = "案内から末尾へ移動して表示する入力";
+const LATE_HELD_TEXT: &str = "読み直し中に上へスクロールした時の入力";
 
 /// A body larger than one 64 KiB chunk, read in three.
 fn big_body_text() -> String {
@@ -72,10 +74,19 @@ fn big_body_text() -> String {
     )
 }
 
+/// Another body of exactly the same byte length as `big_body_text`.
+fn other_big_body_text() -> String {
+    format!(
+        "異なる本文の先頭です。\n\n{}\n\n大きな本文の終わり。",
+        "klmnopqrst ".repeat(14_000)
+    )
+}
+
 fn body_source(base: &str) -> String {
     match base {
         "body-1" => body_text(),
         "body-2" => big_body_text(),
+        "body-3" => other_big_body_text(),
         other => panic!("unknown body {other}"),
     }
 }
@@ -419,6 +430,26 @@ impl UiBackend {
         let at = world.history.len() - before;
         world.history.insert(at, message.clone());
         world.publish(json!({"type": "message_committed", "payload": {"message": message}}));
+    }
+
+    /// Where the message with body `base` is in the history.
+    fn position_of_body(&self, base: &str) -> usize {
+        self.world
+            .lock()
+            .unwrap()
+            .history
+            .iter()
+            .position(|m| m["content"]["payload"]["body_id"] == base)
+            .unwrap()
+    }
+
+    /// The same run and index now hold another body (a renumbering).
+    fn replace_body(&self, from: &str, to: &str) {
+        let position = self.position_of_body(from);
+        let mut world = self.world.lock().unwrap();
+        let total = body_source(to).len().to_string();
+        world.history[position]["content"]["payload"] =
+            json!({"body_id": to, "total_bytes": total});
     }
 
     /// Drop every event stream without a terminal event, as a lost
@@ -914,6 +945,13 @@ fn assert_same_place(actual: &Value, expected: &Value, what: &str) {
 }
 
 impl Driver {
+    /// Let the page render twice, so the scroll events of a scroll just made
+    /// are delivered before the test goes on.
+    async fn settle(&self) {
+        self.eval("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))")
+            .await;
+    }
+
     async fn eval(&self, expression: &str) -> Value {
         let params = EvaluateParams::builder()
             .expression(expression)
@@ -1193,6 +1231,7 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     ui.screenshot("03-thread-bottom").await;
     ui.eval("window.scrollTo(0, 0); true").await;
+    ui.settle().await;
     ui.wait(&format!(
         r##"() => document.querySelector(".thread .card.question")?.textContent.includes({QUESTION_TITLE:?})"##
     ))
@@ -1224,6 +1263,10 @@ async fn web_workbench_main_flows_in_chromium() {
     // whole run that ended before the page. Its place is unknown, so the view
     // reads the newest page again; only the one new message may appear,
     // after the newest.
+    // At the bottom, where re-reads run by themselves.
+    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+        .await;
+    ui.settle().await;
     let reads_before = backend.world.lock().unwrap().history_reads;
     backend.world.lock().unwrap().replay_on_resume = true;
     backend.drop_streams();
@@ -1258,6 +1301,9 @@ async fn web_workbench_main_flows_in_chromium() {
     // past the page. Then run-old's input is delivered late and belongs
     // before the last three messages: it must show there, not after the
     // newest, although every event now comes after the page's cut.
+    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+        .await;
+    ui.settle().await;
     backend.commit_reply(FRESH_REPLY_TEXT);
     ui.wait(&format!(
         r##"() => document.querySelector(".messages .msg:last-child")?.textContent.includes({FRESH_REPLY_TEXT:?})"##
@@ -1284,17 +1330,17 @@ async fn web_workbench_main_flows_in_chromium() {
         "the late input made the view read the newest page again"
     );
 
-    eprintln!("step: a re-read keeps a partly read body and the place on screen");
-    // Read the first chunk of the large body, with its message near the top
-    // of the screen.
+    eprintln!("step: a re-read at the bottom keeps a partly read body");
+    // Read the first chunk of the large body, then go back to the bottom.
     const BIG: &str = r##"document.querySelector('.messages .msg[data-key="run-root#225"]')"##;
+    const CONTINUE: &str = r##"[...m.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む"))"##;
     ui.eval(&format!(
         r##"{BIG}.querySelector(".msg-body button.small:not([hidden])").click()"##
     ))
     .await;
     let partial = ui
         .wait(&format!(
-            r##"() => {{ const m = {BIG}; const more = [...m.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む"));
+            r##"() => {{ const m = {BIG}; const more = {CONTINUE};
                 return more && m.querySelector(".body-text").textContent.length; }}"##
         ))
         .await;
@@ -1306,22 +1352,14 @@ async fn web_workbench_main_flows_in_chromium() {
         .last()
         .cloned()
         .unwrap();
-    let before = ui
-        .eval(&format!(
-            r##"(() => {{ const m = {BIG}; m.scrollIntoView({{ block: "start" }}); window.scrollBy(0, -120);
-                return Math.round(m.getBoundingClientRect().top); }})()"##
-        ))
-        .await;
+    ui.eval(&format!(
+        "window.bigElement = {BIG}; window.scrollTo(0, document.scrollingElement.scrollHeight)"
+    ))
+    .await;
+    ui.settle().await;
     // A late input that belongs above it makes the view read the page again.
     let reads_before = backend.world.lock().unwrap().history_reads;
-    let position = backend
-        .world
-        .lock()
-        .unwrap()
-        .history
-        .iter()
-        .position(|m| m["content"]["payload"]["body_id"] == "body-2")
-        .unwrap();
+    let position = backend.position_of_body("body-2");
     let len = backend.world.lock().unwrap().history.len();
     backend.deliver_late(len - (position - 2), LATE_ABOVE_TEXT);
     let kept = ui
@@ -1330,8 +1368,7 @@ async fn web_workbench_main_flows_in_chromium() {
                 if (document.querySelector(".history-status").textContent) return false;
                 const m = {BIG};
                 const buttons = [...m.querySelectorAll("button")].filter((b) => !b.hidden).map((b) => b.textContent.replace(/（.*/, ""));
-                return {{ text: m.querySelector(".body-text").textContent.length, buttons,
-                          top: Math.round(m.getBoundingClientRect().top) }}; }}"##
+                return {{ same: m === window.bigElement, text: m.querySelector(".body-text").textContent.length, buttons }}; }}"##
         ))
         .await;
     assert!(
@@ -1339,17 +1376,12 @@ async fn web_workbench_main_flows_in_chromium() {
         "the late input caused a re-read"
     );
     assert_eq!(
-        json!({"text": kept["text"], "buttons": kept["buttons"]}),
-        json!({"text": partial, "buttons": ["続きを読み込む"]}),
-        "the partly read body survives the re-read"
-    );
-    assert_same_place(
-        &kept["top"],
-        &before,
-        "the body stays where it was on screen",
+        kept,
+        json!({"same": true, "text": partial, "buttons": ["続きを読み込む"]}),
+        "the element and its partly read body survive the re-read"
     );
     ui.eval(&format!(
-        r##"[...{BIG}.querySelectorAll("button")].find((b) => !b.hidden && b.textContent.startsWith("続きを読み込む")).click()"##
+        "(() => {{ const m = {BIG}; {CONTINUE}.click(); }})()"
     ))
     .await;
     ui.wait(&format!(
@@ -1370,34 +1402,171 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     assert!(second_id.starts_with("body-2-g"));
 
-    eprintln!("step: scrolling up while a re-read runs keeps the place");
-    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
-        .await;
-    let held_history = backend.hold("read_committed_history");
-    backend.deliver_late(1, LATE_WHILE_READING_TEXT);
-    held_history.entered().await;
+    eprintln!("step: reading further up: no re-read, an offer to go to the end");
+    // The oldest loaded message is at the top of the screen.
     let up = ui
-        .eval(&format!(
-            r##"(() => {{ const m = {BIG}; m.scrollIntoView({{ block: "start" }}); window.scrollBy(0, -120);
-                return Math.round(m.getBoundingClientRect().top); }})()"##
-        ))
+        .eval(
+            r##"(() => { const m = document.querySelector(".messages").firstElementChild; window.oldest = m;
+                m.scrollIntoView({ block: "start" }); window.scrollBy(0, -120);
+                return Math.round(m.getBoundingClientRect().top); })()"##,
+        )
         .await;
-    backend.unhold("read_committed_history");
-    let after = ui
+    ui.settle().await;
+    let reads_before = backend.world.lock().unwrap().history_reads;
+    backend.deliver_late(1, LATE_WHILE_READING_TEXT);
+    let offered = ui
         .wait(&format!(
-            r##"() => document.querySelector(".messages").textContent.includes({LATE_WHILE_READING_TEXT:?})
-                && !document.querySelector(".history-status").textContent
-                && {{ top: Math.round({BIG}.getBoundingClientRect().top),
-                      bottom: document.scrollingElement.scrollHeight - document.scrollingElement.scrollTop - document.scrollingElement.clientHeight < 160 }}"##
+            r##"() => !document.querySelector(".new-messages").hidden && {{
+                same: document.querySelector(".messages").firstElementChild === window.oldest,
+                top: Math.round(window.oldest.getBoundingClientRect().top),
+                shown: document.querySelector(".messages").textContent.includes({LATE_WHILE_READING_TEXT:?}) }}"##
         ))
         .await;
     assert_eq!(
-        after["bottom"], false,
-        "the view did not jump back to the bottom"
+        backend.world.lock().unwrap().history_reads,
+        reads_before,
+        "nothing is read while the person reads further up"
+    );
+    assert_eq!(
+        json!({"same": offered["same"], "shown": offered["shown"]}),
+        json!({"same": true, "shown": false}),
+        "the list stays as it is"
+    );
+    assert_same_place(
+        &offered["top"],
+        &up,
+        "the message being read stays in place",
+    );
+    ui.screenshot("14-new-messages").await;
+    // Back at the bottom, the waiting re-read runs.
+    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+        .await;
+    ui.wait(&format!(
+        r##"() => document.querySelector(".messages").textContent.includes({LATE_WHILE_READING_TEXT:?})
+            && document.querySelector(".new-messages").hidden"##
+    ))
+    .await;
+
+    eprintln!("step: the offer takes the person to the end");
+    ui.eval(r##"document.querySelector(".messages").firstElementChild.scrollIntoView({ block: "start" })"##)
+        .await;
+    ui.settle().await;
+    backend.deliver_late(1, LATE_OFFER_TEXT);
+    ui.wait(r##"() => !document.querySelector(".new-messages").hidden"##)
+        .await;
+    ui.eval(r##"document.querySelector(".new-messages").click()"##)
+        .await;
+    let at_end = ui
+        .wait(&format!(
+            r##"() => document.querySelector(".messages").textContent.includes({LATE_OFFER_TEXT:?})
+                && !document.querySelector(".history-status").textContent
+                && document.scrollingElement.scrollHeight - document.scrollingElement.scrollTop - document.scrollingElement.clientHeight < 160"##
+        ))
+        .await;
+    assert_eq!(at_end, true);
+
+    eprintln!("step: scrolling up while a re-read runs keeps the list");
+    let held_history = backend.hold("read_committed_history");
+    backend.deliver_late(1, LATE_HELD_TEXT);
+    held_history.entered().await;
+    let up = ui
+        .eval(
+            r##"(() => { const m = document.querySelector(".messages").firstElementChild; window.oldest = m;
+                m.scrollIntoView({ block: "start" }); window.scrollBy(0, -120);
+                return Math.round(m.getBoundingClientRect().top); })()"##,
+        )
+        .await;
+    ui.settle().await;
+    backend.unhold("read_committed_history");
+    let after = ui
+        .wait(&format!(
+            r##"() => !document.querySelector(".new-messages").hidden
+                && !document.querySelector(".history-status").textContent
+                && {{ same: document.querySelector(".messages").firstElementChild === window.oldest,
+                      top: Math.round(window.oldest.getBoundingClientRect().top),
+                      shown: document.querySelector(".messages").textContent.includes({LATE_HELD_TEXT:?}) }}"##
+        ))
+        .await;
+    assert_eq!(
+        json!({"same": after["same"], "shown": after["shown"]}),
+        json!({"same": true, "shown": false}),
+        "a result that arrives while the person reads further up is not shown"
     );
     assert_same_place(&after["top"], &up, "the place scrolled to is kept");
+    ui.eval(r##"document.querySelector(".new-messages").click()"##)
+        .await;
+    ui.wait(&format!(
+        r##"() => document.querySelector(".messages").textContent.includes({LATE_HELD_TEXT:?})"##
+    ))
+    .await;
 
-    for expected in [100, 150, 200, 235] {
+    eprintln!("step: a snapshot drops the bodies read before it");
+    // The core renumbers: run-root#225 is now another body of the same
+    // length, and the resync gives a snapshot.
+    backend.replace_body("body-2", "body-3");
+    ui.eval(&format!("window.bigElement = {BIG}")).await;
+    backend.drop_streams();
+    let fresh = ui
+        .wait(&format!(
+            r##"() => {{ const m = {BIG}; if (!m || m === window.bigElement || document.querySelector(".history-status").textContent) return false;
+                const buttons = [...m.querySelectorAll("button")].filter((b) => !b.hidden).map((b) => b.textContent.replace(/（.*/, ""));
+                return {{ text: m.querySelector(".body-text").textContent, buttons }}; }}"##
+        ))
+        .await;
+    assert_eq!(
+        fresh,
+        json!({"text": "", "buttons": ["本文を読み込む"]}),
+        "the body read before the snapshot is not shown for the renumbered message"
+    );
+    ui.eval(&format!(
+        r##"{BIG}.querySelector(".msg-body button.small:not([hidden])").click()"##
+    ))
+    .await;
+    ui.wait(&format!(
+        r##"() => {BIG}.querySelector(".body-text").textContent.includes("異なる本文の先頭")"##
+    ))
+    .await;
+
+    eprintln!("step: a body read answered after a snapshot is dropped");
+    let held_body = backend.hold("read_body");
+    ui.eval(&format!(
+        "(() => {{ const m = {BIG}; window.bigElement = m; {CONTINUE}.click(); }})()"
+    ))
+    .await;
+    held_body.entered().await;
+    backend.drop_streams();
+    ui.wait(&format!(
+        r##"() => {{ const m = {BIG}; return m && m !== window.bigElement && !document.querySelector(".history-status").textContent; }}"##
+    ))
+    .await;
+    backend.unhold("read_body");
+    ui.wait(
+        r##"() => window.bigElement.querySelector(".body-status").textContent !== "読み込み中…""##,
+    )
+    .await;
+    // Open the thread again: nothing read before the snapshot comes back.
+    ui.eval(r##"location.hash = "#/""##).await;
+    ui.wait(r##"() => !document.querySelector(".thread")"##)
+        .await;
+    ui.eval(r##"location.hash = "#/t/thr-1""##).await;
+    let reopened = ui
+        .wait(&format!(
+            r##"() => {{ const m = {BIG}; if (!m || document.querySelector(".history-status").textContent) return false;
+                const buttons = [...m.querySelectorAll("button")].filter((b) => !b.hidden).map((b) => b.textContent.replace(/（.*/, ""));
+                return {{ text: m.querySelector(".body-text").textContent, buttons }}; }}"##
+        ))
+        .await;
+    assert_eq!(
+        reopened,
+        json!({"text": "", "buttons": ["本文を読み込む"]}),
+        "the late answer did not bring the old body back"
+    );
+    ui.eval("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+        .await;
+    ui.settle().await;
+
+    let total = backend.world.lock().unwrap().history.len();
+    for expected in [100, 150, 200, total] {
         ui.click("button.older").await;
         ui.wait(&format!(
             r##"() => document.querySelectorAll(".messages .msg").length === {expected}"##
@@ -1779,8 +1948,16 @@ async fn web_workbench_main_flows_in_chromium() {
     );
     ui.wait(r##"() => document.querySelector('#conn[data-state="live"]')"##)
         .await;
-    ui.wait(r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。") && !document.querySelector(".history-status").textContent"##)
+    // Bodies read before the snapshot are read again once in view.
+    ui.wait(r##"() => document.querySelector(".messages .msg") && !document.querySelector(".history-status").textContent"##)
         .await;
+    ui.eval(r##"document.querySelector('.messages .msg[data-key="run-root#229"]').scrollIntoView({ block: "center" })"##)
+        .await;
+    ui.settle().await;
+    ui.wait(
+        r##"() => document.querySelector(".messages")?.textContent.includes("本文の終わり。")"##,
+    )
+    .await;
     assert_eq!(
         ui.eval(r##"document.querySelector(".composer-role").value"##)
             .await,
